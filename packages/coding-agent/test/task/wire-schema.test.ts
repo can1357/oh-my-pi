@@ -76,6 +76,20 @@ describe("task wire schema", () => {
 		}
 	});
 
+	it("keeps a per-call model selector on the flat shape", () => {
+		const parsed = taskSchema({ agent: "task", task: "x", model: "openai/gpt-5.4:high" });
+		expect(parsed instanceof type.errors).toBe(false);
+		if (!(parsed instanceof type.errors)) {
+			expect(parsed.model).toBe("openai/gpt-5.4:high");
+		}
+	});
+
+	it("keeps a per-call model selector on batch items", () => {
+		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
+		const items = parsedItems(batch({ context: "ctx", tasks: [{ task: "x", model: "@smol" }] }));
+		expect(items[0]?.model).toBe("@smol");
+	});
+
 	it("defaults batch item agents to 'task' on the fast path and keeps names", () => {
 		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true });
 		const items = parsedItems(batch({ context: "ctx", tasks: [{ name: "DbMigrator", task: "x" }] }));

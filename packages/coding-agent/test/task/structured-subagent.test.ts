@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -30,6 +31,20 @@ const AGENT: AgentDefinition = {
 	tools: ["read", "write", "ast_grep"],
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
+
+/** One catalog entry so a populated registry can reject an unmatchable selector. */
+const MODEL = buildModel({
+	id: "claude-sonnet-4-5",
+	name: "Claude Sonnet 4.5",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	reasoning: false,
+	baseUrl: "https://api.anthropic.com",
+	input: ["text"],
+	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+});
 
 function session(
 	options: {
@@ -356,6 +371,44 @@ describe("structured subagent primitive", () => {
 
 		expect(policy.modelRole).toBe("definition");
 		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+	});
+
+	it("rejects an ambiguous per-call selector instead of resolving it as the default role", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "default" })),
+		).rejects.toThrow(/"@default"/);
+		// The rule applies per pattern, not to the joined chain.
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "openai/gpt-4o,default" })),
+		).rejects.toThrow(/"@default"/);
+	});
+
+	it("fails a per-call selector that expands to nothing rather than silently demoting it", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
+
+		await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@empty" }))).rejects.toThrow(
+			/No available model matches `model`/,
+		);
+	});
+
+	it("fails a per-call selector that matches no available model", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+		const registry = { getAvailable: () => [MODEL] } as unknown as ToolSession["modelRegistry"];
+		const withRegistry = { ...childSession, modelRegistry: registry } as ToolSession;
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: withRegistry, model: "openai/does-not-exist" })),
+		).rejects.toThrow(/No available model matches `model`/);
+
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: withRegistry, model: "anthropic/claude-sonnet-4-5" }),
+		);
+		expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
 
 	it("falls through an empty configured override to the agent definition role", async () => {
