@@ -9,16 +9,11 @@ import type {
 	MCPSseServerConfig,
 	MCPTransport,
 } from "../../mcp/types";
-import { toJsonRpcError } from "../../mcp/types";
+import { MCPNotificationMethods, toJsonRpcError } from "../../mcp/types";
+import { findByProgressToken, readProgressToken, withProgressToken } from "../progress";
 import { RequestIdAllocator } from "../request-id";
-import { createMCPTimeout, getNeverAbortSignal, resolveMCPTimeoutMs } from "../timeout";
+import { createMCPTimeout, getNeverAbortSignal, type MCPTimeoutOperation, resolveMCPTimeoutMs } from "../timeout";
 import { type MCPFetchInit, mcpFetch } from "./header-policy";
-
-interface MCPTimeoutOperation {
-	signal?: AbortSignal;
-	clear: () => void;
-	isTimeoutAbort: (error: unknown) => boolean;
-}
 
 interface PendingLegacySseRequest {
 	resolve: (value: unknown) => void;
@@ -213,6 +208,10 @@ export class LegacySseTransport implements MCPTransport {
 			return;
 		}
 		if ("method" in message && !("id" in message)) {
+			if (message.method === MCPNotificationMethods.PROGRESS) {
+				const token = readProgressToken(message.params);
+				if (token !== null) findByProgressToken(this.#pending, token)?.operation.refresh();
+			}
 			this.onNotification?.(message.method, message.params);
 		}
 	}
@@ -231,7 +230,7 @@ export class LegacySseTransport implements MCPTransport {
 			jsonrpc: "2.0" as const,
 			id,
 			method,
-			params: params ?? {},
+			params: withProgressToken(params, id),
 		};
 		const timeout = resolveMCPTimeoutMs(this.#config.timeout);
 		const operation = createMCPTimeout(timeout, this.#operationSignal(options?.signal));

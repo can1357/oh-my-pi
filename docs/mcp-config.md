@@ -106,6 +106,14 @@ Shared fields for every transport:
 
 `OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
 
+Every outgoing request carries `params._meta.progressToken` (its JSON-RPC id), so a
+server may report `notifications/progress` while it works. Each matching progress
+notification re-arms that request's deadline, which is what keeps a legitimately
+long tool call — one blocking on a person, a build, a deploy — from being aborted
+mid-flight. `OMP_MCP_MAX_TIMEOUT_MS` caps how long progress can extend a single
+request (default one hour; `0` removes the cap), so a server that heartbeats
+forever without answering still fails instead of holding the turn.
+
 Remote HTTP and SSE transports do not impose an additional socket-idle timeout. Without an applicable MCP deadline, a silent connection can wait indefinitely; cancel the call or close the transport to stop it. A quiet stream alone does not prove that its peer is still reachable.
 
 ### `stdio` transport

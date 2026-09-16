@@ -16,7 +16,7 @@ import type {
 	MCPSseServerConfig,
 	MCPTransport,
 } from "../../mcp/types";
-import { toJsonRpcError } from "../../mcp/types";
+import { MCPNotificationMethods, toJsonRpcError } from "../../mcp/types";
 import {
 	createMCPJsonRpcError,
 	type MCPFailureStage,
@@ -24,8 +24,15 @@ import {
 	mcpTraceIdFromHeaders,
 	normalizeMCPTransportError,
 } from "../errors";
+import { findByProgressToken, readProgressToken, withProgressToken } from "../progress";
 import { RequestIdAllocator } from "../request-id";
-import { createMCPTimeout, getNeverAbortSignal, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
+import {
+	createMCPTimeout,
+	getNeverAbortSignal,
+	isMCPTimeoutEnabled,
+	type MCPTimeoutOperation,
+	resolveMCPTimeoutMs,
+} from "../timeout";
 import { type MCPFetchInit, mcpFetch, withoutHeader } from "./header-policy";
 
 const HTTP_SSE_CONNECT_TIMEOUT_MS = 1_000;
@@ -85,6 +92,16 @@ export class HttpTransport implements MCPTransport {
 	readonly #activeFetches = new Set<Promise<Response>>();
 	readonly #backgroundDrains = new Set<Promise<void>>();
 	#closePromise: Promise<void> | null = null;
+	/**
+	 * Deadlines of requests still in flight, keyed by progress token (their
+	 * request id). A `notifications/progress` for one of them means the server
+	 * is still working, so every deadline covering that request is re-armed
+	 * instead of expiring mid-call. A streamed response has two — the POST
+	 * round-trip and the SSE drain — and progress can arrive on the request's
+	 * own stream or on the standalone GET listener, so both dispatch paths
+	 * consult this.
+	 */
+	readonly #progressRefreshers = new Map<string | number, Set<MCPTimeoutOperation>>();
 	/**
 	 * Protocol version echoed in the `MCP-Protocol-Version` header. `null` until
 	 * the `initialize` response is negotiated (via {@link setProtocolVersion}):
@@ -383,6 +400,11 @@ export class HttpTransport implements MCPTransport {
 		}
 		// Notification: has method but no id
 		if ("method" in message && !("id" in message)) {
+			if (message.method === MCPNotificationMethods.PROGRESS) {
+				const token = readProgressToken(message.params);
+				const operations = token === null ? undefined : findByProgressToken(this.#progressRefreshers, token);
+				if (operations) for (const operation of operations) operation.refresh();
+			}
 			this.onNotification?.(message.method, message.params);
 		}
 	}
@@ -436,7 +458,7 @@ export class HttpTransport implements MCPTransport {
 			jsonrpc: "2.0" as const,
 			id,
 			method,
-			params: params ?? {},
+			params: withProgressToken(params, id),
 		};
 
 		const generated: Record<string, string> = {
@@ -450,6 +472,7 @@ export class HttpTransport implements MCPTransport {
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
 		const operation = createMCPTimeout(timeout, this.#operationSignal(options?.signal));
+		const untrackProgress = this.#trackProgress(id, operation);
 		let stage: MCPFailureStage = "send";
 		let traceId: string | undefined;
 
@@ -533,8 +556,20 @@ export class HttpTransport implements MCPTransport {
 			if (error instanceof Error && error.name === "AbortError") throw error;
 			throw normalizeMCPTransportError(error, { transport: "http", stage, traceId });
 		} finally {
+			untrackProgress();
 			operation.clear();
 		}
+	}
+
+	/** Register `operation` as a deadline that progress on `id` may re-arm. */
+	#trackProgress(id: string | number, operation: MCPTimeoutOperation): () => void {
+		const operations = this.#progressRefreshers.get(id) ?? new Set<MCPTimeoutOperation>();
+		operations.add(operation);
+		this.#progressRefreshers.set(id, operations);
+		return () => {
+			operations.delete(operation);
+			if (operations.size === 0) this.#progressRefreshers.delete(id);
+		};
 	}
 
 	#parseSSEResponse<T>(response: Response, expectedId: string | number, options?: MCPRequestOptions): Promise<T> {
@@ -552,6 +587,7 @@ export class HttpTransport implements MCPTransport {
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
 		const operation = createMCPTimeout(timeout, this.#operationSignal(options?.signal));
+		const untrackProgress = this.#trackProgress(expectedId, operation);
 		const signal = operation.signal ?? getNeverAbortSignal();
 
 		const { promise, resolve, reject } = Promise.withResolvers<T>();
@@ -670,6 +706,7 @@ export class HttpTransport implements MCPTransport {
 					);
 				}
 			} finally {
+				untrackProgress();
 				operation.clear();
 				await current.body?.cancel().catch(() => {});
 			}

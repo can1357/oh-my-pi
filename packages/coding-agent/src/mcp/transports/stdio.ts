@@ -19,10 +19,11 @@ import type {
 	MCPStdioServerConfig,
 	MCPTransport,
 } from "../../mcp/types";
-import { toJsonRpcError } from "../../mcp/types";
+import { MCPNotificationMethods, toJsonRpcError } from "../../mcp/types";
 import { createMCPJsonRpcError, MCPTransportError, normalizeMCPTransportError } from "../errors";
+import { findByProgressToken, readProgressToken, withProgressToken } from "../progress";
 import { RequestIdAllocator } from "../request-id";
-import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
+import { isMCPTimeoutEnabled, progressWindowMs, resolveMCPMaxTimeoutMs, resolveMCPTimeoutMs } from "../timeout";
 
 /** Subprocess argv and platform-derived spawn flags for an MCP stdio server. */
 export interface StdioSpawnCommand {
@@ -536,19 +537,21 @@ export async function terminateStdioProcess(
 	if (!exitedOnTerm) await waitForProcessExit(proc.exited, KILL_GRACE_MS);
 }
 
+/** A request awaiting its response on the subprocess's stdout. */
+interface PendingStdioRequest {
+	resolve: (value: unknown) => void;
+	reject: (error: Error) => void;
+	/** Re-arm this request's deadline after the server reported progress. */
+	onProgress: () => void;
+}
+
 /**
  * Stdio transport for MCP servers.
  * Spawns a subprocess and communicates via stdin/stdout.
  */
 export class StdioTransport implements MCPTransport {
 	#process: Subprocess<"pipe", "pipe", "pipe"> | null = null;
-	#pendingRequests = new Map<
-		string | number,
-		{
-			resolve: (value: unknown) => void;
-			reject: (error: Error) => void;
-		}
-	>();
+	#pendingRequests = new Map<string | number, PendingStdioRequest>();
 	#connected = false;
 	#readLoop: Promise<void> | null = null;
 	/**
@@ -711,6 +714,10 @@ export class StdioTransport implements MCPTransport {
 		// Notification: has method but no id
 		if ("method" in message) {
 			const notification = message as { method: string; params?: unknown };
+			if (notification.method === MCPNotificationMethods.PROGRESS) {
+				const token = readProgressToken(notification.params);
+				if (token !== null) findByProgressToken(this.#pendingRequests, token)?.onProgress();
+			}
 			this.onNotification?.(notification.method, notification.params);
 		}
 	}
@@ -779,7 +786,7 @@ export class StdioTransport implements MCPTransport {
 			jsonrpc: "2.0" as const,
 			id,
 			method,
-			params: params ?? {},
+			params: withProgressToken(params, id),
 		};
 
 		const timeout = resolveMCPTimeoutMs(this.config.timeout);
@@ -817,6 +824,21 @@ export class StdioTransport implements MCPTransport {
 			signal.addEventListener("abort", onAbort, { once: true });
 		}
 
+		const expire = () => {
+			cleanup();
+			reject(
+				new MCPTransportError({
+					transport: "stdio",
+					stage: "receive",
+					failure: "timeout",
+					message: `Request timeout after ${timeout}ms`,
+					retryable: false,
+				}),
+			);
+		};
+		const startedAt = Date.now();
+		const maxTimeoutMs = resolveMCPMaxTimeoutMs();
+
 		this.#pendingRequests.set(id, {
 			resolve: (value: unknown) => {
 				cleanup();
@@ -826,21 +848,20 @@ export class StdioTransport implements MCPTransport {
 				cleanup();
 				reject(error);
 			},
+			// A server that keeps reporting progress is still working, so give it
+			// another window instead of failing a call that is alive — bounded by
+			// the total ceiling so silence-by-heartbeat cannot hold the turn.
+			onProgress: () => {
+				if (settled || timer === undefined) return;
+				const window = progressWindowMs({ timeoutMs: timeout, startedAt, maxTimeoutMs });
+				if (window <= 0) return;
+				clearTimeout(timer);
+				timer = setTimeout(expire, window);
+			},
 		});
 
 		if (isMCPTimeoutEnabled(timeout)) {
-			timer = setTimeout(() => {
-				cleanup();
-				reject(
-					new MCPTransportError({
-						transport: "stdio",
-						stage: "receive",
-						failure: "timeout",
-						message: `Request timeout after ${timeout}ms`,
-						retryable: false,
-					}),
-				);
-			}, timeout);
+			timer = setTimeout(expire, timeout);
 		}
 
 		const stdin = this.#process.stdin;
