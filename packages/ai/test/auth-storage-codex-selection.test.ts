@@ -781,7 +781,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.05);
 	});
 
-	test("evicts an automatic warm pin using inherited global reserve for a priority-only policy", async () => {
+	test("evicts an automatic warm pin only after confirming sibling reserve health", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {
 			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
@@ -823,6 +823,13 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		clockOffset = 10 * 60_000;
 		setUsage(0.95, 0.2);
+		usageByAccount.delete("acct-sibling");
+		await authStorage.invalidateUsageCache("openai-codex");
+		expect(await authStorage.getApiKey("openai-codex", "automatic-reserve-pin")).toBe("api-acct-protected");
+
+		clockOffset = 20 * 60_000;
+		setUsage(0.95, 0.2);
+		await authStorage.invalidateUsageCache("openai-codex");
 		expect(await authStorage.getApiKey("openai-codex", "automatic-reserve-pin")).toBe("api-acct-sibling");
 	});
 

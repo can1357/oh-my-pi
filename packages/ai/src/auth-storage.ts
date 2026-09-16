@@ -1352,6 +1352,8 @@ type UsageCandidate<T extends AuthCredential> = {
 	usageChecked: boolean;
 	/** Present after policy-aware ranking; used to decide whether a warm automatic pin may be evicted. */
 	inReserve?: boolean;
+	/** True only when reserve ranking had a usable remaining-fraction measurement. */
+	reserveMeasured?: boolean;
 };
 
 type OAuthCandidate = UsageCandidate<OAuthCredential>;
@@ -1372,6 +1374,7 @@ type UsageRankedCandidate<T extends AuthCredential> = UsageCandidate<T> & {
 	blocked: boolean;
 	blockedUntil?: number;
 	inReserve: boolean;
+	reserveMeasured?: boolean;
 	accountPriority: number;
 	hasPriorityBoost: boolean;
 	usageMeasured: boolean;
@@ -5265,6 +5268,7 @@ export class AuthStorage {
 			usage: candidate.usage,
 			usageChecked: candidate.usageChecked,
 			inReserve: candidate.inReserve,
+			reserveMeasured: candidate.reserveMeasured,
 		}));
 	}
 
@@ -5406,6 +5410,7 @@ export class AuthStorage {
 				blockedUntil,
 				inReserve:
 					reserveFraction !== undefined && remainingFraction !== undefined && remainingFraction <= reserveFraction,
+				reserveMeasured: reserveFraction !== undefined && remainingFraction !== undefined,
 				accountPriority: policy?.priority === undefined || !Number.isFinite(policy.priority) ? 0 : policy.priority,
 				usageMeasured,
 				hasPriorityBoost: strategy?.hasPriorityBoost?.(primary, primaryUncapped, args.rankingContext) ?? false,
@@ -5576,7 +5581,10 @@ export class AuthStorage {
 			!sessionPinIsExplicit &&
 			preferredCandidate?.inReserve === true &&
 			candidates.some(
-				candidate => candidate.selection.index !== sessionPreferredIndex && candidate.inReserve === false,
+				candidate =>
+					candidate.selection.index !== sessionPreferredIndex &&
+					candidate.reserveMeasured === true &&
+					candidate.inReserve === false,
 			);
 		// A warm automatic pin normally wins. Reserve is the one policy allowed
 		// to evict it, and only while a sibling is confirmed outside reserve.
