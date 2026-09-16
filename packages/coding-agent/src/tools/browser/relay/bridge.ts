@@ -404,6 +404,10 @@ class TabState {
 	readonly frameSessions = new Map<string, string>();
 	/** Live execution contexts from the shared root debugger session. */
 	readonly runtimeContexts = new Map<number, Record<string, unknown>>();
+	/** Temporary context inventories used to target changed frames inside OOPIF sessions. */
+	readonly childPreloadContextProbes = new Map<string, Map<number, Record<string, unknown>>>();
+	/** OOPIF sessions whose Runtime domain a downstream client enabled. */
+	readonly childRuntimeEnabled = new Set<string>();
 	/** Temporary context inventory used to target recovery preloads at changed frames. */
 	preloadContextProbe: Map<number, Record<string, unknown>> | null = null;
 	/** Whether the shared root Runtime domain has been enabled by the bridge. */
@@ -1373,6 +1377,10 @@ export class RelayBridge {
 				method: msg.method,
 				params: msg.params,
 			});
+			if (realSessionId && initialTab) {
+				if (msg.method === "Runtime.enable") initialTab.childRuntimeEnabled.add(realSessionId);
+				if (msg.method === "Runtime.disable") initialTab.childRuntimeEnabled.delete(realSessionId);
+			}
 			const forwardingSessionIsCurrent = this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef);
 			if (pageRef && msg.sessionId && pendingSubscription) {
 				this.#recordSubscription(
@@ -2957,6 +2965,8 @@ export class RelayBridge {
 			if (typeof child === "string") {
 				tab.realSessions.delete(child);
 				this.#realSessionTabs.delete(child);
+				tab.childPreloadContextProbes.delete(child);
+				tab.childRuntimeEnabled.delete(child);
 				for (const [frameId, sessionId] of tab.frameSessions) {
 					if (sessionId === child) tab.frameSessions.delete(frameId);
 				}
@@ -2978,6 +2988,29 @@ export class RelayBridge {
 						}
 					}
 				}
+			}
+		}
+		if (sourceSessionId && method.startsWith("Runtime.")) {
+			const probe = tab.childPreloadContextProbes.get(sourceSessionId);
+			if (probe) {
+				const createdContext = method === "Runtime.executionContextCreated" ? params?.context : undefined;
+				const createdContextId =
+					createdContext &&
+					typeof createdContext === "object" &&
+					"id" in createdContext &&
+					typeof createdContext.id === "number"
+						? createdContext.id
+						: undefined;
+				const destroyedContextId =
+					method === "Runtime.executionContextDestroyed" && typeof params?.executionContextId === "number"
+						? params.executionContextId
+						: undefined;
+				if (createdContextId !== undefined && createdContext) {
+					probe.set(createdContextId, createdContext as Record<string, unknown>);
+				}
+				if (destroyedContextId !== undefined) probe.delete(destroyedContextId);
+				if (method === "Runtime.executionContextsCleared") probe.clear();
+				if (!tab.childRuntimeEnabled.has(sourceSessionId)) return;
 			}
 		}
 		if (sourceSessionId) {
@@ -3346,6 +3379,8 @@ export class RelayBridge {
 		const staleRealSessions = [...tab.realSessions];
 		for (const realSession of staleRealSessions) this.#realSessionTabs.delete(realSession);
 		tab.realSessions.clear();
+		tab.childPreloadContextProbes.clear();
+		tab.childRuntimeEnabled.clear();
 		for (const conn of this.#conns.values()) {
 			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
 				const ref = conn.sessions.get(pageSession);
@@ -3820,6 +3855,7 @@ export class RelayBridge {
 		const enabledForProbe = !tab.rootRuntimeEnabled;
 		const contexts = enabledForProbe ? new Map<number, Record<string, unknown>>() : tab.runtimeContexts;
 		let probeEnabled = false;
+		const temporarilyEnabledChildSessions = new Set<string>();
 		try {
 			if (enabledForProbe) {
 				tab.preloadContextProbe = contexts;
@@ -3852,13 +3888,34 @@ export class RelayBridge {
 					continue;
 				}
 				if (sessionId) {
+					let childContexts = tab.childPreloadContextProbes.get(sessionId);
+					if (!childContexts) {
+						childContexts = new Map();
+						tab.childPreloadContextProbes.set(sessionId, childContexts);
+						const runtimeWasEnabled = tab.childRuntimeEnabled.has(sessionId);
+						this.#assertExtensionCurrent(expectedExt);
+						await this.#rpc({
+							op: "send",
+							tabId: tab.tabId,
+							sessionId,
+							method: "Runtime.enable",
+						});
+						if (!runtimeWasEnabled) temporarilyEnabledChildSessions.add(sessionId);
+					}
+					const match = [...childContexts].find(([, context]) => {
+						const auxData = context.auxData;
+						if (!auxData || typeof auxData !== "object") return false;
+						const contextAuxData = auxData as Record<string, unknown>;
+						return contextAuxData.frameId === frameId && contextAuxData.isDefault === true;
+					});
+					if (!match) throw new Error(`No matching execution context for changed frame ${frameId}`);
 					this.#assertExtensionCurrent(expectedExt);
 					await this.#rpc({
 						op: "send",
 						tabId: tab.tabId,
 						sessionId,
 						method: "Runtime.evaluate",
-						params: { expression: source, ...commandLineAPI },
+						params: { expression: source, contextId: match[0], ...commandLineAPI },
 					});
 					continue;
 				}
@@ -3881,6 +3938,13 @@ export class RelayBridge {
 				});
 			}
 		} finally {
+			for (const sessionId of temporarilyEnabledChildSessions) {
+				this.#assertExtensionCurrent(expectedExt);
+				await this.#rpc({ op: "send", tabId: tab.tabId, sessionId, method: "Runtime.disable" });
+			}
+			for (const sessionId of new Set([...temporarilyEnabledChildSessions, ...tab.childRuntimeEnabled])) {
+				tab.childPreloadContextProbes.delete(sessionId);
+			}
 			if (enabledForProbe) {
 				tab.preloadContextProbe = null;
 				if (probeEnabled) {
@@ -4022,6 +4086,8 @@ export class RelayBridge {
 		const staleRealSessions = [...tab.realSessions];
 		for (const realSession of staleRealSessions) this.#realSessionTabs.delete(realSession);
 		tab.realSessions.clear();
+		tab.childPreloadContextProbes.clear();
+		tab.childRuntimeEnabled.clear();
 		for (const conn of this.#conns.values()) {
 			const preservePages = keepPageSessions.includes(conn);
 			const tabSessions = conn.sessionsForTab(tab.tabId, "tab");
