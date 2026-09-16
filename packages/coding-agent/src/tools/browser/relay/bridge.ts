@@ -499,6 +499,7 @@ class TabState {
 const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chrome-untrusted|chrome-search):/i;
 
 const RPC_TIMEOUT_MS = 20_000;
+const HELLO_TIMEOUT_MS = 20_000;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
 
@@ -548,6 +549,8 @@ export class RelayBridge {
 		browserVersion: string;
 		hardwareConcurrency?: number;
 	} | null = null;
+	/** Bounds the interval where a connected extension has not completed hello. */
+	#helloTimer: NodeJS.Timeout | null = null;
 	#pendingRpc = new Map<
 		number,
 		{
@@ -624,6 +627,7 @@ export class RelayBridge {
 
 	/** A new extension socket connected; replaces any previous one. */
 	extConnected(socket: RelaySocket): void {
+		if (this.#helloTimer) clearTimeout(this.#helloTimer);
 		if (this.#ext && this.#ext !== socket) {
 			this.#log("replacing extension socket");
 			for (const tab of this.#tabs.values()) {
@@ -643,10 +647,18 @@ export class RelayBridge {
 			this.#extInfo = null;
 		}
 		this.#ext = socket;
+		this.#helloTimer = setTimeout(() => {
+			if (this.#ext !== socket || this.#extInfo) return;
+			this.#log("extension hello timed out");
+			socket.close();
+			this.extClosed(socket);
+		}, HELLO_TIMEOUT_MS);
 	}
 
 	extClosed(socket: RelaySocket): void {
 		if (this.#ext !== socket) return;
+		if (this.#helloTimer) clearTimeout(this.#helloTimer);
+		this.#helloTimer = null;
 		this.#ext = null;
 		this.#extInfo = null;
 		this.#rejectPendingExtensionRpcs(new Error("relay extension disconnected"));
@@ -722,6 +734,8 @@ export class RelayBridge {
 	}
 
 	#onHello(msg: Extract<ExtToRelayMessage, { t: "hello" }>): void {
+		if (this.#helloTimer) clearTimeout(this.#helloTimer);
+		this.#helloTimer = null;
 		this.#extInfo = {
 			userAgent: msg.userAgent,
 			browserVersion: msg.browserVersion,

@@ -10399,6 +10399,40 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
 
+	it("recycles a replacement socket whose hello never completes", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+		vi.useFakeTimers();
+		try {
+			const replacement = new FakeExtSocket();
+			bridge.extConnected(replacement);
+			const commandId = ++msgSeq;
+			bridge.cdpMessage(
+				connId,
+				JSON.stringify({ id: commandId, sessionId: pageSession, method: "Runtime.evaluate" }),
+			);
+			await flush();
+			expect(replacement.rpcs("send")).toHaveLength(0);
+
+			vi.advanceTimersByTime(20_000);
+			await flush();
+
+			expect(replacement.closeCount).toBe(1);
+			expect(cdp.messages.find(message => message.id === commandId)?.error).toEqual({
+				code: -32000,
+				message: "relay extension is not connected",
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("rejects a queued command when recovery replaces its auto-attach page session", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
