@@ -6,13 +6,17 @@
 import * as path from "node:path";
 import { APP_NAME, getProjectDir, getPythonEnvDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { discoverAuthStorage } from "../session/auth-broker-config";
 import { Settings, settings } from "../config/settings";
+import { ModelRegistry } from "../config/model-registry";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { theme } from "../modes/theme/theme";
+import { CLOUD_STT_MODEL_OPTIONS, isCloudSttModel, resolveCloudSttModel } from "../stt/cloud-models";
+import { resolveSttCloudCredential } from "../stt/stt-controller";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
-import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
+import { isSttModelKey, resolveSttModelSpec, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODEL_OPTIONS } from "../tts";
-import { selectSetupModel } from "./setup-model-picker";
+import * as setupModelPicker from "./setup-model-picker";
 
 export type SetupComponent = "python" | "speech";
 
@@ -151,7 +155,7 @@ async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Pr
  * `pick` (optional) lets an interactive user choose + persist a model; `ensure`
  * performs the download, streaming a normalized progress event.
  */
-interface SpeechComponent {
+export interface SpeechComponent {
 	name: string;
 	isReady(): Promise<boolean>;
 	status(): Promise<string>;
@@ -159,32 +163,44 @@ interface SpeechComponent {
 	ensure(onProgress: (progress: { stage: string; percent?: number }) => void): Promise<void>;
 }
 
-function buildSpeechComponents(): SpeechComponent[] {
+export function buildSpeechComponents(hasCloudCredential: Promise<boolean>): SpeechComponent[] {
 	return [
 		{
 			name: "Speech-to-Text model",
-			isReady: () => isSttModelCached(settings.get("stt.modelName")),
+			isReady: async () =>
+				(settings.get("stt.backend") === "cloud" && (await hasCloudCredential)) ||
+				isSttModelCached(settings.get("stt.localModel")),
 			status: async () => {
-				const key = settings.get("stt.modelName");
-				return (await isSttModelCached(key)) ? key : `${key} — not downloaded`;
+				if (settings.get("stt.backend") === "cloud" && (await hasCloudCredential))
+					return `cloud (${resolveCloudSttModel(settings.get("stt.cloudModel"))}, no download)`;
+				// A stale key from an older build still maps onto the default spec:
+				// report the model actually probed.
+				const local = resolveSttModelSpec(settings.get("stt.localModel")).key;
+				return (await isSttModelCached(local)) ? local : `${local} — local fallback not downloaded`;
 			},
 			pick: async () => {
-				const chosen = await selectSetupModel(
-					"Speech-to-Text model",
-					[...STT_MODEL_OPTIONS],
-					settings.get("stt.modelName"),
+				// Each backend offers only its own family and writes its own
+				// setting, so picking a cloud model never clobbers the local model
+				// the cloud backend falls back to.
+				const cloud = settings.get("stt.backend") === "cloud" && (await hasCloudCredential);
+				const chosen = await setupModelPicker.selectSetupModel(
+					cloud ? "Cloud speech-to-text model" : "Local speech-to-text model",
+					cloud ? [...CLOUD_STT_MODEL_OPTIONS] : [...STT_MODEL_OPTIONS],
+					cloud ? resolveCloudSttModel(settings.get("stt.cloudModel")) : settings.get("stt.localModel"),
 				);
 				if (chosen === null) return false;
-				if (isSttModelKey(chosen)) {
-					settings.set("stt.modelName", chosen);
-					await settings.flush();
-				}
+				if (cloud && isCloudSttModel(chosen)) settings.set("stt.cloudModel", chosen);
+				else if (!cloud && isSttModelKey(chosen)) settings.set("stt.localModel", chosen);
+				else return true;
+				await settings.flush();
 				return true;
 			},
-			ensure: onProgress =>
-				downloadSttModel(settings.get("stt.modelName"), progress =>
+			ensure: async onProgress => {
+				if (settings.get("stt.backend") === "cloud" && (await hasCloudCredential)) return;
+				await downloadSttModel(settings.get("stt.localModel"), progress =>
 					onProgress({ stage: `Downloading ${progress.label} model`, percent: progress.percent }),
-				),
+				);
+			},
 		},
 		{
 			name: "Text-to-Speech model",
@@ -194,7 +210,7 @@ function buildSpeechComponents(): SpeechComponent[] {
 				return (await isTtsModelCached(key)) ? key : `${key} — model/runtime not installed`;
 			},
 			pick: async () => {
-				const chosen = await selectSetupModel(
+				const chosen = await setupModelPicker.selectSetupModel(
 					"Text-to-Speech model",
 					[...TTS_LOCAL_MODEL_OPTIONS],
 					settings.get("tts.localModel"),
@@ -223,8 +239,17 @@ function buildSpeechComponents(): SpeechComponent[] {
  * values).
  */
 async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Promise<void> {
-	await Settings.init({ cwd: getProjectDir() });
-	const components = buildSpeechComponents();
+	const settingsInstance = await Settings.init({ cwd: getProjectDir() });
+	const hasCloudCredential =
+		settings.get("stt.backend") === "cloud"
+			? discoverAuthStorage()
+					.then(authStorage => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }))
+					.then(registry =>
+						resolveSttCloudCredential(registry, undefined, undefined, settings.get("stt.cloudCredential")),
+					)
+					.then(Boolean)
+			: Promise.resolve(false);
+	const components = buildSpeechComponents(hasCloudCredential);
 
 	if (flags.json) {
 		const report: Record<string, { ready: boolean; status: string }> = {};

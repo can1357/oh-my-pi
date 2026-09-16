@@ -210,7 +210,7 @@ describe("STTController submit trigger integration", () => {
 	beforeEach(async () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
-		settings.set("stt.modelName", "fast");
+		settings.set("stt.localModel", "fast");
 		settings.set("stt.submitTrigger", "never");
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockResolvedValue(undefined);

@@ -1,3 +1,4 @@
+import { readBoundedText } from "@oh-my-pi/pi-utils";
 import type { AgentStorage } from "../../../session/agent-storage";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -144,6 +145,10 @@ export function normalizeSearchText(value: unknown): string | undefined {
 /**
  * Read a provider response body up to a byte cap, truncating or throwing when
  * the limit is exceeded. Shared so streaming-cap fixes land in one place.
+ *
+ * The capped read itself is {@link readBoundedText}; this adds the
+ * search-provider contract on top (a typed {@link SearchProviderError} when
+ * the caller wants an over-limit body rejected rather than truncated).
  */
 export async function readLimitedText(
 	response: Response,
@@ -151,38 +156,9 @@ export async function readLimitedText(
 	maxBytes: number,
 	truncate = false,
 ): Promise<string> {
-	if (!response.body) return "";
-	const reader = response.body.getReader();
-	let buffer = new Uint8Array(Math.min(maxBytes, 64 * 1024));
-	let bytes = 0;
-
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			const accepted = Math.min(value.byteLength, maxBytes - bytes);
-			const nextBytes = bytes + accepted;
-			if (nextBytes > buffer.byteLength) {
-				const grown = new Uint8Array(Math.min(maxBytes, Math.max(nextBytes, buffer.byteLength * 2)));
-				grown.set(buffer.subarray(0, bytes));
-				buffer = grown;
-			}
-			buffer.set(value.subarray(0, accepted), bytes);
-			bytes = nextBytes;
-			if (accepted < value.byteLength) {
-				await reader.cancel().catch(() => undefined);
-				if (!truncate)
-					throw new SearchProviderError(
-						provider,
-						`${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`,
-						500,
-					);
-				break;
-			}
-		}
-	} finally {
-		reader.releaseLock();
+	const { value, truncated } = await readBoundedText(response.body, maxBytes);
+	if (truncated && !truncate) {
+		throw new SearchProviderError(provider, `${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`, 500);
 	}
-
-	return new TextDecoder().decode(buffer.subarray(0, bytes));
+	return value;
 }

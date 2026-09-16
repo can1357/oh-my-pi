@@ -92,7 +92,7 @@ describe("STTController preflight", () => {
 	beforeEach(async () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
-		settings.set("stt.modelName", "fast");
+		settings.set("stt.localModel", "fast");
 		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
 			pushAudio: vi.fn(),
 			stop: vi.fn().mockResolvedValue(""),
@@ -122,14 +122,14 @@ describe("STTController preflight", () => {
 		expect(isCached).toHaveBeenCalledWith("fast");
 		// Background warm calls downloadSttModel with no progress callback.
 		expect(download).toHaveBeenCalledTimes(1);
-		expect(download.mock.calls[0]).toHaveLength(1);
+		expect(download.mock.calls[0]![1]).toBeUndefined();
 		// Nothing was written to the status line, so it must not be cleared.
 		expect(options.showStatus).not.toHaveBeenCalled();
 	});
 
 	it("uncached model: downloads in the foreground with progress before recording", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
-		const download = vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
 			onProgress?.({
 				status: "progress",
 				percent: 42,
@@ -147,8 +147,6 @@ describe("STTController preflight", () => {
 		await controller.toggle(editor, options);
 
 		expect(controller.state).toBe("recording");
-		// Foreground path passes a progress callback (2 args) and surfaces it.
-		expect(download.mock.calls[0]).toHaveLength(2);
 		expect(options.showStatus).toHaveBeenCalledWith("Downloading speech model Whisper base (42%)");
 		// Status was written, so the line is cleared at the end.
 		expect(options.showStatus).toHaveBeenLastCalledWith("");
@@ -165,7 +163,7 @@ describe("STTController preflight", () => {
 		expect(isCached).toHaveBeenLastCalledWith("fast");
 
 		// Switch the model, then stop and re-start the gesture.
-		settings.set("stt.modelName", "turbo");
+		settings.set("stt.localModel", "turbo");
 		await controller.toggle(editor, makeOptions()); // recording -> idle
 		expect(controller.state).toBe("idle");
 		await controller.toggle(editor, makeOptions()); // idle -> recording

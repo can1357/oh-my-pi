@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Added OpenAI cloud speech-to-text for push-to-talk dictation, with ChatGPT subscription and API-key authentication; `stt.backend` selects the backend, `stt.cloudCredential` selects the credential, and `stt.localModel`/`stt.cloudModel` hold each backend's own model ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
 
 ## [18.2.1] - 2026-09-15
 

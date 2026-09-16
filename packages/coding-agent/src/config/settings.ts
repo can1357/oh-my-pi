@@ -39,6 +39,7 @@ import { loadCapability } from "../discovery";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
+import { isCloudSttModel } from "../stt/cloud-models";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
 import { applyHyperlinkSetting } from "../tui/hyperlink";
 import { replaceFileAtomically } from "../utils/atomic-file";
@@ -2379,6 +2380,30 @@ export class Settings {
 		}
 		if (typeof raw["codexResets.autoRedeem"] === "boolean") {
 			raw["codexResets.autoRedeem"] = raw["codexResets.autoRedeem"] ? "yes" : "no";
+		}
+
+		// stt.modelName held two disjoint families (local tiers and OpenAI
+		// transcription ids) in one enum, so picking a cloud id silently reset the
+		// local model the cloud backend falls back to. Route the legacy value to
+		// the family it belongs to; an already-materialised target wins.
+		{
+			const sttObj = isRecord(raw.stt) ? raw.stt : undefined;
+			const legacyModel =
+				typeof sttObj?.modelName === "string"
+					? sttObj.modelName
+					: typeof raw["stt.modelName"] === "string"
+						? (raw["stt.modelName"] as string)
+						: undefined;
+			if (legacyModel !== undefined) {
+				const target = isCloudSttModel(legacyModel) ? "cloudModel" : "localModel";
+				const sttRoot = sttObj ?? {};
+				if (typeof sttRoot[target] !== "string" && typeof raw[`stt.${target}`] !== "string") {
+					sttRoot[target] = legacyModel;
+				}
+				delete sttRoot.modelName;
+				delete raw["stt.modelName"];
+				raw.stt = sttRoot;
+			}
 		}
 
 		// Map legacy `memories.enabled` boolean to the explicit `memory.backend`
