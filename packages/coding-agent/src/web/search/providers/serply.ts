@@ -5,7 +5,7 @@
  * SearchResponse shape used by the web search tool.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { asRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import type { StructuredQuery } from "../query";
@@ -13,12 +13,14 @@ import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeSearchText, readLimitedText, withHardTimeout } from "./utils";
 
 const SERPLY_SEARCH_URL = "https://api.serply.io/v1/search/";
 const DEFAULT_NUM_RESULTS = 10;
 /** Serply serves one Google result page per call, so `num` saturates at 10. */
 const MAX_NUM_RESULTS = 10;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAX_ERROR_BYTES = 8 * 1024;
 
 const RECENCY_MAP: Record<"day" | "week" | "month" | "year", "d" | "w" | "m" | "y"> = {
 	day: "d",
@@ -39,11 +41,6 @@ export interface SerplySearchParams {
 
 interface SerplySearchResponse {
 	results?: unknown;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-	if (typeof value !== "object" || value === null) return null;
-	return value as Record<string, unknown>;
 }
 
 /** Serply reports failures as a `detail` string, occasionally as a nested object. */
@@ -70,11 +67,6 @@ function normalizeUrl(value: unknown): string | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-function normalizeText(value: unknown): string | undefined {
-	if (typeof value !== "string") return undefined;
-	return value.replace(/\s+/g, " ").trim() || undefined;
 }
 
 /** Exported for testing. Builds the Serply request URL from unified params. */
@@ -108,7 +100,7 @@ async function callSerplySearch(apiKey: string, params: SerplySearchParams): Pro
 	});
 
 	if (!response.ok) {
-		const errorText = await response.text();
+		const errorText = await readLimitedText(response, "serply", MAX_ERROR_BYTES, true);
 		const classified = classifyProviderHttpError("serply", response.status, errorText);
 		if (classified) throw classified;
 		let message = errorText.trim();
@@ -124,7 +116,13 @@ async function callSerplySearch(apiKey: string, params: SerplySearchParams): Pro
 		throw new SearchProviderError("serply", `Serply API error (${response.status}): ${message}`, response.status);
 	}
 
-	const payload: unknown = await response.json();
+	const raw = await readLimitedText(response, "serply", MAX_RESPONSE_BYTES, false);
+	let payload: unknown;
+	try {
+		payload = JSON.parse(raw);
+	} catch {
+		throw new SearchProviderError("serply", "Serply API returned invalid JSON", 500);
+	}
 	return asRecord(payload) ?? {};
 }
 
@@ -139,11 +137,11 @@ function toSearchResponse(response: SerplySearchResponse, numResults: number): S
 			if (!url) continue;
 			// Serply attaches the SERP-reported publish date under `metadata`,
 			// as a human-readable string such as "Sep 17, 2023".
-			const publishedDate = normalizeText(asRecord(result.metadata)?.published_time);
+			const publishedDate = normalizeSearchText(asRecord(result.metadata)?.published_time);
 			sources.push({
-				title: normalizeText(result.title) ?? url,
+				title: normalizeSearchText(result.title) ?? url,
 				url,
-				snippet: normalizeText(result.description),
+				snippet: normalizeSearchText(result.description),
 				publishedDate,
 				ageSeconds: dateToAgeSeconds(publishedDate),
 			});
