@@ -88,8 +88,8 @@ function resolveTaggedInBandRateLimitRetry(
 	message: string | undefined,
 	maxRetryDelayMs: number,
 ): ReplaySafeProviderErrorRetryDecision {
-	if (!AIError.hasInBandProviderErrorProvenance(source)) return { _tag: "default" };
-	if (status !== 429 || message === undefined) return { _tag: "deny" };
+	if (!AIError.hasInBandProviderErrorProvenance(source) || status !== 429) return { _tag: "default" };
+	if (message === undefined) return { _tag: "deny" };
 	const retryHintMs = extractRetryHint(undefined, message);
 	const retryHintCapMs =
 		maxRetryDelayMs > 0 ? Math.min(maxRetryDelayMs, CREDIBLE_RATE_LIMIT_HINT_MS) : CREDIBLE_RATE_LIMIT_HINT_MS;

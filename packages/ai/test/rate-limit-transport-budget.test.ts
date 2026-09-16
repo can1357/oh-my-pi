@@ -272,6 +272,21 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.errorStatus).toBe(429);
 	});
 
+	it("retains the generic Completions retry for an HTTP-200 in-band 503", async () => {
+		const outcome = await countCompletionsRequests(request =>
+			request === 1
+				? new Response(`data: ${JSON.stringify({ code: 503, message: "Provider overloaded" })}\n\n`, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					})
+				: completionsSuccess("recovered"),
+		);
+
+		expect(outcome.requests).toBe(2);
+		expect(outcome.stopReason).toBe("stop");
+		expect(outcome.text).toBe("recovered");
+	});
+
 	it("recovers OpenAI Responses after one short-hinted HTTP-200 in-band 429", async () => {
 		let requests = 0;
 		const result = await streamOpenAIResponses(responsesModel, context, {
@@ -304,6 +319,26 @@ describe("transport rate-limit budget", () => {
 					? responsesSse([
 							{ type: "error", code: 429, message: "Too many requests. Please retry in 20ms" },
 						])
+					: responsesSuccess("recovered");
+			},
+			providerRetryWait: async () => {},
+		}).result();
+
+		expect(requests).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("recovered");
+	});
+
+	it("retains the generic Azure Responses retry for a statusless in-band transient error", async () => {
+		let requests = 0;
+		const result = await streamAzureOpenAIResponses(azureResponsesModel, context, {
+			apiKey: "test-key",
+			azureBaseUrl: azureResponsesModel.baseUrl,
+			azureApiVersion: "v1",
+			fetch: async () => {
+				requests++;
+				return requests === 1
+					? responsesSse([{ type: "error", message: "Provider overloaded. Please retry" }])
 					: responsesSuccess("recovered");
 			},
 			providerRetryWait: async () => {},
