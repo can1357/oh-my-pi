@@ -3,6 +3,10 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { SEARCH_PROVIDER_CHOICES } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import {
+	clearAll as clearAllUiStrings,
+	registerUiStrings,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/ui-strings";
 
 beforeAll(async () => {
 	await initTheme();
@@ -224,5 +228,27 @@ describe("settings section sidebar", () => {
 
 		clickOption(comp, "Developer");
 		expect(settings.get("dev.autoqa")).toBe(true);
+	});
+});
+
+describe("settings group headings localization", () => {
+	it("renders the registered group override as the heading and sidebar label", () => {
+		registerUiStrings({ strings: { "group.appearance.Theme": "Theme-ZH" } }, "/path/to/plugin");
+		const comp = createSelector();
+		const text = Bun.stripANSI(comp.render(120).join("\n"));
+
+		// The group name is localized in the sidebar and the section heading.
+		// "Theme-ZH" appears only as the localized group name here — the option
+		// values stay "Dark Theme"/"Light Theme", so it is a clean signal.
+		expect(text).toContain("Theme-ZH");
+		clearAllUiStrings();
+	});
+
+	it("falls back to the canonical group name when no override is registered", () => {
+		clearAllUiStrings();
+		const comp = createSelector();
+		const text = Bun.stripANSI(comp.render(120).join("\n"));
+
+		expect(text).toMatch(/│\s+Theme\s+│/);
 	});
 });

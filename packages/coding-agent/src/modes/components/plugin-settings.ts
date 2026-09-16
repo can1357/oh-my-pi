@@ -32,6 +32,7 @@ import {
 import type { InstalledPlugin, PluginSettingSchema } from "../../extensibility/plugins/types";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { shortenPath } from "../../tools/render-utils";
+import { resolveUiString } from "../../extensibility/extensions/ui-strings";
 import { OverlayPanel } from "./overlay-box";
 
 /**
@@ -212,7 +213,13 @@ export class PluginListComponent extends OverlayPanel {
 
 		this.addChild(this.#selectList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "Enter to configure · Esc to go back"), 0, 0));
+		this.addChild(
+			new Text(
+				theme.fg("dim", resolveUiString("plugins.footer.configure", "Enter to configure · Esc to go back")),
+				0,
+				0,
+			),
+		);
 	}
 
 	#renderItem(entry: PluginListEntry): SelectItem {
@@ -247,7 +254,7 @@ export class PluginListComponent extends OverlayPanel {
 
 		let details = `${kindBadge} ${scopeTag} ${theme.sep.dot} v${version}`;
 		if (summary.shadowedBy) {
-			details += ` ${theme.sep.dot} shadowed by ${summary.shadowedBy}`;
+			details += ` ${theme.sep.dot} ${resolveUiString("plugins.shadowed", "shadowed by")} ${summary.shadowedBy}`;
 		}
 
 		return {
@@ -309,8 +316,8 @@ export class PluginDetailComponent extends OverlayPanel {
 		// Enable/disable toggle
 		items.push({
 			id: "__enabled__",
-			label: "Enabled",
-			description: "Enable or disable this plugin",
+			label: resolveUiString("plugins.enabled", "Enabled"),
+			description: resolveUiString("plugins.enabled.description", "Enable or disable this plugin"),
 			currentValue: plugin.enabled ? "true" : "false",
 			values: ["true", "false"],
 		});
@@ -371,7 +378,9 @@ export class PluginDetailComponent extends OverlayPanel {
 
 		this.addChild(this.#settingsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "Enter to edit · Esc to go back"), 0, 0));
+		this.addChild(
+			new Text(theme.fg("dim", resolveUiString("plugins.footer.edit", "Enter to edit · Esc to go back")), 0, 0),
+		);
 	}
 
 	handleInput(data: string): void {
@@ -438,15 +447,21 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 		const entry = plugin.entries[0];
 		this.title = plugin.id;
 		const subtitleParts = [`[${plugin.scope}]`];
-		if (plugin.shadowedBy) subtitleParts.push(`${theme.status.shadowed} shadowed by ${plugin.shadowedBy}`);
+		if (plugin.shadowedBy)
+			subtitleParts.push(
+				`${theme.status.shadowed} ${resolveUiString("plugins.shadowed", "shadowed by")} ${plugin.shadowedBy}`,
+			);
 		this.addChild(new Text(theme.fg("muted", subtitleParts.join(" ")), 0, 0));
 		this.addChild(new Spacer(1));
 
 		const items: SettingItem[] = [
 			{
 				id: "__enabled__",
-				label: "Enabled",
-				description: "Enable or disable this marketplace plugin",
+				label: resolveUiString("plugins.enabled", "Enabled"),
+				description: resolveUiString(
+					"plugins.enabled.description.marketplace",
+					"Enable or disable this marketplace plugin",
+				),
 				currentValue: marketplaceEnabled(plugin) ? "true" : "false",
 				values: ["true", "false"],
 			},
@@ -476,23 +491,46 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 
 		this.addChild(this.#settingsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", `version       ${entry?.version ?? "(unknown)"}`), 0, 0));
-		this.addChild(new Text(theme.fg("dim", `scope         ${plugin.scope}`), 0, 0));
 		this.addChild(
 			new Text(
-				theme.fg("dim", `install path  ${entry?.installPath ? shortenPath(entry.installPath) : "(unknown)"}`),
+				theme.fg("dim", `version       ${entry?.version ?? resolveUiString("plugins.unknown", "(unknown)")}`),
 				0,
 				0,
 			),
 		);
-		this.addChild(new Text(theme.fg("dim", `installed at  ${entry?.installedAt ?? "(unknown)"}`), 0, 0));
-		this.addChild(new Text(theme.fg("dim", `last updated  ${entry?.lastUpdated ?? "(unknown)"}`), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `scope         ${plugin.scope}`), 0, 0));
+		this.addChild(
+			new Text(
+				theme.fg(
+					"dim",
+					`install path  ${entry?.installPath ? shortenPath(entry.installPath) : resolveUiString("plugins.unknown", "(unknown)")}`,
+				),
+				0,
+				0,
+			),
+		);
+		this.addChild(
+			new Text(
+				theme.fg("dim", `installed at  ${entry?.installedAt ?? resolveUiString("plugins.unknown", "(unknown)")}`),
+				0,
+				0,
+			),
+		);
+		this.addChild(
+			new Text(
+				theme.fg("dim", `last updated  ${entry?.lastUpdated ?? resolveUiString("plugins.unknown", "(unknown)")}`),
+				0,
+				0,
+			),
+		);
 		if (entry?.gitCommitSha) {
 			this.addChild(new Text(theme.fg("dim", `git sha       ${entry.gitCommitSha}`), 0, 0));
 		}
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "Enter to edit · Esc to go back"), 0, 0));
+		this.addChild(
+			new Text(theme.fg("dim", resolveUiString("plugins.footer.edit", "Enter to edit · Esc to go back")), 0, 0),
+		);
 	}
 
 	handleInput(data: string): void {
@@ -538,7 +576,9 @@ class ConfigEnumSubmenu extends OverlayPanel {
 
 		this.addChild(this.#selectList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "Enter to select · Esc to cancel"), 0, 0));
+		this.addChild(
+			new Text(theme.fg("dim", resolveUiString("plugins.footer.select", "Enter to select · Esc to cancel")), 0, 0),
+		);
 	}
 
 	handleInput(data: string): void {
@@ -594,7 +634,9 @@ class ConfigInputSubmenu extends OverlayPanel {
 
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "Enter to save · Esc to cancel"), 0, 0));
+		this.addChild(
+			new Text(theme.fg("dim", resolveUiString("plugins.footer.save", "Enter to save · Esc to cancel")), 0, 0),
+		);
 	}
 
 	handleInput(data: string): void {

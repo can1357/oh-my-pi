@@ -6,6 +6,7 @@
 import { Effort } from "@oh-my-pi/pi-ai";
 import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
+import { resolvePromptSource } from "../extensibility/extensions/prompt-overrides";
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
@@ -35,7 +36,12 @@ interface EmbeddedAgentDef {
 }
 
 function buildAgentContent(def: EmbeddedAgentDef): string {
-	const body = prompt.render(def.template);
+	// Route the agent body template through the prompt-override resolver so an
+	// extension can localize the bundled agent's ROLE prompt (stable IDs:
+	// `agent.task`, `agent.scout`, `agent.reviewer`, `agent.security-reviewer`,
+	// `agent.sonic`). The frontmatter wrapper (YAML metadata: name, description,
+	// model, ...) is left untouched — it is machine data, not model-facing prose.
+	const body = prompt.render(resolvePromptSource(`agent.${def.fileName.replace(/\.md$/, "")}`, def.template));
 	if (!def.frontmatter) return body;
 	return prompt.render(agentFrontmatterTemplate, { ...def.frontmatter, body });
 }
