@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -10,6 +11,13 @@ import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
+import {
+	AUTO_THINKING,
+	CLI_THINKING_LEVELS,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	parseCliThinkingLevel,
+} from "../thinking";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
 import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
@@ -659,6 +667,54 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					`Prewalk on: switching to ${target.model.provider}/${target.model.id} at the next edit/write (todo-gated).`,
 				);
 			}
+			return commandConsumed();
+		},
+	},
+	{
+		name: "effort",
+		icon: "gauge",
+		description: "Set reasoning effort for this session (off, auto, minimal…max)",
+		acpDescription: "Set or show reasoning effort",
+		acpInputHint: "[level]",
+		inlineHint: "[level]",
+		allowArgs: true,
+		subcommands: CLI_THINKING_LEVELS.map(level => ({
+			name: level,
+			description: getConfiguredThinkingLevelMetadata(level as ConfiguredThinkingLevel).description,
+		})),
+		getTuiAutocompleteDescription: runtime =>
+			`Effort: ${runtime.ctx.session.configuredThinkingLevel() ?? "model default"}`,
+		handle: async (command, runtime) => {
+			const session = runtime.session;
+			const model = session.model;
+			if (!model?.reasoning) {
+				await runtime.output(
+					`${model ? `${model.provider}/${model.id}` : "The current model"} has no adjustable reasoning effort.`,
+				);
+				return commandConsumed();
+			}
+			// `off` and `auto` are always selectable; the concrete tiers are the
+			// ones this model actually exposes, so the command never sets a level
+			// the clamp would silently rewrite.
+			const choices: ConfiguredThinkingLevel[] = [
+				ThinkingLevel.Off,
+				AUTO_THINKING,
+				...session.getAvailableThinkingLevels(),
+			];
+			const selector = command.args.trim().toLowerCase();
+			if (!selector) {
+				await runtime.output(
+					`Reasoning effort: ${session.configuredThinkingLevel() ?? "model default"}\nAvailable: ${choices.join(", ")}`,
+				);
+				return commandConsumed();
+			}
+			const parsed = parseCliThinkingLevel(selector);
+			if (parsed === undefined || !choices.includes(parsed)) {
+				return usage(`Unknown effort: ${selector}. Available: ${choices.join(", ")}`, runtime);
+			}
+			session.setThinkingLevel(parsed);
+			await runtime.output(`Reasoning effort set to ${parsed}.`);
+			await runtime.notifyConfigChanged?.();
 			return commandConsumed();
 		},
 	},
