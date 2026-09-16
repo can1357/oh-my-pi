@@ -133,4 +133,85 @@ describe("registerPersistedSubagents mid-spawn stubs", () => {
 		expect(originalGet("Worker")?.status).toBe("running");
 		expect(originalGet("Worker")?.session).toBe(liveSession);
 	});
+
+	it("retries under the disambiguated key instead of grafting descendants onto a foreign winner of the bare id", async () => {
+		using tempDir = TempDir.createSync("@omp-mid-spawn-foreign-bare-win-");
+		const dir = tempDir.path();
+		const sessionBFile = path.join(dir, "sessionB.jsonl");
+		const workerFileB = path.join(dir, "sessionB", "Worker.jsonl");
+		const grandchildFileB = path.join(dir, "sessionB", "Worker", "Grandchild.jsonl");
+		const workerFileA = path.join(dir, "sessionA", "Worker.jsonl");
+		await Bun.write(sessionBFile, `${sessionHeader("sessionB")}\n`);
+		await Bun.write(
+			workerFileB,
+			`${[
+				sessionHeader("workerB"),
+				JSON.stringify({
+					type: "session_init",
+					id: "siB",
+					parentId: null,
+					timestamp: "2026-08-13T17:14:49.000Z",
+					systemPrompt: "review",
+					task: "session B's own Worker",
+					tools: ["read"],
+				}),
+			].join("\n")}\n`,
+		);
+		await Bun.write(
+			grandchildFileB,
+			`${[
+				sessionHeader("grandchildB"),
+				JSON.stringify({
+					type: "session_init",
+					id: "siGB",
+					parentId: null,
+					timestamp: "2026-08-13T17:14:50.000Z",
+					systemPrompt: "review",
+					task: "session B's own Worker's child",
+					tools: ["read"],
+				}),
+			].join("\n")}\n`,
+		);
+
+		const registry = new AgentRegistry();
+		const originalGet = registry.get.bind(registry);
+		let injected = false;
+		registry.get = id => {
+			const current = originalGet(id);
+			// Simulate an unrelated session (A) winning the race for the bare
+			// "Worker" id between this scan's own upfront read and its metadata
+			// read — the same mid-scan-claim technique as above, but the
+			// winner is a FOREIGN owner rather than a live spawn of this scan.
+			if (id === "Worker" && !injected && !current) {
+				injected = true;
+				queueMicrotask(() => {
+					registry.register({
+						id: "Worker",
+						displayName: "Worker",
+						kind: "sub",
+						parentId: "AcpSessionA",
+						session: null,
+						sessionFile: workerFileA,
+						status: "parked",
+					});
+				});
+			}
+			return current;
+		};
+
+		await registerPersistedSubagents(registry, sessionBFile, { rootParentId: "AcpSessionB" });
+
+		// Session A's win is untouched — the fix never clobbers a foreign winner.
+		expect(originalGet("Worker")?.sessionFile).toBe(workerFileA);
+
+		// Session B's OWN "Worker" retried under its disambiguated key instead
+		// of being silently dropped after losing the race for the bare id.
+		expect(originalGet("AcpSessionB/Worker")?.sessionFile).toBe(workerFileB);
+
+		// Before the fix: the recursive descendant scan always used the bare
+		// "Worker" id regardless of whether this scan's own claim to it
+		// succeeded, so this nested child would have been parented onto
+		// session A's unrelated family instead of session B's own.
+		expect(originalGet("Grandchild")?.parentId).toBe("AcpSessionB/Worker");
+	});
 });
