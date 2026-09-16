@@ -2732,11 +2732,15 @@ const streamAnthropicOnce = (
 					);
 				}
 				const response = await request.asResponse();
-				await notifyProviderResponse(options, response, model, response.headers.get("request-id"));
 				// A resolved `asResponse()` is this path's acceptance: the SDK rejects
 				// non-2xx, so the prefix is written even when the body below turns out
-				// to be unparseable.
+				// to be unparseable. Latched before anything else runs, exactly as the
+				// streaming path latches inside its `message_start` handler: the
+				// caller's `onResponse` observer is awaited below and may throw, and a
+				// turn that already paid for its prefix must not leave the next one
+				// comparing against the one before it.
 				acceptedCacheBreakCommit = commitCacheBreakSnapshot;
+				await notifyProviderResponse(options, response, model, response.headers.get("request-id"));
 				const body: unknown = await response.json();
 				if (!isRecord(body)) {
 					throw new AIError.AnthropicStreamEnvelopeError("Anthropic cache refresh returned a malformed response");
@@ -4074,18 +4078,49 @@ function applyCacheControlToMessage(message: MessageParam, cacheControl: Anthrop
 }
 
 /**
- * Wire messages that will still be there next turn. `convertAnthropicMessages`
- * appends a neutral `Continue.` pad after a trailing assistant because
- * Anthropic rejects assistant-prefill endings, and the next normal turn
- * replaces it with the real user turn — so neither a rolling cache breakpoint
- * nor {@link anthropicHistoryChain} may be anchored on it.
+ * Text of the neutral pad `convertAnthropicMessages` appends after a trailing
+ * assistant, because Anthropic rejects assistant-prefill endings.
+ */
+const ANTHROPIC_CONTINUE_PAD_TEXT = "Continue.";
+
+/**
+ * Whether one wire message's content is the pad's, in either spelling it
+ * reaches this function in. `convertAnthropicMessages` writes the string, and
+ * a payload hook that canonicalizes content into blocks — the shape every
+ * projection in this file already normalizes string content to — sends the
+ * one-block text array instead. Both are the same pad, so both must read as
+ * one; a chain anchored past only one of them moves between two requests that
+ * differ in nothing else.
+ *
+ * Exact on purpose: one block, of type `text`, whose text is the whole pad.
+ * Anything else — a second block, a trimmable variant, a substring — is
+ * content a participant supplied.
+ */
+function isAnthropicContinuePadContent(content: MessageParam["content"]): boolean {
+	if (typeof content === "string") return content === ANTHROPIC_CONTINUE_PAD_TEXT;
+	if (content.length !== 1) return false;
+	const block = content[0];
+	return block.type === "text" && block.text === ANTHROPIC_CONTINUE_PAD_TEXT;
+}
+
+/**
+ * Wire messages that will still be there next turn. The pad above is the one
+ * the next normal turn replaces with the real user turn — so neither a rolling
+ * cache breakpoint nor {@link anthropicHistoryChain} may be anchored on it.
+ *
+ * The pad's text is not what separates it from a user who typed `Continue.`
+ * themselves; nothing in the content can. The provenance marker
+ * `convertAnthropicMessages` records on a real conversational turn is, and it
+ * is the reason this stays safe once the block spelling is accepted too: a
+ * genuine turn is marked whichever way its content is spelled, and the pad is
+ * never marked.
  */
 function anthropicStableMessageCount(messages: readonly MessageParam[]): number {
 	const trailingIndex = messages.length - 1;
 	const trailingMessage = messages[trailingIndex];
 	const hasTrailingAssistantPad =
 		trailingMessage?.role === "user" &&
-		trailingMessage.content === "Continue." &&
+		isAnthropicContinuePadContent(trailingMessage.content) &&
 		!isConversationalUser(trailingMessage) &&
 		messages[trailingIndex - 1]?.role === "assistant";
 	return hasTrailingAssistantPad ? trailingIndex : messages.length;
@@ -6164,14 +6199,14 @@ export function convertAnthropicMessages(
 	// nudge used for trailing-assistant prefill below.
 	for (let i = params.length - 1; i > 0; i--) {
 		if (params[i].role === "assistant" && params[i - 1]?.role === "assistant") {
-			params.splice(i, 0, { role: "user", content: "Continue." });
+			params.splice(i, 0, { role: "user", content: ANTHROPIC_CONTINUE_PAD_TEXT });
 		}
 	}
 	// A trailing compaction summary leaves its file metadata queued; emit it
 	// before the prefill check so the list ends the request as a user turn.
 	flushCompactionFiles();
 	if (params.length > 0 && params[params.length - 1]?.role === "assistant") {
-		params.push({ role: "user", content: "Continue." });
+		params.push({ role: "user", content: ANTHROPIC_CONTINUE_PAD_TEXT });
 	}
 
 	return params;

@@ -192,11 +192,12 @@ const rewriteWireTools: NonNullable<AnthropicOptions["onPayload"]> = payload => 
 /**
  * Shape of a wire message as the hooks below read it: enough to find the
  * `tool_addition` / `tool_removal` blocks and the per-message `output_config`
- * the provider materializes for a control transition.
+ * the provider materializes for a control transition, plus the `text` a
+ * canonicalizing hook writes when it promotes string content to a block.
  */
 type WireControlMessage = {
 	role: string;
-	content: string | Array<{ type: string; tool?: { type: string; name: string } }>;
+	content: string | Array<{ type: string; text?: string; tool?: { type: string; name: string } }>;
 	output_config?: { effort?: string };
 };
 
@@ -271,6 +272,24 @@ const dropWireControlBlocks: NonNullable<AnthropicOptions["onPayload"]> = payloa
 						block => block.type !== "tool_addition" && block.type !== "tool_removal",
 					),
 				},
+	);
+
+/**
+ * Payload hook that canonicalizes every string message content into the
+ * equivalent one-block text array, the way a gateway that only handles the
+ * block spelling normalizes a body. Spread rather than rebuilt, so the
+ * provenance marker `convertAnthropicMessages` puts on a real conversational
+ * turn survives — a gateway hook reshapes content, it does not invent turns.
+ *
+ * Every projection in the provider already hashes the two spellings alike, so
+ * this changes nothing the cached prefix holds; the synthetic trailing
+ * `Continue.` pad is the one thing that stops looking like itself.
+ */
+const canonicalizeWireContent: NonNullable<AnthropicOptions["onPayload"]> = payload =>
+	mapWireMessages(payload, message =>
+		typeof message.content === "string"
+			? { ...message, content: [{ type: "text", text: message.content }] }
+			: message,
 	);
 
 /**
@@ -375,6 +394,20 @@ const rejectedFetch: FetchImpl = async () =>
 		status: 400,
 		headers: { "Content-Type": "application/json" },
 	});
+
+/**
+ * The non-streaming body a `max_tokens: 0` cache-refresh request answers with.
+ * A resolved `asResponse()` is that path's acceptance — the SDK rejects
+ * non-2xx — so the prefix is written by the time this body is parsed.
+ */
+const refreshFetch: FetchImpl = async () =>
+	new Response(
+		JSON.stringify({
+			id: "msg_cache_refresh",
+			usage: { input_tokens: 4, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 4 },
+		}),
+		{ status: 200, headers: { "Content-Type": "application/json", "request-id": "req_cache_refresh" } },
+	);
 
 /**
  * Accepts the request and then dies with no content at all: `message_start`,
@@ -574,7 +607,15 @@ async function turn(
 	fetch: FetchImpl = successFetch,
 	options: Pick<
 		AnthropicOptions,
-		"onPayload" | "sessionId" | "promptCacheKey" | "serviceTier" | "effort" | "thinkingEnabled" | "signal"
+		| "onPayload"
+		| "onResponse"
+		| "anthropicCacheRefreshRequest"
+		| "sessionId"
+		| "promptCacheKey"
+		| "serviceTier"
+		| "effort"
+		| "thinkingEnabled"
+		| "signal"
 	> = {},
 ): Promise<AssistantMessage> {
 	return await streamAnthropic(model, context, {
@@ -1684,5 +1725,91 @@ describe("anthropic cache-break attribution", () => {
 		expect(after.body).not.toContain('"type":"thinking"');
 		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
 		expect(third.cacheBreakReason).toBeUndefined();
+	});
+
+	it("blames nothing for the turn that replaces a pad a payload hook canonicalized", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		const history: Message[] = [
+			{ role: "user", content: "Use the tools", timestamp: 1 },
+			assistantTurn([{ type: "text", text: "on it" }], 2),
+		];
+		const padded = await turn(states, { ...base, messages: history }, undefined, MODEL, successFetch, {
+			onPayload: canonicalizeWireContent,
+		});
+		// The hook rewrote the trailing pad into `[{ type: "text", text:
+		// "Continue." }]`, so a literal-string test for it no longer fires and
+		// the chain anchors `markAt` on a message this turn replaces. Reading it
+		// as history would then blame the ordinary next turn for a rewrite.
+		const next = await turn(
+			states,
+			{ ...base, messages: [...history, { role: "user", content: "now summarize", timestamp: 3 }] },
+			undefined,
+			MODEL,
+			successFetch,
+			{ onPayload: canonicalizeWireContent },
+		);
+
+		expect(padded.cacheBreakReason).toBeUndefined();
+		expect(next.cacheBreakReason).toBeUndefined();
+	});
+
+	it("reports a rewritten history when a hook-canonicalized trailing auto-continue turn was edited", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		// An auto-continue injection is the message that looks most like the pad:
+		// a trailing wire `user` after an assistant, carrying no provenance
+		// marker because the agent wrote it. It is not the pad — it is persisted
+		// history the next request keeps — so it belongs in the chain, and the
+		// hook has already erased the one thing that separates the two shapes
+		// apart from the text itself.
+		const history = (injected: string): Message[] => [
+			{ role: "user", content: "Use the tools", timestamp: 1 },
+			assistantTurn([{ type: "text", text: "on it" }], 2),
+			{ role: "user", content: injected, synthetic: true, timestamp: 3 },
+		];
+		await turn(states, { ...base, messages: history("Please continue.") }, undefined, MODEL, successFetch, {
+			onPayload: canonicalizeWireContent,
+		});
+		// Anthropic cached that injection; this request sends a different one.
+		// Reading it as a pad would leave the rewrite outside the chain and the
+		// cold turn unexplained.
+		const second = await turn(
+			states,
+			{ ...base, messages: history("Keep going, please.") },
+			undefined,
+			MODEL,
+			successFetch,
+			{ onPayload: canonicalizeWireContent },
+		);
+
+		expect(second.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+	});
+
+	it("compares against the refreshed prefix when a refresh response callback threw", async () => {
+		const states = createProviderSessionState();
+		const base = contextWithTools([tool("lookup", {})]);
+		const history = (middle: string): Message[] => [
+			{ role: "user", content: "Use the tools", timestamp: 1 },
+			assistantTurn([{ type: "text", text: "on it" }], 2),
+			{ role: "user", content: middle, timestamp: 3 },
+		];
+		const refreshed = history("check the third file instead");
+		await turn(states, { ...base, messages: history("check the second file") });
+		// A `max_tokens: 0` refresh of an edited history: Anthropic accepted the
+		// request and wrote the new prefix, and only then did the caller's
+		// `onResponse` hook throw. The refresh paid for this prefix, so it is
+		// the one the next turn inherits.
+		const threw = await turn(states, { ...base, messages: refreshed }, undefined, MODEL, refreshFetch, {
+			anthropicCacheRefreshRequest: true,
+			onResponse: () => {
+				throw new Error("onResponse observer failed");
+			},
+		});
+		const next = await turn(states, { ...base, messages: refreshed });
+
+		expect(threw.stopReason).toBe("error");
+		expect(threw.cacheBreakReason).toEqual({ kind: "history_rewrite" });
+		expect(next.cacheBreakReason).toBeUndefined();
 	});
 });
