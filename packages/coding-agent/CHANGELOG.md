@@ -37,6 +37,8 @@
 - A corrupted or externally modified session file no longer leaves the session impossible to close; a subsequent Ctrl+C exits without rewriting the session log.
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Added a per-call `model` selector to task items and eval `agent()`: it takes precedence over `task.agentModelOverrides` and the agent definition, accepts `provider/model[:level]` patterns and role aliases, and fails the spawn when the selector is the ambiguous literal `default`/`inherit` (use `@default`) or matches no available model, instead of silently routing elsewhere ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
 
 ## [18.2.1] - 2026-09-15
 
