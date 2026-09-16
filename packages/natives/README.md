@@ -45,6 +45,20 @@ const pdf = await pdfToMarkdown(pdfBytes);
 console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
 
+## Shell subprocess completion
+
+`Shell.run` reports a command's actual exit status and streams its output through
+the supplied callback. On macOS, the host and the native shell share `SIGCHLD`.
+Registering another host listener must not leave an already exited command
+waiting until its deadline. The shell retains its normal asynchronous wait and
+rechecks that same child's status every 100 ms. It never repeats the command or
+turns an unsuccessful exit into success; cancellation and output collection
+remain unchanged.
+
+The real regression runs in an isolated Bun process, registers a host signal
+listener, and checks delayed completion, output, and an unsuccessful command.
+From the repository root, run `bun test tests/process/child-completion.test.ts`.
+
 ## Building
 
 ```bash
