@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { getAnthropicCompactionPayload } from "@oh-my-pi/pi-agent-core/compaction";
+import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
 	type OpenAIResponsesHistoryPayload,
@@ -428,18 +428,20 @@ export function buildSessionContext(
 		}
 	};
 
+	const trackMessageCacheState = (msg: AgentMessage): boolean => {
+		if (msg.role !== "assistant") return false;
+		const currentModel = `${msg.provider}/${msg.model}`;
+		const modelChanged = lastAssistantModel !== undefined && lastAssistantModel !== currentModel;
+		lastAssistantModel = currentModel;
+		const cacheMissExplained = pendingReset || modelChanged;
+		pendingReset = false;
+		return cacheMissExplained;
+	};
+
 	const pushMessage = (msg: AgentMessage) => {
 		messages.push(msg);
 		if (!options?.transcript) return;
-		if (msg.role === "assistant") {
-			const currentModel = `${msg.provider}/${msg.model}`;
-			const modelChanged = lastAssistantModel !== undefined && lastAssistantModel !== currentModel;
-			lastAssistantModel = currentModel;
-			cacheMissExplainedAt.push(pendingReset || modelChanged);
-			pendingReset = false;
-		} else {
-			cacheMissExplainedAt.push(false);
-		}
+		cacheMissExplainedAt.push(trackMessageCacheState(msg));
 	};
 
 	const appendMessage = (entry: SessionEntry) => {
@@ -605,14 +607,33 @@ export function buildSessionContext(
 		// SessionEntry rows so a remotely-compacted session keeps its recent
 		// turns visible instead of showing only the summary and post-compaction.
 		if (!remoteReplacementHistory || options?.transcript) {
-			// Emit kept messages (before compaction, starting from firstKeptEntryId)
-			let foundFirstKept = false;
-			for (let i = 0; i < compactionIdx; i++) {
-				const entry = path[i];
-				if (entry.id === compaction.firstKeptEntryId) {
-					foundFirstKept = true;
+			// Emit kept messages (before compaction, starting from firstKeptEntryId).
+			const firstKeptIdx = path.findIndex(
+				(entry, index) => index < compactionIdx && entry.id === compaction.firstKeptEntryId,
+			);
+			if (firstKeptIdx >= 0) {
+				let displayStartIdx = firstKeptIdx;
+				if (options?.transcript) {
+					// `findCutPoint` may leave the collapsed display's kept region
+					// mid-turn. Prefer the next turn boundary, but retain the original
+					// suffix when there is no later boundary: the compaction summary
+					// does not include that kept content.
+					for (let i = firstKeptIdx; i < compactionIdx; i++) {
+						if (isTurnStartEntry(path[i])) {
+							displayStartIdx = i;
+							break;
+						}
+					}
 				}
-				if (foundFirstKept) {
+				for (let i = firstKeptIdx; i < compactionIdx; i++) {
+					const entry = path[i];
+					if (i < displayStartIdx) {
+						// Hidden assistants still consume pending resets and update the
+						// previous-model state exactly as they do in the visible walk.
+						handleEntryResetTracking(entry);
+						if (entry.type === "message") trackMessageCacheState(entry.message);
+						continue;
+					}
 					appendMessage(entry);
 				}
 			}

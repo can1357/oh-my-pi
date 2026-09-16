@@ -3362,6 +3362,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
+	let registryAbortUnsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
 	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
 		attachIrcWakeTurnMonitor(target, {
@@ -3775,7 +3776,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			monitor.setActiveSession(session);
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
-			AgentRegistry.global().syncSessionStatus(id, session);
+			const registry = AgentRegistry.global();
+			registry.syncSessionStatus(id, session);
+			const runRef = registry.get(id);
+			if (runRef) {
+				// Agent Hub kills bypass this run's caller signal: lifecycle.release()
+				// detaches the session and publishes an `aborted` tombstone directly.
+				// Bridge that exact registry generation back into the monitor so the
+				// prompt race and owning async task job settle promptly.
+				registryAbortUnsubscribe = registry.onChange(event => {
+					if (event.type === "status_changed" && event.ref === runRef && event.ref.status === "aborted") {
+						monitor.requestAbort("signal");
+					}
+				});
+				// Close the subscribe-after-read race with a kill that landed while
+				// createAgentSession was returning.
+				if (runRef.status === "aborted") monitor.requestAbort("signal");
+			}
 			if (sessionFile !== null) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
@@ -4038,6 +4055,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
 					});
 				}
+			}
+			if (registryAbortUnsubscribe) {
+				registryAbortUnsubscribe();
+				registryAbortUnsubscribe = null;
 			}
 			if (unsubscribe) {
 				try {

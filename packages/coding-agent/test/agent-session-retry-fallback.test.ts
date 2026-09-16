@@ -5602,6 +5602,68 @@ describe("AgentSession retry fallback", () => {
 		);
 	});
 
+	it("suppresses unknown-model warnings for a catalog descriptor provider with a cold cache", async () => {
+		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel) {
+			throw new Error("Expected bundled OpenAI test model to exist");
+		}
+		const modelsConfigPath = path.join(tempDir.path(), "cold-descriptor-models.json");
+		await Bun.write(
+			modelsConfigPath,
+			JSON.stringify({
+				providers: {
+					litellm: {
+						baseUrl: "https://litellm.example.net/v1",
+						apiKey: "sk-litellm-test",
+						api: "openai-completions",
+					},
+				},
+			}),
+		);
+		const descriptorAuthStorage = await AuthStorage.create(path.join(tempDir.path(), "descriptor-auth.db"));
+		try {
+			const coldRegistry = new ModelRegistry(descriptorAuthStorage, modelsConfigPath);
+			expect(coldRegistry.find("litellm", "Qwen3.8-27B")).toBeUndefined();
+			expect(coldRegistry.isProviderDiscoveryPending("litellm")).toBe(true);
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": {
+					"litellm/Qwen3.8-27B": ["litellm/Qwen3.8-27B-hetzner"],
+				},
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: () => {
+					throw new Error("Not exercised");
+				},
+			});
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: coldRegistry,
+			});
+			await session.waitForIdle();
+
+			expect(session.configWarnings).not.toContain(
+				"retry.fallbackChains key references unknown model: litellm/Qwen3.8-27B",
+			);
+			expect(session.configWarnings).not.toContain(
+				"Fallback chain for model 'litellm/Qwen3.8-27B' references unknown model: litellm/Qwen3.8-27B-hetzner",
+			);
+		} finally {
+			if (session) {
+				await session.dispose();
+				session = undefined;
+			}
+			descriptorAuthStorage.close();
+		}
+	});
+
 	it("defers fallback warnings while a selector's provider discovery is pending, then surfaces them once settled", () => {
 		const settings = Settings.isolated({
 			"compaction.enabled": false,

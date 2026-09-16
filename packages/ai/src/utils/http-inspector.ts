@@ -165,8 +165,28 @@ export function rewriteClinePassError(errorMessage: string, provider: string): s
 function sanitizeDump(dump: RawHttpRequestDump): RawHttpRequestDump {
 	return {
 		...dump,
+		url: redactUrlQuery(dump.url),
 		headers: redactHeaders(dump.headers),
 	};
+}
+
+/**
+ * Strips a persisted dump's query string entirely rather than picking sensitive
+ * params by name: a configurable `baseUrl` (e.g. Bedrock's gateway routing) can
+ * carry an arbitrary query-based credential the way `SENSITIVE_HEADER_PATTERN`
+ * matches arbitrary header names, and dumps exist to diagnose the request body,
+ * not the query.
+ */
+function redactUrlQuery(url: string | undefined): string | undefined {
+	if (!url) return url;
+	try {
+		const parsed = new URL(url);
+		if (!parsed.search) return url;
+		parsed.search = "";
+		return `${parsed.toString()}[redacted-query]`;
+	} catch {
+		return url;
+	}
 }
 
 function redactHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {

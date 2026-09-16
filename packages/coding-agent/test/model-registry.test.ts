@@ -2229,14 +2229,14 @@ describe("ModelRegistry", () => {
 			const testSettings = Settings.isolated();
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			const legacy = registry.find("openai-codex", "gpt-5.5");
-			const spark = registry.find("openai-codex", "gpt-5.3-codex-spark");
-			if (!legacy || !spark) throw new Error("Expected bundled Codex models");
+			const extended = registry.find("openai-codex", "gpt-5.6-luna");
+			if (!legacy || !extended) throw new Error("Expected bundled Codex models");
 			writeModelCache(
 				"openai-codex",
 				Date.now(),
 				[
 					{ ...legacy, maxContextWindow: 640_000 },
-					{ ...spark, maxContextWindow: 64_000 },
+					{ ...extended, maxContextWindow: 64_000 },
 				],
 				true,
 				"",
@@ -2247,7 +2247,7 @@ describe("ModelRegistry", () => {
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(640_000);
 			// An advertised maximum smaller than the current window cannot shrink it.
-			expect(registry.find("openai-codex", "gpt-5.3-codex-spark")?.contextWindow).toBe(128_000);
+			expect(registry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(1_000_000);
 
 			testSettings.set("extendedContext", false);
 			await registry.reapplyModelPolicies();
