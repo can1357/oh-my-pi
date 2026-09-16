@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- SDK sessions now honor disposal deadlines, memory-consolidation budgets, and shutdown reasons. ([#12284](https://github.com/can1357/oh-my-pi/pull/12284) by [@iliaal](https://github.com/iliaal))
 - Reduced snapshot-recording stalls when a session retains large file histories. ([#12279](https://github.com/can1357/oh-my-pi/pull/12279) by [@iliaal](https://github.com/iliaal))
 - Cancelled background jobs remain tracked until execution finishes, so cleanup cannot report completion prematurely after retention expires. ([#12278](https://github.com/can1357/oh-my-pi/pull/12278) by [@iliaal](https://github.com/iliaal))
 - Fixed localized edits rewriting unrelated bytes in files with invalid UTF-8; these edits now fail without modifying the file. ([#12277](https://github.com/can1357/oh-my-pi/pull/12277) by [@iliaal](https://github.com/iliaal))
