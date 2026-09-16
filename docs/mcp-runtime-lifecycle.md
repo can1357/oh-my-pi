@@ -100,6 +100,7 @@ For each discovered server in `connectServers()`:
 - sends `notifications/initialized` before any further session traffic,
 - for Streamable HTTP, starts the background SSE listener only after `notifications/initialized`,
 - uses timeout precedence `OMP_MCP_TIMEOUT_MS`, then `config.timeout`, then 30s; `0` disables the client-side timeout,
+- tags every request with `_meta.progressToken` and re-arms that request's deadline on each matching `notifications/progress`, capped by `OMP_MCP_MAX_TIMEOUT_MS` (default 1h, `0` uncapped),
 - closes transport on init failure.
 
 ### Fast startup gate + deferred fallback
