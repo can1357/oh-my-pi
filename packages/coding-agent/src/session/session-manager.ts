@@ -2869,6 +2869,79 @@ export class SessionManager {
 	}
 
 	/**
+	 * Append a teardown marker against the journal's current persisted tail.
+	 *
+	 * A second process may have advanced the same session after this manager's
+	 * in-memory leaf stopped moving. The storage callback holds the same publish
+	 * lock as ordinary appends while it reads and extends the file, so the marker
+	 * cannot fork from a stale leaf. This is a terminal operation: persistence
+	 * remains append-only afterward so close cannot rewrite away entries held
+	 * only by the other process.
+	 */
+	appendCustomEntryAtPersistedTail(customType: string, data?: unknown): string {
+		const sessionFile = this.#sessionFile;
+		if (
+			!this.#persist ||
+			!sessionFile ||
+			(!this.#storage.appendFromTailSync && !this.#storage.appendFromTail) ||
+			!this.#storage.existsSync(sessionFile)
+		) {
+			return this.appendCustomEntry(customType, data);
+		}
+		if (this.#atomicEntryBatch)
+			throw new Error("Cannot append a persisted-tail entry during an atomic session batch.");
+
+		const id = generateId(this.#index);
+		const build = (lastLine: string): { content: string; value: CustomEntry } => {
+			const tail = JSON.parse(lastLine) as { type?: string; id?: unknown };
+			const tailId = tail.type === "session" ? null : tail.id;
+			// Known records may have been appended to a background branch without
+			// moving our active leaf. Only an unknown tail proves a peer advanced it.
+			const parentId = typeof tailId === "string" && this.#index.has(tailId) ? this.#index.leafId() : tailId;
+			if (parentId !== null && typeof parentId !== "string") {
+				throw new Error("Cannot append to a session journal without a valid tail entry.");
+			}
+			const entry: CustomEntry = {
+				type: "custom",
+				customType,
+				data,
+				id,
+				parentId,
+				timestamp: nowIso(),
+			};
+			return { content: this.#lineFor(entry), value: entry };
+		};
+
+		const record = (entry: CustomEntry): void => {
+			this.#entries.push(entry);
+			this.#index.insert(entry);
+			this.#expectedDiskSize = this.#storage.statSync(sessionFile).size;
+			this.#notifyEntryAppended(entry);
+		};
+		// Supersede queued snapshots before a deferred tail append. The terminal
+		// append itself must survive seal() and be awaited by close().
+		const supersedeSnapshot = (): void => {
+			this.#diskEpoch++;
+			this.#fileIsCurrent = true;
+			this.#rewriteRequired = false;
+		};
+		if (this.#storage.appendFromTailSync) {
+			const entry = this.#storage.appendFromTailSync(sessionFile, build);
+			supersedeSnapshot();
+			record(entry);
+		} else {
+			supersedeSnapshot();
+			void this.#scheduleDiskWork(
+				async () => {
+					record(await this.#storage.appendFromTail!(sessionFile, build));
+				},
+				{ ignoreEpoch: true },
+			).catch(() => undefined);
+		}
+		return id;
+	}
+
+	/**
 	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
 	 * outputs). Use sparingly.
 	 */

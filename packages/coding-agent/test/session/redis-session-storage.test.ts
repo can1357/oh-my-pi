@@ -76,6 +76,12 @@ function createFakeRedis(): FakeRedis {
 			const keyCount = Number(args[1] ?? "0");
 			const keys = args.slice(2, 2 + keyCount);
 			const argv = args.slice(2 + keyCount);
+			if (script.includes("OMP_READ_TAIL")) {
+				const current = strings.get(keys[0]);
+				if (current === undefined) return [-1, ""];
+				const bytes = Buffer.from(current, "utf8");
+				return [bytes.length, bytes.subarray(-Number(argv[0])).toString("utf8")];
+			}
 			if (script.includes("OMP_WRITE_FULL")) {
 				checkFailure("set");
 				checkFailure("hset");

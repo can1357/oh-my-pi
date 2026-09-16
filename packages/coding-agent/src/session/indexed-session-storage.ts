@@ -28,6 +28,8 @@ export interface SessionStorageBackend {
 	init(): Promise<void>;
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
+	/** Atomically read a bounded UTF-8 tail and its full byte size. */
+	readTail?(path: string, suffixBytes: number): Promise<{ tail: string; size: number }>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	/**
 	 * Replace content, atomically rejecting when the shared backend's current
@@ -40,7 +42,8 @@ export interface SessionStorageBackend {
 		title?: SessionTitleUpdate,
 		expectedSize?: number | null,
 	): Promise<void>;
-	append(path: string, line: string, mtimeMs: number): Promise<void>;
+	/** Append atomically only if the current byte size matches, when supplied. */
+	append(path: string, line: string, mtimeMs: number, expectedSize?: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
 	remove(paths: string[]): Promise<void>;
@@ -212,6 +215,53 @@ export class IndexedSessionStorage implements SessionStorage {
 			{ trackDrain: true },
 		);
 		this.#trackFrame(path, mtimeMs, write);
+	}
+
+	async appendFromTail<T>(path: string, build: (lastLine: string) => { content: string; value: T }): Promise<T> {
+		let value!: T;
+		await this.#enqueuePath(
+			path,
+			async () => {
+				// The backend CAS closes the gap between reading another client's tail
+				// and publishing. Retry only contention, never ambiguous I/O failures.
+				for (let attempt = 0; ; attempt++) {
+					let tail: string;
+					let size: number;
+					if (this.#backend.readTail) {
+						let limit = 64 * 1024;
+						for (;;) {
+							({ tail, size } = await this.#backend.readTail(path, limit));
+							// A window may begin inside UTF-8 or a JSON line. Only use
+							// a complete final line, growing for a single large entry.
+							if (size <= limit || tail.trimEnd().includes("\n")) break;
+							limit *= 2;
+						}
+					} else {
+						// Compatibility fallback for third-party backends without
+						// atomic tail/size reads. SQL and Redis use bounded reads.
+						const content = await this.#backend.readFull(path);
+						if (content === null) throw enoent(path);
+						tail = content;
+						size = byteLength(content);
+					}
+					const trimmed = tail.trimEnd();
+					const built = build(trimmed.slice(trimmed.lastIndexOf("\n") + 1));
+					const appended = (tail.endsWith("\n") ? "" : "\n") + built.content;
+					const mtimeMs = this.#allocMtimeMs();
+					try {
+						await this.#backend.append(path, appended, mtimeMs, size);
+					} catch (error) {
+						if (error instanceof SessionWriteConflictError && attempt < 7) continue;
+						throw error;
+					}
+					this.#setIndex(path, size + byteLength(appended), mtimeMs);
+					value = built.value;
+					return;
+				}
+			},
+			{ trackDrain: true, abortOnPredecessorFailure: true },
+		);
+		return value;
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate): Promise<void> {

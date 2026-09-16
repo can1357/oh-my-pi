@@ -1809,6 +1809,9 @@ export class AgentSession {
 			},
 		});
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
+			// Signal teardown marks disposal before awaiting the draft. Let its
+			// final drain record the exit, rather than racing maintenance writes.
+			if (this.#isDisposed) return;
 			this.#recordSessionExit(reason);
 		});
 		this.#cancelFatalRecoveryHint = postmortem.registerFatalRecoveryHint(() => {
@@ -2527,7 +2530,7 @@ export class AgentSession {
 		};
 		if (pendingToolCalls.length > 0) data.pendingToolCalls = pendingToolCalls;
 		try {
-			this.sessionManager.appendCustomEntry(SESSION_EXIT_CUSTOM_TYPE, data);
+			this.sessionManager.appendCustomEntryAtPersistedTail(SESSION_EXIT_CUSTOM_TYPE, data);
 			this.sessionManager.flushSync();
 			// Only pending tool calls or an abnormal teardown are noteworthy; a
 			// clean dispose logs at debug so routine exits don't read as problems.
@@ -4835,7 +4838,6 @@ export class AgentSession {
 
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.beginDispose();
-		this.#recordSessionExit(options.reason ?? "dispose");
 		this.#cancelExitRecorder?.();
 		this.#cancelExitRecorder = undefined;
 		this.#cancelFatalRecoveryHint?.();
@@ -4967,6 +4969,9 @@ export class AgentSession {
 		// rewrites at their commit guard; hot-path appends drained above are
 		// already durable, and close() (scheduled post-seal) still flushes and
 		// closes the writer.
+		// Read the shared tail only after maintenance/event handlers have drained.
+		// No rewrite may use this refreshed size token with our stale snapshot.
+		this.#recordSessionExit(options.reason ?? "dispose");
 		this.sessionManager.seal();
 		await this.sessionManager.close();
 

@@ -8,7 +8,7 @@
  * `redis-session-storage.test.ts`; we don't require a live server.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import {
 	RedisSessionStorage,
@@ -44,6 +44,12 @@ function createFakeRedis(): FakeRedis {
 			const keyCount = Number(args[1] ?? "0");
 			const keys = args.slice(2, 2 + keyCount);
 			const argv = args.slice(2 + keyCount);
+			if (script.includes("OMP_READ_TAIL")) {
+				const current = strings.get(keys[0]);
+				if (current === undefined) return [-1, ""];
+				const bytes = Buffer.from(current, "utf8");
+				return [bytes.length, bytes.subarray(-Number(argv[0])).toString("utf8")];
+			}
 			if (script.includes("OMP_WRITE_FULL")) {
 				const [fileKey, metaKey, titleKey] = keys;
 				const [content, filePath, mtimeMs, hasTitle, title, expectedSize] = argv;
@@ -58,11 +64,14 @@ function createFakeRedis(): FakeRedis {
 			}
 			if (script.includes("OMP_APPEND")) {
 				const [fileKey, metaKey] = keys;
-				const [line, filePath, mtimeMs] = argv;
+				const [line, filePath, mtimeMs, expectedSize] = argv;
+				const current = strings.get(fileKey);
+				const actual = current === undefined ? -1 : Buffer.byteLength(current, "utf8");
+				if (expectedSize !== "" && actual !== Number(expectedSize)) return [0, actual];
 				const next = (strings.get(fileKey) ?? "") + line;
 				strings.set(fileKey, next);
 				getHash(metaKey).set(filePath, mtimeMs);
-				return Buffer.byteLength(next, "utf-8");
+				return [1, Buffer.byteLength(next, "utf-8")];
 			}
 			if (script.includes("OMP_UPDATE_TITLE")) {
 				const [metaKey, titleKey] = keys;
@@ -156,6 +165,35 @@ function fakeUsage(input: number, output: number): Usage {
 }
 
 describe("SessionManager + RedisSessionStorage", () => {
+	it("keeps a peer's complete branch when a stale client exits and seals", async () => {
+		const client = createFakeRedis();
+		const firstStorage = await RedisSessionStorage.create({ client });
+		const first = SessionManager.create("/cwd", "/sessions/exit", firstStorage);
+		await first.ensureOnDisk();
+		const file = first.getSessionFile();
+		if (!file) throw new Error("Expected session file");
+		const secondStorage = await RedisSessionStorage.create({ client });
+		const second = await SessionManager.open(file, "/sessions/exit", secondStorage);
+		const peerId = second.appendMessage({
+			role: "user",
+			content: "peer's newer turn" + "界".repeat(70 * 1024),
+			timestamp: Date.now(),
+		});
+		await second.close();
+		const fullRead = spyOn(client, "get");
+		const exitId = first.appendCustomEntryAtPersistedTail("session_exit", { reason: "dispose" });
+		first.flushSync();
+		first.seal();
+		await first.close();
+		expect(fullRead).not.toHaveBeenCalled();
+		fullRead.mockRestore();
+		const freshStorage = await RedisSessionStorage.create({ client });
+		const reopened = await SessionManager.open(file, "/sessions/exit", freshStorage);
+		expect(reopened.getLeafEntry()).toMatchObject({ id: exitId, parentId: peerId });
+		expect(reopened.getBranch().some(entry => entry.id === peerId)).toBe(true);
+		await reopened.close();
+	});
+
 	it("persists appended assistant messages into Redis and reloads them via open()", async () => {
 		const redis = createFakeRedis();
 		const storage = await RedisSessionStorage.create({ client: redis });

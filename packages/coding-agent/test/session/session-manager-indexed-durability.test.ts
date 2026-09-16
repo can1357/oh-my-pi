@@ -24,6 +24,7 @@ class FakeBackend implements SessionStorageBackend {
 	readonly mtimes = new Map<string, number>();
 	/** Reject the next N append calls with a transient failure. */
 	failAppends = 0;
+	beforeConditionalAppend?: () => void;
 	/** Reject the next N whole-file publishes with a transient failure. */
 	failWrites = 0;
 	#mtime = 1;
@@ -49,7 +50,13 @@ class FakeBackend implements SessionStorageBackend {
 		return [prefix, suffix];
 	}
 
-	async append(path: string, line: string): Promise<void> {
+	async append(path: string, line: string, _mtimeMs: number, expectedSize?: number): Promise<void> {
+		if (expectedSize !== undefined) {
+			this.beforeConditionalAppend?.();
+			const current = this.files.get(path);
+			const actual = current === undefined ? null : Buffer.byteLength(current, "utf8");
+			if (actual !== expectedSize) throw new SessionWriteConflictError(path, expectedSize, actual);
+		}
 		if (this.failAppends > 0) {
 			this.failAppends -= 1;
 			throw new Error("transient backend append failure");
@@ -139,6 +146,45 @@ async function makeManager(): Promise<{
 }
 
 describe("SessionManager + indexed backend durability", () => {
+	it("retries a racing peer append before anchoring the terminal exit", async () => {
+		const { backend, storage, manager } = await makeManager();
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("Expected session file");
+		backend.beforeConditionalAppend = () => {
+			backend.beforeConditionalAppend = undefined;
+			const current = backend.files.get(file) ?? "";
+			const tail = JSON.parse(current.trimEnd().split("\n").at(-1) ?? "{}");
+			backend.files.set(
+				file,
+				current +
+					JSON.stringify({
+						type: "custom",
+						customType: "peer",
+						id: "peer-race",
+						parentId: tail.type === "session" ? null : tail.id,
+						timestamp: new Date().toISOString(),
+					}) +
+					"\n",
+			);
+		};
+		const id = manager.appendCustomEntryAtPersistedTail("session_exit", { reason: "dispose" });
+		manager.seal();
+		await manager.close();
+		const reopened = await SessionManager.open(file, "/sessions/proj", storage);
+		expect(reopened.getLeafEntry()).toMatchObject({ id, parentId: "peer-race" });
+		expect(reopened.getBranch().some(entry => entry.id === "peer-race")).toBe(true);
+		await reopened.close();
+	});
+
+	it("reports failed terminal publication on close without fabricating an exit", async () => {
+		const { backend, manager } = await makeManager();
+		backend.failAppends = 1;
+		manager.appendCustomEntryAtPersistedTail("session_exit", { reason: "dispose" });
+		manager.seal();
+		await expect(manager.close()).rejects.toThrow("transient backend append failure");
+		expect(backend.files.get(manager.getSessionFile() ?? "")).not.toContain("session_exit");
+	});
+
 	it("does not advance the durable size before the backend confirms the append", async () => {
 		const { backend, storage, manager } = await makeManager();
 		const sessionFile = manager.getSessionFile();

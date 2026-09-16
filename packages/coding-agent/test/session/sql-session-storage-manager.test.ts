@@ -6,7 +6,7 @@
  * out of the table.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
@@ -25,6 +25,36 @@ function fakeUsage(input: number, output: number): Usage {
 }
 
 describe("SessionManager + SqlSessionStorage (SQLite)", () => {
+	it("keeps a peer's complete branch when a stale client exits and seals", async () => {
+		const client = new SQL("sqlite::memory:");
+		const firstStorage = await SqlSessionStorage.create({ client });
+		const first = SessionManager.create("/cwd", "/sessions/exit", firstStorage);
+		await first.ensureOnDisk();
+		const file = first.getSessionFile();
+		if (!file) throw new Error("Expected session file");
+		const secondStorage = await SqlSessionStorage.create({ client });
+		const second = await SessionManager.open(file, "/sessions/exit", secondStorage);
+		const peerId = second.appendMessage({
+			role: "user",
+			content: "peer's newer turn" + "界".repeat(70 * 1024),
+			timestamp: Date.now(),
+		});
+		await second.close();
+		const fullRead = spyOn(client, "unsafe");
+		const exitId = first.appendCustomEntryAtPersistedTail("session_exit", { reason: "dispose" });
+		first.flushSync();
+		first.seal();
+		await first.close();
+		expect(fullRead.mock.calls.every(([query]) => !String(query).includes("SELECT content AS content"))).toBe(true);
+		fullRead.mockRestore();
+		const freshStorage = await SqlSessionStorage.create({ client });
+		const reopened = await SessionManager.open(file, "/sessions/exit", freshStorage);
+		expect(reopened.getLeafEntry()).toMatchObject({ id: exitId, parentId: peerId });
+		expect(reopened.getBranch().some(entry => entry.id === peerId)).toBe(true);
+		await reopened.close();
+		await client.end();
+	});
+
 	it("persists appended assistant messages into SQL and reloads via open()", async () => {
 		const client = new SQL("sqlite::memory:");
 		const storage = await SqlSessionStorage.create({ client });

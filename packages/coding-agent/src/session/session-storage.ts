@@ -126,6 +126,15 @@ export interface SessionStorage {
 	existsSync(path: string): boolean;
 	writeTextSync(path: string, content: string, options?: SessionStorageWriteOptions): void;
 	/**
+	 * Build and append text from the last non-empty line read under the backend's publish lock.
+	 * File-backed session teardown uses this to anchor a terminal record to the
+	 * journal's actual tail without another process appending between the read
+	 * and write.
+	 */
+	appendFromTailSync?<T>(path: string, build: (lastLine: string) => { content: string; value: T }): T;
+	/** Deferred equivalent for network-backed stores; callers must await publication. */
+	appendFromTail?<T>(path: string, build: (lastLine: string) => { content: string; value: T }): Promise<T>;
+	/**
 	 * Update the current session title through the storage backend.
 	 *
 	 * File-like backends rewrite the fixed-width JSONL title slot; indexed
@@ -380,6 +389,43 @@ function isPidAlive(pid: number): boolean {
 }
 
 export class FileSessionStorage implements SessionStorage {
+	#readLastNonEmptyLineSync(fpath: string): { line: string; needsSeparator: boolean } {
+		const fd = fs.openSync(fpath, "r");
+		try {
+			const size = fs.fstatSync(fd).size;
+			let cursor = size;
+			let needsSeparator = false;
+			const chunks: Buffer[] = [];
+			let trimEnd = true;
+			while (cursor > 0) {
+				const length = Math.min(cursor, 64 * 1024);
+				const start = cursor - length;
+				const chunk = Buffer.allocUnsafe(length);
+				fs.readSync(fd, chunk, 0, length, start);
+				if (cursor === size) needsSeparator = chunk[length - 1] !== 0x0a;
+				let end = length;
+				if (trimEnd) {
+					while (end > 0 && (chunk[end - 1] === 0x0a || chunk[end - 1] === 0x0d)) end--;
+					if (end === 0) {
+						cursor = start;
+						continue;
+					}
+					trimEnd = false;
+				}
+				const newline = chunk.lastIndexOf(0x0a, end - 1);
+				if (newline >= 0) {
+					chunks.unshift(chunk.subarray(newline + 1, end));
+					break;
+				}
+				chunks.unshift(chunk.subarray(0, end));
+				cursor = start;
+			}
+			return { line: Buffer.concat(chunks).toString("utf8"), needsSeparator };
+		} finally {
+			fs.closeSync(fd);
+		}
+	}
+
 	#assertExpectedSize(fpath: string, expectedSize: number | null | undefined): void {
 		if (expectedSize === undefined) return;
 		let actualSize: number | null;
@@ -404,7 +450,7 @@ export class FileSessionStorage implements SessionStorage {
 	 * first and released last, so the lockfile claim below only ever runs
 	 * while this process provably owns the name.
 	 */
-	#withPublishLock(fpath: string, task: () => void): void {
+	#withPublishLock<T>(fpath: string, task: () => T): T {
 		const lockPath = this.#publishLockPath(fpath);
 		// The lock lives beside the session file: the directory may not exist
 		// yet when the first publish creates it (writeTextSync creates it for
@@ -415,7 +461,7 @@ export class FileSessionStorage implements SessionStorage {
 		try {
 			this.#acquirePublishLock(fpath, lockPath);
 			try {
-				task();
+				return task();
 			} finally {
 				try {
 					fs.unlinkSync(lockPath);
@@ -618,6 +664,15 @@ export class FileSessionStorage implements SessionStorage {
 			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
 		}
+	}
+
+	appendFromTailSync<T>(fpath: string, build: (lastLine: string) => { content: string; value: T }): T {
+		return this.#withPublishLock(fpath, () => {
+			const tail = this.#readLastNonEmptyLineSync(fpath);
+			const append = build(tail.line);
+			fs.appendFileSync(fpath, (tail.needsSeparator ? "\n" : "") + append.content);
+			return append.value;
+		});
 	}
 
 	async updateSessionTitle(fpath: string, update: SessionTitleUpdate): Promise<void> {
@@ -1108,6 +1163,17 @@ export class MemorySessionStorage implements SessionStorage {
 			throw new SessionWriteConflictError(path, options.expectedSize, actualSize);
 		}
 		this.#files.set(path, createMemoryFileEntry(content, Date.now()));
+	}
+
+	appendFromTailSync<T>(path: string, build: (lastLine: string) => { content: string; value: T }): T {
+		const entry = this.#requireEntry(path);
+		const content = materializeMemoryEntry(entry);
+		const lastLine = content.trimEnd().split("\n").at(-1);
+		if (!lastLine) throw new Error(`Session file is empty: ${path}`);
+		const append = build(lastLine);
+		appendMemoryChunk(entry, (content.endsWith("\n") ? "" : "\n") + append.content);
+		entry.mtimeMs = Date.now();
+		return append.value;
 	}
 
 	async updateSessionTitle(path: string, update: SessionTitleUpdate): Promise<void> {

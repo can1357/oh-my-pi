@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 
 const pendingAssistant: AssistantMessage = {
@@ -138,6 +139,163 @@ describe("session exit diagnostics", () => {
 			],
 		});
 	});
+
+	it("preserves the active branch when a background result is the physical tail", async () => {
+		tempDir = TempDir.createSync("@pi-session-exit-branch-");
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		const oldBranch = manager.appendMessage({ role: "user", content: "old turn", timestamp: Date.now() });
+		manager.appendMessage({
+			...pendingAssistant,
+			content: [{ type: "text", text: "old answer" }],
+			stopReason: "stop",
+		});
+		manager.branch(oldBranch);
+		const activeLeaf = manager.appendMessage({ role: "user", content: "current turn", timestamp: Date.now() });
+		const backgroundId = manager.appendMessageToBranch(
+			{ ...pendingAssistant, content: [{ type: "text", text: "background answer" }], stopReason: "stop" },
+			oldBranch,
+		);
+		await manager.flush();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const exitId = manager.appendCustomEntryAtPersistedTail(SESSION_EXIT_CUSTOM_TYPE, { reason: "dispose" });
+		await manager.close();
+		const reopened = await SessionManager.open(sessionFile, tempDir.path(), undefined, { suppressBreadcrumb: true });
+		const branch = reopened.getBranch();
+		expect(branch.at(-1)).toMatchObject({ id: exitId, parentId: activeLeaf });
+		expect(branch.map(entry => entry.id)).not.toContain(backgroundId);
+		await reopened.close();
+	});
+
+	it("anchors a session exit to the journal tail advanced by another process", async () => {
+		tempDir = TempDir.createSync("@pi-session-exit-tail-");
+		const first = SessionManager.create(tempDir.path(), tempDir.path());
+		first.appendMessage({ role: "user", content: "shared turn", timestamp: Date.now() });
+		first.appendMessage({
+			...pendingAssistant,
+			content: [{ type: "text", text: "shared answer" }],
+			stopReason: "stop",
+		});
+		await first.flush();
+		const sessionFile = first.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+
+		const second = await SessionManager.open(sessionFile, tempDir.path(), undefined, { suppressBreadcrumb: true });
+		second.appendMessage({ role: "user", content: "newer turn", timestamp: Date.now() });
+		const newerAnswer = `newer answer ${"x".repeat(70 * 1024)}`;
+		const newerAssistantId = second.appendMessage({
+			...pendingAssistant,
+			content: [{ type: "text", text: newerAnswer }],
+			stopReason: "stop",
+		});
+		await second.close();
+
+		const exitId = first.appendCustomEntryAtPersistedTail(SESSION_EXIT_CUSTOM_TYPE, {
+			reason: "dispose",
+			kind: "normal",
+			recordedAt: "2026-09-16T11:30:00.000Z",
+		});
+		first.flushSync();
+
+		const reopened = await SessionManager.open(sessionFile, tempDir.path(), undefined, {
+			suppressBreadcrumb: true,
+		});
+		const branch = reopened.getBranch();
+		expect(branch.map(entry => entry.id)).toContain(newerAssistantId);
+		expect(branch.at(-1)).toMatchObject({ id: exitId, parentId: newerAssistantId });
+		expect(
+			reopened
+				.buildSessionContext({ transcript: true })
+				.messages.some(
+					message =>
+						message.role === "assistant" &&
+						message.content[0]?.type === "text" &&
+						message.content[0].text === newerAnswer,
+				),
+		).toBe(true);
+		await reopened.close();
+		await first.close();
+	});
+
+	it("preserves the peer tail when the signal recorder runs while teardown saves the draft", async () => {
+		tempDir = TempDir.createSync("@pi-exit-maintenance-");
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const first = SessionManager.create(tempDir.path(), tempDir.path());
+		first.appendMessage({ ...pendingAssistant, content: [{ type: "text", text: "shared" }], stopReason: "stop" });
+		await first.flush();
+		const file = first.getSessionFile();
+		if (!file) throw new Error("Expected session file");
+		const second = await SessionManager.open(file, tempDir.path(), undefined, { suppressBreadcrumb: true });
+		const peerId = second.appendMessage({ role: "user", content: "peer", timestamp: Date.now() });
+		await second.close();
+		const agent = new Agent({ convertToLlm });
+		const register = postmortem.register;
+		let recorder: ((reason: postmortem.Reason) => void | Promise<void>) | undefined;
+		const registration = spyOn(postmortem, "register").mockImplementation((id, callback, options) => {
+			if (id.startsWith("agent-session:")) recorder = callback;
+			return register(id, callback, options);
+		});
+		try {
+			session = new AgentSession({
+				agent,
+				sessionManager: first,
+				settings: Settings.isolated(),
+				modelRegistry: new ModelRegistry(authStorage),
+			});
+		} finally {
+			registration.mockRestore();
+		}
+		const activeSession = session;
+		const maintenance = spyOn(agent, "waitForIdle").mockImplementation(async () => {
+			// A maintenance handler still draining during dispose must retain its
+			// original CAS token, not the exit append's refreshed shared size.
+			await first.rewriteEntries().catch(() => undefined);
+		});
+		const draft = Promise.withResolvers<void>();
+		const teardown = createSessionTeardown({
+			getDraftText: () => "pending draft",
+			beginDispose: () => activeSession.beginDispose(),
+			saveDraft: () => draft.promise,
+			disposeSession: reason => activeSession.dispose({ reason }),
+		});
+		const disposing = teardown(postmortem.Reason.SIGTERM);
+		try {
+			if (!recorder) throw new Error("Expected agent-session exit recorder");
+			// postmortem invokes the earlier recorder before the draft await settles.
+			await recorder(postmortem.Reason.SIGTERM);
+		} finally {
+			draft.resolve();
+			await disposing.catch(() => undefined);
+			maintenance.mockRestore();
+		}
+		session = undefined;
+		const reopened = await SessionManager.open(file, tempDir.path(), undefined, { suppressBreadcrumb: true });
+		expect(reopened.getEntries().some(entry => entry.id === peerId)).toBe(true);
+		expect(reopened.getLeafEntry()).toMatchObject({
+			type: "custom",
+			customType: SESSION_EXIT_CUSTOM_TYPE,
+			parentId: peerId,
+			data: expect.objectContaining({ reason: "sigterm", kind: "signal" }),
+		});
+		await reopened.close();
+	});
+
+	for (const backend of ["file", "memory"] as const) {
+		it(`keeps an unterminated ${backend} journal tail parseable when appending an exit`, async () => {
+			tempDir = TempDir.createSync("@pi-exit-separator-");
+			const storage = backend === "file" ? new FileSessionStorage() : new MemorySessionStorage();
+			const file = path.join(tempDir.path(), "session.jsonl");
+			storage.writeTextSync(file, '{"type":"custom","id":"peer"}');
+			storage.appendFromTailSync(file, lastLine => ({
+				content: `${JSON.stringify({ type: "custom", customType: SESSION_EXIT_CUSTOM_TYPE, parentId: JSON.parse(lastLine).id })}\n`,
+				value: undefined,
+			}));
+			expect(Bun.JSONL.parse(await storage.readText(file))).toEqual([
+				{ type: "custom", id: "peer" },
+				{ type: "custom", customType: SESSION_EXIT_CUSTOM_TYPE, parentId: "peer" },
+			]);
+		});
+	}
 
 	it("signal teardown persists the postmortem reason, not the generic dispose", async () => {
 		tempDir = TempDir.createSync("@pi-session-exit-signal-");

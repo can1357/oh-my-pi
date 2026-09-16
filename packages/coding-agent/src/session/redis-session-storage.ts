@@ -67,10 +67,18 @@ else
 end
 return {1, string.len(ARGV[1])}`;
 
+const READ_TAIL_SCRIPT = `-- OMP_READ_TAIL
+if redis.call("EXISTS", KEYS[1]) == 0 then return {-1, ""} end
+return {redis.call("STRLEN", KEYS[1]), redis.call("GETRANGE", KEYS[1], -tonumber(ARGV[1]), -1)}`;
+
 const APPEND_SCRIPT = `-- OMP_APPEND
+if ARGV[4] ~= "" then
+	local actual = redis.call("EXISTS", KEYS[1]) == 1 and redis.call("STRLEN", KEYS[1]) or -1
+	if actual ~= tonumber(ARGV[4]) then return {0, actual} end
+end
 local size = redis.call("APPEND", KEYS[1], ARGV[1])
 redis.call("HSET", KEYS[2], ARGV[2], ARGV[3])
-return size`;
+return {1, size}`;
 
 const UPDATE_TITLE_SCRIPT = `-- OMP_UPDATE_TITLE
 redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
@@ -186,6 +194,14 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		return Promise.all([head, tail]);
 	}
 
+	async readTail(path: string, suffixBytes: number): Promise<{ tail: string; size: number }> {
+		const result = await this.#client.send("EVAL", [READ_TAIL_SCRIPT, "1", this.#fileKey(path), String(suffixBytes)]);
+		if (!Array.isArray(result) || Number(result[0]) < 0) {
+			throw Object.assign(new Error(`Session not found: ${path}`), { code: "ENOENT" });
+		}
+		return { size: Number(result[0]), tail: String(result[1]) };
+	}
+
 	async writeFull(
 		path: string,
 		content: string,
@@ -214,8 +230,8 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		throw new SessionWriteConflictError(path, expectedSize, actualSize);
 	}
 
-	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		await this.#client.send("EVAL", [
+	async append(path: string, line: string, mtimeMs: number, expectedSize?: number): Promise<void> {
+		const result = await this.#client.send("EVAL", [
 			APPEND_SCRIPT,
 			"2",
 			this.#fileKey(path),
@@ -223,7 +239,11 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 			line,
 			path,
 			String(mtimeMs),
+			expectedSize === undefined ? "" : String(expectedSize),
 		]);
+		if (expectedSize === undefined || (Array.isArray(result) && Number(result[0]) === 1)) return;
+		const actual = Array.isArray(result) ? Number(result[1]) : -1;
+		throw new SessionWriteConflictError(path, expectedSize, actual === -1 ? null : actual);
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {

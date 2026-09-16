@@ -72,6 +72,7 @@ interface DialectQueries {
 	replaceIfSize: string;
 	/** Insert if missing; otherwise append the new chunk to existing content. Used for `writeLine`. */
 	upsertAppend: string;
+	appendIfSize: string;
 	/** Update indexed title metadata without rewriting the JSONL body. */
 	updateTitle: string;
 	/** Delete a single row by path. */
@@ -100,6 +101,7 @@ interface ContentRow {
 }
 
 interface SliceRow {
+	byte_len: number | bigint | string;
 	head: unknown;
 	tail: unknown;
 }
@@ -154,6 +156,7 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			replaceIfSize:
 				`UPDATE ${table} SET content = ?, mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ? ` +
 				`WHERE path = ? AND length(content) = ?`,
+			appendIfSize: `UPDATE ${table} SET content = CONCAT(content, ?), mtime_ms = ? WHERE path = ? AND length(content) = ?`,
 			upsertAppend:
 				`INSERT INTO ${table} (path, content, mtime_ms) VALUES (?, ?, ?) ` +
 				`ON DUPLICATE KEY UPDATE content = CONCAT(content, VALUES(content)), mtime_ms = VALUES(mtime_ms)`,
@@ -165,7 +168,7 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			readSlices:
 				`SELECT substring(cast(content AS binary), 1, ?) AS head, ` +
 				`CASE WHEN ? <= 0 THEN cast('' AS binary) ` +
-				`ELSE substring(cast(content AS binary), greatest(1, length(content) - ? + 1)) END AS tail ` +
+				`ELSE substring(cast(content AS binary), greatest(1, length(content) - ? + 1)) END AS tail, length(content) AS byte_len ` +
 				`FROM ${table} WHERE path = ?`,
 		};
 	}
@@ -177,10 +180,10 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 		adapter === "postgres"
 			? `SELECT substring(convert_to(content, 'UTF8') from 1 for ${placeholder(1)}) AS head, ` +
 				`CASE WHEN ${placeholder(2)} <= 0 THEN ''::bytea ` +
-				`ELSE substring(convert_to(content, 'UTF8') from greatest(1, octet_length(content) - ${placeholder(2)} + 1)) END AS tail ` +
+				`ELSE substring(convert_to(content, 'UTF8') from greatest(1, octet_length(content) - ${placeholder(2)} + 1)) END AS tail, octet_length(content) AS byte_len ` +
 				`FROM ${table} WHERE path = ${placeholder(3)}`
 			: `SELECT substr(cast(content AS blob), 1, ?) AS head, ` +
-				`CASE WHEN ? <= 0 THEN x'' ELSE substr(cast(content AS blob), -?) END AS tail ` +
+				`CASE WHEN ? <= 0 THEN x'' ELSE substr(cast(content AS blob), -?) END AS tail, length(cast(content AS blob)) AS byte_len ` +
 				`FROM ${table} WHERE path = ?`;
 
 	return {
@@ -210,6 +213,7 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`UPDATE ${table} SET content = ${placeholder(1)}, mtime_ms = ${placeholder(2)}, title = ${placeholder(3)}, ` +
 			`title_source = ${placeholder(4)}, title_updated_at = ${placeholder(5)} ` +
 			`WHERE path = ${placeholder(6)} AND ${byteLengthExpr} = ${placeholder(7)} RETURNING path`,
+		appendIfSize: `UPDATE ${table} SET content = content || ${placeholder(1)}, mtime_ms = ${placeholder(2)} WHERE path = ${placeholder(3)} AND ${byteLengthExpr} = ${placeholder(4)} RETURNING path`,
 		upsertAppend:
 			`INSERT INTO ${table} (path, content, mtime_ms) ` +
 			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}) ` +
@@ -354,6 +358,14 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		return [decodeSqlBytes(row.head), decodeSqlBytes(row.tail)];
 	}
 
+	async readTail(path: string, suffixBytes: number): Promise<{ tail: string; size: number }> {
+		const values = this.#adapter === "postgres" ? [0, suffixBytes, path] : [0, suffixBytes, suffixBytes, path];
+		const rows = (await this.#client.unsafe(this.#q.readSlices, values)) as SliceRow[];
+		const row = rows[0];
+		if (!row) throw enoent(path);
+		return { tail: decodeSqlBytes(row.tail), size: rowNumber(row.byte_len) };
+	}
+
 	async writeFull(
 		path: string,
 		content: string,
@@ -397,7 +409,17 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 		]);
 	}
 
-	async append(path: string, line: string, mtimeMs: number): Promise<void> {
+	async append(path: string, line: string, mtimeMs: number, expectedSize?: number): Promise<void> {
+		if (expectedSize !== undefined) {
+			const result = await this.#client.unsafe(this.#q.appendIfSize, [line, mtimeMs, path, expectedSize]);
+			if (this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1) return;
+			const current = await this.readFull(path);
+			throw new SessionWriteConflictError(
+				path,
+				expectedSize,
+				current === null ? null : Buffer.byteLength(current, "utf8"),
+			);
+		}
 		await this.#client.unsafe(this.#q.upsertAppend, [path, line, mtimeMs]);
 	}
 

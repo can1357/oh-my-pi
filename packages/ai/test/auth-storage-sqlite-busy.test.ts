@@ -176,6 +176,9 @@ db.close();`,
 			this: Database,
 			...args: Parameters<typeof realRun>
 		) {
+			// Other test files can open databases while open() awaits filesystem I/O.
+			// Only inject the failure into this test's store.
+			if (this.filename !== dbPath) return realRun.apply(this, args);
 			runCalls++;
 			if (runCalls === 1) {
 				const err = new Error("disk I/O error") as SqliteBusyShape;
