@@ -33,6 +33,12 @@
 - A corrupted or externally modified session file no longer leaves the session impossible to close; a subsequent Ctrl+C exits without rewriting the session log.
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+### Fixed
+
+- Interactive and print sessions now announce an OAuth account the auth layer signed out automatically — when it happens, and again at startup until that account signs in — instead of silently degrading to a sibling account; SDK consumers get the same replay from `session.getDisabledCredentialNotices()` ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- `omp usage` now lists accounts the auth layer disabled, and `--redact` keeps distinct providers distinct in both usage and history JSON instead of collapsing them onto one masked key ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
+- Copilot terminal auth errors no longer log out the entire provider after the failed request has settled, preserving a concurrent re-login and unrelated accounts ([#11910](https://github.com/can1357/oh-my-pi/pull/11910) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.2.1] - 2026-09-15
 

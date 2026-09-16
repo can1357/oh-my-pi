@@ -266,7 +266,9 @@ describe("AuthStorage OAuth refresh race", () => {
 				const row = rows.find(entry => entry.id === id);
 				if (row) row.credential = credential;
 			},
-			deleteAuthCredential() {},
+			deleteAuthCredential() {
+				return false;
+			},
 			tryDisableAuthCredentialIfMatches() {
 				return false;
 			},

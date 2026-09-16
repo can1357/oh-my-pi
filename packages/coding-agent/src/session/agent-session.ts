@@ -55,6 +55,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	CredentialDisabledEvent,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -103,6 +104,11 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import {
+	collectDisabledCredentialNotices,
+	formatCredentialDisabledNotice,
+	type RetainedCredentialDisable,
+} from "../config/credential-notices";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
@@ -413,6 +419,9 @@ class AgentStartPolicyChangedError extends Error {
 	}
 }
 
+// Match AuthStorage's no-listener event budget; a long-lived SDK session must
+// not retain every historical sign-out just to bridge startup subscription.
+const MAX_DISABLED_CREDENTIAL_NOTICES = 32;
 const EXPERIMENTAL_CONTEXT_REQUIRED_TOOLS: Record<string, true> = {
 	context_notes: true,
 	new_context: true,
@@ -651,6 +660,9 @@ export class AgentSession {
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
+	/** Recent sign-outs survive even when the store cannot replay tombstones. */
+	readonly #disabledCredentialNotices = new Map<number, RetainedCredentialDisable & { announcedAt?: number }>();
+	#disabledCredentialNoticeCount = 0;
 	/** Resolves once the resume-time advisor spend backfill settles. */
 	#advisorCostRestore: Promise<void> = Promise.resolve();
 	#goalTurnCounter = 0;
@@ -3480,26 +3492,6 @@ export class AgentSession {
 			// repeatedly on provider errors otherwise leaves no actionable trace
 			// outside the session transcript (issue #6177).
 			logProviderTurnError(msg);
-
-			// Invalidate GitHub Copilot credentials on a hard auth failure (401, or an
-			// expired/revoked token) so stale tokens aren't reused on the next request.
-			// Account usage caps and concurrency caps leave the credential valid: the
-			// former rotates until its reset window, while the latter is retried after
-			// a short backoff without touching the credential pool. Model-policy 403s
-			// (plan, model policy, org restriction) also preserve the credential: the
-			// token is valid, and wiping it hides the provider from `/model` (#11275).
-			if (msg.stopReason === "error" && msg.provider === "github-copilot") {
-				const errorId = AIError.classifyMessage(msg);
-				const isConcurrencyCap = AIError.parseRateLimitReason(msg.errorMessage ?? "") === "CONCURRENT_LIMIT";
-				if (
-					AIError.is(errorId, AIError.Flag.AuthFailed) &&
-					!AIError.is(errorId, AIError.Flag.UsageLimit) &&
-					!isConcurrencyCap &&
-					!AIError.isGitHubCopilotPolicyDenial(msg.provider, msg.errorStatus, msg.errorMessage)
-				) {
-					await this.#modelRegistry.authStorage.remove("github-copilot");
-				}
-			}
 
 			if (this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
 				const skippedSpeculationCompletion = this.#skippedPostTurnSpeculationCompletion;
@@ -11265,6 +11257,86 @@ export class AgentSession {
 	/** WATCHDOG.yml problems from startup discovery; shown by the UI once it is ready. */
 	getAdvisorConfigWarnings(): readonly string[] {
 		return this.#advisors.configWarnings;
+	}
+
+	/**
+	 * Announce a credential the auth layer tore down while this session is
+	 * live: a `warning` notice with source `auth` for subscribers. Retain the
+	 * event for replay when nobody was listening or the store lacks tombstones.
+	 */
+	announceCredentialDisabled(event: CredentialDisabledEvent): void {
+		const position = this.#disabledCredentialNoticeCount++;
+		this.#disabledCredentialNotices.delete(event.credentialId);
+		// The emitter attributed these against the snapshot the teardown happened
+		// in. Re-deriving them here would read a pool that a broker peer may have
+		// advanced since, so carry the event's own set through unchanged.
+		const siblingApiKeyIds = event.siblingApiKeyIds;
+		this.#disabledCredentialNotices.set(event.credentialId, {
+			event,
+			disabledAtMs: Date.now(),
+			siblingApiKeyIds,
+			announcedAt: this.#eventListeners.length > 0 ? position : undefined,
+		});
+		if (this.#disabledCredentialNotices.size > MAX_DISABLED_CREDENTIAL_NOTICES) {
+			const oldest = this.#disabledCredentialNotices.keys().next();
+			if (!oldest.done) this.#disabledCredentialNotices.delete(oldest.value);
+		}
+		this.emitNotice("warning", formatCredentialDisabledNotice(event), "auth");
+	}
+
+	/**
+	 * Position in the live announcement log. Read it immediately before
+	 * subscribing (same synchronous step) and hand it to
+	 * {@link AgentSession.getDisabledCredentialNotices}: every announcement
+	 * from that position on reached the new listener.
+	 */
+	get disabledCredentialNoticeMark(): number {
+		return this.#disabledCredentialNoticeCount;
+	}
+
+	/**
+	 * Notices for accounts the auth layer signed out on its own that have not
+	 * signed in again. Pull-after-subscribe like
+	 * {@link AgentSession.getAdvisorConfigWarnings}: a teardown before this
+	 * session had a listener — background model discovery while the session was
+	 * being created, an earlier session, a sibling process — reached nobody's
+	 * `notice` stream. Recent events are retained in memory; tombstones also
+	 * recover earlier sessions and sibling-process sign-outs. Teardowns after
+	 * subscribing arrive live as `notice` events with source `auth`; pass the
+	 * {@link AgentSession.disabledCredentialNoticeMark} taken before
+	 * subscribing as `announcedAfter` so a teardown racing the replay — even
+	 * one landing while the lookup is in flight — is told once. Bounded and
+	 * best-effort: an unreachable broker still permits retained event replay.
+	 */
+	async getDisabledCredentialNotices(options?: { announcedAfter?: number; nowMs?: number }): Promise<string[]> {
+		const announcedAfter = options?.announcedAfter;
+		return collectDisabledCredentialNotices(
+			this.#modelRegistry.authStorage,
+			options?.nowMs ?? Date.now(),
+			id => {
+				const position = this.#disabledCredentialNotices.get(id)?.announcedAt;
+				return announcedAfter !== undefined && position !== undefined && position >= announcedAfter;
+			},
+			this.#disabledCredentialNotices,
+		);
+	}
+
+	/**
+	 * Sign-outs this session retained. A caller tearing the session down hands
+	 * these back to `AuthStorage` so the next session can report them — without
+	 * a tombstone-listing store they exist nowhere else.
+	 *
+	 * Deliberately every retained event, not just the ones no listener saw.
+	 * Listener presence is a poor proxy for "the operator read it": an internal
+	 * subscriber that ignores `notice` events counts, a subscriber that attached
+	 * and detached counts, and a sign-out shown once in a session that then died
+	 * is still unresolved. The next session re-announces only what is still
+	 * actionable — `collectDisabledCredentialNotices` drops anything the user has
+	 * since signed back into — which is the documented contract: report it again
+	 * at startup until that account signs in.
+	 */
+	retainedCredentialDisabledEvents(): CredentialDisabledEvent[] {
+		return [...this.#disabledCredentialNotices.values()].map(retained => retained.event);
 	}
 
 	/**

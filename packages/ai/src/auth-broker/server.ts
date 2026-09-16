@@ -12,7 +12,8 @@
 
 import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AuthStorage, StoredCredentialBlock } from "../auth-storage";
+import type { AuthStorage, DisabledCredentialSummary, StoredCredentialBlock } from "../auth-storage";
+import { summarizeDisableCause, UnsupportedDisabledHistoryError } from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
@@ -25,6 +26,7 @@ import type {
 	CredentialUploadResponse,
 	DisabledCredentialsResponse,
 	HealthzResponse,
+	ProviderLogoutResponse,
 	RefresherSchedule,
 	SnapshotEntry,
 	SnapshotResponse,
@@ -35,6 +37,7 @@ import type {
 import {
 	AUTH_BROKER_CAPABILITIES_HEADER,
 	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
+	AUTH_BROKER_CAPABILITY_DISABLED_CREDENTIAL_PROJECT_ID,
 	DEFAULT_AUTH_BROKER_BIND,
 	DEFAULT_REFRESH_INTERVAL_MS,
 	DEFAULT_REFRESH_SKEW_MS,
@@ -46,6 +49,7 @@ import {
 	credentialBlockRequestSchema,
 	credentialDisableRequestSchema,
 	credentialUploadRequestSchema,
+	providerLogoutRequestSchema,
 } from "./wire-schemas";
 
 const DEFAULT_EXTERNAL_CHANGE_POLL_MS = 250;
@@ -106,13 +110,9 @@ function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
 	return tokens.has(match[1].trim());
 }
 
-function supportsCodexMeterBlockScopes(req: Request): boolean {
+function supportsCapability(req: Request, expectedCapability: string): boolean {
 	const capabilities = req.headers.get(AUTH_BROKER_CAPABILITIES_HEADER);
-	return (
-		capabilities
-			?.split(",")
-			.some(capability => capability.trim() === AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES) ?? false
-	);
+	return capabilities?.split(",").some(capability => capability.trim() === expectedCapability) ?? false;
 }
 
 /**
@@ -128,8 +128,8 @@ async function parseBody<t>(
 	let raw: string;
 	try {
 		raw = await req.text();
-	} catch (error) {
-		return { ok: false, response: json(400, { error: `Invalid request body: ${String(error)}` }) };
+	} catch {
+		return { ok: false, response: json(400, { error: "Invalid request body" }) };
 	}
 	if (raw.length === 0 && !options.allowEmpty) {
 		return { ok: false, response: json(400, { error: "Request body required" }) };
@@ -137,12 +137,13 @@ async function parseBody<t>(
 	let parsed: unknown;
 	try {
 		parsed = raw.length === 0 ? {} : JSON.parse(raw);
-	} catch (error) {
-		return { ok: false, response: json(400, { error: `Invalid JSON body: ${String(error)}` }) };
+	} catch {
+		return { ok: false, response: json(400, { error: "Invalid JSON body" }) };
 	}
 	const result = schema(parsed);
 	if (result instanceof type.errors) {
-		return { ok: false, response: json(400, { error: result.summary }) };
+		// Schema summaries may echo rejected credentials without a secret-labelled boundary.
+		return { ok: false, response: json(400, { error: "Invalid request body" }) };
 	}
 	return { ok: true, data: result };
 }
@@ -426,7 +427,7 @@ async function serveSnapshot(
 	peer: string,
 ): Promise<Response> {
 	await storage.reload();
-	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
+	const clientSupportsCodexMeterBlockScopes = supportsCapability(req, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES);
 	let currentGeneration = storage.getGeneration();
 	const clientGeneration = parseGenerationTag(req.headers.get("if-none-match"));
 	const waitMs = parseWaitMs(url);
@@ -498,7 +499,7 @@ function serveSnapshotStream(
 ): Response {
 	const encoder = new TextEncoder();
 	const openedAt = Date.now();
-	const clientSupportsCodexMeterBlockScopes = supportsCodexMeterBlockScopes(req);
+	const clientSupportsCodexMeterBlockScopes = supportsCapability(req, AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES);
 	const lastByCredId = new Map<number, string>();
 	let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
 	let unsubscribe: (() => void) | null = null;
@@ -677,7 +678,11 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					return json(200, body);
 				}
 				if (!isAuthorized(req, tokens)) {
-					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
+					logger.info("auth-broker request unauthorized", {
+						method: req.method,
+						path: pathname,
+						peer,
+					});
 					return json(401, { error: "unauthorized" });
 				}
 				if (req.method === "GET" && pathname === "/v1/snapshot/stream") {
@@ -713,7 +718,12 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						sinceMsParsed !== undefined && Number.isFinite(sinceMsParsed) ? sinceMsParsed : undefined;
 					const provider = url.searchParams.get("provider") ?? undefined;
 					const entries = opts.storage.listUsageHistory({ sinceMs, provider });
-					logger.info("auth-broker usage history served", { peer, entries: entries.length, sinceMs, provider });
+					logger.info("auth-broker usage history served", {
+						peer,
+						entries: entries.length,
+						sinceMs,
+						provider: provider === undefined ? undefined : provider,
+					});
 					return json(200, { generatedAt: Date.now(), entries });
 				}
 				if (req.method === "POST" && pathname === "/v1/usage/observed") {
@@ -728,7 +738,7 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						logger.debug("auth-broker client usage recorded", {
 							peer,
 							installId: report.installId,
-							hostname: report.hostname,
+							hostname: report.hostname === undefined ? undefined : report.hostname,
 							entries: report.entries.length,
 						});
 						return json(200, { ok: true });
@@ -757,9 +767,34 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				}
 				if (req.method === "GET" && pathname === "/v1/credentials/disabled") {
 					const provider = url.searchParams.get("provider") ?? undefined;
-					const disabled = await opts.storage.listDisabledCredentials(provider, req.signal);
-					const body: DisabledCredentialsResponse = { generatedAt: Date.now(), disabled };
-					return json(200, body);
+					let disabled: DisabledCredentialSummary[];
+					try {
+						disabled = await opts.storage.listDisabledCredentials(provider, req.signal, {
+							requireSupported: true,
+						});
+					} catch (error) {
+						// A store without tombstones is a permanent capability gap, not a
+						// fault: answer 501 so the client latches it off instead of
+						// retrying a 500 with backoff for the rest of the session.
+						if (error instanceof UnsupportedDisabledHistoryError) {
+							return json(501, { error: error.message });
+						}
+						throw error;
+					}
+					const body: DisabledCredentialsResponse = {
+						generatedAt: Date.now(),
+						disabled: supportsCapability(req, AUTH_BROKER_CAPABILITY_DISABLED_CREDENTIAL_PROJECT_ID)
+							? disabled
+							: disabled.map(({ projectId: _projectId, ...summary }) => summary),
+					};
+					return json(200, body, { Vary: AUTH_BROKER_CAPABILITIES_HEADER });
+				}
+				if (req.method === "POST" && pathname === "/v1/provider/logout") {
+					const parsed = await parseBody(req, providerLogoutRequestSchema);
+					if (!parsed.ok) return parsed.response;
+					await opts.storage.remove(parsed.data.provider);
+					const response: ProviderLogoutResponse = { ok: true };
+					return json(200, response);
 				}
 				const refreshMatch = req.method === "POST" ? pathname.match(REFRESH_ROUTE) : null;
 				if (refreshMatch) {
@@ -791,11 +826,15 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					const cause =
 						parsed.data.cause && parsed.data.cause.length > 0 ? parsed.data.cause : "disabled via auth-broker";
 					const ok = opts.storage.disableCredentialById(id, cause);
+					// The cause is provider-controlled — a Copilot hard-401 body, a token
+					// endpoint's error text — and this log rotates on the broker host.
+					// Store the verbatim cause on the tombstone; log the classification.
+					const loggedCause = summarizeDisableCause(cause);
 					if (!ok) {
-						logger.info("auth-broker disable miss", { id, peer, cause });
+						logger.info("auth-broker disable miss", { id, peer, cause: loggedCause });
 						return json(404, { error: `No credential with id=${id}` });
 					}
-					logger.info("auth-broker credential disabled", { id, peer, cause });
+					logger.info("auth-broker credential disabled", { id, peer, cause: loggedCause });
 					const response: CredentialDisableResponse = { ok: true };
 					return json(200, response);
 				}
@@ -827,7 +866,11 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(200, response);
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker credential block upsert failed", { id, peer, error: message });
+						logger.warn("auth-broker credential block upsert failed", {
+							id,
+							peer,
+							error: message,
+						});
 						const status = message.includes("No credential with id") ? 404 : 500;
 						return json(status, { error: message });
 					}
@@ -846,7 +889,11 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(200, response);
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker credential blocks delete failed", { id, peer, error: message });
+						logger.warn("auth-broker credential blocks delete failed", {
+							id,
+							peer,
+							error: message,
+						});
 						const status = message.includes("No credential with id") ? 404 : 500;
 						return json(status, { error: message });
 					}
@@ -862,9 +909,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 								? (credential.email ?? credential.accountId ?? credential.projectId ?? "(no identity)")
 								: "(api key)";
 						logger.info("auth-broker credential upserted", {
-							provider,
+							provider: provider,
 							type: credential.type,
-							identity,
+							identity: identity,
 							peer,
 							providerTotal: entries.length,
 						});
@@ -872,7 +919,11 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 						return json(200, response);
 					} catch (error) {
 						const message = error instanceof Error ? error.message : String(error);
-						logger.warn("auth-broker upload failed", { provider, peer, error: message });
+						logger.warn("auth-broker upload failed", {
+							provider: provider,
+							peer,
+							error: message,
+						});
 						return json(500, { error: message });
 					}
 				}

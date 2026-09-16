@@ -447,7 +447,9 @@ describe("cursor usage provider", () => {
 					return [];
 				},
 				updateAuthCredential() {},
-				deleteAuthCredential() {},
+				deleteAuthCredential() {
+					return false;
+				},
 				tryDisableAuthCredentialIfMatches() {
 					return false;
 				},
