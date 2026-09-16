@@ -2346,6 +2346,8 @@ export class TurnRecovery {
 		if (currentSelector === originalSelector.raw) {
 			if (!this.isRetryFallbackSelectorSuppressed(originalSelector)) {
 				this.clearActiveRetryFallback();
+				this.#activeRetryFallback = fallback.previousFallback;
+				if (fallback.originalWasFallback) this.#markFallbackRouted();
 			}
 			return false;
 		}
