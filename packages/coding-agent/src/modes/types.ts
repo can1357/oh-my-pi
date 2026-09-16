@@ -261,6 +261,10 @@ export interface InteractiveModeContext {
 	/** True once `shutdown()` has started. Read-only from the context;
 	 *  controllers use this to skip work that races with teardown. */
 	readonly isShuttingDown: boolean;
+	/** True once a graceful `shutdown()` teardown failed at the dispose stage,
+	 *  so the next single Ctrl+C must escape (force-quit) rather than re-run the
+	 *  doomed teardown or merely clear the editor (#12238). */
+	readonly teardownFailed: boolean;
 	hookSelector: HookSelectorComponent | undefined;
 	hookInput: HookInputComponent | undefined;
 	hookEditor: HookEditorComponent | undefined;

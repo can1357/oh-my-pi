@@ -34,7 +34,7 @@ import type {
 import { isAnthropicSigningProxyUrl, isAzureAnthropicRoute, isOfficialAnthropicApiUrl } from "./anthropic";
 import { applyCompatOverrides } from "./apply";
 import { API_COMPAT_RECORDS, AXES, type CompatRecordName } from "./axes";
-import { resolveCascade } from "./cascade";
+import { hasModelScopedEffortsRule, resolveCascade } from "./cascade";
 import { compareRevision, parseRevision, type Revision } from "./revision";
 import { classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
 import type { ModelIdentity, ResolvedAxes, ResolveTarget } from "./types";
@@ -1270,4 +1270,17 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		thinking: resolveThinkingPolicy(spec, facts, axes, compat),
 		catalog: axes.catalog,
 	};
+}
+
+/**
+ * Whether reviewed rules know THIS model's effort ladder, as opposed to it
+ * inheriting a provider-wide default or {@link resolveThinkingPolicy} falling
+ * through to the neutral wire ladder.
+ *
+ * Discovery uses this to tell "omp knows this model's tiers" apart from "omp
+ * is guessing them", so catalog-published tiers can correct the guess without
+ * ever overriding reviewed knowledge.
+ */
+export function hasModelScopedEffortLadder<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	return hasModelScopedEffortsRule(buildResolveTarget(spec, resolveIdentity(spec)));
 }
