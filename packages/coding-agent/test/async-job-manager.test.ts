@@ -411,6 +411,40 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
 	});
 
+	test.each(["single", "bulk"] as const)("keeps %s cancelled work reapable past retention", async kind => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ retentionMs: 25 });
+		const release = Promise.withResolvers<void>();
+		const jobId = manager.register(
+			"bash",
+			"pending cleanup",
+			async () => {
+				await release.promise;
+				return "cleanup finished";
+			},
+			{ ownerId: "owner" },
+		);
+		try {
+			if (kind === "single") manager.cancel(jobId);
+			else manager.cancelAll({ ownerId: "owner" });
+			vi.advanceTimersByTime(50);
+			const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now());
+			expect(reap.settled).toBe(false);
+			expect(reap.pendingJobIds).toEqual([jobId]);
+			release.resolve();
+			await reap.completion;
+			expect(manager.getJob(jobId)?.resultText).toBe("cleanup finished");
+			expect(await manager.waitForOwnerJobs("owner")).toBe(true);
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+		} finally {
+			release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	test("enforces maxRunningJobs cap", () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,
