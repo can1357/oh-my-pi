@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Extension handlers now receive `ctx.agent` (`{ id, isSubagent }`), the agent their session runs as. MCP notification frames fan out to every subagent's runner, so a bridge that turns them into steers can now act from the top-level session only ([#11895](https://github.com/can1357/oh-my-pi/pull/11895) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.2.1] - 2026-09-15
 
