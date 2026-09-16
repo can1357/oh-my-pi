@@ -2,11 +2,12 @@
  * File verification for edit benchmark.
  *
  * Compares output files against expected fixtures after Prettier formatting.
- * For code files the comparison additionally ignores blank-line count, so a
- * stray seam blank left by an otherwise perfect edit does not fail the task;
- * blank-sensitive formats (markdown, yaml) keep exact formatted equality.
+ * JavaScript and TypeScript also tolerate syntax-aware formatting differences;
+ * whitespace inside literals and unparseable files remains significant.
  */
 import * as path from "node:path";
+import generate from "@babel/generator";
+import { parse } from "@babel/parser";
 import { diffLines } from "diff";
 import { formatContent } from "./formatter";
 import { listFiles } from "./shared";
@@ -131,18 +132,14 @@ export async function verifyExpectedFileSubset(
 			const actualRaw = await Bun.file(actualPath).text();
 			const expectedNormalized = normalizeLineEndings(expectedRaw);
 			const actualNormalized = normalizeLineEndings(actualRaw);
-			const actualNormalizedWithPreservedWhitespace = restoreWhitespaceOnlyLineDiffs(
-				expectedNormalized,
-				actualNormalized,
-			);
-			const expectedFormatted = await formatContent(expectedPath, normalizeBlankLines(expectedNormalized));
-			const actualFormatted = await formatContent(
-				actualPath,
-				normalizeBlankLines(actualNormalizedWithPreservedWhitespace),
-			);
-			const formattedEquivalent = blankLineSensitive(file)
-				? expectedFormatted.formatted === actualFormatted.formatted
-				: stripBlankLines(expectedFormatted.formatted) === stripBlankLines(actualFormatted.formatted);
+			const expectedFormatted = await formatContent(expectedPath, expectedNormalized);
+			const actualFormatted = await formatContent(actualPath, actualNormalized);
+			const formattedEquivalent =
+				expectedFormatted.formatted === actualFormatted.formatted ||
+				(expectedFormatted.didFormat &&
+					actualFormatted.didFormat &&
+					normalizeCodeFormatting(file, expectedFormatted.formatted) ===
+						normalizeCodeFormatting(file, actualFormatted.formatted));
 
 			// Indent score: distance between agent's raw output and formatted output
 			// This measures how much the formatter had to fix the agent's indentation
@@ -243,80 +240,26 @@ function normalizeLineEndings(value: string): string {
 	return value.replace(/\r\n?/g, "\n");
 }
 
-/** Collapse runs of 2+ blank lines into a single blank line. */
-function normalizeBlankLines(text: string): string {
-	return text.replace(/\n{3,}/g, "\n\n");
-}
-
-/** Formats where blank lines are semantic (paragraph/document structure). */
-const BLANK_SENSITIVE_EXTENSIONS: Record<string, true> = {
-	".md": true,
-	".mdx": true,
-	".yml": true,
-	".yaml": true,
-};
-
-function blankLineSensitive(file: string): boolean {
-	return BLANK_SENSITIVE_EXTENSIONS[path.extname(file).toLowerCase()] === true;
-}
-
-/** Drop empty/whitespace-only lines so blank-line count differences never fail code comparisons. */
-function stripBlankLines(text: string): string {
-	const lines = text.split("\n");
-	const kept: string[] = [];
-	for (const line of lines) {
-		if (line.trim() !== "") kept.push(line);
+/** Remove only syntax-level formatting, preserving literal and comment contents. */
+function normalizeCodeFormatting(file: string, content: string): string {
+	const extension = path.extname(file).toLowerCase();
+	if (![".js", ".jsx", ".ts", ".tsx"].includes(extension)) return content;
+	try {
+		const ast = parse(content, {
+			sourceType: "unambiguous",
+			allowReturnOutsideFunction: true,
+			plugins: [
+				extension === ".ts" || extension === ".tsx" ? "typescript" : "flow",
+				"jsx",
+				"flowComments",
+				"importAssertions",
+				"decorators-legacy",
+			],
+		});
+		return generate(ast, { compact: true }).code;
+	} catch {
+		return content;
 	}
-	return kept.join("\n");
-}
-
-function restoreWhitespaceOnlyLineDiffs(expected: string, actual: string): string {
-	const changes = diffLines(expected, actual);
-	const out: string[] = [];
-	let pendingRemoved: string[] = [];
-	let pendingAdded: string[] = [];
-
-	const flush = () => {
-		const pairs = Math.min(pendingRemoved.length, pendingAdded.length);
-		for (let i = 0; i < pairs; i++) {
-			const removedLine = pendingRemoved[i]!;
-			const addedLine = pendingAdded[i]!;
-			out.push(
-				removedLine !== addedLine && equalsIgnoringWhitespace(removedLine, addedLine) ? removedLine : addedLine,
-			);
-		}
-		// Unmatched added lines (insertions beyond the removal window) stay as-is.
-		for (let i = pairs; i < pendingAdded.length; i++) {
-			out.push(pendingAdded[i]!);
-		}
-		// Unmatched removed lines have no counterpart in actual — drop them.
-		pendingRemoved = [];
-		pendingAdded = [];
-	};
-
-	for (const change of changes) {
-		const lines = splitLines(change.value);
-		if (change.removed) {
-			pendingRemoved.push(...lines);
-			continue;
-		}
-		if (change.added) {
-			pendingAdded.push(...lines);
-			continue;
-		}
-		flush();
-		out.push(...lines);
-	}
-	flush();
-
-	// Preserve trailing newline semantics: rejoin with "\n" and add a trailing
-	// newline iff actual originally ended with one.
-	const joined = out.join("\n");
-	return actual.endsWith("\n") ? `${joined}\n` : joined;
-}
-
-function equalsIgnoringWhitespace(a: string, b: string): boolean {
-	return a.replace(/\s+/g, "") === b.replace(/\s+/g, "");
 }
 
 function splitLines(value: string): string[] {
