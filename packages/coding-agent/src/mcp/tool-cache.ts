@@ -283,6 +283,9 @@ export class MCPToolCache {
 	observeCatalogAt(serverName: string): number | undefined {
 		const catalog = cacheKey(serverName);
 		const claim = claimKey(serverName);
+		// Publish any barrier a prior failed reservation left pending: a store
+		// interaction here proves the lock that blocked it has cleared.
+		this.#flushPendingBarrier(serverName);
 		let claimed = 0;
 		for (let attempt = 0; attempt < CACHE_CLAIM_ATTEMPTS; attempt++) {
 			const claimRaw = this.storage.getCache(claim);
@@ -371,9 +374,17 @@ export class MCPToolCache {
 	 * and catalog rows.
 	 */
 	#issuedHighWater = new Map<string, number>();
+	/**
+	 * Barriers a failed {@link #publishUnreservedBarrier} could not write, held
+	 * for the next store interaction on this instance to publish once the lock
+	 * clears. Lost if the process exits first — no in-process state survives that
+	 * — so the barrier is best-effort, not a guarantee.
+	 */
+	#pendingBarrier = new Map<string, number>();
 
 	async get(serverName: string, config: MCPServerConfig): Promise<MCPToolDefinition[] | null> {
 		const key = cacheKey(serverName);
+		this.#flushPendingBarrier(serverName);
 		const raw = this.storage.getCache(key);
 		if (!raw) return null;
 
@@ -429,6 +440,7 @@ export class MCPToolCache {
 		tools: MCPToolDefinition[],
 		...observed: [] | [observedAt: number | undefined]
 	): Promise<void> {
+		this.#flushPendingBarrier(serverName);
 		// An OMITTED token means "no request to anchor on" (an out-of-band
 		// invalidation, or a test) and samples now. A supplied token is the
 		// outcome `observeCatalogAt()` handed the caller BEFORE its `tools/list`:
@@ -576,7 +588,8 @@ export class MCPToolCache {
 
 	/**
 	 * Raise the shared claim row to `barrier` so a later cross-process write
-	 * defers to it, without persisting a catalog.
+	 * defers to it, without persisting a catalog. Hold it pending when the store
+	 * cannot be written now.
 	 *
 	 * A reservation whose claim never published (a store lock, or an exhausted
 	 * CAS) still observed the server, later than anything already in flight on
@@ -586,24 +599,63 @@ export class MCPToolCache {
 	 * (which compares the catalog row and that request's OWN claim, never a
 	 * barrier) to cache its superseded catalog for the full TTL. The claim row
 	 * is the one cross-process ordering state an unreserved response can leave,
-	 * so CAS `barrier` above whatever it holds. Nonblocking and best-effort: if
-	 * the store is still locked the barrier is skipped, but so is every peer's
-	 * write, so nothing regresses.
+	 * so CAS `barrier` above whatever it holds.
+	 *
+	 * The publish is nonblocking, so a lock held across BOTH the reservation and
+	 * this publish would otherwise leave no barrier at all — the hole a same-call
+	 * retry cannot close without spinning the event loop on the lock round 3
+	 * removed. So a barrier that cannot be written now is held pending and
+	 * flushed by the next store interaction on this instance
+	 * ({@link #flushPendingBarrier}), which closes the window whenever this
+	 * process survives to touch the store once more.
+	 *
+	 * It does NOT survive this process EXITING before the lock clears: no
+	 * in-process state can, since the only durable ordering signal lives in the
+	 * store that is unreachable. A read-path refusal cannot cover that residual
+	 * window either — a legitimate catalog carries a `writeStartedAt` equal to
+	 * its own published claim, so refusing that shape refuses every catalog. This
+	 * is the best available guarantee; the residual window is a process exit
+	 * during a lock that outlives the reservation, its response, and every later
+	 * store touch.
 	 */
 	#publishUnreservedBarrier(serverName: string, barrier: number): void {
+		if (this.#tryPublishBarrier(serverName, barrier)) return;
+		const pending = this.#pendingBarrier.get(serverName);
+		this.#pendingBarrier.set(serverName, Math.max(pending ?? barrier, barrier));
+	}
+
+	/**
+	 * CAS `barrier` onto the claim row above whatever it holds. Returns whether
+	 * the row now carries at least `barrier` — written here, or already dominant.
+	 * A held store (nonblocking `"unavailable"`) or an exhausted CAS returns
+	 * false so the caller can hold the barrier pending.
+	 */
+	#tryPublishBarrier(serverName: string, barrier: number): boolean {
 		const claim = claimKey(serverName);
 		for (let attempt = 0; attempt < CACHE_CLAIM_ATTEMPTS; attempt++) {
 			const claimRaw = this.storage.getCache(claim);
 			const claimedAt = readClaimedAt(claimRaw);
-			if (claimedAt !== undefined && claimedAt >= barrier) return;
+			if (claimedAt !== undefined && claimedAt >= barrier) return true;
 			const serialized = JSON.stringify({ claimedAt: barrier } satisfies MCPToolClaimPayload);
 			const expiresAtSec = Math.floor((Date.now() + CLAIM_TTL_MS) / 1000);
 			const outcome = this.storage.setCacheIfMatches(claim, claimRaw, serialized, expiresAtSec, {
 				nonblocking: true,
 			});
-			if (outcome === "written") return;
-			if (outcome === "unavailable") return;
+			if (outcome === "written") return true;
+			if (outcome === "unavailable") return false;
 		}
+		return false;
+	}
+
+	/**
+	 * Publish a barrier a prior failed reservation left pending for `serverName`,
+	 * now that this later store interaction proves the lock cleared. Clears the
+	 * mark once the claim row carries it (or already dominates it).
+	 */
+	#flushPendingBarrier(serverName: string): void {
+		const pending = this.#pendingBarrier.get(serverName);
+		if (pending === undefined) return;
+		if (this.#tryPublishBarrier(serverName, pending)) this.#pendingBarrier.delete(serverName);
 	}
 
 	/**

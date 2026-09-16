@@ -832,6 +832,61 @@ describe("MCPToolCache empty-toolset guard", () => {
 		expect((await startup.get("litellm", CONFIG)) ?? []).not.toContainEqual(OLD_TOOL);
 	});
 
+	// The round-4 hole: a store lock held across BOTH the newer request's
+	// reservation AND its response's barrier publish left NO barrier at all,
+	// because `#publishUnreservedBarrier` returned on "unavailable". Once the
+	// lock cleared the older delayed response wrote its superseded catalog. The
+	// barrier that could not publish is now held pending and flushed by the next
+	// store interaction on this instance, so it survives a lock that outlives the
+	// reservation and its response — everything short of the process exiting
+	// before the lock clears.
+	//
+	// RED (round 4): the barrier was dropped on "unavailable", so the claim row
+	// still held only the older token and a fresh startup served the older
+	// catalog the newer request had superseded.
+	test("a barrier held pending across a persistent lock publishes once the lock clears, refusing an older cross-process response", async () => {
+		const storage = createFakeStorage();
+		const older = new MCPToolCache(storage);
+		const newer = new MCPToolCache(storage);
+
+		// The older request reserves first and publishes its (lower) claim token.
+		const olderToken = reserved(older, "litellm");
+
+		// A store lock is held across the newer request's reservation AND its
+		// response's barrier publish — every conditional write returns
+		// "unavailable" while `locked`.
+		let locked = true;
+		const realCas = storage.setCacheIfMatches.bind(storage);
+		const cas = vi
+			.spyOn(storage, "setCacheIfMatches")
+			.mockImplementation((key, expected, value, expiresAtSec, options) =>
+				locked ? "unavailable" : realCas(key, expected, value, expiresAtSec, options),
+			);
+
+		// The reservation cannot publish and reserves unreserved.
+		const newerToken = newer.observeCatalogAt("litellm");
+		expect(newerToken).toBeUndefined();
+
+		// The newer response lands while the lock still holds: its barrier cannot
+		// publish, so it is held pending on the newer instance.
+		await newer.set("litellm", CONFIG, [NEW_TOOL], newerToken);
+
+		// The lock clears. The newer instance's next store interaction flushes the
+		// pending barrier to the shared claim row.
+		locked = false;
+		await newer.get("litellm", CONFIG);
+		cas.mockRestore();
+
+		// The older response lands LAST through its own instance, carrying its
+		// published lower token. The flushed barrier must refuse its catalog.
+		await older.set("litellm", CONFIG, [OLD_TOOL], olderToken);
+
+		// A subsequent fresh-instance startup must NOT read the older catalog; the
+		// store holds no authoritative catalog, so a live re-list repopulates it.
+		const startup = new MCPToolCache(storage);
+		expect((await startup.get("litellm", CONFIG)) ?? []).not.toContainEqual(OLD_TOOL);
+	});
+
 	// A tombstone's ordering must outlive the CATALOG TTL, because an MCP request
 	// does not have a bounded lifetime — `timeout: 0` disables the timeout
 	// outright. When an older `tools/list` is in flight for longer than the
