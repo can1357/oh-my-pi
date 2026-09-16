@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Read tool SQLite auto-detect no longer opens databases in place when their WAL is coordinated by a foreign engine or SQLite sidecars are missing; such reads go through a private copy so the original, its WAL, and its directory are never modified ([#12231](https://github.com/can1357/oh-my-pi/issues/12231)).
+
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
