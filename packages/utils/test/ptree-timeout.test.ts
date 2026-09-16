@@ -84,18 +84,15 @@ sleep 30
 			const cleanupProcesses: Process[] = [];
 
 			try {
+				// A BunFile handle caches a negative `exists()`; stat fresh each poll.
+				const pidFileExists = () =>
+					fs.stat(pidFile).then(
+						() => true,
+						() => false,
+					);
 				const setupDeadline = Date.now() + 2_000;
-				let workerCreated = false;
-				while (Date.now() < setupDeadline) {
-					try {
-						await fs.stat(pidFile);
-						workerCreated = true;
-						break;
-					} catch {
-						await Bun.sleep(10);
-					}
-				}
-				expect(workerCreated, "the launcher must create its worker").toBe(true);
+				while (!(await pidFileExists()) && Date.now() < setupDeadline) await Bun.sleep(10);
+				expect(await pidFileExists(), "the launcher must create its worker").toBe(true);
 
 				const workerPid = Number.parseInt((await Bun.file(pidFile).text()).trim(), 10);
 				const subreaper = Process.fromPid(child.pid);

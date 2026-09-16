@@ -818,6 +818,18 @@ export function truncateDiffByHunk(
 // Path Utilities
 // =============================================================================
 
+let cachedHomeDir: string | undefined;
+let cachedHomedir: typeof os.homedir | undefined;
+
+function defaultHomeDir(): string {
+	const homedir = os.homedir;
+	if (cachedHomeDir === undefined || cachedHomedir !== homedir) {
+		cachedHomedir = homedir;
+		cachedHomeDir = homedir();
+	}
+	return cachedHomeDir;
+}
+
 const homePatternCache = new Map<string, RegExp>();
 function homePatternFor(homeDir: string, windowsStyle: boolean): RegExp {
 	const key = `${windowsStyle ? 1 : 0} ${homeDir}`;
@@ -838,7 +850,7 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	if (typeof filePath !== "string") {
 		return "";
 	}
-	const home = homeDir ?? os.homedir();
+	const home = homeDir ?? defaultHomeDir();
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
 	const hasHomePrefix = windowsStyle
 		? filePath.toLowerCase().startsWith(home.toLowerCase())
@@ -855,7 +867,7 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 /** Shorten home-prefixed paths inside free text, preserving surrounding
  * punctuation so error strings with embedded paths stay readable. */
 export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
-	const resolvedHome = homeDir ?? os.homedir();
+	const resolvedHome = homeDir ?? defaultHomeDir();
 	const shortenedHome = resolvedHome.length > 1 ? shortenPath(resolvedHome, resolvedHome) : resolvedHome;
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
 	const homePattern = homePatternFor(resolvedHome, windowsStyle);
