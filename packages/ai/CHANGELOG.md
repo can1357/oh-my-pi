@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Rate-limited models now fail over quickly: wire 429s receive at most two transport requests and no provider replay, while in-band 429s receive at most one replay and only with a server-promised recovery within 5s; quota, hintless, and long-hint limits surface immediately so fallback can take over promptly ([#11701](https://github.com/can1357/oh-my-pi/pull/11701) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added
@@ -92,7 +96,6 @@
 - GitHub Copilot streams remember the working `Copilot-Integration-Id` per credential after a denied chat identity retries as the Copilot CLI, so later streams start at the working shape instead of replaying the denial ([#11669](https://github.com/can1357/oh-my-pi/issues/11669)).
 - Fixed Anthropic OAuth requests omitting the tool-array cache breakpoint, so tool definitions are now cached across session rewrites and sibling subagents ([#11660](https://github.com/can1357/oh-my-pi/pull/11660) by [@camjac251](https://github.com/camjac251)).
 - Fixed Amazon Bedrock OpenAI models rejecting image-bearing tool results by sending each image as a sibling user content block ([#11681](https://github.com/can1357/oh-my-pi/issues/11681)).
-- Rate-limited models now fail over quickly: a persistent 429 costs at most two provider requests per attempt (one unless the server promises recovery within 5s) instead of twelve, so a configured fallback chain takes over promptly and parallel subagents stop amplifying the limit. In-band Anthropic `rate_limit_error` stream frames take the same path ([#11701](https://github.com/can1357/oh-my-pi/pull/11701) by [@schickling-assistant](https://github.com/schickling-assistant)).
 
 ## [18.1.17] - 2026-09-10
 

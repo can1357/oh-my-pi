@@ -72,7 +72,9 @@ function completionsSuccess(text: string): Response {
 }
 
 function completionsInBandRateLimited(message: string): Response {
-	return new Response(`data: ${JSON.stringify({ error: { type: "TOO_MANY_REQUESTS", message } })}\n\n`, {
+	// A bare numeric code is classified only by the shared in-band body
+	// classifier; the legacy completions error guard does not assign it a status.
+	return new Response(`data: ${JSON.stringify({ code: 429, message })}\n\n`, {
 		status: 200,
 		headers: { "content-type": "text/event-stream" },
 	});
@@ -179,7 +181,7 @@ describe("transport rate-limit budget", () => {
 		expect(outcome.text).toBe("recovered");
 	});
 
-	it("waits for one short-hinted retry for an in-band OpenAI 429", async () => {
+	it("waits for one short-hinted retry for an in-band OpenAI 429 from the shared classifier", async () => {
 		const outcome = await countCompletionsRequests(request =>
 			request === 1
 				? completionsInBandRateLimited("Too many requests. Please retry in 3s")

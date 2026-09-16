@@ -145,14 +145,16 @@ concurrent subagent.
   `Retry-After`/`retry-after-ms` or an equivalent body hint.
 - A 429 with no hint, a long hint, or a quota/usage-limit body surfaces on the
   first attempt.
-- Provider-level replay loops (`withReplaySafeStreamRetry`, the Anthropic
-  stream retry loop) do not re-run a 429 either: `isProviderRetryableError`
-  rejects it because the transport already spent that budget.
-- In-band rate limits ride a 200 stream and therefore carry no HTTP status of
-  their own, so they are given one at construction — an Anthropic
-  `rate_limit_error` SSE frame becomes a 429, matching the OpenAI-completions
-  in-band mapping — and take the same path as a wire 429 instead of being
-  replayed as generic transient text.
+- Provider-level replay loops do not re-run a wire 429:
+  `isProviderRetryableError` rejects it because the transport already spent
+  the route's dedicated budget.
+- In-band rate limits ride an HTTP 200 stream and never pass through the
+  transport's 429 budget. The shared body classifier records that provenance
+  explicitly; status 429 alone is not enough. A replay-safe in-band 429 may
+  receive exactly one provider retry, only when the body carries a credible
+  hint within 5s and is not a quota/usage limit. Hintless, long-hint, and quota
+  failures surface immediately. Anthropic `rate_limit_error` frames use the
+  same bounded rule in the Anthropic stream loop.
 - Capacity (5xx), timeouts (408), and transient transport failures keep the
   full per-transport `maxAttempts` budget.
 

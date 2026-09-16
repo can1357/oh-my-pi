@@ -677,13 +677,7 @@ function createOpenAICompletionsStreamError(chunk: unknown, provider: string): E
 	if (status === undefined) {
 		return new AIError.ProviderResponseError(detail, { provider, kind: "runtime" });
 	}
-	const streamError = new AIError.ProviderHttpError(`${status} ${detail}`, status, { code: parsed.code });
-	if (status === 429) {
-		(streamError as AIError.ProviderHttpError & OpenAICompletionsInBandRateLimitTagged)[
-			kOpenAICompletionsInBandRateLimit
-		] = true;
-	}
-	return streamError;
+	return new AIError.ProviderHttpError(`${status} ${detail}`, status, { code: parsed.code });
 }
 
 const streamOpenAICompletionsOnce = (
@@ -1542,11 +1536,10 @@ const streamOpenAICompletionsOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
-			if (
-				(error as OpenAICompletionsInBandRateLimitTagged | null | undefined)?.[
-					kOpenAICompletionsInBandRateLimit
-				] === true
-			) {
+			// Only the shared HTTP-200 body classifier carries this provenance.
+			// A wire 429 has the same status, but already spent its transport budget
+			// and must not receive another replay at the provider layer.
+			if (result.status === 429 && AIError.isInBandProviderError(error)) {
 				(output as AssistantMessage & OpenAICompletionsInBandRateLimitTagged)[kOpenAICompletionsInBandRateLimit] =
 					true;
 			}

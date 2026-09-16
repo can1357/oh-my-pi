@@ -7,7 +7,7 @@
  *   SDK's former `maxRetries: 5`. A 429 instead gets the transport's small
  *   rate-limit budget (`MAX_RATE_LIMIT_ATTEMPTS`), so a limited route reaches
  *   credential rotation and model fallback instead of being replayed.
- * - SSE decode: `readSseJson` (spec-compliant framing, `[DONE]`-aware).
+ * - SSE decode: `readSseJsonOrText` (spec-compliant framing, `[DONE]`-aware).
  *   `onSseEvent` observers now receive real wire frames instead of events
  *   re-synthesized from decoded SDK objects.
  * - Errors: {@link OpenAIHttpError} exposes `status`/`headers`/`code`
@@ -49,7 +49,8 @@ const MAX_DETAIL_CHARS = 4096;
  * that `TurnRecovery` already owns, stalling one turn for up to ~300s
  * (issue #8854). {@link isConcurrencyAdmissionRejection} lets the transport
  * surface it on the first attempt so session recovery runs promptly. Genuine
- * RPM/quota 429s carry no such marker and keep honoring `Retry-After`.
+ * RPM 429s keep their bounded `Retry-After` path; quota failures surface
+ * immediately.
  */
 const CONCURRENCY_ADMISSION_LIMITER = "max_parallel_requests";
 
