@@ -68,6 +68,21 @@ describe("isInsideTerminalMultiplexer", () => {
 });
 
 describe("detectTerminalId", () => {
+	it("recognizes rio via TERM_PROGRAM", () => {
+		expect(detectTerminalId({ TERM_PROGRAM: "rio", COLORTERM: "truecolor" })).toBe("rio");
+	});
+
+	it("maps rio to kitty graphics with conservative unverified capabilities", () => {
+		// Reporter-verified (#12205): kitty graphics + true color. Everything
+		// else stays on the base defaults until proven inside rio itself.
+		const info = getTerminalInfo("rio");
+		expect(info.id).toBe("rio");
+		expect(info.imageProtocol).toBe(ImageProtocol.Kitty);
+		expect(info.trueColor).toBe(true);
+		expect(info.hyperlinks).toBe(false);
+		expect(info.notifyProtocol).toBe(NotifyProtocol.Bell);
+	});
+
 	it("recognizes Warp before the true-color fallback", () => {
 		expect(detectTerminalId({ TERM_PROGRAM: "WarpTerminal", COLORTERM: "truecolor" })).toBe("warp");
 	});

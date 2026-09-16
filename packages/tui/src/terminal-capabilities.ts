@@ -37,6 +37,7 @@ export type TerminalId =
 	| "alacritty"
 	| "warp"
 	| "orca"
+	| "rio"
 	| "base"
 	| "trueColor";
 
@@ -669,6 +670,11 @@ const KNOWN_TERMINALS = Object.freeze({
 	// honor OSC 8 yet (the escape renders as visible text), so hyperlinks stay off,
 	// but it does support OSC 9 notifications.
 	warp: new TerminalInfo("warp", ImageProtocol.Kitty, true, false, NotifyProtocol.Osc9, false, false, false, 1),
+	// rio ships the Kitty graphics protocol — direct placement plus U=1 Unicode
+	// placeholders verified by the reporter (#12205). Everything unproven stays
+	// conservative: hyperlinks, DECCARA, screen-to-scrollback, and notifications
+	// keep the base defaults until verified in that terminal.
+	rio: new TerminalInfo("rio", ImageProtocol.Kitty, true, false),
 });
 
 /** Resolve terminal identity from environment markers used by common emulators. */
@@ -705,6 +711,7 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		if (caseEq(TERM_PROGRAM, "alacritty")) return "alacritty";
 		if (caseEq(TERM_PROGRAM, "warpterminal")) return "warp";
 		if (caseEq(TERM_PROGRAM, "orca")) return "orca";
+		if (caseEq(TERM_PROGRAM, "rio")) return "rio";
 	}
 
 	if (TERM?.toLowerCase().includes("ghostty")) return "ghostty";

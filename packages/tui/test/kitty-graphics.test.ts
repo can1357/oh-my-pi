@@ -98,6 +98,13 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", env())).toBe(true);
 	});
 
+	it("enables the scroll-aware placeholder path for rio (#12205 reporter-verified U=1 rendering)", () => {
+		expect(detectKittyUnicodePlaceholdersSupport("rio", env())).toBe(true);
+		// The opt-out and Herdr guards must still apply to rio like any other id.
+		expect(detectKittyUnicodePlaceholdersSupport("rio", env({ PI_NO_KITTY_PLACEHOLDERS: "1" }))).toBe(false);
+		expect(detectKittyUnicodePlaceholdersSupport("rio", env({ HERDR_ENV: "1" }))).toBe(false);
+	});
+
 	it("disables for wezterm and other Kitty-protocol paths that treat placeholders as literal PUA glyphs (#1877)", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("wezterm", env())).toBe(false);
 		expect(detectKittyUnicodePlaceholdersSupport("warp", env())).toBe(false);
