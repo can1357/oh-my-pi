@@ -21,7 +21,7 @@ interface Harness {
 	configChanges: () => number;
 }
 
-function harness(options: { reasoning?: boolean; efforts?: readonly Effort[] } = {}): Harness {
+function harness(options: { reasoning?: boolean; efforts?: readonly Effort[]; selectorEfforts?: readonly Effort[] } = {}): Harness {
 	const outputs: string[] = [];
 	let configured: ConfiguredThinkingLevel | undefined;
 	let configChanges = 0;
@@ -33,7 +33,7 @@ function harness(options: { reasoning?: boolean; efforts?: readonly Effort[] } =
 			configured = level;
 		},
 		getAvailableThinkingLevels: () => options.efforts ?? [Effort.Low, Effort.Medium, Effort.High],
-		getAvailableEffortSelectors: () => [ThinkingLevel.Off, AUTO_THINKING, ...(options.efforts ?? [Effort.Low, Effort.Medium, Effort.High])],
+		getAvailableEffortSelectors: () => [ThinkingLevel.Off, AUTO_THINKING, ...(options.selectorEfforts ?? options.efforts ?? [Effort.Low, Effort.Medium, Effort.High])],
 	} as unknown as AgentSession;
 	const tuiRuntime = { ctx: { session } } as unknown as TuiSlashCommandRuntime;
 	return {
