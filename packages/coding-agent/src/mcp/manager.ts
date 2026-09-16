@@ -221,6 +221,16 @@ export interface MCPDiscoverOptions {
 	extensionRoots?: EffectiveExtensionRoots;
 	/** Called when MCP server connection state changes. */
 	onStatus?: (event: McpConnectionStatusEvent) => void;
+	/**
+	 * Late abort check, consulted AFTER config load resolves and BEFORE any
+	 * connection is created. Returning `true` abandons discovery without
+	 * starting a subprocess. The reconnect path passes the owning session's
+	 * disposal state: `discoverAndConnect` opens an async gap at `loadConfigs`
+	 * during which the session can be disposed and its single `disconnectAll()`
+	 * can complete, and connecting past that point would spawn MCP subprocesses
+	 * onto a torn-down session that will never disconnect them again.
+	 */
+	shouldAbort?: () => boolean;
 }
 
 /** Handles an MCP `WWW-Authenticate` challenge and returns refreshed config. */
@@ -231,6 +241,19 @@ export type MCPAuthHandler = (serverName: string, challenge: MCPAuthChallenge) =
  *
  * Manages connections to MCP servers and provides tools to the agent.
  */
+/** What a project-config reconcile discovered, for the caller to apply. */
+export interface MCPReconcileResult {
+	/**
+	 * Exa keys discovery extracted, applied by the caller via
+	 * `applyMCPEnvironment`.
+	 *
+	 * Absent when discovery did not run (an unchanged setting). That is distinct
+	 * from an empty array, which `applyMCPEnvironment` reads as "the configured
+	 * key was removed" and acts on.
+	 */
+	exaApiKeys?: string[];
+}
+
 export class MCPManager {
 	static #instance: MCPManager | undefined;
 
@@ -266,6 +289,7 @@ export class MCPManager {
 	 */
 	#pendingNotifications: Array<{ server: string; method: string; params: unknown }> = [];
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>;
+	readonly #toolsChangedListeners = new Set<(tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>>();
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
 	#notificationsEnabled = false;
@@ -300,6 +324,21 @@ export class MCPManager {
 		private loadConfigs: MCPConfigLoader = loadAllMCPConfigs,
 		private reconnectPolicy: MCPReconnectPolicy = DEFAULT_RECONNECT_POLICY,
 	) {}
+
+	/**
+	 * Re-point config discovery at `cwd`.
+	 *
+	 * The constructor value is a session-START snapshot, but a live session can
+	 * MOVE project (`/move`, a cross-project resume): `SessionManager` and
+	 * `Settings` are both repointed, while this manager kept loading
+	 * `.mcp.json` from the ORIGINAL directory — so a reconnect disconnected the
+	 * current project's servers and respawned the old project's stdio commands.
+	 * Also feeds the `roots` capability, which advertises this directory to
+	 * connected servers.
+	 */
+	setCwd(cwd: string): void {
+		this.cwd = cwd;
+	}
 
 	/**
 	 * Register a listener for MCP connection lifecycle events
@@ -416,6 +455,51 @@ export class MCPManager {
 	}
 
 	/**
+	 * Observe tool-set changes WITHOUT taking the single owner slot.
+	 *
+	 * {@link setOnToolsChanged} has exactly one owner, so a session handed a
+	 * manager it does not own — a top-level embedder supplying `mcpManager`, or a
+	 * subagent sharing its parent's — cannot use it. Those sessions had no way to
+	 * receive a tool set published after their own snapshot, so a server slower
+	 * than the startup timeout (whose load `connectServers` deliberately leaves
+	 * in the background) never reached their registry.
+	 *
+	 * Returns an unsubscribe function. Listeners are invoked with independent
+	 * error isolation, like {@link addNotificationListener}.
+	 */
+	addToolsChangedListener(
+		listener: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void | Promise<void>,
+	): () => void {
+		this.#toolsChangedListeners.add(listener);
+		return () => {
+			this.#toolsChangedListeners.delete(listener);
+		};
+	}
+
+	/** Fires the owner handler and every observer, isolating their failures. */
+	async #emitToolsChanged(): Promise<void> {
+		// Isolate the owner handler exactly as each observer below is isolated: a
+		// caller-supplied owner (`setOnToolsChanged`) that throws or rejects must
+		// not stop the `addToolsChangedListener` observers from running. Without
+		// this catch the await rejected before any observer ran, so the session
+		// observer `sdk.ts` installs for caller-supplied managers never received
+		// late server tools — and most callers discard this promise, so the
+		// rejection surfaced as an unhandled rejection.
+		try {
+			await this.#onToolsChanged?.(this.#tools);
+		} catch (error) {
+			logger.debug("MCP tools-changed owner handler threw", { error });
+		}
+		for (const listener of this.#toolsChangedListeners) {
+			try {
+				await listener(this.#tools);
+			} catch (error) {
+				logger.debug("MCP tools-changed listener threw", { error });
+			}
+		}
+	}
+
+	/**
 	 * Set a callback to fire when any server's resources change.
 	 */
 	setOnResourcesChanged(handler: (serverName: string, uri: string) => void): void {
@@ -526,6 +610,15 @@ export class MCPManager {
 			throw error;
 		}
 		const { configs, exaApiKeys, sources } = loadedConfigs;
+		// Late disposal gate. `loadConfigs` above is asynchronous, so a caller
+		// (session teardown) can dispose and run its single `disconnectAll()`
+		// while it is in flight. Connecting now would start MCP subprocesses that
+		// the completed teardown will never disconnect. Checked here, after the
+		// only async gap and before the first connection is created, so no
+		// subprocess is ever spawned after `disconnectAll()`.
+		if (options?.shouldAbort?.()) {
+			return { tools: this.#tools, errors: new Map<string, string>(), connectedServers: [], exaApiKeys };
+		}
 		const result = await this.connectServers(configs, sources, options?.onStatus);
 		result.exaApiKeys = exaApiKeys;
 		return result;
@@ -573,6 +666,132 @@ export class MCPManager {
 		}
 		await Promise.all([...names].map(name => this.disconnectServer(name)));
 		this.#discoverOptions = { ...options, filterBrowser: true };
+	}
+
+	/**
+	 * Reconcile project-level MCP servers with `mcp.enableProjectConfig`.
+	 *
+	 * The setting is consumed only during discovery, so flipping it off left the
+	 * project servers this session had already started connected and callable
+	 * until an MCP-scoped refresh or a restart. Serialized on the same tail as
+	 * the browser filter: both mutate the connection set and rewrite
+	 * `#discoverOptions`, so interleaving them would let the loser's cached
+	 * options overwrite the winner's.
+	 */
+	reconcileProjectConfigFilter(enableProjectConfig: boolean): Promise<MCPReconcileResult> {
+		const reconcile = this.#browserFilterMutationTail.then(() => this.#applyProjectConfigFilter(enableProjectConfig));
+		this.#browserFilterMutationTail = reconcile.then(
+			() => undefined,
+			() => undefined,
+		);
+		return reconcile;
+	}
+
+	async #applyProjectConfigFilter(enableProjectConfig: boolean): Promise<MCPReconcileResult> {
+		const options = this.#discoverOptions;
+		// Discovery did NOT run, which is not the same as discovering no keys: an
+		// empty list tells `applyMCPEnvironment` the configured Exa key was
+		// removed, so returning one here would delete the session's key on any
+		// unrelated settings edit. `undefined` means "nothing was discovered, do
+		// not touch credentials".
+		if ((options?.enableProjectConfig ?? true) === enableProjectConfig) return {};
+		// Record the new value first: a later browser reconcile reads these
+		// options, and `loadConfigs` must not be asked to honor the stale one.
+		this.#discoverOptions = { ...options, enableProjectConfig };
+		if (!enableProjectConfig) {
+			// Drop what is already running. `#sources` carries each connected
+			// server's level, which is the same discriminator `loadConfigs` uses.
+			const names = [...this.#serverConfigs.keys()].filter(name => this.#sources.get(name)?.level === "project");
+			await Promise.all(names.map(name => this.disconnectServer(name)));
+		}
+		// Then converge on what discovery admits under the NEW value, in both
+		// directions. Disabling is not disconnect-only: `loadConfigs` drops
+		// project entries BEFORE deduplication, so a project `foo` that shadowed a
+		// user-level `foo` was keeping that user server from ever connecting —
+		// disconnecting the project one alone left no `foo` at all, where a fresh
+		// session with the setting off would have run the user's.
+		//
+		// The extracted Exa credentials come back to the caller: an Exa MCP entry
+		// is filtered out in favour of the native integration, so revealing one
+		// must still authenticate that integration, and hiding one must let the
+		// caller drop the key it recorded.
+		return { exaApiKeys: await this.#connectNewlyDiscovered(enableProjectConfig, options) };
+	}
+
+	/**
+	 * Converge the running set on what discovery admits under the new value.
+	 *
+	 * An already-connected name is not evidence of convergence: the flip changes
+	 * which SOURCE wins a contested name, so a user-level `foo` that owned the
+	 * name while project config was off must be REPLACED by the project `foo`
+	 * that now outranks it — otherwise the live session keeps running a command
+	 * a freshly started session would not. Names whose selection did not move
+	 * are left strictly alone, so nothing healthy restarts.
+	 */
+	async #connectNewlyDiscovered(
+		enableProjectConfig: boolean,
+		options: MCPDiscoverOptions | undefined,
+	): Promise<string[]> {
+		const loaded = await this.loadConfigs(this.cwd, {
+			enableProjectConfig,
+			filterExa: options?.filterExa,
+			filterBrowser: options?.filterBrowser,
+			extensionRoots: options?.extensionRoots,
+		});
+		const configs: Record<string, MCPServerConfig> = {};
+		const sources: Record<string, SourceMeta> = {};
+		const superseded: string[] = [];
+		for (const name in loaded.configs) {
+			const config = loaded.configs[name];
+			if (!config) continue;
+			const running = this.#serverConfigs.get(name);
+			if (running !== undefined) {
+				// Compare the SELECTION, not the name. The source's level and path say
+				// which file won the name; the config catches an edit inside the
+				// winning file that the level alone would hide. `Bun.deepEquals` is
+				// what the settings and capability layers already use for this shape.
+				const current = this.#sources.get(name);
+				const next = loaded.sources[name];
+				if (current?.level === next?.level && current?.path === next?.path && Bun.deepEquals(running, config)) {
+					continue;
+				}
+				superseded.push(name);
+			}
+			configs[name] = config;
+			const source = loaded.sources[name];
+			if (source) sources[name] = source;
+		}
+		// Running servers the NEW selection does not contain at all. Iterating
+		// `loaded.configs` alone misses them, and they are not hypothetical: a
+		// project entry carrying `enabled: false` can claim a name during
+		// capability dedup and then be suppressed, so the name is absent from
+		// `loaded.configs` while the user-level server it outranked is still
+		// connected — where a fresh session would expose no such server. Only
+		// servers this reconcile's own discovery governs are considered, so an
+		// Exa/browser entry filtered out by policy is never mistaken for a
+		// removal.
+		for (const name of this.#serverConfigs.keys()) {
+			if (loaded.configs[name] !== undefined) continue;
+			// Only names DISCOVERY governs: `#sources` records `user`/`project` for
+			// a config-file server, and anything else (a `native` entry, or a
+			// server registered outside this path) is not this reconcile's to drop.
+			const level = this.#sources.get(name)?.level;
+			if (level !== "user" && level !== "project") continue;
+			superseded.push(name);
+		}
+		// Drop superseded connections FIRST, and before the early return below:
+		// `connectServers` is incremental and would otherwise see a name as already
+		// live and leave the loser running — and the suppressed-winner case has a
+		// server to drop with nothing to connect, so returning early would skip
+		// the disconnect entirely.
+		await Promise.all(superseded.map(name => this.disconnectServer(name)));
+		// Returned even when no connection moved: an Exa entry is FILTERED out of
+		// `configs` in favour of the native integration, so "nothing to connect"
+		// is exactly the case where the extracted credential still has to reach
+		// the caller.
+		if (Object.keys(configs).length === 0) return loaded.exaApiKeys;
+		await this.connectServers(configs, sources, options?.onStatus);
+		return loaded.exaApiKeys;
 	}
 
 	/**
@@ -746,7 +965,7 @@ export class MCPManager {
 						this.reconnectServer(name, options);
 					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 					this.#replaceServerTools(name, customTools);
-					void this.#onToolsChanged?.(this.#tools);
+					void this.#emitToolsChanged();
 					void this.toolCache?.set(name, config, serverTools);
 
 					notify({ type: "connected", serverName: name });
@@ -1138,7 +1357,7 @@ export class MCPManager {
 		// Remove tools from this server and notify consumers
 		const hadTools = this.#tools.some(t => t.mcpServerName === name);
 		this.#tools = this.#tools.filter(t => t.mcpServerName !== name);
-		if (hadTools) void this.#onToolsChanged?.(this.#tools);
+		if (hadTools) void this.#emitToolsChanged();
 
 		// Notify prompt consumers so stale commands are cleared
 		if (connection?.prompts?.length) this.#onPromptsChanged?.(name);
@@ -1453,7 +1672,7 @@ export class MCPManager {
 			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
 			void this.toolCache?.set(name, config, serverTools);
 			this.#replaceServerTools(name, customTools);
-			void this.#onToolsChanged?.(this.#tools);
+			void this.#emitToolsChanged();
 			void this.#loadServerResourcesAndPrompts(name, connection);
 			return connection;
 		} catch (error) {
@@ -1505,7 +1724,7 @@ export class MCPManager {
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
-		await this.#onToolsChanged?.(this.#tools);
+		await this.#emitToolsChanged();
 	}
 
 	/**

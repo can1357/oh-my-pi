@@ -864,7 +864,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	};
 	readonly label = "Read";
 	readonly loadMode = "essential";
-	description: string;
+	// A getter, like `parameters` below: it quotes the live default limit, and a
+	// field assigned once in the constructor kept advertising the startup value
+	// after a settings refresh moved it. No subscription, so nothing to dispose —
+	// the tool has no dispose lifecycle.
+	get description(): string {
+		return this.#renderDescription();
+	}
 	get parameters(): typeof readSchema {
 		// `skillful: false` removes the system-prompt catalog and must also
 		// strip the provider-side `skill://` hint, matching sdk.ts:3186.
@@ -898,20 +904,26 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	>();
 
 	#speculativeReadExecutions = new Map<string, { discarded: boolean }>();
-	readonly #autoResizeImages: boolean;
-	readonly #defaultLimit: number;
+	// Read LIVE, not snapshotted in the constructor: a settings refresh can move
+	// either value on disk, and a captured copy kept the startup behaviour for
+	// read ranges, image processing, and the advertised default limit until the
+	// process restarted. The description is re-rendered on change for the same
+	// reason — it quotes the limit.
+	get #autoResizeImages(): boolean {
+		return this.session.settings.get("images.autoResize");
+	}
+
+	get #defaultLimit(): number {
+		return Math.max(
+			1,
+			Math.min(this.session.settings.get("read.defaultLimit") ?? DEFAULT_MAX_LINES, DEFAULT_MAX_LINES),
+		);
+	}
 
 	constructor(
 		private readonly session: ToolSession,
 		private readonly completeImageRequest: typeof completeSimple = completeSimple,
-	) {
-		this.#autoResizeImages = session.settings.get("images.autoResize");
-		this.#defaultLimit = Math.max(
-			1,
-			Math.min(session.settings.get("read.defaultLimit") ?? DEFAULT_MAX_LINES, DEFAULT_MAX_LINES),
-		);
-		this.description = this.#renderDescription();
-	}
+	) {}
 
 	async #executeSpeculativeRead(
 		context: ToolSpeculationExecutionContext,

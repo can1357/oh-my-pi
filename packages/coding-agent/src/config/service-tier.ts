@@ -131,6 +131,13 @@ export const SERVICE_TIER_INHERIT_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTi
 	{ value: "priority", label: "Priority", description: "Priority on every supported family of the spawned model" },
 ];
 
+/**
+ * The provider families that carry an independent `tier.*` setting, so a
+ * caller reconciling the live per-family map against a reloaded config can
+ * iterate them without re-listing the keys at each site.
+ */
+export const SERVICE_TIER_FAMILIES: readonly ServiceTierFamily[] = ["openai", "anthropic", "google"];
+
 /** Map a per-family setting value to a wire {@link ServiceTier}, or `undefined` to omit. */
 export function serviceTierSettingToTier(value: string): ServiceTier | undefined {
 	if (value === "none" || value === "" || value === "inherit") return undefined;
@@ -146,6 +153,38 @@ export function buildServiceTierByFamily(openai: string, anthropic: string, goog
 	if (a) out.anthropic = a;
 	const g = serviceTierSettingToTier(google);
 	if (g) out.google = g;
+	return out;
+}
+
+/**
+ * Overlay the live `tier.*` config onto a persisted tier map, for the families
+ * the receipt recorded as still FOLLOWING that config.
+ *
+ * A `service_tier_change` is a whole-map snapshot, so a session-local pin for
+ * one family (`/fast`, the settings selector, an RPC/ACP write) used to freeze
+ * every other family at the value it held when the receipt was written. A
+ * config edit made while the session was stopped was then silently overridden
+ * on resume, and no later refresh could notice: `Settings` has already loaded
+ * the new value, so the reconcile sees no movement to act on.
+ *
+ * Families absent from `trackingFamilies` keep their persisted value — they are
+ * real pins. An undefined list means a pre-provenance receipt, which restores
+ * wholesale exactly as before.
+ */
+export function applySettingsTrackedServiceTiers(
+	persisted: ServiceTierByFamily,
+	trackingFamilies: ReadonlyArray<keyof ServiceTierByFamily> | undefined,
+	configured: ServiceTierByFamily,
+): ServiceTierByFamily {
+	if (!trackingFamilies?.length) return persisted;
+	const out: ServiceTierByFamily = { ...persisted };
+	for (const family of trackingFamilies) {
+		const tier = configured[family];
+		// An unset config value means the family has no tier now, so the stale
+		// persisted one has to go rather than survive as an implicit pin.
+		if (tier) out[family] = tier;
+		else delete out[family];
+	}
 	return out;
 }
 

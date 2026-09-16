@@ -9,6 +9,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as secrets from "@oh-my-pi/pi-coding-agent/secrets";
@@ -232,6 +233,72 @@ describe("createAgentSession session storage isolation", () => {
 		).rejects.toThrow("already owned by another session generation");
 		expect(registry.get("shared-worker")).toBe(replacement);
 		expect(replacement).toMatchObject({ status: "idle", session: null });
+	});
+
+	// `async.maxJobs` is pushed into the job manager by a settings listener, but a
+	// structured subagent's `scopedAsyncJobManager` IS the process-wide singleton
+	// it inherited. A child reloading its own project-scoped value therefore
+	// rewrote the PARENT's admission limit, and would start rejecting or admitting
+	// the parent's background jobs.
+	it("does not let a subagent's async.maxJobs reload move the shared job cap", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-asynccap-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const cwd = path.join(tempDir, "project");
+		fs.mkdirSync(cwd, { recursive: true });
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+		const lifecycle = AgentLifecycleManager.global();
+
+		// The parent's manager, which the child will inherit as the singleton.
+		AsyncJobManager.resetForTests();
+		const parentManager = new AsyncJobManager({ maxRunningJobs: 1, onJobComplete: async () => {} });
+		AsyncJobManager.setInstance(parentManager);
+
+		const childSettings = Settings.isolated();
+		let session: AgentSession | undefined;
+		try {
+			({ session } = await createAgentSession({
+				cwd,
+				agentDir: path.join(tempDir, "agent"),
+				modelRegistry: sharedModelRegistry,
+				settings: childSettings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				// A structured subagent: it adopts the singleton rather than building
+				// its own manager.
+				agentId: "async-cap-child",
+				agentDisplayName: "child",
+				parentTaskPrefix: "async-cap-child",
+				parentAgentId: "Main",
+				taskDepth: 1,
+				expectedAgentRef: null,
+			}));
+
+			// The child's own settings scope moves the cap.
+			childSettings.set("async.maxJobs", 25);
+
+			// Observable through admission, which is what the cap actually governs:
+			// the parent's limit of 1 must still refuse a second job. Pre-fix the
+			// listener raised the inherited singleton to 25 and this was admitted.
+			const hold = async ({ signal }: { signal: AbortSignal }) => {
+				const aborted = Promise.withResolvers<void>();
+				signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+				await aborted.promise;
+				return "done";
+			};
+			const firstJobId = parentManager.register("bash", "first", hold);
+			expect(() => parentManager.register("bash", "second", hold)).toThrow(/Background job limit reached/);
+			parentManager.cancel(firstJobId);
+		} finally {
+			await session?.dispose();
+			await lifecycle.dispose();
+			AsyncJobManager.resetForTests();
+		}
 	});
 
 	it("reclaims an unrevivable parked generation before a fresh same-id spawn", async () => {

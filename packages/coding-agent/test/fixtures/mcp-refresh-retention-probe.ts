@@ -48,6 +48,7 @@ const host: SessionToolsHost = {
 	extensionRunner: () => undefined,
 	clientBridge: () => undefined,
 	agentKind: () => "main",
+	taskDepth: () => 0,
 	isDisposed: () => false,
 	isStreaming: () => false,
 	queuedMessageCount: () => 0,

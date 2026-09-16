@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAutoLearnCaptureRunner } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 class FakeSession {
 	readonly listeners: Array<(event: AgentSessionEvent) => void> = [];
@@ -133,6 +134,19 @@ function interactionsResponse(): Response {
 		status: 200,
 		headers: { "content-type": "text/event-stream" },
 	});
+}
+
+/**
+ * The `properties` map of a normalized tool schema.
+ *
+ * `normalizeTools` emits plain JSON schema, but the declared `TSchema` is
+ * opaque, so the map is read through a narrow local shape rather than an inline
+ * cast at the assertion.
+ */
+function jsonSchemaProperties(schema: unknown): Record<string, unknown> | undefined {
+	if (typeof schema !== "object" || schema === null) return undefined;
+	const properties = (schema as { properties?: unknown }).properties;
+	return typeof properties === "object" && properties !== null ? (properties as Record<string, unknown>) : undefined;
 }
 
 describe("AutoLearnController", () => {
@@ -378,7 +392,7 @@ describe("isolated auto-learn capture", () => {
 		let captureSessionId: string | undefined;
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createSessionId: () => "0193c8f2-7b1a-7c4d-9e2f-123456789abc",
 			createAgent: options => {
 				captureMessages = options.initialState?.messages ?? [];
@@ -434,7 +448,7 @@ describe("isolated auto-learn capture", () => {
 		let captureOnResponse: AgentOptions["onResponse"];
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			onPayload,
 			onResponse,
 			createAgent: options => {
@@ -455,6 +469,116 @@ describe("isolated auto-learn capture", () => {
 		expect(captureOnResponse).toBe(onResponse);
 	});
 
+	// `tools.intentTracing` reconciles onto `agent.intentTracing` on a settings
+	// refresh, and the capture agent must be built from that LIVE value. Asserted
+	// on the wire schema the capture actually sends, not on the option: the field
+	// is what the provider sees, and a copied option proves nothing about it.
+	it("builds the capture from the source agent's live intent-tracing policy", async () => {
+		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const sourceAgent = new Agent({
+			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [manageSkillTool] },
+			// Launch-time policy: OFF, as a session started before the edit.
+			intentTracing: false,
+		});
+		// The mid-session flip `/refresh settings` performs.
+		sourceAgent.intentTracing = true;
+
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => [manageSkillTool],
+			createAgent: options =>
+				new Agent({
+					...options,
+					convertToLlm,
+					streamFn: captureMock.stream,
+					// What sdk.ts passes: the live agent value, not the constant.
+					intentTracing: sourceAgent.intentTracing,
+				}),
+		});
+
+		await runCapture("Capture after an intent-tracing flip");
+
+		expect(captureMock.calls).toHaveLength(1);
+		const sentTools = captureMock.calls[0]?.context.tools ?? [];
+		const sent = sentTools.find(tool => tool.name === "manage_skill");
+		// Pre-fix the capture was pinned to the construction-time `!!intentField`
+		// (false here), so the required intent field never reached the schema.
+		// Read through the wire JSON shape: the injected schema is a plain
+		// JSON-schema record at runtime, which `TSchema` deliberately hides.
+		expect(jsonSchemaProperties(sent?.parameters)).toHaveProperty(INTENT_FIELD);
+	});
+
+	it("captures with tools that only became available after construction", async () => {
+		// `autolearn.enabled` is reloadable, so a session can start with no capture
+		// tools at all and gain them from a refresh. Held as a snapshot the list
+		// stays empty and every later capture returns at the empty-list guard —
+		// the controller runs and silently captures nothing.
+		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const sourceAgent = new Agent({
+			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [] },
+		});
+
+		// Empty at construction, exactly as a session started with auto-learn off.
+		let available: AgentTool[] = [];
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => available,
+			createAgent: options => new Agent({ ...options, convertToLlm, streamFn: captureMock.stream }),
+		});
+
+		await runCapture("Capture before the refresh");
+		expect(captureMock.calls).toHaveLength(0);
+
+		// What the settings reconcile does: builds and activates the tool.
+		available = [manageSkillTool];
+
+		await runCapture("Capture after the refresh");
+
+		expect(captureMock.calls).toHaveLength(1);
+		const names = (captureMock.calls[0]?.context.tools ?? []).map(tool => tool.name);
+		expect(names).toEqual(["manage_skill"]);
+	});
+
+	// Same shape one setting over: `inlineToolDescriptors` is reloadable too, so
+	// a capture built from the construction-time constant pruned descriptions the
+	// source prompt had just been rebuilt to include — leaving the capture model
+	// without them in either place. Asserted on the wire schema, not the option.
+	it("builds the capture from the source agent's live descriptor policy", async () => {
+		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const sourceAgent = new Agent({
+			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [manageSkillTool] },
+			// Launch-time policy: pruning ON, as a session started before the edit.
+			pruneToolDescriptions: true,
+		});
+		// The mid-session flip `/refresh settings` performs.
+		sourceAgent.pruneToolDescriptions = false;
+
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: () => [manageSkillTool],
+			createAgent: options =>
+				new Agent({
+					...options,
+					convertToLlm,
+					streamFn: captureMock.stream,
+					// What sdk.ts passes: the live agent value, not the constant.
+					pruneToolDescriptions: sourceAgent.pruneToolDescriptions,
+				}),
+		});
+
+		await runCapture("Capture after a descriptor-policy flip");
+
+		expect(captureMock.calls).toHaveLength(1);
+		const sentTools = captureMock.calls[0]?.context.tools ?? [];
+		const sent = sentTools.find(tool => tool.name === "manage_skill");
+		// Pre-fix the capture stayed pinned to the launch-time constant and sent a
+		// pruned description.
+		expect(sent?.description).toBe("Manage reusable skills");
+	});
+
 	it("adds learn alongside manage_skill when a memory backend provides it", async () => {
 		const model = googleInteractionsModel();
 		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
@@ -466,7 +590,7 @@ describe("isolated auto-learn capture", () => {
 		let captureToolNames: string[] = [];
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool, learnTool],
+			captureTools: () => [manageSkillTool, learnTool],
 			createAgent: options => {
 				captureToolNames = options.initialState?.tools?.map(tool => tool.name) ?? [];
 				return new Agent({
@@ -513,7 +637,7 @@ describe("isolated auto-learn capture", () => {
 		});
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createSessionId: () => "capture-transport",
 			createAgent: options =>
 				new Agent({
@@ -549,7 +673,7 @@ describe("isolated auto-learn capture", () => {
 		let closeCalls = 0;
 		const runCapture = createAutoLearnCaptureRunner({
 			sourceAgent,
-			captureTools: [manageSkillTool],
+			captureTools: () => [manageSkillTool],
 			createAgent: options => {
 				providerState = options.providerSessionState;
 				providerState?.set("blocked", { close: () => closeCalls++ });
