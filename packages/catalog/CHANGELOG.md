@@ -6,6 +6,7 @@
 
 ### Added
 
+- Muse Spark 1.3 Contributor now supports `max` on the Meta Model API and Muse Code providers ([#11788](https://github.com/can1357/oh-my-pi/issues/11788), [#12199](https://github.com/can1357/oh-my-pi/pull/12199) by [@mgpai22](https://github.com/mgpai22)).
 - OpenAI-compatible model discovery now fills in reasoning-effort tiers for unrecognized models using the shared catalog’s published reasoning options, while preserving explicit discovery metadata and reviewed model rules.
 
 ### Fixed

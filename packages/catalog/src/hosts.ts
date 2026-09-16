@@ -176,3 +176,28 @@ export function isDashscopeCompatibleModeUrl(baseUrl: string): boolean {
 		normalized.includes("dashscope") && normalized.includes("aliyuncs.com") && normalized.includes("/compatible-mode")
 	);
 }
+
+/**
+ * First-party Meta Model API base URL. Strict identity: https scheme,
+ * api.meta.ai hostname (case-insensitive), default port, and a bare `/v1`
+ * path. Parsed with URL so equivalent forms (uppercase host, explicit
+ * default `:443` port, which WHATWG normalizes away) match; lookalikes
+ * (`api.meta.ai.evil.com`, proxies embedding the host in a path), subpaths,
+ * and non-default ports never match, so proxies and neighboring services
+ * never receive the Muse fingerprint gated on this.
+ */
+export function isDirectMetaModelApiUrl(baseUrl: string | undefined): boolean {
+	if (!baseUrl) return false;
+	let parsed: URL;
+	try {
+		parsed = new URL(baseUrl.trim());
+	} catch {
+		return false;
+	}
+	return (
+		parsed.protocol === "https:" &&
+		parsed.hostname === "api.meta.ai" &&
+		parsed.port === "" &&
+		parsed.pathname.replace(/\/+$/, "") === "/v1"
+	);
+}

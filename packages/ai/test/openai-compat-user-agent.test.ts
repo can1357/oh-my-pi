@@ -5,6 +5,7 @@ import type { Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { resolveOpenAIRequestSetup } from "../src/providers/openai-shared";
+import { MUSE_USER_AGENT } from "../src/providers/muse-fingerprint";
 
 const context: Context = {
 	messages: [{ role: "user", content: "ping", timestamp: 0 }],
@@ -140,6 +141,43 @@ describe("resolveOpenAIRequestSetup User-Agent", () => {
 		expect(setup.headers["user-agent"]).toBe("custom-xai-client/1.0");
 		expect(setup.headers["User-Agent"]).toBeUndefined();
 	});
+
+	test("sends the Muse fingerprint only when compat flags it, even on uppercase hosts", () => {
+		const flagged = resolveOpenAIRequestSetup(
+			{
+				provider: "meta",
+				id: "muse-spark-1.3-contributor",
+				baseUrl: "https://API.META.AI/v1",
+				compat: { museFingerprint: true },
+			},
+			{ apiKey: "sk-test", messages: [] },
+		);
+		expect(flagged.headers["User-Agent"]).toBe(MUSE_USER_AGENT);
+		expect(flagged.requestHeaders["User-Agent"]).toBe(MUSE_USER_AGENT);
+	});
+
+	test("does not fingerprint direct Meta URLs without the compat flag", () => {
+		const setup = resolveOpenAIRequestSetup(
+			{ provider: "meta", id: "muse-spark-1.3-contributor", baseUrl: "https://api.meta.ai/v1" },
+			{ apiKey: "sk-test", messages: [] },
+		);
+		expect(setup.headers["User-Agent"]).toBeUndefined();
+		expect(setup.requestHeaders["User-Agent"]).toBeUndefined();
+	});
+
+	test("does not fingerprint proxies even when compat flags the provider", () => {
+		const setup = resolveOpenAIRequestSetup(
+			{
+				provider: "muse-code",
+				id: "muse-spark-1.3-contributor",
+				baseUrl: "https://proxy.example/v1",
+				compat: { museFingerprint: true },
+			},
+			{ apiKey: "sk-test", messages: [] },
+		);
+		expect(setup.headers["User-Agent"]).toBeUndefined();
+		expect(setup.requestHeaders["User-Agent"]).toBeUndefined();
+	});
 });
 
 describe("xAI stream User-Agent", () => {
@@ -169,5 +207,98 @@ describe("xAI stream User-Agent", () => {
 		);
 		expect(captured.url).toBe("https://api.openai.com/v1/chat/completions");
 		expect(captured.userAgent).toBeNull();
+	});
+});
+
+function museResponsesModel(
+	provider: "meta" | "muse-code",
+	baseUrl = "https://api.meta.ai/v1",
+): Model<"openai-responses"> {
+	return buildModel({
+		id: "muse-spark-1.3-contributor",
+		name: "Muse Spark 1.3 (C)",
+		api: "openai-responses",
+		provider,
+		baseUrl,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+	} as ModelSpec<"openai-responses">);
+}
+
+describe("Muse stream User-Agent", () => {
+	test("Muse Responses POST sends the Muse fingerprint with reasoning.effort:max", async () => {
+		const userAgents: Array<string | null> = [];
+		const efforts: Array<string | undefined> = [];
+		for (const provider of ["meta", "muse-code"] as const) {
+			const fetchMock: FetchImpl = async (_input, init) => {
+				userAgents.push(new Headers(init?.headers).get("user-agent"));
+				const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as Record<string, unknown>;
+				efforts.push((body.reasoning as { effort?: string } | undefined)?.effort);
+				return createResponsesSse();
+			};
+			for await (const event of streamOpenAIResponses(museResponsesModel(provider), context, {
+				apiKey: "sk-test",
+				fetch: fetchMock,
+				reasoning: "max",
+			})) {
+				if (event.type === "done" || event.type === "error") break;
+			}
+		}
+		expect(userAgents).toEqual([MUSE_USER_AGENT, MUSE_USER_AGENT]);
+		expect(efforts).toEqual(["max", "max"]);
+	});
+
+	test("proxy requests never carry the Muse fingerprint on the wire", async () => {
+		const userAgents: Array<string | null> = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			userAgents.push(new Headers(init?.headers).get("user-agent"));
+			return createResponsesSse();
+		};
+		for await (const event of streamOpenAIResponses(
+			museResponsesModel("muse-code", "https://proxy.example/v1"),
+			context,
+			{ apiKey: "sk-test", fetch: fetchMock, reasoning: "max" },
+		)) {
+			if (event.type === "done" || event.type === "error") break;
+		}
+		expect(userAgents.length).toBeGreaterThan(0);
+		for (const userAgent of userAgents) expect(userAgent).not.toBe(MUSE_USER_AGENT);
+	});
+
+	test("an explicit lowercase override survives to the wire", async () => {
+		const userAgents: Array<string | null> = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			userAgents.push(new Headers(init?.headers).get("user-agent"));
+			return createResponsesSse();
+		};
+		for await (const event of streamOpenAIResponses(museResponsesModel("meta"), context, {
+			apiKey: "sk-test",
+			fetch: fetchMock,
+			headers: { "user-agent": "custom-muse-client/1.0" },
+		})) {
+			if (event.type === "done" || event.type === "error") break;
+		}
+		expect(userAgents.length).toBeGreaterThan(0);
+		for (const userAgent of userAgents) expect(userAgent).toBe("custom-muse-client/1.0");
+	});
+
+	test("a caller-supplied User-Agent survives to the wire", async () => {
+		const userAgents: Array<string | null> = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			userAgents.push(new Headers(init?.headers).get("user-agent"));
+			return createResponsesSse();
+		};
+		for await (const event of streamOpenAIResponses(museResponsesModel("muse-code"), context, {
+			apiKey: "sk-test",
+			fetch: fetchMock,
+			headers: { "User-Agent": "custom-muse-client/1.0" },
+		})) {
+			if (event.type === "done" || event.type === "error") break;
+		}
+		expect(userAgents.length).toBeGreaterThan(0);
+		for (const userAgent of userAgents) expect(userAgent).toBe("custom-muse-client/1.0");
 	});
 });

@@ -16,7 +16,7 @@
  * fallbacks cover unmatched targets.
  */
 import { Effort, THINKING_EFFORTS } from "../effort";
-import { hostMatchesUrl, modelMatchesHost } from "../hosts";
+import { hostMatchesUrl, isDirectMetaModelApiUrl, modelMatchesHost } from "../hosts";
 import type {
 	Api,
 	CompatOf,
@@ -36,7 +36,7 @@ import { applyCompatOverrides } from "./apply";
 import { API_COMPAT_RECORDS, AXES, type CompatRecordName } from "./axes";
 import { hasModelScopedEffortsRule, resolveCascade } from "./cascade";
 import { compareRevision, parseRevision, type Revision } from "./revision";
-import { classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
+import { billingVariantPlain, classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
 import type { ModelIdentity, ResolvedAxes, ResolveTarget } from "./types";
 
 /** Result of resolving one model spec through the compat engine. */
@@ -562,6 +562,7 @@ function detectOpenAICompat(
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
 		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		museFingerprint: isDirectMetaModelApiUrl(baseUrl),
 		dropThinkingWhenReasoningEffort: false,
 		nativeKimiK3Reasoning: false,
 		zaiReasoningEffortDialect: false,
@@ -779,6 +780,7 @@ function resolveOpenAIResponsesPolicy(
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
 		promptCacheSessionHeader: hostMatchesUrl(baseUrl, "xai") ? "x-grok-conv-id" : undefined,
+		museFingerprint: isDirectMetaModelApiUrl(baseUrl),
 		streamFirstEventTimeoutMs: isLocalServingBackend ? 0 : spec.compat?.streamFirstEventTimeoutMs,
 		streamIdleTimeoutMs: isLocalServingBackend
 			? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
@@ -1089,6 +1091,26 @@ function isQwenTemplateReasoningEffortCompat(compat: CompatOf<Api>): boolean {
 	);
 }
 
+/**
+ * Contributor `max` rides the Muse fingerprint, which the transport sends
+ * only on the direct first-party Meta endpoint. The cascade has no URL
+ * dimension, so KDL grants the tier by identity and the endpoint decides
+ * here: anywhere else the tier is stripped so callers cannot select an
+ * effort the wire would reject. Billing-variant membership comes from the
+ * taxonomy's declared suffixes, never an id match; standard SKUs keep
+ * their cascade ladder untouched.
+ */
+function stripFingerprintGatedMax<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	facts: IdentityFacts,
+	efforts: readonly Effort[],
+): readonly Effort[] {
+	if (!efforts.includes(Effort.Max)) return efforts;
+	if (!facts.is("meta") || billingVariantPlain(spec.id) === undefined) return efforts;
+	if (isDirectMetaModelApiUrl(spec.baseUrl)) return efforts;
+	return efforts.filter(effort => effort !== Effort.Max);
+}
+
 function resolveThinkingPolicy<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	facts: IdentityFacts,
@@ -1124,7 +1146,7 @@ function resolveThinkingPolicy<TApi extends Api>(
 	}
 	const config: ThinkingConfig = {
 		mode: rule.mode ?? defaultThinkingMode(spec, facts),
-		efforts: rule.efforts ?? fallbackEfforts(spec, compat),
+		efforts: stripFingerprintGatedMax(spec, facts, rule.efforts ?? fallbackEfforts(spec, compat)),
 	};
 	if (config.efforts.length === 0) {
 		throw new Error(`Model ${spec.provider}/${spec.id} resolved to an empty thinking range`);
@@ -1175,7 +1197,9 @@ function mergeEffortMap(
  * Backfill missing wire/default fields onto explicit thinking metadata.
  * Explicit spec thinking is layer 4 of the resolution order: its ladder and
  * every explicitly-set field always win; only absent fields are filled from
- * the rules and identity-derived defaults.
+ * the rules and identity-derived defaults. The one exception is a
+ * fingerprint-gated `max` on a non-direct endpoint, which the wire cannot
+ * honor: it is stripped before the merge so the effort map cannot keep it.
  */
 function fillExplicitThinking<TApi extends Api>(
 	spec: ModelSpec<TApi>,
@@ -1184,20 +1208,22 @@ function fillExplicitThinking<TApi extends Api>(
 	thinking: ThinkingConfig,
 	rule: RuleThinking,
 ): ThinkingConfig {
+	const gatedEfforts = stripFingerprintGatedMax(spec, facts, thinking.efforts);
+	const gated = gatedEfforts === thinking.efforts ? thinking : { ...thinking, efforts: gatedEfforts };
 	const effortMap =
-		thinking.effortMap === undefined ? mergeEffortMap(spec, rule.effortMap, compat, thinking.efforts) : undefined;
+		gated.effortMap === undefined ? mergeEffortMap(spec, rule.effortMap, compat, gated.efforts) : undefined;
 	const needsDisplay =
-		thinking.supportsDisplay === undefined && (rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts));
+		gated.supportsDisplay === undefined && (rule.supportsDisplay ?? defaultSupportsDisplay(spec, facts));
 	const needsRequiresEffort =
-		thinking.requiresEffort === undefined &&
+		gated.requiresEffort === undefined &&
 		(rule.requiresEffort ??
 			(impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
-	const needsDefaultLevel = thinking.defaultLevel === undefined && rule.defaultLevel !== undefined;
-	const needsPrefixBinding = thinking.prefixBinding === undefined && rule.prefixBinding === true;
+	const needsDefaultLevel = gated.defaultLevel === undefined && rule.defaultLevel !== undefined;
+	const needsPrefixBinding = gated.prefixBinding === undefined && rule.prefixBinding === true;
 	if (effortMap === undefined && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel && !needsPrefixBinding) {
-		return thinking;
+		return gated;
 	}
-	const filled: ThinkingConfig = { ...thinking };
+	const filled: ThinkingConfig = { ...gated };
 	if (effortMap !== undefined) filled.effortMap = effortMap;
 	if (needsDisplay) filled.supportsDisplay = true;
 	if (needsDefaultLevel && rule.defaultLevel !== undefined) filled.defaultLevel = rule.defaultLevel;
