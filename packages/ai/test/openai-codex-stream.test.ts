@@ -5011,6 +5011,97 @@ describe("openai-codex streaming", () => {
 		expect(JSON.stringify(retryInput)).not.toContain("Partial answer");
 	});
 
+	it("preserves websocket continuation during the bounded in-band 429 retry", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock = vi.fn(async () => {
+			throw new Error("SSE fallback should not be called");
+		});
+
+		class RetriedContinuationWebSocket extends MockWebSocket {
+			constructor(url: string, options?: { headers?: WsHeaders }) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(data: string): void {
+				const request = JSON.parse(data) as Record<string, unknown>;
+				sentRequests.push(request);
+				const requestIndex = sentRequests.length;
+
+				if (requestIndex === 1) {
+					this.emitCodexResponse({
+						messageId: "msg_1",
+						responseId: "resp_1",
+						text: "First answer",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				if (requestIndex === 2) {
+					this.sendJson({
+						type: "error",
+						code: "rate_limit_exceeded",
+						message: "Too many requests. Please retry in 20ms",
+					});
+					return;
+				}
+
+				if (requestIndex === 3) {
+					this.emitCodexResponse({
+						messageId: "msg_3",
+						responseId: "resp_3",
+						text: "Second answer",
+						terminalType: "response.completed",
+						includeCreated: true,
+					});
+					return;
+				}
+
+				throw new Error(`Unexpected websocket request index: ${requestIndex}`);
+			}
+		}
+
+		global.WebSocket = RetriedContinuationWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel("https://chatgpt.com/backend-api");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const firstContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "First question", timestamp: Date.now() }],
+		};
+		const options = {
+			fetch: fetchMock as FetchImpl,
+			apiKey: createCodexTestToken(),
+			sessionId: "ws-bounded-rate-limit-continuation-session",
+			providerSessionState,
+		};
+		const firstResponse = await streamOpenAICodexResponses(model, firstContext, options).result();
+		const secondContext: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [
+				...firstContext.messages,
+				firstResponse,
+				{ role: "user", content: "Second question", timestamp: Date.now() + 1 },
+			],
+		};
+
+		const secondResponse = await streamOpenAICodexResponses(model, secondContext, options).result();
+
+		expect(secondResponse.stopReason).toBe("stop");
+		expect(secondResponse.content.find(block => block.type === "text")?.text).toBe("Second answer");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(sentRequests).toHaveLength(3);
+		expect(sentRequests[1]?.previous_response_id).toBe("resp_1");
+		expect(sentRequests[2]?.previous_response_id).toBe("resp_1");
+		expect(sentRequests[2]?.input).toEqual(sentRequests[1]?.input);
+		expect(JSON.stringify(sentRequests[2]?.input)).toContain("Second question");
+		expect(JSON.stringify(sentRequests[2]?.input)).not.toContain("First answer");
+	});
+
 	it("retries websocket continuations when a proxy reports a stale previous response anchor", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
