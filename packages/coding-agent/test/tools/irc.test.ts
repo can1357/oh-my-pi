@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -1254,6 +1254,27 @@ describe("IRC", () => {
 
 			const event = await ircEvent;
 			expect(event.type).toBe("irc_message");
+		});
+		it("queues an IRC wake when a competing turn wins the prompt race", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockRejectedValueOnce(new AgentBusyError());
+
+			await expect(
+				session.deliverIrcMessage({
+					id: "msg-busy-race",
+					from: "0-Peer",
+					to: "0-Me",
+					body: "queued after race",
+					ts: Date.now(),
+				}),
+			).resolves.toBe("woken");
+			await Promise.resolve();
+
+			expect(promptSpy).toHaveBeenCalledTimes(1);
+			expect(session.agent.peekFollowUpQueue()).toContainEqual(
+				expect.objectContaining({ customType: "irc:incoming", content: expect.any(String) }),
+			);
 		});
 
 		it("queues peer IRC as an interrupt while a turn is streaming", async () => {

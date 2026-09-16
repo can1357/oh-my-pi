@@ -979,9 +979,18 @@ export class AgentSession {
 	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
+	/** Queue IRC records behind the active turn when the fire-and-forget wake loses a scheduling race. */
+	#queueIrcFollowUps(records: AgentMessage[]): void {
+		for (const record of records) this.agent.followUp(record);
+	}
+
 	#wakeForIrc(records: AgentMessage[]): void {
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(records);
+			return;
+		}
+		if (this.agent.state.isStreaming) {
+			this.#queueIrcFollowUps(records);
 			return;
 		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
@@ -1016,6 +1025,10 @@ export class AgentSession {
 		void this.agent
 			.prompt(records)
 			.catch(error => {
+				if (error instanceof AgentBusyError) {
+					this.#queueIrcFollowUps(records);
+					return;
+				}
 				turnError = error;
 				logger.warn("IRC wake turn failed", { error: String(error) });
 			})
