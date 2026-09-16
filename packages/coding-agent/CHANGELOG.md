@@ -5,6 +5,11 @@
 ### Added
 
 - Added opt-in `retry.refusalFallbackRevertPolicy: after-success` to return to the previous model after one successful refusal/content-block fallback response, including Codex cybersecurity blocks, without changing outage or rate-limit fallback behavior or overriding explicit model selections during restoration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+### Fixed
+
+- Reduced snapshot-recording stalls when a session retains large file histories. ([#12279](https://github.com/can1357/oh-my-pi/pull/12279) by [@iliaal](https://github.com/iliaal))
+- Cancelled background jobs remain tracked until execution finishes, so cleanup cannot report completion prematurely after retention expires. ([#12278](https://github.com/can1357/oh-my-pi/pull/12278) by [@iliaal](https://github.com/iliaal))
+- Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
 
 ## [18.2.2] - 2026-09-16
 
