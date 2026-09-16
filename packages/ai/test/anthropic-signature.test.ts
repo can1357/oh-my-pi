@@ -6,6 +6,7 @@
  * one.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import {
@@ -37,6 +38,41 @@ describe("servedModelFromAnthropicSignature", () => {
 		expect(servedModelFromAnthropicSignature(OPENAI_FERNET)).toBeUndefined();
 		expect(servedModelFromAnthropicSignature("not base64 at all!!")).toBeUndefined();
 		expect(servedModelFromAnthropicSignature("")).toBeUndefined();
+	});
+
+	it("rejects a length above signed 32-bit range without looping", () => {
+		const signature = Buffer.from([0x1a, 0x80, 0x80, 0x80, 0x80, 0x08]).toString("base64");
+		const module = import.meta.resolve("@oh-my-pi/pi-ai/providers/anthropic-signature");
+		// A synchronous parser loop cannot be interrupted by the test runner's timeout.
+		const result = spawnSync(
+			process.execPath,
+			[
+				"-e",
+				`import { servedModelFromAnthropicSignature } from ${JSON.stringify(module)};
+console.log(servedModelFromAnthropicSignature(${JSON.stringify(signature)}));`,
+			],
+			{ encoding: "utf8", timeout: 2_000 },
+		);
+		expect(result.error).toBeUndefined();
+		expect(result.stdout).toBe("undefined\n");
+	});
+
+	it.each([
+		{ name: "overflowing tag", prefix: [0x88, 0x80, 0x80, 0x80, 0x10, 0x00] },
+		{ name: "overlong tag", prefix: [0x88, 0x80, 0x80, 0x80, 0x80, 0x00, 0x00] },
+		{ name: "overflowing length", prefix: [0x1a, 0x80, 0x80, 0x80, 0x80, 0x10] },
+		{ name: "overlong length", prefix: [0x1a, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00] },
+	])("rejects an $name before a valid header", ({ prefix }) => {
+		const signature = Buffer.concat([Buffer.from(prefix), Buffer.from(OPUS_5_SIGNATURE, "base64")]);
+		expect(servedModelFromAnthropicSignature(signature.toString("base64"))).toBeUndefined();
+	});
+
+	it("skips an unknown field with the maximum protobuf field number", () => {
+		const signature = Buffer.concat([
+			Buffer.from([0xf8, 0xff, 0xff, 0xff, 0x0f, 0x01]),
+			Buffer.from(OPUS_5_SIGNATURE, "base64"),
+		]);
+		expect(servedModelFromAnthropicSignature(signature.toString("base64"))).toBe("claude-opus-5");
 	});
 
 	it("reads only OpenRouter items that forward an Anthropic signature", () => {
