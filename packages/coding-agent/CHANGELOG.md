@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- xAI web search now follows the provider's catalog default model and supports model selection via `providers.webSearchXaiModel` / `XAI_SEARCH_MODEL` ([#11307](https://github.com/can1357/oh-my-pi/pull/11307) by [@WeMingT](https://github.com/WeMingT)).
+
+### Added
+
+- Registry-less xAI web search now honors `XAI_BASE_URL`. Custom endpoints retain their configured `xai-oauth` API keys; only official OAuth/env credentials fall back to an available `xai` key ([#11307](https://github.com/can1357/oh-my-pi/pull/11307) by [@WeMingT](https://github.com/WeMingT)).
+
+### Fixed
+
+- xAI web search keeps custom-endpoint fallback credentials paired with their transport and honors the selected model's reasoning-effort compatibility ([#11307](https://github.com/can1357/oh-my-pi/pull/11307) by [@WeMingT](https://github.com/WeMingT)).
+- xAI web search now recommends the matching `xai-oauth` API key when official OAuth credentials are refused for a custom relay ([#11307](https://github.com/can1357/oh-my-pi/pull/11307) by [@WeMingT](https://github.com/WeMingT)).
+
 ## [18.2.2] - 2026-09-16
 
 ### Added

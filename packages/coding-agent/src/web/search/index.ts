@@ -171,6 +171,13 @@ async function executeSearch(
 		geminiModel = undefined;
 	}
 
+	let xaiModel: string | undefined;
+	try {
+		xaiModel = settings.get("providers.webSearchXaiModel");
+	} catch {
+		xaiModel = undefined;
+	}
+
 	let timeoutMs = DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS * 1_000;
 	try {
 		const configuredSeconds = settings.get("providers.webSearchTimeoutSeconds");
@@ -220,6 +227,7 @@ async function executeSearch(
 				sessionId,
 				antigravityEndpointMode,
 				geminiModel,
+				xaiModel,
 			});
 
 			// Lenient constraint pass over whatever the provider returned: enforce
