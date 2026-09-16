@@ -1034,6 +1034,37 @@ describe("isCacheControlUnsupported", () => {
 		).toBe(true);
 	});
 
+	it("detects an OpenAI-compatible validator calling cache_control an invalid parameter", () => {
+		// The adjective carries the refusal with no negation anywhere in the
+		// message, which is the shape every OpenAI-compatible `Invalid
+		// parameter: …` 400 has.
+		expect(
+			isCacheControlUnsupported(makeStatusError(400, "400 invalid_request_error: Invalid parameter: cache_control")),
+		).toBe(true);
+	});
+
+	// Snake_cased error codes, which the prose gate structurally cannot see: `_`
+	// is a word character, so `\bunsupported\b` never fires on
+	// `unsupported_parameter` and `\bunrecognized\b` never fires on
+	// `unrecognized_keys`. Each row is a different emitter and a different
+	// adjective/noun branch of the widened pattern.
+	it.each([
+		["OpenAI-compatible invalid_parameter", "invalid_parameter: messages[0].content[0].cache_control"],
+		["OpenAI-compatible unsupported_parameter", "unsupported_parameter: messages[0].content[0].cache_control"],
+		// A strict Zod object rejects extra keys with this code — the same 400
+		// this repo's auth-broker returned when an MCP credential carried
+		// provider extension fields.
+		["a strict Zod schema's unrecognized_keys", `unrecognized_keys: ["cache_control"]`],
+		// gRPC/Connect's canonical code, which is what a proxy fronted by a
+		// Connect gateway returns for a field its schema has no slot for.
+		["a Connect gateway's invalid_argument", "invalid_argument: messages[0].content[0].cache_control"],
+		// protojson, so any Google-gateway-fronted deployment: the repo has this
+		// exact 400 captured for `store` and `propertyNames`.
+		["protojson's unknown name", `Invalid JSON payload received. Unknown name "cache_control": Cannot find field.`],
+	])("detects %s naming cache_control", (_emitter, message) => {
+		expect(isCacheControlUnsupported(makeStatusError(400, `400 ${message}`))).toBe(true);
+	});
+
 	it("keeps caching enabled when a 400 rejects the number of cache_control blocks", () => {
 		// Anthropic's breakpoint cap: the endpoint does support prompt caching, so
 		// disabling it for the rest of the session would be the wrong fallback.
@@ -1062,12 +1093,25 @@ describe("isCacheControlUnsupported", () => {
 
 	it("keeps caching enabled when a 400 refuses a cache_control value while naming the field itself", () => {
 		// No trailing segment to key on: the named member is the field, and only
-		// its value is refused. The unknown-member negations require a
-		// schema-member noun ("field", "parameter", "key", …), so "not a valid
-		// value" never reaches the fallback.
+		// its value is refused. Every member refusal is anchored to a
+		// schema-member noun ("field", "parameter", "key", …) and `value` is
+		// deliberately not one of them, so "not a valid value" never reaches the
+		// fallback.
 		expect(
 			isCacheControlUnsupported(
 				makeStatusError(400, `400 invalid_request_error: cache_control: "2h" is not a valid value`),
+			),
+		).toBe(false);
+	});
+
+	it("keeps caching enabled when an error code refuses a cache_control value", () => {
+		// Same contract in code form, and the bound on the widened adjective
+		// vocabulary: `invalid_value` is one joiner away from a noun too, so only
+		// `value`'s absence from the noun class keeps it out. `invalid_request_error`
+		// prefixing the message is likewise inert — `request` is not a member noun.
+		expect(
+			isCacheControlUnsupported(
+				makeStatusError(400, "400 invalid_request_error: invalid_value: messages[0].content[0].cache_control"),
 			),
 		).toBe(false);
 	});

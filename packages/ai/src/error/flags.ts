@@ -311,15 +311,28 @@ const FAST_MODE_ENTITLEMENT_PATTERN = /fast mode/i;
 const CACHE_CONTROL_FIELD_PATTERN = /\bcache_control\b/i;
 const CACHE_CONTROL_REJECTION_PATTERN =
 	/\bunexpected\b|\bunrecognized\b|\bnot permitted\b|\bnot allowed\b|\bnot recognized\b|\bnot supported\b|\bunsupported\b|\binvalid[_ ]field\b|\bextra (?:inputs?|fields?)\b/i;
-// Strict JSON decoders and OpenAI-compatible validators express the same schema
-// rejection as an unknown *member* rather than as a forbidden extra input:
-// `json: unknown field "cache_control"` (Go `DisallowUnknownFields`),
-// `unknown_parameter` (OpenAI-compatible error codes), `Unpermitted parameter`
-// (Rails strong parameters), `is not a valid field` (hand-rolled validators).
-// These negations stay anchored to a schema-member noun, so a 400 rejecting a
-// cache_control *value* rather than the field itself keeps caching enabled.
-const CACHE_CONTROL_UNKNOWN_MEMBER_PATTERN =
-	/\b(?:un(?:known|permitted)|not (?:an? )?(?:known|valid|accepted))[_ -](?:field|param(?:eter)?|argument|key|propert(?:y|ies)|attribute|member|option)s?\b/i;
+// The bare-word gate above reads prose, and `_` is a word character, so it
+// misses every snake_cased error code: `\bunsupported\b` never fires on
+// `unsupported_parameter`, `\bunrecognized\b` never fires on
+// `unrecognized_keys`. Strict decoders and OpenAI-compatible validators report
+// a refused *member* rather than a forbidden extra input, either as a negation
+// (`json: unknown field "cache_control"` — Go `DisallowUnknownFields`;
+// `unknown_parameter` — OpenAI-compatible error codes; `Unpermitted parameter`
+// — Rails strong parameters; `is not a valid field` — hand-rolled validators)
+// or as a bare adjective (`Invalid parameter: cache_control` and the
+// `invalid_parameter` / `unsupported_parameter` codes — OpenAI-compatible;
+// `unrecognized_keys` — a strict Zod object, which is how this repo's own
+// auth-broker 400'd an extension field; `invalid_argument` — the gRPC/Connect
+// canonical code; `Unknown name "cache_control": Cannot find field` —
+// protojson, so every Google-gateway-fronted deployment).
+//
+// Both families stay anchored to a schema-member noun one joiner away, and that
+// anchor is the false-positive bound: `invalid_request_error` prefixes nearly
+// every Anthropic 400 and still cannot match, because `request` is not a member
+// noun. `value` is absent for the same reason — a 400 refusing a cache_control
+// *value* while naming no member says nothing about the field.
+const CACHE_CONTROL_MEMBER_REFUSAL_PATTERN =
+	/\b(?:un(?:known|permitted|supported|recognized|expected)|invalid|bad|not (?:an? )?(?:known|valid|accepted|supported|permitted|allowed|recognized))[_ -](?:field|name|param(?:eter)?|argument|key|propert(?:y|ies)|attribute|member|option|input)s?\b/i;
 // Anthropic rejects a breakpoint on an empty text block with a 400 that names
 // `cache_control` too. That is a content-shape fault — dropping every
 // breakpoint neither fixes it nor proves the endpoint lacks prompt caching.
@@ -366,7 +379,7 @@ function matchesCacheControlRejection(message: string, errorStatus: number | und
 	if (errorStatus !== 400) return false;
 	if (!CACHE_CONTROL_FIELD_PATTERN.test(message)) return false;
 	if (CACHE_CONTROL_EMPTY_TEXT_PATTERN.test(message)) return false;
-	return CACHE_CONTROL_REJECTION_PATTERN.test(message) || CACHE_CONTROL_UNKNOWN_MEMBER_PATTERN.test(message);
+	return CACHE_CONTROL_REJECTION_PATTERN.test(message) || CACHE_CONTROL_MEMBER_REFUSAL_PATTERN.test(message);
 }
 
 /** Whether an OAuth refresh error message means the grant is definitively dead. */
