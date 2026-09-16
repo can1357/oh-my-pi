@@ -125,6 +125,7 @@ async function createHarness(): Promise<ShutdownHarness> {
 		subscribe: () => {},
 		getAllToolNames: () => [],
 		getLastAssistantMessage: () => undefined,
+		getDisabledCredentialNotices: async () => [],
 		prepareForHeadlessAdvisorDrain: () => {},
 		setTextOutputCommitted: () => {},
 		waitForAdvisorCatchup: async () => true,

@@ -1,15 +1,146 @@
-import { describe, expect, it } from "bun:test";
+import { $ } from "bun";
+import { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	AuthStorage,
+	type DisabledCredentialSummary,
+	SqliteAuthCredentialStore,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
+import type { UsageHistoryEntry } from "@oh-my-pi/pi-ai/usage";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	runUsageCommand,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
+import * as sdk from "@oh-my-pi/pi-coding-agent/sdk";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import { getActiveProfile, getAgentDir, getConfigRootDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 
+it("sanitizes provider-controlled disabled account labels before terminal output", () => {
+	const output = formatUsageBreakdown([], [], Date.now(), undefined, [
+		{
+			id: 1,
+			provider: "openai-codex",
+			type: "oauth",
+			email: "who\x1b[2Jami@example.com",
+			orgName: "Example Org",
+			cause: "invalid_grant",
+		},
+	]);
+	expect(output).not.toContain("\x1b[2J");
+	expect(output).toContain("whoami@example.com");
+	expect(output).toContain("sign-in expired");
+});
+
+it("projects disabled CLI rows without truncating JSON or mutating tombstones", async () => {
+	const profile = TempDir.createSync("@omp-usage-disabled-display-");
+	const dbPath = profile.join(".omp", "profiles", "disabled-display", "agent", "agent.db");
+	const store = await SqliteAuthCredentialStore.open(dbPath);
+	const provider = "disabled-display-fixture";
+	const detail = `(${profile.path()}/cache/session)\tdenied ${"界\u{10400}".repeat(100)} diagnostic-tail`;
+	const cause = `oauth refresh failed: ${detail}; refresh_token=ROWSECRET`;
+	const identities = [
+		{ email: `Primary\t(${profile.path()}/private/account) ${"界\u{10400}".repeat(100)} identity-tail` },
+		{ projectId: `Secondary\t(${profile.path()}/private/project) ${"界\u{10400}".repeat(100)} identity-tail` },
+	];
+	try {
+		for (const identity of identities) {
+			const [row] = store.upsertAuthCredentialForProvider(provider, {
+				type: "oauth",
+				access: "SYNTHETICACCESS",
+				refresh: "SYNTHETICREFRESH",
+				expires: 1,
+				...identity,
+				orgName: "workspace",
+			});
+			store.deleteAuthCredential(row!.id, cause);
+		}
+		const tombstones = await store.listDisabledCredentials();
+		const database = new Database(dbPath, { readonly: true });
+		try {
+			const protectedRows = database.query("SELECT data, disabled_cause FROM auth_credentials ORDER BY id").all();
+			for (const redact of [false, true]) {
+				for (const json of [false, true]) {
+					const result =
+						await $`${process.execPath} ${import.meta.dir}/../src/cli.ts --profile disabled-display usage ${json ? ["--json"] : []} ${redact ? ["--redact"] : []}`
+							.cwd(profile.path())
+							.env({
+								HOME: profile.path(),
+								PATH: process.env.PATH ?? "",
+								PI_CONFIG_DIR: ".omp",
+								NO_COLOR: "1",
+								PI_NO_TITLE: "1",
+							})
+							.quiet()
+							.nothrow();
+					expect(result.exitCode, result.stderr.toString()).toBe(0);
+					expect(result.stderr.toString()).toBe("");
+					const output = stripVTControlCharacters(result.stdout.toString());
+					// Bearers never reach any projection. The forensic cause does reach the
+					// JSON projection, which shares the store's trust domain; the text row
+					// shows only the classified cause.
+					for (const secret of ["SYNTHETICACCESS", "SYNTHETICREFRESH"]) {
+						expect(output).not.toContain(secret);
+					}
+					if (!json) expect(output).not.toContain("ROWSECRET");
+					if (json) {
+						const payload = JSON.parse(output) as { disabledCredentials: DisabledCredentialSummary[] };
+						expect(payload.disabledCredentials.map(row => row.id)).toEqual(tombstones.map(row => row.id));
+						for (const [index, row] of payload.disabledCredentials.entries()) {
+							expect(row.provider).toBe(provider);
+							// `omp usage` is an ordinary user surface: the cause is classified in
+							// both modes. The verbatim cause stays in the store.
+							expect(row.cause).toBe("authentication failed");
+							if (redact) {
+								expect(row.orgName).not.toContain("workspace");
+								expect(row.email ?? row.projectId).not.toContain(index === 0 ? "Primary" : "Secondary");
+								expect(row.email ?? row.projectId).not.toContain(profile.path());
+							} else {
+								expect(row.orgName).toBe("workspace");
+								expect(row.email ?? row.projectId).toBe(
+									identities[index]!.email ?? identities[index]!.projectId,
+								);
+							}
+						}
+					} else {
+						const rows = output.split("\n").filter(line => line.startsWith("  ✗ "));
+						expect(rows).toHaveLength(identities.length);
+						for (const [index, row] of rows.entries()) {
+							if (redact) expect(row).not.toContain(index === 0 ? "Primary" : "Secondary");
+							else expect(row).toContain(index === 0 ? "Primary" : "Secondary");
+							if (!redact) expect(row).toContain(`~/private/${index === 0 ? "account" : "project"}`);
+							expect(row).not.toContain(profile.path());
+							expect(row).not.toContain("\t");
+							expect(row).not.toContain("\ufffd");
+							expect(row).toEndWith("(re-login to restore)");
+							const parts = row.match(/^  ✗ (.*?) — disabled.*?: (.*?) \(re-login to restore\)$/);
+							expect(parts).not.toBeNull();
+							expect(Bun.stringWidth(parts![1]!)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.TITLE);
+							expect(Bun.stringWidth(parts![2]!)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.CONTENT);
+						}
+					}
+				}
+			}
+			expect(database.query("SELECT data, disabled_cause FROM auth_credentials ORDER BY id").all()).toEqual(
+				protectedRows,
+			);
+			expect(await store.listDisabledCredentials()).toEqual(tombstones);
+		} finally {
+			database.close();
+		}
+	} finally {
+		store.close();
+		await profile.remove();
+	}
+}, 30_000);
+
+const ACCOUNT_ALIAS_PREFIX = "redacted-account:sha256:";
 const HOUR = 3_600_000;
 const FIVE_HOURS = 5 * HOUR;
 const SEVEN_DAYS = 7 * 24 * HOUR;
@@ -48,6 +179,625 @@ function makeLimit(opts: {
 function makeReport(provider: string, email: string, limits: UsageReport["limits"], notes?: string[]): UsageReport {
 	return { provider, fetchedAt: Date.now(), limits, ...(notes ? { notes } : {}), metadata: { email } };
 }
+
+describe("usage history JSON account keys", () => {
+	const cliPath = `${import.meta.dir}/../src/cli.ts`;
+	const agentPath = [".omp", "profiles", "history-keys", "agent"];
+
+	async function runHistoryJson(profile: TempDir, redact = false): Promise<UsageHistoryEntry[]> {
+		const result =
+			await $`${process.execPath} ${cliPath} --profile history-keys usage --history --json ${redact ? ["--redact"] : []}`
+				.cwd(profile.path())
+				.env({
+					HOME: profile.path(),
+					PATH: process.env.PATH ?? "",
+					PI_CONFIG_DIR: ".omp",
+					NO_COLOR: "1",
+					PI_NO_TITLE: "1",
+				})
+				.quiet()
+				.nothrow();
+		expect(result.exitCode, result.stderr.toString()).toBe(0);
+		return JSON.parse(result.stdout.toString()).entries;
+	}
+
+	it("keeps canonical API-key generations separate across rotation and repeated snapshots", async () => {
+		const profile = TempDir.createSync("@omp-usage-generations-");
+		const provider = "history-key-fixture";
+		let recordedAt = Date.now() - 4 * HOUR;
+		let usedFraction = 0;
+		const store = await SqliteAuthCredentialStore.open(profile.join(...agentPath, "agent.db"));
+		const storage = new AuthStorage(store, {
+			configValueResolver: async value => value,
+			usageProviderResolver: id =>
+				id === provider
+					? {
+							id: provider,
+							fetchUsage: async () => ({
+								provider,
+								fetchedAt: recordedAt,
+								limits: [makeLimit({ id: "rolling", provider, usedFraction })],
+							}),
+						}
+					: undefined,
+		});
+		try {
+			await storage.reload();
+			const secrets = ["FIRSTGENERATIONSECRET", "SECONDGENERATIONSECRET", "FIRSTGENERATIONSECRET"];
+			for (const [index, key] of secrets.entries()) {
+				recordedAt += HOUR;
+				usedFraction = (index + 1) / 4;
+				await storage.set(provider, { type: "api_key", key });
+				await storage.invalidateUsageCache(provider);
+				await storage.fetchUsageReports();
+			}
+			const stored = storage.listUsageHistory();
+			expect(stored.map(entry => entry.usedFraction)).toEqual([0.25, 0.5, 0.75]);
+			expect(stored.every(entry => entry.accountKey.startsWith("api_key|secret:"))).toBe(true);
+			expect(stored[0]!.accountKey).toBe(stored[2]!.accountKey);
+			expect(stored[0]!.accountKey).not.toBe(stored[1]!.accountKey);
+			for (const redact of [false, true]) {
+				const entries = await runHistoryJson(profile, redact);
+				expect(entries.map(entry => entry.usedFraction)).toEqual([0.25, 0.5, 0.75]);
+				expect(entries[0]!.accountKey).toBe(entries[2]!.accountKey);
+				expect(entries[0]!.accountKey).not.toBe(entries[1]!.accountKey);
+				for (const secret of secrets) expect(JSON.stringify(entries)).not.toContain(secret);
+			}
+			expect(storage.listUsageHistory()).toEqual(stored);
+		} finally {
+			storage.close();
+			await profile.remove();
+		}
+	}, 30_000);
+
+	it("keeps safe keys canonical and secret-safe aliases stable across membership, order, and literal lookalikes", async () => {
+		async function readKeys(accountKeys: string[], redact = false): Promise<Map<string, string>> {
+			const profile = TempDir.createSync("@omp-usage-account-keys-");
+			try {
+				const store = await SqliteAuthCredentialStore.open(profile.join(...agentPath, "agent.db"));
+				try {
+					store.recordUsageSnapshots(
+						accountKeys.map((accountKey, index) => ({
+							recordedAt: Date.now() - (accountKeys.length - index) * HOUR,
+							provider: "anthropic",
+							accountKey,
+							limitId: String(index),
+							label: "Session",
+							usedFraction: 0.25,
+						})),
+					);
+				} finally {
+					store.close();
+				}
+				const entries = await runHistoryJson(profile, redact);
+				return new Map(entries.map(entry => [accountKeys[Number(entry.limitId)]!, entry.accountKey]));
+			} finally {
+				await profile.remove();
+			}
+		}
+		const canonical = "oauth|email:shared@example.test";
+		const first = `${ACCOUNT_ALIAS_PREFIX}1111111111111111111111111111111111111111111111111111111111111111`;
+		const second = `${ACCOUNT_ALIAS_PREFIX}2222222222222222222222222222222222222222222222222222222222222222`;
+		const redactedLookalike = "oauth|account:bearer=[REDACTED]";
+		const keys = [canonical, first, second, redactedLookalike];
+		const baseline = await readKeys(keys);
+		expect(baseline.get(canonical)).toBe(canonical);
+		expect(new Set(baseline.values()).size).toBe(keys.length);
+		// A key that already looks like an alias is re-hashed so it cannot
+		// impersonate another identity's alias.
+		for (const literal of [first, second]) expect(baseline.get(literal)).not.toBe(literal);
+		const alias = baseline.get(first)!;
+		const withLookalike = await readKeys([alias, ...keys.toReversed()]);
+		expect(new Set(withLookalike.values()).size).toBe(keys.length + 1);
+		for (const key of keys) expect(withLookalike.get(key)).toBe(baseline.get(key));
+		const subset = await readKeys([second, alias]);
+		expect(subset.get(second)).toBe(baseline.get(second));
+		expect(subset.get(alias)).toBe(withLookalike.get(alias));
+		const privateKeys = await readKeys([canonical], true);
+		expect(privateKeys.get(canonical)).not.toContain("shared@example.test");
+		expect(privateKeys.get(canonical)).not.toBe(canonical);
+	}, 30_000);
+});
+
+describe("runUsageCommand disabled credential output", () => {
+	interface ProfileState {
+		profile: string | undefined;
+		agentDir: string;
+		configRoot: string;
+		env: (string | undefined)[];
+	}
+	function profileState() {
+		return {
+			profile: getActiveProfile(),
+			agentDir: getAgentDir(),
+			configRoot: getConfigRootDir(),
+			env: [process.env.OMP_PROFILE, process.env.PI_PROFILE, process.env.PI_CODING_AGENT_DIR],
+		};
+	}
+	let callerProfile: ProfileState;
+	beforeEach(() => {
+		callerProfile = profileState();
+	});
+	afterEach(() => {
+		expect(profileState()).toEqual(callerProfile);
+	});
+
+	async function readProviderKeys(
+		reports: UsageReport[],
+		{ history = false, redact = false }: { history?: boolean; redact?: boolean } = {},
+	): Promise<Record<string, string>> {
+		const profile = TempDir.createSync("@omp-usage-provider-subsets-");
+		const originalExitCode = process.exitCode;
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		let authStorage: AuthStorage | undefined = new AuthStorage(store);
+		try {
+			await authStorage.reload();
+			store.recordUsageSnapshots(
+				reports.map(report => ({
+					recordedAt: Date.now() - HOUR,
+					provider: report.provider,
+					accountKey: "oauth|email:shared@example.test",
+					email: "shared@example.test",
+					limitId: report.limits[0]!.id,
+					label: report.limits[0]!.label,
+					usedFraction: report.limits[0]!.amount.usedFraction!,
+				})),
+			);
+			vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+			vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue(reports);
+			let output = "";
+			vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+				output += String(chunk);
+				return true;
+			});
+			await runUsageCommand({ history, json: true, redact }, profile.join("models.yml"));
+			authStorage = undefined;
+			const payload = JSON.parse(output);
+			return Object.fromEntries(
+				history
+					? (payload.entries as UsageHistoryEntry[]).map(entry => [entry.limitId, entry.provider])
+					: (payload.reports as UsageReport[]).map(report => [report.limits[0]!.id, report.provider]),
+			);
+		} finally {
+			authStorage?.close();
+			vi.restoreAllMocks();
+			process.exitCode = originalExitCode;
+			await profile.remove();
+		}
+	}
+
+	it("joins current usage to history containing only a subset of providers", async () => {
+		const reports = ["token exchange", "token refresh"].map((provider, index) =>
+			makeReport(provider, "shared@example.test", [makeLimit({ id: String(index), provider, usedFraction: 0.5 })]),
+		);
+		const current = await readProviderKeys(reports);
+		for (const redact of [false, true]) {
+			const history = await readProviderKeys([reports[1]!], { history: true, redact });
+			expect(history["1"]).toBe(current["1"]);
+		}
+	});
+
+	it("keeps a literal provider alias distinct without changing the original provider key", async () => {
+		const provider = `redacted-provider:sha256:${"a".repeat(64)}`;
+		const report = makeReport(provider, "shared@example.test", [
+			makeLimit({ id: "original", provider, usedFraction: 0.5 }),
+		]);
+		const baseline = await readProviderKeys([report]);
+		const alias = baseline.original!;
+		// A provider key that already looks like an alias is re-hashed.
+		expect(alias).not.toBe(provider);
+		const lookalike = makeReport(alias, "shared@example.test", [
+			makeLimit({ id: "lookalike", provider: alias, usedFraction: 0.25 }),
+		]);
+		for (const redact of [false, true]) {
+			const current = await readProviderKeys([lookalike, report], { redact });
+			expect(current.original).toBe(alias);
+			expect(current.lookalike).not.toBe(alias);
+			const history = await readProviderKeys([lookalike], { history: true, redact });
+			expect(history.lookalike).toBe(current.lookalike);
+		}
+	});
+
+	it("keeps distinct UTF-16 provider identities separate in JSON join keys", async () => {
+		const reports = ["token=\ud800", "token=\ud801"].map((provider, index) =>
+			makeReport(provider, "shared@example.test", [makeLimit({ id: String(index), provider, usedFraction: 0.5 })]),
+		);
+		const keys = await readProviderKeys(reports);
+		expect(keys["0"]).not.toBe(keys["1"]);
+	});
+
+	it("keeps usage and history provider aliases stable as providers appear and disappear", async () => {
+		const profile = TempDir.createSync("@omp-usage-provider-keys-");
+		const originalExitCode = process.exitCode;
+		let authStorage: AuthStorage | undefined;
+		const providers = ["token exchange", "token refresh", "token-exchange", "token-refresh", "toString"];
+		const reports = providers.map((provider, index) =>
+			makeReport(provider, `account${index}@example.test`, [
+				makeLimit({ id: `limit-${index}`, provider, usedFraction: (index + 1) / 6, durationMs: FIVE_HOURS }),
+			]),
+		);
+		let aliases: Record<string, string> | undefined;
+		try {
+			for (const redact of [false, true]) {
+				for (const ordered of [reports, [...reports].reverse(), reports.slice(1), [reports[1]!]]) {
+					authStorage = await AuthStorage.create(":memory:");
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue(ordered);
+					let output = "";
+					vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						return true;
+					});
+					await runUsageCommand({ json: true, redact }, profile.join("models.yml"));
+					authStorage = undefined;
+					vi.restoreAllMocks();
+					const payload = JSON.parse(output);
+					const keys = payload.reports.map((report: UsageReport) => report.provider);
+					expect(new Set(keys).size).toBe(ordered.length);
+					for (const provider of ["token-exchange", "token-refresh", "toString"]) {
+						if (ordered.some(report => report.provider === provider)) expect(keys).toContain(provider);
+					}
+					expect(Object.keys(payload.capacity).sort()).toEqual([...keys].sort());
+					for (const report of payload.reports as UsageReport[]) {
+						expect(report.limits[0]!.scope.provider).toBe(report.provider);
+						expect(payload.capacity[report.provider][0].usedAccounts).toBe(report.limits[0]!.amount.usedFraction);
+					}
+					const current = Object.fromEntries(
+						payload.reports.map((report: UsageReport) => [report.limits[0]!.id, report.provider]),
+					);
+					if (aliases) {
+						for (const [limitId, provider] of Object.entries(current)) expect(provider).toBe(aliases[limitId]);
+					} else aliases = current;
+
+					const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					const now = Date.now();
+					const entries: UsageHistoryEntry[] = ordered.flatMap(report =>
+						[2, 1].map(hoursAgo => ({
+							recordedAt: now - hoursAgo * HOUR,
+							provider: report.provider,
+							accountKey: "oauth|email:shared@example.test",
+							email: "shared@example.test",
+							accountId: "shared-account",
+							limitId: report.limits[0]!.id,
+							label: "Session",
+							usedFraction: report.limits[0]!.amount.usedFraction! / hoursAgo,
+						})),
+					);
+					store.recordUsageSnapshots(entries);
+					const originalEntries = store.listUsageHistory();
+					let storedEntries: UsageHistoryEntry[] = [];
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					output = "";
+					vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						storedEntries = store.listUsageHistory();
+						return true;
+					});
+					await runUsageCommand({ history: true, json: true, redact }, profile.join("models.yml"));
+					authStorage = undefined;
+					vi.restoreAllMocks();
+					const history = JSON.parse(output).entries as UsageHistoryEntry[];
+					expect(new Set(history.map(entry => entry.provider)).size).toBe(ordered.length);
+					for (const report of ordered) {
+						const snapshots = history.filter(entry => entry.provider === current[report.limits[0]!.id]);
+						expect(snapshots.map(entry => entry.usedFraction)).toEqual([
+							report.limits[0]!.amount.usedFraction! / 2,
+							report.limits[0]!.amount.usedFraction,
+						]);
+					}
+					expect(history[0]).toMatchObject({
+						accountKey: redact
+							? expect.not.stringContaining("shared@example.test")
+							: "oauth|email:shared@example.test",
+						email: redact ? expect.not.stringContaining("shared@example.test") : "shared@example.test",
+						accountId: redact ? expect.not.stringContaining("shared-account") : "shared-account",
+					});
+					expect(storedEntries).toEqual(originalEntries);
+				}
+			}
+		} finally {
+			authStorage?.close();
+			vi.restoreAllMocks();
+			process.exitCode = originalExitCode;
+			await profile.remove();
+		}
+	});
+
+	for (const json of [false, true]) {
+		it(`shows only the latest repeated SQLite sign-out in usage ${json ? "JSON" : "text"}`, async () => {
+			const profile = TempDir.createSync("@omp-usage-repeated-");
+			const originalExitCode = process.exitCode;
+			const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+			let authStorage: AuthStorage | undefined = new AuthStorage(store);
+			try {
+				let latestId = 0;
+				for (let generation = 0; generation < 3; generation++) {
+					await authStorage.set("anthropic", {
+						type: "oauth",
+						access: `access-${generation}`,
+						refresh: `refresh-${generation}`,
+						expires: Date.now() + HOUR,
+						email: "repeated@example.test",
+					});
+					latestId = authStorage.listStoredCredentials("anthropic")[0]!.id;
+					expect(authStorage.disableCredentialById(latestId, `invalid_grant generation-${generation}`)).toBe(true);
+				}
+				const history = await store.listDisabledCredentials();
+				expect(history.map(row => row.cause)).toEqual([
+					"invalid_grant generation-0",
+					"invalid_grant generation-1",
+					"invalid_grant generation-2",
+				]);
+				vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+				vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+				// The command owns its storage; inspect unchanged raw history before it closes.
+				const close = authStorage.close.bind(authStorage);
+				vi.spyOn(authStorage, "close").mockImplementation(() => {});
+				let output = "";
+				vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+					output += String(chunk);
+					return true;
+				});
+				vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+				await runUsageCommand({ json }, profile.join("models.yml"));
+				const after = await store.listDisabledCredentials();
+				close();
+				authStorage = undefined;
+				vi.restoreAllMocks();
+				expect(after).toEqual(history);
+				if (json) {
+					expect(JSON.parse(output).disabledCredentials).toEqual([
+						expect.objectContaining({ id: latestId, cause: "sign-in expired" }),
+					]);
+				} else {
+					// Only the newest tombstone for the account is shown; its cause is
+					// classified, so the row is identified by account, not cause text.
+					expect(output.match(/repeated@example.test/g)).toHaveLength(1);
+				}
+			} finally {
+				vi.restoreAllMocks();
+				authStorage?.close();
+				process.exitCode = originalExitCode;
+				await profile.remove();
+			}
+		});
+	}
+	for (const transition of ["revalidation fails", "disable during tombstone lookup"]) {
+		for (const json of [false, true]) {
+			it(`retains a real tombstone when ${transition} in ${json ? "JSON" : "text"}`, async () => {
+				const profile = TempDir.createSync("@omp-usage-stale-");
+				const originalExitCode = process.exitCode;
+				const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+				const authority = new AuthStorage(store);
+				let authStorage: AuthStorage | undefined;
+				try {
+					await authority.reload();
+					await authority.set("anthropic", {
+						type: "oauth",
+						access: "old-access",
+						refresh: "old-refresh",
+						expires: Date.now() + HOUR,
+						email: "stale@example.test",
+					});
+					const id = authority.exportSnapshot().credentials[0]!.id;
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					if (transition === "revalidation fails") {
+						expect(authority.disableCredentialById(id, "invalid_grant")).toBe(true);
+						Object.assign(store, {
+							refreshSnapshot: async () => {
+								throw new Error("broker offline");
+							},
+						});
+					} else {
+						const list = store.listDisabledCredentials.bind(store);
+						vi.spyOn(store, "listDisabledCredentials").mockImplementationOnce(async provider => {
+							expect(authority.disableCredentialById(id, "invalid_grant")).toBe(true);
+							return list(provider);
+						});
+					}
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						return true;
+					});
+					vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+					await runUsageCommand({ json }, profile.join("models.yml"));
+					authStorage = undefined;
+					vi.restoreAllMocks();
+					if (json)
+						expect(JSON.parse(output).disabledCredentials).toEqual([
+							expect.objectContaining({ id, email: "stale@example.test" }),
+						]);
+					else {
+						expect(output).toContain("sign-in expired");
+						expect(output).toContain("stale@example.test");
+					}
+				} finally {
+					authStorage?.close();
+					authority.close();
+					vi.restoreAllMocks();
+					process.exitCode = originalExitCode;
+					await profile.remove();
+				}
+			});
+		}
+	}
+	for (const json of [false, true]) {
+		it(`keeps secrets out of ${json ? "JSON" : "text"} and masks echoed identities only with --redact`, async () => {
+			const profile = TempDir.createSync("@omp-usage-redaction-");
+			const originalExitCode = process.exitCode;
+			const provider = "mcp_oauth:profile:default:https://host.test/mcp?key=QUERYSECRET&region=west";
+			const projectId = "private-project-42";
+			const email = "Person@Example.test";
+			const accountId = "AcCt";
+			const cause = `oauth refresh failed: HTTP 400 ${JSON.stringify({
+				error: "invalid_grant",
+				refresh_token: "BODYSECRET",
+				error_description: `${email.toUpperCase()} ${projectId} ${projectId.toUpperCase()} ${accountId} ${accountId.toLowerCase()} denied; client_secret=ECHOSECRET`,
+			})}`;
+			let authStorage: AuthStorage | undefined;
+			try {
+				for (const redact of [false, true]) {
+					const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					vi.spyOn(logger, "warn").mockImplementation(() => {});
+					await authStorage.set(provider, {
+						type: "oauth",
+						access: "SYNTHETICACCESS",
+						refresh: "SYNTHETICREFRESH",
+						expires: 1,
+						projectId,
+						email,
+						accountId,
+						orgId: "bearer=ORGIDSECRET",
+						orgName: "client_secret=ORGNAMESECRET",
+					});
+					const id = authStorage.exportSnapshot().credentials[0]!.id;
+					expect(authStorage.disableCredentialById(id, cause)).toBe(true);
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					let forensic: Promise<DisabledCredentialSummary[]> | undefined;
+					const stdout = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						forensic = store.listDisabledCredentials();
+						return true;
+					});
+					const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+					await runUsageCommand({ json, redact }, profile.join("models.yml"));
+					authStorage = undefined; // The command closes its real in-memory store.
+					stdout.mockRestore();
+					expect(stderr.mock.calls).toEqual([]);
+					stderr.mockRestore();
+					expect(await forensic).toEqual([expect.objectContaining({ provider, projectId, cause })]);
+					const text = stripVTControlCharacters(output);
+					// Bearers never reach any projection.
+					for (const secret of ["SYNTHETICACCESS", "SYNTHETICREFRESH"]) {
+						expect(text).not.toContain(secret);
+					}
+					// The text row carries only the classified cause, so a provider echo
+					// cannot reach it. JSON keeps the forensic cause, and the provider id
+					// is projected exactly as `main` already projects provider ids.
+					if (!json) {
+						for (const secret of ["BODYSECRET", "ECHOSECRET"]) expect(text).not.toContain(secret);
+						expect(text).toContain("sign-in expired");
+					}
+					if (redact) {
+						expect(text).not.toContain(email);
+						expect(text).not.toContain(accountId);
+						expect(text).toContain("Pe*");
+					}
+					if (json) {
+						const payload = JSON.parse(output) as { disabledCredentials: DisabledCredentialSummary[] };
+						expect(payload.disabledCredentials).toHaveLength(1);
+						expect(payload.disabledCredentials[0]).toMatchObject({ id, projectId: redact ? "pr*" : projectId });
+						// JSON keeps the forensic cause; the text row shows the classified one.
+						expect(payload.disabledCredentials[0]!.cause).toBe("sign-in expired");
+					} else {
+						expect(text).toContain("disabled");
+						expect(text).not.toContain("No credentials found");
+					}
+					vi.restoreAllMocks();
+				}
+			} finally {
+				authStorage?.close();
+				vi.restoreAllMocks();
+				process.exitCode = originalExitCode;
+				await profile.remove();
+			}
+		});
+
+		it(`recovers retained managed MCP tombstones without adding usage rows in ${json ? "JSON" : "text"}`, async () => {
+			const profile = TempDir.createSync("@omp-usage-recovery-");
+			const originalExitCode = process.exitCode;
+			const provider = "mcp_oauth:profile:default:https://host.test/mcp";
+			const email = "Recovered@Example.test";
+			const cause = "oauth refresh failed: invalid_grant";
+			let retained: DisabledCredentialSummary[] = [];
+			let authStorage: AuthStorage | undefined;
+			try {
+				for (const recovered of [false, true]) {
+					const store = new SqliteAuthCredentialStore(new Database(profile.join("auth.db")));
+					authStorage = new AuthStorage(store);
+					await authStorage.reload();
+					vi.spyOn(logger, "warn").mockImplementation(() => {});
+					await authStorage.set(provider, {
+						type: "oauth",
+						access: recovered ? "REAUTHORIZEDACCESS" : "DISABLEDACCESS",
+						refresh: recovered ? "REAUTHORIZEDREFRESH" : "DISABLEDREFRESH",
+						expires: Date.now() + HOUR,
+						email: recovered ? email.toLowerCase() : email,
+					});
+					if (!recovered) {
+						const id = authStorage.exportSnapshot().credentials[0]!.id;
+						expect(authStorage.disableCredentialById(id, cause)).toBe(true);
+						retained = await store.listDisabledCredentials();
+						// `retained` is the store's tombstone, which keeps the verbatim cause
+						// and the full provider id; only the projections classify.
+						expect(retained).toEqual([expect.objectContaining({ id, provider, email, cause })]);
+					}
+					// SQLite prunes recovered rows; a broker may retain the original forensic listing.
+					vi.spyOn(store, "listDisabledCredentials").mockResolvedValue(retained);
+					vi.spyOn(sdk, "discoverAuthStorage").mockResolvedValue(authStorage);
+					vi.spyOn(authStorage, "fetchUsageReports").mockResolvedValue([]);
+					let output = "";
+					let errors = "";
+					vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+						output += String(chunk);
+						return true;
+					});
+					vi.spyOn(process.stderr, "write").mockImplementation(chunk => {
+						errors += String(chunk);
+						return true;
+					});
+					process.exitCode = 0;
+					await runUsageCommand({ json }, profile.join("models.yml"));
+					authStorage = undefined;
+					vi.restoreAllMocks();
+					if (json) {
+						const payload = JSON.parse(output) as {
+							disabledCredentials: DisabledCredentialSummary[];
+							accountsWithoutUsage: UsageAccountIdentity[];
+						};
+						// The JSON projection classifies the cause and drops the URL; `retained`
+						// above is the store's verbatim tombstone.
+						expect(payload.disabledCredentials).toEqual(
+							recovered
+								? []
+								: retained.map(row => ({
+										...row,
+										provider: "mcp_oauth:profile:default:https://host.test",
+										cause: "sign-in expired",
+									})),
+						);
+						expect(payload.accountsWithoutUsage).toEqual([]);
+						expect(errors).toBe("");
+					} else if (recovered) {
+						expect(output).toBe("");
+						expect(errors).toContain("providers without a usage endpoint");
+						expect(errors).not.toContain("No credentials found");
+						expect(process.exitCode).toBe(1);
+					} else {
+						expect(output).toContain(email);
+						expect(output).toContain("re-login to restore");
+						expect(errors).toBe("");
+					}
+				}
+			} finally {
+				authStorage?.close();
+				vi.restoreAllMocks();
+				process.exitCode = originalExitCode ?? 0;
+				await profile.remove();
+			}
+		});
+	}
+});
 
 describe("buildRedactionMap", () => {
 	it("masks everything past a two-char anchor when the anchor is unique", () => {
@@ -440,81 +1190,27 @@ describe("formatUsageBreakdown", () => {
 		for (const mask of redaction.values()) expect(text).toContain(mask);
 	});
 
-	it("renders auto-disabled tombstones with the upstream error_description and hides lifecycle noise", () => {
-		const now = Date.now();
-		const disabled = [
+	it("masks overlapping diagnostic identities literally before truncating the cause", () => {
+		const projectId = "private-project";
+		const orgName = "private-project-confidential-organization";
+		const longIdentity = "$&-" + "private".repeat(20);
+		const redaction = buildRedactionMap([projectId, orgName, longIdentity]);
+		const disabled: DisabledCredentialSummary[] = [
 			{
-				id: 26,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "dead@example.test",
-				cause: 'oauth refresh failed: OAuthError: refresh request failed; body={"error": "invalid_grant", "error_description": "Refresh token expired"}',
-				disabledAtMs: now - 4 * HOUR,
-			},
-			{
-				id: 27,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "rotated@example.test",
-				cause: "replaced by newer credential",
-			},
-			{
-				id: 28,
-				provider: "fireworks",
-				type: "api_key" as const,
-				cause: "oauth refresh failed: whatever",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown(reports, accounts, now, undefined, disabled));
-		// Auto-disabled OAuth row: identity, age, shortened upstream cause, and the fix.
-		expect(text).toContain("✗ dead@example.test — disabled 4h ago: Refresh token expired (re-login to restore)");
-		// User-driven replacement and api_key tombstones are lifecycle noise, not lost capacity.
-		expect(text).not.toContain("rotated@example.test");
-		expect(text).not.toContain("Fireworks");
-	});
-	it("suppresses auto-disabled tombstones when an active account exists with the same identity", () => {
-		const now = Date.now();
-		const activeAccounts: UsageAccountIdentity[] = [
-			{
-				provider: "anthropic",
+				id: 51,
+				provider: "google-gemini-cli",
 				type: "oauth",
-				email: "active@example.test",
+				projectId,
+				orgName,
+				cause: `oauth refresh failed: ${orgName} ${longIdentity} denied`,
 			},
 		];
-		const disabled = [
-			{
-				id: 30,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "active@example.test",
-				cause: "oauth refresh failed: Refresh token expired",
-			},
-			{
-				id: 31,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "truly-dead@example.test",
-				cause: "oauth refresh failed: Refresh token expired",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown([], activeAccounts, now, undefined, disabled));
-		expect(text).not.toContain("active@example.test — disabled");
-		expect(text).toContain("✗ truly-dead@example.test — disabled");
-	});
-
-	it("renders a tombstone-only provider section even when no active credential remains", () => {
-		const disabled = [
-			{
-				id: 50,
-				provider: "anthropic",
-				type: "oauth" as const,
-				email: "last@example.test",
-				cause: "oauth refresh failed: token endpoint said no",
-			},
-		];
-		const text = stripVTControlCharacters(formatUsageBreakdown([], [], Date.now(), undefined, disabled));
-		expect(text).toContain("Anthropic");
-		expect(text).toContain("✗ last@example.test — disabled: token endpoint said no (re-login to restore)");
+		const text = stripVTControlCharacters(formatUsageBreakdown([], [], 1000, redaction, disabled));
+		// The cause is classified, so only the identity label can echo an identity
+		// and `--redact` must mask every part of it.
+		expect(text).toContain(redaction.get(orgName)!);
+		expect(text).not.toContain("confidential-organization");
+		expect(text).not.toContain("private");
 	});
 
 	it("warns about Anthropic's ~30d grant lifetime only inside the final week", () => {

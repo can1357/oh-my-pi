@@ -3478,7 +3478,13 @@ describe("ExtensionRunner", () => {
 				modelRegistry,
 			);
 
-			await runner.emit({ type: "credential_disabled", provider: "anthropic", disabledCause: "invalid_grant" });
+			await runner.emit({
+				type: "credential_disabled",
+				provider: "anthropic",
+				disabledCause: "invalid_grant",
+				credentialId: 1,
+				credentialType: "oauth",
+			});
 
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
@@ -3527,7 +3533,13 @@ describe("ExtensionRunner", () => {
 				errors.push(err);
 			});
 
-			await runner.emit({ type: "credential_disabled", provider: "anthropic", disabledCause: "invalid_grant" });
+			await runner.emit({
+				type: "credential_disabled",
+				provider: "anthropic",
+				disabledCause: "invalid_grant",
+				credentialId: 1,
+				credentialType: "oauth",
+			});
 
 			const events = fs
 				.readFileSync(eventsPath, "utf8")
@@ -3552,7 +3564,13 @@ describe("ExtensionRunner", () => {
 
 			expect(runner.hasHandlers("credential_disabled")).toBe(false);
 			await expect(
-				runner.emit({ type: "credential_disabled", provider: "anthropic", disabledCause: "invalid_grant" }),
+				runner.emit({
+					type: "credential_disabled",
+					provider: "anthropic",
+					disabledCause: "invalid_grant",
+					credentialId: 1,
+					credentialType: "oauth",
+				}),
 			).resolves.toBeUndefined();
 		});
 
@@ -3583,7 +3601,12 @@ describe("ExtensionRunner", () => {
 
 			// Push 33 events while uninitialized — the 1st should be dropped.
 			for (let i = 0; i < 33; i++) {
-				await runner.emitCredentialDisabled({ provider: `provider-${i}`, disabledCause: "invalid_grant" });
+				await runner.emitCredentialDisabled({
+					provider: `provider-${i}`,
+					disabledCause: "invalid_grant",
+					credentialId: i + 1,
+					credentialType: "oauth",
+				});
 			}
 
 			runner.initialize(

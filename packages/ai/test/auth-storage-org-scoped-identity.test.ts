@@ -340,7 +340,9 @@ function makeStore(
 		updateAuthCredential(id, credential) {
 			onUpdate?.(id, credential);
 		},
-		deleteAuthCredential() {},
+		deleteAuthCredential() {
+			return false;
+		},
 		tryDisableAuthCredentialIfMatches() {
 			return false;
 		},

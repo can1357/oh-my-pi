@@ -39,7 +39,7 @@ Source: `packages/ai/src/auth-broker/`, `packages/ai/src/auth-gateway/`, `packag
                   api.anthropic.com / api.openai.com / …
 ```
 
-The broker is the only writer of OAuth refresh tokens. Clients (including the gateway itself) load a redacted snapshot in which every `refresh` field has been replaced with `REMOTE_REFRESH_SENTINEL`; when an access token expires the client calls `POST /v1/credential/:id/refresh` and the broker performs the refresh server-side. `RemoteAuthCredentialStore` rejects local replace/upsert/delete-by-provider mutations, with errors pointing at `omp auth-broker login` / `omp auth-broker logout`.
+The broker is the only writer of OAuth refresh tokens. Clients (including the gateway itself) load a redacted snapshot in which every `refresh` field has been replaced with `REMOTE_REFRESH_SENTINEL`; when an access token expires the client calls `POST /v1/credential/:id/refresh` and the broker performs the refresh server-side. `RemoteAuthCredentialStore` rejects synchronous local replace/upsert/delete-by-provider mutations. `AuthStorage` uses the store's asynchronous write hooks instead; whole-provider `remove()` / `logout()` rejects providers restricted by the client's account pool, otherwise calls `POST /v1/provider/logout` and awaits persistence before clearing the client snapshot.
 
 ## auth-broker
 
@@ -47,7 +47,7 @@ The broker is the only writer of OAuth refresh tokens. Clients (including the ga
 
 ```
 omp auth-broker serve     [--bind=host:port]                    # boot the broker
-omp auth-broker token     [--regenerate] [--json]               # print or rotate the bearer token
+omp auth-broker token     [--regenerate] [--json]               # print or regenerate the saved token
 omp auth-broker login     [<provider>] [--via=user@host] [--dry-run]
 omp auth-broker logout    [<provider>]
 omp auth-broker list      [--json]
@@ -57,9 +57,9 @@ omp auth-broker status    [--json]
 ```
 
 - `serve` opens the local SQLite store at `getAgentDbPath()` and binds an HTTP listener (default `127.0.0.1:8765`). On startup a token is ensured at `<config-dir>/auth-broker.token` (mode `0600`, `0700` parent dir). The background refresher refreshes any OAuth credential whose `expires - Date.now() < refreshSkewMs` (default 5 min) every `refreshIntervalMs` (default 60 s).
-- `token` prints the cached bearer or generates a new one. `--regenerate` rotates it.
+- `token` prints the saved bearer or generates a new one. `--regenerate` replaces the token file, not the running server's token set: restart the broker to load it and update its clients. Until restart, the old token still authorizes protected requests and the new one is rejected.
 - `login [<provider>]` runs the per-provider OAuth flow locally — when no provider is supplied, it falls back to an interactive numbered picker. With `--via=user@host` it shells out `ssh -L <callback-port>:127.0.0.1:<callback-port> user@host omp auth-broker login <provider>` so the OAuth callback hits the local browser but the credential is written on the broker host (`--via` requires `<provider>`). Built-in callback ports: `anthropic:54545`, `openai-codex:1455`, `google-gemini-cli:8085`, `google-antigravity:51121`, `gitlab-duo:8080`, `devin:59653`, `gitlab-duo-agent:8080`, `zai-coding-plan:9999`. The OAuth dance is driven in-process via `AuthStorage.login()` — there is no longer a `pi-ai` bin to spawn.
-- `logout [<provider>]` deletes every credential row for `<provider>`. With no argument it shows an interactive numbered picker of currently-stored providers.
+- `logout [<provider>]` disables all active credentials and clears prior disabled history for `<provider>` in the local SQLite store. With no argument it shows an interactive numbered picker of currently-stored providers.
 - `list` enumerates every registered OAuth provider id/name (the union of built-ins + `registerOAuthProvider` custom providers). `--json` emits a machine-readable array.
 - `import <file|dir>` imports CLIProxyAPI-style JSON credentials into the local SQLite store. Maps `type` field → omp provider (`claude → anthropic`, `codex → openai-codex`, `gemini → google-gemini-cli`, `antigravity → google-antigravity`, `gemini-cli → google-gemini-cli`).
 - `migrate --from-local` uploads local SQLite credentials to the configured broker (`POST /v1/credential`). Local API keys are included by default; local OAuth rows are skipped unless `--include-oauth` is set; environment-derived API keys are skipped unless `--include-env` is set. Re-runs are idempotent against the broker snapshot.
@@ -75,6 +75,7 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/credential`             | bearer | Upsert one OAuth or API-key credential                             |
 | `POST`   | `/v1/credential/:id/refresh` | bearer | Force-refresh one OAuth credential                                 |
 | `POST`   | `/v1/credential/:id/disable` | bearer | Disable one credential with a recorded cause                       |
+| `POST`   | `/v1/provider/logout`       | bearer | Disable all provider credentials and clear prior disabled history |
 | `GET`    | `/v1/credentials/disabled`   | bearer | List disabled credentials; optional `provider` query filter        |
 | `POST`   | `/v1/credential/:id/block`   | bearer | Upsert a provider/scope rate-limit block                           |
 | `DELETE` | `/v1/credential/:id/blocks`  | bearer | Delete all rate-limit blocks for a credential                      |
@@ -85,6 +86,10 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/usage/stale`            | bearer | Invalidate the broker's current usage cache                        |
 
 Requests use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
+
+`POST /v1/provider/logout` accepts `{ "provider": "<provider-id>" }` and returns `{ "ok": true }` after persistence succeeds. It clears all prior history for that exact provider, including unidentified tombstones and history with no active credentials, then records active rows as `deleted by user`. Other providers are untouched. This is a deliberate logout and emits no automatic credential-disable event. Single-account removal still uses the per-row disable route and cannot claim unidentified history. Broker errors propagate to the caller. A broker predating this endpoint answers 404, and the client then falls back to disabling the provider's rows one by one through `POST /v1/credential/:id/disable`, which every broker has always supported: the accounts are logged out, but prior history for that provider is not cleared, so unidentified tombstones and history with no active credentials survive. A failure during that fallback propagates and the local snapshot is left intact. Upgrade the broker to clear history as part of logout.
+
+`POST /v1/credential/:id/disable` with a deliberate logout cause (`deleted by user` or `logged out by user`) also purges an already-disabled target and succeeds if that id is already gone. Automatic-disable causes still return 404 for missing active rows. A client whose snapshot lost the selected row can retry only when the tombstone remains visible through its account pool. Persistence failures propagate before local state is cleared; unrelated unidentified history is preserved.
 
 #### Conditional snapshot long polling
 
@@ -136,7 +141,7 @@ omp auth-gateway check   [--strict] [--json]
 ```
 
 - `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, and constructs an `AuthStorage` that resolves access tokens through the broker. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely (loopback-only use).
-- `token` / `status` manage and inspect the gateway bearer token and upstream broker readiness.
+- `token` manages the saved gateway bearer; `status` inspects upstream broker readiness. `token --regenerate` only replaces the token file. Restart an authenticated gateway and update its clients to activate the new bearer; the running gateway continues accepting the old token until restart.
 - `check` probes broker-backed credentials through the gateway store. Without `--strict` it uses provider usage probes; `--strict` also exercises each credential against its chat-completion endpoint and can consume a small amount of quota.
 
 ### Endpoints
@@ -205,6 +210,8 @@ SDK hosts can supply the same provider-to-identity mapping as `accountPool` in `
 - An empty array hides every OAuth credential for that provider.
 - A non-empty array exposes only exact identity matches, including organization/workspace qualifiers.
 - API-key credentials remain visible; the pool applies only to OAuth accounts.
+
+Whole-provider `remove()` / `logout()` rejects with `ConfigurationError` before any mutation or broker request when the provider is named in the pool, including an empty array. This preserves visible and hidden accounts and disabled history; remove individual visible accounts instead. Providers absent from the pool retain normal whole-provider logout.
 
 The file is parsed once when broker-backed auth storage starts. An unreadable file, malformed JSON, or invalid provider entry aborts initialization rather than silently broadening the pool. Full snapshots, SSE updates, refresh responses, and aggregate usage are filtered consistently. For a provider named in the pool, aggregate reports are returned only when they can be attributed to a visible OAuth identity; reports attributable only to an API key or lacking matching identity metadata fail closed. The encrypted snapshot cache remains a raw broker snapshot so trusted processes sharing that cache can apply different pools.
 
