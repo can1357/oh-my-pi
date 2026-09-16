@@ -763,6 +763,14 @@ export interface CreateAgentSessionOptions {
 	 *   the original `A` therefore builds a replacement combining A's prompt and
 	 *   extensions with B's filesystem; taking it from the reopened manager
 	 *   keeps both halves on the same project.
+	 * - Pass `providerSessionId` from the callback THROUGH to the replacement's
+	 *   {@link providerSessionId} option. It is the session's ACTIVE
+	 *   provider-facing identity, which diverges from the durable `sessionId`
+	 *   once the user runs `/fresh` (or a context reset) to rotate provider-side
+	 *   stream state. The durable id is still what `SessionManager.open()`
+	 *   restores for transcript reattachment, so omitting `providerSessionId`
+	 *   would silently rebuild the replacement on the old durable id and resume
+	 *   the provider session the user deliberately rotated away from.
 	 * Keep genuine host configuration (provider registry, auth, agent id, event
 	 * bus); invalidate the discovery-backed preload fields above and re-derive
 	 * `cwd`.
@@ -781,7 +789,11 @@ export interface CreateAgentSessionOptions {
 	 * host-process-level operation, never triggered per-agent. Unset =>
 	 * `requestRestart()` refuses (restart unavailable).
 	 */
-	onRestartRequested?: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>;
+	onRestartRequested?: (info: {
+		sessionId: string;
+		sessionFile: string;
+		providerSessionId: string;
+	}) => void | Promise<void>;
 	/**
 	 * Re-read `model` from `modelRegistry` by its own provider/id before use.
 	 *

@@ -1512,4 +1512,105 @@ describe("restart reconstruction reattach", () => {
 			AgentRegistry.resetGlobalForTests();
 		}
 	});
+
+	// After /fresh the session runs on a ROTATED provider-facing identity
+	// (#freshProviderSessionId), while its durable SessionManager id is unchanged
+	// — the durable id is only for transcript reattachment. The restart handoff
+	// captured only the durable id, so a reconstruction fell back to it and the
+	// replacement resumed the provider session the user deliberately rotated away
+	// from. The handoff now also carries the active provider identity, which the
+	// host passes through as `providerSessionId`.
+	//
+	// RED (pre-fix): the callback payload had no `providerSessionId`, so the
+	// replacement rebuilt on the durable id — `replacement.agent.sessionId` equals
+	// the durable id instead of the rotated one.
+	it("preserves the /fresh-rotated provider identity across a reconstruction", async () => {
+		using tempDir = TempDir.createSync("@pi-restart-fresh-provider-");
+		const marker = Bun.nanoseconds().toString(36);
+		const api = `restart-fresh-provider-${marker}`;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("managed-primary", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+
+		let replacement: AgentSession | undefined;
+		let reopenedManager: SessionManager | undefined;
+		let durableIdSeenByHost: string | undefined;
+		let providerIdSeenByHost: string | undefined;
+		const onRestartRequested = async ({
+			sessionId,
+			sessionFile,
+			providerSessionId,
+		}: {
+			sessionId: string;
+			sessionFile: string;
+			providerSessionId: string;
+		}) => {
+			durableIdSeenByHost = sessionId;
+			providerIdSeenByHost = providerSessionId;
+			// Reopen off the DURABLE id (transcript reattachment) but rebuild on
+			// the active provider identity, exactly as the contract now requires.
+			reopenedManager = await SessionManager.open(sessionFile, tempDir.path());
+			const rebuilt = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				sessionManager: reopenedManager,
+				authStorage,
+				modelRegistry,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				model: buildLocalModel(api),
+				providerSessionId,
+				disableExtensionDiscovery: true,
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+			replacement = rebuilt.session;
+		};
+
+		const sessionManager = SessionManager.create(tempDir.path());
+		const { session: parent } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager,
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model: buildLocalModel(api),
+			disableExtensionDiscovery: true,
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			onRestartRequested,
+		});
+		await sessionManager.ensureOnDisk();
+		await sessionManager.flush();
+
+		const durableId = sessionManager.getSessionId();
+		// Rotate the provider-facing identity, as /fresh does.
+		const fresh = parent.freshSession();
+		if (!fresh) throw new Error("Expected freshSession to rotate the provider identity");
+		const rotatedProviderId = parent.sessionId;
+		expect(rotatedProviderId).not.toBe(durableId);
+
+		const result = await parent.requestRestart();
+		expect(result.ok).toBe(true);
+
+		try {
+			if (!replacement) throw new Error("Expected the restart callback to build a replacement session");
+			// The handoff carried the durable id for reattachment AND the active
+			// provider identity separately.
+			expect(durableIdSeenByHost).toBe(durableId);
+			expect(providerIdSeenByHost).toBe(rotatedProviderId);
+			// Consumer-visible: a provider request from the replacement routes on the
+			// ROTATED identity, not the durable session the user rotated away from.
+			expect(replacement.agent.sessionId).toBe(rotatedProviderId);
+			expect(replacement.agent.sessionId).not.toBe(durableId);
+			// Transcript reattachment still tracks the durable id.
+			expect(reopenedManager?.getSessionId()).toBe(durableId);
+		} finally {
+			await replacement?.dispose();
+			await reopenedManager?.close();
+		}
+	});
 });

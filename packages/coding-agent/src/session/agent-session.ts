@@ -591,7 +591,9 @@ export class AgentSession {
 		return this.#extensionPaths;
 	}
 
-	#onRestartRequested: ((info: { sessionId: string; sessionFile: string }) => void | Promise<void>) | undefined;
+	#onRestartRequested:
+		| ((info: { sessionId: string; sessionFile: string; providerSessionId: string }) => void | Promise<void>)
+		| undefined;
 	/**
 	 * Cooperative-restart state. `#restarting` latches out new turns from entry
 	 * through the host callback. `#restartCall` coalesces an in-flight
@@ -6008,7 +6010,11 @@ export class AgentSession {
 	}
 
 	async #doRequestRestart(
-		onRestartRequested: (info: { sessionId: string; sessionFile: string }) => void | Promise<void>,
+		onRestartRequested: (info: {
+			sessionId: string;
+			sessionFile: string;
+			providerSessionId: string;
+		}) => void | Promise<void>,
 		sessionFile: string,
 	): Promise<RequestRestartResult> {
 		try {
@@ -6084,6 +6090,11 @@ export class AgentSession {
 			// SessionManager.open restores, NOT the sessionId getter (which can
 			// return a fresh provider UUID that diverges from it).
 			const sessionId = this.sessionManager.getSessionId();
+			// The ACTIVE provider-facing identity, captured before dispose. It
+			// diverges from the durable id once /fresh (or a context reset) rotates
+			// the provider session; handing it to the host keeps the rotation across
+			// the recycle instead of resuming the session the user rotated away from.
+			const providerSessionId = this.sessionId;
 			// Durability barrier: the file the host re-opens reflects the full transcript.
 			await this.sessionManager.flush();
 			await this.sessionManager.ensureOnDisk();
@@ -6249,7 +6260,7 @@ export class AgentSession {
 			}
 			let reattached = false;
 			try {
-				await onRestartRequested({ sessionId, sessionFile });
+				await onRestartRequested({ sessionId, sessionFile, providerSessionId });
 				reattached = true;
 			} finally {
 				// Only NOW does a replacement exist to own the shared resources the
