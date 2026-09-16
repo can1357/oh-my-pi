@@ -4588,6 +4588,119 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 	});
 
+	it("keeps preserved sessions when a changed frame disappears before isolated-world replay", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true, worldName: "isolated" },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "oopif", loaderId: "child-before" } }],
+			},
+		});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "oopif", loaderId: "child-before" } }],
+			},
+		});
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "oopif", loaderId: "child-before" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-after-recovery" });
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				sessionId: "oopif-session",
+				method: "Page.frameNavigated",
+				params: { frame: { id: "oopif", loaderId: "child-after" } },
+			}),
+		);
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Target.attachedToTarget",
+				params: { sessionId: "oopif-session", targetInfo: { targetId: "oopif", type: "iframe" } },
+			}),
+		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: {
+				frame: { id: "main", loaderId: "main-loader" },
+				childFrames: [{ frame: { id: "oopif", loaderId: "child-after" } }],
+			},
+		});
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.enable"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.createIsolatedWorld"));
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Target.detachedFromTarget",
+				params: { sessionId: "oopif-session", targetId: "oopif" },
+			}),
+		);
+		nack(bridge, ext2, "send", "No frame with given id found");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.disable"));
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
+		await flush();
+		ack(bridge, ext2, "send", { frameTree: { frame: { id: "main", loaderId: "main-loader" } } });
+		await flush();
+
+		expect(ext2.rpcs("detach")).toEqual([]);
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: commandId,
+				sessionId: pageSession,
+				method: "Runtime.evaluate",
+				params: { expression: "1 + 1" },
+			}),
+		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
+		ack(bridge, ext2, "send", { result: { value: 2 } });
+		await waitFor(() => cdp.messages.some(message => message.id === commandId));
+		expect(cdp.messages.find(message => message.id === commandId)?.error).toBeUndefined();
+	});
+
 	it("evaluates changed nested OOPIF frames in their exact default contexts", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

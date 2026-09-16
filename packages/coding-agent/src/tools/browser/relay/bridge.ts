@@ -3880,79 +3880,91 @@ export class RelayBridge {
 			}
 			for (const frameId of frameIds) {
 				const sessionId = tab.frameSessions.get(frameId);
-				if (typeof worldName === "string") {
-					const isolatedWorld = (await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						...(sessionId ? { sessionId } : {}),
-						method: "Page.createIsolatedWorld",
-						params: { frameId, worldName },
-					})) as { executionContextId?: unknown } | undefined;
-					if (typeof isolatedWorld?.executionContextId !== "number") {
-						throw new Error(`No isolated execution context for changed frame ${frameId}`);
+				try {
+					if (typeof worldName === "string") {
+						const isolatedWorld = (await this.#rpc({
+							op: "send",
+							tabId: tab.tabId,
+							...(sessionId ? { sessionId } : {}),
+							method: "Page.createIsolatedWorld",
+							params: { frameId, worldName },
+						})) as { executionContextId?: unknown } | undefined;
+						if (typeof isolatedWorld?.executionContextId !== "number") {
+							throw new Error(`No isolated execution context for changed frame ${frameId}`);
+						}
+						this.#assertExtensionCurrent(expectedExt);
+						await this.#rpc({
+							op: "send",
+							tabId: tab.tabId,
+							...(sessionId ? { sessionId } : {}),
+							method: "Runtime.evaluate",
+							params: { expression: source, contextId: isolatedWorld.executionContextId, ...commandLineAPI },
+						});
+						continue;
 					}
-					this.#assertExtensionCurrent(expectedExt);
-					await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						...(sessionId ? { sessionId } : {}),
-						method: "Runtime.evaluate",
-						params: { expression: source, contextId: isolatedWorld.executionContextId, ...commandLineAPI },
-					});
-					continue;
-				}
-				if (sessionId) {
-					let childContexts = tab.childPreloadContextProbes.get(sessionId);
-					if (!childContexts) {
-						childContexts = new Map();
-						tab.childPreloadContextProbes.set(sessionId, childContexts);
-						const runtimeWasEnabled = tab.childRuntimeEnabled.has(sessionId);
+					if (sessionId) {
+						let childContexts = tab.childPreloadContextProbes.get(sessionId);
+						if (!childContexts) {
+							childContexts = new Map();
+							tab.childPreloadContextProbes.set(sessionId, childContexts);
+							const runtimeWasEnabled = tab.childRuntimeEnabled.has(sessionId);
+							this.#assertExtensionCurrent(expectedExt);
+							await this.#rpc({
+								op: "send",
+								tabId: tab.tabId,
+								sessionId,
+								method: "Runtime.enable",
+							});
+							if (!runtimeWasEnabled) temporarilyEnabledChildSessions.add(sessionId);
+						}
+						const match = [...childContexts].find(([, context]) => {
+							const auxData = context.auxData;
+							if (!auxData || typeof auxData !== "object") return false;
+							const contextAuxData = auxData as Record<string, unknown>;
+							return contextAuxData.frameId === frameId && contextAuxData.isDefault === true;
+						});
+						if (!match) throw new Error(`No matching execution context for changed frame ${frameId}`);
 						this.#assertExtensionCurrent(expectedExt);
 						await this.#rpc({
 							op: "send",
 							tabId: tab.tabId,
 							sessionId,
-							method: "Runtime.enable",
+							method: "Runtime.evaluate",
+							params: { expression: source, contextId: match[0], ...commandLineAPI },
 						});
-						if (!runtimeWasEnabled) temporarilyEnabledChildSessions.add(sessionId);
+						continue;
 					}
-					const match = [...childContexts].find(([, context]) => {
+					const match = [...contexts].find(([, context]) => {
 						const auxData = context.auxData;
 						if (!auxData || typeof auxData !== "object") return false;
 						const contextAuxData = auxData as Record<string, unknown>;
-						return contextAuxData.frameId === frameId && contextAuxData.isDefault === true;
+						if (contextAuxData.frameId !== frameId) {
+							return false;
+						}
+						return contextAuxData.isDefault === true;
 					});
 					if (!match) throw new Error(`No matching execution context for changed frame ${frameId}`);
 					this.#assertExtensionCurrent(expectedExt);
 					await this.#rpc({
 						op: "send",
 						tabId: tab.tabId,
-						sessionId,
 						method: "Runtime.evaluate",
 						params: { expression: source, contextId: match[0], ...commandLineAPI },
 					});
-					continue;
+				} catch (err) {
+					if (isExtensionTransportInterrupted(err)) throw err;
+					// Frame discovery and targeted replay are separate CDP operations. A
+					// vanished/replaced child is already covered by the durable registration.
+					if (tab.frameSessions.get(frameId) !== sessionId) continue;
+					const currentFrames = await this.#frameDocumentState(tab.tabId);
+					this.#assertExtensionCurrent(expectedExt);
+					if (!(frameId in currentFrames.frameLoaderIds)) continue;
+					throw err;
 				}
-				const match = [...contexts].find(([, context]) => {
-					const auxData = context.auxData;
-					if (!auxData || typeof auxData !== "object") return false;
-					const contextAuxData = auxData as Record<string, unknown>;
-					if (contextAuxData.frameId !== frameId) {
-						return false;
-					}
-					return contextAuxData.isDefault === true;
-				});
-				if (!match) throw new Error(`No matching execution context for changed frame ${frameId}`);
-				this.#assertExtensionCurrent(expectedExt);
-				await this.#rpc({
-					op: "send",
-					tabId: tab.tabId,
-					method: "Runtime.evaluate",
-					params: { expression: source, contextId: match[0], ...commandLineAPI },
-				});
 			}
 		} finally {
 			for (const sessionId of temporarilyEnabledChildSessions) {
+				if (!tab.realSessions.has(sessionId)) continue;
 				this.#assertExtensionCurrent(expectedExt);
 				await this.#rpc({ op: "send", tabId: tab.tabId, sessionId, method: "Runtime.disable" });
 			}
