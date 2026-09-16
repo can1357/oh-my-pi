@@ -1138,6 +1138,47 @@ describe("resolveAgentModelPatterns", () => {
 		).toEqual(["anthropic/claude-sonnet-4-5"]);
 	});
 
+	test("a default alias with a thinking suffix inherits the active model at the requested level", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" },
+		});
+
+		for (const requestModel of ["@default:high", "*:high", "pi/default:high", "default:high"]) {
+			expect(
+				resolveAgentModelSelection({
+					requestModel,
+					settingsOverride: "@definition",
+					agentModel: "@definition",
+					settings,
+					activeModelPattern: "zai/glm-5.2",
+				}),
+			).toEqual({ patterns: ["zai/glm-5.2:high"], role: undefined });
+		}
+
+		// A bare `@default` inherits an unsuffixed parent selector verbatim.
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@default", settings, activeModelPattern: "zai/glm-5.2" }),
+		).toEqual(["zai/glm-5.2"]);
+		// A bare alias also preserves a parent's existing suffix.
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@default", settings, activeModelPattern: "zai/glm-5.2:high" }),
+		).toEqual(["zai/glm-5.2:high"]);
+		// A requested level replaces the parent's own instead of stacking on it.
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@default:low", settings, activeModelPattern: "zai/glm-5.2:high" }),
+		).toEqual(["zai/glm-5.2:low"]);
+		// Without an active model the configured default carries the suffix.
+		expect(resolveAgentModelPatterns({ requestModel: "*:xhigh", settings })).toEqual(["openai/gpt-4o:xhigh"]);
+		// A suffixed non-default alias still expands its configured role.
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@definition:high", settings, activeModelPattern: "zai/glm-5.2" }),
+		).toEqual(["anthropic/claude-sonnet-4-5:high"]);
+		// The agent definition's own suffixed `@default` inherits the same way.
+		expect(
+			resolveAgentModelPatterns({ agentModel: "@default:high", settings, activeModelPattern: "zai/glm-5.2" }),
+		).toEqual(["zai/glm-5.2:high"]);
+	});
+
 	test("uses the configured task role before falling back to the session model", () => {
 		const settings = Settings.isolated({
 			modelRoles: {

@@ -1132,6 +1132,22 @@ export function resolveExplicitModelRole(
 	return undefined;
 }
 
+/**
+ * Split an optional `:<level>` suffix off a role-alias-shaped pattern.
+ *
+ * The colon floor is the matched alias prefix (so `pi/default` keeps its
+ * slash-prefixed shape and `*:high` splits after the one-character token);
+ * non-alias patterns fall back to the legacy prefix length, which is what the
+ * role expansion below already does.
+ */
+function splitRoleAliasThinkingSuffix(value: string): { base: string; level?: ConfiguredThinkingLevel } {
+	return splitThinkingSuffix(
+		value,
+		modelRoleAliasPrefixLength(value) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+		MAX_THINKING_SUFFIX_OPTIONS,
+	);
+}
+
 /** The `default` role written as a pattern: names the session's model, not a configured list. */
 function isDefaultRolePattern(value: string): boolean {
 	return (
@@ -1142,24 +1158,47 @@ function isDefaultRolePattern(value: string): boolean {
 	);
 }
 
-function isSessionInheritedAgentPattern(value: string): boolean {
-	return (
-		isDefaultRolePattern(value) ||
-		value === formatModelRoleAlias("task") ||
-		value === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`
-	);
+/**
+ * A selection that means "run whatever the parent session is running", carrying
+ * the thinking level it asked for. Role aliases take `:level` suffixes
+ * everywhere else, so `@default:high` is the session's model at `high` — not an
+ * expansion of `modelRoles.default`.
+ */
+interface SessionModelInheritance {
+	level?: ConfiguredThinkingLevel;
 }
 
 /**
- * Whether a model selection means "run whatever the parent session is running"
- * rather than a configured pattern list. `@default` is the explicit spelling of
- * that intent, so it must resolve through the session's active model instead of
- * expanding `modelRoles.default` — a parent that switched models mid-session
- * would otherwise hand its child a different model than its own.
+ * Whether a single pattern names the session's model rather than a configured
+ * list. `@default` (and its `*` / `pi/default` / bare spellings) is the explicit
+ * spelling of that intent, so it must resolve through the session's active model
+ * instead of expanding `modelRoles.default` — a parent that switched models
+ * mid-session would otherwise hand its child a different model than its own.
+ * Agent definitions additionally inherit through `@task`.
  */
-export function modelSelectionInheritsSessionModel(value: string | string[] | undefined): boolean {
+function matchSessionInheritedPattern(
+	value: string,
+	options?: { includeTaskAlias?: boolean },
+): SessionModelInheritance | undefined {
+	const { base, level } = splitRoleAliasThinkingSuffix(value);
+	if (isDefaultRolePattern(base)) return { level };
+	if (
+		options?.includeTaskAlias === true &&
+		(base === formatModelRoleAlias("task") || base === `${LEGACY_MODEL_ROLE_ALIAS_PREFIX}task`)
+	) {
+		return { level };
+	}
+	return undefined;
+}
+
+function sessionModelInheritance(value: string | string[] | undefined): SessionModelInheritance | undefined {
 	const patterns = normalizeModelPatternList(value);
-	return patterns.length === 1 && isDefaultRolePattern(patterns[0]!);
+	return patterns.length === 1 ? matchSessionInheritedPattern(patterns[0]!) : undefined;
+}
+
+/** {@link matchSessionInheritedPattern} for a whole selection, without the level. */
+export function modelSelectionInheritsSessionModel(value: string | string[] | undefined): boolean {
+	return sessionModelInheritance(value) !== undefined;
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
@@ -1206,11 +1245,7 @@ function resolveNestedRolePatterns(
 ): string[] {
 	const resolved: string[] = [];
 	for (const pattern of normalizeModelPatternList(value)) {
-		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
-			pattern,
-			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-			MAX_THINKING_SUFFIX_OPTIONS,
-		);
+		const { base: aliasCandidate, level: thinkingLevel } = splitRoleAliasThinkingSuffix(pattern);
 		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
 		if (!aliasRole) {
 			resolved.push(pattern);
@@ -1250,11 +1285,7 @@ function resolveConfiguredRolePattern(
 	const normalized = value.trim();
 	if (!normalized) return undefined;
 
-	const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
-		normalized,
-		modelRoleAliasPrefixLength(normalized) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-		MAX_THINKING_SUFFIX_OPTIONS,
-	);
+	const { base: aliasCandidate, level: thinkingLevel } = splitRoleAliasThinkingSuffix(normalized);
 	const role = getModelRoleAlias(aliasCandidate, settings);
 	if (!role) return [normalized];
 	if (visited.has(role)) return undefined;
@@ -1325,20 +1356,28 @@ interface EffectiveAgentModelSelection {
 	patterns: string[];
 }
 
+/** Point an inherited selector at an explicitly requested thinking level. */
+function applyRequestedThinkingLevel(pattern: string, level: ConfiguredThinkingLevel): string {
+	return `${splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS).base}:${level}`;
+}
+
 function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
 	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
-	const inheritSessionModel = (): EffectiveAgentModelSelection => {
+	const inheritSessionModel = (requested?: SessionModelInheritance): EffectiveAgentModelSelection => {
 		const fallback =
 			activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
-		return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
+		const patterns = resolveConfiguredModelPatterns(fallback, settings);
+		const level = requested?.level;
+		return { patterns: level ? patterns.map(pattern => applyRequestedThinkingLevel(pattern, level)) : patterns };
 	};
 
 	// `@default` asks for the parent's live model, so it short-circuits to the
 	// session tail rather than expanding the `default` role — and it stays the
 	// winning source, never demoting to the agent definition below.
-	if (modelSelectionInheritsSessionModel(requestModel)) return inheritSessionModel();
+	const requestedInheritance = sessionModelInheritance(requestModel);
+	if (requestedInheritance) return inheritSessionModel(requestedInheritance);
 	const requestPatterns = resolveConfiguredModelPatterns(requestModel, settings);
 	if (requestPatterns.length > 0) {
 		return { source: requestModel, patterns: requestPatterns };
@@ -1352,7 +1391,9 @@ function resolveEffectiveAgentModelSelection(
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
 	const configuredAgentPatterns = resolveConfiguredModelPatterns(agentModel, settings);
 	const singleAgentPattern = normalizedAgentPatterns.length === 1 ? normalizedAgentPatterns[0] : undefined;
-	const agentInheritsSessionModel = singleAgentPattern ? isSessionInheritedAgentPattern(singleAgentPattern) : false;
+	const agentInheritance = singleAgentPattern
+		? matchSessionInheritedPattern(singleAgentPattern, { includeTaskAlias: true })
+		: undefined;
 	if (configuredAgentPatterns.length > 0) {
 		if (
 			singleAgentPattern === formatModelRoleAlias("task") ||
@@ -1360,10 +1401,10 @@ function resolveEffectiveAgentModelSelection(
 		) {
 			return { source: agentModel, patterns: configuredAgentPatterns };
 		}
-		if (!agentInheritsSessionModel) return { source: agentModel, patterns: configuredAgentPatterns };
+		if (!agentInheritance) return { source: agentModel, patterns: configuredAgentPatterns };
 	}
 
-	return inheritSessionModel();
+	return inheritSessionModel(agentInheritance);
 }
 
 /** Effective agent model patterns paired with the pre-expansion role alias behind them. */
