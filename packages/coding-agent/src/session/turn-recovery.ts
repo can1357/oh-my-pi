@@ -279,6 +279,7 @@ export class TurnRecovery {
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
+	#retryFallbackGeneration = 0;
 	#usageReserveApprovedSelector: string | undefined;
 	#pendingRetryErrors: PendingRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
@@ -1575,6 +1576,7 @@ export class TurnRecovery {
 
 	/** Clears fallback ownership after an explicit model change or a restore. */
 	clearActiveRetryFallback(): void {
+		this.#retryFallbackGeneration++;
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
 	}
@@ -2167,7 +2169,20 @@ export class TurnRecovery {
 		this.clearActiveRetryFallback();
 		this.#activeRetryFallback = fallback.previousFallback;
 		if (fallback.originalWasFallback) this.#markFallbackRouted();
+		const fallbackGeneration = this.#retryFallbackGeneration;
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
+		// Reconciliation can yield to an explicit model selection, including a
+		// re-selection of the same model after fallback ownership was cleared.
+		if (
+			this.#retryFallbackGeneration !== fallbackGeneration ||
+			this.#activeRetryFallback !== fallback.previousFallback ||
+			this.#host.model() !== primaryModel ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress()
+		) {
+			return false;
+		}
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);

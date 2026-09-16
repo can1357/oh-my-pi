@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added opt-in `retry.refusalFallbackRevertPolicy: after-success` to return to the previous model after one successful refusal/content-block fallback response, including Codex cybersecurity blocks, without changing outage or rate-limit fallback behavior ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Added opt-in `retry.refusalFallbackRevertPolicy: after-success` to return to the previous model after one successful refusal/content-block fallback response, including Codex cybersecurity blocks, without changing outage or rate-limit fallback behavior or overriding explicit model selections during restoration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
 
 ## [18.2.2] - 2026-09-16
 

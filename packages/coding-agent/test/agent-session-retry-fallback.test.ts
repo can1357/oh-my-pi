@@ -33,8 +33,10 @@ import {
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import { getRestorableSessionModels } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -3626,6 +3628,91 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 		expect(requestedModels).toEqual([primary, fallback, selected]);
 	});
+
+	it.each(["different model", "same model"] as const)(
+		"preserves an explicit selection of the %s during restoration reconciliation, including on reload",
+		async selection => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const requestedModels: string[] = [];
+			const mock = createMockModel({
+				responses: [
+					{ stopReason: "error", stopDetails: { type: "refusal" }, errorMessage: "Classifier declined" },
+					{ content: ["Recovered"] },
+					{ content: ["Explicitly selected model"] },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": { [primary]: [fallback] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+			const activeSession = new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+				thinkingLevel: Effort.High,
+			});
+			session = activeSession;
+			const reconciliationStarted = Promise.withResolvers<void>();
+			const releaseReconciliation = Promise.withResolvers<void>();
+			let pauseRestoration = true;
+			const reconcileThinkTool = SessionTools.prototype.reconcileThinkTool;
+			vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (this: SessionTools) {
+				if (
+					pauseRestoration &&
+					requestedModels.at(-1) === fallback &&
+					activeSession.model?.id === primaryModel.id
+				) {
+					pauseRestoration = false;
+					reconciliationStarted.resolve();
+					await releaseReconciliation.promise;
+				}
+				return reconcileThinkTool.call(this);
+			});
+
+			const prompt = activeSession.prompt("Recover this request");
+			let selectedModel: Model;
+			try {
+				await reconciliationStarted.promise;
+				selectedModel =
+					selection === "same model" ? activeSession.model! : getBundledModel("anthropic", "claude-opus-4-1")!;
+				await activeSession.setModel(selectedModel, "temporary");
+				activeSession.setThinkingLevel(Effort.Low);
+			} finally {
+				releaseReconciliation.resolve();
+				await prompt;
+				await activeSession.waitForIdle();
+			}
+
+			const selected = `${selectedModel.provider}/${selectedModel.id}`;
+			expect(activeSession.model?.id).toBe(selectedModel.id);
+			expect(activeSession.thinkingLevel).toBe(Effort.Low);
+			await sessionManager.flush();
+			const reloaded = await SessionManager.open(sessionManager.getSessionFile()!);
+			const restoredContext = reloaded.buildSessionContext();
+			expect(getRestorableSessionModels(restoredContext.models, reloaded.getLastModelChangeRole())[0]).toBe(
+				selected,
+			);
+			expect(restoredContext.thinkingLevel).toBe(Effort.Low);
+
+			await activeSession.prompt("Use the model I selected");
+			await activeSession.waitForIdle();
+			expect(requestedModels).toEqual([primary, fallback, selected]);
+		},
+	);
 
 	it("waits for a successful fallback response before restoring and preserves its attribution", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
