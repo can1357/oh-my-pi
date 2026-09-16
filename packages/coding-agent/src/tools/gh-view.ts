@@ -17,6 +17,7 @@ import {
 	pushLine,
 	requireNonEmpty,
 	resolveDefaultRepoMemoized,
+	resolveGhRequestHost,
 } from "./gh-common";
 import { formatShortSha } from "./gh-format";
 import { FILE_PREVIEW_LIMIT } from "./gh-search";
@@ -457,6 +458,7 @@ export async function executeRepoView(
 
 	const data = await github.json<GhRepoViewData>(session.cwd, args, signal, {
 		repoProvided: Boolean(repo),
+		authHost: await resolveGhRequestHost(session.cwd, repo, signal),
 	});
 	return buildTextResult(formatRepoView(data, { repo, branch }), data.url);
 }

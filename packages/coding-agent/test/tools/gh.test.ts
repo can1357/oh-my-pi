@@ -551,7 +551,7 @@ describe("github tool", () => {
 				"ref=main",
 			],
 			undefined,
-			{ repoProvided: true, trimOutput: false },
+			{ repoProvided: true, trimOutput: false, authHost: "github.com" },
 		);
 	});
 

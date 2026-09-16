@@ -2,7 +2,7 @@ import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { untilAborted } from "@oh-my-pi/pi-utils";
-import { github } from "../utils/github";
+import { type GhAuthHost, ghAuthHost, github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "./gh";
 import type { GhLabel, GhUser } from "./gh-types";
@@ -41,10 +41,22 @@ export function requireNonEmpty(value: string | null | undefined, label: string)
 	return normalized;
 }
 
+/**
+ * The repository a PR-shaped request will actually resolve.
+ *
+ * `gh` derives host, repo and number from a full URL identifier and rejects a
+ * competing `--repo`, so the URL outranks `repo`. Everything that has to agree
+ * with the arguments `gh` receives — the flag below, and the request's auth
+ * host — reads this one answer, so the two cannot drift apart.
+ */
+export function ghRequestRepo(repo: string | undefined, identifier: string | undefined): string | undefined {
+	return identifier?.startsWith("https://") ? identifier : repo;
+}
+
 export function appendRepoFlag(args: string[], repo: string | undefined, identifier?: string): void {
-	// A full URL identifier already names host, repo, and number; `gh` derives
-	// all three from it and rejects a competing `--repo`.
-	if (!repo || identifier?.startsWith("https://")) {
+	// A URL identifier already names host, repo, and number; `gh` derives all
+	// three from it and rejects a competing `--repo`.
+	if (!repo || ghRequestRepo(repo, identifier) !== repo) {
 		return;
 	}
 
@@ -191,9 +203,69 @@ export function defaultGhHost(): string {
 	return (process.env.GH_HOST || GITHUB_HOST).toLowerCase();
 }
 
-/** The host `gh` will send a ref to, whether or not the ref names one. */
-function effectiveHost(ref: GhRepoRef): string {
-	return ref.host?.toLowerCase() ?? defaultGhHost();
+/**
+ * Whether a ref is the shape the `[HOST/]OWNER/REPO` split can actually model.
+ *
+ * `parseRepoRef` splits on `/` and calls anything else a host-less slug, so a
+ * URL, a bare owner, or a deeper path all come back looking like a repository
+ * on the default host. For a display string that is harmless; for deciding
+ * which host holds a credential it is not, so those shapes are refused here
+ * instead of being reported as the default host.
+ */
+function isPlainRepoRef(ref: GhRepoRef): boolean {
+	const parts = ref.slug.split("/");
+	if (parts.length !== 2 || parts.some(part => part === "")) return false;
+	if (/[\s:]/.test(ref.slug)) return false;
+	return ref.host === undefined || (ref.host !== "" && !/[\s:/]/.test(ref.host));
+}
+
+/**
+ * One normalized reading of a repository argument: `[HOST/]OWNER/REPO`, with
+ * the host lowercased and filled in whenever the argument names one.
+ *
+ * `gh` accepts a URL wherever it accepts a repository, and a URL's authority is
+ * its host — but splitting one on `/` reads `https:` as a host, or gives up and
+ * calls the whole string a host-less slug bound to the default host. Every
+ * decision that has to agree with the arguments `gh` receives — the search
+ * `--hostname`, the `repo:` qualifier, the request's auth host — reads the
+ * argument through here, so no two of them can come from different readings of
+ * the same string.
+ *
+ * `undefined` when the argument does not name a repository at all.
+ */
+export function ghRepoRef(repo: string): GhRepoRef | undefined {
+	let url: URL | undefined;
+	try {
+		url = new URL(repo);
+	} catch {
+		url = undefined;
+	}
+	if (url) {
+		const [owner, name] = url.pathname.replace(/^\/+/, "").split("/");
+		// `host`, not `hostname`: a port is part of the authority a request
+		// reaches, so `github.com:8443` is not github.com. `URL` already drops a
+		// port that is the scheme's default, and userinfo never appears here.
+		if (!url.host || !owner || !name) return undefined;
+		return { host: url.host.toLowerCase(), slug: `${owner}/${name}` };
+	}
+	const ref = parseRepoRef(repo);
+	if (!isPlainRepoRef(ref)) return undefined;
+	return ref.host === undefined ? { slug: ref.slug } : { host: ref.host.toLowerCase(), slug: ref.slug };
+}
+
+/**
+ * The host `gh` will send a request to, and so the host any credential for it
+ * belongs to. This is the one place a request's host is decided.
+ *
+ * A ref that names no host is not host-agnostic: `gh` resolves it against
+ * `GH_HOST`, so it is bound to whatever `gh` defaults to. `undefined` means no
+ * host could be established from this argument — the caller must then run on
+ * the ambient environment rather than claim a host it cannot vouch for.
+ */
+export function ghRequestHost(repo: string | GhRepoRef | undefined): GhAuthHost | undefined {
+	if (repo === undefined) return ghAuthHost(defaultGhHost());
+	const ref = typeof repo === "string" ? ghRepoRef(repo) : isPlainRepoRef(repo) ? repo : undefined;
+	return ref === undefined ? undefined : ghAuthHost(ref.host ?? defaultGhHost());
 }
 
 /**
@@ -207,7 +279,9 @@ export function githubRepoSlugEquals(left: string | undefined, right: string): b
 	if (left === undefined) return false;
 	const leftRef = parseRepoRef(left);
 	const rightRef = parseRepoRef(right);
-	if (effectiveHost(leftRef) !== effectiveHost(rightRef)) return false;
+	if ((leftRef.host?.toLowerCase() ?? defaultGhHost()) !== (rightRef.host?.toLowerCase() ?? defaultGhHost())) {
+		return false;
+	}
 	return leftRef.slug.toLowerCase() === rightRef.slug.toLowerCase();
 }
 
@@ -299,6 +373,31 @@ export async function tryResolveCurrentRepo(cwd: string, signal: AbortSignal | u
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * The host a `gh` command that resolves its own base repository will reach.
+ *
+ * `gh repo view`, `gh pr view` and `gh pr create` fall back to the checkout's
+ * remotes when no repository is named, so the host cannot be read off the
+ * arguments — the same resolver `gh` would agree with is asked instead, and it
+ * keeps the host of the remote it found. A URL identifier outranks the
+ * checkout, because `gh` takes host, repo and number from the URL.
+ *
+ * `undefined` when nothing resolves: no host was established, so the caller
+ * runs on the ambient environment instead of on a host that was guessed.
+ */
+export async function resolveGhRequestHost(
+	cwd: string,
+	repo: string | undefined,
+	signal: AbortSignal | undefined,
+): Promise<GhAuthHost | undefined> {
+	if (repo) return ghRequestHost(repo);
+	// Deliberately not the process-lifetime default-repo cache: this decides
+	// which host may be handed a credential, and the repository mounted at a
+	// cwd — or its origin — can change under a cached answer.
+	const resolved = await tryResolveCurrentRepoFresh(cwd, signal);
+	return resolved === undefined ? undefined : ghRequestHost(resolved);
 }
 
 /**

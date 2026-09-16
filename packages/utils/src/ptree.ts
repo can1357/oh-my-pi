@@ -145,6 +145,41 @@ export class TimeoutError extends AbortError {
 	}
 }
 
+/**
+ * Exception for a command whose captured output reached `maxOutputBytes`.
+ *
+ * Counted as an abort: the command was stopped rather than allowed to finish,
+ * so its output is not a result, and `wait()` holds the report until the tree
+ * is gone like any other termination.
+ */
+export class OutputLimitError extends AbortError {
+	constructor(limit: number, stderr: string) {
+		super(new Error(`Captured output reached the ${limit} byte limit`), stderr);
+	}
+}
+
+/**
+ * The longest prefix of `text` that fits `budget` UTF-8 bytes, cut only between
+ * whole code points.
+ *
+ * Slicing by string index would split a surrogate pair, and slicing the encoded
+ * bytes would leave a partial sequence that decodes back to a replacement
+ * character — larger than the byte it replaced.
+ */
+function truncateToUtf8Bytes(text: string, budget: number): string {
+	if (budget <= 0) return "";
+	if (Buffer.byteLength(text) <= budget) return text;
+	let bytes = 0;
+	let end = 0;
+	for (const char of text) {
+		const size = Buffer.byteLength(char);
+		if (bytes + size > budget) break;
+		bytes += size;
+		end += char.length;
+	}
+	return text.slice(0, end);
+}
+
 // ── Wait / Exec types ────────────────────────────────────────────────────────
 
 /** Options for waiting for process exit and capturing output. */
@@ -153,6 +188,16 @@ export interface WaitOptions {
 	allowAbort?: boolean;
 	/** `full` requires upfront capture; `exec` enables it, while direct `spawn` callers pass `stderr: "full"`. */
 	stderr?: "full" | "buffer";
+	/**
+	 * Hard cap on captured stdout, in bytes.
+	 *
+	 * Enforced while reading, not after: past the cap the read stops and the
+	 * process tree is terminated, so a command that streams without end cannot
+	 * grow this process's memory first. The result then carries an
+	 * `OutputLimitError` and stdout holds no more than `maxOutputBytes` bytes.
+	 * Stderr needs no cap — it is drained into a bounded tail as it arrives.
+	 */
+	maxOutputBytes?: number;
 }
 
 /** Result from wait and exec. */
@@ -188,6 +233,19 @@ export class ChildProcess<In extends InMask = InMask> {
 	#drainCutoff: Promise<void>;
 	#resolveDrainCutoff: () => void;
 	#timeoutTimer?: NodeJS.Timeout;
+	// Released once the command is finished with and the root is gone, not at root
+	// exit: a pipe-holding descendant is precisely when an abort still has work to do.
+	#signalDetach?: () => void;
+	// Collection state, deliberately not folded into #openPipeReaders. That counter
+	// means "a read is in flight", which is what proves a pipe's write end is still
+	// held -- it says nothing about which process holds it, so it can never stand in
+	// for the identity of a dead root's process group. These mean "this output has
+	// been dealt with", which is what decides when the caller's abort listener may
+	// go. Stdout counts as outstanding from spawn, because a caller can abort before
+	// it ever starts reading: the root's exit is not the end of the command, and a
+	// descendant can still hold stdout with stderr already closed.
+	#stdoutCollected = false;
+	#stderrCollected = false;
 	#stderrStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
@@ -250,6 +308,8 @@ export class ChildProcess<In extends InMask = InMask> {
 				}
 			} catch {}
 			this.#openPipeReaders--;
+			this.#stderrCollected = true;
+			this.#releaseSignalIfDone();
 			this.#stderrTail += dec.decode();
 			trim();
 		})();
@@ -363,21 +423,6 @@ export class ChildProcess<In extends InMask = InMask> {
 				return;
 			}
 		}
-		if (
-			this.proc.exitCode !== null &&
-			this.#terminateGroup &&
-			this.#openPipeReaders > 0 &&
-			process.platform !== "win32"
-		) {
-			// Bun detached children are POSIX session/process-group leaders. If
-			// the leader has exited, the native Process handle cannot rediscover
-			// its PGID, but a pipe-holding descendant keeps that exact group alive.
-			try {
-				process.kill(-this.proc.pid, "SIGKILL");
-			} catch {}
-			this.#terminating = Promise.resolve();
-			return;
-		}
 		if (this.proc.exitCode !== null && this.#windowsRootProcess && this.#openPipeReaders > 0) {
 			// The retained handle keeps the dead root PID reserved, making the
 			// Windows Toolhelp descendant walk identity-safe after root exit.
@@ -385,16 +430,73 @@ export class ChildProcess<In extends InMask = InMask> {
 			this.#terminating = Promise.resolve();
 			return;
 		}
-		if (!this.proc.killed) {
+		// Everything below signals a pid, so it may only run while that pid is still
+		// the process we spawned. A root whose exit has been observed was reaped, and
+		// from that moment its pid names nothing: the kernel may hand it to a stranger,
+		// and `terminate()` would sweep that stranger's tree.
+		//
+		// A POSIX detached root is also its group's leader, so the group id was that
+		// same pid, and the group outlives the leader while a descendant holds it. An
+		// open pipe read does not make that id verifiable: it proves some writer still
+		// holds the write end, not that the writer is still IN the original group. A
+		// descendant that calls setsid (or setpgid) keeps the pipe while leaving the
+		// group, which can leave the group empty, its id free and reusable by an
+		// unrelated group -- so `kill(-pid)` after the root is gone can SIGKILL a
+		// foreign group. Nothing available here distinguishes the two, so a dead root
+		// signals nothing at all on POSIX.
+		//
+		// The caller is still released: the abort listener and the command deadline
+		// resolve the drain cutoff, which ends the reads a descendant is holding open.
+		// What is given up is reaping that descendant, and only where no ownership is
+		// tracked -- `subreaper: true` retains it on Linux, the retained handle retains
+		// it on Windows, and a live root is swept through its own tree below.
+		if (!this.proc.killed && (this.proc.exitCode === null || this.#windowsRootProcess)) {
 			const options =
 				gracefulMs === undefined
 					? this.#terminateGroup
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
-			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))
+			const terminated = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))
 				?.terminate(options)
 				?.catch(e => void e);
+			// A group signal sent while the root is alive is the one that is provably
+			// ours: the pid it names is still unreaped, so the group id cannot yet have
+			// been recycled. `terminate()` resolves on the root's own exit, though, and
+			// `wait()` promises the caller a signalled tree is gone before it reports,
+			// so hold until the group has emptied.
+			this.#terminating =
+				terminated && this.#terminateGroup && process.platform !== "win32"
+					? terminated.then(() => this.#awaitGroupTeardown(this.proc.pid))
+					: terminated;
+		}
+	}
+
+	/**
+	 * Wait until a group signalled through a live root has no member left, bounded.
+	 *
+	 * Terminating the root only queues the signal its group members still have to be
+	 * torn down by, and `wait()` promises the caller that an aborted tree is gone
+	 * before it reports. Resolving on the root's own exit broke that promise: on a
+	 * loaded machine the descendant was still scheduled when the caller looked.
+	 *
+	 * Probing at all is safe only because the group was signalled while its leader
+	 * was still unreaped, so the id is this command's own group and not a recycled
+	 * one. `kill(-pgid, 0)` is the only portable probe, and a zombie still answers
+	 * it, so the wait ends on the bound rather than hanging on a descendant nobody
+	 * has reaped yet. Reaching the bound is still correct: by then the kill has been
+	 * delivered, and a zombie has already exited.
+	 */
+	async #awaitGroupTeardown(pgid: number): Promise<void> {
+		const deadline = Date.now() + SUBREAPER_KILL_WINDOW_MS;
+		for (;;) {
+			try {
+				process.kill(-pgid, 0);
+			} catch {
+				return;
+			}
+			if (Date.now() >= deadline) return;
+			await Bun.sleep(SUBREAPER_KILL_POLL_MS);
 		}
 	}
 
@@ -435,13 +537,31 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	/**
-	 * Read a pipe fully, stopping early only at an explicit command deadline.
+	 * Read a pipe, stopping early at an explicit command deadline or at
+	 * `maxOutputBytes` of captured output.
+	 *
+	 * The cap is measured on the decoded result, not on the bytes that arrived:
+	 * invalid input expands to three-byte replacement characters, so counting
+	 * input would let a hostile stream return three times the promised bound. A
+	 * sequence the cap cuts in half is likewise never flushed as a replacement
+	 * character past the budget — the trailing partial code point is dropped
+	 * instead, so the returned string always re-encodes to at most the cap.
+	 *
+	 * Dropping it is not silent. The decoder's leftover at EOF counts toward the
+	 * limit like any other byte, so output that only fits once that remainder is
+	 * discarded is reported with an `OutputLimitError` rather than returned as a
+	 * whole answer that happens to be short.
+	 *
+	 * Reaching the cap releases the pipe reads as a deadline does. The kill
+	 * cannot always reach a descendant holding stderr, and the command may have
+	 * no deadline behind it, so nothing else would end that read.
 	 */
-	async #readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+	async #readStream(stream: ReadableStream<Uint8Array>, maxOutputBytes?: number): Promise<string> {
 		this.#openPipeReaders++;
 		const reader = stream.getReader();
 		const dec = new TextDecoder();
 		let out = "";
+		let captured = 0;
 		try {
 			for (;;) {
 				const chunk = await Promise.race([
@@ -453,13 +573,50 @@ export class ChildProcess<In extends InMask = InMask> {
 					break;
 				}
 				if (chunk.r.done) break;
-				out += dec.decode(chunk.r.value, { stream: true });
+				// One chunk at a time, so the decode is bounded by the pipe buffer
+				// rather than by however much the command decides to send.
+				const piece = dec.decode(chunk.r.value, { stream: true });
+				if (maxOutputBytes === undefined) {
+					out += piece;
+					continue;
+				}
+				const pieceBytes = Buffer.byteLength(piece);
+				if (captured + pieceBytes <= maxOutputBytes) {
+					out += piece;
+					captured += pieceBytes;
+					continue;
+				}
+				// Keep the allowance exactly, then stop the command rather than the
+				// buffer: whatever is still coming would only grow this heap.
+				out += truncateToUtf8Bytes(piece, maxOutputBytes - captured);
+				captured = maxOutputBytes;
+				await reader.cancel().catch(() => {});
+				// Same hard path a deadline takes, so a descendant that left the
+				// original group is swept rather than left running.
+				this.kill(new OutputLimitError(maxOutputBytes, this.#stderrTail), -1);
+				// A descendant the kill cannot reach still holds stderr, and this
+				// command may have no deadline behind it, so nothing else would ever
+				// end that read: release the pipes here as a deadline would.
+				this.#resolveDrainCutoff();
+				break;
 			}
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		}
 		this.#openPipeReaders--;
-		return out + dec.decode();
+		if (stream === this.proc.stdout) this.#stdoutCollected = true;
+		this.#releaseSignalIfDone();
+		const tail = dec.decode();
+		if (maxOutputBytes === undefined || captured + Buffer.byteLength(tail) <= maxOutputBytes) return out + tail;
+		// The decoder was still holding an incomplete sequence at EOF and flushing
+		// it as U+FFFD crosses the cap. Dropping it quietly would report a bounded
+		// read as a complete one, so the tail reaches the limit like any other
+		// byte: the caller is told the output was cut, not handed a short answer
+		// that looks whole.
+		const bounded = out + truncateToUtf8Bytes(tail, maxOutputBytes - captured);
+		this.kill(new OutputLimitError(maxOutputBytes, this.#stderrTail), -1);
+		this.#resolveDrainCutoff();
+		return bounded;
 	}
 
 	async #readBytes(): Promise<Uint8Array> {
@@ -485,6 +642,8 @@ export class ChildProcess<In extends InMask = InMask> {
 			// A cancelled or failed read keeps whatever was already collected.
 		} finally {
 			this.#openPipeReaders--;
+			this.#stdoutCollected = true;
+			this.#releaseSignalIfDone();
 			reader.releaseLock();
 		}
 
@@ -524,13 +683,13 @@ export class ChildProcess<In extends InMask = InMask> {
 	// ── Wait ─────────────────────────────────────────────────────────────
 
 	async wait(opts?: WaitOptions): Promise<ExecResult> {
-		const { allowNonZero = false, allowAbort = false, stderr: stderrMode = "buffer" } = opts ?? {};
+		const { allowNonZero = false, allowAbort = false, stderr: stderrMode = "buffer", maxOutputBytes } = opts ?? {};
 		const stderrChunks = this.#stderrChunks;
 		if (stderrMode === "full" && !stderrChunks) {
 			throw new Error('Full stderr capture must be requested when spawning the process (pass stderr: "full")');
 		}
 
-		const stdoutP = this.#readStream(this.proc.stdout);
+		const stdoutP = this.#readStream(this.proc.stdout, maxOutputBytes);
 		const stderrP =
 			stderrMode === "full" && stderrChunks
 				? this.#stderrDone.then(() => new TextDecoder().decode(Buffer.concat(stderrChunks)))
@@ -568,11 +727,49 @@ export class ChildProcess<In extends InMask = InMask> {
 
 	// ── Signal / timeout ─────────────────────────────────────────────────
 
+	/**
+	 * Honor `signal` for as long as this command is still being collected.
+	 *
+	 * The listener deliberately outlives the root's exit: a detached group
+	 * survives its leader while a descendant still holds the pipes, and that is
+	 * exactly when an abort still has work to do. Detaching at root exit left the
+	 * abort with nothing to cancel, so the caller waited out the command deadline
+	 * — or, with no deadline configured, never returned at all. It is released
+	 * once the output has been collected and the root is gone, so nothing keeps
+	 * listening on the caller's signal.
+	 *
+	 * No escalation belongs here: a live root keeps the graceful termination an
+	 * abort has always given it, and a root that is already gone is not signalled
+	 * at all -- releasing the pipe reads is the whole of what an abort can do to a
+	 * descendant whose ownership can no longer be proven.
+	 */
 	attachSignal(signal: AbortSignal): void {
-		const onAbort = () => this.kill(new AbortError(signal.reason, "<cancelled>"));
+		const onAbort = () => {
+			this.kill(new AbortError(signal.reason, "<cancelled>"));
+			// Nothing else ends reads a descendant is holding open, so a tree the
+			// kill could not reach would strand the caller here.
+			this.#resolveDrainCutoff();
+		};
 		if (signal.aborted) return void onAbort();
 		signal.addEventListener("abort", onAbort, { once: true });
-		this.#exited.catch(() => {}).finally(() => signal.removeEventListener("abort", onAbort));
+		this.#signalDetach = () => {
+			this.#signalDetach = undefined;
+			signal.removeEventListener("abort", onAbort);
+		};
+		this.#exited.catch(() => {}).finally(() => this.#releaseSignalIfDone());
+	}
+
+	/**
+	 * Release the caller's abort listener once nothing an abort could act on is
+	 * left: the root is gone and both streams have been dealt with.
+	 *
+	 * Root exit alone is not enough. A descendant can hold stdout open with stderr
+	 * already closed, and a caller that has not started collecting yet can abort
+	 * after that -- which is exactly the case a reader-count test mistook for a
+	 * finished command.
+	 */
+	#releaseSignalIfDone(): void {
+		if (this.#stdoutCollected && this.#stderrCollected && this.proc.exitCode !== null) this.#signalDetach?.();
 	}
 
 	#clearTimeout(): void {
@@ -588,9 +785,9 @@ export class ChildProcess<In extends InMask = InMask> {
 		// A clean command clears it in wait(), so fast invocations do not hold
 		// the event loop for the unused remainder.
 		const timer = setTimeout(() => {
-			// A detached group can remain alive after its leader exits. Only use
-			// the dead-leader fallback while an inherited pipe proves that exact
-			// group still has a live member; this avoids stale-PGID reuse.
+			// A pipe-holding descendant can outlive its root, and the deadline is
+			// then the only thing that ends the command: record it as the reason
+			// even though a reaped root's tree can no longer be signalled safely.
 			if (
 				this.proc.exitCode === null ||
 				(this.#openPipeReaders > 0 && (this.#terminateGroup || this.#windowsRootProcess))
@@ -604,8 +801,13 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	[Symbol.dispose](): void {
-		if (this.proc.exitCode !== null) return;
+		// Disposal ends the command whether or not anything read it, so a handle
+		// whose stdout was never collected cannot leave a listener on the signal.
+		this.#stdoutCollected = true;
+		this.#stderrCollected = true;
+		if (this.proc.exitCode !== null) return void this.#signalDetach?.();
 		this.kill(new AbortError("process disposed", this.#stderrTail));
+		this.#signalDetach?.();
 	}
 }
 
@@ -623,6 +825,13 @@ type ChildSpawnOptions<In extends InMask = InMask> = Omit<
 	 * remain reachable after changing session and reparenting. Other platforms
 	 * ignore this option. macOS process groups cannot retain a daemonized
 	 * descendant that creates a new session and reparents to launchd.
+	 *
+	 * It is also the only way a descendant that outlives its root is reaped on
+	 * POSIX. Once the root has exited it has been reaped, so neither its pid nor
+	 * the group id that pid named can be shown to still be this command's, and a
+	 * kill aimed at either could reach a stranger that inherited the number. Such
+	 * a command is ended by releasing its pipe reads and nothing is signalled, so
+	 * a descendant holding them is left running unless a subreaper adopted it.
 	 */
 	subreaper?: boolean;
 	/** Expose and retain complete stderr for a later `wait({ stderr: "full" })`. */
@@ -671,11 +880,11 @@ export interface ExecOptions extends Omit<ChildSpawnOptions, "stderr" | "stdin">
 
 /** Spawn, wait, and return captured output. */
 export async function exec(cmd: string[], opts?: ExecOptions): Promise<ExecResult> {
-	const { input, stderr, allowAbort, allowNonZero, ...spawnOpts } = opts ?? {};
+	const { input, stderr, allowAbort, allowNonZero, maxOutputBytes, ...spawnOpts } = opts ?? {};
 	const stdin = typeof input === "string" ? Buffer.from(input) : input;
 	const resolved: ChildSpawnOptions = stdin === undefined ? spawnOpts : { ...spawnOpts, stdin };
 	using child = spawnInternal(cmd, resolved, stderr === "full");
-	return await child.wait({ stderr, allowAbort, allowNonZero });
+	return await child.wait({ stderr, allowAbort, allowNonZero, maxOutputBytes });
 }
 
 // ── Signal combinators ───────────────────────────────────────────────────────

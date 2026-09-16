@@ -13,6 +13,7 @@ import {
 	buildTextResult,
 	formatRepoRef,
 	ghApiHostArgs,
+	ghRequestHost,
 	githubRepoSlugEquals,
 	normalizeBlock,
 	normalizeOptionalString,
@@ -585,7 +586,7 @@ export async function resolveGitHubBranchHead(
 		cwd,
 		["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/branches/${encodeURIComponent(branch)}`],
 		signal,
-		{ repoProvided: true },
+		{ repoProvided: true, authHost: ghRequestHost(ref) },
 	);
 	return requireNonEmpty(response.commit?.sha, `head SHA for branch ${branch}`);
 }
@@ -617,7 +618,7 @@ export async function fetchRunsForCommit(
 			`per_page=${RUN_JOBS_PAGE_SIZE}`,
 		],
 		signal,
-		{ repoProvided: true },
+		{ repoProvided: true, authHost: ghRequestHost(ref) },
 	);
 
 	return Promise.all(
@@ -667,7 +668,7 @@ export async function fetchRunJobs(
 				`page=${page}`,
 			],
 			signal,
-			{ repoProvided: true },
+			{ repoProvided: true, authHost: ghRequestHost(ref) },
 		);
 		const rawPage = response.jobs ?? [];
 		const pageJobs = rawPage.map(job => normalizeRunJob(job)).filter((job): job is GhRunJobSnapshot => job !== null);
@@ -701,9 +702,7 @@ export async function fetchRunSnapshot(
 			cwd,
 			["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/actions/runs/${runId}`],
 			signal,
-			{
-				repoProvided: true,
-			},
+			{ repoProvided: true, authHost: ghRequestHost(ref) },
 		),
 		fetchRunJobs(cwd, repo, runId, signal),
 	]);
@@ -735,6 +734,7 @@ export async function fetchFailedJobLogs(
 				cwd,
 				["api", ...ghApiHostArgs(ref), `/repos/${ref.slug}/actions/jobs/${entry.job.id}/logs`],
 				signal,
+				{ authHost: ghRequestHost(ref) },
 			);
 			const fullLog = result.exitCode === 0 ? normalizeBlock(result.stdout) : undefined;
 			const logTail = fullLog ? tailLogLines(fullLog, tail) : undefined;
