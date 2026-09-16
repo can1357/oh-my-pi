@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.2] - 2026-09-16
+
 ### Added
 
 - Expanded built-in secret obfuscation to detect credentials in connection URLs regardless of environment-variable name, including PostgreSQL, MongoDB, MySQL, Redis, AMQP, and other supported schemes.
