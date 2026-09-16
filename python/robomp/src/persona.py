@@ -373,14 +373,18 @@ def followup_review(
     comment_body: str,
     comment_path: str,
     comment_line_range: str,
+    comment_ref: str | None = None,
     thread: tuple = (),
 ) -> str:
+    if comment_ref is None:
+        comment_ref = f"{comment_path}{comment_line_range}" if comment_path else "review summary"
     return render(
         _load("followup_review.md"),
         {
             "repo": repo,
             "workspace": workspace,
             "pr": {"number": pr_number},
+            "comment_ref": comment_ref,
             "comment": {
                 "author": comment_author,
                 "body": comment_body,

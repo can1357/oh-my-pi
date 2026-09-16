@@ -2019,12 +2019,18 @@ async def test_handle_pr_conversation_unmapped_bot_pr_uses_pr_branch(
         assert number == 900
         return []
 
+    async def _get_issue_comment(self, repo_full: str, comment_id: int):
+        assert repo_full == "octo/widget"
+        assert comment_id == 10
+        return CommentInfo(id=10, author="can1357", body="please fix", created_at="2026-05-15T00:00:00Z")
+
     monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
     monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
     monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
     monkeypatch.setattr(GitHubClient, "list_comments", _list_comments)
     monkeypatch.setattr(GitHubClient, "list_review_comments", _list_review_comments)
     monkeypatch.setattr(GitHubClient, "list_pr_reviews", _list_pr_reviews)
+    monkeypatch.setattr(GitHubClient, "get_issue_comment", _get_issue_comment)
 
     payload = {
         "action": "created",
@@ -2136,12 +2142,18 @@ async def test_handle_pr_conversation_repairs_missing_pr_mapping_from_branch(
         assert number == 900
         return []
 
+    async def _get_issue_comment(self, repo_full: str, comment_id: int):
+        assert repo_full == "octo/widget"
+        assert comment_id == 11
+        return CommentInfo(id=11, author="can1357", body="please fix", created_at="2026-05-15T00:00:00Z")
+
     monkeypatch.setattr(GitHubClient, "get_pull_request", _get_pull_request)
     monkeypatch.setattr(GitHubClient, "get_repo", _get_repo)
     monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
     monkeypatch.setattr(GitHubClient, "list_comments", _list_comments)
     monkeypatch.setattr(GitHubClient, "list_review_comments", _list_review_comments)
     monkeypatch.setattr(GitHubClient, "list_pr_reviews", _list_pr_reviews)
+    monkeypatch.setattr(GitHubClient, "get_issue_comment", _get_issue_comment)
 
     payload = {
         "action": "created",

@@ -423,6 +423,95 @@ async def test_list_review_comments(proxy_settings: Settings) -> None:
     assert items[0]["line"] == 5
 
 
+async def test_get_issue_comment(proxy_settings: Settings) -> None:
+    def gh(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/repos/octo/widget/issues/comments/14253"
+        return httpx.Response(
+            200,
+            json={
+                "id": 14253,
+                "user": {"login": "miracodeai-bot"},
+                "body": "the real walkthrough",
+                "created_at": "2026-09-15T16:33:10Z",
+            },
+        )
+
+    app = _build_app(proxy_settings, gh)
+    params = {"repo": "octo/widget", "comment_id": 14253}
+    async with await _async_client(app) as client:
+        resp = await client.get(
+            "/gh/v1/get_issue_comment",
+            params=params,
+            headers=_signed("GET", "/gh/v1/get_issue_comment", params=params),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "id": 14253,
+        "author": "miracodeai-bot",
+        "body": "the real walkthrough",
+        "created_at": "2026-09-15T16:33:10Z",
+    }
+
+
+async def test_get_issue_comment_rejects_unsigned_request(proxy_settings: Settings) -> None:
+    """No HMAC headers → 401 before upstream is touched."""
+
+    def gh(req: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("upstream called without auth")
+
+    app = _build_app(proxy_settings, gh)
+    async with await _async_client(app) as client:
+        resp = await client.get("/gh/v1/get_issue_comment", params={"repo": "octo/widget", "comment_id": 1})
+    assert resp.status_code == 401
+
+
+async def test_get_pr_review(proxy_settings: Settings) -> None:
+    """Review-summary ids (approve / request-changes verdicts) resolve on the
+    `pulls/{pr}/reviews/{id}` endpoint — verified against Forgejo 16.0.3."""
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        assert req.url.path == "/repos/octo/widget/pulls/1686/reviews/555"
+        return httpx.Response(
+            200,
+            json={
+                "id": 555,
+                "user": {"login": "djdembeck"},
+                "body": "## Verdict: changes requested",
+                "state": "REQUEST_CHANGES",
+                "submitted_at": "2026-09-06T00:00:00Z",
+            },
+        )
+
+    app = _build_app(proxy_settings, gh)
+    params = {"repo": "octo/widget", "review_id": 555, "pr_number": 1686}
+    async with await _async_client(app) as client:
+        resp = await client.get(
+            "/gh/v1/get_pr_review",
+            params=params,
+            headers=_signed("GET", "/gh/v1/get_pr_review", params=params),
+        )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "id": 555,
+        "author": "djdembeck",
+        "body": "## Verdict: changes requested",
+        "state": "REQUEST_CHANGES",
+        "submitted_at": "2026-09-06T00:00:00Z",
+    }
+
+
+async def test_get_pr_review_rejects_unsigned_request(proxy_settings: Settings) -> None:
+    """No HMAC headers → 401 before upstream is touched."""
+
+    def gh(req: httpx.Request) -> httpx.Response:  # pragma: no cover - must not run
+        raise AssertionError("upstream called without auth")
+
+    app = _build_app(proxy_settings, gh)
+    async with await _async_client(app) as client:
+        resp = await client.get("/gh/v1/get_pr_review", params={"repo": "octo/widget", "review_id": 1, "pr_number": 2})
+    assert resp.status_code == 401
+
+
 async def test_list_pr_reviews(proxy_settings: Settings) -> None:
     def gh(req: httpx.Request) -> httpx.Response:
         assert req.url.path == "/repos/octo/widget/pulls/1/reviews"
@@ -1145,6 +1234,38 @@ async def test_hmac_rejects_query_mutation(proxy_settings: Settings) -> None:
         resp = await client.get("/gh/v1/issue", params=mutated, headers=headers)
     assert resp.status_code == 401, resp.text
     # Upstream GitHub mock MUST NOT have been called — auth failed first.
+    assert captured == []
+
+
+async def test_get_issue_comment_rejects_query_mutation(proxy_settings: Settings) -> None:
+    """Sign a request for comment 14253, replay it against comment 1.
+
+    The HMAC binds the query, so an attacker who captures a signed request
+    cannot retarget the fetch at another comment id; the upstream mock MUST
+    stay untouched.
+    """
+    captured: list[httpx.Request] = []
+
+    def gh(req: httpx.Request) -> httpx.Response:
+        captured.append(req)
+        return httpx.Response(
+            200,
+            json={"id": 1, "user": {"login": "x"}, "body": "b", "created_at": "2026-01-01T00:00:00Z"},
+        )
+
+    app = _build_app(proxy_settings, gh)
+    headers = _signed(
+        "GET",
+        "/gh/v1/get_issue_comment",
+        params={"repo": "octo/widget", "comment_id": 14253},
+    )
+    async with await _async_client(app) as client:
+        resp = await client.get(
+            "/gh/v1/get_issue_comment",
+            params={"repo": "octo/widget", "comment_id": 1},
+            headers=headers,
+        )
+    assert resp.status_code == 401, resp.text
     assert captured == []
 
 
