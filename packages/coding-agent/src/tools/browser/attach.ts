@@ -300,5 +300,163 @@ async function processMatchPaths(exe: string): Promise<string[]> {
 			if (st.isFile()) await add(sibling);
 		} catch {
 			// sibling missing
+		}
+	}
+	return [...paths];
+}
 
-			[Showing lines 1 - 300 of 461. Use : 301 to continue]
+function runningProcessesForPaths(exes: string[]): Process[] {
+	const byPid = new Map<number, Process>();
+	for (const exe of exes) {
+		for (const process of Process.fromPath(exe)) {
+			if (process.status() === ProcessStatus.Running) byPid.set(process.pid, process);
+		}
+	}
+	return [...byPid.values()];
+}
+
+/**
+ * Return a reusable CDP endpoint for `exe`, or null when no instance is
+ * running. Refuse to replace an occupied instance unless the caller can
+ * launch an isolated profile.
+ */
+export async function findReusableCdp(
+	exe: string,
+	options: { signal?: AbortSignal; appArgs?: string[] } = {},
+): Promise<{ cdpUrl: string; pid: number } | null> {
+	const requestedUserDataDir = findUserDataDirInArgs(options.appArgs);
+	const normalizedRequestedUserDataDir =
+		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
+			? normalizeUserDataDir(requestedUserDataDir)
+			: null;
+	const candidates = runningProcessesForPaths(await processMatchPaths(exe));
+	const candidateArgs: string[][] = [];
+	let hasUnreadableCandidate = false;
+	for (const process of candidates) {
+		let args: string[];
+		try {
+			args = process.args();
+		} catch {
+			hasUnreadableCandidate = true;
+			continue;
+		}
+		candidateArgs.push(args);
+		const candidateProfile = findUserDataDirInArgs(args);
+		if (
+			requestedUserDataDir !== null &&
+			(normalizedRequestedUserDataDir === null ||
+				candidateProfile === null ||
+				!path.isAbsolute(candidateProfile) ||
+				normalizeUserDataDir(candidateProfile) !== normalizedRequestedUserDataDir)
+		) {
+			continue;
+		}
+		const port = findCdpPortInArgs(args);
+		if (port === null) continue;
+		if (await probeCdpAt(port, options.signal)) {
+			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
+		}
+	}
+	const canLaunchIsolatedProfile =
+		normalizedRequestedUserDataDir !== null &&
+		!hasUnreadableCandidate &&
+		candidateArgs.every(args => {
+			const existingUserDataDir = findUserDataDirInArgs(args);
+			return (
+				existingUserDataDir === null ||
+				(path.isAbsolute(existingUserDataDir) &&
+					normalizeUserDataDir(existingUserDataDir) !== normalizedRequestedUserDataDir)
+			);
+		});
+	if (!canLaunchIsolatedProfile && candidates.length > 0) {
+		const name = path.basename(exe);
+		throw new ToolError(
+			`Cannot launch ${name} because it is already running without a reusable CDP endpoint. Close ${name}, relaunch it with --remote-debugging-port, or pass app.cdp_url for an existing endpoint.`,
+		);
+	}
+	return null;
+}
+
+export function shouldPreserveConnectedBrowserFocus(target?: string): boolean {
+	return !target;
+}
+
+/**
+ * Pick the best page target on an attached browser. Prefer discoverable page
+ * targets first so Chromium/Edge attach flows that hide pages from
+ * `browser.pages()` can still return a usable tab.
+ *
+ * `preferVisible` is for attaching to a browser a human is using: among equally
+ * usable tabs, take the one that is actually foregrounded rather than whichever
+ * target CDP happens to enumerate first.
+ */
+export async function pickElectronTarget(
+	browser: Browser,
+	options: { matcher?: string; preferVisible?: boolean } = {},
+): Promise<Page> {
+	const discoveredPages = await Promise.all(
+		browser.targets().map(async target => {
+			if (String(target.type()) !== "page") return null;
+			return await target.page().catch(() => null);
+		}),
+	);
+	const usablePages = discoveredPages.filter((page): page is Page => page !== null);
+	if (usablePages.length > 0) {
+		return pickPageFromList(usablePages, options);
+	}
+
+	const fallbackPages = await browser.pages();
+	if (!fallbackPages.length) {
+		throw new ToolError("No page targets available on the attached browser");
+	}
+	return pickPageFromList(fallbackPages, options);
+}
+
+async function enrichPages(pages: Page[]): Promise<Array<{ page: Page; url: string; title: string }>> {
+	return await Promise.all(
+		pages.map(async page => ({
+			page,
+			url: page.url(),
+			title: ((await page.title().catch(() => "")) ?? "").trim(),
+		})),
+	);
+}
+
+async function pickPageFromList(pages: Page[], options: { matcher?: string; preferVisible?: boolean }): Promise<Page> {
+	const enriched = await enrichPages(pages);
+	if (options.matcher) {
+		const needle = options.matcher.toLowerCase();
+		const hit = enriched.find(p => p.url.toLowerCase().includes(needle) || p.title.toLowerCase().includes(needle));
+		if (hit) return hit.page;
+		const summary = enriched.map(p => `- ${p.title || "(untitled)"}  ${p.url}`).join("\n");
+		throw new ToolError(`No page target matched ${JSON.stringify(options.matcher)}. Available pages:\n${summary}`);
+	}
+	const usable = enriched.filter(
+		p => !ATTACH_TARGET_SKIP_PATTERN.test(p.url) && !ATTACH_TARGET_SKIP_PATTERN.test(p.title),
+	);
+	if (options.preferVisible && usable.length > 1) {
+		// Best-effort foreground probe; a tab that cannot answer counts as hidden.
+		const visibility = await Promise.all(
+			usable.map(async p => {
+				try {
+					return (await p.page.evaluate(() => document.visibilityState === "visible")) === true;
+				} catch {
+					return false;
+				}
+			}),
+		);
+		const foreground = visibility.indexOf(true);
+		if (foreground >= 0) return usable[foreground]!.page;
+	}
+	return usable[0]?.page ?? enriched[0]!.page;
+}
+
+/**
+ * SIGTERM the process tree, wait briefly, then SIGKILL anything still alive.
+ * Single-process variant for our own spawned children.
+ */
+export async function gracefulKillTreeOnce(pid: number, gracePeriodMs = 2000): Promise<void> {
+	const process = Process.fromPid(pid);
+	if (!process) return;
+	await process.terminate({ gracefulMs: gracePeriodMs, timeoutMs: 500 });
+}
