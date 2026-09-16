@@ -77,6 +77,12 @@ export type WorkerInitPayload =
 			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
 			 */
 			activateForScreenshot?: boolean;
+			/**
+			 * True when omp created this page itself (a relay-forced fresh tab) rather
+			 * than adopting a pre-existing user tab. Only owned targets are closed by
+			 * the worker on `{ type: "close" }` — an adopted tab belongs to the user.
+			 */
+			ownsTarget?: boolean;
 	  };
 
 /** Result of one host tool requested by browser-run JavaScript. */
