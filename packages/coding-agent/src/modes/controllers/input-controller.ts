@@ -371,6 +371,11 @@ export class InputController {
 					this.toggleToolActivityVisibility();
 					return { consume: true };
 				}
+				if (this.ctx.keybindings.matches(data, "app.display.reset")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					this.ctx.resetDisplayAfterAppearanceRefresh();
+					return { consume: true };
+				}
 				return undefined;
 			});
 		}
