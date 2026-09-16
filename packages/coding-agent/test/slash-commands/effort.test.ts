@@ -74,6 +74,13 @@ describe("/effort slash command", () => {
 		expect(effort?.getInlineHint?.("x")).toBeNull();
 	});
 
+	it("uses the model-controls selector list for completions", async () => {
+		const h = harness({ efforts: [Effort.Low, Effort.Medium], selectorEfforts: [Effort.Medium] });
+		const effort = buildTuiBuiltinSlashCommands(h.tuiRuntime).find(item => item.name === "effort");
+		const completions = await Promise.resolve(effort?.getArgumentCompletions?.(""));
+		expect(completions?.map(item => item.label)).toEqual(["off", "auto", "medium"]);
+	});
+
 	it("reports the configured level and the model's selectable levels", async () => {
 		const h = harness();
 		await run(h, "");
