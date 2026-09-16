@@ -630,6 +630,33 @@ The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `expli
 `supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`, and
 `promptCacheMaximumCheckpoints` for Bedrock models.
 
+By default `bedrock-converse-stream` requests go to `bedrock-runtime.{region}.amazonaws.com`, where
+`{region}` comes from an explicit per-request region, the model id (ARN or cross-region
+inference-profile prefix), or `AWS_REGION`/`AWS_DEFAULT_REGION`/the AWS profile — falling back to
+`us-east-1`. Set `baseUrl` on `providers.amazon-bedrock` (or on a custom provider using
+`api: bedrock-converse-stream`) to send requests somewhere else instead — a VPC/PrivateLink
+endpoint, a FIPS host, or a gateway. Any path or query string on the `baseUrl` is kept — the path
+as a prefix, the query appended to the final URL (and included in SigV4's canonical request when
+signing) — so `{baseUrl}/model/{id}/converse-stream[?query]` is the final URL. That covers gateways
+that authenticate via a query parameter instead of a header:
+
+```yaml
+providers:
+  amazon-bedrock:
+    baseUrl: https://vpce-0123456789abcdef0.bedrock-runtime.us-east-1.vpce.amazonaws.com
+```
+
+One host shape is not taken literally: a `baseUrl` of exactly
+`bedrock-runtime.{region}.amazonaws.com` is AWS's own endpoint, and its region segment is replaced
+with the resolved region — signing has to match the region it sends to, and every bundled Bedrock
+model already carries such a `baseUrl`. Use a distinct host (VPC endpoint, `-fips`, gateway) to
+pin an origin exactly.
+
+Region resolution itself is unaffected by `baseUrl`, because SigV4 still signs with a real AWS
+region — set `AWS_REGION` or use a region-scoped model id/ARN if the endpoint expects a specific
+one. A gateway that accepts a bearer token instead of SigV4 needs no region at all: set the
+provider's `apiKey` (or `AWS_BEARER_TOKEN_BEDROCK`) and signing is skipped.
+
 ### Strict tool schemas (`disableStrictTools`)
 
 Anthropic's API supports a `strict` field on tool definitions that forces the model to always follow the provided schema exactly. OMP enables it by default for a small allowlist of high-frequency built-in `anthropic-messages` tools (`bash`, `python`, `edit`, and `find`) whose schemas fit Anthropic's strict grammar limits; other tools still send normalized schemas but omit `strict`.

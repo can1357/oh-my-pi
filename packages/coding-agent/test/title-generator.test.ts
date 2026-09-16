@@ -11,10 +11,10 @@ import {
 	setExtensionTerminalTitle,
 	setSessionTerminalTitle,
 	setTerminalTitle,
+	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
-import { isConPTYHosted } from "@oh-my-pi/pi-tui";
-import { logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
 function getModelOrThrow(id: string): Model<Api> {
@@ -854,7 +854,7 @@ describe("title generator", () => {
 
 // The terminal title runtime is a module-global. `emitTerminalTitle()` composes
 // the emitted OSC title from three inputs — an extension override, a run-state
-// separator (spinner frame, static Windows `:`, `>`, or `!` between the `π`
+// separator (spinner frame, static WSL `:`, `>`, or `!` between the `π`
 // brand and the session label), and the session label — and writes it to
 // `process.stdout` as `ESC]0;<title>BEL`. These tests pin the observable
 // contract at that sink: what string actually reaches the terminal after a
@@ -872,13 +872,12 @@ const OSC_TITLE_RE = /\x1b\]0;([\s\S]*?)\x07/;
 // private TITLE_SPINNER_FRAMES); a clobbered override would surface one of these.
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-// The `working` separator is a spinner frame everywhere except ConPTY hosts
-// (native Windows and WSL), where the title is static `:` because no interval is
-// ever scheduled. Assert the separator the host actually renders instead of
-// skipping the platform: the contract under test — the override was released, so
-// the run state drives the title again — holds identically on both.
+// The `working` separator is a spinner frame everywhere except WSL, where the title is
+// static `:` because no interval is ever scheduled. Assert the separator the host actually
+// renders instead of skipping the platform: the contract under test — the override was
+// released, so the run state drives the title again — holds identically on both.
 function expectWorkingSeparator(title: string | undefined, label: string): void {
-	if (isConPTYHosted()) expect(title).toBe(`π : ${label}`);
+	if (isWsl()) expect(title).toBe(`π : ${label}`);
 	else expect(SPINNER_FRAMES.some(frame => title?.includes(frame))).toBe(true);
 }
 
@@ -997,19 +996,24 @@ describe("terminal title runtime", () => {
 		expect(writes).toHaveLength(1);
 	});
 
-	it("keeps the working title static with ':' on Windows", () => {
+	it("animates the working title on Windows", () => {
 		const originalPlatform = process.platform;
 		try {
 			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			setTerminalTitleSpinnerStyle("line");
+			setTerminalTitleSpinnerStyle("braille");
 			setSessionTerminalTitle("windows-project");
 			writes.length = 0;
 
 			setTerminalTitleState("working");
-			expect(emittedTitles()).toEqual(["π : windows-project"]);
+			expect(emittedTitles()).toEqual(["π ⠋ windows-project"]);
 
 			writes.length = 0;
-			vi.advanceTimersByTime(400);
-			expect(writes).toEqual([]);
+			vi.advanceTimersByTime(160);
+			const titles = emittedTitles();
+			expect(titles.length).toBeGreaterThan(0);
+			expect(titles.every(title => SPINNER_FRAMES.some(frame => title.includes(frame)))).toBe(true);
+			expect(titles.some(title => title !== "π ⠋ windows-project")).toBe(true);
 		} finally {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}

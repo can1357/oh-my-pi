@@ -313,7 +313,7 @@ describe("ModelBrowser native model metadata", () => {
 
 	test("detail line badges upstream flags and appends the provider blurb", () => {
 		const detail = renderDetail(
-			makeModel("devin", "swe-2", {
+			makeModel("fixture", "swe-2", {
 				description: "Fast\tagentic\ncoder",
 				isNew: true,
 				isBeta: true,

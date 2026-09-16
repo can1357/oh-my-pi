@@ -356,7 +356,11 @@ export interface UsageProvider {
 	id: Provider;
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
-	parseRateLimitHeaders?(headers: Record<string, string>, now?: number): UsageReport | null;
+	parseRateLimitHeaders?(
+		headers: Record<string, string>,
+		now?: number,
+		context?: { responseStatus?: number },
+	): UsageReport | null;
 	supports?(params: UsageFetchParams): boolean;
 	/** True when fetchUsage contacts upstream and can authenticate the credential for health checks. */
 	validatesCredentials?: boolean;

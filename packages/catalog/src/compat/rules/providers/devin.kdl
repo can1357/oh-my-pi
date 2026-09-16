@@ -39,4 +39,50 @@ provider "devin" {
 			supports-parallel-tool-calls #true
 		}
 	}
+
+
+	// Devin omits cost dimensions for plan-included models on lower tiers
+	// (PRO reports $0 for SWE-2, SWE-1.7, and GLM-5.2 High). `cost-fallback`
+	// seeds the enterprise-tier list price only when upstream reports no
+	// token price, so accounts whose discovery does carry dimensions keep
+	// their real rates.
+
+	// SWE-2: enterprise promo is 75% off list through 2026-12-31; list
+	// pricing ($3/$15, $0.30 cache read) applies from 2027-01-01.
+	models "swe-2*" {
+		cost-fallback {
+			input 0.75
+			output 3.75
+			cache-read 0.075
+			cache-write 0.75
+			effective-rates {
+				list-price {
+					effective-from "2027-01-01T00:00:00Z"
+					input 3
+					output 15
+					cache-read 0.3
+					cache-write 3
+				}
+			}
+		}
+	}
+
+	// SWE-1.7 and GLM-5.2 High: plan-included on PRO, no published promo
+	// schedule — enterprise list is the only published per-token price.
+	models "swe-1-7" "swe-1-7-medium" {
+		cost-fallback {
+			input 0.5
+			output 2.5
+			cache-read 0.2
+			cache-write 0.5
+		}
+	}
+	models "glm-5-2" {
+		cost-fallback {
+			input 1.4
+			output 4.4
+			cache-read 0.26
+			cache-write 1.4
+		}
+	}
 }

@@ -53,6 +53,8 @@ function assistantStopMessage(text: string): AssistantMessage {
 
 interface SessionHarness {
 	session: AgentSession;
+	/** Resolves when the executor has dispatched the session's prompt. */
+	promptEntered: Promise<void>;
 	/** Emit a successful terminal `yield` tool result through the session event stream. */
 	emitTerminalYield: (data: unknown) => void;
 	/** The observer factory installed by {@link attachIrcWakeTurnMonitor}, if any. */
@@ -67,9 +69,11 @@ interface SessionHarness {
  * `subscribeRunState` never fires — the run-state mirror omits `idle`, which is
  * exactly the leak the acceptance boundary must cover.
  */
-function createHarness(): SessionHarness {
+function createHarness(options?: { hangPrompt?: boolean }): SessionHarness {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const messages: AssistantMessage[] = [];
+	const promptEntered = Promise.withResolvers<void>();
+	const hangingPrompt = Promise.withResolvers<void>();
 	let yieldSeq = 0;
 	let wakeObserver: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined;
 	const emit = (event: AgentSessionEvent) => {
@@ -107,6 +111,11 @@ function createHarness(): SessionHarness {
 			};
 		},
 		prompt: async (text: string) => {
+			promptEntered.resolve();
+			if (options?.hangPrompt) {
+				await hangingPrompt.promise;
+				return;
+			}
 			const message = assistantStopMessage("submitting");
 			messages.push(message);
 			emit({ type: "message_end", message } as AgentSessionEvent);
@@ -132,6 +141,7 @@ function createHarness(): SessionHarness {
 	};
 	return {
 		session: session as unknown as AgentSession,
+		promptEntered: promptEntered.promise,
 		emitTerminalYield,
 		wakeObserver: () => wakeObserver,
 	};
@@ -145,6 +155,10 @@ function registerRunning(session: AgentSession) {
 		session,
 		status: "running",
 	});
+}
+
+async function flushMicrotasks(): Promise<void> {
+	for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
 }
 
 describe("runSubprocess result acceptance", () => {
@@ -187,6 +201,53 @@ describe("runSubprocess result acceptance", () => {
 		expect(AgentRegistry.global().staleAcceptedRuns()).toEqual([]);
 		// Launch milestone is the registration timestamp the acceptance must not move.
 		expect(settled?.createdAt).toBe(ref.createdAt);
+	});
+
+	it("settles the owning task job when Agent Hub tombstones a running subagent", async () => {
+		const harness = createHarness({ hangPrompt: true });
+		const ref = registerRunning(harness.session);
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: harness.session,
+			extensionsResult: {} as unknown as LoadExtensionsResult,
+			setToolUIContext: () => {},
+			eventBus: new EventBus(),
+		} as CreateAgentSessionResult);
+		const delivered = Promise.withResolvers<{ id: string; text: string }>();
+		const manager = new AsyncJobManager({
+			onJobComplete: (id, text) => delivered.resolve({ id, text }),
+		});
+		const jobId = manager.register("task", AGENT_ID, async ({ signal }) => {
+			const result = await runSubprocess({
+				cwd: "/tmp",
+				agent: baseAgent,
+				task: "do the work",
+				index: 0,
+				id: AGENT_ID,
+				signal,
+			});
+			if (result.exitCode !== 0) throw new Error(result.abortReason ?? result.error ?? "Task failed");
+			return result.output;
+		});
+
+		try {
+			await harness.promptEntered;
+			await harness.session.abort();
+			await AgentLifecycleManager.global().release(AGENT_ID, ref, { tombstone: true });
+
+			const job = manager.getJob(jobId);
+			expect(job).toBeDefined();
+			await flushMicrotasks();
+			const settlement = job!.status === "running" ? ("still-running" as const) : ("settled" as const);
+			if (settlement === "still-running") manager.cancel(jobId);
+			await job!.promise;
+
+			expect(settlement).toBe("settled");
+			expect(job!.status).toBe("failed");
+			expect(await delivered.promise).toMatchObject({ id: jobId });
+		} finally {
+			manager.cancel(jobId);
+			await manager.dispose({ timeoutMs: 1000 });
+		}
 	});
 
 	it("terminalizes an existing ref on a follow-up turn whose run-state mirror omits idle", async () => {

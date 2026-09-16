@@ -131,9 +131,13 @@ export class TtsrCoordinator {
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
 		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
-		// AST rules use the reconstructed edit/write snapshot and are awaited so
-		// the manager self-throttles native matching.
-		if (matchContext.source === "tool" && this.#manager.hasAstRules()) {
+		// AST rules match whole-file structure against the reconstructed edit/write
+		// snapshot, so they run once on the finalized call: per-delta snapshots are
+		// always partial source (a truncated prefix of the final arguments) and
+		// each run costs a native `astMatch` pass (~90ms at 150KB × entries ×
+		// rules). Awaiting that per delta serializes hundreds of milliseconds onto
+		// the streaming event path and wedges the loop (ui.loop-blocked).
+		if (assistantEvent.type === "toolcall_end" && matchContext.source === "tool" && this.#manager.hasAstRules()) {
 			const astMatches = await this.#checkAstStream(matchContext, streamingToolCall);
 			if (astMatches.length > 0 && this.#handleMatches(astMatches, matchContext, targetMessageTimestamp))
 				return true;

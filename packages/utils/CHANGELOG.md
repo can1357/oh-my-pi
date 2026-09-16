@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.2.2] - 2026-09-16
+
+### Added
+
+- Added asynchronous and synchronous SQLite database opening APIs with path-attributed errors, optional corruption recovery that preserves private database and sidecar backups, and automatic retries for transient busy errors during asynchronous opens.
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

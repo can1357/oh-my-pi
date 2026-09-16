@@ -12,7 +12,7 @@ import {
 	pricingPeerFor,
 } from "../compat/behavior";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
-import { resolveModelPolicy } from "../compat/resolve";
+import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
@@ -239,6 +239,192 @@ async function fetchCatalogPayload(
 	session.etag = response.headers.get("etag");
 	session.hasPayload = true;
 	return payload;
+}
+
+/**
+ * The wire effort tiers the catalog publishes for a model, in canonical order.
+ * Undefined when the row has no effort-addressed thinking, or names no tier
+ * omp knows.
+ */
+function publishedEffortLadder(model: ModelsDevModel): Effort[] | undefined {
+	const values = model.reasoning_options?.find(option => option?.type === "effort")?.values;
+	if (!Array.isArray(values)) return undefined;
+	const ladder = THINKING_EFFORTS.filter(effort => values.includes(effort));
+	return ladder.length > 0 ? ladder : undefined;
+}
+
+/**
+ * Published ladders, addressable both by the host that published them and by
+ * bare id.
+ *
+ * `byHost` (keyed `provider\0id`) is authoritative: a ladder is only valid for
+ * the deployment that published it, so the endpoint's own catalog identity is
+ * consulted first. `byId` answers when the host is unknown — a gateway id with
+ * no catalog provider of its own — and only while every host publishing that
+ * id agrees that it takes an effort dial and on which tiers; an id whose hosts
+ * disagree, or that any host publishes with no dial at all, is dropped from
+ * it, so the ladder stays unknown instead of borrowing an arbitrary host's.
+ *
+ * `withoutLadder` carries the same `provider\0id` key for a row the catalog
+ * does publish but with no effort dial on it. The host serving an id outranks
+ * every other host on the question of what that deployment accepts, so its
+ * silence blocks the bare-id fallback for that id rather than letting a
+ * foreign ladder answer in its place. When the serving host is unknown that
+ * per-host veto cannot fire, which is why a dialless row also disqualifies the
+ * bare id outright.
+ */
+interface PublishedEffortLadders {
+	byHost: ReadonlyMap<string, readonly Effort[]>;
+	byId: ReadonlyMap<string, readonly Effort[]>;
+	withoutLadder: ReadonlySet<string>;
+}
+
+const EMPTY_PUBLISHED_EFFORT_LADDERS: PublishedEffortLadders = {
+	byHost: new Map(),
+	byId: new Map(),
+	withoutLadder: new Set(),
+};
+
+function indexPublishedEffortLadders(payload: unknown): PublishedEffortLadders {
+	const byHost = new Map<string, readonly Effort[]>();
+	const byId = new Map<string, readonly Effort[]>();
+	const withoutLadder = new Set<string>();
+	const index: PublishedEffortLadders = { byHost, byId, withoutLadder };
+	const unshareable = new Set<string>();
+	if (!isRecord(payload)) return index;
+	for (const [providerKey, provider] of Object.entries(payload)) {
+		if (!isRecord(provider) || !isRecord(provider.models)) continue;
+		for (const [modelId, rawModel] of Object.entries(provider.models)) {
+			if (!isRecord(rawModel)) continue;
+			const key = `${providerKey}\u0000${modelId}`;
+			const ladder = publishedEffortLadder(rawModel as ModelsDevModel);
+			if (!ladder) {
+				withoutLadder.add(key);
+				// Some deployment of this id rejects an effort dial; without
+				// knowing which host serves a bare id, none may claim one.
+				byId.delete(modelId);
+				unshareable.add(modelId);
+				continue;
+			}
+			byHost.set(key, ladder);
+			if (unshareable.has(modelId)) continue;
+			const shared = byId.get(modelId);
+			if (shared === undefined) {
+				byId.set(modelId, ladder);
+			} else if (shared.length !== ladder.length || shared.some((effort, index) => effort !== ladder[index])) {
+				byId.delete(modelId);
+				unshareable.add(modelId);
+			}
+		}
+	}
+	return index;
+}
+
+/**
+ * The index is tagged onto the catalog payload it was built from, so each
+ * catalog version is indexed once. {@link fetchWellKnownModels} already scopes
+ * payloads by fetch context, coalesces concurrent requests, answers a `304`
+ * with the same object, and hands back the last good payload when a refresh
+ * fails, so the tag inherits all of that lifetime behaviour for free.
+ */
+const kPublishedEffortLadders = Symbol("catalog.publishedEffortLadders");
+
+interface IndexedCatalogPayload {
+	[kPublishedEffortLadders]?: PublishedEffortLadders;
+}
+
+async function loadPublishedEffortLadders(fetchImpl?: FetchImpl): Promise<PublishedEffortLadders> {
+	const payload = await fetchWellKnownModels(fetchImpl);
+	if (!isRecord(payload)) return EMPTY_PUBLISHED_EFFORT_LADDERS;
+	const tagged = payload as IndexedCatalogPayload;
+	return (tagged[kPublishedEffortLadders] ??= indexPublishedEffortLadders(payload));
+}
+
+/**
+ * The catalog provider keys this endpoint publishes under. A provider whose
+ * catalog identity differs from its omp id (`moonshot` → `moonshotai`) is
+ * resolved through its descriptors; the omp id stays as a candidate for
+ * providers the descriptors do not cover.
+ */
+function catalogProviderKeys(providerId: string): readonly string[] {
+	const keys = new Set<string>();
+	for (const descriptor of MODELS_DEV_DESCRIPTORS_BY_PROVIDER[providerId] ?? []) keys.add(descriptor.modelsDevKey);
+	keys.add(providerId);
+	return [...keys];
+}
+
+/**
+ * The ladder published for a discovered id, preferring the host that serves it.
+ *
+ * Gateway prefixes are peeled (`deepseek/deepseek-v4` → `deepseek-v4`), and
+ * each peeled segment joins the host candidates ahead of the endpoint's own
+ * keys: on an aggregator the prefix names the real upstream. All host-scoped
+ * candidates are checked before accepting any shared-id fallback.
+ * A bare id is only accepted from {@link PublishedEffortLadders.byId}, which
+ * holds it only while every publishing host agrees that it takes an effort
+ * dial and on which tiers. A host serving the id that published it without a
+ * dial is this deployment's own answer and outranks any other host's ladder,
+ * so it vetoes the candidate here; a dialless host omp cannot recognize as the
+ * server already kept the id out of `byId` when the index was built.
+ */
+function lookupPublishedEffortLadder(
+	ladders: PublishedEffortLadders,
+	providerKeys: readonly string[],
+	modelId: string,
+): readonly Effort[] | undefined {
+	const hosts = [...providerKeys];
+	let shared: readonly Effort[] | undefined;
+	for (let candidate = modelId; ;) {
+		let dialless = false;
+		for (const host of hosts) {
+			const key = `${host}\u0000${candidate}`;
+			const scoped = ladders.byHost.get(key);
+			if (scoped) return scoped;
+			dialless ||= ladders.withoutLadder.has(key);
+		}
+		if (dialless) return undefined;
+		shared ??= ladders.byId.get(candidate);
+		const slash = candidate.indexOf("/");
+		if (slash < 0) return shared;
+		hosts.unshift(candidate.slice(0, slash));
+		candidate = candidate.slice(slash + 1);
+	}
+}
+
+/**
+ * Fill the effort ladder of discovered reasoning models whose tiers omp would
+ * otherwise guess from the neutral wire or provider-wide unknown-class default.
+ *
+ * Source precedence is unchanged: a provider that reports its own thinking
+ * surface, and any model whose ladder reviewed rules declare, are left exactly
+ * as they are. Only the guess is corrected, and only for ids the catalog
+ * actually publishes for this endpoint (or publishes unambiguously), so no
+ * request is made when every discovered model is already covered.
+ */
+async function applyPublishedEffortLadders<TApi extends Api>(
+	models: readonly ModelSpec<TApi>[] | null,
+	providerId: string,
+	fetchImpl?: FetchImpl,
+): Promise<readonly ModelSpec<TApi>[] | null> {
+	if (models === null) return null;
+	const guessed = new Set(
+		models
+			.filter(
+				model => model.reasoning === true && model.thinking === undefined && !hasModelScopedEffortLadder(model),
+			)
+			.map(model => model.id),
+	);
+	if (guessed.size === 0) return models;
+	// An unreachable catalog with no prior payload is not a discovery failure:
+	// the endpoint's own listing stands and the guess stays in place.
+	const ladders = await loadPublishedEffortLadders(fetchImpl).catch(() => EMPTY_PUBLISHED_EFFORT_LADDERS);
+	if (ladders.byHost.size === 0) return models;
+	const providerKeys = catalogProviderKeys(providerId);
+	return models.map(model => {
+		if (!guessed.has(model.id)) return model;
+		const efforts = lookupPublishedEffortLadder(ladders, providerKeys, model.id);
+		return efforts ? { ...model, thinking: { mode: "effort" as const, efforts } } : model;
+	});
 }
 
 function mapAnthropicModelsDev(payload: unknown, baseUrl: string): ModelSpec<"anthropic-messages">[] {
@@ -609,19 +795,23 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 			dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch,
 		}),
 		...((!options.requireApiKey || apiKey) && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels({
-					api: options.api,
-					provider: options.providerId,
-					baseUrl,
-					apiKey,
-					...(options.headers && { headers: resolveSimpleProviderHeaders(options.headers) }),
-					...(filterModel && {
-						filterModel: (entry, model) => filterModel(entry, model, references),
+			fetchDynamicModels: async () =>
+				applyPublishedEffortLadders(
+					await fetchOpenAICompatibleModels({
+						api: options.api,
+						provider: options.providerId,
+						baseUrl,
+						apiKey,
+						...(options.headers && { headers: resolveSimpleProviderHeaders(options.headers) }),
+						...(filterModel && {
+							filterModel: (entry, model) => filterModel(entry, model, references),
+						}),
+						mapModel: (entry, defaults) => options.mapModel(entry, defaults, references.get(defaults.id)),
+						fetch: options.config?.fetch,
 					}),
-					mapModel: (entry, defaults) => options.mapModel(entry, defaults, references.get(defaults.id)),
-					fetch: options.config?.fetch,
-				}),
+					options.providerId,
+					options.config?.fetch,
+				),
 		}),
 	};
 }
