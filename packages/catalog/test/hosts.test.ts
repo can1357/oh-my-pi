@@ -102,6 +102,7 @@ describe("isDirectMetaModelApiUrl", () => {
 		expect(isDirectMetaModelApiUrl("http://api.meta.ai/v1")).toBe(false);
 		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v2")).toBe(false);
 		expect(isDirectMetaModelApiUrl("https://api.meta.ai/v1/extra")).toBe(false);
+		expect(isDirectMetaModelApiUrl("https://api.meta.ai:8443/v1")).toBe(false);
 		expect(isDirectMetaModelApiUrl("not a url")).toBe(false);
 	});
 });
