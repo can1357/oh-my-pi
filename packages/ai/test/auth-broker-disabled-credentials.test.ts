@@ -1,16 +1,23 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, spyOn } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import { logger } from "@oh-my-pi/pi-utils";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
 	AuthStorage,
+	type CredentialDisabledEvent,
+	type AuthCredentialStore,
 	type OAuthCredential,
 	registerOAuthProvider,
 	SqliteAuthCredentialStore,
 	unregisterOAuthProviders,
+	projectCredentialDisabledEvent,
 } from "@oh-my-pi/pi-ai";
 import {
 	AuthBrokerClient,
+	AUTH_BROKER_CAPABILITIES_HEADER,
+	AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES,
 	type AuthBrokerServerHandle,
 	RemoteAuthCredentialStore,
 	startAuthBroker,
@@ -19,6 +26,87 @@ import { removeWithRetries } from "../../utils/src/temp";
 
 const DISABLE_CAUSE =
 	'oauth refresh failed: OAuthError: Anthropic token refresh request failed. url=https://api.anthropic.com/v1/oauth/token; body={"error": "invalid_grant", "error_description": "Refresh token expired"}';
+
+test("broker refresh and disable diagnostics withhold provider echoes while forensic causes and events remain raw", async () => {
+	const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-diagnostic-"));
+	const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
+	const echo = JSON.stringify({
+		error: "invalid_grant",
+		refresh_token: "diag-refresh-echo",
+		client_secret: "diag-client-echo",
+		error_description: "grant revoked",
+	});
+	const endpoint = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(echo, { status: 400 }) });
+	const logs = ["info", "warn", "debug", "error"].map(level =>
+		spyOn(logger, level as "warn").mockImplementation(() => {}),
+	);
+	const storage = new AuthStorage(store, {
+		refreshOAuthCredential: async () => {
+			const response = await fetch(`http://127.0.0.1:${endpoint.port}/token`);
+			throw new Error(`OAuth refresh failed: HTTP ${response.status} ${await response.text()}`);
+		},
+	});
+	const events: CredentialDisabledEvent[] = [];
+	storage.onCredentialDisabled(event => {
+		events.push(event);
+	});
+	let broker: AuthBrokerServerHandle | undefined;
+	try {
+		store.saveOAuth("anthropic", { ...mintOAuth("forensic@example.test"), expires: 0 });
+		const row = store.listAuthCredentials("anthropic")[0];
+		await storage.reload();
+		broker = startAuthBroker({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: ["diag-broker-auth"],
+			disableRefresher: true,
+		});
+		const headers = { Authorization: "Bearer diag-broker-auth", "Content-Type": "application/json" };
+		const refresh = await fetch(`${broker.url}/v1/credential/${row.id}/refresh`, { method: "POST", headers });
+		expect(refresh.status).toBe(500);
+		await refresh.text();
+		const raw = await store.listDisabledCredentials();
+		expect(raw[0]?.cause).toContain(echo);
+		// In-process events keep the verbatim cause; the extension/SDK boundary
+		// projects it (see the canary in `sdk-credential-disabled-bridge.test.ts`).
+		expect(JSON.stringify(events)).toContain("diag-refresh-echo");
+		expect(JSON.stringify(events.map(projectCredentialDisabledEvent))).not.toContain("diag-refresh-echo");
+		const local = await storage.listDisabledCredentials();
+		const remote = await (await fetch(`${broker.url}/v1/credentials/disabled`, { headers })).text();
+		storage.upsertCredential("manual-provider", { type: "api_key", key: "diag-manual-key" });
+		const manual = store.listAuthCredentials("manual-provider")[0];
+		const cause = "manual client_secret=diag-disable-cause";
+		for (const id of [manual.id, 999999]) {
+			const disabled = await fetch(`${broker.url}/v1/credential/${id}/disable`, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ cause }),
+			});
+			expect(disabled.status).toBe(id === manual.id ? 200 : 404);
+		}
+		expect((await store.listDisabledCredentials("manual-provider"))[0]?.cause).toBe(cause);
+		// The forensic cause survives in the store, the authenticated broker
+		// projection, and the event: those share the store's trust domain.
+		expect(JSON.stringify({ local, remote })).toContain("diag-refresh-echo");
+		// In-process events keep the verbatim cause; the projection applied at the
+		// extension/SDK boundary is what withholds it.
+		expect(JSON.stringify(events.map(projectCredentialDisabledEvent))).not.toContain("diag-refresh-echo");
+		// The disable announcement this change adds carries only the classified
+		// cause, so a provider echo never reaches ~/.omp/logs through it.
+		const announcements = logs
+			.flatMap(log => log.mock.calls)
+			.filter(([message]) => message === "Auth credential disabled");
+		expect(announcements.length).toBeGreaterThan(0);
+		for (const secret of ["diag-refresh-echo", "diag-client-echo", "diag-disable-cause"])
+			expect(JSON.stringify(announcements)).not.toContain(secret);
+	} finally {
+		for (const log of logs) log.mockRestore();
+		await broker?.close();
+		endpoint.stop(true);
+		storage.close();
+		await removeWithRetries(tempDir);
+	}
+});
 
 function mintOAuth(email: string): OAuthCredential {
 	return {
@@ -48,6 +136,33 @@ describe("disabled credential tombstones", () => {
 		await removeWithRetries(tempDir);
 	});
 
+	test("one login consumes at most one unidentified tombstone", async () => {
+		// Two accounts signed out without any recoverable identity (no email, no
+		// account id, no identity key). A later login can only account for one of
+		// them; purging both on a single login silently drops the other account's
+		// startup and usage warning.
+		const anonymous = (access: string): OAuthCredential => ({
+			type: "oauth",
+			access,
+			refresh: `refresh-${access}`,
+			expires: Date.now() + 60_000,
+		});
+		store!.saveOAuth("anthropic", anonymous("first"));
+		store!.saveOAuth("anthropic", anonymous("second"));
+		const rows = store!.listAuthCredentials("anthropic");
+		expect(rows).toHaveLength(2);
+		for (const row of rows) store!.deleteAuthCredential(row.id, "oauth refresh failed: invalid_grant");
+		expect(await store!.listDisabledCredentials("anthropic")).toHaveLength(2);
+
+		// A fresh login writes one new credential.
+		store!.saveOAuth("anthropic", mintOAuth("back@example.test"));
+
+		const remaining = await store!.listDisabledCredentials("anthropic");
+		expect(remaining).toHaveLength(1);
+		// The older sign-out is the one left to explain; the newest was consumed.
+		expect(remaining[0]!.id).toBe(Math.min(...rows.map(row => row.id)));
+	});
+
 	test("sqlite store lists identity + cause + disabledAtMs and never token material", async () => {
 		store!.saveOAuth("anthropic", mintOAuth("dead@example.test"));
 		store!.saveOAuth("openai-codex", mintOAuth("alive@example.test"));
@@ -63,7 +178,6 @@ describe("disabled credential tombstones", () => {
 			type: "oauth",
 			email: "dead@example.test",
 			accountId: "account-dead@example.test",
-			cause: DISABLE_CAUSE,
 		});
 		expect(typeof summary.disabledAtMs).toBe("number");
 		// Tombstones are display-only: no token bytes may leak through them.
@@ -76,12 +190,56 @@ describe("disabled credential tombstones", () => {
 		expect(await storage!.listDisabledCredentials("openai-codex")).toHaveLength(0);
 	});
 
-	test("client maps a broker without the endpoint (404) to an empty list", async () => {
-		const fetchImpl: typeof fetch = Object.assign(async () => new Response("not found", { status: 404 }), {
-			preconnect: fetch.preconnect,
+	test("current clients accept old disabled shapes but require per-call support before trusting empty history", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const broker = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				const provider = new URL(request.url).searchParams.get("provider");
+				if (provider === "missing") {
+					started.resolve();
+					await release.promise;
+					return new Response("not found", { status: 404 });
+				}
+				return Response.json({
+					generatedAt: Date.now(),
+					disabled:
+						provider === "empty"
+							? []
+							: [
+									{
+										id: 1,
+										provider: "anthropic",
+										type: "oauth",
+										email: "legacy@example.test",
+										cause: "invalid_grant",
+									},
+								],
+				});
+			},
 		});
-		const client = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused", fetchImpl });
-		expect(await client.listDisabledCredentials()).toEqual([]);
+		const client = new AuthBrokerClient({ url: broker.url.href, token: "unused", maxRetries: 0 });
+		const remote = new AuthStorage(new RemoteAuthCredentialStore({ client, streamSnapshots: false }));
+		try {
+			expect(await remote.listDisabledCredentials("old", undefined, { requireSupported: true })).toMatchObject([
+				{ id: 1, email: "legacy@example.test" },
+			]);
+			const unsupported = remote
+				.listDisabledCredentials("missing", undefined, { requireSupported: true })
+				.catch((error: unknown) => error);
+			await started.promise;
+			expect(await remote.listDisabledCredentials("empty", undefined, { requireSupported: true })).toEqual([]);
+			release.resolve();
+			expect(await unsupported).toMatchObject({ status: 404 });
+			expect(await remote.listDisabledCredentials("missing")).toEqual([]);
+			expect(await remote.listDisabledCredentials("empty", undefined, { requireSupported: true })).toEqual([]);
+		} finally {
+			release.resolve();
+			remote.close();
+			broker.stop(true);
+		}
 	});
 });
 
@@ -132,9 +290,62 @@ describe("broker /v1/credentials/disabled round-trip", () => {
 			provider: "anthropic",
 			type: "oauth",
 			email: "gone@example.test",
-			cause: DISABLE_CAUSE,
 		});
 		expect(JSON.stringify(disabled[0])).not.toContain("refresh-gone");
+	});
+
+	test("legacy strict clients receive only their known disabled fields while current clients retain project scope", async () => {
+		serverStore!.saveOAuth("google", {
+			...mintOAuth("scoped@example.test"),
+			projectId: "project-a",
+			orgId: "org-a",
+			orgName: "Team",
+		});
+		const row = serverStore!.listAuthCredentials("google")[0]!;
+		serverStore!.deleteAuthCredential(row.id, DISABLE_CAUSE);
+		// Exact strict disabled response schema from source base 1091f70, before projectId.
+		const legacySchema = type({
+			"+": "reject",
+			generatedAt: "number",
+			disabled: type({
+				"+": "reject",
+				id: "number.integer",
+				provider: type("string").atLeastLength(1),
+				type: "'oauth' | 'api_key'",
+				"email?": "string",
+				"accountId?": "string",
+				"orgId?": "string",
+				"orgName?": "string",
+				cause: "string",
+				"disabledAtMs?": "number",
+			}).array(),
+		});
+		for (const capabilities of ["", AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES]) {
+			const response = await fetch(handle!.url + "/v1/credentials/disabled", {
+				headers: { Authorization: "Bearer " + token, [AUTH_BROKER_CAPABILITIES_HEADER]: capabilities },
+			});
+			expect(response.status).toBe(200);
+			const body: unknown = await response.json();
+			const parsed = legacySchema(body);
+			expect(parsed).not.toBeInstanceOf(type.errors);
+			if (parsed instanceof type.errors) throw new Error(parsed.summary);
+			expect(parsed.disabled).toMatchObject([{ id: row.id, orgId: "org-a", orgName: "Team" }]);
+		}
+		expect(
+			await clientStorage!.listDisabledCredentials("google", undefined, { requireSupported: true }),
+		).toMatchObject([{ id: row.id, projectId: "project-a" }]);
+	});
+
+	test("an unsupported backing store never becomes authoritative empty broker history", async () => {
+		const source: AuthCredentialStore = serverStore!;
+		source.listDisabledCredentials = undefined;
+		expect(await serverStorage!.listDisabledCredentials()).toEqual([]);
+		await expect(
+			serverStorage!.listDisabledCredentials(undefined, undefined, { requireSupported: true }),
+		).rejects.toThrow();
+		await expect(
+			clientStorage!.listDisabledCredentials(undefined, undefined, { requireSupported: true }),
+		).rejects.toThrow();
 	});
 
 	test("revalidateCredentials re-hydrates broker-side identity changes past a stale snapshot", async () => {
@@ -212,6 +423,52 @@ describe("OAuth login stamps authorizedAt", () => {
 			expect(after.credential.authorizedAt).toBe(authorizedAt);
 		} finally {
 			refreshingStorage.close();
+		}
+	});
+});
+
+describe("broker history against a store without tombstones", () => {
+	/**
+	 * `requireSupported` exists so the broker never reports an authoritative
+	 * empty history it cannot vouch for. The failure mode that matters is what
+	 * the client does next: a store that simply has no tombstone table is a
+	 * permanent capability gap, and answering `500` made the client's removal
+	 * lookup retry it with backoff for the life of the process.
+	 */
+	test("answers 501 so the client latches it off instead of retrying", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-nohistory-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "broker.db"));
+		// A store that legitimately omits the optional hook.
+		(store as { listDisabledCredentials?: unknown }).listDisabledCredentials = undefined;
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		const token = "no-history-bearer";
+		const handle = startAuthBroker({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+		});
+		try {
+			const response = await fetch(`${handle.url}/v1/credentials/disabled`, {
+				headers: { authorization: `Bearer ${token}` },
+			});
+			expect(response.status).toBe(501);
+			await response.text();
+
+			const client = new AuthBrokerClient({ url: handle.url, token });
+			// Default lookups treat it as "no history", exactly like a 404 from a
+			// broker predating the endpoint.
+			expect(await client.listDisabledCredentials()).toEqual([]);
+			// A caller that needs authority still gets an error rather than a
+			// silent empty list.
+			await expect(
+				client.listDisabledCredentials(undefined, undefined, { requireSupported: true }),
+			).rejects.toThrow();
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 });

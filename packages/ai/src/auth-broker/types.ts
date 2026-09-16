@@ -171,6 +171,9 @@ export const AUTH_BROKER_CAPABILITIES_HEADER = "OMP-Auth-Broker-Capabilities";
 /** Client understands independent Codex `chat` and `spark` credential-block scopes. */
 export const AUTH_BROKER_CAPABILITY_CODEX_METER_BLOCK_SCOPES = "codex-meter-block-scopes";
 
+/** Client accepts project-scoped disabled credential identities. */
+export const AUTH_BROKER_CAPABILITY_DISABLED_CREDENTIAL_PROJECT_ID = "disabled-credential-project-id";
+
 /** Default port when none is configured. Loopback-only, no external exposure. */
 export const DEFAULT_AUTH_BROKER_BIND = "127.0.0.1:8765";
 
