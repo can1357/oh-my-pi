@@ -832,6 +832,54 @@ describe("MCPToolCache empty-toolset guard", () => {
 		expect((await startup.get("litellm", CONFIG)) ?? []).not.toContainEqual(OLD_TOOL);
 	});
 
+	// The reviewer's populated-cache hole. Every barrier test above starts with
+	// NO catalog row, so `readWriteStartedAt(null)` is undefined and the claim
+	// barrier is reached through the `??` fallback. The ORDINARY case has a
+	// catalog row already: its token short-circuited the `??`, so the barrier was
+	// never consulted. An older cross-process request holding a token ABOVE the
+	// existing catalog then overwrote it, even though a newer unreserved response
+	// had published a barrier above that older request. The write must be ordered
+	// against the GREATER of the catalog token and the claim barrier.
+	//
+	// RED (round 5): the populated catalog's token bypassed the barrier, so the
+	// superseded older toolset was cached for the full TTL.
+	test("a delayed older response cannot overwrite a populated catalog once a newer unreserved response has published its barrier", async () => {
+		const storage = createFakeStorage();
+
+		// An existing catalog on the row, carrying the LOWEST token.
+		const existing = new MCPToolCache(storage);
+		await existing.set("litellm", CONFIG, [TOOL], reserved(existing, "litellm"));
+		expect(await existing.get("litellm", CONFIG)).toEqual([TOOL]);
+
+		// An older cross-process request reserves a token ABOVE the existing
+		// catalog and publishes it to the claim row. Its response is merely delayed.
+		const older = new MCPToolCache(storage);
+		const olderToken = reserved(older, "litellm");
+
+		// A newer request's `tools/list` goes out while the store is briefly
+		// locked, so its claim cannot publish and it reserves unreserved — but its
+		// floored token still lands above the older published claim.
+		const newer = new MCPToolCache(storage);
+		const cas = vi.spyOn(storage, "setCacheIfMatches").mockReturnValueOnce("unavailable");
+		const newerToken = newer.observeCatalogAt("litellm");
+		cas.mockRestore();
+		expect(newerToken).toBeUndefined();
+
+		// The newer response lands FIRST. It skips the persisted catalog (no
+		// established order) but publishes a barrier ABOVE the older request.
+		await newer.set("litellm", CONFIG, [NEW_TOOL], newerToken);
+
+		// The older response lands LAST, carrying its published token. The catalog
+		// still on the row carries a LOWER token, so only the claim barrier can
+		// refuse it — reading the catalog token alone was the bug.
+		await older.set("litellm", CONFIG, [OLD_TOOL], olderToken);
+
+		// A subsequent fresh-instance startup must read the EXISTING catalog, never
+		// the superseded older toolset resurrected for the full TTL.
+		const startup = new MCPToolCache(storage);
+		expect(await startup.get("litellm", CONFIG)).toEqual([TOOL]);
+	});
+
 	// The round-4 hole: a store lock held across BOTH the newer request's
 	// reservation AND its response's barrier publish left NO barrier at all,
 	// because `#publishUnreservedBarrier` returned on "unavailable". Once the
@@ -849,7 +897,14 @@ describe("MCPToolCache empty-toolset guard", () => {
 		const older = new MCPToolCache(storage);
 		const newer = new MCPToolCache(storage);
 
-		// The older request reserves first and publishes its (lower) claim token.
+		// A populated catalog is already on the row, carrying the LOWEST token, so
+		// the flushed barrier is exercised on the ordinary populated-cache path
+		// (its token would otherwise short-circuit the claim comparison) rather
+		// than the empty-store one.
+		const existing = new MCPToolCache(storage);
+		await existing.set("litellm", CONFIG, [TOOL], reserved(existing, "litellm"));
+
+		// The older request reserves next and publishes its (lower) claim token.
 		const olderToken = reserved(older, "litellm");
 
 		// A store lock is held across the newer request's reservation AND its
@@ -881,10 +936,10 @@ describe("MCPToolCache empty-toolset guard", () => {
 		// published lower token. The flushed barrier must refuse its catalog.
 		await older.set("litellm", CONFIG, [OLD_TOOL], olderToken);
 
-		// A subsequent fresh-instance startup must NOT read the older catalog; the
-		// store holds no authoritative catalog, so a live re-list repopulates it.
+		// A subsequent fresh-instance startup must read the EXISTING catalog, never
+		// the superseded older toolset; the flushed barrier refuses the older write.
 		const startup = new MCPToolCache(storage);
-		expect((await startup.get("litellm", CONFIG)) ?? []).not.toContainEqual(OLD_TOOL);
+		expect(await startup.get("litellm", CONFIG)).toEqual([TOOL]);
 	});
 
 	// A tombstone's ordering must outlive the CATALOG TTL, because an MCP request
