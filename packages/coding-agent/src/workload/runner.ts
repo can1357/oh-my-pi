@@ -139,11 +139,24 @@ async function createWorkloadSession(
  * on. `output` is the parsed value when stdout is a JSON document, so a shell
  * step can feed `for_each` (a script that lists targets) without a model in
  * the loop; `stdout` always stays the raw text.
+ *
+ * A spawn that never starts (missing executable, unexecutable file) is a
+ * failed attempt rather than a thrown error, so it goes through `retries` and
+ * `on_failure` like any non-zero exit.
  */
 async function runShellStep(step: WorkloadStep, scope: TemplateScope, cwd: string): Promise<StepAttempt> {
 	const argv = (step.run ?? []).map(argument => interpolate(argument, scope));
 	const started = Bun.nanoseconds();
-	const child = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe" });
+	let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
+	try {
+		child = Bun.spawn(argv, { cwd, stdout: "pipe", stderr: "pipe" });
+	} catch (err) {
+		return {
+			ok: false,
+			durationMs: Math.round((Bun.nanoseconds() - started) / 1_000_000),
+			error: `spawn failed: ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
 	const [stdout, stderr] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()]);
 	const exitCode = await child.exited;
 	const durationMs = Math.round((Bun.nanoseconds() - started) / 1_000_000);
@@ -196,15 +209,17 @@ async function runAgentStep(
 		const { result } = execution;
 		const durationMs = Math.round((Bun.nanoseconds() - started) / 1_000_000);
 		const structured = result.structuredOutput;
+		// Same success condition as the `task` tool and the eval `agent()`
+		// bridge: a capture or merge failure is reported in `result.error` with
+		// exit code 0, and must still count as a failed attempt.
+		const ok = result.exitCode === 0 && !result.error && !result.aborted;
 		return {
-			ok: result.exitCode === 0 && !result.aborted,
+			ok,
 			output: structured?.data !== undefined ? structured.data : result.output,
 			durationMs,
 			...(result.resolvedModel !== undefined ? { resolvedModel: result.resolvedModel } : {}),
 			...(result.tokens !== undefined ? { tokens: result.tokens } : {}),
-			...(result.exitCode === 0 && !result.aborted
-				? {}
-				: { error: result.error ?? result.abortReason ?? `subagent exited ${result.exitCode}` }),
+			...(ok ? {} : { error: result.error ?? result.abortReason ?? `subagent exited ${result.exitCode}` }),
 		};
 	} catch (err) {
 		const durationMs = Math.round((Bun.nanoseconds() - started) / 1_000_000);
