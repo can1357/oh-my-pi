@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.21] - 2026-09-16
+
 ### Changed
 
 - Bundled the generated `cerebras/qwen-3.8-27b` catalog entry (models.dev source: 64k context, 32k output, text+image, `effort` low/medium/high). Live `/v1/models` discovery now inherits the reasoning dial from the bundled reference like every other cerebras SKU, so the interim discovery-side reasoning flag for the id was removed.
