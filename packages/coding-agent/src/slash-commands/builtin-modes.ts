@@ -714,7 +714,9 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			session.setThinkingLevel(parsed);
 			await runtime.output(`Reasoning effort set to ${parsed}.`);
-			await runtime.notifyConfigChanged?.();
+			// `setThinkingLevel` emits `thinking_level_changed`, which hosts with a
+			// session-lifetime subscription (ACP) already turn into a config push.
+			await runtime.notifyConfigChanged?.({ handledBySessionEvent: true });
 			return commandConsumed();
 		},
 	},

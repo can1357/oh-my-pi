@@ -997,7 +997,15 @@ export class AcpAgent implements Agent {
 					},
 				});
 			},
-			notifyConfigChanged: async () => {
+			notifyConfigChanged: async options => {
+				// Mirrors `setSessionConfigOption`: once the session-lifetime
+				// subscription is installed, `model_changed`/`thinking_level_changed`
+				// already reach `#handleLifetimeEvent`, which pushes the
+				// `config_option_update`. Pushing again here would make clients
+				// redraw their config UI twice for a single change.
+				if (options?.handledBySessionEvent && record.lifetimeUnsubscribe !== undefined) {
+					return;
+				}
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});
