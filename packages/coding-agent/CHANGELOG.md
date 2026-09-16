@@ -5,6 +5,7 @@
 ### Added
 
 - Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Session headers now record `gitBranch`, the branch of the session `cwd`'s checkout, re-resolved when a session moves to another directory. Absent outside a checkout, on a detached `HEAD`, and in a pure-jj workspace.
 
 ## [18.2.1] - 2026-09-15
 
