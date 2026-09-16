@@ -1115,10 +1115,14 @@ async function attachTabOperation(
 	socket: WebSocket,
 	operation: PendingAttachToken,
 ): Promise<void> {
-	await chrome.debugger.attach({ tabId }, "1.3");
-	freshRootRequiredTabIds.delete(tabId);
+	// Reserve this attach's ownership generation before Chrome can report its
+	// detach. A user cancellation may arrive after Chrome attaches but before
+	// this await resumes; advancing the epoch afterwards would make that
+	// cancellation look stale and let the delayed persistence restore ownership.
 	noteAttachmentStateChange(attachmentStateEpochs, tabId);
 	const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
+	await chrome.debugger.attach({ tabId }, "1.3");
+	freshRootRequiredTabIds.delete(tabId);
 	// The relay that requested this attachment disappeared while Chrome was
 	// still resolving attach(). Its pending RPC was rejected by RelayBridge,
 	// so no downstream session can own the resulting debugger attachment.

@@ -954,10 +954,10 @@ async function attachTab(tabId, socket) {
   }
 }
 async function attachTabOperation(tabId, socket, operation) {
-  await chrome.debugger.attach({ tabId }, "1.3");
-  freshRootRequiredTabIds.delete(tabId);
   noteAttachmentStateChange(attachmentStateEpochs, tabId);
   const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
+  await chrome.debugger.attach({ tabId }, "1.3");
+  freshRootRequiredTabIds.delete(tabId);
   if (ws !== socket) {
     guardDetachments.add(tabId);
     await trackPendingDetach(chrome.debugger.detach({ tabId }).catch(async () => {
