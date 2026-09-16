@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
+- Fixed a crash when logging in to a provider that has no stored credentials — the model hub's locked provider row, `/login`, `/logout <provider>`, and account pinning could each take the session down with an unhandled rejection ([#12271](https://github.com/can1357/oh-my-pi/pull/12271)).
 
 ## [18.2.2] - 2026-09-16
 

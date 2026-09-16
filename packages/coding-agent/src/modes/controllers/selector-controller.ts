@@ -135,23 +135,88 @@ function loadModelOverlayComponents(): ModelOverlayModules {
 	};
 }
 
-interface ProviderAuthUiModules {
+/** Catalog half of the login UI; cached across login attempts. */
+let providerAuthCatalog: Promise<AuthCatalogModules> | undefined;
+
+interface AuthCatalogModules {
 	PASTE_CODE_LOGIN_PROVIDERS: typeof PasteCodeLoginProviders;
 	getOAuthProviders: typeof GetOAuthProviders;
-	LoginDialogComponent: typeof LoginDialogComponentType;
-	LogoutAccountSelectorComponent: typeof LogoutAccountSelectorComponentType;
-	OAuthSelectorComponent: typeof OAuthSelectorComponentType;
 }
 
-/** Synchronous first-use boundary for provider auth catalog and dialog components. */
-function loadProviderAuthUi(): ProviderAuthUiModules {
+/**
+ * Load the pi-ai auth catalog for the login/logout flows.
+ *
+ * The package-root barrel is reached through an ESM `import()` rather than
+ * `require()`: a `require()` of any `@oh-my-pi/*` specifier stays unresolved
+ * while the legacy pi specifier shim is installed (the shim's `onResolve`
+ * answers with a path the CJS loader then treats as a filename), so a login
+ * request died with `ENOENT reading "file:/…"` — and, before the shim stopped
+ * re-entering itself, with `BuildMessage: NameTooLong reading "file:file:…"`,
+ * which killed the whole process.
+ *
+ * A static import cannot replace this: this boundary exists to keep the auth
+ * catalog and dialogs out of the CLI's startup graph.
+ */
+function loadProviderAuthCatalog(): Promise<AuthCatalogModules> {
+	providerAuthCatalog ??= import("@oh-my-pi/pi-ai")
+		.then(ai => {
+			const { PASTE_CODE_LOGIN_PROVIDERS, getOAuthProviders } = ai;
+			// At runtime the specifier can land on a compat shim or a virtual
+			// module rather than the typed barrel, so a module without the catalog
+			// is a load failure — name it here instead of the `undefined.has`
+			// TypeError the login flow would raise later.
+			if (typeof getOAuthProviders !== "function" || !PASTE_CODE_LOGIN_PROVIDERS) {
+				throw new Error("the pi-ai package did not expose the provider auth catalog");
+			}
+			return { PASTE_CODE_LOGIN_PROVIDERS, getOAuthProviders };
+		})
+		.catch(error => {
+			// A failed load must not be cached: the next attempt (a retry, or a
+			// transient module error) has to try again.
+			providerAuthCatalog = undefined;
+			throw error;
+		});
+	return providerAuthCatalog;
+}
+
+/** Test hook: forget the cached catalog so a mocked module can be loaded. */
+export function resetProviderAuthCatalogCache(): void {
+	providerAuthCatalog = undefined;
+}
+
+/**
+ * Load the auth catalog for a UI entry point. The /login and /logout slash
+ * commands start these flows with `void` and the model hub fires its own from a
+ * click handler, so a catalog that cannot be loaded is reported here: a
+ * rejection would reach the process as a fatal unhandled rejection.
+ *
+ * Returns undefined once the failure has been surfaced.
+ */
+async function loadAuthCatalogOrReport(
+	ctx: InteractiveModeContext,
+	action: string,
+): Promise<AuthCatalogModules | undefined> {
+	try {
+		return await loadProviderAuthCatalog();
+	} catch (error) {
+		ctx.showError(`${action} failed: ${error instanceof Error ? error.message : String(error)}`);
+		return undefined;
+	}
+}
+
+/** Synchronous first-use boundary for the provider auth dialog components. */
+function loadProviderAuthComponents(): ProviderAuthComponents {
 	return {
-		PASTE_CODE_LOGIN_PROVIDERS: require("@oh-my-pi/pi-ai/index.js").PASTE_CODE_LOGIN_PROVIDERS,
-		getOAuthProviders: require("@oh-my-pi/pi-ai/registry/oauth/index.js").getOAuthProviders,
 		LoginDialogComponent: require("../components/login-dialog").LoginDialogComponent,
 		LogoutAccountSelectorComponent: require("../components/logout-account-selector").LogoutAccountSelectorComponent,
 		OAuthSelectorComponent: require("../components/oauth-selector").OAuthSelectorComponent,
 	};
+}
+
+interface ProviderAuthComponents {
+	LoginDialogComponent: typeof LoginDialogComponentType;
+	LogoutAccountSelectorComponent: typeof LogoutAccountSelectorComponentType;
+	OAuthSelectorComponent: typeof OAuthSelectorComponentType;
 }
 
 interface ProviderToggleModules {
@@ -194,9 +259,8 @@ export class SelectorController {
 		return resolve;
 	}
 
-	async #refreshOAuthProviderAuthState(): Promise<void> {
-		const { getOAuthProviders } = loadProviderAuthUi();
-		const oauthProviders = getOAuthProviders();
+	async #refreshOAuthProviderAuthState(catalog: AuthCatalogModules): Promise<void> {
+		const oauthProviders = catalog.getOAuthProviders();
 		await Promise.all(
 			oauthProviders.map(provider =>
 				this.ctx.session.modelRegistry
@@ -1254,7 +1318,12 @@ export class SelectorController {
 
 				onLoginRequest: providerId => {
 					done();
-					void this.#loginThenReopenModelHub(providerId);
+					// The hub calls this from a click/Enter handler with nothing to
+					// await it: own the rejection so a login that cannot start is an
+					// error toast instead of a process-killing unhandled rejection.
+					void this.#loginThenReopenModelHub(providerId).catch(error => {
+						this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
+					});
 				},
 				onCycleOrderChange: order => {
 					try {
@@ -2078,8 +2147,6 @@ export class SelectorController {
 	 */
 	async #handleOAuthLogin(providerId: string): Promise<boolean> {
 		this.ctx.showStatus(`Logging in to ${providerId}…`);
-		const { LoginDialogComponent, PASTE_CODE_LOGIN_PROVIDERS } = loadProviderAuthUi();
-		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
 		let restored = false;
 		const restoreEditor = () => {
 			if (restored) return;
@@ -2089,29 +2156,45 @@ export class SelectorController {
 			this.ctx.ui.setFocus(this.ctx.editor);
 			this.ctx.ui.requestRender();
 		};
-		const dialog = new LoginDialogComponent(this.ctx.ui, providerId, (_success, message) => {
-			// Fires on Esc: unblock the editor immediately; the aborted flow's
-			// rejection settles the awaited login below.
-			restoreEditor();
-			if (message) this.ctx.showStatus(message);
-		});
-		this.ctx.editorContainer.clear();
-		this.ctx.editorContainer.addChild(dialog);
-		this.ctx.ui.setFocus(dialog);
-		this.ctx.ui.requestRender();
+		let dialog: LoginDialogComponentType | undefined;
 		try {
+			// The dialog mounts synchronously — swapping the editor slot is part of
+			// the request, and Esc must be able to cancel it immediately.
+			const { LoginDialogComponent } = loadProviderAuthComponents();
+			const activeDialog = new LoginDialogComponent(this.ctx.ui, providerId, (_success, message) => {
+				// Fires on Esc: unblock the editor immediately; the aborted flow's
+				// rejection settles the awaited login below.
+				restoreEditor();
+				if (message) this.ctx.showStatus(message);
+			});
+			dialog = activeDialog;
+			this.ctx.editorContainer.clear();
+			this.ctx.editorContainer.addChild(activeDialog);
+			this.ctx.ui.setFocus(activeDialog);
+			this.ctx.ui.requestRender();
+
+			// Loading the auth catalog is part of logging in, so a module that cannot
+			// be loaded has to reach the user as an error: this request comes from a
+			// UI callback (a locked provider row in the /model hub) whose promise is
+			// fire-and-forget, and a rejection here used to kill the whole session.
+			const { PASTE_CODE_LOGIN_PROVIDERS } = await loadProviderAuthCatalog();
+			// Esc during the catalog load already cancelled the request: the dialog
+			// aborted and restored the editor, so the flow must not start.
+			if (activeDialog.signal.aborted) return false;
+			const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
+
 			const identity = await this.ctx.session.modelRegistry.authStorage.login(providerId as OAuthProvider, {
-				signal: dialog.signal,
+				signal: activeDialog.signal,
 				onBrowserSession: captureBrowserSession,
 				onAuth: (info: { url: string; launchUrl?: string; instructions?: string }) => {
 					// The dialog renders the full URL (SSH-safe copy target) and
 					// opens the browser best-effort.
-					dialog.showAuth(info.url, info.instructions, info.launchUrl);
+					activeDialog.showAuth(info.url, info.instructions, info.launchUrl);
 				},
 				onPrompt: (prompt: { message: string; placeholder?: string }) =>
-					dialog.showPrompt(prompt.message, prompt.placeholder),
+					activeDialog.showPrompt(prompt.message, prompt.placeholder),
 				onProgress: (message: string) => {
-					dialog.showProgress(message);
+					activeDialog.showProgress(message);
 				},
 				// Paste-code providers (e.g. Codex) may need the user to paste the
 				// fallback redirect URL when the loopback callback can't complete
@@ -2120,7 +2203,7 @@ export class SelectorController {
 				// editor's `/login <url>` path is unreachable while the dialog holds
 				// focus (#5339).
 				onManualCodeInput: useManualInput
-					? signal => dialog.showManualInput(MANUAL_LOGIN_PROMPT, signal)
+					? signal => activeDialog.showManualInput(MANUAL_LOGIN_PROMPT, signal)
 					: undefined,
 			});
 			// Scope the post-login refresh to the just-authenticated provider with an
@@ -2149,7 +2232,7 @@ export class SelectorController {
 			this.ctx.present(block);
 			return true;
 		} catch (error: unknown) {
-			if (dialog.signal.aborted) {
+			if (dialog?.signal.aborted) {
 				// User-cancelled: the dialog already restored the editor and
 				// surfaced "Login cancelled".
 				return false;
@@ -2210,7 +2293,10 @@ export class SelectorController {
 			);
 			return;
 		}
-		const { getOAuthProviders, LogoutAccountSelectorComponent } = loadProviderAuthUi();
+		const catalog = await loadAuthCatalogOrReport(this.ctx, "Logout");
+		if (!catalog) return;
+		const { getOAuthProviders } = catalog;
+		const { LogoutAccountSelectorComponent } = loadProviderAuthComponents();
 		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
 		const accounts = toLogoutAccounts(providerId, authStorage.listStoredCredentials(providerId), {
 			activeIdentity: authStorage.getOAuthAccountIdentity(providerId, this.ctx.session.sessionId),
@@ -2250,9 +2336,12 @@ export class SelectorController {
 			return;
 		}
 
-		const { getOAuthProviders, OAuthSelectorComponent } = loadProviderAuthUi();
+		const catalog = await loadAuthCatalogOrReport(this.ctx, mode === "login" ? "Login" : "Logout");
+		if (!catalog) return;
+		const { getOAuthProviders } = catalog;
+		const { OAuthSelectorComponent } = loadProviderAuthComponents();
 		if (mode === "logout") {
-			await this.#refreshOAuthProviderAuthState();
+			await this.#refreshOAuthProviderAuthState(catalog);
 			const oauthProviders = getOAuthProviders();
 			const loggedInProviders = oauthProviders.filter(provider =>
 				this.ctx.session.modelRegistry.authStorage.has(provider.id),
@@ -2318,7 +2407,9 @@ export class SelectorController {
 			this.ctx.showStatus("Select a model before pinning a provider account.");
 			return;
 		}
-		const { getOAuthProviders } = loadProviderAuthUi();
+		const catalog = await loadAuthCatalogOrReport(this.ctx, "Account pinning");
+		if (!catalog) return;
+		const { getOAuthProviders } = catalog;
 		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
 		const providerName = provider?.name ?? accountList.provider;
 		const accounts = toSessionPinAccounts(accountList.accounts);

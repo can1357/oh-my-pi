@@ -1,10 +1,20 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, mock, vi } from "bun:test";
 import { LoginDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/login-dialog";
-import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import {
+	resetProviderAuthCatalogCache,
+	SelectorController,
+} from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { installLegacyPiSpecifierShim } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { TUI } from "@oh-my-pi/pi-tui";
+
+// A greyed-out provider row in the /model hub forwards to the OAuth login this
+// controller runs, and a real omp process always has the legacy pi specifier
+// shim installed (the plugin and extension loaders register it at import time).
+// Without it this suite would exercise a resolution path production never takes.
+installLegacyPiSpecifierShim();
 
 interface RenderableBlock {
 	render(width: number): string[];
@@ -129,5 +139,129 @@ describe("SelectorController login", () => {
 		dialog.handleInput("\n");
 
 		await expect(prompt).resolves.toBe("OMP_PASTE_TEST_123");
+	});
+});
+
+/** The ctx shape `#handleOAuthLogin` touches, with the auth UI a real module load. */
+function makeLoginContext(): {
+	ctx: InteractiveModeContext;
+	blocks: unknown[];
+	showError: ReturnType<typeof vi.fn>;
+} {
+	const blocks: unknown[] = [];
+	const showError = vi.fn();
+	const ctx = {
+		oauthManualInput: { waitForInput: vi.fn(), clear: vi.fn() },
+		session: {
+			modelRegistry: {
+				authStorage: { login: vi.fn(async () => {}) },
+				refresh: vi.fn(async () => {}),
+				refreshProvider: vi.fn(async () => {}),
+			},
+		},
+		editorContainer: { clear: vi.fn(), addChild: vi.fn(), children: [] },
+		editor: {},
+		ui: { setFocus: vi.fn(), requestRender: vi.fn() },
+		showStatus: vi.fn(),
+		showError,
+		present: vi.fn((block: unknown) => {
+			blocks.push(block);
+		}),
+		openInBrowser: vi.fn(),
+	} as unknown as InteractiveModeContext;
+	return { ctx, blocks, showError };
+}
+
+describe("SelectorController login for a provider with no credentials configured", () => {
+	afterEach(() => {
+		mock.restore();
+		resetProviderAuthCatalogCache();
+	});
+
+	it("loads the auth UI and runs the login the /model hub requested", async () => {
+		const { ctx, blocks } = makeLoginContext();
+		const controller = new SelectorController(ctx);
+
+		await controller.showOAuthSelector("login", "anthropic");
+
+		expect(ctx.session.modelRegistry.authStorage.login).toHaveBeenCalledTimes(1);
+		expect(renderPresented(blocks)).toContain("Successfully logged in to anthropic");
+		expect(ctx.showError).not.toHaveBeenCalled();
+	});
+
+	// Regression: the hub fires this login from a click/Enter handler whose
+	// promise nobody awaits. A failure to load the auth catalog has to surface as
+	// a login error; it used to reject that promise, and the process died on the
+	// fatal unhandled-rejection path instead of showing anything.
+	it("surfaces an auth-catalog load failure as a login error instead of rejecting", async () => {
+		resetProviderAuthCatalogCache();
+		// A barrel whose catalog export cannot be read stands in for the
+		// resolution failure the shim produced in the field.
+		mock.module("@oh-my-pi/pi-ai", () => ({
+			get PASTE_CODE_LOGIN_PROVIDERS(): never {
+				throw new Error("simulated auth catalog failure");
+			},
+			getOAuthProviders: () => [],
+		}));
+		const { ctx } = makeLoginContext();
+		const controller = new SelectorController(ctx);
+
+		// Resolves: the failure is reported, not thrown at the caller.
+		await controller.showOAuthSelector("login", "anthropic");
+
+		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("Login failed:"));
+		expect(ctx.session.modelRegistry.authStorage.login).not.toHaveBeenCalled();
+		// The editor slot comes back, so the session stays usable.
+		expect(ctx.editorContainer.addChild).toHaveBeenCalledWith(ctx.editor);
+	});
+});
+
+describe("SelectorController OAuth entry points under a broken auth catalog", () => {
+	afterEach(() => {
+		mock.restore();
+		resetProviderAuthCatalogCache();
+	});
+
+	// Regression: /login and /logout start these flows with `void` and nothing
+	// attaches a handler, so each entry point has to report a catalog failure
+	// itself — an escaping rejection is the fatal unhandled-rejection path.
+	it("reports a catalog load failure from every entry point without an unhandled rejection", async () => {
+		const { ctx, showError } = makeLoginContext();
+		const controller = new SelectorController(ctx);
+		const rejections: unknown[] = [];
+		const record = (reason: unknown) => {
+			rejections.push(reason);
+		};
+		process.on("unhandledRejection", record);
+		try {
+			const entries: ReadonlyArray<readonly [string, () => Promise<void>]> = [
+				["login with provider", () => controller.showOAuthSelector("login", "anthropic")],
+				["login picker", () => controller.showOAuthSelector("login")],
+				["logout with provider", () => controller.showOAuthSelector("logout", "anthropic")],
+				["logout picker", () => controller.showOAuthSelector("logout")],
+			];
+			mock.module("@oh-my-pi/pi-ai", () => ({
+				get PASTE_CODE_LOGIN_PROVIDERS(): never {
+					throw new Error("simulated auth catalog failure");
+				},
+			}));
+			for (const [label, entry] of entries) {
+				// Each entry point takes its own load path (the failed load is not
+				// cached), so one registration covers all four.
+				resetProviderAuthCatalogCache();
+				const reported = showError.mock.calls.length;
+
+				// Resolving — not rejecting — is the contract.
+				await entry();
+
+				expect(showError.mock.calls.length, label).toBeGreaterThan(reported);
+			}
+			// Let a rejection that nobody awaited surface before asserting.
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(rejections).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", record);
+		}
 	});
 });

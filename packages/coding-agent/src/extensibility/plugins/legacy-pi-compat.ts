@@ -2714,33 +2714,53 @@ function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {
 	return "js";
 }
 
+/**
+ * Canonical specifiers whose plugin resolution is currently on the stack.
+ *
+ * Every Bun resolver (`Bun.resolveSync`, `Bun.resolve`, `import.meta.resolve`,
+ * `require.resolve`) re-runs this plugin's own `onResolve` for the specifier it
+ * is asked to resolve, so resolving a filter-matched specifier from inside
+ * `resolveLegacyPiSpecifier` re-enters it; each level prefixes `file:` to the
+ * inner result until the path passes PATH_MAX and the caller fails with
+ * `BuildMessage: NameTooLong reading "file:file:…"`. A re-entered specifier is
+ * declined instead, which hands that level back to Bun's own resolution.
+ */
+const resolvingSpecifiers = new Set<string>();
+
 function resolveLegacyPiSpecifier(args: { path: string; importer: string }): LegacyPiResolveResult | undefined {
 	const remappedSpecifier = remapLegacyPiSpecifier(args.path);
 	if (!remappedSpecifier) {
 		return undefined;
 	}
-
-	// Primary: resolve the canonical @oh-my-pi/* specifier from the host binary
-	// location. Works in dev mode and in source-link installs.
+	if (resolvingSpecifiers.has(remappedSpecifier)) {
+		return undefined;
+	}
+	resolvingSpecifiers.add(remappedSpecifier);
 	try {
-		return toLegacyPiResolveResult(resolveCanonicalPiSpecifier(remappedSpecifier));
-	} catch {
-		// Fallback for compiled binary mode: the bundled packages live inside
-		// /$bunfs/root and aren't reachable by filesystem resolution. Prefer the
-		// canonical specifier against the importing file's directory when the
-		// plugin installed @oh-my-pi peer deps, then try the original legacy
-		// specifier for plugins that still vendor only @mariozechner or
-		// @earendil-works peer deps.
-		const importerDir = path.dirname(args.importer);
+		// Primary: resolve the canonical @oh-my-pi/* specifier from the host binary
+		// location. Works in dev mode and in source-link installs.
 		try {
-			return toLegacyPiResolveResult(Bun.resolveSync(remappedSpecifier, importerDir));
+			return toLegacyPiResolveResult(resolveCanonicalPiSpecifier(remappedSpecifier));
 		} catch {
+			// Fallback for compiled binary mode: the bundled packages live inside
+			// /$bunfs/root and aren't reachable by filesystem resolution. Prefer the
+			// canonical specifier against the importing file's directory when the
+			// plugin installed @oh-my-pi peer deps, then try the original legacy
+			// specifier for plugins that still vendor only @mariozechner or
+			// @earendil-works peer deps.
+			const importerDir = path.dirname(args.importer);
 			try {
-				return toLegacyPiResolveResult(Bun.resolveSync(args.path, importerDir));
+				return toLegacyPiResolveResult(Bun.resolveSync(remappedSpecifier, importerDir));
 			} catch {
-				return undefined;
+				try {
+					return toLegacyPiResolveResult(Bun.resolveSync(args.path, importerDir));
+				} catch {
+					return undefined;
+				}
 			}
 		}
+	} finally {
+		resolvingSpecifiers.delete(remappedSpecifier);
 	}
 }
 
