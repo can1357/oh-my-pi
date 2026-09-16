@@ -768,6 +768,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#todoPhasesOwner?: AgentSession;
 	#todoHudHidden = false;
 	hideThinkingBlock = false;
+	liveThinkingPreview = false;
 	#sessionsWithDisplayableThinkingContent = new WeakSet<AgentSession>();
 	/** Whether the visible session has produced thinking content the user can reveal. */
 	get hasDisplayableThinkingContent(): boolean {
@@ -1255,6 +1256,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
 		this.proseOnlyThinking = settings.get("proseOnlyThinking");
+		this.liveThinkingPreview = settings.get("liveThinkingPreview");
 
 		const hookCommands: SlashCommand[] = (
 			this.session.extensionRunner?.getRegisteredCommands(BUILTIN_SLASH_COMMAND_RESERVED_NAMES) ?? []

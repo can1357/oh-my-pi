@@ -211,6 +211,7 @@ export interface InteractiveModeContext {
 	loopCondition?: LoopConditionConfig;
 	planModePlanFilePath?: string;
 	hideThinkingBlock: boolean;
+	liveThinkingPreview: boolean;
 	/**
 	 * Effective thinking-block visibility: true when hidden by user setting OR
 	 * thinking level is "off" before the session has produced displayable
