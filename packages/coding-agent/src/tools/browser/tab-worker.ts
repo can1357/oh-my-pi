@@ -20,9 +20,8 @@ import type {
 	Target,
 } from "puppeteer-core";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
-import { resizeImage } from "../../utils/image-resize";
+import { formatScreenshot, resizeImage } from "../../utils/image-resize";
 import { resolveToCwd } from "../path-utils";
-import { formatScreenshot } from "../render-utils";
 import {
 	bindRunFacade,
 	CELL_BUDGET_SLACK_MS,
@@ -36,7 +35,8 @@ import {
 	waitForRun,
 	withBrowserPromiseCombinatorTracking,
 } from "../run-scope";
-import { ToolAbortError, ToolError, throwIfAborted } from "../tool-errors";
+import { ToolAbortError, throwIfAborted } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	type AriaSnapshotOptions,
 	assertSelectorString,

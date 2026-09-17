@@ -1,5 +1,5 @@
 import type { ElementHandle, JSHandle, Page } from "puppeteer-core";
-import { ToolError } from "../../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import ariaBundle from "./aria-snapshot.bundle.txt" with { type: "text" };
 // `aria-snapshot.bundle.txt` is a generated, committed artifact: Playwright's
 // injected ARIA-snapshot sources (pinned, Apache-2.0) bundled to a CJS module.

@@ -19,6 +19,7 @@ import type {
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { FetchImpl, Model, Static, TSchema } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
+import type { RenderResultOptions } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -27,9 +28,9 @@ import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
-import type { Theme } from "../../modes/theme/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { ReadonlySessionManager } from "../../session/session-manager";
-import type { TodoItem } from "../../tools/todo";
+import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
 import type { RetryErrorUpdate } from "../shared-events";
 
 /** Alias for clarity */
@@ -39,6 +40,8 @@ export type CustomToolUIContext = HookUIContext;
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 /** Re-export for custom tools to use in execute signature */
 export type { AgentToolResult, AgentToolUpdateCallback, ToolApproval, ToolApprovalDecision, ToolTier };
+/** Display state handed to `renderCall`/`renderResult`; owned by pi-tui. */
+export type { RenderResultOptions };
 
 /** Pending action entry consumed by the hidden resolve tool */
 export interface CustomToolPendingAction {
@@ -151,26 +154,6 @@ export type CustomToolSessionEvent =
 			attempt: number;
 			maxAttempts: number;
 	  };
-
-/** Rendering options passed to renderResult */
-export interface RenderResultOptions {
-	/** Whether the result view is expanded */
-	expanded: boolean;
-	/** Whether this is a partial/streaming result */
-	isPartial: boolean;
-	/** Current spinner frame index for animated elements (0-9, only provided during partial results) */
-	spinnerFrame?: number;
-	/**
-	 * True once arguments are final (`message_end` / `setArgsComplete`).
-	 * Exclusive tools can sit here while an earlier call still runs.
-	 */
-	argsComplete?: boolean;
-	/**
-	 * True once this specific call has begun executing (`tool_execution_start`).
-	 * Streamed `xd://` previews stay queued until this is set.
-	 */
-	executionStarted?: boolean;
-}
 
 export type CustomToolResult<TDetails = any> = AgentToolResult<TDetails>;
 

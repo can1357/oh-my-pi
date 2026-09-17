@@ -1,8 +1,8 @@
 import { truncateToWidth } from "@oh-my-pi/pi-tui";
-import type { StatusLineSegmentId } from "../../config/settings-schema";
-import { ALL_SEGMENT_IDS, renderSegment } from "../../modes/components/status-line/segments";
-import type { SegmentContext } from "../../modes/components/status-line/types";
-import { theme } from "../../modes/theme/theme";
+import type { StatusLineSegmentId } from "@oh-my-pi/pi-tui/status-line/schema";
+import { ALL_SEGMENT_IDS, renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
+import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/types";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { GallerySessionOptions } from "./preview-session";
 import { createGallerySession, GALLERY_CONTEXT_WINDOW } from "./preview-session";
 import type { GalleryPreviewEntry } from "./types";
@@ -45,6 +45,7 @@ export function createGallerySegmentContext(sessionOptions?: GallerySessionOptio
 		prewalk: null,
 		loopMode: null,
 		goalMode: null,
+		goalStatusInFooter: true,
 		vibeMode: null,
 		vim: null,
 		collab: { role: "host", participantCount: 3 },

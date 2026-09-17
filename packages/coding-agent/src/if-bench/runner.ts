@@ -19,8 +19,9 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { BenchRuntime, BenchTarget, StreamSimpleFn } from "../cli/bench-runtime";
-import { formatModelSelectorValue, formatModelString } from "../config/model-resolver";
-import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelString } from "../config/model-resolver";
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { Action } from "./actions";
 import { applyActions, initialArray, makeActions } from "./actions";
 import type { CatPlacement, IfBenchFailure } from "./protocol";

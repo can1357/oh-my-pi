@@ -29,7 +29,7 @@ const compiledPath = path.join(tempRoot, "compiled-template-probe");
 let bundlePath: string;
 const bundledDependencyStubs: Record<string, string> = {
 	"@oh-my-pi/pi-utils": 'export const APP_NAME = "omp"; export const isEnoent = () => false;',
-	"../../modes/theme/theme":
+	"@oh-my-pi/pi-tui/theme":
 		"export const getResolvedThemeColors = async () => ({}); export const getThemeExportColors = async () => ({});",
 	"../../session/session-loader": "export const loadEntriesFromFile = async () => [];",
 	"../../session/session-manager":

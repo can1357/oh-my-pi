@@ -1442,6 +1442,88 @@
      "a.ts": "function loadUser(id: string) {\n  const cached = cache.get(id);\n  if (cached) return cached;\n  const user = await database.users.read(id);\n  return user;\n}\n"
     }
    }
+  },
+  {
+   "name": "re-emits an open trailing line-end gap as nothing",
+   "files": {
+    "a.ts": "  const x = 1;\n  return `<button class=\"file-row${sel}\" data-id=\"${file.id}\">${name}</button>`;\n  done();\n"
+   },
+   "args": {
+    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n  return `<button class=\"file-row…\n</SM:FIND>\n<SM:PUT>\n  return `<button class=\"row…\n</SM:PUT>\n</SM:EDIT>"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "  const x = 1;\n  return `<button class=\"row${sel}\" data-id=\"${file.id}\">${name}</button>`;\n  done();\n"
+    }
+   }
+  },
+  {
+   "name": "reports no change when <SM:FIND> and <SM:PUT> differ only by an open trailing gap",
+   "files": {
+    "a.ts": "  const x = 1;\n  return `<button class=\"file-row${sel}\" data-id=\"${file.id}\">${name}</button>`;\n  done();\n"
+   },
+   "args": {
+    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n  return `<button class=\"file-row…\n</SM:FIND>\n<SM:PUT>\n  return `<button class=\"file-row…\n</SM:PUT>\n</SM:EDIT>"
+   },
+   "expect": {
+    "error": "Operation 1 makes no change to a.ts.",
+    "writes": 0
+   }
+  },
+  {
+   "name": "re-emits open whole-line edge gaps as nothing around an inner capture",
+   "files": {
+    "a.ts": "before();\nfunction legacy(a) {\n  stage(a);\n}\nafter();\n"
+   },
+   "args": {
+    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n…\nfunction legacy(a) {\n…\n}\n…\n</SM:FIND>\n<SM:PUT>\n…\nfunction modern(a) {\n…\n}\n…\n</SM:PUT>\n</SM:EDIT>"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\nfunction modern(a) {\n  stage(a);\n}\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "leaves the newline joining a whole-line edge gap to its anchor in the file",
+   "files": {
+    "a.ts": "before();\nconst value = old;\nafter();\n"
+   },
+   "args": {
+    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = old;\n…\n</SM:FIND>\n<SM:PUT>\nconst value = new;\n</SM:PUT>\n</SM:EDIT>"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\nconst value = new;\nafter();\n"
+    }
+   }
+  },
+  {
+   "name": "keeps CRLF intact when whole-line edge gaps are re-emitted",
+   "files": {
+    "a.ts": "a\r\nconst value = old;\r\nb\r\n"
+   },
+   "args": {
+    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n…\r\nconst value = old;\r\n…\n</SM:FIND>\n<SM:PUT>\n…\r\nconst value = new;\r\n…\n</SM:PUT>\n</SM:EDIT>"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "a\r\nconst value = new;\r\nb\r\n"
+    }
+   }
+  },
+  {
+   "name": "rejects a <SM:PUT> made only of edge ellipses",
+   "files": {
+    "a.ts": "before();\nconst value = old;\nafter();\n"
+   },
+   "args": {
+    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n…\nconst value = old;\n…\n</SM:FIND>\n<SM:PUT>\n…\n…\n</SM:PUT>\n</SM:EDIT>"
+   },
+   "expect": {
+    "error": "whole-line … with no <SM:FIND> gap to re-emit",
+    "writes": 0
+   }
   }
  ]
 }

@@ -261,8 +261,14 @@
       "name": "@oh-my-pi/pi-tui",
       "version": "18.2.4",
       "dependencies": {
+        "@oh-my-pi/omptype": "catalog:",
+        "@oh-my-pi/pi-agent-core": "catalog:",
+        "@oh-my-pi/pi-ai": "catalog:",
+        "@oh-my-pi/pi-catalog": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
+        "@oh-my-pi/pi-wire": "catalog:",
+        "@oh-my-pi/snapcompact": "catalog:",
       },
       "devDependencies": {
         "kitty-vt-wasm": "catalog:",

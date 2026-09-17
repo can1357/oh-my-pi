@@ -15,7 +15,7 @@ import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-remin
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 import {

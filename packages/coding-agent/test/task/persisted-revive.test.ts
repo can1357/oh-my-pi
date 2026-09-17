@@ -22,9 +22,10 @@ import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-st
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSessionDefaults } from "../helpers/session-defaults";
 

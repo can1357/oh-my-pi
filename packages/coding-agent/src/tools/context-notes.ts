@@ -15,7 +15,8 @@ import {
 import contextNotesDescription from "../prompts/tools/context-notes.md" with { type: "text" };
 import newContextDescription from "../prompts/tools/new-context.md" with { type: "text" };
 import type { ToolSession } from ".";
-import { ToolError, throwIfAborted } from "./tool-errors";
+import { throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const contextNotesSchema = type({
 	"text?": type("string").describe("Entire replacement notebook text. Omit to read; use an empty string to clear."),

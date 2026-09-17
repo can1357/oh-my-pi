@@ -15,7 +15,7 @@ import {
 	parseThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveTaskEffortLevel,
-} from "@oh-my-pi/pi-coding-agent/thinking";
+} from "@oh-my-pi/pi-tui/thinking";
 import type { TinyMemoryLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { asGlobalFetch } from "./helpers/fetch-mock";
