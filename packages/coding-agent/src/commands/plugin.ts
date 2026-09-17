@@ -42,7 +42,7 @@ export default class Plugin extends Command {
 		json: Flags.boolean({ description: "Output JSON" }),
 		fix: Flags.boolean({ description: "Attempt to fix issues (doctor)" }),
 		force: Flags.boolean({ description: "Force install" }),
-		"dry-run": Flags.boolean({ description: "Show actions without applying changes" }),
+		"dry-run": Flags.boolean({ description: "Show actions without applying changes (install, uninstall, upgrade)" }),
 		local: Flags.boolean({ char: "l", description: "Operate on local plugin directory" }),
 		enable: Flags.string({ description: "Enable a feature" }),
 		disable: Flags.string({ description: "Disable a feature" }),
