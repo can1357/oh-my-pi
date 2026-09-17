@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic sessions on a custom `baseUrl` (a gateway in front of Anthropic) losing the server-side fallback marker and redacted thinking from a persisted turn, which made the next request fail with `thinking … blocks in the latest assistant message cannot be modified` ([#12352](https://github.com/can1357/oh-my-pi/pull/12352) by [@sjawhar](https://github.com/sjawhar)).
+- Persisted server-side fallback markers are now replayed to any Anthropic endpoint the request opts into fallbacks with, not only api.anthropic.com ([#12352](https://github.com/can1357/oh-my-pi/pull/12352) by [@sjawhar](https://github.com/sjawhar)).
+- Anthropic's `thinking … blocks in the latest assistant message cannot be modified` rejection now retries without that turn's replayed thinking instead of ending the turn with the error ([#12352](https://github.com/can1357/oh-my-pi/pull/12352) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.2.2] - 2026-09-16
 
 ### Added

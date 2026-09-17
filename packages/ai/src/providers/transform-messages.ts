@@ -909,17 +909,16 @@ export function transformMessages<TApi extends Api>(
 
 				if (block.type === "fallback") {
 					// Server-side-fallback boundary marker (Anthropic beta
-					// `server-side-fallback-2026-06-01`). Only the official
-					// Anthropic endpoint accepts this block on replay: every
-					// other target either rejects unknown content blocks with a
-					// 400 (anthropic-compatible endpoints like Umans/Z.AI/MiniMax,
-					// and older omp gateways whose schema pre-dates this feature)
-					// or throws in its converter (Bedrock). Even the official
-					// replay path only accepts the block when the current request
-					// itself opts into the beta — but we don't know that here, so
-					// keep it and let `convertAnthropicMessages` re-check the
-					// per-request opt-in before serializing.
-					if (isAnthropicTarget && model.compat.officialEndpoint) return block;
+					// `server-side-fallback-2026-06-01`). The endpoint accepts it on
+					// replay exactly when the current request itself opts into the
+					// beta chain — a request carrying `fallbacks` reaches an endpoint
+					// that speaks the beta (a transparent gateway to Anthropic
+					// included) or fails on that field first. The opt-in is
+					// per-request and unknown here, so keep the block for every
+					// anthropic-messages target and let `convertAnthropicMessages`
+					// apply it before serializing. Cross-api targets (Bedrock's
+					// converter throws on it) never see it.
+					if (isAnthropicTarget) return block;
 					return [];
 				}
 

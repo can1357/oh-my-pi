@@ -2120,6 +2120,24 @@ export function isInvalidThinkingSignatureError(message: string): boolean {
 	return INVALID_THINKING_SIGNATURE_PATTERN.test(message) || MISSING_THINKING_SIGNATURE_PATTERN.test(message);
 }
 
+/**
+ * Anthropic validates the latest assistant message's thinking strictly: every
+ * replayed `thinking`/`redacted_thinking` block must match the original
+ * response. A turn assembled by a server-side fallback handoff and persisted
+ * without its `fallback` marker, or otherwise rewritten, fails with
+ * `messages.N.content.M: \`thinking\` or \`redacted_thinking\` blocks in the
+ * latest assistant message cannot be modified. These blocks must remain as
+ * they were in the original response.` Distinct from the invalid-signature and
+ * prefix-binding wordings: unsigned demotion cannot help (every implicated
+ * block is signed), so the retry drops that turn's replayed thinking instead.
+ */
+const LATEST_ASSISTANT_THINKING_IMMUTABLE_PATTERN =
+	/blocks?\s+in\s+the\s+latest\s+assistant\s+message\s+cannot\s+be\s+modified/i;
+
+export function isLatestAssistantThinkingImmutableError(message: string): boolean {
+	return LATEST_ASSISTANT_THINKING_IMMUTABLE_PATTERN.test(message);
+}
+
 const INPUT_TRANSFORMATION_PATH_PATTERN = /^messages\.(\d+)\.content\.(\d+)$/;
 const PREFIX_BINDING_ERROR_PATH_PATTERN = /messages\.(\d+)\.content\.(\d+)/;
 
@@ -2187,6 +2205,36 @@ function rememberPrefixBindingFailure(
 		state,
 	);
 	return true;
+}
+
+/**
+ * Remember every signed `thinking`/`redacted_thinking` block of the latest
+ * assistant wire message as dropped for this (baseUrl, model), so the retry
+ * — and every later request while that turn stays the latest — replays the
+ * turn without them. Earlier turns keep their thinking: only the latest
+ * assistant message is validated strictly. Returns false when there is no
+ * session state or the turn carries nothing droppable, in which case the
+ * caller falls back to dropping all replayed thinking for the request.
+ */
+function rememberLatestAssistantThinkingDropped(
+	params: MessageCreateParamsStreaming,
+	state: AnthropicProviderSessionState | undefined,
+): boolean {
+	if (!state) return false;
+	for (let messageIndex = params.messages.length - 1; messageIndex >= 0; messageIndex--) {
+		const candidate = params.messages[messageIndex];
+		if (candidate?.role !== "assistant") continue;
+		if (!Array.isArray(candidate.content)) return false;
+		let remembered = false;
+		for (const block of candidate.content) {
+			const key = thinkingReplayKey(block);
+			if (!key) continue;
+			state.prefixDroppedThinkingBlocks.add(key);
+			remembered = true;
+		}
+		return remembered;
+	}
+	return false;
 }
 
 function applyReportedInputTransformations(
@@ -2312,6 +2360,7 @@ const streamAnthropicOnce = (
 			let droppedAllThinkingForSignature = providerSessionState?.thinkingReplayDisabled ?? false;
 			let dropAllThinking = droppedAllThinkingForSignature;
 			let prefixBindingRetryAttempted = false;
+			let latestThinkingRetryAttempted = false;
 			let prefixMismatchBehavior =
 				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
 					? (options?.anthropicPrefixMismatchBehavior ?? "drop_block")
@@ -3349,6 +3398,46 @@ const streamAnthropicOnce = (
 						continue;
 					}
 					if (
+						!latestThinkingRetryAttempted &&
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						isLatestAssistantThinkingImmutableError(streamFailureMessage)
+					) {
+						// The latest assistant turn no longer matches what Anthropic
+						// remembers producing (a server-side fallback handoff persisted
+						// without its marker, or a rewritten block). Every implicated
+						// block is signed, so unsigned demotion cannot help; drop that
+						// one turn's replayed thinking and retry. Stored history keeps
+						// its blocks; only the wire payload changes. A repeat escalates
+						// to dropping all replayed thinking below.
+						logger.warn(
+							"anthropic: latest assistant thinking rejected as modified, dropping that turn's replayed thinking and retrying",
+							{
+								provider: model.provider,
+								model: model.id,
+								baseUrl,
+								error: streamFailureMessage,
+							},
+						);
+						latestThinkingRetryAttempted = true;
+						if (!rememberLatestAssistantThinkingDropped(params, providerSessionState)) {
+							dropAllThinking = true;
+						}
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.upstreamModel = undefined;
+						output.errorMessage = undefined;
+						output.inputTransformations = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
+					if (
 						!forceDemoteUnsignedThinking &&
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
@@ -3386,7 +3475,8 @@ const streamAnthropicOnce = (
 						firstTokenTime === undefined &&
 						!streamedReplayUnsafeContent &&
 						!isThinkingPrefixBindingError(streamFailureMessage) &&
-						isInvalidThinkingSignatureError(streamFailureMessage)
+						(isInvalidThinkingSignatureError(streamFailureMessage) ||
+							isLatestAssistantThinkingImmutableError(streamFailureMessage))
 					) {
 						// The unsigned-demotion retry only rewrites UNSIGNED blocks;
 						// when every replayed block carries a signature the signer no
@@ -4998,13 +5088,16 @@ export function convertAnthropicMessages(
 				} else if (block.type === "anthropicServerTool") {
 					blocks.push(block.block);
 				} else if (block.type === "fallback") {
-					// Replay ONLY when both sides are aligned: the current
-					// request opted into the beta chain, and the target is
-					// official Anthropic (the only endpoint that accepts the
-					// block on the wire). `transformMessages` already drops
-					// the block for cross-provider / non-official replays, so
-					// this is defense-in-depth for direct convert calls.
-					if (!opts?.serverSideFallbackEnabled || !model.compat.officialEndpoint) continue;
+					// Replay exactly when the current request opts into the beta
+					// chain: an endpoint that accepts `fallbacks` accepts the marker
+					// it minted, whether it is api.anthropic.com or a transparent
+					// gateway in front of it; an endpoint that does not speak the
+					// beta rejects the `fallbacks` field before the marker matters.
+					// Dropping the marker while replaying the surrounding thinking
+					// rewrites the turn, and Anthropic rejects a rewritten latest
+					// assistant turn ("`thinking` … blocks in the latest assistant
+					// message cannot be modified").
+					if (!opts?.serverSideFallbackEnabled) continue;
 					blocks.push({
 						type: "fallback",
 						from: block.from,
