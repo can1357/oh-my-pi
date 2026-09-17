@@ -11,6 +11,7 @@ export interface StatusAccountIdentity {
 	orgId?: string;
 }
 
+/** Nested repository selected as the active workspace context. */
 export interface ActiveRepoContext {
 	cwd: string;
 	repoRoot: string;

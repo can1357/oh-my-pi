@@ -137,6 +137,17 @@ type SelectItemLayout =
 	  };
 
 export class SelectList implements Component, MouseRoutable {
+	/**
+	 * Sanitized `{label, description}` per item object. `sanitizeSingleLine`
+	 * is 3 passes + 2 regex execs per call and render() used to run it up to
+	 * 3x per item per frame (column widths, row counts, item render). Items
+	 * are host-owned and stable across frames; the map is cleared when the
+	 * visible item list identity changes.
+	 */
+	#sanitized = new WeakMap<
+		SelectItem,
+		{ sourceLabel: string; sourceDescription: string | undefined; label: string; description: string | undefined }
+	>();
 	#maxVisible: number;
 	#selection: MenuSelection<SelectItem>;
 	#hoveredIndex: number | null = null;
@@ -445,7 +456,7 @@ export class SelectList implements Component, MouseRoutable {
 		const iconWidth = item.icon ? visibleWidth(item.icon) : 0;
 		const iconCell = iconColumnWidth > 0 ? (item.icon ?? "") + padding(iconColumnWidth - iconWidth + 1) : "";
 		const prefixWidth = visibleWidth(prefix) + (iconColumnWidth > 0 ? iconColumnWidth + 1 : 0);
-		const descriptionSingleLine = item.description ? sanitizeSingleLine(item.description) : undefined;
+		const descriptionSingleLine = this.#sanitizedDescription(item);
 
 		if (descriptionSingleLine && width > 40) {
 			const effectivePrimaryColumnWidth = Math.max(1, Math.min(primaryColumnWidth, width - prefixWidth - 4));
@@ -526,7 +537,36 @@ export class SelectList implements Component, MouseRoutable {
 	}
 
 	#getDisplayValue(item: SelectItem): string {
-		return sanitizeSingleLine(item.label || item.value);
+		return this.#sanitizedLabel(item);
+	}
+
+	#sanitizedLabel(item: SelectItem): string {
+		return this.#sanitizedEntry(item).label;
+	}
+
+	#sanitizedDescription(item: SelectItem): string | undefined {
+		return this.#sanitizedEntry(item).description;
+	}
+
+	#sanitizedEntry(item: SelectItem): { label: string; description: string | undefined } {
+		const sourceLabel = item.label || item.value;
+		const sourceDescription = item.description;
+		const cached = this.#sanitized.get(item);
+		if (
+			cached !== undefined &&
+			cached.sourceLabel === sourceLabel &&
+			cached.sourceDescription === sourceDescription
+		) {
+			return cached;
+		}
+		const entry = {
+			sourceLabel,
+			sourceDescription,
+			label: sanitizeSingleLine(sourceLabel),
+			description: sourceDescription ? sanitizeSingleLine(sourceDescription) : undefined,
+		};
+		this.#sanitized.set(item, entry);
+		return entry;
 	}
 
 	#renderStatusLine(width: number): string {

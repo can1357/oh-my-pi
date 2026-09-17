@@ -4,13 +4,9 @@ import { routeSgrMouseInput, type SgrMouseEvent } from "../../mouse";
 import { padding, replaceTabs, truncateToWidth, visibleWidth } from "../../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { theme } from "../../theme/theme";
+import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
 import { DebugViewerFrame, type DebugViewerFrameContent, type DebugViewerFrameContext } from "./viewer-frame";
-import {
-	formatDebugLogExpandedLines,
-	formatDebugLogLine,
-	parseDebugLogPid,
-	parseDebugLogTimestampMs,
-} from "./log-formatting";
+import { formatDebugLogExpandedLines, parseDebugLogPid, parseDebugLogTimestampMs } from "./log-formatting";
 /** Host capabilities for copying and fetching earlier log entries. */
 export interface LogViewerDeps {
 	copyToClipboard(text: string): void;
@@ -836,7 +832,10 @@ export class DebugLogViewerComponent implements Component {
 				continue;
 			}
 
-			const preview = formatDebugLogLine(this.#model.getRawLine(logIndex), contentWidth);
+			const preview = truncateToWidth(
+				sanitizeDisplayText(this.#model.getRawLine(logIndex)),
+				Math.max(1, contentWidth),
+			);
 			const content = selected ? theme.bold(preview) : preview;
 			rendered.push({ rowIndex, lines: [truncateToWidth(`${prefix}${content}`, innerWidth)] });
 		}

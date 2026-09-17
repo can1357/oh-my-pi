@@ -7,11 +7,9 @@
  * writes, so callers keep one code path for both modes.
  */
 import { replaceTabs, truncateToWidth } from "../utils";
-import { SPINNER_FRAMES } from "../theme/symbols";
+import { ensureThemeSync, theme } from "../theme/theme";
 
 const RENDER_INTERVAL_MS = 80;
-
-const ACTIVITY_FRAMES = SPINNER_FRAMES.unicode.activity;
 
 /** Output contract for the live board (satisfied by `process.stdout`). */
 export interface LiveBoardOutput {
@@ -84,7 +82,9 @@ export function createLiveBoard(
 	const repaint = (): void => {
 		if (!interactive || closed) return;
 		const { width, maxRows } = dimensions();
-		const spinner = ACTIVITY_FRAMES[frame % ACTIVITY_FRAMES.length] ?? "*";
+		ensureThemeSync();
+		const frames = theme.getSpinnerFrames("activity");
+		const spinner = frames[frame % frames.length] ?? "*";
 		let lines = render(spinner, width);
 		if (lines.length > maxRows) {
 			lines = [...lines.slice(0, maxRows - 1), `… +${lines.length - (maxRows - 1)} more`];

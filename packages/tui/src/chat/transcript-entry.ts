@@ -77,9 +77,20 @@ export function userTurnDraft(entry: TranscriptEntryLike): string | undefined {
 	return titleTextFromSkillPrompt(message) ?? textContent(message.content);
 }
 
-function textContent(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+/** Extract text blocks verbatim, optionally separating block boundaries. */
+export function textContent(content: string | ReadonlyArray<{ type: string; text?: string }>, separator = ""): string {
 	if (typeof content === "string") return content;
 	let text = "";
-	for (const block of content) if (block.type === "text" && block.text !== undefined) text += block.text;
+	let boundary = "";
+	for (const block of content) {
+		if (block.type !== "text") continue;
+		text += boundary + (block.text ?? "");
+		boundary = separator;
+	}
 	return text;
+}
+
+/** Join text blocks with spaces and collapse whitespace into a single-line label. */
+export function userMessageLabel(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
+	return textContent(content, " ").replace(/\s+/g, " ").trim();
 }

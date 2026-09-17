@@ -2,9 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SSE `raw` wire lines are captured only when a reader opts in; the default token path returns empty `raw` with no per-line slices.
+- The rotating file sink holds one append fd per active file instead of open/write/close per log line.
+
 ### Added
 
+- Added getDotenvEnvValues helper to retrieve environment values sourced from dotenv
+- Added callback support to filterChildShellEnv for custom processing of filtered values
+- Exported paletteToRgb utility function
 - Added stringifyYamlConfig utility to strip trailing spaces from YAML block headers
+
+### Fixed
+
+- `stringifyJson` now tries the plain serializer first and only retries with bigint coercion when a bigint is actually present, avoiding the replacer slow path on every call.
+- `$which` cache keys embed the raw lookup options instead of their hashes, so distinct PATH/cwd combinations can no longer collide and return each other's binary.
 
 ## [18.2.3] - 2026-09-17
 

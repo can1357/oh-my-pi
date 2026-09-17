@@ -20,7 +20,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme";
 import { shortenPath } from "../render/render-utils";
 import { OverlayPanel } from "../chrome/overlay-box";
-import { FormField, SelectFormField, TextFormField, type FormFieldTheme } from "../components/form";
+import { FormField, SelectFormField, TextFormField } from "../components/form";
+import { formTheme } from "../chrome/form-theme";
 import { SettingsFormField } from "../components/settings-list";
 
 /** Setting metadata consumed by the plugin settings UI. */
@@ -569,13 +570,6 @@ export class MarketplacePluginDetailComponent extends OverlayPanel {
 // =============================================================================
 // Config Submenus
 // =============================================================================
-
-const formTheme: FormFieldTheme = {
-	label: text => theme.bold(theme.fg("accent", text)),
-	description: text => theme.fg("muted", text),
-	error: text => theme.fg("error", text),
-	hint: text => theme.fg("dim", text),
-};
 
 /** Shared footer hint for plugin detail lists. */
 const DETAIL_FOOTER_HINT = "Enter to edit · Esc to go back";

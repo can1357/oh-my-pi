@@ -28,7 +28,7 @@ import type {
 import { getSessionAccentAnsi, getSessionAccentHex } from "../theme/session-color";
 import { sanitizeStatusText } from "../chrome/shared";
 import { getThemeEpoch, theme } from "../theme";
-import { type CompactionBoundaries, getToolSchemaMetadataRevision } from "./context-usage";
+import { type CompactionBoundaries, EMPTY_STRING_PARTS, getToolSchemaMetadataRevision } from "./context-usage";
 import {
 	type CodexResetFireworksEvent,
 	type CodexResetUsageSnapshot,
@@ -380,7 +380,6 @@ interface ActiveMeter {
 }
 
 const EMPTY_MESSAGES: readonly AgentMessage[] = [];
-const EMPTY_STRING_PARTS: readonly string[] = [];
 const STATUS_USAGE_START_DELAY_MS = 0;
 const STATUS_USAGE_REFRESH_TIMEOUT_MS = 2_000;
 
@@ -544,6 +543,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 */
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
 	#collabStatus: CollabStatus | null = null;
+	#streamStatus: { viewers: number } | null = null;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -946,6 +946,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return;
 		}
 		this.#collabStatus = status;
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	setStreamStatus(status: { viewers: number } | null): void {
+		if (this.#streamStatus?.viewers === status?.viewers) return;
+		this.#streamStatus = status;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -2157,6 +2163,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			vibeMode: this.#vibeModeStatus,
 			vim: this.#vimStatus,
 			collab: this.#collabStatus,
+			stream: this.#streamStatus,
 			usageStats,
 			contextPercent,
 			contextTokens,

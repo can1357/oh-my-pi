@@ -1,18 +1,9 @@
-import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "../../render/render-utils";
-
-/** Sanitize and fit a collapsed log entry to the available width. */
-export function formatDebugLogLine(line: string, maxWidth: number): string {
-	const sanitized = sanitizeText(line);
-	const normalized = replaceTabs(sanitized);
-	const width = Math.max(1, maxWidth);
-	return truncateToWidth(normalized, width);
-}
+import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
+import { wrapTextWithAnsi } from "../../render/render-utils";
 
 /** Sanitize and wrap an expanded log entry into display rows. */
 export function formatDebugLogExpandedLines(line: string, maxWidth: number): string[] {
-	const sanitized = sanitizeText(line);
-	const normalized = replaceTabs(sanitized);
+	const normalized = sanitizeDisplayText(line);
 	const width = Math.max(1, maxWidth);
 
 	if (normalized.length === 0) {

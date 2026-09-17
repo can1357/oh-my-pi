@@ -12,7 +12,7 @@ import {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
@@ -128,7 +128,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
-import { formatDuration } from "@oh-my-pi/pi-tui/chrome/format";
+import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
@@ -139,6 +139,8 @@ import { tinyTitleClient } from "../tiny/title-client";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { StreamPublisher } from "../stream/publisher";
+import { StreamRedactor } from "../stream/redactor";
 import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatFeedModelBadge,
@@ -176,7 +178,7 @@ import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
 import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
-import { TokenRateMeter } from "../utils/token-rate";
+import type { TokenRateMeter } from "../utils/token-rate";
 import {
 	disposeTerminalTitleState,
 	initTerminalTitleState,
@@ -277,9 +279,8 @@ import type {
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
 	SubmittedUserInput,
-	TodoItem,
-	TodoPhase,
 } from "./types";
+import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
@@ -811,7 +812,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	streamingMessage: AssistantMessage | undefined = undefined;
 	lastAssistantUsage: Usage | undefined = undefined;
 	servedModelTracker = new ServedModelTracker();
-	tokenRate = new TokenRateMeter(text => this.session.agent.tokenizer.countTokens(text));
 	loadingAnimation: Loader | undefined = undefined;
 	autoCompactionLoader: Loader | undefined = undefined;
 	retryLoader: Loader | undefined = undefined;
@@ -827,6 +827,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		const name = this.sessionManager.getSessionName();
 		if (!name) return undefined;
 		return `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
+	}
+	/** Live gen tok/s for the working row: the viewed session's own meter, so a
+	 * focused subagent shows its own reading and the main session's survives
+	 * focus round-trips. */
+	get tokenRate(): TokenRateMeter {
+		return this.viewSession.tokenRate;
 	}
 	/** Generation tok/s: live while streaming, the last reading between
 	 * turns, blank until a run has produced enough tokens to measure. */
@@ -905,6 +911,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	#streamPublisher: StreamPublisher | undefined;
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
@@ -1090,7 +1097,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.streamingMessage = undefined;
 		this.lastAssistantUsage = undefined;
 		this.servedModelTracker = new ServedModelTracker();
-		this.tokenRate.reset();
 		this.pendingTools.clear();
 	}
 	readonly #uiHelpers: UiHelpers;
@@ -1595,6 +1601,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		// tree before session_start hooks/reconciliation continue; renderNow keeps
 		// TUI's multiplexer, output-backlog, and image safety gates.
 		this.ui.renderNow();
+
+		const streamCwd = this.sessionManager.getCwd();
+		this.#streamPublisher =
+			(await StreamPublisher.connectLazy({
+				cwd: streamCwd,
+				sessionId: this.sessionManager.getSessionId(),
+				title: path.basename(streamCwd),
+				tui: this.ui,
+				loadRedactor: () => StreamRedactor.load(streamCwd, this.settings.get("stream.redactPatterns")),
+				onStatus: status => {
+					this.statusLine.setStreamStatus(status);
+					this.ui.requestRender();
+				},
+				onChat: message => {
+					const chat = truncateToWidth(
+						replaceTabs(sanitizeText(`${message.name}: ${message.text}`)).replace(/[\r\n]+/g, " "),
+						TRUNCATE_LENGTHS.LINE,
+					);
+					this.showStatus(chat);
+				},
+			})) ?? undefined;
+		if (this.#streamPublisher) this.ui.renderNow();
 
 		// Prewarm the local tiny-title worker off the submit hot path: spawn it
 		// now, idle and unref'd, so the first submit reuses a live subprocess
@@ -5037,7 +5065,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			`Objective: ${goal.objective}`,
 			`Status: ${goal.status}${state?.enabled ? "" : " (paused)"}`,
 			`Tokens: ${budgetLine}`,
-			`Time spent: ${formatDuration(goal.timeUsedSeconds * 1000)}`,
+			`Time spent: ${formatCoarseDuration(goal.timeUsedSeconds * 1000)}`,
 		];
 		this.showStatus(lines.join("\n"));
 	}
@@ -5439,6 +5467,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#appearanceRefreshRequest = undefined;
+		this.#streamPublisher?.dispose();
+		this.#streamPublisher = undefined;
 		// Last chance to refresh the startup status placeholder for the next launch.
 		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
@@ -5613,6 +5643,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, STILL_CLOSING_DELAY_MS);
 		try {
+			this.#streamPublisher?.dispose();
+			this.#streamPublisher = undefined;
 			// Guests get goodbye and the registry entry disappears before the
 			// session is disposed, under the same still-closing progress notice.
 			await this.collabController.shutdown("host exited");
@@ -6186,10 +6218,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	truncateTranscriptFromMessage(message: AgentMessage): boolean {
 		return this.#uiHelpers.truncateTranscriptFromMessage(message);
-	}
-
-	getUserMessageText(message: Message): string {
-		return this.#uiHelpers.getUserMessageText(message);
 	}
 
 	findLastAssistantMessage(): AssistantMessage | undefined {

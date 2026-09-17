@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `omp stream` wire contract (`@oh-my-pi/pi-wire/stream`): pane screen-delta frames, viewer snapshot/chat frames, channel directory shapes, and the `live.omp.sh` route layout.
+- Added host auth close codes (`4401` unauthorized, `4403` forbidden), `welcome.user`, and `StreamChannelInfo.owner` for stencil.so-authenticated streams.
+
+### Changed
+
+- Restrict channel names to Stencil-compatible format (alphanumeric and underscores)
+- Derive host channels from authentication tokens instead of URL path segments
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Session traces are memoized on root mtime and conditional polls compare the ETag after one stat instead of rebuilding the whole transcript tree first.
+- Session-list disk sweeps are cached behind a short TTL instead of readdir+stat of every file per poll.
+- Fork-dedup probes use covering `(entry_id, timestamp)` indexes on message, user-message, and tool-call tables.
+
 ## [18.2.1] - 2026-09-15
 
 ### Fixed

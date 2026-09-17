@@ -10,7 +10,9 @@
  * Non-TTY output keeps the original plain-line protocol
  * (`[start]`/`[done]`/`[fail]`), so scripted callers see unchanged output.
  */
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
+import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
+import { truncateToWidth } from "../utils";
 import { renderProgressBar, type ProgressBarStyle } from "../components/progress-bar";
 import { fgOrPlain, theme } from "../theme/theme";
 import { createLiveBoard, type LiveBoardOutput } from "../chrome/live-board";
@@ -220,7 +222,13 @@ export function createCleanseStatusBoard(
 				if (outcome.success) {
 					output.write(`[done] ${outcome.name}${outcome.resolvedModel ? ` (${outcome.resolvedModel})` : ""}\n`);
 				} else {
-					errors.write(`[fail] ${outcome.name}: ${oneLine(outcome.error ?? "subagent failed", ERROR_WIDTH)}\n`);
+					const message = truncateToWidth(
+						sanitizeDisplaySingleLine(outcome.error ?? "subagent failed")
+							.replace(/\s+/g, " ")
+							.trim(),
+						ERROR_WIDTH,
+					);
+					errors.write(`[fail] ${outcome.name}: ${message}\n`);
 				}
 				return;
 			}
@@ -277,7 +285,13 @@ function renderOutcomeLine(
 ): string {
 	const files = compactFiles(assignment);
 	if (!outcome.success) {
-		return `${fgOrPlain("error", "✗")} ${outcome.name} ${files} ${fgOrPlain("error", oneLine(outcome.error ?? "subagent failed", ERROR_WIDTH))}`;
+		const message = truncateToWidth(
+			sanitizeDisplaySingleLine(outcome.error ?? "subagent failed")
+				.replace(/\s+/g, " ")
+				.trim(),
+			ERROR_WIDTH,
+		);
+		return `${fgOrPlain("error", "✗")} ${outcome.name} ${files} ${fgOrPlain("error", message)}`;
 	}
 	const meta: string[] = [];
 	const toolCount = agent?.progress?.toolCount ?? 0;
@@ -297,9 +311,19 @@ function agentActivity(progress: AgentProgress | undefined): string {
 			`rate-limited · retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`,
 		);
 	}
-	const intent = oneLine(progress.lastIntent ?? "", ACTIVITY_WIDTH);
+	const intent = truncateToWidth(
+		sanitizeDisplaySingleLine(progress.lastIntent ?? "")
+			.replace(/\s+/g, " ")
+			.trim(),
+		ACTIVITY_WIDTH,
+	);
 	if (progress.currentTool) {
-		const args = oneLine(progress.currentToolArgs ?? "", ACTIVITY_WIDTH);
+		const args = truncateToWidth(
+			sanitizeDisplaySingleLine(progress.currentToolArgs ?? "")
+				.replace(/\s+/g, " ")
+				.trim(),
+			ACTIVITY_WIDTH,
+		);
 		const tool = fgOrPlain("dim", args ? `${progress.currentTool} ${args}` : progress.currentTool);
 		return intent ? `${intent} ${tool}` : tool;
 	}
@@ -310,10 +334,6 @@ function compactFiles(assignment: CleanseAssignment): string {
 	const files = assignment.groups.map(group => group.file ?? "<project>");
 	const first = files[0] ?? "<project>";
 	return files.length > 1 ? `${first} +${files.length - 1}` : first;
-}
-
-function oneLine(text: string, width: number): string {
-	return sanitizeText(text).replace(/\s+/g, " ").trim().slice(0, width);
 }
 
 function formatCost(cost: number): string {

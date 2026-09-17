@@ -36,7 +36,8 @@ export interface LimitsInput {
 // OutputMetaBuilder - Fluent API for building OutputMeta
 // =============================================================================
 
-export interface TruncationOptions {
+/** Metadata supplied when recording a truncated tool result. */
+export interface TruncationMetaInput {
 	direction: "head" | "tail" | "middle";
 	startLine?: number;
 	totalFileLines?: number;
@@ -76,7 +77,7 @@ export class OutputMetaBuilder {
 	#meta: OutputMeta = {};
 
 	/** Add truncation info from TruncationResult. No-op if not truncated. */
-	truncation(result: TruncationResult, options: TruncationOptions): this {
+	truncation(result: TruncationResult, options: TruncationMetaInput): this {
 		if (!result.truncated) return this;
 
 		const { direction, startLine = 1, totalFileLines, artifactId, maxBytes } = options;

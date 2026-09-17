@@ -886,6 +886,37 @@ export function normalizeMessagesForProvider(
 const INTENT_FIELD_DESCRIPTION = "concise intent";
 const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 
+// Memoize injection per input schema identity: normalizeTools runs on every
+// model call and injectIntentIntoSchema mints a fresh root object each time,
+// which defeats the stamp-keyed schema memos downstream (toolWireSchema,
+// stripSchemaDescriptions, tryEnforceStrictSchema each deep-clone + re-walk
+// the whole catalog per request). The injected object is shared across
+// requests — the same profile as the intent-off path, where parameters IS the
+// shared memoized wire schema (see schema-immutability.test.ts).
+const intentInjectMemo = new WeakMap<object, Map<string, unknown>>();
+
+function memoizedInjectIntentIntoSchema(
+	schema: unknown,
+	mode: "require" | "optional",
+	describeIntent: boolean,
+): unknown {
+	if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
+		return injectIntentIntoSchema(schema, mode, describeIntent);
+	}
+	const host = schema as Record<string, unknown>;
+	const memoKey = `${mode}:${describeIntent ? 1 : 0}`;
+	let slots = intentInjectMemo.get(host);
+	if (slots === undefined) {
+		slots = new Map();
+		intentInjectMemo.set(host, slots);
+	}
+	const cached = slots.get(memoKey);
+	if (cached !== undefined) return cached;
+	const injected = injectIntentIntoSchema(host, mode, describeIntent);
+	slots.set(memoKey, injected);
+	return injected;
+}
+
 function injectIntentIntoSchema(
 	schema: unknown,
 	mode: "require" | "optional" = "require",
@@ -966,11 +997,11 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		// intent tracing keeps the field while no descriptions ride the wire.
 		if (pruneDescriptions) {
 			let parameters = stripSchemaDescriptions(toolWireSchema(t)) as TSchema;
-			if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode, false) as TSchema;
+			if (doInjectIntent) parameters = memoizedInjectIntentIntoSchema(parameters, intentMode, false) as TSchema;
 			return { ...t, parameters, description: "" };
 		}
 		let parameters = toolWireSchema(t) as TSchema;
-		if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode) as TSchema;
+		if (doInjectIntent) parameters = memoizedInjectIntentIntoSchema(parameters, intentMode, true) as TSchema;
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;

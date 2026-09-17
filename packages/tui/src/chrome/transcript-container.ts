@@ -69,6 +69,13 @@ interface TranscriptEntry {
 	mode: TranscriptBlockMode;
 	stableRows: readonly TranscriptStableRow[];
 	renderedStableByWidth: Map<number, readonly string[]>;
+	/**
+	 * Rendered row counts per `(width, snapshot count)`: lets the projected
+	 * length skip the re-render when the same prefix was already rendered.
+	 * Keyed on both dimensions because one snapshot commonly renders to
+	 * multiple physical rows (Markdown wrap).
+	 */
+	stableRowCountByWidth: Map<number, Map<number, number>>;
 	emitted: number;
 	/**
 	 * Set when a published stable row drifted (retraction, byte change within a
@@ -166,6 +173,7 @@ export class TranscriptContainer extends Container {
 			mode: blockMode(component),
 			stableRows: EMPTY_STABLE_ROWS,
 			renderedStableByWidth: new Map(),
+			stableRowCountByWidth: new Map(),
 			emitted: 0,
 			stableFrozen: false,
 		});
@@ -219,6 +227,7 @@ export class TranscriptContainer extends Container {
 			entry.emitted = 0;
 			entry.stableRows = EMPTY_STABLE_ROWS;
 			entry.renderedStableByWidth = new Map();
+			entry.stableRowCountByWidth = new Map();
 			entry.stableFrozen = false;
 			if (entry.mode === "appendOnly") {
 				(entry.component as Component & AppendOnlyTranscriptBlock).resetTranscriptStableRows?.();
@@ -289,7 +298,7 @@ export class TranscriptContainer extends Container {
 		for (const { entry, index } of this.#liveEntries()) {
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const rendered = this.#renderEntry(entry, width);
-			const block = rendered.slice(this.#projectedEmitted(entry, index, width));
+			const block = rendered.slice(this.#projectedEmittedRowCount(entry, index, width));
 			if (block.length > 0) total += block.length + (total > 0 ? 1 : 0);
 		}
 		return total;
@@ -336,7 +345,7 @@ export class TranscriptContainer extends Container {
 		for (const candidate of live) {
 			this.#setAllocation(candidate.entry.component, Number.MAX_SAFE_INTEGER, frame);
 			const rendered = this.#renderEntry(candidate.entry, width);
-			const block = rendered.slice(this.#projectedEmitted(candidate.entry, candidate.index, width));
+			const block = rendered.slice(this.#projectedEmittedRowCount(candidate.entry, candidate.index, width));
 			if (block.length === 0) continue;
 			total += block.length + (shown.length > 0 ? 1 : 0);
 			shown.push(candidate);
@@ -391,7 +400,7 @@ export class TranscriptContainer extends Container {
 			const allocated = allocation[index]!;
 			this.#setAllocation(candidate.entry.component, allocated, frame);
 			const rendered = this.#renderEntry(candidate.entry, width).slice(
-				this.#projectedEmitted(candidate.entry, candidate.index, width),
+				this.#projectedEmittedRowCount(candidate.entry, candidate.index, width),
 			);
 			const visible = rendered.length <= allocated ? rendered : rendered.slice(rendered.length - allocated);
 			for (const line of visible) {
@@ -645,7 +654,23 @@ export class TranscriptContainer extends Container {
 			return this.#freezeStableRows(entry, rendered, "stable rows changed within a width epoch");
 		}
 		entry.stableRows = published;
-		entry.renderedStableByWidth.set(width, stableRendered.slice());
+		// Slice only when the rendered rows actually changed: same length
+		// plus prefix-equality in both directions means byte-identical, so
+		// the stored array can be reused (callers only slice/read it).
+		const priorRows = entry.renderedStableByWidth.get(width);
+		if (
+			priorRows === undefined ||
+			priorRows.length !== stableRendered.length ||
+			!isRowPrefix(priorRows, stableRendered)
+		) {
+			entry.renderedStableByWidth.set(width, stableRendered.slice());
+		}
+		let perCount = entry.stableRowCountByWidth.get(width);
+		if (perCount === undefined) {
+			perCount = new Map();
+			entry.stableRowCountByWidth.set(width, perCount);
+		}
+		perCount.set(published.length, stableRendered.length);
 		return rendered;
 	}
 
@@ -666,6 +691,22 @@ export class TranscriptContainer extends Container {
 		if (count === 0) return EMPTY_ROWS;
 		const appendOnly = entry.component as Component & AppendOnlyTranscriptBlock;
 		return appendOnly.renderTranscriptStableRows(Math.min(count, entry.stableRows.length), width);
+	}
+
+	/**
+	 * Length-only variant of `#renderStablePrefix`: answers the projected
+	 * emitted row count without re-rendering the prefix. The container only
+	 * needs the length for slicing; the render call it replaced existed
+	 * purely to read `.length` off the result.
+	 */
+	#projectedEmittedRowCount(entry: TranscriptEntry, index: number, width: number): number {
+		const offered = this.#offered;
+		const count = offered?.kind === "append" && offered.entry === index ? offered.emittedEnd : entry.emitted;
+		if (count === 0) return 0;
+		const perCount = entry.stableRowCountByWidth.get(width);
+		const memo = perCount?.get(Math.min(count, entry.stableRows.length));
+		if (memo !== undefined) return memo;
+		return this.#renderStablePrefix(entry, count, width).length;
 	}
 	/**
 	 * Record that pressure retirement is blocked behind a not-yet-settled
@@ -800,7 +841,7 @@ export class TranscriptContainer extends Container {
 			}
 			this.#setAllocation(candidate.entry.component, 1, frame);
 			const rendered = this.#renderEntry(candidate.entry, width).slice(
-				this.#projectedEmitted(candidate.entry, candidate.index, width),
+				this.#projectedEmittedRowCount(candidate.entry, candidate.index, width),
 			);
 			output.push(rendered[0] ?? "");
 			owners.push(candidate.entry.component);
@@ -808,12 +849,6 @@ export class TranscriptContainer extends Container {
 		const visibleOutput = output.slice(0, rows);
 		this.#commitViewportSpans(owners, visibleOutput.length);
 		return visibleOutput;
-	}
-
-	#projectedEmitted(entry: TranscriptEntry, index: number, width: number): number {
-		const offered = this.#offered;
-		const count = offered?.kind === "append" && offered.entry === index ? offered.emittedEnd : entry.emitted;
-		return this.#renderStablePrefix(entry, count, width).length;
 	}
 
 	#setAllocation(component: Component, rows: number, frame: AnimationFrame): void {
@@ -853,6 +888,7 @@ export class TranscriptContainer extends Container {
 					mode: blockMode(component),
 					stableRows: EMPTY_STABLE_ROWS,
 					renderedStableByWidth: new Map(),
+					stableRowCountByWidth: new Map(),
 					emitted: 0,
 					stableFrozen: false,
 				},

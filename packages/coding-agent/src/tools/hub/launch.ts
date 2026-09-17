@@ -1,7 +1,7 @@
+import { TERMINAL_STATES } from "@oh-my-pi/pi-tui/apps/ps-data";
 import {
 	type LaunchParams,
 	type LaunchToolDetails,
-	TERMINAL_STATES,
 	readyPendingSummary,
 	waitPendingSummary,
 } from "@oh-my-pi/pi-tui/tools/hub";

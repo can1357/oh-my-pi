@@ -46,14 +46,8 @@ import { PluginSettingsComponent, type PluginSettingsHost } from "./plugin-setti
 import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "../status-line/presets";
-import { FormField, SelectFormField, TextFormField, type FormFieldTheme } from "../components/form";
-
-const formTheme: FormFieldTheme = {
-	label: text => theme.bold(theme.fg("accent", text)),
-	description: text => theme.fg("muted", text),
-	error: text => theme.fg("error", text),
-	hint: text => theme.fg("dim", text),
-};
+import { FormField, SelectFormField, TextFormField } from "../components/form";
+import { formTheme } from "../chrome/form-theme";
 
 /**
  * Free-text string setting field backed by the shared text form field.

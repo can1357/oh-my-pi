@@ -10,7 +10,7 @@ import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-p
 import { type Component, matchesKey, replaceTabs, routeSgrMouseInput, truncateToWidth, visibleWidth } from "../index";
 import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../chrome/format";
-import { collapseSharedUsageReports } from "./usage-display";
+import { collapseSharedUsageReports, formatLimitTitle } from "./usage-display";
 import { colorToAnsi } from "../theme/color";
 import { ensureThemeSync, theme } from "../theme/theme";
 import { formatAbsoluteOnlyAmount } from "../prompt/usage-amounts";
@@ -63,20 +63,12 @@ export interface ProviderCard {
 	idle: boolean;
 }
 
-function formatLimitTitle(limit: UsageLimit): string {
-	const tier = limit.scope.tier;
-	if (tier && !limit.label.toLowerCase().includes(tier.toLowerCase())) {
-		return `${limit.label} (${tier})`;
-	}
-	return limit.label;
-}
-
 /**
  * Aggregate status across a bucket's limits, mirroring the classic report:
  * a mix of healthy and pressured accounts reads as a warning, not as the
  * worst account's status.
  */
-function aggregateStatus(limits: UsageLimit[]): UsageLimit["status"] {
+function aggregateStatus(limits: readonly { status?: UsageLimit["status"] }[]): UsageLimit["status"] {
 	const hasOk = limits.some(limit => limit.status === "ok");
 	const hasWarning = limits.some(limit => limit.status === "warning");
 	const hasExhausted = limits.some(limit => limit.status === "exhausted");
@@ -102,17 +94,6 @@ function compactWindowTag(window: NonNullable<UsageLimit["window"]>): string {
 	}
 	const id = window.id.toLowerCase();
 	return id.length <= 3 ? id : id.slice(0, 1);
-}
-
-/** Card-level status from its window rows, same mixing rules as {@link aggregateStatus}. */
-function aggregateRowStatus(windows: CardWindowRow[]): UsageLimit["status"] {
-	const hasOk = windows.some(window => window.status === "ok");
-	const hasWarning = windows.some(window => window.status === "warning");
-	const hasExhausted = windows.some(window => window.status === "exhausted");
-	if (hasOk) return hasWarning || hasExhausted ? "warning" : "ok";
-	if (hasWarning) return "warning";
-	if (hasExhausted) return "exhausted";
-	return "unknown";
 }
 
 /**
@@ -403,7 +384,7 @@ export class UsageDashboardComponent implements Component {
 
 	#renderCardLines(card: ProviderCard, width: number): string[] {
 		const lines: string[] = [];
-		const cardStatus = card.unlimited ? "ok" : aggregateRowStatus(card.windows);
+		const cardStatus = card.unlimited ? "ok" : aggregateStatus(card.windows);
 		const accountsText = card.accounts > 1 ? theme.fg("dim", `${card.accounts} accts`) : "";
 		const titleBudget = width - 2 - visibleWidth(accountsText) - (accountsText ? 1 : 0);
 		const title = theme.bold(truncateToWidth(card.name, Math.max(4, titleBudget)));

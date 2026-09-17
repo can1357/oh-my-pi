@@ -127,6 +127,7 @@ export interface SegmentContext {
 		display: "text" | "icon" | "none";
 	} | null;
 	collab: CollabStatus | null;
+	stream: { viewers: number } | null;
 	// Cached values for performance (computed once per render)
 	usageStats: {
 		input: number;

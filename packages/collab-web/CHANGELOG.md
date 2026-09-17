@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Guest entry frames append amortized and publish one snapshot copy per commit instead of copying the whole array per frame.
+- Transcript tool-id scans are memoized on entries, stream, and active tools instead of re-walking per render.
+
 ## [18.2.1] - 2026-09-15
 
 ### Fixed

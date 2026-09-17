@@ -37,16 +37,6 @@ function createContext(options: {
 	};
 	const ctx = createInteractiveModeContext({
 		editor,
-		getUserMessageText: message =>
-			typeof message.content === "string"
-				? message.content
-				: message.content
-						.map(content =>
-							content.type === "text" && "text" in content && typeof content.text === "string"
-								? content.text
-								: "",
-						)
-						.join(""),
 		optimisticUserMessageSignature: options.optimisticSignature,
 		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
 	});
