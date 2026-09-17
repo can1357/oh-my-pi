@@ -7,7 +7,7 @@
  * 429/5xx responses retry with bounded, `retry-after`-aware backoff.
  *
  * Environment (mirrors the official SDK): `TYPESAFE_API_KEY` is resolved by
- * the auth registry (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL`
+ * the auth registry (`rules/auth/jev.kdl`; `/login typesafe` is an alias), `TYPESAFE_BASE_URL`
  * overrides the API root, `TYPESAFE_DEFAULT_MODEL` the model.
  */
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
