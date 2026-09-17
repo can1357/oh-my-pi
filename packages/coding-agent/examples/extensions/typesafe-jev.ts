@@ -1,23 +1,17 @@
 /**
- * TypeSafe Jev skill routing
+ * TypeSafe Jev skill routing (cookbook calls 1–2).
  *
- * Names at most one installed skill before the chat model runs. Jev is not a
- * chat model (max output tokens 0) — do not put it in `/model`. This follows
- * call 1 of https://docs.typesafe.ai/cookbooks/skill_suggestion.md: one
- * Choice over the roster plus three gate Nouls in the same request. Typical
- * omp rosters (~40 skills) fit in one Choice; the cookbook's second request
- * (rerank the top 3 with SKILL.md excerpts) is the follow-up when lookalikes
- * collide or the roster grows past ~100.
- *
- * Injects a per-turn `<skill_relevance>` line via `systemPromptAppend`. Quiet
- * when nothing fits. Missing key, timeout, or HTTP error: fail-open.
+ * Call 1: Choice over the roster + three gate Nouls. Call 2 (auto): rerank the
+ * top 3 with SKILL.md excerpts + fits Nouls when the roster is large or the
+ * top two choices collide. Injects `<skill_relevance>` via systemPromptAppend.
+ * Fail-open on missing key, timeout, or HTTP error.
  *
  * Usage:
- * 1. `/login typesafe` or `TYPESAFE_API_KEY` in the environment / ~/.omp/.env
- * 2. Copy this file to ~/.omp/agent/extensions/
- * 3. `/jev` prints key + roster size. Restart omp so the extension loads.
+ * 1. `/login typesafe` or `TYPESAFE_API_KEY` in ~/.omp/.env
+ * 2. Restart omp so the extension loads.
+ * 3. `/jev` prints key + roster size + rerank mode.
  */
-import { appendFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
@@ -27,7 +21,15 @@ const MODEL = process.env.TYPESAFE_DEFAULT_MODEL || "jev-latest";
 const HOOK_BUDGET_MS = 2500;
 const MAX_CHOICES = 240;
 const GATE_THRESHOLD = 0.3;
-const LOG = join(homedir(), ".omp/agent/extensions/typesafe-jev.log");
+const FITS_THRESHOLD = 0.3;
+const SHORTLIST = 3;
+const EXCERPT_CHARS = 700;
+const LOOKALIKE_DELTA = 0.1;
+const ROSTER_RERANK_THRESHOLD = 100;
+const HIGH_CONFIDENCE_GATE = 0.6;
+const HIGH_CONFIDENCE_PROB = 0.7;
+const NONE_OF_THESE = "none_of_these";
+const LOG = join(homedir(), ".omp/agent/extensions/typesafe-jev/route.log");
 
 const GATE_QUESTIONS = {
 	acts_on_user_system:
@@ -39,21 +41,19 @@ const GATE_QUESTIONS = {
 } as const;
 const INVERTED = new Set(["prose_suffices"]);
 
-type Skill = { name: string; description: string };
+type Skill = { name: string; description: string; skillMd?: string };
 
 function loadKey(): string {
 	if (process.env.TYPESAFE_API_KEY?.trim()) return process.env.TYPESAFE_API_KEY.trim();
-	for (const file of [join(homedir(), ".omp/.env")]) {
-		try {
-			for (const line of readFileSync(file, "utf8").split("\n")) {
-				if (line.startsWith("TYPESAFE_API_KEY=")) {
-					const v = line.slice("TYPESAFE_API_KEY=".length).trim().replace(/^['"]|['"]$/g, "");
-					if (v) return v;
-				}
+	try {
+		for (const line of readFileSync(join(homedir(), ".omp/.env"), "utf8").split("\n")) {
+			if (line.startsWith("TYPESAFE_API_KEY=")) {
+				const v = line.slice("TYPESAFE_API_KEY=".length).trim().replace(/^['"]|['"]$/g, "");
+				if (v) return v;
 			}
-		} catch {
-			/* missing file */
 		}
+	} catch {
+		/* missing file */
 	}
 	return "";
 }
@@ -90,6 +90,13 @@ function parseFrontmatter(text: string): { name?: string; description?: string }
 	return out;
 }
 
+function stripFrontmatter(text: string): string {
+	if (!text.startsWith("---")) return text;
+	const end = text.indexOf("\n---", 3);
+	if (end < 0) return text;
+	return text.slice(end + 4).trimStart();
+}
+
 function skillDirs(cwd?: string): string[] {
 	const home = homedir();
 	const dirs = [
@@ -118,7 +125,8 @@ function loadRoster(cwd?: string): Skill[] {
 			const skillMd = join(root, name, "SKILL.md");
 			if (!existsSync(skillMd) || seen.has(name)) continue;
 			try {
-				const meta = parseFrontmatter(readFileSync(skillMd, "utf8"));
+				const raw = readFileSync(skillMd, "utf8");
+				const meta = parseFrontmatter(raw);
 				const id = (meta.name || name).trim();
 				if (!id || id.length > 64) continue;
 				seen.add(name);
@@ -126,6 +134,7 @@ function loadRoster(cwd?: string): Skill[] {
 				skills.push({
 					name: id,
 					description: (meta.description || id).replace(/\s+/g, " ").slice(0, 120),
+					skillMd,
 				});
 			} catch {
 				/* skip unreadable skill */
@@ -151,6 +160,25 @@ function gateMean(answers: Record<string, { noul?: number } | undefined>): numbe
 	}
 	if (values.length === 0) return 0;
 	return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function topProbs(probabilities: Record<string, number> | undefined): number[] {
+	if (!probabilities) return [];
+	return Object.values(probabilities)
+		.map(Number)
+		.filter(Number.isFinite)
+		.sort((a, b) => b - a);
+}
+
+function shouldRerank(rosterSize: number, gate: number, probabilities: Record<string, number> | undefined): boolean {
+	const rerankEnv = (process.env.TYPESAFE_JEV_RERANK || "auto").toLowerCase();
+	if (rerankEnv === "off" || rerankEnv === "false" || rerankEnv === "0") return false;
+	if (rerankEnv === "always" || rerankEnv === "1") return true;
+	if (rosterSize >= ROSTER_RERANK_THRESHOLD) return true;
+	const [first, second] = topProbs(probabilities);
+	if (first !== undefined && gate >= HIGH_CONFIDENCE_GATE && first >= HIGH_CONFIDENCE_PROB) return false;
+	if (first !== undefined && second !== undefined && first - second <= LOOKALIKE_DELTA) return true;
+	return false;
 }
 
 async function systemone(
@@ -186,6 +214,75 @@ async function systemone(
 	}
 }
 
+function rankedShortlist(probabilities: Record<string, number> | undefined, roster: Skill[]): string[] {
+	if (!probabilities) return roster.slice(0, SHORTLIST).map(s => s.name);
+	const allowed = new Set(roster.map(s => s.name));
+	return Object.entries(probabilities)
+		.filter(([name, p]) => allowed.has(name) && Number.isFinite(Number(p)))
+		.sort((a, b) => Number(b[1]) - Number(a[1]))
+		.slice(0, SHORTLIST)
+		.map(([name]) => name);
+}
+
+function skillExcerpt(skill: Skill | undefined): string {
+	if (!skill?.skillMd) return "";
+	try {
+		const body = stripFrontmatter(readFileSync(skill.skillMd, "utf8"));
+		return body.replace(/\s+/g, " ").slice(0, EXCERPT_CHARS);
+	} catch {
+		return "";
+	}
+}
+
+async function rerank(
+	prompt: string,
+	shortlist: string[],
+	byName: Map<string, Skill>,
+	key: string,
+	budgetMs: number,
+): Promise<{ winner: string; fits: number; p: number; model: string } | null> {
+	const criteria: Record<string, string> = { [NONE_OF_THESE]: "None of these skills fit the request." };
+	for (const name of shortlist) {
+		const skill = byName.get(name);
+		const excerpt = skillExcerpt(skill);
+		criteria[name] = excerpt ? `${skill?.description ?? name} — ${excerpt}` : (skill?.description ?? name);
+	}
+	const questions: Record<string, unknown> = {
+		which: {
+			type: "choice",
+			instructions:
+				"Exactly one of these skills is the right one to load for the user's latest request. Which one? Read what each actually does, not just its name.",
+			criteria,
+		},
+	};
+	for (const name of shortlist) {
+		const skill = byName.get(name);
+		questions[`fits::${name}`] = {
+			type: "noul",
+			instructions: `Does the skill '${name}' do the specific thing the user's request asks for? It is described as: ${skill?.description ?? name}`,
+		};
+	}
+	const body = await systemone(
+		key,
+		{ request: prompt.slice(0, 4000), recent_context: "" },
+		questions,
+		budgetMs,
+	);
+	const choice = String(body?.answers?.which?.choice || "");
+	if (!choice || choice === NONE_OF_THESE || !byName.has(choice)) return null;
+	const fitsEntries = Object.entries(body?.answers || {}).filter(([k]) => k.startsWith("fits::"));
+	const fitsValues = fitsEntries.map(([, v]) => Number((v as { noul?: number })?.noul ?? 0));
+	const bestFits = fitsValues.length ? Math.max(...fitsValues) : 0;
+	if (bestFits < FITS_THRESHOLD) return null;
+	const winnerFits = Number(body?.answers?.[`fits::${choice}`]?.noul ?? bestFits);
+	return {
+		winner: choice,
+		fits: winnerFits,
+		p: Number(body?.answers?.which?.probabilities?.[choice] ?? 0),
+		model: body?.model || "?",
+	};
+}
+
 async function route(
 	prompt: string,
 	key: string,
@@ -205,8 +302,8 @@ async function route(
 			criteria,
 		},
 	};
-	for (const [key, text] of Object.entries(GATE_QUESTIONS)) {
-		questions[`gate::${key}`] = { type: "noul", instructions: text };
+	for (const [keyName, text] of Object.entries(GATE_QUESTIONS)) {
+		questions[`gate::${keyName}`] = { type: "noul", instructions: text };
 	}
 
 	const started = Date.now();
@@ -218,16 +315,37 @@ async function route(
 	);
 	const which = body?.answers?.which;
 	const choice = String(which?.choice || "");
-	const p = Number(which?.probabilities?.[choice] ?? 0);
+	let p = Number(which?.probabilities?.[choice] ?? 0);
 	const gate = gateMean(body?.answers || {});
+	const byName = new Map(skills.map(skill => [skill.name, skill]));
+
+	let winner = choice;
+	let fits: number | undefined;
+	let model = body?.model || "?";
+	let reranked = false;
+
+	if (choice && gate >= GATE_THRESHOLD && shouldRerank(skills.length, gate, which?.probabilities)) {
+		const remaining = Math.max(400, HOOK_BUDGET_MS - (Date.now() - started));
+		const shortlist = rankedShortlist(which?.probabilities, skills);
+		const second = await rerank(prompt, shortlist, byName, key, remaining);
+		if (!second) return;
+		winner = second.winner;
+		fits = second.fits;
+		p = second.p;
+		model = second.model;
+		reranked = true;
+	} else if (!choice || gate < GATE_THRESHOLD) {
+		return;
+	}
+
 	log(
 		"suggest",
-		`${choice || "-"} gate=${gate.toFixed(3)} p=${p.toFixed(3)} ${(Date.now() - started) / 1000}s model=${body?.model || "?"}`,
+		`${winner || "-"} gate=${gate.toFixed(3)}${fits !== undefined ? ` fits=${fits.toFixed(3)}` : ""} p=${p.toFixed(3)}${reranked ? " rerank" : ""} ${(Date.now() - started) / 1000}s model=${model}`,
 	);
-	if (!choice || gate < GATE_THRESHOLD) return;
+	if (!winner) return;
 	return [
 		"<skill_relevance>",
-		`Relevant to the current request: ${choice}. Ignore this if it does not fit what the user actually asked for.`,
+		`Relevant to the current request: ${winner}. Ignore this if it does not fit what the user actually asked for.`,
 		"</skill_relevance>",
 	].join("\n");
 }
@@ -253,9 +371,10 @@ export default function typesafeJev(pi: ExtensionAPI) {
 	pi.registerCommand("jev", {
 		description: "TypeSafe Jev status (native System One skill routing)",
 		async handler(_args, ctx) {
+			const rerank = process.env.TYPESAFE_JEV_RERANK || "auto";
 			ctx.ui.notify(
 				key
-					? `Jev: key present, ${skills.length} skills, model ${MODEL} @ ${BASE_URL}`
+					? `Jev: key present, ${skills.length} skills, rerank=${rerank}, model ${MODEL} @ ${BASE_URL}`
 					: "Jev: TYPESAFE_API_KEY missing — /login typesafe or put it in ~/.omp/.env",
 				key ? "info" : "warning",
 			);
