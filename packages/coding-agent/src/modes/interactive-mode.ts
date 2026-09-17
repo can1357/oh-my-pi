@@ -117,7 +117,7 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { modelMentionDisplayName } from "../session/model-mentions";
+import { modelMentionDisplayName } from "../session/model-mention-syntax";
 import { modelMentionChipLabel } from "./composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
