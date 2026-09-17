@@ -44,7 +44,13 @@
     "gen:native": "bun --cwd=../natives run gen:native",
     "gen:native:reset": "bun --cwd=../natives run gen:native:reset",
     "prepack": "bun run gen:tool-views && bun run gen:bundle",
-    "bench:guard": "bun scripts/bench-guard.ts"
+    "bench:guard": "bun scripts/bench-guard.ts",
+    "test:jev-showcase": "bun test test/jev-showcase-*.test.ts test/computer-decide*.test.ts test/skills-suggest.test.ts",
+    "jev:showcase:skill": "bun evals/jev-showcase/skill-suggestion/orchestrate.ts",
+    "jev:showcase:skill:report": "bun evals/jev-showcase/skill-suggestion/report.ts",
+    "jev:showcase:skill:roster": "bun evals/jev-showcase/skill-suggestion/build-hermes-roster.ts",
+    "jev:showcase:computer": "bun evals/jev-showcase/computer-decide/orchestrate.ts",
+    "jev:showcase:computer:report": "bun evals/jev-showcase/computer-decide/report.ts"
   },
   "dependencies": {
     "@babel/parser": "catalog:",

@@ -1,3 +1,5 @@
+# JEV showcase live battery output (resume-safe jsonl)
+packages/coding-agent/evals/jev-showcase/**/results/
 # Dependencies
 node_modules
 .npm/

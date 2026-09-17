@@ -1,0 +1,14 @@
+[
+  { "id": "cookbook-notes-recipe", "text": "Can you save this recipe as a new note in my Recipes folder in Notes.app?", "gold": "apple-notes" },
+  { "id": "cookbook-pptx-author", "text": "Can you put together a pitch deck skeleton (cover, situation overview, comps, precedent transactions, DCF, LBO) as a .pptx, using our firm-template.pptx for branding and footnoting each valuation number back to the cell it came from in the model?", "gold": "pptx-author" },
+  { "id": "cookbook-1password", "text": "Config.yaml has op:// placeholders — set up runtime secret injection.", "gold": "1password" },
+  { "id": "cookbook-debug-hermes", "text": "Debug why hermes CLI prints HERMES_HOME fallback on every launch.", "gold": "systematic-debugging" },
+  { "id": "cookbook-github-research", "text": "Search GitHub issues and PRs in NousResearch/hermes-agent for recent skill-routing discussions and summarize themes.", "gold": "github" },
+  { "id": "cookbook-hermes-config", "text": "How do I enable skill routing and set judgmentProvider to typesafe?", "gold": "hermes-agent" },
+  { "id": "negative-trello", "text": "Add these three cards to our Trello backlog.", "gold": null },
+  { "id": "negative-mastodon", "text": "Post this announcement to my Mastodon account.", "gold": null },
+  { "id": "negative-monad", "text": "Explain what a monad is in plain English.", "gold": null },
+  { "id": "negative-greeting", "text": "hey", "gold": null },
+  { "id": "negative-thanks", "text": "thanks, that worked", "gold": null },
+  { "id": "lookalike-pptx", "text": "Author a new investor deck from scratch as a .pptx with our firm-template.pptx — build slides headless, do not just edit an existing deck in place.", "gold": "pptx-author" }
+]

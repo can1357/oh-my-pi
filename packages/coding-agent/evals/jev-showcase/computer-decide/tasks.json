@@ -1,0 +1,140 @@
+[
+  {
+    "id": "save-cancel-rules",
+    "goal": "click Save",
+    "candidates": [
+      {
+        "id": "e1",
+        "label": "Save",
+        "role": "button",
+        "source": "ax"
+      },
+      {
+        "id": "e2",
+        "label": "Cancel",
+        "role": "button",
+        "source": "ax"
+      }
+    ],
+    "expected": {
+      "action": "click",
+      "target": "e1",
+      "backend": "rules|rerank"
+    }
+  },
+  {
+    "id": "submit-ambiguous-null",
+    "goal": "click Submit",
+    "candidates": [
+      {
+        "id": "e1",
+        "label": "Submit form",
+        "role": "button"
+      },
+      {
+        "id": "e2",
+        "label": "Submit request",
+        "role": "button"
+      },
+      {
+        "id": "e3",
+        "label": "Submit now",
+        "role": "button"
+      }
+    ],
+    "expected": {
+      "null": true,
+      "backend": "none",
+      "minConfidence": 0.95
+    },
+    "gtkLabels": "Submit form,Submit request,Submit now"
+  },
+  {
+    "id": "delete-no-match",
+    "goal": "click Delete permanently",
+    "candidates": [
+      {
+        "id": "e1",
+        "label": "Save",
+        "role": "button"
+      },
+      {
+        "id": "e2",
+        "label": "Cancel",
+        "role": "button"
+      }
+    ],
+    "expected": {
+      "null": true
+    },
+    "gtkLabels": "Save,Cancel"
+  },
+  {
+    "id": "rerank-purchase",
+    "goal": "click Purchase subscription",
+    "candidates": [
+      {
+        "id": "e1",
+        "label": "Cancel",
+        "role": "button"
+      },
+      {
+        "id": "e2",
+        "label": "Purchase subscription",
+        "role": "button"
+      }
+    ],
+    "expected": {
+      "action": "click",
+      "target": "e2",
+      "backend": "rules|rerank"
+    }
+  },
+  {
+    "id": "lone-control-rules",
+    "goal": "press Continue",
+    "candidates": [
+      {
+        "id": "e1",
+        "label": "Continue setup",
+        "role": "button"
+      }
+    ],
+    "expected": {
+      "action": "click",
+      "target": "e1",
+      "backend": "rules"
+    }
+  },
+  {
+    "id": "jev-armed-click",
+    "goal": "click Register",
+    "candidates": [
+      {
+        "id": "e1",
+        "label": "Register",
+        "role": "button"
+      },
+      {
+        "id": "e2",
+        "label": "Sign in",
+        "role": "button"
+      }
+    ],
+    "expected": {
+      "action": "click",
+      "target": "e1",
+      "backend": "rules|rerank|jev"
+    }
+  },
+  {
+    "id": "gtk-save-cancel",
+    "goal": "click Save",
+    "candidates": [],
+    "expected": {
+      "action": "click",
+      "backend": "rules|rerank"
+    },
+    "gtkLabels": "Save,Cancel"
+  }
+]
