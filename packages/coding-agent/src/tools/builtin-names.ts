@@ -1,3 +1,5 @@
+import type { EvalBackendsAllowance } from "./eval-backends";
+
 export const BUILTIN_TOOL_NAMES = [
 	"read",
 	"bash",
@@ -61,6 +63,41 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 		out.push(normalized);
 	}
 	return out;
+}
+
+/**
+ * The `exec` shorthand maps to the concrete execution tools: `bash` always,
+ * plus `eval` when an eval backend is available. Extracted from the executor's
+ * child tool derivation (fr-vW/fo80l) so the persona grant and the child-side
+ * capability intersect expand the shorthand through the SAME rule instead of
+ * drifting copies.
+ *
+ * `backends === undefined` means "assume available": grant layers computed
+ * before a session exists (the persona grant) cannot read eval settings — the
+ * registry/`effective()` layer gates `eval` at use time, so expanding it here
+ * never grants a tool the session cannot actually run.
+ */
+export function expandExecToolShorthand(names: readonly string[], backends?: EvalBackendsAllowance): string[] {
+	// Case-insensitive membership: a frontmatter `tools: [EXEC]` is the same
+	// shorthand, and callers may expand BEFORE normalization (the persona grant
+	// normalizes the expanded result).
+	if (!names.some(name => name.toLowerCase() === "exec")) return [...names];
+	const expanded = names.filter(name => name.toLowerCase() !== "exec");
+	if (!backends || backends.python || backends.js) expanded.push("eval");
+	expanded.push("bash");
+	return Array.from(new Set(expanded));
+}
+/**
+ * Checkpoint and rewind are a pair: a tool list naming one without the other
+ * strands the agent (it can checkpoint but not rewind, or vice versa). The
+ * session builders auto-include the sister tool for one-sided explicit lists;
+ * persona grants must pair through the SAME rule instead of a drifting copy.
+ * Unrelated names pass through unchanged.
+ */
+export function withPairedCheckpointRewind(names: readonly string[]): string[] {
+	if (names.includes("checkpoint") && !names.includes("rewind")) return [...names, "rewind"];
+	if (names.includes("rewind") && !names.includes("checkpoint")) return [...names, "checkpoint"];
+	return [...names];
 }
 
 /** MCP tool names carry the `mcp__<server>_<tool>` prefix minted by `createMCPToolName`. */

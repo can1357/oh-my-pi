@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { SessionToolPolicy } from "@oh-my-pi/pi-coding-agent/session/tool-policy";
+import { createTools, HIDDEN_TOOLS, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -444,6 +445,38 @@ describe("createTools", () => {
 		).map(t => t.name);
 		expect(names).toContain("checkpoint");
 		expect(names).toContain("rewind");
+	});
+
+	it("keeps hub in an ordinary unrestricted session with a live tool policy (fr-vQ)", async () => {
+		// The policy's registry view is EMPTY during this first createTools pass;
+		// consulting policy.hubEnabled() eagerly denied hub everywhere. The gate
+		// must fall back to the classic unrestricted derivation until the session
+		// registry holds `hub`.
+		const registry = new Map<string, Tool>();
+		const policy = new SessionToolPolicy({
+			registry: () => new Set(registry.keys()),
+			isDefaultActive: () => true,
+		});
+		const names = (await createTools(createTestSession({ toolRegistry: registry, getToolPolicy: () => policy }))).map(
+			t => t.name,
+		);
+		expect(names).toContain("hub");
+	});
+
+	it("drops hub when the persona grant omits it once the registry is primed (fr-vQ)", async () => {
+		const registry = new Map<string, Tool>();
+		// Primed registry simulates a later createTools rebuild (persona
+		// enter/exit): the policy layers now decide hub availability.
+		registry.set("hub", {} as Tool);
+		const policy = new SessionToolPolicy({
+			registry: () => new Set(registry.keys()),
+			isDefaultActive: () => true,
+		});
+		policy.enterPersona({ name: "x", description: "x", systemPrompt: "x", source: "bundled", tools: ["read"] }, {});
+		const tools = await createTools(createTestSession({ toolRegistry: registry, getToolPolicy: () => policy }));
+		const names = tools.map(t => t.name);
+		expect(names).not.toContain("hub");
+		expect(names).toContain("read");
 	});
 
 	it("HIDDEN_TOOLS contains yield, goal, and think", () => {

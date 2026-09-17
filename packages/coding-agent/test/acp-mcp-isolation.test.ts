@@ -74,6 +74,53 @@ describe("createAcpSessionFactory MCP isolation (issue #1234)", () => {
 		}
 	});
 
+	// Regression (Codex P2): the ACP session pins the WORKSPACE's creation-time
+	// roots view but must stay live for settings changes — a reload of the
+	// session's own `extensions` list must land on the next discovery read.
+	// Pre-fix the pinned closure returned the creation snapshot forever.
+	it("serves the session settings' live configured lane from the pinned roots provider", async () => {
+		const tempDir = TempDir.createSync("@pi-acp-roots-live-");
+		try {
+			const settings = Settings.isolated({});
+			const fakeSession = {} as AgentSession;
+			let captured: CreateAgentSessionOptions | undefined;
+			const factory = createAcpSessionFactory({
+				// The CLI hands the factory a launch-cwd provider; the factory
+				// must REPLACE it with the per-workspace pinned closure.
+				baseOptions: {
+					extensionRoots: () => ({
+						explicit: [],
+						mode: "merge",
+						configured: [],
+						configuredLevel: "user",
+					}),
+				} as CreateAgentSessionOptions,
+				settings,
+				sessionDir: tempDir.join("sessions"),
+				authStorage,
+				modelRegistry,
+				parsedArgs: {},
+				rawArgs: [],
+				createSession: async options => {
+					captured = options;
+					return { session: fakeSession } as CreateAgentSessionResult;
+				},
+			});
+
+			await factory(tempDir.path());
+			const provider = captured?.extensionRoots;
+			if (!provider) throw new Error("Expected the factory to pass an extensionRoots provider");
+			expect(provider().configured).toEqual([]);
+
+			// The SESSION's own settings (the clone the factory made), reloaded
+			// with a configured extension — the next provider read must carry it.
+			captured?.settings?.override("extensions", [tempDir.join("configured-pkg")]);
+			expect(provider().configured).toEqual([tempDir.join("configured-pkg")]);
+		} finally {
+			await tempDir.remove();
+		}
+	});
+
 	it("rejects allowlisted tools absent from the completed ACP session registry", async () => {
 		const tempDir = TempDir.createSync("@pi-acp-tool-allowlist-");
 		try {
