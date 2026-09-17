@@ -540,6 +540,66 @@ export class MarketplaceManager {
 	}
 
 	/**
+	 * Reads the cached marketplace catalog (a local file — refreshing it is
+	 * `updateMarketplace`'s job) and resolves the target version the same way
+	 * `installPlugin` would. url/github/git-subdir sources need a read-only temp
+	 * clone for version resolution (removed right after); nothing in the plugin
+	 * cache or registry is touched.
+	 */
+	async #previewUpgrade(
+		parsed: { name: string; marketplace: string },
+		scope: "user" | "project",
+		targetEntries: InstalledPluginEntry[],
+	): Promise<InstalledPluginEntry> {
+		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
+		const mktEntry = getMarketplaceEntry(mktReg, parsed.marketplace);
+		if (!mktEntry) {
+			throw new Error(`Marketplace "${parsed.marketplace}" not found`);
+		}
+
+		const catalog = await this.#readCatalog(mktEntry);
+		const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
+		if (!pluginEntry) {
+			throw new Error(`Plugin "${parsed.name}" not found in marketplace "${parsed.marketplace}"`);
+		}
+		if (
+			typeof pluginEntry.version === "string" &&
+			pluginEntry.version.length > 0 &&
+			!isValidVersionForCache(pluginEntry.version)
+		) {
+			throw new Error(`Invalid version for cache: "${pluginEntry.version}"`);
+		}
+
+		// Same source resolution the real install uses. Relative sources resolve
+		// against the marketplace clone; url/github/git-subdir sources temp-clone
+		// and the clone is removed in the finally below.
+		const { dir: sourcePath, tempCloneRoot } = await resolvePluginSource(pluginEntry, {
+			marketplaceClonePath: this.#resolveMarketplaceRoot(mktEntry),
+			catalogMetadata: catalog.metadata,
+			tmpDir: os.tmpdir(),
+		});
+
+		let version: string;
+		try {
+			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
+		} finally {
+			if (tempCloneRoot) {
+				await fs.rm(tempCloneRoot, { recursive: true, force: true }).catch(() => {});
+			}
+		}
+		const existing = targetEntries[0];
+		const wasDisabled = targetEntries.some(e => e.enabled === false);
+		return {
+			scope,
+			installPath: getCachedPluginPath(this.#opts.pluginsCacheDir, parsed.marketplace, parsed.name, version),
+			version,
+			installedAt: existing?.installedAt ?? new Date().toISOString(),
+			lastUpdated: new Date().toISOString(),
+			...(wasDisabled ? { enabled: false } : {}),
+		};
+	}
+
+	/**
 	 * Resolve plugin version from multiple sources:
 	 * 1. Catalog entry version (if set)
 	 * 2. Plugin manifest (.claude-plugin/plugin.json, Agent Plugins root plugin.json, or package.json)
@@ -809,7 +869,13 @@ export class MarketplaceManager {
 	}
 
 	// Re-install a specific plugin at the latest catalog version (force-overwrites).
-	async upgradePlugin(pluginId: string, scope?: "user" | "project"): Promise<InstalledPluginEntry> {
+	// With `dryRun`, only validates and resolves the would-be version — the caller
+	// prints the preview; nothing is written to the cache, registry, or runtime link.
+	async upgradePlugin(
+		pluginId: string,
+		scope?: "user" | "project",
+		options?: { dryRun?: boolean },
+	): Promise<InstalledPluginEntry> {
 		const parsed = parsePluginId(pluginId);
 		if (!parsed) {
 			throw new Error(`Invalid plugin ID: "${pluginId}". Expected "name@marketplace".`);
@@ -840,12 +906,19 @@ export class MarketplaceManager {
 			resolvedScope = "user";
 		}
 
+		if (options?.dryRun) {
+			const targetEntries = resolvedScope === "project" ? projectEntries! : userEntries!;
+			return this.#previewUpgrade(parsed, resolvedScope, targetEntries);
+		}
 		return this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: resolvedScope });
 	}
 
 	// Upgrade a plugin across all scopes where it is installed.
 	// Returns one entry per scope upgraded (0–2 entries).
-	async upgradePluginAcrossScopes(pluginId: string): Promise<InstalledPluginEntry[]> {
+	async upgradePluginAcrossScopes(
+		pluginId: string,
+		options?: { dryRun?: boolean },
+	): Promise<InstalledPluginEntry[]> {
 		const parsed = parsePluginId(pluginId);
 		if (!parsed) {
 			throw new Error(`Invalid plugin ID: "${pluginId}". Expected "name@marketplace".`);
@@ -863,11 +936,15 @@ export class MarketplaceManager {
 		const results: InstalledPluginEntry[] = [];
 
 		if (inProject) {
-			const entry = await this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: "project" });
+			const entry = options?.dryRun
+				? await this.#previewUpgrade(parsed, "project", projectEntries!)
+				: await this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: "project" });
 			results.push(entry);
 		}
 		if (inUser) {
-			const entry = await this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: "user" });
+			const entry = options?.dryRun
+				? await this.#previewUpgrade(parsed, "user", userEntries!)
+				: await this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: "user" });
 			results.push(entry);
 		}
 
@@ -877,15 +954,20 @@ export class MarketplaceManager {
 	// Upgrade every (pluginId, scope) pair that checkForUpdates reports as outdated.
 	// Only stale scopes are touched; a current user install is not re-installed when only
 	// the project scope is stale. Per-entry failures are skipped — partial success is returned.
-	async upgradeAllPlugins(): Promise<
+	async upgradeAllPlugins(options?: { dryRun?: boolean }): Promise<
 		Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>
 	> {
 		const updates = await this.checkForUpdates();
 		const results: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
 		for (const update of updates) {
 			try {
-				const entry = await this.upgradePlugin(update.pluginId, update.scope);
-				results.push({ pluginId: update.pluginId, scope: update.scope, from: update.from, to: entry.version });
+				const entry = await this.upgradePlugin(update.pluginId, update.scope, { dryRun: options?.dryRun });
+				results.push({
+					pluginId: update.pluginId,
+					scope: update.scope,
+					from: update.from,
+					to: entry.version,
+				});
 			} catch {
 				// Skip this entry; partial upgrades are better than none.
 			}
