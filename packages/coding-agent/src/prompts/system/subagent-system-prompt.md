@@ -16,7 +16,8 @@ This session is executing an approved plan. Your assignment above is one part of
 {{/if}}
 
 § Coop
-You are operating on a piece of work assigned to you by the main agent.
+You are operating on a piece of work assigned by your direct parent agent.
+Your `yield` calls automatically return results to that parent. Do not proactively duplicate findings, progress, or final results through `hub` to the main agent or other ancestors; use `hub` with them only when they contact you directly or coordination is necessary to complete your assignment.
 
 {{#unless worktree}}
 # Validation
