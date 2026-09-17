@@ -16,6 +16,7 @@
 - Added the `before_subagent_spawn` extension event to reroute or block each subagent before it resolves its model ([#12907](https://github.com/can1357/oh-my-pi/pull/12907) by [@aloyzzz](https://github.com/aloyzzz)).
 - Added Pi-compatible `get_entries`, `get_tree`, and `get_available_thinking_levels` RPC commands ([#12900](https://github.com/can1357/oh-my-pi/pull/12900) by [@44madfire](https://github.com/44madfire)).
 - Model fallback warnings now explain why the fallback happened, and fallback events carry the cause for extensions and RPC clients ([#12904](https://github.com/can1357/oh-my-pi/pull/12904) by [@lockwo](https://github.com/lockwo)).
+- Added `async.waitBackoffMs` to customize consecutive hub job/message waits while retaining the existing default intervals. ([#12320](https://github.com/can1357/oh-my-pi/pull/12320) by [@luken](https://github.com/luken))
 
 ### Changed
 

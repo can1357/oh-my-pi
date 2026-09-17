@@ -486,16 +486,20 @@ export class AsyncJobManager {
 	 * Compute the next adaptive wait window (ms) for a blocking `hub` wait by
 	 * the given owner. Consecutive waits — those starting within
 	 * POLL_ESCALATION_RESET_MS of the previous wait returning — climb
-	 * POLL_WAIT_LADDER_MS so a tight wait loop backs off; a longer gap means the
+	 * the configured ladder so a tight wait loop backs off; a longer gap means the
 	 * agent left to do real work, so the window resets to the floor. Pair each
 	 * call with `recordPollWaitEnd()` once the wait returns.
 	 */
-	nextPollWaitMs(ownerId: string | undefined, now: number = Date.now()): number {
+	nextPollWaitMs(
+		ownerId: string | undefined,
+		now: number = Date.now(),
+		ladderMs: readonly number[] = POLL_WAIT_LADDER_MS,
+	): number {
 		const prev = this.#pollEscalation.get(ownerId);
 		const reset = !prev || now - prev.lastPollEndAt >= POLL_ESCALATION_RESET_MS;
-		const level = reset ? 0 : Math.min(prev.level + 1, POLL_WAIT_LADDER_MS.length - 1);
+		const level = reset ? 0 : Math.min(prev.level + 1, ladderMs.length - 1);
 		this.#pollEscalation.set(ownerId, { level, lastPollEndAt: prev?.lastPollEndAt ?? now });
-		return POLL_WAIT_LADDER_MS[level];
+		return ladderMs[level];
 	}
 
 	/**

@@ -25,7 +25,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 
-import { prompt } from "@oh-my-pi/pi-utils";
+import { MAX_TIMER_DELAY_MS, prompt } from "@oh-my-pi/pi-utils";
 import { POLL_WAIT_LADDER_MS } from "../../async/job-manager";
 
 import { IrcBus } from "../../irc/bus";
@@ -357,6 +357,17 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const manager = this.session.asyncJobManager;
 		const ownerId = this.#ownerId();
 		const from = params.from?.trim() || undefined;
+		const backoffMs = this.session.settings.get("async.waitBackoffMs") ?? POLL_WAIT_LADDER_MS;
+		if (
+			!Array.isArray(backoffMs) ||
+			backoffMs.length === 0 ||
+			backoffMs.some(ms => !Number.isInteger(ms) || ms < 1 || ms > MAX_TIMER_DELAY_MS)
+		) {
+			return hubErrorResult(
+				`async.waitBackoffMs must be a nonempty list of integer milliseconds from 1 to ${MAX_TIMER_DELAY_MS}.`,
+				{ op: "wait" },
+			);
+		}
 
 		// A message already buffered on the session satisfies the wait first.
 		if (messaging) {
@@ -386,7 +397,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		// agent waits in a tight loop, then resets once it steps away (see
 		// AsyncJobManager.nextPollWaitMs). Job and message waits share one
 		// per-owner ladder; only paths that actually block advance and record it.
-		const nextWindowMs = (): number => manager?.nextPollWaitMs(ownerId) ?? POLL_WAIT_LADDER_MS[0];
+		const nextWindowMs = (): number => manager?.nextPollWaitMs(ownerId, Date.now(), backoffMs) ?? backoffMs[0];
 
 		if (!manager || runningJobs.length === 0) {
 			// No job legs: pure message wait — or nothing to block on at all.
