@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Extension lifecycle events now carry matching run IDs so integrations can ignore stale completion notifications ([#12301](https://github.com/can1357/oh-my-pi/pull/12301) by [@ryxli](https://github.com/ryxli)).
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes
