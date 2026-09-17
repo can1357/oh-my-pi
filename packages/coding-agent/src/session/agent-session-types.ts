@@ -32,7 +32,7 @@ import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ExtensionRunner, PreparedExtension } from "../extensibility/extensions";
-import type { ContextUsage } from "../extensibility/extensions/types";
+import type { ContextUsage, ModelSelectSource } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -415,6 +415,21 @@ export interface RoleModelCycleResult {
 	model: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	role: string;
+}
+
+/**
+ * Result of a provider-session-resetting model switch. When the model actually
+ * changed, a `model_select` FIFO slot was reserved at switch time; the caller
+ * MUST release it via `commit(source)` as the last step of its transaction
+ * (use `try/finally` — the model already changed, so a failing tail still
+ * commits). `commit` is a no-op when nothing changed or no slot was reserved.
+ * Every reset that actually changed the model produces exactly one
+ * `model_select`, in switch order; a rollback is simply the next event.
+ */
+export interface ModelSwitchResult {
+	changed: boolean;
+	previousModel: Model | undefined;
+	commit(source: ModelSelectSource): void;
 }
 
 /** A configured role resolved to a concrete model. */

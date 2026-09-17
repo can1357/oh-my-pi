@@ -58,6 +58,7 @@ import type {
 	InputEvent,
 	InputEventResult,
 	McpNotificationEvent,
+	ModelSelectEvent,
 	MessageRenderer,
 	RegisteredCommand,
 	RegisteredTool,
@@ -382,17 +383,37 @@ export type SwitchSessionHandler = (sessionPath: string) => Promise<{ cancelled:
 
 export type ShutdownHandler = () => void;
 
+/** A `model_select` delivery slot reserved in FIFO order at switch time and released once the switch has committed. */
+export interface ModelSelectSlot {
+	/** Deliver `event` in this slot. Idempotent; later calls are ignored. */
+	commit(event: Omit<ModelSelectEvent, "type">): void;
+}
 /**
  * Emit `session_shutdown`, dispose file-write-fallback registrations, and clear
  * timers owned by an extension runner.
  *
- * Returns whether any shutdown handlers were present. Fallback disposal and timer
- * cleanup run even when a handler fails so extension background work — and a
- * fallback bound to this session's context — cannot outlive its host.
+ * Before anything else this fences and drains the detached `model_select`
+ * delivery chain: `beginShutdown()` stops new deliveries from queueing, and
+ * `drainModelSelect` waits (bounded by the shutdown-handler budget) for the
+ * in-flight pass to settle. Without the drain a parked handler could resume
+ * after `disposeFileFallbacks`/`clearManagedTimers` below — registering
+ * `ctx.setTimeout`/`setInterval` handles after `clearAll`, touching a
+ * torn-down session's context — and extensions would observe `model_select`
+ * after `session_shutdown`. The drain runs even when no shutdown handlers are
+ * registered: the chain belongs to the runner, not to that event.
+ *
+ * The drain and the shutdown handlers each get `sessionShutdownHandlerTimeoutMs`,
+ * so worst-case teardown is twice that bound; acceptable because both waits
+ * only bite on misbehaving handlers. Returns whether any shutdown handlers
+ * were present. Fallback disposal and timer cleanup run even when a handler
+ * fails so extension background work — and a fallback bound to this session's
+ * context — cannot outlive its host.
  */
 export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner | undefined): Promise<boolean> {
 	if (!extensionRunner) return false;
 	try {
+		extensionRunner.beginShutdown();
+		await extensionRunner.drainModelSelect(sessionShutdownHandlerTimeoutMs);
 		if (!extensionRunner.hasHandlers("session_shutdown")) return false;
 		await extensionRunner.emit({
 			type: "session_shutdown",
@@ -514,6 +535,32 @@ export class ExtensionRunner {
 	 * takes effect, which is why the API documents load-time registration.
 	 */
 	#fileFallbackDisposers: Array<() => void> = [];
+	/**
+	 * Promise-chain mutex serializing detached `model_select` notifications
+	 * (PR #12186 review). Without it, two rapid switches A→B→C run their
+	 * handler passes concurrently, and the older A→B emit can finish after
+	 * the newer B→C one — an extension that awaits quota state and then
+	 * records "current model" would persist the stale B. Each switch RESERVES
+	 * its slot via {@link reserveModelSelect} at reset time, so slot order is
+	 * switch order even when two overlapping transactions finish in reverse
+	 * order; the handler pass runs only when the caller commits the slot as
+	 * the last step of its transaction. Kept non-rejecting so a failed pass
+	 * never wedges the queue.
+	 *
+	 * FIFO holds only up to the per-handler budget: `#runHandlerWithTimeout`
+	 * resolves `EXTENSION_HANDLER_TIMEOUT` after `extensionHandlerTimeoutMs`
+	 * while a handler that ignores its abort signal keeps running detached;
+	 * the chain then advances, so a later pass can overtake the still-running
+	 * timed-out one. Handlers that depend on strict ordering must honor
+	 * `ctx.signal` and settle within the budget.
+	 *
+	 * Torn down cooperatively at shutdown: `beginShutdown` fences new appends
+	 * and `drainModelSelect` bounds the wait on the current head so teardown
+	 * stays prompt (see `emitSessionShutdownEvent`).
+	 */
+	#modelSelectChain: Promise<void> = Promise.resolve();
+	/** Set by {@link beginShutdown}; once true, `model_select` delivery is over for this runner. */
+	#shutdownStarted = false;
 	/**
 	 * Dedup markers for `tool_call` emission, keyed `${toolCallId}:${toolName}`.
 	 * The agent loop emits `tool_call` at arg-prep time (before scheduling and
@@ -843,6 +890,84 @@ export class ExtensionRunner {
 			return;
 		}
 		await this.emit({ type: "credential_disabled", ...event });
+	}
+
+	/**
+	 * Reserve the next FIFO slot for a `model_select` delivery. Called at the
+	 * moment the model actually changes (next to `model_changed`), so slot order
+	 * == switch order even when two switch transactions overlap and finish in
+	 * reverse order. The slot's handler pass runs only after `commit()`, which
+	 * callers invoke as the LAST step of their transaction, so handlers observe
+	 * the committed switch. A slot never committed (bug) is abandoned after
+	 * `extensionHandlerTimeoutMs` with a warning so it cannot wedge the chain.
+	 * Returns `undefined` when nothing will be delivered (no handlers, or shutdown
+	 * already fenced this runner).
+	 */
+	reserveModelSelect(): ModelSelectSlot | undefined {
+		if (this.#shutdownStarted) return undefined;
+		if (!this.hasHandlers("model_select")) return undefined;
+		const { promise, resolve } = Promise.withResolvers<Omit<ModelSelectEvent, "type"> | undefined>();
+		let released = false;
+		this.#modelSelectChain = this.#modelSelectChain
+			.then(async () => {
+				const timer = setTimeout(() => {
+					if (released) return;
+					released = true;
+					logger.warn("model_select slot never committed; abandoning it", {
+						timeoutMs: extensionHandlerTimeoutMs,
+					});
+					resolve(undefined);
+				}, extensionHandlerTimeoutMs);
+				timer.unref?.();
+				try {
+					const event = await promise;
+					if (!event || this.#shutdownStarted) return;
+					await this.emit({ type: "model_select", ...event });
+				} finally {
+					clearTimeout(timer);
+				}
+			})
+			.catch(error => logger.warn("model_select extension notification failed", { error: String(error) }));
+		return {
+			commit: event => {
+				if (released) return;
+				released = true;
+				resolve(event);
+			},
+		};
+	}
+
+	/** Reserve-and-commit in one step for switches that have no transaction tail (e.g. the `switchSession` rollback). */
+	emitModelSelect(event: Omit<ModelSelectEvent, "type">): void {
+		this.reserveModelSelect()?.commit(event);
+	}
+
+	/** Mark this runner as shutting down: `model_select` delivery stops queueing immediately. */
+	beginShutdown(): void {
+		this.#shutdownStarted = true;
+	}
+
+	/**
+	 * Wait for the in-flight `model_select` delivery pass (the current chain
+	 * head) to settle, bounded by `timeoutMs`; never rejects. A pass that
+	 * overruns the bound is abandoned with a warning — teardown must stay
+	 * prompt, and {@link beginShutdown} has already fenced off later passes,
+	 * so the abandoned handler is the only loose end (its own
+	 * `#runHandlerWithTimeout` budget still aborts it eventually). The timer
+	 * is `unref`'d so the drain itself can never keep the process alive,
+	 * matching the bounded-wait discipline in `raceHandlerWithTimeout`.
+	 */
+	async drainModelSelect(timeoutMs: number): Promise<void> {
+		const { promise: timedOut, resolve: onTimeout } = Promise.withResolvers<true>();
+		const timer = setTimeout(() => onTimeout(true), timeoutMs);
+		timer.unref?.();
+		try {
+			if (await Promise.race([this.#modelSelectChain.then(() => false), timedOut])) {
+				logger.warn("model_select delivery still in flight at shutdown; abandoning it", { timeoutMs });
+			}
+		} finally {
+			clearTimeout(timer);
+		}
 	}
 
 	/**

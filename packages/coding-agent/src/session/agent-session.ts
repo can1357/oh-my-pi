@@ -253,6 +253,7 @@ import type {
 	FreshSessionResult,
 	HandoffResult,
 	ModelCycleResult,
+	ModelSwitchResult,
 	Prewalk,
 	PromptOptions,
 	ResetSessionContextResult,
@@ -8955,14 +8956,17 @@ export class AgentSession {
 			if (!currentModel || this.#isDisposed) return;
 			const updated = this.#modelRegistry.find(currentModel.provider, currentModel.id);
 			if (updated && updated.contextWindow !== currentModel.contextWindow) {
-				await this.#setModelWithProviderSessionReset(updated);
+				// Same model, so no slot was reserved and `commit` is a no-op; the
+				// call exists purely for the provider reset — but keep the
+				// "every result is committed" invariant.
+				(await this.#setModelWithProviderSessionReset(updated)).commit("set");
 			}
 		} catch (error) {
 			logger.warn("extended-context policy reapply failed", { error: String(error) });
 		}
 	}
 
-	async #setModelWithProviderSessionReset(model: Model): Promise<void> {
+	async #setModelWithProviderSessionReset(model: Model): Promise<ModelSwitchResult> {
 		const currentModel = this.model;
 		const isChanging = !currentModel || !modelsAreEqual(currentModel, model);
 		if (currentModel) {
@@ -8984,12 +8988,29 @@ export class AgentSession {
 		// `model_changed` has no extension-facing hook (`#emitExtensionEvent`
 		// never maps it), so routing it through `#emitSessionEvent` would only
 		// add an extension-delivery await inside every model switch — including
-		// retry-fallback on the error path.
+		// retry-fallback on the error path. The pi-compatible `model_select`
+		// notification keeps that contract: its FIFO slot is reserved below at
+		// reset time, but the handler pass only runs once the caller commits
+		// the slot as the LAST step of its switch transaction, so handlers
+		// observe the committed switch (`model_changed` above still fires
+		// synchronously here).
 		if (isChanging) {
 			this.#emit({ type: "model_changed" });
 		}
+		// Reserve the `model_select` FIFO slot at reset time — right next to
+		// `model_changed` — so slot order == switch order even when two
+		// overlapping switch transactions finish in reverse order. Delivery
+		// still waits for the caller's `commit(source)` as the LAST step of
+		// its transaction, so handlers observe the committed switch (see
+		// `ModelSwitchResult`).
+		const slot = isChanging ? this.#extensionRunner?.reserveModelSelect() : undefined;
 
 		await this.#reconcileModelDependentState(currentModel, model);
+		return {
+			changed: isChanging,
+			previousModel: currentModel,
+			commit: source => slot?.commit({ model, previousModel: currentModel, source }),
+		};
 	}
 
 	async #reconcileModelDependentState(previousModel: Model | undefined, model: Model): Promise<void> {
@@ -9570,6 +9591,9 @@ export class AgentSession {
 		this.#usagePreflightReadyModel = undefined;
 
 		let cwdChangeTarget: string | undefined;
+		// The attempted model restore's result must outlive the try block: the
+		// catch commits its slot when the switch fails mid-tail.
+		let restoreResult: ModelSwitchResult | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -9630,7 +9654,6 @@ export class AgentSession {
 				this.#closeAllProviderSessions("session reload");
 			}
 
-			// Restore model if saved
 			const targetModelStrings = getRestorableSessionModels(
 				sessionContext.models,
 				this.sessionManager.getLastModelChangeRole(),
@@ -9655,7 +9678,10 @@ export class AgentSession {
 								currentModel.id !== match.id ||
 								currentModel.api !== match.api));
 					if (shouldResetProviderState) {
-						await this.#setModelWithProviderSessionReset(match);
+						// Same-session reloads rebind the same model (`changed` false →
+						// `commit` is a no-op); a real restore reserves its slot here and
+						// commits it at the end of the switch (success tail or catch).
+						restoreResult = await this.#setModelWithProviderSessionReset(match);
 					} else {
 						this.agent.setModel(match);
 					}
@@ -9751,8 +9777,20 @@ export class AgentSession {
 			}
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
+			// The switch is fully committed: every step that could still throw
+			// into the rollback below has run. A failed switch instead commits
+			// the attempted restore in the catch block and follows it with the
+			// rollback restore — one event per actual change, in switch order.
+			restoreResult?.commit("restore");
 			return true;
 		} catch (error) {
+			// The model already changed, so the attempted restore's slot must
+			// release even though the switch failed (see ModelSwitchResult) —
+			// one `model_select` per actual change, in switch order. The
+			// rollback below reserves its own later slot, so delivery order is
+			// attempted restore, then rollback restore, regardless of when the
+			// commits happen relative to each other.
+			restoreResult?.commit("restore");
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
@@ -9790,15 +9828,21 @@ export class AgentSession {
 			// would push a { previousModel, target-session-thinking } config that
 			// was never a real session state.
 			let modelRolledBack = false;
+			let rolledBackModel: Model | undefined;
 			if (previousModel) {
-				const rolledBackModel = this.model;
+				rolledBackModel = this.model;
 				this.agent.setModel(previousModel);
 				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
 			this.#models.restoreServiceTiers(previousServiceTierByFamily);
-			if (modelRolledBack) {
+			if (modelRolledBack && previousModel) {
 				this.#emit({ type: "model_changed" });
+				this.#extensionRunner?.emitModelSelect({
+					model: previousModel,
+					previousModel: rolledBackModel,
+					source: "restore",
+				});
 			}
 			this.#todo.syncFromBranch();
 			this.#modelMentions.syncFromBranch();

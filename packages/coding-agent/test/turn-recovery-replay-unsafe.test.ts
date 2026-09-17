@@ -94,7 +94,7 @@ function createHost(
 		waitForSessionMessagePersistence: async () => {},
 		appendSessionMessage: () => {},
 		sessionMessageAlreadyPersisted: () => false,
-		setModelWithProviderSessionReset: async () => {},
+		setModelWithProviderSessionReset: async () => ({ changed: false, previousModel: undefined, commit() {} }),
 		resolveActiveEditMode: () => "hashline",
 		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
@@ -144,11 +144,13 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			getSessionId: () => "replay-unsafe-session",
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
+			const previous = activeModel;
 			activeModel = nextModel;
 			if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {
 				fallbackApplied.resolve();
 				await releaseReconciliation.promise;
 			}
+			return { changed: true, previousModel: previous, commit() {} };
 		};
 		host.emitSessionEvent = async event => {
 			emittedEvents.push(event.type);
@@ -196,11 +198,13 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		} as never;
 		host.setThinkingLevel = level => thinkingChanges.push(level);
 		host.setModelWithProviderSessionReset = async nextModel => {
+			const previous = activeModel;
 			activeModel = nextModel;
 			if (nextModel.provider === fallback.provider && nextModel.id === fallback.id) {
 				fallbackApplied.resolve();
 				await releaseReconciliation.promise;
 			}
+			return { changed: true, previousModel: previous, commit() {} };
 		};
 		host.emitSessionEvent = async event => {
 			emittedEvents.push(event.type);
@@ -244,6 +248,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		} as never;
 		host.setModelWithProviderSessionReset = async nextModel => {
 			activeModel = nextModel;
+			return { changed: true, previousModel: model, commit() {} };
 		};
 		host.emitSessionEvent = async event => {
 			if (event.type !== "retry_fallback_applied") return;
