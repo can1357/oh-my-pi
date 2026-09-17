@@ -261,6 +261,10 @@
 ### Changed
 
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
+- The difficulty, unexpected-stop, and AI-staging classifiers share one judgment interface; without TypeSafe, or when a TypeSafe request fails, they fall back through the `tiny`, `smol`, `default`, and active-session models. Text backends receive XML-field state with nested YAML; chat models get anti-execution guards and forced structured correction, while local bucket classifiers get XML-shaped examples. AI staging now asks one yes/no question per file in a single batched request instead of echoing paths.
+### Fixed
+
+- Starting omp no longer dies on a single ambiguous discovered model identity in `models.yml` (OmniRoute `openai-compatible-chat-<uuid>/cohere/north-mini-code:free` tying `cohere` and `openai`).
 
 ## [18.2.3] - 2026-09-17
 
@@ -332,15 +336,6 @@
 - A corrupted or externally modified session file no longer leaves the session impossible to close; a subsequent Ctrl+C exits without rewriting the session log.
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked ([#12236](https://github.com/can1357/oh-my-pi/pull/12236) by [@shivamklr](https://github.com/shivamklr)).
-
-### Fixed
-
-- Agent and history database startup errors now identify the failing database file, including corruption found during schema initialization.
-- Corrupt agent and prompt-history databases no longer prevent startup: damaged files are preserved as private `.corrupt-*` backups before creating fresh stores; lost credentials require logging in again.
-- Terminal title spinner now animates on native Windows via `SetConsoleTitleW` instead of staying on the static `:` separator; WSL keeps the static separator to avoid the ConPTY write-loop CPU cost ([#12250](https://github.com/can1357/oh-my-pi/pull/12250) by [@H4vC](https://github.com/H4vC)).
-- Prewalk now hands off after an edit/write dispatched through an eval cell: Code Mode routes those tools through the eval bridge, so the turn-level result is named `eval` and the old detector never recognized the nested mutation ([#11018](https://github.com/can1357/oh-my-pi/issues/11018)).
-- Fixed repeated 0.3–1.5s main-thread stalls (`ui.loop-blocked`) while streaming large edits: TTSR awaited a native `astMatch` pass per `toolcall_delta`, so a streamed 150KB edit paid ~90ms per delta per rule entry; AST rules now run once on the finalized `toolcall_end` while regex rules keep streaming per delta.
-- Starting omp no longer dies on a single ambiguous discovered model identity in `models.yml` (OmniRoute `openai-compatible-chat-<uuid>/cohere/north-mini-code:free` tying `cohere` and `openai`).
 
 ## [18.2.1] - 2026-09-15
 
