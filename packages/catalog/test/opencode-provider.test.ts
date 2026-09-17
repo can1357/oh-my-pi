@@ -492,6 +492,73 @@ describe("Shared models.dev catalog fallback", () => {
 });
 
 describe("OpenCode provider discovery", () => {
+	test("routes OpenCode Go Union Alpha to Anthropic Messages", async () => {
+		const descriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
+		expect(descriptor?.resolveApi?.("union-alpha", { tool_call: true })).toEqual({
+			api: "anthropic-messages",
+			baseUrl: "https://opencode.ai/zen/go",
+		});
+		const options = opencodeGoModelManagerOptions({
+			apiKey: "test-key",
+			fetch: async () => modelListResponse(["union-alpha"]),
+		});
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.find(model => model.id === "union-alpha")).toMatchObject({
+			api: "anthropic-messages",
+			baseUrl: "https://opencode.ai/zen/go",
+		});
+	});
+
+	test("refreshes a cached OpenCode Go Union Alpha chat-completions route on upgrade", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-union-cache-"));
+		const cacheDbPath = path.join(tempDir, "models.db");
+		try {
+			let fetches = 0;
+			const options = opencodeGoModelManagerOptions({
+				apiKey: "test-key",
+				fetch: async () => {
+					fetches++;
+					return modelListResponse(["union-alpha"]);
+				},
+			});
+			const stale: ModelSpec<"openai-completions"> = {
+				id: "union-alpha",
+				name: "Union Alpha Free",
+				provider: "opencode-go",
+				api: "openai-completions",
+				baseUrl: "https://opencode.ai/zen/go/v1",
+				reasoning: false,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 262_144,
+				maxTokens: 131_072,
+			};
+			await resolveProviderModels(
+				{
+					...options,
+					cacheDbPath,
+					modelsDev: undefined,
+					dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch?.filter(
+						id => id !== stale.id,
+					),
+					fetchDynamicModels: async () => [stale],
+				},
+				"online",
+			);
+			const upgraded = await resolveProviderModels(
+				{ ...options, cacheDbPath, modelsDev: undefined },
+				"online-if-uncached",
+			);
+			expect(fetches).toBe(1);
+			expect(upgraded.models.find(model => model.id === stale.id)).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl: "https://opencode.ai/zen/go",
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test("treats the OpenCode model endpoints as authoritative catalogs", () => {
 		for (const providerId of ["opencode-go", "opencode-zen"]) {
 			const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === providerId);
