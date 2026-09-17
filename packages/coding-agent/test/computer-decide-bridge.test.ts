@@ -32,8 +32,8 @@ describe("runEvalComputerDecide", () => {
 
 	it("validates state shape", async () => {
 		const settings = Settings.isolated({});
-		await expect(runEvalComputerDecide({ state: { goal: 1, candidates: [] } }, { session: session(settings) })).rejects.toThrow(
-			"state.goal must be a string",
-		);
+		await expect(
+			runEvalComputerDecide({ state: { goal: 1, candidates: [] } }, { session: session(settings) }),
+		).rejects.toThrow("state.goal must be a string");
 	});
 });

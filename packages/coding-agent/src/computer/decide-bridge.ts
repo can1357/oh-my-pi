@@ -28,14 +28,14 @@ function parseCandidate(value: unknown, index: number): ComputerCandidate {
 	const id = value.id;
 	const label = value.label;
 	if (typeof id !== "string" || !id.trim()) throw invalid(`candidates[${index}].id must be a non-empty string`);
-	if (typeof label !== "string" || !label.trim()) throw invalid(`candidates[${index}].label must be a non-empty string`);
+	if (typeof label !== "string" || !label.trim())
+		throw invalid(`candidates[${index}].label must be a non-empty string`);
 	return {
 		id: id.trim(),
 		label: label.trim(),
 		role: typeof value.role === "string" ? value.role : undefined,
 		region: typeof value.region === "string" ? value.region : undefined,
-		source:
-			value.source === "ax" || value.source === "ocr" || value.source === "ax+ocr" ? value.source : undefined,
+		source: value.source === "ax" || value.source === "ocr" || value.source === "ax+ocr" ? value.source : undefined,
 	};
 }
 
@@ -52,8 +52,7 @@ function parseState(value: unknown): ComputerDecisionState {
 	if (isRecord(value.focused_field)) {
 		focused_field = {
 			label: typeof value.focused_field.label === "string" ? value.focused_field.label : undefined,
-			placeholder:
-				typeof value.focused_field.placeholder === "string" ? value.focused_field.placeholder : undefined,
+			placeholder: typeof value.focused_field.placeholder === "string" ? value.focused_field.placeholder : undefined,
 			value: typeof value.focused_field.value === "string" ? value.focused_field.value : undefined,
 		};
 	}

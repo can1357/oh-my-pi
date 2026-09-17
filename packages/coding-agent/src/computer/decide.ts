@@ -8,15 +8,7 @@
  */
 import type { ChoiceQuestion, Judge, NoulQuestion, Questions } from "@oh-my-pi/pi-ai";
 
-export const COMPUTER_ACTIONS = [
-	"click",
-	"type",
-	"key",
-	"scroll",
-	"wait",
-	"done",
-	"escalate",
-] as const;
+export const COMPUTER_ACTIONS = ["click", "type", "key", "scroll", "wait", "done", "escalate"] as const;
 
 export type ComputerAction = (typeof COMPUTER_ACTIONS)[number];
 
@@ -56,7 +48,6 @@ export interface ComputerDecisionPacket extends ComputerDecision {
 	state: ComputerDecisionState;
 	scores?: Record<string, number>;
 }
-
 
 export interface AxLikeElement {
 	ref: string;
