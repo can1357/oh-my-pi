@@ -28,7 +28,8 @@ import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { loadBundledAgents, parseAgent } from "./agents";
-import type { AgentDefinition, AgentSource } from "./types";
+import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentDefinition } from "./types";
 
 const TASK_AGENT_CONFIG_SOURCE = ".omp";
 

@@ -38,8 +38,8 @@ import {
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
-} from "../thinking";
-import type { EditMode } from "../utils/edit-mode";
+} from "@oh-my-pi/pi-tui/thinking";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type {
 	InitialRetryFallbackState,

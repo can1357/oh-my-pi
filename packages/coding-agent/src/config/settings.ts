@@ -31,28 +31,39 @@ import {
 	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
+import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
+import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
+import { setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
+import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
-import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
-import { applyHyperlinkSetting } from "../tui/hyperlink";
+import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
+import {
+	setFeedModelBadgeEnabled,
+	setInlineImageMaxColumns,
+	setInlineImageMaxRows,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import { replaceFileAtomically } from "../utils/atomic-file";
-import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
+import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import { normalizeEditMode } from "../utils/edit-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
-import { stringifyYamlConfig } from "./config-file";
+import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
 import { validateAgentServiceTierOverrides } from "./service-tier";
+import { STATUS_LINE_SEGMENT_IDS } from "@oh-my-pi/pi-tui/status-line/schema";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
 	type GroupTypeMap,
 	getDefault,
 	SETTINGS_SCHEMA,
-	STATUS_LINE_SEGMENT_IDS,
 	type SettingPath,
 	type SettingValue,
 } from "./settings-schema";
@@ -741,7 +752,9 @@ export class Settings {
 		const segments = path.split(".");
 		setByPath(this.#overrides, segments, value);
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		const next = this.get(path);
+		SETTING_HOOKS[path]?.(next, prev);
+		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
 
 	/**
@@ -761,7 +774,9 @@ export class Settings {
 		}
 		delete current[segments[segments.length - 1]];
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		const next = this.get(path);
+		SETTING_HOOKS[path]?.(next, prev);
+		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
 
 	/** Effective values of every setting that repartitions the Code Mode surface. */
@@ -3234,6 +3249,45 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	// track it the same instant path/resource links do. Runtime `/settings` edits
 	// also go through the selector controller to invalidate and repaint live views.
 	"tui.hyperlinks": value => applyHyperlinkSetting(value),
+	"display.hideToolActivity": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ hideToolActivity: value });
+	},
+	"read.toolResultPreview": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ readToolResultPreview: value });
+	},
+	"terminal.showImages": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showImages: value });
+	},
+	"display.cacheMissMarker": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ cacheMissMarker: value });
+	},
+	"display.showTokenUsage": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTokenUsage: value });
+	},
+	"display.showTurnTime": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTurnTime: value });
+	},
+	"tui.maxInlineImageColumns": value => {
+		if (typeof value === "number") setInlineImageMaxColumns(value);
+	},
+	"tui.maxInlineImageRows": value => {
+		if (typeof value === "number") setInlineImageMaxRows(value);
+	},
+	"task.showResolvedModelBadge": value => {
+		if (typeof value === "boolean") setFeedModelBadgeEnabled(value);
+	},
+	"mcp.renderMarkdownResults": value => {
+		if (typeof value === "boolean") setMcpRenderMarkdownResults(value);
+	},
+	"display.shimmer": value => {
+		if (value === "classic" || value === "kitt" || value === "disabled") setShimmerMode(value);
+	},
+	"composer.shape": value => {
+		if (typeof value === "string") setEditorGapComposerShape(value);
+	},
+	emojiAutocomplete: value => {
+		if (typeof value === "boolean") setEmojiAutocompleteEnabled(value);
+	},
 	"provider.appendOnlyContext": value => {
 		if (typeof value === "string") {
 			appendOnlyModeSignal.fire(value);

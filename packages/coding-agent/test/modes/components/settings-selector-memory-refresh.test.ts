@@ -1,8 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadHindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/settings-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
+import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 beforeAll(async () => {
 	await initTheme();
@@ -47,7 +49,8 @@ function createSelector(onCancel: () => void = () => {}): SettingsSelectorCompon
 			thinkingLevel: undefined,
 			availableThemes: ["dark"],
 			providers: [],
-			cwd: process.cwd(),
+			settings: createSettingsHost(),
+			plugins: createPluginSettingsHost(process.cwd()),
 		},
 		{
 			onChange: () => {},

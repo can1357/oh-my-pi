@@ -5,17 +5,15 @@ import * as path from "node:path";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
-import type { EvalToolDetails } from "@oh-my-pi/pi-coding-agent/eval/types";
-import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { evalToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/eval-render";
-import {
-	formatOutputNotice,
-	stripOutputNotice,
-	wrapToolWithMetaNotice,
-} from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { evalToolRenderer } from "@oh-my-pi/pi-tui/tools/eval";
+import { stripOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
 
 function makeSession(settings = Settings.isolated()): ToolSession {

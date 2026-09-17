@@ -33,7 +33,7 @@ import { trackLateCleanup } from "../utils/late-cleanup";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
 import { needsNativeTeardown, writeRetainedBackend } from "./isolation-ownership";
-import type { SingleResult } from "./types";
+import type { NestedRepoPatch, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	applyNestedPatches,
 	captureBaseline,
@@ -46,7 +46,6 @@ import {
 	getRepoRoot,
 	type IsolationHandle,
 	mergeTaskBranches,
-	type NestedRepoPatch,
 	type WorktreeBaseline,
 } from "./worktree";
 

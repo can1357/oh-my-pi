@@ -19,7 +19,7 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { TaskEffort } from "../thinking";
+import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -39,13 +39,8 @@ import {
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
-import {
-	type AgentDefinition,
-	type AgentProgress,
-	canSpawnAtDepth,
-	type SingleResult,
-	type StructuredSubagentOutput,
-} from "./types";
+import { type AgentDefinition, canSpawnAtDepth } from "./types";
+import { type AgentProgress, type SingleResult, type StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import { parseIsolationBackend } from "./worktree";
 

@@ -43,6 +43,10 @@ afterEach(() => {
 });
 
 describe("resolveProviderCandidates", () => {
+	it("places keyless Parallel first in the default chain", () => {
+		expect(resolveProviderCandidates()[0]).toEqual({ id: "parallel", explicit: false });
+	});
+
 	it("orders the forced provider before configured and built-in fallbacks", () => {
 		setSearchProviderOrder(["gemini", "exa"]);
 

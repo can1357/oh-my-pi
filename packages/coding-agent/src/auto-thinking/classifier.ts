@@ -18,7 +18,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import bucketQuestionInstructions from "../prompts/system/auto-thinking-bucket-question.md" with { type: "text" };
 import type { Settings } from "../config/settings";
 import { type JudgmentUsage, resolveJudge } from "../judgment";
-import { clampAutoThinkingEffort } from "../thinking";
+import { clampAutoThinkingEffort } from "@oh-my-pi/pi-tui/thinking";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 
 type Level = "low" | "medium" | "high" | "xhigh" | "max";

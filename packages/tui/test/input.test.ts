@@ -201,6 +201,13 @@ describe("Input component", () => {
 		expect(renderedWidth(input, width)).toBeLessThanOrEqual(width);
 	});
 
+	it("clips an oversized prompt without losing the editable value after resize", () => {
+		const input = setupAtEnd("retained");
+		input.prompt = "Prompt: ";
+		expect(renderedWidth(input, 1)).toBeLessThanOrEqual(1);
+		expect(Bun.stripANSI(input.render(20)[0]!.replaceAll(CURSOR_MARKER, ""))).toContain("retained");
+	});
+
 	it("masks one bullet per grapheme without changing the submitted value", () => {
 		const input = new Input();
 		input.focused = true;

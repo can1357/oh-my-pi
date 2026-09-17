@@ -22,7 +22,7 @@ import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.m
 import type { AgentSession } from "../session/agent-session";
 import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
-import { shortenPath } from "../tools/render-utils";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	loadMnemopiConfig,
 	type MnemopiBackendConfig,

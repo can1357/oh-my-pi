@@ -1,4 +1,4 @@
-import { runPauseScreen } from "../modes/components/pause-screen";
+import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";

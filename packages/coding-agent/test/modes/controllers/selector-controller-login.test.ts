@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
-import { LoginDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/login-dialog";
+import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { TUI } from "@oh-my-pi/pi-tui";
@@ -122,7 +122,7 @@ describe("SelectorController login", () => {
 	});
 	it("submits exact prompt values while hiding secret input and retained answers", async () => {
 		const tui = { requestRender: vi.fn() } as unknown as TUI;
-		const dialog = new LoginDialogComponent(tui, "openrouter", vi.fn());
+		const dialog = new LoginDialogComponent(tui, "openrouter", vi.fn(), vi.fn());
 		const ordinary = dialog.showPrompt({ message: "Paste your OpenRouter API key" });
 
 		dialog.pasteText("OMP_PASTE_TEST_123");

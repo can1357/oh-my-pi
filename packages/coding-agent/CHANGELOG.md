@@ -3,9 +3,19 @@
 ## [Unreleased]
 
 - Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
+### Breaking Changes
+
+- Moved every terminal-UI module (theme, tool renderers, chat/overlay/status-line/composer components, setup wizard, git/ps/debug apps) to `@oh-my-pi/pi-tui`; `@oh-my-pi/pi-coding-agent/modes/theme/*`, `/modes/components/*`, `/tui/*`, `/tools/render-utils` and related subpaths no longer exist. Names re-exported from the package root (`Theme`, `theme`, hook/editor components, tool Details types) are unchanged.
+
+### Changed
+
+- Keyless Parallel web search now leads the default provider chain ahead of Perplexity.
+
 ### Fixed
 
+- Fixed the `edit` tool splicing a literal `…` into the file when a `<SM:FIND>` opened or closed with an ellipsis (a line-end `…` spanning the rest of a line, or a whole-line `…` at either edge) and `<SM:PUT>` re-emitted it. An edge gap captures nothing, so the matching `<SM:PUT>` ellipsis now re-emits nothing and the anchor keeps its own newline; an identical `<SM:FIND>`/`<SM:PUT>` pair reports no change instead of writing the marker. A leading gap combined with an inner gap no longer panics.
 - Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+
 ## [18.2.4] - 2026-09-17
 
 ### Added

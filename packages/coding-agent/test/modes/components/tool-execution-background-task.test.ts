@@ -1,9 +1,9 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 function progressEntry(description: string): AgentProgress {

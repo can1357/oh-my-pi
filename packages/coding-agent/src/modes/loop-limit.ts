@@ -1,5 +1,5 @@
 import { readShellWord } from "../tools/shell-tokenize";
-import type { LoopConditionConfig } from "./loop-condition";
+import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 
 export type LoopLimitConfig =
 	| {
@@ -9,18 +9,6 @@ export type LoopLimitConfig =
 	| {
 			kind: "duration";
 			durationMs: number;
-	  };
-
-export type LoopLimitRuntime =
-	| {
-			kind: "iterations";
-			initial: number;
-			remaining: number;
-	  }
-	| {
-			kind: "duration";
-			durationMs: number;
-			deadlineMs: number;
 	  };
 
 const TIME_UNITS_MS = new Map<string, number>([
