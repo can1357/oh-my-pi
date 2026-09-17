@@ -109,9 +109,15 @@ export async function resolveConfigValue(valueConfig: string): Promise<string | 
 
 /**
  * Run one command-backed value with isolated stdio and a bounded process tree.
- * POSIX uses an absolute shell, a detached process group, and Linux subreaper
- * supervision so descendants cannot survive timeout. Windows retains Brush's
- * established shell grammar and native process-tree cancellation.
+ * POSIX uses an absolute shell and a detached process group. Windows keeps
+ * Brush's established shell grammar and native process-tree cancellation.
+ *
+ * The deadline bounds this call on every platform. Reaching it cuts the pipe
+ * drains, so the call fails closed. Cleanup reaches a descendant only where
+ * ownership is provable: a live root's own tree, the Linux subreaper, or the
+ * retained root identity on Windows. On macOS, and on Linux without the
+ * subreaper, a descendant that changes session or outlives its root keeps
+ * running: `ptree` signals no group id it cannot prove is this command's.
  */
 export async function runShellCommand(
 	command: string,

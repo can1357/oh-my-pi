@@ -5,7 +5,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IsoBackendKind, VcsGitRepo, VcsWorktreeEntry } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getWorktreeDir, hashPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { github } from "../utils/github";
+import { type GhAuthHost, github } from "../utils/github";
 import { formatIsolationBackend, parseIsolationBackend } from "../task/worktree";
 import { withRepoLock } from "../utils/repo-lock";
 import type { ToolSession } from ".";
@@ -16,6 +16,8 @@ import {
 	formatAuthor,
 	formatLabels,
 	formatRepoRef,
+	ghRequestHost,
+	ghRequestRepo,
 	normalizeOptionalString,
 	normalizePrIdentifierList,
 	normalizeText,
@@ -24,6 +26,7 @@ import {
 	pushLine,
 	requireCurrentGitBranch,
 	requireNonEmpty,
+	resolveGhRequestHost,
 } from "./gh-common";
 import { formatShortSha } from "./gh-format";
 import type { GhPrViewData, GhRepoViewData, GithubInput } from "./gh-types";
@@ -164,11 +167,12 @@ async function ensurePrRemoteWithRepo(
 	const headRepository = requireNonEmpty(data.headRepository?.nameWithOwner, "head repository");
 	const pullRepo = parsePullRequestUrl(data.url).repo;
 	const pullHost = pullRepo ? parseRepoRef(pullRepo).host : undefined;
+	const cloneRepo = formatRepoRef(pullHost, headRepository);
 	const repoSummary = await github.json<GhRepoViewData>(
 		repoRoot,
-		["repo", "view", formatRepoRef(pullHost, headRepository), "--json", GH_REPO_CLONE_FIELDS.join(",")],
+		["repo", "view", cloneRepo, "--json", GH_REPO_CLONE_FIELDS.join(",")],
 		signal,
-		{ repoProvided: true },
+		{ repoProvided: true, authHost: ghRequestHost(cloneRepo) },
 	);
 	const originUrl = await repository.remoteUrl("origin", signal);
 	const remoteUrl = selectPrCloneUrl(originUrl ?? undefined, repoSummary);
@@ -321,8 +325,21 @@ export async function executePrCheckout(
 	const prRefs = prList.length > 0 ? prList : [undefined];
 	const isMulti = prRefs.length > 1;
 
+	// Which repository each ref names is decided synchronously and once, through
+	// the same `ghRequestRepo` the per-PR path uses, so the argv and the auth host
+	// cannot disagree. A ref that carries its own authority — a full PR URL — needs
+	// no fallback at all, and resolving one anyway costs a `gh repo view` against
+	// the checkout that nothing then reads.
+	const requestRepos = prRefs.map(prRef => ghRequestRepo(repo, prRef));
+	// One host for the whole operation, and only when some ref actually needs it.
+	// Every PR in this call reads the same checkout, so resolving inside the
+	// fan-out would repeat the lookup once per PR and let the concurrent checkouts
+	// race each other into `gh`.
+	const authHost = requestRepos.some(requestRepo => requestRepo === undefined)
+		? await resolveGhRequestHost(session.cwd, repo, signal)
+		: undefined;
 	const settled = await Promise.allSettled(
-		prRefs.map(prRef => checkoutPullRequest(session, signal, { prRef, repo, force })),
+		prRefs.map(prRef => checkoutPullRequest(session, signal, { prRef, repo, force, authHost })),
 	);
 	const outcomes: PrCheckoutOutcome[] = [];
 	const failures: Array<{ prRef: string | undefined; reason: unknown }> = [];
@@ -382,6 +399,12 @@ export interface PrCheckoutOptions {
 	prRef: string | undefined;
 	repo: string | undefined;
 	force: boolean;
+	/**
+	 * Host for a PR that names no repository of its own, resolved once for the
+	 * whole operation by `executePrCheckout`. `undefined` states no host, so the
+	 * request runs on the ambient environment.
+	 */
+	authHost: GhAuthHost | undefined;
 }
 
 export interface PrCheckoutOutcome {
@@ -409,8 +432,16 @@ export async function checkoutPullRequest(
 	appendRepoFlag(args, repo, prRef);
 	args.push("--json", GH_PR_CHECKOUT_FIELDS.join(","));
 
+	// The same answer `appendRepoFlag` just used: a URL identifier outranks
+	// `repo` and drops the flag, so `gh` contacts the URL's host, and reading the
+	// host off `repo` instead would state one host while the child talks to
+	// another. With neither, `gh` resolves this checkout's base repository — the
+	// host the caller already resolved for it.
+	const requestRepo = ghRequestRepo(repo, prRef);
+	const authHost = requestRepo === undefined ? options.authHost : ghRequestHost(requestRepo);
 	const data = await github.json<GhPrViewData>(session.cwd, args, signal, {
 		repoProvided: Boolean(repo),
+		authHost,
 	});
 	const prNumber = data.number;
 	if (typeof prNumber !== "number") {
@@ -644,8 +675,12 @@ export async function executePrCreate(
 			}
 		}
 
+		// `gh pr create` falls back to this checkout's base repository when no
+		// repo is named, so the host comes from the same resolver.
+		const authHost = await resolveGhRequestHost(session.cwd, repo, signal);
 		const output = await github.text(session.cwd, args, signal, {
 			repoProvided: Boolean(repo),
+			authHost,
 		});
 		const url =
 			output
@@ -670,7 +705,7 @@ export async function executePrCreate(
 						GH_PR_FIELDS_NO_COMMENTS.join(","),
 					],
 					signal,
-					{ repoProvided: true },
+					{ repoProvided: true, authHost: ghRequestHost(resolvedRepo) },
 				);
 			} catch {
 				// Best-effort summary; PR creation already succeeded.

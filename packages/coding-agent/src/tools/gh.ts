@@ -21,8 +21,8 @@ import { loadImageAttachmentInput, webpExclusionForModel } from "../utils/image-
 import type { ToolSession } from ".";
 import {
 	buildTextResult,
-	defaultGhHost,
 	ghApiHostArgs,
+	ghRequestHost,
 	normalizeOptionalString,
 	parseRepoRef,
 	requireNonEmpty,
@@ -293,6 +293,7 @@ async function executeFileRead(
 		response = await github.json<GitHubContentsResponse>(session.cwd, args, signal, {
 			repoProvided: true,
 			trimOutput: false,
+			authHost: ghRequestHost(ref),
 		});
 	} catch (error) {
 		if (!(error instanceof ToolError)) throw error;
@@ -308,8 +309,7 @@ async function executeFileRead(
 	}
 
 	// A host-less ref went to gh's default host, so the link has to match it.
-	const fallbackHost = ref.host ?? defaultGhHost();
-	const fallbackSourceUrl = `https://${fallbackHost}/${ref.slug}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
+	const fallbackSourceUrl = `https://${ghRequestHost(ref)}/${ref.slug}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
 	const sourceUrl = response.html_url || fallbackSourceUrl;
 	if (response.encoding !== "base64" || typeof response.content !== "string") {
 		const size =
