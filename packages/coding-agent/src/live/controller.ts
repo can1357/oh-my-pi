@@ -15,13 +15,11 @@ import {
 	type LiveClientMessage,
 	type LiveServerEvent,
 } from "./protocol";
-import { CodexLiveTransport } from "./transport";
+import { resolveLiveTransport, type LiveProviderSetting } from "./provider";
+import type { ILiveTransport } from "./transport-types";
 import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
-import { DEFAULT_LIVE_VOICE } from "./voices";
+import { DEFAULT_GROK_LIVE_VOICE, DEFAULT_LIVE_VOICE } from "./voices";
 
-const OUTPUT_ACTIVE_LEVEL = 0.015;
-const MIN_BARGE_IN_LEVEL = 0.04;
-const OUTPUT_ECHO_RATIO = 0.65;
 
 /** Incremental or final transcript for one realtime conversational turn. */
 export interface LiveTranscript {
@@ -52,8 +50,12 @@ export interface LiveSessionControllerOptions {
 	callbacks: LiveSessionCallbacks;
 	/** Extracts visible assistant text using the caller's normal UI rules. */
 	extractAssistantText(message: AssistantMessage): string;
-	/** Realtime output voice, defaulting to sol. */
+	/** Codex realtime output voice, defaulting to sol. */
 	voice?: string;
+	/** Grok realtime output voice, defaulting to eve. */
+	grokVoice?: string;
+	/** Native-duplex backend: auto skips exhausted providers. */
+	provider?: LiveProviderSetting;
 }
 
 function errorFrom(cause: unknown): Error {
@@ -93,8 +95,10 @@ export class LiveSessionController {
 	readonly #callbacks: LiveSessionCallbacks;
 	readonly #extractAssistantText: (message: AssistantMessage) => string;
 	readonly #voice: string;
+	readonly #grokVoice: string;
+	readonly #provider: LiveProviderSetting;
 
-	#transport: CodexLiveTransport | undefined;
+	#transport: ILiveTransport | undefined;
 	#recorder: AudioCapture | undefined;
 	#unsubscribeSession: (() => void) | undefined;
 	#sendChain: Promise<void> = Promise.resolve();
@@ -121,7 +125,15 @@ export class LiveSessionController {
 		this.#callbacks = options.callbacks;
 		this.#extractAssistantText = options.extractAssistantText;
 		this.#voice = options.voice?.trim() || DEFAULT_LIVE_VOICE;
+		this.#grokVoice = options.grokVoice?.trim() || DEFAULT_GROK_LIVE_VOICE;
+		this.#provider = options.provider ?? "auto";
 	}
+
+	/** Resolved native-duplex identity after connect, if any. */
+	get identity() {
+		return this.#transport?.identity;
+	}
+
 
 	/** Current realtime call phase. */
 	get phase(): LivePhase {
@@ -151,11 +163,13 @@ export class LiveSessionController {
 		try {
 			const user = currentUser();
 			const instructions = prompt.render(liveInstructionsTemplate, user);
-			const transport = new CodexLiveTransport({
+			const transport = await resolveLiveTransport({
 				authStorage: this.#session.modelRegistry.authStorage,
 				sessionId: this.#session.sessionId,
 				instructions,
-				voice: this.#voice,
+				provider: this.#provider,
+				codexVoice: this.#voice,
+				grokVoice: this.#grokVoice,
 				callbacks: {
 					onEvent: event => this.#guardEvent(() => this.#handleLiveEvent(event)),
 					onOutputLevel: level => this.#guardEvent(() => this.#handleOutputLevel(level)),
@@ -362,9 +376,7 @@ export class LiveSessionController {
 		if (this.#muted) return;
 		this.#inputLevel = microphoneLevel(samples);
 		this.#emitLevels();
-		const outputActive = this.#outputLevel > OUTPUT_ACTIVE_LEVEL;
-		const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, this.#outputLevel * OUTPUT_ECHO_RATIO);
-		if (outputActive && this.#inputLevel < echoThreshold) return;
+		if (!this.#transport.shouldStreamAudio(this.#inputLevel, this.#outputLevel)) return;
 		try {
 			this.#transport.pushAudio(samples);
 		} catch (cause) {

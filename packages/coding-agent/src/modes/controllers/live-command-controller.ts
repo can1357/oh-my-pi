@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
 import { LIVE_MODEL } from "../../live/protocol";
+import type { LiveProviderSetting } from "../../live/provider";
 import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { vocalizer } from "../../tts/vocalizer";
 import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -53,13 +54,13 @@ export class LiveCommandController {
 	}
 
 	/** Start live mode, or stop the currently active session. */
-	async handleCommand(): Promise<void> {
+	async handleCommand(provider?: LiveProviderSetting): Promise<void> {
 		if (this.#session) {
 			await this.stop();
 			return;
 		}
 		if (this.#settling) await this.#settling;
-		await this.#start();
+		await this.#start(provider);
 	}
 
 	/** Stop the active live session and restore the editor. */
@@ -91,7 +92,7 @@ export class LiveCommandController {
 		}
 	}
 
-	async #start(): Promise<void> {
+	async #start(provider?: LiveProviderSetting): Promise<void> {
 		this.#assistantTranscriptTurn = 0;
 		this.#assistantTranscriptStartedAt = 0;
 		const visualizer = new LiveVisualizer({
@@ -107,6 +108,8 @@ export class LiveCommandController {
 			session: this.#ctx.session,
 			extractAssistantText: message => this.#ctx.extractAssistantText(message),
 			voice: this.#ctx.settings.get("live.voice"),
+			grokVoice: this.#ctx.settings.get("live.grokVoice"),
+			provider: provider ?? this.#ctx.settings.get("live.provider"),
 			callbacks: {
 				onPhase: phase => {
 					if (this.#visualizer !== visualizer) return;
@@ -165,12 +168,13 @@ export class LiveCommandController {
 			this.#assistantTranscriptComponent = component;
 			this.#assistantTranscriptStartedAt = Date.now();
 		}
+		const identity = this.#session?.identity;
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: transcript.text }],
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			model: LIVE_MODEL,
+			api: identity?.api ?? "openai-codex-responses",
+			provider: identity?.provider ?? "openai-codex",
+			model: identity?.model ?? LIVE_MODEL,
 			usage: { ...LIVE_MESSAGE_USAGE },
 			stopReason: "stop",
 			timestamp: this.#assistantTranscriptStartedAt,

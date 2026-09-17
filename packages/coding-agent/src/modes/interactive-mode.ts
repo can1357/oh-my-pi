@@ -217,6 +217,7 @@ import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-containe
 import type { LspServerInfo as WelcomeLspServerInfo } from "@oh-my-pi/pi-tui/prompt/welcome";
 import { Composer, PINNED_HUD_TOGGLE_ID, type ComposerStatusSnapshot } from "@oh-my-pi/pi-tui/prompt/composer";
 import { writeComposerStatusCache, writeComposerWelcomeCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
+import type { LiveProviderSetting } from "../live/provider";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -6360,13 +6361,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 	}
 
-	/** Start or stop the Codex-backed realtime voice surface. */
-	async handleLiveCommand(): Promise<void> {
+	/** Start or stop the realtime voice surface. */
+	async handleLiveCommand(provider?: LiveProviderSetting): Promise<void> {
 		if (this.#sttController && this.#sttController.state !== "idle") {
 			this.showWarning("Finish the current speech-to-text capture before starting live mode.");
 			return;
 		}
-		await this.#liveCommandController.handleCommand();
+		await this.#liveCommandController.handleCommand(provider);
 	}
 
 	#setMicCursor(color: { r: number; g: number; b: number }): void {

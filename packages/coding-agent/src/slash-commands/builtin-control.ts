@@ -1,4 +1,5 @@
 import { runPauseScreen } from "@oh-my-pi/pi-tui/overlays/pause-screen";
+import { parseLiveProviderArg } from "../live/provider";
 import { shutdownHandlerTui } from "./builtin-lifecycle";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -57,10 +58,14 @@ export const BUILTIN_CONTROL_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "live",
 		icon: "voice",
-		description: "Start Codex-backed realtime voice mode",
-		handleTui: async (_command, runtime) => {
+		description: "Start realtime voice mode (auto skips exhausted Codex)",
+		inlineHint: "[auto|codex|grok]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleLiveCommand();
+			await runtime.ctx.handleLiveCommand(
+				parseLiveProviderArg(command.args) ?? runtime.ctx.settings.get("live.provider"),
+			);
 		},
 	},
 	{
