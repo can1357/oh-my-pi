@@ -1250,6 +1250,15 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		waitUntil: opts.waitUntil,
 		timeoutMs: opts.timeoutMs,
 		activateForScreenshot,
+		// A freshly created relay/connected tab is OMP-owned, not a borrowed
+		// user tab — safe to focus-emulate like headless tabs. Without this,
+		// a Chrome window that lacks real OS focus throttles rAF and
+		// IntersectionObserver, and puppeteer's Locator actions (click/fill/…)
+		// poll IntersectionObserver for visibility before acting, so they hang
+		// indefinitely even though raw CDP input dispatch still works fine.
+		// An explicit app.target still attaches to a real borrowed tab, so it
+		// keeps the original unemulated behavior.
+		emulateFocus: forceNewTab,
 	};
 }
 
