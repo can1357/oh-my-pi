@@ -11,7 +11,7 @@ import {
 	renderPlaceholders,
 	skillChipStyle,
 } from "../composer-attachments";
-import { MODEL_MENTION_TAG_RE } from "../../session/model-mentions";
+import { MODEL_MENTION_TAG_RE } from "../../session/model-mention-syntax";
 import { fileHyperlink } from "../../tui";
 import { imageReferenceHyperlink } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";

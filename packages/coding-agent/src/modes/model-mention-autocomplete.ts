@@ -2,7 +2,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
-import { modelMentionDisplayName } from "../session/model-mentions";
+import { modelMentionDisplayName } from "../session/model-mention-syntax";
 import type {
 	buildSearchAffinity as BuildSearchAffinity,
 	buildSessionModelScope as BuildSessionModelScope,

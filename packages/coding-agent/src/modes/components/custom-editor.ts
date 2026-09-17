@@ -7,7 +7,7 @@ import { type KeyId, parseKey, parseKittySequence } from "@oh-my-pi/pi-tui/keys"
 import { TUI } from "@oh-my-pi/pi-tui/tui";
 import type { AppKeybinding } from "../../config/keybindings";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "../../extensibility/skill-tokens";
-import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "../../session/model-mentions";
+import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "../../session/model-mention-syntax";
 import { isVideoPath, videoPreviewSource } from "../../utils/video";
 import {
 	attachmentSgr,

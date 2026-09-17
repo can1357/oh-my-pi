@@ -1,5 +1,5 @@
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "../extensibility/skill-tokens";
-import { MODEL_MENTION_RE, modelMentionToken } from "../session/model-mentions";
+import { MODEL_MENTION_RE, modelMentionToken } from "../session/model-mention-syntax";
 import { SYMBOL_PRESETS } from "./theme/symbols";
 import { type ThemeColor, theme } from "./theme/theme";
 
