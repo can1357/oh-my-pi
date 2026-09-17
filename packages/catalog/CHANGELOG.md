@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added `jev` as the canonical TypeSafe Jev auth provider (`/login jev`); `typesafe` remains a hidden login alias that stores credentials under `jev`.
+
 ### Fixed
 
 - Fixed Yolo-Auto advertising 1M context for Qwen Flash: `qwen3.8-flash` and the paid `yolo` route now resolve to the documented 256K deployment window with the Qwen chat-template reasoning dialect, and `qwen3.8-flash` is the provider default.

@@ -267,9 +267,14 @@ describe("TypeSafeJudge", () => {
 		await expect(mismatched.judge(request)).rejects.toThrow(/missing a "noul" answer/);
 	});
 
-	it("is loginable via the auth registry with TYPESAFE_API_KEY as env fallback", () => {
-		const definition = getProviderDefinition("typesafe");
-		expect(definition?.envKeys).toBe("TYPESAFE_API_KEY");
-		expect(typeof definition?.login).toBe("function");
+	it("registers Jev as the canonical judgment provider with legacy aliases", () => {
+		const jev = getProviderDefinition("jev");
+		expect(jev?.name).toBe("TypeSafe (Jev)");
+		expect(jev?.envKeys).toBe("TYPESAFE_API_KEY");
+		expect(typeof jev?.login).toBe("function");
+
+		const typesafe = getProviderDefinition("typesafe");
+		expect(typesafe?.storeCredentialsAs).toBe("jev");
+		expect(getProviderDefinition("typesafe-ai")?.id).toBe("jev");
 	});
 });

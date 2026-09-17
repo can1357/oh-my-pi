@@ -1,11 +1,8 @@
-// TypeSafe (System One judgments) is not a chat-model provider: it answers
-// typed questions (choice / yes-no / score) over JSON state via
-// `POST /v1/systemone`, consumed through `@oh-my-pi/pi-ai`'s `TypeSafeJudge`.
-// No `providers/typesafe.kdl` entry exists on purpose — it has no chat models,
-// so it never appears in the model picker; the credential alone is what the
-// judgment resolver checks.
+// Back-compat alias for `/login typesafe` — credentials store under `jev`.
 auth "typesafe" {
 	name "TypeSafe"
+	show-in-login-list #false
+	store-as "jev"
 	env "TYPESAFE_API_KEY"
 	login "api-key" {
 		auth-url "https://console.typesafe.ai/"

@@ -196,6 +196,13 @@ import {
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 import { flushSharpshooterExtraction } from "../sharpshooter/extract";
+import {
+	type AppliedSkillSuggestion,
+	applySkillSuggestion,
+	shouldRunSkillSuggestion,
+	systemPromptAlreadyHasSkillRelevance,
+	type SkillSuggestionMode,
+} from "../skills/apply";
 import { toolReadsSkillUris } from "../system-prompt";
 import {
 	AUTO_THINKING,
@@ -617,6 +624,7 @@ export class AgentSession {
 	readonly #models: ModelControls;
 	readonly #tools: SessionTools;
 	readonly #prewalk: PrewalkCoordinator;
+	#lastSkillSuggestion: AppliedSkillSuggestion | null = null;
 
 	readonly #providerBoundary: SessionProviderBoundary;
 	#promptTemplates: PromptTemplate[];
@@ -6917,11 +6925,16 @@ export class AgentSession {
 			// non-auto sessions are skipped. Never blocks the turn — failures fall
 			// back to a concrete level inside the helper.
 			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
-			if (this.isAutoThinking && isUserTurn) {
-				await this.#models.applyAutoThinkingLevel(expandedText, generation);
-				if (this.#promptGeneration !== generation) {
-					return false;
-				}
+			const thinking =
+				this.isAutoThinking && isUserTurn
+					? this.#models.applyAutoThinkingLevel(expandedText, generation)
+					: Promise.resolve();
+			// Plain user turns only: a /skill: invocation already named the skill.
+			const suggesting =
+				message.role === "user" ? this.#applySkillSuggestionForTurn(expandedText, generation) : Promise.resolve();
+			await Promise.all([thinking, suggesting]);
+			if (this.#promptGeneration !== generation) {
+				return false;
 			}
 
 			// Only the xd:// mount notice can carry substantial inline docs (up to
@@ -7919,6 +7932,50 @@ export class AgentSession {
 	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
 	get skills(): readonly Skill[] {
 		return this.#tools.skills;
+	}
+
+	/** Last TypeSafe skill suggestion for this session, or null if none ran / none injected. */
+	get lastSkillSuggestion(): AppliedSkillSuggestion | null {
+		return this.#lastSkillSuggestion;
+	}
+
+	/** `skills.suggestion` setting (`auto` / `typesafe` / `off`). */
+	get skillSuggestionMode(): SkillSuggestionMode {
+		return this.settings.get("skills.suggestion");
+	}
+
+	setSkillSuggestionMode(mode: SkillSuggestionMode): void {
+		this.settings.set("skills.suggestion", mode);
+	}
+
+	skillSuggestionStatus(): string {
+		const mode = this.skillSuggestionMode;
+		const armed = shouldRunSkillSuggestion(this.settings, this.modelRegistry);
+		const n = this.skills.filter(skill => !skill.hide).length;
+		const last = this.#lastSkillSuggestion;
+		const rerank = this.settings.get("skills.suggestion.rerank");
+		const lastBit = last
+			? ` last=${last.suggestion.name} gate=${last.suggestion.gate.toFixed(2)}${
+					last.suggestion.fits !== undefined ? ` fits=${last.suggestion.fits.toFixed(2)}` : ""
+				}${last.suggestion.reranked ? " rerank" : ""} ${last.elapsedMs}ms`
+			: "";
+		return `Skill suggestion: ${mode}, rerank=${rerank}${armed ? " (TypeSafe)" : " (idle)"}; ${n} visible skills.${lastBit}`;
+	}
+
+	async #applySkillSuggestionForTurn(promptText: string, generation: number): Promise<void> {
+		if (systemPromptAlreadyHasSkillRelevance(this.agent.state.systemPrompt)) return;
+		const result = await applySkillSuggestion({
+			prompt: promptText,
+			skills: this.skills,
+			settings: this.settings,
+			registry: this.modelRegistry,
+			sessionId: this.sessionId,
+		});
+		if (this.#promptGeneration !== generation) return;
+		this.#lastSkillSuggestion = result;
+		if (!result) return;
+		const current = this.agent.state.systemPrompt;
+		this.#tools.setTurnSystemPromptOverride([...current, result.block]);
 	}
 
 	/** Skill loading warnings captured by SDK */

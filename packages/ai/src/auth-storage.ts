@@ -20,6 +20,7 @@ import {
 import type { ApiKeyResolver } from "./auth-retry";
 import * as AIError from "./error";
 import { isUsageLimitOutcome } from "./error/rate-limit";
+import { isJevAuthProvider, jevAuthCredentialIds } from "./registry/jev-auth";
 import { getProviderDefinition, PASTE_CODE_LOGIN_PROVIDERS } from "./registry";
 import { getOAuthApiKey, getOAuthProvider, normalizeOAuthCredentialExpiry, refreshOAuthToken } from "./registry/oauth";
 import type {
@@ -1828,6 +1829,13 @@ export class AuthStorage {
 
 	/** Returns all credentials for a provider as an array */
 	#getCredentialsForProvider(provider: string): AuthCredential[] {
+		if (isJevAuthProvider(provider)) {
+			const merged: AuthCredential[] = [];
+			for (const id of jevAuthCredentialIds()) {
+				merged.push(...this.#getStoredCredentials(id).map(entry => entry.credential));
+			}
+			return merged;
+		}
 		return this.#getStoredCredentials(provider).map(entry => entry.credential);
 	}
 
@@ -3216,19 +3224,20 @@ export class AuthStorage {
 			if (!result) {
 				return undefined;
 			}
+			const storeProvider = def.storeCredentialsAs ?? provider;
 			const newCredential: ApiKeyCredential = {
 				type: "api_key",
 				key: result,
 				source: "login",
 			};
 			const stored = this.#store.upsertAuthCredentialRemote
-				? await this.#store.upsertAuthCredentialRemote(provider, newCredential)
-				: this.#store.upsertAuthCredentialForProvider(provider, newCredential);
+				? await this.#store.upsertAuthCredentialRemote(storeProvider, newCredential)
+				: this.#store.upsertAuthCredentialForProvider(storeProvider, newCredential);
 			this.#setStoredCredentials(
-				provider,
+				storeProvider,
 				stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 			);
-			this.#resetProviderAssignments(provider);
+			this.#resetProviderAssignments(storeProvider);
 			return { type: "api_key" };
 		}
 		// Stamp the interactive-login instant: providers with an absolute grant

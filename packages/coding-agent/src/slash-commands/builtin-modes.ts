@@ -541,6 +541,53 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "jev",
+		icon: "compass",
+		description: "TypeSafe Jev skill suggestion status (native System One)",
+		acpDescription: "TypeSafe skill suggestion status",
+		acpInputHint: "[status|auto|typesafe|off]",
+		subcommands: [
+			{ name: "status", description: "Show whether TypeSafe skill suggestion will run" },
+			{ name: "auto", description: "Suggest skills when TypeSafe is authenticated (default)" },
+			{ name: "typesafe", description: "Always use TypeSafe when a key exists" },
+			{ name: "on", description: "Alias for typesafe" },
+			{ name: "off", description: "Disable TypeSafe skill suggestion" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => runtime.ctx.session.skillSuggestionStatus(),
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg || arg === "status") {
+				await runtime.output(runtime.session.skillSuggestionStatus());
+				return commandConsumed();
+			}
+			if (arg === "on" || arg === "typesafe" || arg === "auto" || arg === "off") {
+				const mode = arg === "on" ? "typesafe" : arg;
+				runtime.session.setSkillSuggestionMode(mode);
+				await runtime.output(runtime.session.skillSuggestionStatus());
+				return commandConsumed();
+			}
+			return usage("Usage: /jev [status|auto|typesafe|off]", runtime);
+		},
+		handleTui: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg || arg === "status") {
+				runtime.ctx.showStatus(runtime.ctx.session.skillSuggestionStatus());
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg === "on" || arg === "typesafe" || arg === "auto" || arg === "off") {
+				const mode = arg === "on" ? "typesafe" : arg;
+				runtime.ctx.session.setSkillSuggestionMode(mode);
+				runtime.ctx.showStatus(runtime.ctx.session.skillSuggestionStatus());
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /jev [status|auto|typesafe|off]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "extended-context",
 		icon: "expand",
 		description: "Toggle extended context windows",
