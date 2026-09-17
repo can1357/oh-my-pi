@@ -180,6 +180,31 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		expect(onFast?.description).toBe("Fast: on");
 	});
 
+	it("normalizes file-command hints before autocomplete renders them", async () => {
+		const created = createHarness([]);
+		const providerSlot = captureAutocompleteProvider(created.mode);
+
+		await created.mode.refreshSlashCommandState(tempDir.path(), [
+			{
+				name: "git-sync",
+				description: "Sync branches",
+				content: "body",
+				source: "test",
+				argumentHint: "[base\tbranch]\n[next]",
+			},
+		]);
+
+		const provider = providerSlot.current;
+		expect(provider).toBeDefined();
+		const item = (await fetchSlashItems(provider!, "/git-sync")).find(candidate => candidate.value === "git-sync");
+		const inlineHint = provider!.getInlineHint?.(["/git-sync "], 0, "/git-sync ".length);
+
+		expect(item?.description).toContain("[next] - Sync branches");
+		expect(item?.description).not.toMatch(/[\t\r\n]/);
+		expect(inlineHint).toContain("[next]");
+		expect(inlineHint).not.toMatch(/[\t\r\n]/);
+	});
+
 	it("does not duplicate templates whose names collide with builtin slash commands", async () => {
 		const created = createHarness([
 			{

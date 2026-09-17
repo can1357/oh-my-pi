@@ -149,6 +149,16 @@ beforeEach(() => {
 	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
 	vi.spyOn(vcs, "git").mockReturnValue(fakeRepository);
 	vi.spyOn(vcs, "repo").mockReturnValue(fakeVcsRepository);
+	// Presentation now resolves a second handle: forward to the operational
+	// double's current implementation without recording an extra `repo` call,
+	// so these scenarios keep display == operational (pure git / pure jj)
+	// while call-count assertions on the operational detector keep meaning.
+	const operational = vi.spyOn(vcs, "repo") as unknown as {
+		getMockImplementation(): ((dir: string) => VcsRepo | null) | undefined;
+	};
+	vi.spyOn(vcs, "repoForDisplay").mockImplementation(
+		(dir: string) => operational.getMockImplementation()?.(dir) ?? null,
+	);
 });
 
 function useReftable(info: Partial<VcsGitRepoInfo> = {}): void {

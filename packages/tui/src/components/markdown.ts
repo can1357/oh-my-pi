@@ -988,14 +988,6 @@ const FAST_LINE_START_HAZARD_RE =
 	// chars are in ASCENDING code-point order (no reversed ranges that
 	// rely on engine leniency): * + = – — ─ ━ ═ then the literal `-`.
 	/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|\d{1,9}[.)](?:[ \t]|$)|[*+=–—─━═-](?:[ \t]|$)|(?:[*+=–—─━═-][ \t]*){2,}[ \t]*$)/;
-/** @internal exported for tests — counts fast-tail splice frames. A future
- *  regression that silently disarms the fast path (e.g. an over-broad gate)
- *  leaves byte-identity intact but drops the counter to zero. */
-export let fastTailSplices = 0;
-/** @internal exported for tests — resets the splice counter. */
-export function resetFastTailSplices(): void {
-	fastTailSplices = 0;
-}
 
 /** @internal exported for tests — the grown-line-start block-kind gate. */
 export function fastLineStartHazard(grownLine: string): boolean {
@@ -2199,7 +2191,6 @@ export class Markdown implements Component {
 						rowEnd: recipe.rowStart + wrapped.length,
 						signature: recipe.signature,
 					};
-					fastTailSplices++;
 					return fastResult;
 				}
 			}

@@ -148,6 +148,70 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result?.items.map(item => item.value)).toEqual(["skill:humanizer"]);
 		});
 
+		it("matches leading skills from hyphen-delimited bare-name segments", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "skill:code-ponytail", description: "Ponytail coding workflow" },
+				],
+				"/tmp",
+			);
+
+			for (const [input, expected] of [
+				["/last", "skill:research-last30days"],
+				["/last30days", "skill:research-last30days"],
+				["/research-last30days", "skill:research-last30days"],
+				["/ponytail", "skill:code-ponytail"],
+			] as const) {
+				const result = await provider.getSuggestions([input], 0, input.length);
+				expect(result?.items[0]?.value).toBe(expected);
+			}
+		});
+
+		it("matches mid-prompt skills from hyphen-delimited bare-name segments", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[{ name: "skill:design-impeccable", description: "Improve interface design" }],
+				"/tmp",
+			);
+			const line = "polish this /impec";
+
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			expect(result?.prefix).toBe("/impec");
+			expect(result?.items.map(item => item.value)).toEqual(["skill:design-impeccable"]);
+		});
+
+		it("does not widen hyphen-segment matching to ordinary command names or aliases", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "docs-last30days", aliases: ["archive-last30days"], description: "Open archived docs" },
+				],
+				"/tmp",
+			);
+
+			const result = await provider.getSuggestions(["/last"], 0, "/last".length);
+
+			// The ordinary command remains only a fuzzy hit; it must not acquire a
+			// segment-prefix tier that ties and suppresses the skill breakout, and it
+			// still surfaces with the same ordinary fuzzy behavior as before.
+			expect(result?.items.map(item => item.value)).toEqual(["skill:research-last30days", "docs-last30days"]);
+		});
+
+		it("keeps command precedence when a leading command ties a segmented skill prefix", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "skill:research-last30days", description: "Research the last 30 days" },
+					{ name: "last-report", description: "Open the latest report" },
+				],
+				"/tmp",
+			);
+
+			const result = await provider.getSuggestions(["/last"], 0, "/last".length);
+
+			expect(result?.items.map(item => item.value)).toEqual(["last-report"]);
+		});
+
 		it("collapses skills into a single skill: namespace row at prompt start", async () => {
 			const provider = new CombinedAutocompleteProvider(
 				[

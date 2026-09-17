@@ -1,4 +1,5 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import type { OAuthPrompt } from "@oh-my-pi/pi-ai/oauth/types";
 import { Container, getKeybindings, Input, Spacer, Text, type TUI, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
@@ -31,17 +32,21 @@ export class LoginDialogComponent extends OverlayPanel {
 		this.#contentContainer = new Container();
 		this.addChild(this.#contentContainer);
 
-		// Input (always present, used when needed)
-		this.#input = new Input();
-		this.#input.onSubmit = () => {
+		this.#input = this.#createInput();
+	}
+
+	#createInput(): Input {
+		const input = new Input();
+		input.onSubmit = value => {
 			const resolve = this.#inputResolver;
 			if (!resolve) return;
 			this.#clearInputHandlers();
-			resolve(this.#input.getValue());
+			resolve(value);
 		};
-		this.#input.onEscape = () => {
+		input.onEscape = () => {
 			this.#cancel();
 		};
+		return input;
 	}
 
 	get signal(): AbortSignal {
@@ -106,16 +111,17 @@ export class LoginDialogComponent extends OverlayPanel {
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
 	showManualInput(prompt: string, signal?: AbortSignal): Promise<string> {
-		// Invalid pastes re-prompt (the OAuth callback loop calls this again), so
-		// reuse the already-mounted input instead of stacking duplicate prompt and
-		// hint lines beneath the dialog. Reset the value so each retry starts clean.
-		if (!this.#contentContainer.children.includes(this.#input)) {
+		// Keep retry chrome in place, but discard prior prompt undo/kill history.
+		const mounted = this.#contentContainer.children.indexOf(this.#input);
+		this.#input = this.#createInput();
+		if (mounted !== -1) {
+			this.#contentContainer.children.splice(mounted, 1, this.#input);
+		} else {
 			this.#contentContainer.addChild(new Spacer(1));
 			this.#contentContainer.addChild(new Text(theme.fg("dim", prompt), 0, 0));
 			this.#contentContainer.addChild(this.#input);
 			this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel)"), 0, 0));
 		}
-		this.#input.setValue("");
 		this.#tui.requestRender();
 
 		if (signal?.aborted) {
@@ -140,24 +146,26 @@ export class LoginDialogComponent extends OverlayPanel {
 	 * Called by onPrompt callback - show prompt and wait for input
 	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
 	 */
-	showPrompt(message: string, placeholder?: string): Promise<string> {
-		// Multi-step flows (email → OTP) prompt repeatedly; the single input
-		// must follow the latest prompt, leaving the submitted answer in place.
+	showPrompt(prompt: OAuthPrompt): Promise<string> {
+		// Multi-step flows keep prior answers visible, except secrets.
 		const mounted = this.#contentContainer.children.indexOf(this.#input);
 		if (mounted !== -1) {
-			const answer = new Text(theme.fg("dim", `${this.#input.prompt}${this.#input.getValue()}`), 0, 0);
+			const value = this.#input.mask ? "********" : this.#input.getValue();
+			const answer = new Text(theme.fg("dim", `${this.#input.prompt}${value}`), 0, 0);
 			this.#contentContainer.removeChild(this.#input);
 			this.#contentContainer.children.splice(mounted, 0, answer);
 		}
+		// A new prompt must not recover a previous secret through undo or yank.
+		this.#input = this.#createInput();
+		this.#input.mask = prompt.secret === true;
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("text", message), 0, 0));
-		if (placeholder) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 0, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("text", prompt.message), 0, 0));
+		if (prompt.placeholder) {
+			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${prompt.placeholder}`), 0, 0));
 		}
 		this.#contentContainer.addChild(this.#input);
 		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 0, 0));
 
-		this.#input.setValue("");
 		this.#tui.requestRender();
 
 		this.#inputAbortCleanup?.();

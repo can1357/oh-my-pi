@@ -16,9 +16,11 @@ afterEach(() => {
 });
 
 describe("SignInTab", () => {
-	it("keeps the OSC8 login link and manual-code prompt above clipped wizard rows", async () => {
+	it("masks secret input and keeps the OSC8 login link and manual-code prompt above clipped rows", async () => {
 		const url = `https://example.com/oauth/authorize?client_id=omp&redirect_uri=http%3A%2F%2Flocalhost%3A45454%2Fcallback&state=${"a".repeat(96)}`;
 		const loginGate = Promise.withResolvers<void>();
+		const secretReceived = Promise.withResolvers<string>();
+		const secretValue = crypto.randomUUID();
 		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
 		let focusTarget: Component | undefined;
 		const openedUrls: string[] = [];
@@ -29,6 +31,9 @@ describe("SignInTab", () => {
 			getCredentialOrigin: (_providerId: string) => undefined,
 			async login(_provider: OAuthProviderId, ctrl: OAuthLoginCallbacks): Promise<void> {
 				ctrl.onAuth({ url });
+				secretReceived.resolve(
+					await ctrl.onPrompt({ message: "Consumer key", placeholder: "secret value", secret: true }),
+				);
 				const prompt = ctrl.onManualCodeInput?.();
 				await loginGate.promise;
 				await prompt;
@@ -61,6 +66,13 @@ describe("SignInTab", () => {
 				tab.handleInput(char);
 			}
 			tab.handleInput("\n");
+
+			expect(focusTarget).toBeDefined();
+			focusTarget?.handleInput?.(secretValue);
+			const masked = tab.render(120).join("\n");
+			expect(masked).not.toContain(secretValue);
+			focusTarget?.handleInput?.("\n");
+			await expect(secretReceived.promise).resolves.toBe(secretValue);
 
 			const rendered = tab.render(36);
 			const compact = rendered.map(line => Bun.stripANSI(line).trim()).join("");

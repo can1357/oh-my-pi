@@ -131,6 +131,17 @@ export function classifyProviderHttpError(
 }
 
 /**
+ * Collapse runs of whitespace in a loosely-typed provider field, returning
+ * `undefined` for missing/non-string/blank values. Shared so tab/newline
+ * folding cannot drift between providers.
+ */
+export function normalizeSearchText(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const text = value.replace(/\s+/g, " ").trim();
+	return text.length > 0 ? text : undefined;
+}
+
+/**
  * Read a provider response body up to a byte cap, truncating or throwing when
  * the limit is exceeded. Shared so streaming-cap fixes land in one place.
  */

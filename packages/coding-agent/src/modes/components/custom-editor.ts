@@ -1,27 +1,23 @@
 import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import {
-	addKeyAliases,
-	canonicalKeyId,
-	Editor,
-	type EditorTextDecorationContext,
-	type EditorTheme,
-	getKeybindings,
-	type KeyId,
-	parseKey,
-	parseKittySequence,
-	TUI,
-} from "@oh-my-pi/pi-tui";
 import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
+import { Editor, type EditorTextDecorationContext, type EditorTheme } from "@oh-my-pi/pi-tui/components/editor";
+import { addKeyAliases, canonicalKeyId, getKeybindings } from "@oh-my-pi/pi-tui/keybindings";
+import { type KeyId, parseKey, parseKittySequence } from "@oh-my-pi/pi-tui/keys";
+import { TUI } from "@oh-my-pi/pi-tui/tui";
 import type { AppKeybinding } from "../../config/keybindings";
-import { allowsSkillTokens, SKILL_TOKEN_RE } from "../../extensibility/skills";
+import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "../../extensibility/skill-tokens";
+import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "../../session/model-mention-syntax";
 import { isVideoPath, videoPreviewSource } from "../../utils/video";
 import {
 	attachmentSgr,
 	COMPOSER_TOKEN_REGEX,
 	chipLabel,
 	collapseImageMarkers,
+	collapseModelMentions,
 	collapseSkillTokens,
+	composerTokenRegex,
+	modelChipStyle,
 	renderPlaceholders,
 	skillChipLabel,
 	skillChipStyle,
@@ -44,10 +40,6 @@ type ConfigurableEditorAction = Extract<
 	| "app.model.cycleBackward"
 	| "app.model.select"
 	| "app.model.selectTemporary"
-	| "app.tools.toggleVisibility"
-	| "app.thinking.toggle"
-	| "app.editor.external"
-	| "app.history.search"
 	| "app.message.dequeue"
 	| "app.retry"
 	| "app.clipboard.pasteImage"
@@ -66,10 +58,6 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.model.cycleBackward": ["shift+ctrl+p"],
 	"app.model.select": ["alt+m"],
 	"app.model.selectTemporary": ["alt+p"],
-	"app.tools.toggleVisibility": ["ctrl+shift+o"],
-	"app.thinking.toggle": ["ctrl+t"],
-	"app.editor.external": ["ctrl+g"],
-	"app.history.search": ["ctrl+r"],
 	"app.message.dequeue": ["alt+up", "shift+up"],
 	"app.retry": ["f5", "alt+r"],
 	"app.clipboard.pasteImage": ["ctrl+v"],
@@ -426,6 +414,18 @@ export class CustomEditor extends Editor {
 	 *  (labels key the atom table). */
 	pendingTexts: TextAttachment[] = [];
 	#textAttachmentCounter = 0;
+	#composerChipsCache:
+		| {
+				textRevision: number;
+				images: ImageContent[];
+				imageCount: number;
+				imageLinks: (string | undefined)[];
+				imageLinkCount: number;
+				texts: TextAttachment[];
+				textCount: number;
+				chips: ComposerChipDescriptor[];
+		  }
+		| undefined;
 	/** Host-wired producer of per-image `file://` links (session blob store); drives clickable
 	 *  chip tokens for restored drafts (esc-esc, `/tree`, branch). */
 	draftImageLinkMaterializer?: (images: readonly ImageContent[]) => Promise<(string | undefined)[] | undefined>;
@@ -531,18 +531,26 @@ export class CustomEditor extends Editor {
 		void this.#materializeDraftLinks();
 	}
 
-	/** Set the buffer text with bracketed `[Image #N]` markers collapsed into chip tokens and
-	 *  registered in the atom table (queued-message dequeue, failed-submit restore). Leaves the
-	 *  pending image/text state untouched — callers own that. */
+	/** Set restored text with image, skill, and model references collapsed into atomic chips.
+	 *  Leaves pending image/text state untouched — callers own that. */
 	setCollapsedText(text: string): void {
 		const register = (label: string, expansion: string) => this.registerAtom(label, expansion);
 		this.setText(
-			collapseSkillTokens(
-				collapseImageMarkers(text, this.pendingImages.length, register),
-				name => this.skillFilePath(name) !== undefined,
+			collapseModelMentions(
+				collapseSkillTokens(
+					collapseImageMarkers(
+						expandModelMentionTags(text, this.modelMentionSelector),
+						this.pendingImages.length,
+						register,
+					),
+					name => this.skillFilePath(name) !== undefined,
+					register,
+				),
+				selector => this.#mentionLabelFor(selector),
 				register,
 			),
 		);
+		this.#syncComposerTokenPattern();
 	}
 
 	/**
@@ -552,6 +560,20 @@ export class CustomEditor extends Editor {
 	 * to "none known".
 	 */
 	skillFilePath: (name: string) => string | undefined = () => undefined;
+
+	/** Host-owned model probe: maps a mentionable selector to its display chip label. */
+	modelMentionLabel: (selector: string) => string | undefined = () => undefined;
+
+	/** Host-owned session probe: maps a persisted model pseudonym back to its selector. */
+	modelMentionSelector: (agent: string) => string | undefined = () => undefined;
+
+	#mentionLabelFor(selector: string): string | undefined {
+		const label = this.modelMentionLabel(selector);
+		if (label === undefined) return undefined;
+		const expansion = modelMentionToken(selector);
+		const registered = this.atoms.get(label);
+		return registered !== undefined && registered !== expansion ? undefined : label;
+	}
 
 	/**
 	 * Late-bound OSC 8 file link renderer. Startup stays plain until the full
@@ -588,6 +610,36 @@ export class CustomEditor extends Editor {
 		}
 	}
 
+	/** Collapse every completed mentionable `^provider/id` selector into an atomic model chip. */
+	#collapseModelMentions(): void {
+		const lines = this.getLines();
+		if (!lines.some(line => line.includes("^")) || !allowsModelMentions(this.getText())) return;
+		let anyCollapsed = false;
+		for (let i = 0; i < lines.length; i++) {
+			let line = lines[i];
+			if (!line.includes("^")) continue;
+			for (;;) {
+				MODEL_MENTION_RE.lastIndex = 0;
+				let collapsed = false;
+				for (let match = MODEL_MENTION_RE.exec(line); match !== null; match = MODEL_MENTION_RE.exec(line)) {
+					const selector = match[2];
+					const start = match.index + match[1].length;
+					const end = match.index + match[0].length;
+					if (end === line.length && i === lines.length - 1) break;
+					const label = this.#mentionLabelFor(selector);
+					if (label === undefined) continue;
+					this.collapseToAtom(i, start, end, label, modelMentionToken(selector));
+					collapsed = true;
+					anyCollapsed = true;
+					break;
+				}
+				if (!collapsed) break;
+				line = this.getLines()[i];
+			}
+		}
+		if (anyCollapsed) this.#syncComposerTokenPattern();
+	}
+
 	/** Stage `content` as a text-attachment chip: inserts the compact token at the cursor and
 	 *  registers `expansion` (default: the content itself) in the atom table for submit. */
 	insertTextAttachment(content: string, expansion: string = content): void {
@@ -604,9 +656,21 @@ export class CustomEditor extends Editor {
 		this.insertAtom(label, expansion);
 	}
 
-	/** Attachments whose chip token (or legacy bracketed marker) is still present in the buffer —
-	 *  deleting the inline token hides the chip and drops the attachment from the submission. */
-	composerChips(): ComposerChipDescriptor[] {
+	/** Cached read-only attachments whose chip token remains in the buffer.
+	 * Deleting a token hides its chip and drops the attachment from submission. */
+	composerChips(): readonly ComposerChipDescriptor[] {
+		const cached = this.#composerChipsCache;
+		if (
+			cached?.textRevision === this.textRevision &&
+			cached.images === this.pendingImages &&
+			cached.imageCount === this.pendingImages.length &&
+			cached.imageLinks === this.pendingImageLinks &&
+			cached.imageLinkCount === this.pendingImageLinks.length &&
+			cached.texts === this.pendingTexts &&
+			cached.textCount === this.pendingTexts.length
+		) {
+			return cached.chips;
+		}
 		const text = this.getText();
 		const chips: ComposerChipDescriptor[] = [];
 		for (let i = 0; i < this.pendingImages.length; i++) {
@@ -627,6 +691,16 @@ export class CustomEditor extends Editor {
 			if (!text.includes(entry.label)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
 		}
+		this.#composerChipsCache = {
+			textRevision: this.textRevision,
+			images: this.pendingImages,
+			imageCount: this.pendingImages.length,
+			imageLinks: this.pendingImageLinks,
+			imageLinkCount: this.pendingImageLinks.length,
+			texts: this.pendingTexts,
+			textCount: this.pendingTexts.length,
+			chips,
+		};
 		return chips;
 	}
 
@@ -646,6 +720,12 @@ export class CustomEditor extends Editor {
 	/** Treat image/paste references — compact chip tokens and bracketed markers alike — as
 	 *  indivisible: a stray backspace deletes the whole token instead of corrupting it. */
 	override atomicTokenPattern = COMPOSER_TOKEN_REGEX;
+
+	#syncComposerTokenPattern(): void {
+		const labels = [...this.atoms].filter(([, expansion]) => expansion.startsWith("^")).map(([label]) => label);
+		const next = composerTokenRegex(labels);
+		if (next.source !== this.atomicTokenPattern.source) this.atomicTokenPattern = next;
+	}
 
 	/** Magic-keyword shimmer cadence — drives one editor repaint every 70 ms while
 	 *  a keyword is on screen and the prompt is focused. ~14 frames/s is smooth
@@ -671,6 +751,7 @@ export class CustomEditor extends Editor {
 	 *  Queue shorthand reserves its first logical line as a dim `Queueing` label; sequential
 	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
 	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
+		this.#syncComposerTokenPattern();
 		const editorText = this.getText();
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
@@ -689,55 +770,63 @@ export class CustomEditor extends Editor {
 			sourceSearchOffset = offset + value.length;
 			return offset;
 		};
-		return renderPlaceholders(text, {
-			renderText: value => {
-				const sourceOffset = locateSource(value);
-				const highlighted = this.#spelling.decorateTypos(
-					value,
-					{
-						editorText,
-						lines: this.#decorationLines,
-						line: context.line,
-						startCol: context.startCol + sourceOffset,
-					},
-					span => highlightMagicKeywords(span, undefined, phase),
-				);
-				if (this.#queueShorthandActive && (value.startsWith("->") || value.startsWith("=>"))) {
-					const icon = typeof theme === "undefined" ? "➤" : theme.nav.selected;
-					return `${fgOrPlain("dim", `Queueing ${icon}`)}${highlighted.slice(2)}`;
-				}
-				if (this.#queueListActive) {
-					const markerMatch = QUEUE_LIST_MARKER_RE.exec(value);
-					if (markerMatch) {
-						const indent = markerMatch[1] ?? "";
-						const markerEnd = markerMatch[0].length;
-						return `${indent}${fgOrPlain("accent", value.slice(indent.length, markerEnd))}${highlighted.slice(markerEnd)}`;
+		return renderPlaceholders(
+			text,
+			{
+				renderText: value => {
+					const sourceOffset = locateSource(value);
+					const highlighted = this.#spelling.decorateTypos(
+						value,
+						{
+							editorText,
+							lines: this.#decorationLines,
+							line: context.line,
+							startCol: context.startCol + sourceOffset,
+						},
+						span => highlightMagicKeywords(span, undefined, phase),
+					);
+					if (this.#queueShorthandActive && (value.startsWith("->") || value.startsWith("=>"))) {
+						const icon = typeof theme === "undefined" ? "➤" : theme.nav.selected;
+						return `${fgOrPlain("dim", `Queueing ${icon}`)}${highlighted.slice(2)}`;
 					}
-				}
-				return highlighted;
-			},
-			renderSkill: (label, name) => {
-				locateSource(label);
-				const styled = skillChipStyle(label);
-				const filePath = this.skillFilePath(name);
-				return filePath === undefined ? styled : this.fileHyperlink(filePath, styled);
-			},
-			renderReference: (value, kind, index, form) => {
-				locateSource(value);
-				if (form === "chip") {
-					// Chip tokens carry their attachment identity color (matches the band card).
-					const styled = `${attachmentSgr(kind, index)}\x1b[1m${value}\x1b[22m\x1b[39m`;
+					if (this.#queueListActive) {
+						const markerMatch = QUEUE_LIST_MARKER_RE.exec(value);
+						if (markerMatch) {
+							const indent = markerMatch[1] ?? "";
+							const markerEnd = markerMatch[0].length;
+							return `${indent}${fgOrPlain("accent", value.slice(indent.length, markerEnd))}${highlighted.slice(markerEnd)}`;
+						}
+					}
+					return highlighted;
+				},
+				renderSkill: (label, name) => {
+					locateSource(label);
+					const styled = skillChipStyle(label);
+					const filePath = this.skillFilePath(name);
+					return filePath === undefined ? styled : this.fileHyperlink(filePath, styled);
+				},
+				renderMention: label => {
+					locateSource(label);
+					return modelChipStyle(label);
+				},
+				renderReference: (value, kind, index, form) => {
+					locateSource(value);
+					if (form === "chip") {
+						// Chip tokens carry their attachment identity color (matches the band card).
+						const styled = `${attachmentSgr(kind, index)}\x1b[1m${value}\x1b[22m\x1b[39m`;
+						return kind === "image" || kind === "video"
+							? this.imageReferenceHyperlink(value, index, this.imageLinks, () => styled)
+							: styled;
+					}
 					return kind === "image" || kind === "video"
-						? this.imageReferenceHyperlink(value, index, this.imageLinks, () => styled)
-						: styled;
-				}
-				return kind === "image" || kind === "video"
-					? this.imageReferenceHyperlink(value, index, this.imageLinks, label =>
-							fgOrPlain("accent", label, `\x1b[1m\x1b[4m${label}\x1b[24m\x1b[22m`),
-						)
-					: fgOrPlain("accent", value, `\x1b[1m${value}\x1b[22m`);
+						? this.imageReferenceHyperlink(value, index, this.imageLinks, label =>
+								fgOrPlain("accent", label, `\x1b[1m\x1b[4m${label}\x1b[24m\x1b[22m`),
+							)
+						: fgOrPlain("accent", value, `\x1b[1m${value}\x1b[22m`);
+				},
 			},
-		});
+			this.atomicTokenPattern,
+		);
 	};
 
 	/** Optional test override for the magic-keyword shimmer gate. */
@@ -794,10 +883,6 @@ export class CustomEditor extends Editor {
 	onCycleModelForward?: () => void;
 	onCycleModelBackward?: () => void;
 	onSelectModel?: () => void;
-	onToggleToolActivity?: () => void;
-	onToggleThinking?: () => void;
-	onExternalEditor?: () => void;
-	onHistorySearch?: () => void;
 	onSuspend?: () => void;
 	onSelectModelTemporary?: () => void;
 	/** Called when the configured copy-prompt shortcut is pressed. */
@@ -1084,6 +1169,7 @@ export class CustomEditor extends Editor {
 			if (this.#isSubmitKey(remaining)) this.pasteText(content, { submitAfterPaste: true });
 			else this.pasteText(content);
 			this.#collapseSkillTokens();
+			this.#collapseModelMentions();
 			// No async paste was started; drain the queued trailing bytes ourselves.
 			const drained = this.#pendingInput.splice(0);
 			for (const chunk of drained) this.handleInput(chunk);
@@ -1122,12 +1208,6 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured external editor shortcut
-			if (this.#matchesAction(canonical, "app.editor.external") && this.onExternalEditor) {
-				this.onExternalEditor();
-				return;
-			}
-
 			// Intercept configured temporary model selector shortcut
 			if (this.#matchesAction(canonical, "app.model.selectTemporary") && this.onSelectModelTemporary) {
 				this.onSelectModelTemporary();
@@ -1146,27 +1226,9 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured thinking block visibility toggle
-			if (this.#matchesAction(canonical, "app.thinking.toggle") && this.onToggleThinking) {
-				this.onToggleThinking();
-				return;
-			}
-
 			// Intercept configured model selector shortcut
 			if (this.#matchesAction(canonical, "app.model.select") && this.onSelectModel) {
 				this.onSelectModel();
-				return;
-			}
-
-			// Intercept configured history search shortcut
-			if (this.#matchesAction(canonical, "app.history.search") && this.onHistorySearch) {
-				this.onHistorySearch();
-				return;
-			}
-
-			// Intercept configured tool activity visibility toggle
-			if (this.#matchesAction(canonical, "app.tools.toggleVisibility") && this.onToggleToolActivity) {
-				this.onToggleToolActivity();
 				return;
 			}
 
@@ -1214,10 +1276,34 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured exit shortcut. Always consume the shortcut so it
-			// never reaches the parent handler; firing onExit is the controller's
-			// chance to snapshot the current text as a draft before shutting down.
+			// Intercept configured exit shortcut. When the key doubles as
+			// forward-delete (readline ^D: the default app.exit binding overlaps
+			// tui.editor.deleteCharForward) and the buffer is non-empty, perform
+			// the delete here instead of quitting. Invoking the operation directly
+			// — not falling through, not redispatching the raw key — keeps the
+			// exit chord's precedence slot on both sides: a later app action or
+			// extension handler bound to the same chord cannot steal it, and
+			// neither can an earlier base-editor action (e.g. a user-bound
+			// tui.input.submit, which Editor.handleInput checks before
+			// deleteCharForward). Only an empty buffer exits; firing onExit is
+			// the controller's chance to snapshot the current text as a draft
+			// before shutting down. Exit keys with no forward-delete role always
+			// exit. Draft presence is read off the buffer alone: attachments live
+			// as inline chip tokens, while `pendingImages` / `pendingTexts`
+			// intentionally retain deleted records so numbering isn't recycled
+			// (see composerChips) — trusting them would make Ctrl+D a permanent
+			// no-op after the last chip is deleted.
 			if (this.#matchesAction(canonical, "app.exit")) {
+				const doublesAsForwardDelete =
+					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
+				if (doublesAsForwardDelete && !this.textEquals("")) {
+					this.deleteCharForward();
+					// Same post-edit normalization the parent dispatch runs below: an edit that
+					// leaves a bare "->"/"=>" turns it into a reserved queue header, or later
+					// typing lands on the Queueing label instead of the queue body.
+					this.#normalizeQueuePrefix(hadBareQueuePrefix);
+					return;
+				}
 				this.onExit?.();
 				return;
 			}
@@ -1258,23 +1344,28 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for normal handling
 		this.#forwardInput(data);
-		if (!hadBareQueuePrefix && (this.textEquals("->") || this.textEquals("=>"))) {
-			const cursor = this.getCursor();
-			if (cursor.line === 0 && cursor.col === 2) {
-				this.insertText("\n");
-			}
+		this.#normalizeQueuePrefix(hadBareQueuePrefix);
+	}
+
+	/** Promote a newly formed bare `->` / `=>` prefix to a reserved header line by opening the
+	 *  queue body beneath it. `hadBareQueuePrefix` is the pre-edit state: a prompt that was
+	 *  already just the prefix is left alone so the user can keep editing it. */
+	#normalizeQueuePrefix(hadBareQueuePrefix: boolean): void {
+		if (hadBareQueuePrefix || !(this.textEquals("->") || this.textEquals("=>"))) return;
+		const cursor = this.getCursor();
+		if (cursor.line === 0 && cursor.col === 2) {
+			this.insertText("\n");
 		}
 	}
 
 	/**
 	 * Route a keystroke through the base text-editor pipeline only, skipping the
-	 * app-level shortcut interception in {@link handleInput} (Agent Hub, model
-	 * selector, history search, external editor, …). Used when the editor is
-	 * mounted for draft editing beneath another focused surface — e.g. an Ask
-	 * dialog opened over a non-empty prompt — so finishing or submitting the
-	 * draft can never fire an editor-slot shortcut that clears `editorContainer`
-	 * and orphans the overlay. Only text editing, cursor movement, submission,
-	 * and the clear action reach the buffer.
+	 * editor-scoped shortcut interception in {@link handleInput}. Used when the
+	 * editor is mounted for draft editing beneath another focused surface — e.g.
+	 * an Ask dialog opened over a non-empty prompt — so finishing or submitting
+	 * the draft cannot fire an editor-slot shortcut that clears
+	 * `editorContainer` and orphans the overlay. Only text editing, cursor
+	 * movement, submission, and the clear action reach the buffer.
 	 */
 	handleDraftEdit(data: string): void {
 		// The base editor reserves Ctrl+C for parent handling and returns without
@@ -1293,9 +1384,10 @@ export class CustomEditor extends Editor {
 		this.#forwardInput(data);
 	}
 
-	/** Base text-editing pipeline, then snap any skill token the keystroke just completed. */
+	/** Base text-editing pipeline, then snap any skill or model token the keystroke just completed. */
 	#forwardInput(data: string): void {
 		super.handleInput(data);
 		this.#collapseSkillTokens();
+		this.#collapseModelMentions();
 	}
 }

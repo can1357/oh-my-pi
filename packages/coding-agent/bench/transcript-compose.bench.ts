@@ -1,6 +1,5 @@
 /**
  * Benchmark: transcript compose cost vs session depth
- * (perf/transcript-compose-flat-after-commit)
  *
  * A long interactive session finalizes assistant blocks and emits their rows
  * into native terminal scrollback. Once committed, those rows are immutable
@@ -8,13 +7,9 @@
  * them from its frame so a live tail mutation does not re-walk sealed history.
  *
  * This bench builds N finalized assistant blocks (prose + closed code fences),
- * commits every finalized row into native scrollback, then times one pure
- * `TranscriptContainer.render(width)` per streaming tick of a single live tail
- * block. Depth-linear cost (ms rising with N) means sealed history is still
- * walked and re-assembled each tick; flat cost means the committed prefix was
- * compacted and only the live tail composes.
- *
- * Target after the fix: ratio(N5000/N500) <= 1.3, N5000 p95 < 10 ms.
+ * commits every finalized row into native scrollback, then times the retirement
+ * check and viewport render for an unchanged live tail. Full-history render()
+ * is an export path and intentionally renders committed blocks.
  */
 
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -24,7 +19,7 @@ import { TranscriptContainer } from "../src/modes/components/transcript-containe
 import { initTheme } from "../src/modes/theme/theme";
 
 const WIDTH = 100;
-const SIZES = [500, 5000];
+const SIZES = [500, 5000, 50_000];
 const WARMUP = 20;
 const SAMPLES = 200;
 
@@ -69,9 +64,9 @@ function percentile(sorted: number[], p: number): number {
 }
 
 /** Build N committed finalized blocks + a live tail, return per-tick render medians/p95. */
-function measure(n: number): { median: number; p95: number } {
+function measure(n: number): { median: number; p95: number; replayMs: number } {
 	const histText = makeMarkdownCorpus(240);
-	const tailCorpus = makeMarkdownCorpus(1200);
+	const tailCorpus = "Live answer in progress.";
 	const container = new TranscriptContainer();
 	for (let i = 0; i < n; i++) {
 		const c = new AssistantMessageComponent();
@@ -81,17 +76,15 @@ function measure(n: number): { median: number; p95: number } {
 	}
 	const tail = new AssistantMessageComponent();
 	container.addChild(tail);
-	let revealed = Math.floor(tailCorpus.length * 0.5);
-	tail.updateContent(makeTextMessage(tailCorpus.slice(0, revealed)), { transient: true });
-
-	// Warm every block's markdown L1 cache and establish the assembled frame,
-	container.render(WIDTH);
+	tail.updateContent(makeTextMessage(tailCorpus), { transient: true });
+	const history = container.peekFlushBatch(WIDTH);
+	if (!history) throw new Error("Expected finalized history");
+	container.acknowledgeFinalizedBatch(history.id);
+	const frame = { tick: 0, now: 0 };
 
 	const tick = () => {
-		revealed += 20;
-		if (revealed > tailCorpus.length) revealed = Math.floor(tailCorpus.length * 0.5);
-		tail.updateContent(makeTextMessage(tailCorpus.slice(0, revealed)), { transient: true });
-		container.render(WIDTH);
+		if (container.peekFinalizedBatch(WIDTH, 24)) throw new Error("Retired history was offered again");
+		container.renderViewport(WIDTH, 24, frame);
 	};
 
 	for (let i = 0; i < WARMUP; i++) tick();
@@ -102,7 +95,13 @@ function measure(n: number): { median: number; p95: number } {
 		samples.push((Bun.nanoseconds() - start) / 1e6);
 	}
 	samples.sort((a, b) => a - b);
-	return { median: percentile(samples, 50), p95: percentile(samples, 95) };
+	const started = Bun.nanoseconds();
+	container.beginReplay();
+	const replay = container.peekReplayBatch(WIDTH);
+	if (!replay || replay.rows.length !== history.rows.length) throw new Error("Replay lost committed rows");
+	const replayMs = (Bun.nanoseconds() - started) / 1e6;
+	container.acknowledgeFinalizedBatch(replay.id);
+	return { median: percentile(samples, 50), p95: percentile(samples, 95), replayMs };
 }
 
 await Settings.init({ inMemory: true });
@@ -112,7 +111,9 @@ console.log(`\nBenchmark: transcript-compose (live tail tick after committed fin
 
 const results = SIZES.map(n => {
 	const r = measure(n);
-	console.log(`  N=${n}: median ${r.median.toFixed(4)}ms  p95 ${r.p95.toFixed(4)}ms`);
+	console.log(
+		`  N=${n}: median ${r.median.toFixed(4)}ms  p95 ${r.p95.toFixed(4)}ms  replay ${r.replayMs.toFixed(4)}ms`,
+	);
 	return r;
 });
 
@@ -121,5 +122,5 @@ const large = results[results.length - 1]!;
 const ratio = large.median / small.median;
 console.log(
 	`\n  ratio(N${SIZES[SIZES.length - 1]}/N${SIZES[0]}) median = ${ratio.toFixed(3)}  ` +
-		`(target <= 1.3; N${SIZES[SIZES.length - 1]} p95 = ${large.p95.toFixed(4)}ms, target < 10ms)\n`,
+		`(N${SIZES[SIZES.length - 1]} p95 = ${large.p95.toFixed(4)}ms)\n`,
 );

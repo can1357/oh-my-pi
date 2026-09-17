@@ -232,7 +232,7 @@ function createCompleter(
 					{ messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
 					{ apiKey, sessionId, maxTokens: SAFE_MAX_TOKENS, temperature: 0, disableReasoning: true, signal },
 				),
-			{ signal },
+			{ signal, provider: model.provider },
 		);
 		if (response.stopReason === "error") {
 			throw new Error(`AI staging request failed: ${response.errorMessage ?? "unknown error"}`);

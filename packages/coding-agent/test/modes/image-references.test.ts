@@ -2,33 +2,49 @@ import { describe, expect, it } from "bun:test";
 import {
 	chipLabel,
 	collapseImageMarkers,
+	collapseModelMentions,
 	collapseSkillTokens,
 	compactImageMarkers,
+	composerTokenRegex,
+	modelMentionChipLabel,
 	type PlaceholderKind,
 	renderPlaceholders,
 	shiftImageMarkers,
 	skillChipLabel,
 } from "@oh-my-pi/pi-coding-agent/modes/composer-attachments";
 
-function capture(text: string): {
+function capture(
+	text: string,
+	mentionLabels: readonly string[] = [],
+): {
 	out: string;
 	refs: Array<{ label: string; kind: PlaceholderKind; index: number; form: "marker" | "chip" }>;
 	skills: string[];
+	mentions: string[];
 } {
 	const refs: Array<{ label: string; kind: PlaceholderKind; index: number; form: "marker" | "chip" }> = [];
 	const skills: string[] = [];
-	const out = renderPlaceholders(text, {
-		renderText: t => t,
-		renderReference: (label, kind, index, form) => {
-			refs.push({ label, kind, index, form });
-			return `<${kind}:${index}>`;
+	const mentions: string[] = [];
+	const out = renderPlaceholders(
+		text,
+		{
+			renderText: t => t,
+			renderReference: (label, kind, index, form) => {
+				refs.push({ label, kind, index, form });
+				return `<${kind}:${index}>`;
+			},
+			renderSkill: (_label, name) => {
+				skills.push(name);
+				return `<skill:${name}>`;
+			},
+			renderMention: label => {
+				mentions.push(label);
+				return `<model:${label}>`;
+			},
 		},
-		renderSkill: (_label, name) => {
-			skills.push(name);
-			return `<skill:${name}>`;
-		},
-	});
-	return { out, refs, skills };
+		composerTokenRegex(mentionLabels),
+	);
+	return { out, refs, skills, mentions };
 }
 
 describe("renderPlaceholders", () => {
@@ -98,6 +114,48 @@ describe("renderPlaceholders", () => {
 		expect(capture("\uf0eb reviewer").skills).toEqual(["reviewer"]);
 		expect(capture("SK reviewer").skills).toEqual(["reviewer"]);
 		expect(capture("TASK reviewer").skills).toHaveLength(0);
+	});
+
+	it("routes registered model labels with spaces and parentheses as whole tokens", () => {
+		const short = modelMentionChipLabel("Claude");
+		const long = modelMentionChipLabel("Claude (Fast)");
+		const { out, mentions, refs } = capture(`ask ${long} then ${short}`, [short, long]);
+		expect(mentions).toEqual([long, short]);
+		expect(refs).toHaveLength(0);
+		expect(out).toBe(`ask <model:${long}> then <model:${short}>`);
+	});
+
+	it("dispatches an ASCII model label before bracketed attachment markers", () => {
+		const label = "[M] Claude (Fast)";
+		const { out, mentions, refs } = capture(`ask ${label} now`, [label]);
+		expect(mentions).toEqual([label]);
+		expect(refs).toHaveLength(0);
+		expect(out).toBe(`ask <model:${label}> now`);
+	});
+});
+
+describe("collapseModelMentions", () => {
+	const labelFor = (selector: string) => (selector === "a/x" ? modelMentionChipLabel("X One") : undefined);
+
+	it("collapses known whitespace-delimited selectors and registers their canonical expansion", () => {
+		const registered: Array<[string, string]> = [];
+		const out = collapseModelMentions("ask ^a/x now", labelFor, (label, expansion) =>
+			registered.push([label, expansion]),
+		);
+		expect(out).toBe(`ask ${modelMentionChipLabel("X One")} now`);
+		expect(registered).toEqual([[modelMentionChipLabel("X One"), "^a/x"]]);
+	});
+
+	it("keeps unknown and punctuation-attached selectors literal", () => {
+		expect(collapseModelMentions("^nope/z and ^a/x,", labelFor, () => {})).toBe("^nope/z and ^a/x,");
+	});
+
+	it("allows slash prompts but not local-execution drafts", () => {
+		expect(collapseModelMentions("/plan ask ^a/x now", labelFor, () => {})).toBe(
+			`/plan ask ${modelMentionChipLabel("X One")} now`,
+		);
+		expect(collapseModelMentions("!echo ^a/x", labelFor, () => {})).toBe("!echo ^a/x");
+		expect(collapseModelMentions("$ echo ^a/x", labelFor, () => {})).toBe("$ echo ^a/x");
 	});
 });
 

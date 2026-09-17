@@ -24,6 +24,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/model-resolver";
+import type { ModelRegistry } from "../../config/model-registry";
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import type { ModelPerfStats } from "../../session/agent-storage";
@@ -230,13 +231,49 @@ export function sortModelItems(items: ModelBrowserItem[], options: SortModelItem
 	});
 }
 
+/** Picker candidates and ordering inputs shared with composer model mentions. */
+export interface SessionModelScope {
+	items: ModelBrowserItem[];
+	roles: RoleAssignments;
+	mruOrder: ReadonlyArray<string>;
+	error: string | undefined;
+}
+
+/** Build the session picker's current scope without creating an interactive browser. */
+export function buildSessionModelScope(
+	settings: Settings,
+	registry: ModelRegistry,
+	scopedModels: ReadonlyArray<Model>,
+): SessionModelScope {
+	let models: ReadonlyArray<Model>;
+	let error: string | undefined;
+	if (scopedModels.length > 0) {
+		models = scopedModels;
+	} else {
+		const loadError = registry.getError();
+		error = loadError ? String(loadError) : undefined;
+		try {
+			models = registry.getAvailable();
+		} catch (cause) {
+			error = cause instanceof Error ? cause.message : String(cause);
+			models = [];
+		}
+	}
+	const allModels = scopedModels.length > 0 ? models : registry.getAll();
+	const roles = resolveRoleAssignments(settings, allModels, models);
+	const mruOrder = settings.getStorage()?.getModelUsageOrder() ?? [];
+	const items = buildBrowserItems(models);
+	sortModelItems(items, { roles, mruOrder });
+	return { items, roles, mruOrder, error };
+}
+
 interface RoleProviderStats {
 	count: number;
 	firstRole: number;
 }
 
 /** User affinity used to order search matches within one relevance tier. */
-interface SearchAffinity {
+export interface SearchAffinity {
 	/** `provider/id` (lowercased) → rank; configured-role models first, then MRU. */
 	models: Map<string, number>;
 	/** provider (lowercased) → rank; explicit order, then role providers, then MRU providers. */
@@ -248,7 +285,7 @@ interface SearchAffinity {
  * role assignments, and recent model use. Auto-selected roles are catalog
  * policy, not evidence of user preference.
  */
-function buildSearchAffinity(
+export function buildSearchAffinity(
 	providerOrder: ReadonlyArray<string>,
 	roles: RoleAssignments,
 	mruOrder: ReadonlyArray<string>,
@@ -327,6 +364,50 @@ function modelSearchTier(query: string, item: ModelBrowserItem): number {
 	return 2;
 }
 
+/** Rank picker and mention candidates by text relevance, user affinity, and MRU/version order. */
+export function rankModelItems(
+	query: string,
+	items: ReadonlyArray<ModelBrowserItem>,
+	options: { roles: RoleAssignments; mruOrder: ReadonlyArray<string>; affinity: SearchAffinity },
+): ModelBrowserItem[] {
+	if (!query.trim()) return [...items];
+	const ranked = fuzzyRank(items, query, modelSearchText);
+	const matches = ranked.map(result => result.item);
+	// Exact and contiguous matches stay ahead of fuzzy-only candidates; affinity
+	// breaks ties before fuzzy quality and the normal MRU/version ordering.
+	sortModelItems(matches, { roles: options.roles, mruOrder: options.mruOrder, skipRoleRank: true });
+	const fallbackRanks = new Map(matches.map((item, index) => [item, index]));
+	const queryKey = compactModelSearchText(query);
+	const searchRanks = new Map<ModelBrowserItem, { tier: number; bucket: number }>();
+	for (const result of ranked) {
+		searchRanks.set(result.item, {
+			tier: modelSearchTier(queryKey, result.item),
+			bucket: Math.round(result.score / 10),
+		});
+	}
+	matches.sort((a, b) => {
+		const aSearch = searchRanks.get(a);
+		const bSearch = searchRanks.get(b);
+		const tierCmp = (aSearch?.tier ?? Number.MAX_SAFE_INTEGER) - (bSearch?.tier ?? Number.MAX_SAFE_INTEGER);
+		if (tierCmp !== 0) return tierCmp;
+
+		const modelCmp =
+			(options.affinity.models.get(a.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
+			(options.affinity.models.get(b.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
+		if (modelCmp !== 0) return modelCmp;
+
+		const providerCmp =
+			(options.affinity.providers.get(a.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
+			(options.affinity.providers.get(b.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
+		if (providerCmp !== 0) return providerCmp;
+
+		const bucketCmp = (aSearch?.bucket ?? Number.MAX_SAFE_INTEGER) - (bSearch?.bucket ?? Number.MAX_SAFE_INTEGER);
+		if (bucketCmp !== 0) return bucketCmp;
+		return (fallbackRanks.get(a) ?? Number.MAX_SAFE_INTEGER) - (fallbackRanks.get(b) ?? Number.MAX_SAFE_INTEGER);
+	});
+	return matches;
+}
+
 /** Compact glyph for a configured thinking level using the active theme. */
 export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
 	return sharedThinkingLevelGlyph(level, theme);
@@ -358,17 +439,21 @@ export function formatRoleChip(role: string, assignment: RoleAssignment, setting
 /** Both token legs at zero cost — the condition {@link formatCostPair} renders as `free`. */
 function isFreeModel(model: Model): boolean {
 	const cost = model.cost;
-	return !cost || (cost.input <= 0 && cost.output <= 0);
+	return !cost || (cost.input === 0 && cost.output === 0);
 }
 
 /** `$in/out` per-million cost pair; `free` when both legs are zero. */
 function formatCostPair(model: Model): string {
 	if (isFreeModel(model)) return "free";
 	const cost = model.cost;
+
 	const fmt = (n: number): string => {
-		if (n <= 0) return "0";
+		if (!Number.isFinite(n) || n < 0) return "?";
+		if (n > 0 && n < 0.01) {
+			return n.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 });
+		}
 		const s = n >= 100 ? String(Math.round(n)) : n >= 10 ? n.toFixed(1) : n.toFixed(2);
-		return s.replace(/\.?0+$/, "");
+		return s.includes(".") ? s.replace(/\.?0+$/, "") : s;
 	};
 	return `$${fmt(cost.input)}/${fmt(cost.output)}`;
 }
@@ -721,59 +806,15 @@ export class ModelBrowser implements Component {
 		const previousSelectedIndex = this.#selectedIndex;
 		const previousSelected = previousItems[previousSelectedIndex];
 		const query = this.#searchInput.getValue();
-		let items: ModelBrowserItem[];
-		if (query.trim()) {
-			// Match against the displayed row text so the user can type what
-			// they see: bare names, provider prefixes, scoped queries, and the
-			// cost column's `free` all flow through the same fuzzy matcher.
-			const ranked = fuzzyRank(this.#baseItems, query, modelSearchText);
-			const matches = ranked.map(result => result.item);
-			if (this.#preserveQueryOrder) {
-				items = matches;
-			} else {
-				// Exact and contiguous text matches remain ahead of fuzzy-only
-				// candidates. Within each relevance tier: models the user
-				// assigned to a role or used recently, then providers the user
-				// configured, assigned, or used recently, then fuzzy quality,
-				// then the normal MRU/version ordering.
-				sortModelItems(matches, { roles: this.#roles, mruOrder: this.#mruOrder, skipRoleRank: true });
-				const fallbackRanks = new Map(matches.map((item, index) => [item, index]));
-				const queryKey = compactModelSearchText(query);
-				const searchRanks = new Map<ModelBrowserItem, { tier: number; bucket: number }>();
-				for (const result of ranked) {
-					searchRanks.set(result.item, {
-						tier: modelSearchTier(queryKey, result.item),
-						bucket: Math.round(result.score / 10),
-					});
-				}
-				matches.sort((a, b) => {
-					const aSearch = searchRanks.get(a);
-					const bSearch = searchRanks.get(b);
-					const tierCmp = (aSearch?.tier ?? Number.MAX_SAFE_INTEGER) - (bSearch?.tier ?? Number.MAX_SAFE_INTEGER);
-					if (tierCmp !== 0) return tierCmp;
-
-					const modelCmp =
-						(this.#affinity.models.get(a.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
-						(this.#affinity.models.get(b.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
-					if (modelCmp !== 0) return modelCmp;
-
-					const providerCmp =
-						(this.#affinity.providers.get(a.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
-						(this.#affinity.providers.get(b.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
-					if (providerCmp !== 0) return providerCmp;
-
-					const bucketCmp =
-						(aSearch?.bucket ?? Number.MAX_SAFE_INTEGER) - (bSearch?.bucket ?? Number.MAX_SAFE_INTEGER);
-					if (bucketCmp !== 0) return bucketCmp;
-					return (
-						(fallbackRanks.get(a) ?? Number.MAX_SAFE_INTEGER) - (fallbackRanks.get(b) ?? Number.MAX_SAFE_INTEGER)
-					);
+		const items = this.#preserveQueryOrder
+			? query.trim()
+				? fuzzyRank(this.#baseItems, query, modelSearchText).map(result => result.item)
+				: this.#baseItems
+			: rankModelItems(query, this.#baseItems, {
+					roles: this.#roles,
+					mruOrder: this.#mruOrder,
+					affinity: this.#affinity,
 				});
-				items = matches;
-			}
-		} else {
-			items = this.#baseItems;
-		}
 		this.#visibleItems = this.#insertSeparator(items);
 		if (
 			selection === "reset-changed-prefix" &&
