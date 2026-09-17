@@ -158,6 +158,14 @@ Conversion behavior:
 
 ## Runtime switching behavior
 
+The `theme` export is a live binding, including in bundled extensions. Read it inside rendering callbacks rather than retaining a theme instance across switches. Extension renderer callbacks may also use their supplied theme argument.
+
+```ts
+import { theme } from "@oh-my-pi/pi-coding-agent";
+
+const renderStatus = () => theme.fg("accent", "Ready");
+```
+
 ### Initial theme (`initTheme`)
 
 `main.ts` initializes theme with settings:
@@ -184,7 +192,7 @@ Current defaults from settings schema:
 ### Explicit switching (`setTheme`)
 
 - loads selected theme
-- updates global `theme` singleton
+- updates the live `theme` export
 - optionally starts watcher
 - triggers `onThemeChange` callback
 
@@ -195,7 +203,7 @@ On failure:
 
 ### Preview switching (`previewTheme`)
 
-- applies temporary preview theme to global `theme`
+- applies the preview to the live `theme` export
 - does **not** change persisted settings by itself
 - returns success/error without fallback replacement
 

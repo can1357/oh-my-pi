@@ -106,6 +106,7 @@ async function postSpeechRequest(options: {
 	url: string;
 	payload: Record<string, unknown>;
 	apiKey: ApiKey;
+	resolveHeaders?: () => Promise<Record<string, string> | undefined>;
 	fetchImpl: FetchImpl;
 	signal: AbortSignal | undefined;
 }): Promise<Uint8Array | { errorText: string }> {
@@ -117,9 +118,11 @@ async function postSpeechRequest(options: {
 		response = await withAuth(
 			options.apiKey,
 			async key => {
+				const configuredHeaders = await options.resolveHeaders?.();
 				const resp = await options.fetchImpl(options.url, {
 					method: "POST",
 					headers: {
+						...configuredHeaders,
 						Authorization: `Bearer ${key}`,
 						"Content-Type": "application/json",
 						"User-Agent": USER_AGENT,
@@ -202,6 +205,7 @@ async function synthesizeXai(
 		url: `${creds.baseURL}/tts`,
 		payload,
 		apiKey,
+		resolveHeaders: () => ctx.modelRegistry.getProviderHeaders(creds.provider),
 		fetchImpl: ctx.fetch ?? fetch,
 		signal,
 	});
@@ -258,6 +262,7 @@ async function synthesizeDeepInfra(
 		url: DEEPINFRA_TTS_URL,
 		payload,
 		apiKey,
+		resolveHeaders: () => ctx.modelRegistry.getProviderHeaders("deepinfra"),
 		fetchImpl: ctx.fetch ?? fetch,
 		signal,
 	});

@@ -46,10 +46,20 @@ pub const MAX_COMBINATIONS: usize = 20_000;
 pub const ATOMICITY_NOTICE: &str =
 	"No operations were applied — ops apply atomically; re-send the full corrected payload.";
 
+/// Replacement or insertion applied by the sloppy engine to a matched source
+/// span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationRewrite {
-	Explicit { text: String },
-	Inline { replacements: Vec<String> },
+	Explicit {
+		text: String,
+	},
+	/// Literal, LF-terminated lines inserted after the last matched source line.
+	After {
+		text: String,
+	},
+	Inline {
+		replacements: Vec<String>,
+	},
 }
 
 /// One compiled `«` … `»` … operation.

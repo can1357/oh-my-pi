@@ -45,6 +45,7 @@ import { AssistantMessageComponent } from "./assistant-message";
 import { createBackgroundTanDispatchBlock } from "./background-tan-message";
 import { BashExecutionComponent } from "./bash-execution";
 import { detectCacheInvalidation } from "./cache-invalidation-marker";
+import { ServedModelTracker } from "./served-model-marker";
 import { CollabPromptMessageComponent } from "./collab-prompt-message";
 import {
 	BranchSummaryMessageComponent,
@@ -97,6 +98,7 @@ export class ChatTranscriptBuilder {
 	#pendingUsageElapsedMs: number | undefined;
 	#turnStartedAt: number | undefined;
 	#lastAssistantUsage: Usage | undefined;
+	#servedModelTracker = new ServedModelTracker();
 	#waitingPoll: ToolExecutionComponent | null = null;
 	#todoSnapshot: ToolExecutionComponent | null = null;
 	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
@@ -161,6 +163,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsageElapsedMs = undefined;
 		this.#turnStartedAt = undefined;
 		this.#lastAssistantUsage = undefined;
+		this.#servedModelTracker = new ServedModelTracker();
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
 		this.#expandables = [];
@@ -323,6 +326,7 @@ export class ChatTranscriptBuilder {
 				if (message.output) component.appendOutput(message.output);
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
+					artifactError: message.meta?.artifactError,
 					images: message.images,
 					showImages: settings.get("terminal.showImages"),
 				});
@@ -332,7 +336,10 @@ export class ChatTranscriptBuilder {
 			case "pythonExecution": {
 				const component = new EvalExecutionComponent(message.code, this.deps.ui, message.excludeFromContext);
 				if (message.output) component.appendOutput(message.output);
-				component.setComplete(message.exitCode, message.cancelled, { truncation: message.meta?.truncation });
+				component.setComplete(message.exitCode, message.cancelled, {
+					truncation: message.meta?.truncation,
+					artifactError: message.meta?.artifactError,
+				});
 				this.container.addChild(component);
 				break;
 			}
@@ -401,6 +408,7 @@ export class ChatTranscriptBuilder {
 		if (message.usage.cacheRead + message.usage.cacheWrite + message.usage.input > 0) {
 			this.#lastAssistantUsage = message.usage;
 		}
+		assistantComponent.setServedModelMismatch(this.#servedModelTracker.check(message));
 
 		const hasVisibleAssistantContent = assistantHasVisibleContent(message);
 		if (hasVisibleAssistantContent) {

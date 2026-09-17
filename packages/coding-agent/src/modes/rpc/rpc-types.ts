@@ -451,6 +451,8 @@ export interface RpcHostToolDefinition {
 	hidden?: boolean;
 	/** How this host tool is presented when enabled; omission normalizes to `"discoverable"` at the adapter boundary. */
 	loadMode?: ToolLoadMode;
+	/** Whether this host tool can read `skill://` instruction content. */
+	readsSkillUris?: boolean;
 }
 
 /** Emitted by the RPC server when it needs the host to execute a registered tool. */

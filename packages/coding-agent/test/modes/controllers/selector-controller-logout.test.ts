@@ -71,6 +71,7 @@ describe("SelectorController logout", () => {
 			editor: {},
 			ui: {
 				setFocus: vi.fn(),
+				getFocused: () => undefined,
 				requestRender: vi.fn(),
 			},
 			session: {

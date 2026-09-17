@@ -1,25 +1,23 @@
+import type { EditorTopBorder } from "@oh-my-pi/pi-tui/components/composer/types";
+import { Spacer } from "@oh-my-pi/pi-tui/components/spacer";
+import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
+import { ProcessTerminal, type Terminal } from "@oh-my-pi/pi-tui/terminal";
 import {
 	type Component,
 	Container,
-	type EditorTopBorder,
-	isInsideTerminalMultiplexer,
-	ProcessTerminal,
 	type ResizeScrollbackMode,
-	Spacer,
-	sliceWithWidth,
-	type Terminal,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
-	truncateToWidth,
 	TUI,
 	type TUIOptions,
 	type ViewportSize,
-	visibleWidth,
-} from "@oh-my-pi/pi-tui";
+} from "@oh-my-pi/pi-tui/tui";
+import { sliceWithWidth, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui/utils";
+import { postmortem } from "@oh-my-pi/pi-utils";
 import { CustomEditor } from "./components/custom-editor";
 import { type AnimationFrame, TranscriptContainer } from "./components/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./components/welcome";
-import { getEditorTheme, initThemeSync, theme } from "./theme/theme";
+import { ensureThemeSync, getEditorTheme, theme } from "./theme/theme";
 
 const DOUBLE_INTERRUPT_MS = 500;
 
@@ -255,14 +253,26 @@ export class Composer implements TerminalFrameProvider {
 	#retiredHeaderStart = 0;
 	#resizeRetiredHeaderStart: number | undefined;
 	#lastNormalRows = 0;
+	// Smallest below-transcript chrome height (editor + status + any transient
+	// inline dialog) seen since mount. Retirement is billed against this
+	// persistent baseline, never the transient peak, so a dialog or tall editor
+	// that later shrinks never leaves committed transcript rows the live viewport
+	// cannot reclaim (#11007). The baseline is terminal-height independent — the
+	// editor and status floors do not scale with rows — so it is retained across
+	// resizes rather than rediscovered from whatever chrome is expanded at the
+	// moment the height changes.
+	#retirementBelowFloor: number | undefined;
 	#lastInterruptAt = 0;
 	#started = false;
 	#stopped = false;
 	#transferred = false;
 
 	constructor(options: ComposerOptions = {}) {
-		if (typeof theme === "undefined") initThemeSync();
-		this.#exit = options.exit ?? (code => process.exit(code));
+		ensureThemeSync();
+		// Host-owned hard exit: route through postmortem so a double-Ctrl-C during
+		// an open extension-load guard window exits cleanly instead of throwing
+		// ExtensionExitError through the guarded process.exit (#11789).
+		this.#exit = options.exit ?? (code => postmortem.exitProcess(code));
 		this.#now = options.now ?? Date.now;
 		this.#preferences = { ...COMPOSER_DEFAULTS, ...options.preferences };
 		this.#statusSnapshot = options.status;
@@ -294,6 +304,11 @@ export class Composer implements TerminalFrameProvider {
 		}
 		this.#applyStatusSnapshot();
 		// Emergency controls stay active until InteractiveMode installs configured bindings.
+		// They deliberately mirror the interactive editor's contract so a stalled startup
+		// never behaves differently from a healthy one: Ctrl+C clears the draft and a second
+		// press exits 130 — the unconditional abort, draft or not; Ctrl+D exits 0 on an
+		// empty draft and otherwise forward-deletes (see CustomEditor's app.exit handling),
+		// so typing while the session loads cannot be lost to a mistyped delete.
 		this.editor.setActionKeys("app.clear", ["ctrl+c"]);
 		this.editor.setActionKeys("app.exit", ["ctrl+d"]);
 		this.editor.onClear = () => this.#handleInterrupt();
@@ -375,13 +390,28 @@ export class Composer implements TerminalFrameProvider {
 		// reflowing to the current width) while the screen has room. A batch
 		// leaves the mutable viewport in the same frame it is appended, so its
 		// rows are never painted twice.
-		const history = this.#offerHistory(transcript, width, rows, preRoots.length + after.length);
+		//
+		// Retirement is billed against the persistent below-transcript chrome
+		// baseline, not the transient peak: a confirmation dialog or a tall
+		// multi-line editor swapped in below the transcript clips the live tail
+		// for its lifetime, but must not permanently commit transcript rows to
+		// native history — otherwise a later shrink cannot refill the freed rows
+		// and the editor drifts up above a band of blank rows (#11007).
+		this.#retirementBelowFloor =
+			this.#retirementBelowFloor === undefined ? after.length : Math.min(this.#retirementBelowFloor, after.length);
+		const belowFloor = this.#retirementBelowFloor;
+		const history = this.#offerHistory(transcript, width, rows, preRoots.length + belowFloor);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
-		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - after.length), frame);
+		// The live tail is laid out against the same baseline retirement is
+		// billed against, so its compaction allocator (one row per block, no
+		// inter-block blanks) engages only when a block genuinely cannot retire.
+		// Rows the transient chrome peak displaces are clipped from the top by
+		// the `drop` slice below, which is what scrollback would have done.
+		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - belowFloor), frame);
 		const activeSpans: ViewportClickSpan[] = [];
 		for (const span of transcript.getLastViewportSpans()) {
 			const ids = (span.component as Partial<{ getClickFocusAgentIds(): string[] }>).getClickFocusAgentIds?.();
@@ -474,6 +504,9 @@ export class Composer implements TerminalFrameProvider {
 		}
 		this.#offeredHistory = undefined;
 		if (this.#historyReplayRequested) this.#startHistoryReplay();
+		if (offered.kind === "replay") {
+			this.ui.requestRender();
+		}
 	}
 
 	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
@@ -697,6 +730,10 @@ export class Composer implements TerminalFrameProvider {
 		this.#started = true;
 		this.ui.start({ clearScrollback: options.clearScrollback === true, deferInput: options.deferInput === true });
 		if (options.playWelcomeIntro !== false) this.playWelcomeIntro();
+		// Deferred input identifies the CLI prepaint handoff. Flush the queued
+		// forced frame before returning so subsequent dynamic-import evaluation
+		// cannot monopolize the event loop ahead of the speculative status chrome.
+		if (options.deferInput === true) this.ui.renderNow({ clearScrollback: options.clearScrollback === true });
 	}
 	/** Take raw-input ownership after a deferred-input start. Idempotent. */
 	enableInput(): void {

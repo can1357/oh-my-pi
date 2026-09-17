@@ -66,11 +66,19 @@ use crate::{
 	task::{self, AbortReason, AbortToken, CancelToken},
 };
 
-#[cfg(target_os = "linux")]
+/// Whether the host kernel is WSL, read once from `/proc/sys/kernel/osrelease`.
+///
+/// A host probe the hermetic unit tests cannot control, so it is pinned to
+/// `false` under `#[cfg(test)]`; tests exercise WSL rejection through the
+/// `WSL_DISTRO_NAME` / `WSL_INTEROP` env keys they own instead.
+#[cfg(all(target_os = "linux", not(test)))]
 static WSL_KERNEL: LazyLock<bool> = LazyLock::new(|| {
 	fs::read_to_string("/proc/sys/kernel/osrelease")
 		.is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"))
 });
+
+#[cfg(all(target_os = "linux", test))]
+static WSL_KERNEL: LazyLock<bool> = LazyLock::new(|| false);
 
 const JOURNAL_VERSION: u32 = 1;
 const JOURNAL_LIMIT: u64 = 1024 * 1024;
@@ -811,5 +819,7 @@ fn napi_error(error: impl std::fmt::Display) -> Error {
 	Error::from_reason(error.to_string())
 }
 
+#[cfg(test)]
+mod darwin_compiler;
 #[cfg(test)]
 mod tests;

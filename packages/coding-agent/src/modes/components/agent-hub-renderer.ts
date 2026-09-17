@@ -70,7 +70,7 @@ export function statusText(status: AgentRef["status"], text: string): string {
 function formatModelBadge(modelId: string, level: ThinkingLevel | undefined): string {
 	const model = theme.fg("muted", sanitizeDisplayText(modelId));
 	if (!level || level === ThinkingLevel.Off || level === ThinkingLevel.Inherit) return model;
-	const display = theme.thinking[level as keyof typeof theme.thinking] ?? level;
+	const display = theme.thinking[level] ?? level;
 	return `${model} ${theme.getThinkingBorderColor(level)(display)}`;
 }
 

@@ -198,8 +198,48 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 
 		expect(emptyResult.exitCode).toBe(0);
 		expect(absentResult.exitCode).toBe(0);
-		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield", "hub"]);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["yield"]);
 		expect(spy.mock.calls[1]?.[0]?.toolNames).toBeUndefined();
+	});
+
+	it("does not inject hub into read-only subagents", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const readOnlyResult = await runSubprocess({
+			...baseOptions,
+			id: "read-only-child",
+			agent: { ...baseAgent, tools: ["read", "grep", "glob"] },
+		});
+		const writableResult = await runSubprocess({
+			...baseOptions,
+			id: "writable-child",
+			agent: { ...baseAgent, tools: ["read", "write"] },
+		});
+		const spawningResult = await runSubprocess({
+			...baseOptions,
+			id: "spawning-child",
+			agent: { ...baseAgent, tools: ["read"], spawns: ["scout"] },
+		});
+
+		expect(readOnlyResult.exitCode).toBe(0);
+		expect(writableResult.exitCode).toBe(0);
+		expect(spawningResult.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["read", "grep", "glob"]);
+		expect(spy.mock.calls[1]?.[0]?.toolNames).toEqual(["read", "write", "hub"]);
+		expect(spy.mock.calls[2]?.[0]?.toolNames).toEqual(["read", "task", "hub"]);
+
+		const promptText = (index: number): string => {
+			const prompt = spy.mock.calls[index]?.[0]?.systemPrompt;
+			const resolved = typeof prompt === "function" ? prompt(["default"]) : prompt;
+			return Array.isArray(resolved) ? resolved.join("\n") : (resolved ?? "");
+		};
+		const readOnlyPrompt = promptText(0);
+		const writablePrompt = promptText(1);
+		const spawningPrompt = promptText(2);
+		expect(readOnlyPrompt.includes("# Peers")).toBe(false);
+		expect(writablePrompt.includes("# Peers")).toBe(true);
+		expect(spawningPrompt.includes("# Peers")).toBe(true);
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
@@ -222,7 +262,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
 	});
 
-	it("removes all MCP and discovered capability sources for a restricted child", async () => {
+	it("removes MCP and fresh discovery sources for a restricted child", async () => {
 		const session = yieldEmittingSession();
 		const persistedInits: Array<{ restrictToolNames?: boolean; tools: string[] }> = [];
 		vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
@@ -264,7 +304,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.mcpManager).toBeUndefined();
 		expect(forwarded?.customTools).toBeUndefined();
 		expect(forwarded?.preloadedExtensionPaths).toEqual([]);
-		expect(forwarded?.preloadedPreparedExtensions).toEqual([]);
 		expect(forwarded?.preloadedCustomToolPaths).toEqual([]);
 		expect(getTools).not.toHaveBeenCalled();
 		expect(forwarded?.outputSchemaMode).toBe("strict");

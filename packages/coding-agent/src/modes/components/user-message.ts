@@ -1,7 +1,17 @@
 import { applyBackgroundToLine, type Component, Container, Markdown, padding, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
-import { getMarkdownTheme, theme } from "../../modes/theme/theme";
-import { attachmentSgr, collapseImageMarkers, renderPlaceholders, skillChipStyle } from "../composer-attachments";
+import { ensureThemeSync, getMarkdownTheme, theme } from "../../modes/theme/theme";
+import {
+	attachmentSgr,
+	collapseImageMarkers,
+	COMPOSER_TOKEN_REGEX,
+	composerTokenRegex,
+	modelChipStyle,
+	modelMentionChipLabel,
+	renderPlaceholders,
+	skillChipStyle,
+} from "../composer-attachments";
+import { MODEL_MENTION_TAG_RE } from "../../session/model-mention-syntax";
 import { fileHyperlink } from "../../tui";
 import { imageReferenceHyperlink } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
@@ -46,7 +56,10 @@ export interface UserBubbleOptions {
  * own foreground after it. Shared by {@link UserMessageComponent} and the skill
  * callout so both read as one turn.
  */
-export function userBubbleColor(options: UserBubbleOptions = {}): (value: string) => string {
+export function userBubbleColor(
+	options: UserBubbleOptions = {},
+	tokenRegex: RegExp = COMPOSER_TOKEN_REGEX,
+): (value: string) => string {
 	const { imageLinks, synthetic = false, skillPath } = options;
 	// The Markdown component routes code spans and fenced blocks through its own code styling
 	// (never `color`), so those are already excluded; `highlightMagicKeywords` additionally
@@ -58,25 +71,30 @@ export function userBubbleColor(options: UserBubbleOptions = {}): (value: string
 		? (text: string) => theme.fg("dim", text)
 		: (text: string) => theme.fgOnBg("userMessageText", "userMessageBg", highlightMagicKeywords(text, keywordReset));
 	return (value: string) =>
-		renderPlaceholders(value, {
-			renderText,
-			renderSkill: (label, name) => {
-				const styled = skillChipStyle(label, bubbleReset);
-				const path = skillPath?.(name);
-				return path ? fileHyperlink(path, styled, { line: 1 }) : styled;
+		renderPlaceholders(
+			value,
+			{
+				renderText,
+				renderSkill: (label, name) => {
+					const styled = skillChipStyle(label, bubbleReset);
+					const path = skillPath?.(name);
+					return path ? fileHyperlink(path, styled, { line: 1 }) : styled;
+				},
+				renderMention: label => modelChipStyle(label, bubbleReset),
+				renderReference: (label, kind, index, form) => {
+					// Chip tokens keep their composer identity color; the bubble's own
+					// foreground resumes after the token (same pattern as keywords).
+					const styled =
+						form === "chip"
+							? `${attachmentSgr(kind, index)}\x1b[1m${label}\x1b[22m${keywordReset}`
+							: theme.fg("accent", `\x1b[1m${label}\x1b[22m`);
+					return kind === "image" || kind === "video"
+						? imageReferenceHyperlink(label, index, imageLinks, () => styled)
+						: styled;
+				},
 			},
-			renderReference: (label, kind, index, form) => {
-				// Chip tokens keep their composer identity color; the bubble's own
-				// foreground resumes after the token (same pattern as keywords).
-				const styled =
-					form === "chip"
-						? `${attachmentSgr(kind, index)}\x1b[1m${label}\x1b[22m${keywordReset}`
-						: theme.fg("accent", `\x1b[1m${label}\x1b[22m`);
-				return kind === "image" || kind === "video"
-					? imageReferenceHyperlink(label, index, imageLinks, () => styled)
-					: styled;
-			},
-		});
+			tokenRegex,
+		);
 }
 
 /**
@@ -95,15 +113,23 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 
 	constructor(text: string, options: UserBubbleOptions = {}) {
 		super();
+		ensureThemeSync();
 		// Display-only collapse: the stored/wire text carries bracketed `[Image #N, WxH]` markers,
 		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
 		// Markdown layout so wrapping and bubble padding are computed on the visible text.
 		text = collapseImageMarkers(text, Number.POSITIVE_INFINITY, () => {});
+		const mentionLabels: string[] = [];
+		MODEL_MENTION_TAG_RE.lastIndex = 0;
+		text = text.replace(MODEL_MENTION_TAG_RE, (_tag, _agent: string, name: string) => {
+			const label = modelMentionChipLabel(name);
+			mentionLabels.push(label);
+			return label;
+		});
 		const bgColor = (value: string) => theme.bg("userMessageBg", value);
 		this.#bgColor = bgColor;
 		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor,
-			color: userBubbleColor(options),
+			color: userBubbleColor(options, composerTokenRegex(mentionLabels)),
 		});
 		md.setIgnoreTight(true);
 		this.addChild(md);

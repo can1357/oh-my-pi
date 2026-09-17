@@ -23,6 +23,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
@@ -254,6 +255,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				meta: message.meta
 					? {
 							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							artifactError: message.meta.artifactError,
 							limits: normalizeProviderReplayValue(message.meta.limits),
 							diagnostics: message.meta.diagnostics
 								? normalizeProviderReplayValue({
@@ -275,6 +277,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				meta: message.meta
 					? {
 							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							artifactError: message.meta.artifactError,
 							limits: normalizeProviderReplayValue(message.meta.limits),
 							diagnostics: message.meta.diagnostics
 								? normalizeProviderReplayValue({
@@ -760,6 +763,7 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 					attribution: "user",
 					timestamp: message.timestamp,
 				};
+	copyPerCallContextMessage(userMessage, message);
 	if (typeof message.content === "string") {
 		if (message.content.length === 0) return message.role === "user" ? message : userMessage;
 		return { ...userMessage, content: renderSteeringEnvelope(message.content) };
@@ -1195,6 +1199,11 @@ interface ConvertArrayMemo {
 let convertGeneration = 0;
 const convertArrayCache = new WeakMap<AgentMessage[], ConvertArrayMemo>();
 
+/** Drop the outer-array shortcut when an owner replaces a live history in place. */
+export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void {
+	convertArrayCache.delete(messages);
+}
+
 registerMessageCacheInvalidator(message => {
 	convertCache.delete(message);
 	convertGeneration++;
@@ -1328,6 +1337,7 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	const cached = convertCache.get(m);
 	if (cached !== undefined && cached.interruptedNext === interruptedNext) return cached.fragment;
 	const fragment = convertOne(m, interruptedNext);
+	for (const message of fragment) copyPerCallContextMessage(message, m);
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;
 }

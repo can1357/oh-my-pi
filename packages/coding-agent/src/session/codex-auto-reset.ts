@@ -21,8 +21,8 @@
  *   retried as usage grows or a window exhausts before expiry.
  * - `blocked-account` (restore; `blocked` trigger only): a live 429 blocked
  *   the turn and no sibling credential could take over, so the pool is dry.
- *   Candidates are accounts with at least one genuinely exhausted chat window
- *   — 5h primary or weekly secondary. A banked reset clears the account's
+ *   Candidates are accounts with at least one genuinely exhausted normalized
+ *   chat window — 5h or weekly. A banked reset clears the account's
  *   chat rate limits generally, not just the weekly window: OpenAI's own
  *   client consumes one for a 5h-only block while the weekly window still has
  *   ~80% headroom (openai/codex#28525). The natural unblock is the LATEST
@@ -43,11 +43,11 @@
  * BOTH the primary (5h) and secondary (weekly) `buildUsageLimit` calls, so when
  * an account is blocked, *both* limit entries carry `status: "exhausted"`
  * regardless of which window is actually at 100%. Only `amount.usedFraction`
- * disambiguates. This module keys eligibility off exact limit ids
- * (`openai-codex:primary` / `openai-codex:secondary`) and `usedFraction`,
- * never off `status`, so the plan names the true blocking window(s) and their
- * real unblock time. Whether a short wait (e.g. a 5h-only block) is worth a
- * credit is the `minBlockedMinutes` knob's call, not hardcoded fiat.
+ * disambiguates. This module selects the base chat entries by their stable
+ * limit ids, then classifies the actual window from normalized window metadata
+ * before applying duration-specific policy. Whether a short wait (e.g. a
+ * 5h-only block) is worth a credit is the `minBlockedMinutes` knob's call,
+ * not hardcoded fiat.
  *
  * All of this is pure — no fetches, no IO. The only stateful piece is the
  * {@link CodexAutoRedeemCoordinator} container, whose read-only views are
@@ -57,6 +57,7 @@ import type {
 	OAuthAccountIdentity,
 	ResetCreditAccountStatus,
 	ResetCreditTarget,
+	UsageLimit,
 	UsageReport,
 	UsageResetCreditDetail,
 } from "@oh-my-pi/pi-ai";
@@ -210,6 +211,15 @@ function soonestCreditExpiryMs(
 	return soonest;
 }
 
+type CodexChatWindow = "5h" | "weekly";
+
+interface CodexChatWindowSnapshot {
+	window: CodexChatWindow;
+	usedFraction: number | undefined;
+	resetsAt: number | undefined;
+	plausibleMs: number;
+}
+
 interface AccountSnapshot {
 	accountKey: string;
 	target: ResetCreditTarget;
@@ -217,12 +227,41 @@ interface AccountSnapshot {
 	active: boolean;
 	/** Undefined when synthesized from live 429 evidence without a report. */
 	availableCount: number | undefined;
-	primaryUsed: number | undefined;
-	primaryResetsAt: number | undefined;
-	weeklyUsed: number | undefined;
-	weeklyResetsAt: number | undefined;
+	windows: CodexChatWindowSnapshot[];
 	limitReached: boolean;
 	creditExpiresAtMs: number | undefined;
+}
+
+function classifyChatWindow(limit: UsageLimit, fallback: CodexChatWindow): CodexChatWindow {
+	const durationMs = limit.window?.durationMs;
+	if (durationMs !== undefined && Number.isFinite(durationMs)) {
+		if (Math.abs(durationMs - 7 * 24 * 3_600_000) <= 60_000) return "weekly";
+		if (Math.abs(durationMs - 5 * 3_600_000) <= 60_000) return "5h";
+	}
+	const windowId = limit.window?.id.toLowerCase();
+	const scopeWindowId = limit.scope.windowId?.toLowerCase();
+	if (windowId === "7d" || scopeWindowId === "7d") return "weekly";
+	if (windowId === "5h" || scopeWindowId === "5h") return "5h";
+	return fallback;
+}
+
+function snapshotChatWindow(limit: UsageLimit, fallback: CodexChatWindow): CodexChatWindowSnapshot {
+	const window = classifyChatWindow(limit, fallback);
+	return {
+		window,
+		usedFraction: limit.amount.usedFraction,
+		resetsAt: limit.window?.resetsAt,
+		plausibleMs: window === "weekly" ? MAX_PLAUSIBLE_WEEKLY_REMAINING_MS : MAX_PLAUSIBLE_PRIMARY_REMAINING_MS,
+	};
+}
+
+function usedFractionForWindow(snapshot: AccountSnapshot, window: CodexChatWindow): number | undefined {
+	let fullest: number | undefined;
+	for (const entry of snapshot.windows) {
+		if (entry.window !== window || entry.usedFraction === undefined) continue;
+		if (fullest === undefined || entry.usedFraction > fullest) fullest = entry.usedFraction;
+	}
+	return fullest;
 }
 
 /**
@@ -285,6 +324,9 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 		}
 		const primary = report.limits.find(l => l.id === "openai-codex:primary");
 		const weekly = report.limits.find(l => l.id === "openai-codex:secondary");
+		const windows: CodexChatWindowSnapshot[] = [];
+		if (primary) windows.push(snapshotChatWindow(primary, "5h"));
+		if (weekly) windows.push(snapshotChatWindow(weekly, "weekly"));
 		if (isActive) activeHasSnapshot = true;
 		snapshots.push({
 			accountKey,
@@ -292,10 +334,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			label: email ?? accountId ?? accountKey,
 			active: isActive,
 			availableCount: available,
-			primaryUsed: primary?.amount.usedFraction,
-			primaryResetsAt: primary?.window?.resetsAt,
-			weeklyUsed: weekly?.amount.usedFraction,
-			weeklyResetsAt: weekly?.window?.resetsAt,
+			windows,
 			limitReached: report.metadata?.limitReached === true,
 			creditExpiresAtMs: soonestCreditExpiryMs(report.resetCredits?.credits, nowMs),
 		});
@@ -333,20 +372,11 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			// `status` (see the Decision-2 trap in the module docs). Either
 			// window qualifies: a banked reset also clears a 5h-only block
 			// (openai/codex#28525).
-			const exhausted: { window: "5h" | "weekly"; resetsAt: number | undefined; plausibleMs: number }[] = [];
-			if (snapshot.primaryUsed !== undefined && snapshot.primaryUsed >= WINDOW_EXHAUSTED_MIN_FRACTION) {
-				exhausted.push({
-					window: "5h",
-					resetsAt: snapshot.primaryResetsAt,
-					plausibleMs: MAX_PLAUSIBLE_PRIMARY_REMAINING_MS,
-				});
-			}
-			if (snapshot.weeklyUsed !== undefined && snapshot.weeklyUsed >= WINDOW_EXHAUSTED_MIN_FRACTION) {
-				exhausted.push({
-					window: "weekly",
-					resetsAt: snapshot.weeklyResetsAt,
-					plausibleMs: MAX_PLAUSIBLE_WEEKLY_REMAINING_MS,
-				});
+			const exhausted: CodexChatWindowSnapshot[] = [];
+			for (const window of snapshot.windows) {
+				if (window.usedFraction !== undefined && window.usedFraction >= WINDOW_EXHAUSTED_MIN_FRACTION) {
+					exhausted.push(window);
+				}
 			}
 			let unblockAtMs: number;
 			let blockedWindows: ("5h" | "weekly")[];
@@ -467,10 +497,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 						label: email ?? accountId ?? accountKey,
 						active: true,
 						availableCount: undefined,
-						primaryUsed: undefined,
-						primaryResetsAt: undefined,
-						weeklyUsed: undefined,
-						weeklyResetsAt: undefined,
+						windows: [],
 						limitReached: true,
 						creditExpiresAtMs: undefined,
 					},
@@ -488,7 +515,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				attemptKey: blockedAttemptKey(best.snapshot.accountKey, best.unblockAtMs),
 				label: best.snapshot.label,
 				availableCount: best.snapshot.availableCount,
-				weeklyUsedFraction: best.snapshot.weeklyUsed,
+				weeklyUsedFraction: usedFractionForWindow(best.snapshot, "weekly"),
 				remainingMs: best.remainingMs,
 				expiresInMs:
 					best.snapshot.creditExpiresAtMs === undefined ? undefined : best.snapshot.creditExpiresAtMs - nowMs,
@@ -510,19 +537,21 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				skip("no-expiring-credit");
 				continue;
 			}
-			// Value = the fuller of the two chat windows a redeem restores. A
-			// 5h-only exhausted account with a light week still gains real quota
-			// (openai/codex#28525); a reset on two mostly-free windows restores
+			// Value = the fullest chat window a redeem restores. A 5h-only
+			// exhausted account with a light week still gains real quota
+			// (openai/codex#28525); a reset on mostly-free windows restores
 			// ~nothing. If usage grows before the credit expires, a later sweep
 			// reconsiders.
-			const primaryUsed = snapshot.primaryUsed ?? 0;
-			const weeklyUsed = snapshot.weeklyUsed ?? 0;
-			const salvageUsedFraction = Math.max(primaryUsed, weeklyUsed);
-			if (salvageUsedFraction < SALVAGE_MIN_USED_FRACTION) {
+			let fullestWindow: CodexChatWindowSnapshot | undefined;
+			for (const window of snapshot.windows) {
+				if ((window.usedFraction ?? 0) > (fullestWindow?.usedFraction ?? 0)) fullestWindow = window;
+			}
+			const salvageUsedFraction = fullestWindow?.usedFraction ?? 0;
+			if (!fullestWindow || salvageUsedFraction < SALVAGE_MIN_USED_FRACTION) {
 				skip("window-mostly-free");
 				continue;
 			}
-			const salvageWindow: "5h" | "weekly" = primaryUsed >= weeklyUsed ? "5h" : "weekly";
+			const salvageWindow = fullestWindow.window;
 			const attemptKey = salvageAttemptKey(snapshot.accountKey, expiresAtMs);
 			if (input.attemptedKeys.has(attemptKey)) {
 				skip("already-attempted");
@@ -544,7 +573,7 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 				attemptKey,
 				label: snapshot.label,
 				availableCount: snapshot.availableCount,
-				weeklyUsedFraction: snapshot.weeklyUsed,
+				weeklyUsedFraction: usedFractionForWindow(snapshot, "weekly"),
 				salvageWindow,
 				salvageUsedFraction,
 				expiresInMs: expiresAtMs - nowMs,

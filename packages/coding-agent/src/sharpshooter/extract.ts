@@ -212,22 +212,24 @@ async function runSharpshooterExtraction(
 	if (!model || session.isDisposed) return;
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
-	const response = await retryTransientCompletion(() =>
-		completeSimple(
-			model,
-			{
-				systemPrompt: [prompt.render(extractSystemTemplate)],
-				messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
-				tools: [recordDeltasTool],
-			},
-			{
-				apiKey: modelRegistry.resolver(model, session.sessionId),
-				sessionId: session.sessionId,
-				maxTokens: 2048,
-				reasoning: clampThinkingLevelForModel(model, Effort.Low),
-				toolChoice: "required",
-			},
-		),
+	const response = await retryTransientCompletion(
+		() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [prompt.render(extractSystemTemplate)],
+					messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+					tools: [recordDeltasTool],
+				},
+				{
+					apiKey: modelRegistry.resolver(model, session.sessionId),
+					sessionId: session.sessionId,
+					maxTokens: 2048,
+					reasoning: clampThinkingLevelForModel(model, Effort.Low),
+					toolChoice: "required",
+				},
+			),
+		{ provider: model.provider },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "Sharpshooter extraction model error");
