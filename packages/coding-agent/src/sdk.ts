@@ -66,6 +66,7 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
+	filterAvailableModelsByEnabledPatterns,
 	formatModelSelectorValue,
 	formatModelString,
 	formatModelStringWithRouting,
@@ -2410,6 +2411,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			await logger.time("resolveModelDiscoveryDeferredRetry", startRuntimeDiscovery);
 			const matchPreferences = getModelMatchPreferences(settings);
 			const disabledProviders = new Set(settings.get("disabledProviders"));
+			const enabledPatterns = isSubagentSession ? (settings.get("enabledModels") ?? []) : [];
+			const scopedRuntimeModels =
+				enabledPatterns.length > 0
+					? filterAvailableModelsByEnabledPatterns(
+							modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider)),
+							enabledPatterns,
+							settings,
+						)
+					: undefined;
 			const runtimeResolved = deferredModelPatterns.some(pattern =>
 				pattern.split(",").some(selector => {
 					const trimmedSelector = selector.trim();
@@ -2429,7 +2439,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// is unreachable, so a match on one likewise must not count: otherwise
 					// a disabled first selector suppresses the discovery refresh an enabled
 					// later selector still needs.
-					return resolved.model !== undefined && !disabledProviders.has(resolved.model.provider);
+					return (
+						resolved.model !== undefined &&
+						!disabledProviders.has(resolved.model.provider) &&
+						(scopedRuntimeModels === undefined ||
+							scopedRuntimeModels.some(
+								candidate =>
+									candidate.provider === resolved.model?.provider && candidate.id === resolved.model?.id,
+							))
+					);
 				}),
 			);
 			if (!runtimeResolved && modelRegistry.getDiscoverableProviders().length > 0) {
@@ -2437,14 +2455,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					modelRegistry.refresh("online-if-uncached"),
 				);
 			}
-			const allEnabledModels =
+			const allEnabledModels = filterAvailableModelsByEnabledPatterns(
 				disabledProviders.size === 0
 					? modelRegistry.getAll()
-					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider));
-			const availableModels =
+					: modelRegistry.getAll().filter(candidate => !disabledProviders.has(candidate.provider)),
+				enabledPatterns,
+				settings,
+			);
+			const availableModels = filterAvailableModelsByEnabledPatterns(
 				disabledProviders.size === 0
 					? modelRegistry.getAvailable()
-					: modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider));
+					: modelRegistry.getAvailable().filter(candidate => !disabledProviders.has(candidate.provider)),
+				enabledPatterns,
+				settings,
+			);
 			const expandedModelPatterns = deferredModelPatterns.flatMap(pattern =>
 				pattern.split(",").flatMap(selector => {
 					const trimmedSelector = selector.trim();

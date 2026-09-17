@@ -145,6 +145,71 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("does not select an out-of-scope subagent model registered after preflight", async () => {
+		// Separate provider so the forbidden selector is a distinct exact model:
+		// with `runtime-provider` alone the fuzzy matcher would rebind the
+		// forbidden `runtime-model` selector onto the allowed
+		// `runtime-fallback-model` and the fixture would prove nothing.
+		const outOfScopeExtension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-blocked-provider", {
+				baseUrl: "https://runtime.example.com/v1",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [
+					{
+						id: "runtime-model",
+						name: "Runtime Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128000,
+						maxTokens: 8192,
+					},
+				],
+			});
+		};
+		const { session, modelFallbackMessage } = await createAgentSession({
+			...buildSessionOptions("runtime-blocked-provider/runtime-model"),
+			extensions: [outOfScopeExtension],
+			taskDepth: 1,
+			settings: Settings.isolated({ enabledModels: ["runtime-provider/runtime-fallback-model"] }),
+			modelPatternAuthFallback: "runtime-blocked-provider/runtime-model",
+		});
+		try {
+			expect(session.model).toBeUndefined();
+			expect(modelFallbackMessage).toContain("not found");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("deferred subagent candidates skip a forbidden model and select an allowed extension model", async () => {
+		const { session } = await createAgentSession({
+			...buildSessionOptions(["runtime-provider/runtime-model", "runtime-provider/runtime-fallback-model"]),
+			taskDepth: 1,
+			settings: Settings.isolated({ enabledModels: ["runtime-provider/runtime-fallback-model"] }),
+		});
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-fallback-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps explicit top-level deferred selectors independent of the model cycling scope", async () => {
+		const { session } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-model"),
+			settings: Settings.isolated({ enabledModels: ["runtime-provider/runtime-fallback-model"] }),
+		});
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("resolves explicit dynamic-only modelPattern from fresh runtime cache", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
@@ -451,73 +516,78 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("advances past a disabled first selector to an enabled discovery-backed model", async () => {
-		// A disabled provider's model already sits in the static catalog, so
-		// resolveCliModel resolves the first selector against the full registry. If
-		// that match short-circuited the deferred discovery refresh, the enabled
-		// second selector (only reachable after a models.yml discovery fetch) would
-		// never be discovered and dispatch would report it as not found.
-		const disabledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!disabledModel) {
-			throw new Error("Expected bundled anthropic model");
-		}
-		const authStorage = createInMemoryAuthStorage();
-		authStoragesToClose.push(authStorage);
-		const modelsPath = path.join(tempDir, "disabled-first-models.yml");
-		await Bun.write(
-			modelsPath,
-			JSON.stringify({
-				providers: {
-					gateway: {
-						baseUrl: "http://127.0.0.1:9995",
-						api: "openai-completions",
-						auth: "none",
-						discovery: { type: "openai-models-list" },
-					},
-				},
-			}),
-		);
-		let modelListCalls = 0;
-		const fetchMock: FetchImpl = async input => {
-			const url = String(input);
-			if (url === "http://127.0.0.1:9995/v1/models") {
-				modelListCalls++;
-				return Response.json({ data: [{ id: "dynamic-model", context_length: 65_536 }] });
+	test.each(["disabled provider", "enabledModels scope"] as const)(
+		"advances past a first selector excluded by %s to an enabled discovery-backed model",
+		async exclusion => {
+			// The first selector resolves against the static catalog, but must not
+			// suppress discovery for an allowed second selector.
+			const disabledModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!disabledModel) {
+				throw new Error("Expected bundled anthropic model");
 			}
-			throw new Error(`Unexpected URL: ${url}`);
-		};
-		const modelRegistry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			const modelsPath = path.join(tempDir, "disabled-first-models.yml");
+			await Bun.write(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						gateway: {
+							baseUrl: "http://127.0.0.1:9995",
+							api: "openai-completions",
+							auth: "none",
+							discovery: { type: "openai-models-list" },
+						},
+					},
+				}),
+			);
+			let modelListCalls = 0;
+			const fetchMock: FetchImpl = async input => {
+				const url = String(input);
+				if (url === "http://127.0.0.1:9995/v1/models") {
+					modelListCalls++;
+					return Response.json({ data: [{ id: "dynamic-model", context_length: 65_536 }] });
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const modelRegistry = new ModelRegistry(authStorage, modelsPath, { fetch: fetchMock });
 
-		const { session, modelFallbackMessage } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			authStorage,
-			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ disabledProviders: [disabledModel.provider] }),
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			rules: [],
-			preloadedCustomToolPaths: [],
-			toolNames: ["read"],
-			modelPattern: [`${disabledModel.provider}/${disabledModel.id}`, "gateway/dynamic-model"],
-		});
+			const { session, modelFallbackMessage } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated(
+					exclusion === "disabled provider"
+						? { disabledProviders: [disabledModel.provider] }
+						: { enabledModels: ["gateway/dynamic-model"] },
+				),
+				taskDepth: exclusion === "enabledModels scope" ? 1 : 0,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read"],
+				modelPattern: [`${disabledModel.provider}/${disabledModel.id}`, "gateway/dynamic-model"],
+			});
 
-		try {
-			expect(modelListCalls).toBeGreaterThan(0);
-			expect(session.model?.provider).toBe("gateway");
-			expect(session.model?.id).toBe("dynamic-model");
-			expect(modelFallbackMessage).toBeUndefined();
-		} finally {
-			await session.dispose();
-		}
-	});
+			try {
+				expect(modelListCalls).toBeGreaterThan(0);
+				expect(session.model?.provider).toBe("gateway");
+				expect(session.model?.id).toBe("dynamic-model");
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
 
 	test("uses auth fallback when deferred subagent modelPattern resolves without working credentials", async () => {
 		const parentModel = getBundledModel("anthropic", "claude-sonnet-4-5");
