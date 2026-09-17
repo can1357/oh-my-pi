@@ -24,13 +24,8 @@ import {
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveLocalRoot } from "../internal-urls";
 import { cachedVaultRoots, isVaultEnabled } from "../internal-urls/vault-protocol";
-import {
-	createLspWritethrough,
-	type FileDiagnosticsResult,
-	flushLspWritethroughBatch,
-	type WritethroughCallback,
-	writethroughNoop,
-} from "../lsp";
+import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
+import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
@@ -51,12 +46,14 @@ import {
 import { outputMeta } from "../tools/output-meta";
 import { resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { planLocalProtocolOptions } from "../tools/plan-mode-guard";
-import { ToolError } from "../tools/tool-errors";
-import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import { normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
-import { type EditToolDetails, type EditToolPerFileResult, getLspBatchRequest, type Operation } from "./renderer";
+import { getLspBatchRequest } from "../lsp/batch";
+import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	type ApplyPatchParams,
 	applyPatchSchema,
@@ -72,10 +69,17 @@ import {
 } from "./schemas";
 import { getEditStore } from "./store";
 
-export * from "./renderer";
+export type {
+	EditRenderContext,
+	EditToolDetails,
+	EditToolPerFileResult,
+	Operation,
+	PerFileDiffPreview,
+} from "@oh-my-pi/pi-tui/tools/edit";
 export * from "./schemas";
 export * from "./store";
-export { DEFAULT_EDIT_MODE, type EditMode, normalizeEditMode } from "../utils/edit-mode";
+export { DEFAULT_EDIT_MODE, normalizeEditMode } from "../utils/edit-mode";
+export { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 
 type TInput =
 	| typeof replaceEditSchema

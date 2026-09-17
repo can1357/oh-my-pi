@@ -1,7 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentOutput } from "../task/types";
-import type { OutputMeta } from "../tools/output-meta";
+import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -420,7 +420,6 @@ export class AsyncJobManager {
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
 		job.abortController.abort();
-		this.#scheduleEviction(id);
 		return true;
 	}
 
@@ -586,7 +585,6 @@ export class AsyncJobManager {
 		for (const job of this.getRunningJobs(filter)) {
 			job.status = "cancelled";
 			job.abortController.abort(reason);
-			this.#scheduleEviction(job.id);
 		}
 	}
 

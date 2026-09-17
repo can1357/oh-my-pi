@@ -327,6 +327,15 @@ mod platform {
 	}
 }
 
+/// Translate libproc's PID count into a padded allocation and its C byte size.
+#[cfg(any(target_os = "macos", test))]
+fn macos_pid_buffer_size(reported: i32) -> Option<(usize, i32)> {
+	let count = usize::try_from(reported).ok().filter(|count| *count > 0)?;
+	let capacity = count.saturating_mul(4).max(2048);
+	let bytes = i32::try_from(capacity.checked_mul(size_of::<i32>())?).ok()?;
+	Some((capacity, bytes))
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
 	use std::{
@@ -501,28 +510,25 @@ mod platform {
 
 	/// Snapshot every pid currently visible to `proc_listallpids`. macOS
 	/// silently truncates the second call to the supplied buffer size even
-	/// when the sizing query reports more bytes available, so the buffer is
+	/// when the sizing query reports more PIDs available, so the buffer is
 	/// padded well beyond the reported count.
 	fn snapshot_all_pids() -> Vec<i32> {
 		// SAFETY: Passing a null buffer with size 0 is the documented libproc
-		// query form for obtaining the byte count needed for all PIDs; libproc
+		// query form for obtaining the PID count; libproc
 		// does not dereference the null pointer in this mode.
-		let bytes = unsafe { proc_listallpids(ptr::null_mut(), 0) };
-		if bytes <= 0 {
+		let reported = unsafe { proc_listallpids(ptr::null_mut(), 0) };
+		let Some((cap, byte_capacity)) = super::macos_pid_buffer_size(reported) else {
 			return Vec::new();
-		}
-		let count = (bytes as usize) / size_of::<i32>();
-		let cap = count.saturating_mul(4).max(2048);
+		};
 		let mut buffer = vec![0i32; cap];
 		// SAFETY: `buffer` is valid for `buffer.len() * size_of::<i32>()` bytes
 		// and is properly aligned for `i32`; libproc writes at most the
 		// supplied size.
-		let actual =
-			unsafe { proc_listallpids(buffer.as_mut_ptr(), (buffer.len() * size_of::<i32>()) as i32) };
+		let actual = unsafe { proc_listallpids(buffer.as_mut_ptr(), byte_capacity) };
 		if actual <= 0 {
 			return Vec::new();
 		}
-		let pid_count = ((actual as usize) / size_of::<i32>()).min(buffer.len());
+		let pid_count = (actual as usize).min(buffer.len());
 		buffer.truncate(pid_count);
 		buffer
 	}
@@ -1927,6 +1933,17 @@ const fn platform_process_group_alive(_pgid: i32) -> bool {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn macos_pid_buffer_size_preserves_count_and_checks_byte_capacity() {
+		let count = 4097;
+		let (capacity, bytes) = macos_pid_buffer_size(count).expect("valid PID count");
+		assert!(capacity > usize::try_from(count).unwrap(), "leave room for new processes");
+		assert_eq!(usize::try_from(bytes).unwrap(), capacity * size_of::<i32>());
+		assert_eq!(macos_pid_buffer_size(i32::MAX), None, "byte size must fit the C ABI");
+		assert_eq!(macos_pid_buffer_size(0), None);
+		assert_eq!(macos_pid_buffer_size(-1), None);
+	}
 
 	/// The harness pid must be the only protected pid. Including its recorded
 	/// parent would be unsafe on Windows: that stale numeric pid can have been

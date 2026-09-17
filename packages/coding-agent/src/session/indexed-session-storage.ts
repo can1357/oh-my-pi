@@ -356,6 +356,10 @@ export class IndexedSessionStorage implements SessionStorage {
 		await this.#awaitPath(dst);
 		const entry = this.#index.get(src);
 		if (!entry) throw enoent(src);
+		if (src === dst) {
+			await this.#enqueuePath(src, () => this.#backend.move(src, dst, entry.mtimeMs), { trackDrain: false });
+			return;
+		}
 		const dstPrevious = this.#index.get(dst);
 		this.#index.delete(src);
 		this.#index.set(dst, { ...entry });

@@ -1,3 +1,4 @@
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { beforeAll, describe, expect, test } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -5,12 +6,14 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildBrowserItems,
+	buildSearchAffinity,
+	rankModelItems,
 	ModelBrowser,
 	type RoleAssignments,
 	resolveRoleAssignments,
 	sortModelItems,
-} from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+} from "@oh-my-pi/pi-tui/overlays/model-browser";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
 /** Optional presentation metadata a catalog or discovery source may attach. */
 type NativeMetadata = Pick<Model, "description" | "isNew" | "isBeta" | "isRecommended" | "int" | "tps"> &
@@ -38,7 +41,9 @@ function makeBrowser(
 	mruOrder: string[],
 	options: { roles?: RoleAssignments; providerOrder?: string[] } = {},
 ): ModelBrowser {
-	const browser = new ModelBrowser(Settings.isolated({ modelProviderOrder: options.providerOrder ?? [] }));
+	const browser = new ModelBrowser(
+		createModelBrowserSource(Settings.isolated({ modelProviderOrder: options.providerOrder ?? [] })),
+	);
 	const items = buildBrowserItems(models);
 	sortModelItems(items, { mruOrder });
 	browser.setRoles(options.roles ?? {});
@@ -58,7 +63,11 @@ describe("resolveRoleAssignments", () => {
 			},
 		});
 
-		const roles = resolveRoleAssignments(settings, [smol, priorityHead], [smol, priorityHead]);
+		const roles = resolveRoleAssignments(
+			createModelBrowserSource(settings),
+			[smol, priorityHead],
+			[smol, priorityHead],
+		);
 
 		expect(roles.smol?.model).toBe(smol);
 		expect(roles.tiny?.model).toBe(smol);
@@ -75,7 +84,11 @@ describe("resolveRoleAssignments", () => {
 			},
 		});
 
-		const roles = resolveRoleAssignments(settings, [slow, priorityHead], [slow, priorityHead]);
+		const roles = resolveRoleAssignments(
+			createModelBrowserSource(settings),
+			[slow, priorityHead],
+			[slow, priorityHead],
+		);
 
 		expect(roles.slow?.model).toBe(slow);
 		expect(roles.advisor?.model).toBe(slow);
@@ -84,6 +97,25 @@ describe("resolveRoleAssignments", () => {
 });
 
 describe("ModelBrowser search ranking", () => {
+	test("headless candidates preserve picker relevance and affinity ordering", () => {
+		const models = [makeModel("a", "example-2"), makeModel("b", "example-2"), makeModel("a", "other")];
+		const roles: RoleAssignments = {};
+		const mruOrder = ["b/example-2", "a/example-2"];
+		const providerOrder = ["a"];
+		const browser = makeBrowser(models, mruOrder, { roles, providerOrder });
+		const query = "example";
+		browser.setQuery(query);
+		const items = buildBrowserItems(models);
+		const ranked = rankModelItems(query, items, {
+			roles,
+			mruOrder,
+			affinity: buildSearchAffinity(providerOrder, roles, mruOrder),
+		});
+		expect(ranked.map(item => item.selector)).toEqual(["b/example-2", "a/example-2"]);
+		expect(browser.getSelected()?.selector).toBe(ranked[0].selector);
+		expect(ranked.length).toBe(browser.visibleCount);
+	});
+
 	test("an exact query match outranks the MRU model", () => {
 		// Regression: with gpt-5.6-sol as the active (MRU) model, typing
 		// "gpt-5.5" must select gpt-5.5, not keep the MRU pinned on top.
@@ -243,7 +275,7 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	function makePerfBrowser(): ModelBrowser {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 		browser.setPerfStats(new Map([["openai/gpt-5", { samples: 12, tps: 118.4, ttftMs: 930 }]]));
 		return browser;
@@ -270,7 +302,7 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	test("catalog metrics render an intelligence tab and estimated TPS when unmeasured", () => {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
 
 		const lines = renderPlain(browser, 120);
@@ -280,7 +312,7 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	test("measured TPS takes precedence over the catalog estimate", () => {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5", { int: 45.2, tps: 82.5 })]));
 		browser.setPerfStats(new Map([["openai/gpt-5", { samples: 12, tps: 118.4, ttftMs: 930 }]]));
 
@@ -290,7 +322,7 @@ describe("ModelBrowser perf display", () => {
 	});
 
 	test("models without measurements or catalog metrics render no metric cells", () => {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([makeModel("openai", "gpt-5")]));
 
 		const row = renderPlain(browser, 120)[2];
@@ -305,7 +337,7 @@ describe("ModelBrowser native model metadata", () => {
 	});
 
 	function renderDetail(model: Model): string {
-		const browser = new ModelBrowser(Settings.isolated({}));
+		const browser = new ModelBrowser(createModelBrowserSource(Settings.isolated({})));
 		browser.setItems(buildBrowserItems([model]));
 		const lines = browser.render(160).map(line => Bun.stripANSI(line));
 		return lines[lines.length - 2] as string;

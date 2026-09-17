@@ -2,6 +2,44 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added composable forms, menus, split layouts, disclosures, tree views, tool cards, and data widgets for terminal extensions and standalone apps.
+- Added the full coding-agent terminal UI to this package: theme runtime (`@oh-my-pi/pi-tui/theme`), render primitives (`/render`), shared chrome (`/chrome`), tool renderers and registry (`/tools`), chat transcript components (`/chat/*`), overlays and hubs (`/overlays/*`), status line (`/status-line`), composer and autocomplete (`/prompt/*`), setup wizard (`/setup/*`), and standalone apps (`/apps/*`: git TUI, process top, debug viewers, boards, pickers). Components take host capabilities through structural interfaces and setters instead of reading application settings.
+- Added image input validation and automatic conversion for unsupported formats
+- Added MCP Add Wizard for streamlined server configuration
+- Added support for video preview rendering in chat
+- Added interactive task list renderer for managing subtasks
+- Added `autoresearch` tool renderer for tracking experiments
+- Enhanced merge conflict rendering with side-by-side diff support
+- Improved output rendering for GitHub workflow jobs and runs
+- Added performance improvements for long-running bash streaming output
+- Added the `dark-celestial` built-in theme: a twilight dark palette with pink/coral accents, purple keywords, cyan functions, and peach strings.
+
+## [18.2.4] - 2026-09-17
+
+### Fixed
+
+- Fixed inline images disappearing or temporarily blanking when resizing the terminal in kitty and Ghostty.
+
+## [18.2.3] - 2026-09-17
+
+### Added
+
+- Editors support whitespace-delimited `^` mention autocomplete and expose registered atoms for host-defined chip rendering.
+
+### Changed
+
+- `fuzzyRank` accepts readonly candidate arrays without copying them.
+
+### Fixed
+
+- Masked inputs no longer expose their text in diagnostic previews.
+
+### Removed
+
+- Removed the internal `fastTailSplices` and `resetFastTailSplices` Markdown instrumentation exports.
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

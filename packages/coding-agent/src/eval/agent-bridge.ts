@@ -15,13 +15,11 @@ import {
 	type StructuredSubagentResult,
 	type StructuredSubagentSchemaMode,
 } from "../task/structured-subagent";
-import type { AgentProgress, SingleResult } from "../task/types";
-import type { NestedRepoPatch } from "../task/worktree";
+import type { AgentProgress, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { JsStatusEvent } from "./js/shared/types";
-// Import review tools for side effects (registers subagent tool handlers).
-import "../tools/review";
 
 /** Synthetic bridge name reserved for the `agent()` helper across both runtimes. */
 export const EVAL_AGENT_BRIDGE_NAME = "__agent__";

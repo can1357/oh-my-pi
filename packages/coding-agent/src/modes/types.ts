@@ -5,7 +5,7 @@ import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } fro
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
-import type { KeybindingsManager } from "../config/keybindings";
+import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
@@ -27,26 +27,26 @@ import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "../tools";
 import type { EventBus } from "../utils/event-bus";
-import type { AssistantMessageComponent } from "./components/assistant-message";
-import type { BashExecutionComponent } from "./components/bash-execution";
-import type { CustomEditor } from "./components/custom-editor";
-import type { EvalExecutionComponent } from "./components/eval-execution";
-import type { HookEditorComponent } from "./components/hook-editor";
-import type { HookInputComponent } from "./components/hook-input";
-import type { HookSelectorComponent, HookSelectorOptions } from "./components/hook-selector";
-import type { ServedModelTracker } from "./components/served-model-marker";
-import type { StatusLineComponent } from "./components/status-line";
-import type { ToolExecutionHandle } from "./components/tool-execution";
-import type { TranscriptContainer } from "./components/transcript-container";
-import type { RecentSession } from "./components/welcome";
+import type { TokenRateMeter } from "../utils/token-rate";
+import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
+import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
+import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
+import type { HookSelectorComponent, HookSelectorOptions } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import type { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
+import type { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import type { ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import type { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import type { RecentSession } from "@oh-my-pi/pi-tui/prompt/welcome";
 import type { EventController } from "./controllers/event-controller";
-import type { LoopConditionConfig } from "./loop-condition";
-import type { LoopLimitRuntime } from "./loop-limit";
+import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import type { OAuthManualInputManager } from "./oauth-manual-input";
-import type { Theme } from "./theme/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 
 export type CompactionQueuedMessage = {
 	text: string;
@@ -217,6 +217,8 @@ export interface InteractiveModeContext {
 	 * thinking content.
 	 */
 	readonly effectiveHideThinkingBlock: boolean;
+	readonly assistantImagesVisible: boolean;
+	resolveAssistantMessageLinks(texts: readonly string[]): Promise<ReadonlyMap<string, string>>;
 	/** Whether this visible session has produced thinking content the user can reveal. */
 	readonly hasDisplayableThinkingContent: boolean;
 	/** Record a message whose thinking content makes Ctrl+T meaningful even at thinking level "off"; returns true on first observation. */
@@ -245,6 +247,8 @@ export interface InteractiveModeContext {
 	 * Replaced by `renderSessionContext` on every rebuild/session switch.
 	 */
 	servedModelTracker: ServedModelTracker;
+	/** Live gen tok/s for the working row; fed by streamed deltas, reset per run. */
+	tokenRate: TokenRateMeter;
 	loadingAnimation: Loader | undefined;
 	autoCompactionLoader: Loader | undefined;
 	retryLoader: Loader | undefined;
