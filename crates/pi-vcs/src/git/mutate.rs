@@ -440,6 +440,12 @@ impl GitRepo {
 			)
 			.map_err(|e| Error::backend("git clean", e))?;
 
+		// Collect the deletion set before touching the tree. gix's walk is live, so
+		// deleting under it makes its next stat land on a vanished path; some
+		// platforms surface that as "Could not obtain directory entry" instead of
+		// continuing the walk. Two phases — collect, then delete — keep the walk
+		// intact and match how `git clean` itself operates.
+		let mut deletions = Vec::new();
 		for item in iter {
 			let item = item.map_err(|e| Error::backend("git clean", e))?;
 			let gix::status::index_worktree::Item::DirectoryContents { entry, .. } = item else {
@@ -459,9 +465,25 @@ impl GitRepo {
 			if !wanted {
 				continue;
 			}
-			let full = self.root().join(entry.rela_path.to_str_lossy().as_ref());
-			remove_existing(&full)?;
-			prune_empty_parents(self.root(), full.parent(), &paths)?;
+			deletions.push(entry.rela_path.clone());
+		}
+
+		// Deepest paths first so directory entries never outlive the contents that
+		// would keep them non-empty.
+		deletions.sort_unstable_by_key(|rel| rel.bytes().filter(|b| *b == b'/').count());
+		deletions.reverse();
+		for rel in &deletions {
+			remove_existing(&self.root().join(rel.to_str_lossy().as_ref()))?;
+		}
+		// Prune now-empty ancestors while the walk is done and nothing else can
+		// repopulate them. Nested repositories keep their parent non-empty, so they
+		// survive exactly as before.
+		for rel in &deletions {
+			prune_empty_parents(
+				self.root(),
+				self.root().join(rel.to_str_lossy().as_ref()).parent(),
+				&paths,
+			)?;
 		}
 		Ok(())
 	}
