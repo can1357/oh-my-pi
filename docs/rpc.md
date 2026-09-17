@@ -515,6 +515,7 @@ Extension runner errors are emitted separately as:
   type: "agent_end";
   messages: AgentMessage[];
   isTerminal?: boolean;
+  requestId?: string;
 }
 ```
 
@@ -522,6 +523,11 @@ Extension runner errors are emitted separately as:
 so the session will resume before its true final settle. Treat an `agent_end` as
 run completion only when `isTerminal !== false`; the field is optional so frames
 from older runtimes, where it is absent, remain terminal-compatible.
+
+For a direct `prompt` request with an `id`, `requestId` carries that same value on every root
+`agent_end` belonging to the run. The identity remains attached across nonterminal settles and
+queued continuations until the final terminal event. Prompts explicitly queued with
+`streamingBehavior` do not replace the active run's request identity.
 
 ### Available commands
 

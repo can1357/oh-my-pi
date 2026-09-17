@@ -638,6 +638,23 @@ describe("Agent", () => {
 		expect(JSON.stringify(replayedMessages)).not.toContain("I can't assist");
 	});
 
+	it("copies the prompt request id to the terminal event", async () => {
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const events: AgentEvent[] = [];
+		const unsubscribe = agent.subscribe(event => events.push(event));
+
+		await agent.prompt("trigger", { requestId: "rpc-prompt-1" });
+		unsubscribe();
+
+		expect(events.find(event => event.type === "agent_end")).toEqual(
+			expect.objectContaining({ type: "agent_end", requestId: "rpc-prompt-1" }),
+		);
+	});
+
 	it("prompt() emits assistant error lifecycle for Anthropic output-blocked stream errors before assistant start", async () => {
 		const mock = createMockModel({ responses: [] });
 		const errorText = "Output blocked by content filtering policy";

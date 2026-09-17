@@ -246,18 +246,22 @@ describe("RPC frame encoding", () => {
 		expect(decoded).toEqual(frame);
 	});
 
-	it("preserves terminal message counts above the protocol v2 ceiling", () => {
+	it("preserves terminal identity and message counts above the protocol v2 ceiling", () => {
 		const encoder = new RpcFrameEncoder();
 		encoder.setProtocolVersion(2);
 		const encoded = encoder.encode({
 			type: "agent_end",
+			requestId: "prompt-1",
 			messages: [{ role: "assistant", content: "😀".repeat(Math.ceil(MAX_RPC_REASSEMBLED_BYTES / 4)) }],
+			isTerminal: true,
 		});
 
 		expect(decode(encoded)).toEqual({
 			type: "agent_end",
+			requestId: "prompt-1",
 			messages: [],
 			messageCount: 1,
+			isTerminal: true,
 		});
 	});
 

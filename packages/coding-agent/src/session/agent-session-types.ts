@@ -354,6 +354,8 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/** Opaque identity copied to the terminal event for this prompt. */
+	requestId?: string;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled

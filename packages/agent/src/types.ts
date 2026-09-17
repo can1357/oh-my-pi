@@ -173,6 +173,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Used by providers that support session-based caching (e.g., OpenAI Codex).
 	 */
 	sessionId?: string;
+	/** Opaque caller request identity copied to this run's terminal event. */
+	requestId?: string;
 
 	/** Absolute wall-clock deadline in Unix epoch milliseconds. */
 	deadline?: number;
@@ -1124,6 +1126,8 @@ export type AgentEvent =
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
+			/** Opaque identity of the request that started this run. */
+			requestId?: string;
 			/** Present iff `AgentTelemetryConfig` was supplied on this run. */
 			telemetry?: AgentRunSummary;
 			coverage?: AgentRunCoverage;

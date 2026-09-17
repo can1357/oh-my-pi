@@ -222,6 +222,52 @@ describe("AgentSession queued steer delivery", () => {
 		expect(hostSteer.attribution).toBe("agent");
 	});
 
+	it("preserves request identity across a nonterminal settle continuation", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ responses: [{ content: ["first"] }, { content: ["second"] }] });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+		});
+		let injectStaleTerminal = true;
+		let queueContinuation = true;
+		agent.subscribe(event => {
+			if (event.type === "agent_start" && injectStaleTerminal) {
+				injectStaleTerminal = false;
+				agent.emitExternalEvent({ type: "agent_end", messages: [], requestId: "rpc-prompt-old" });
+				return;
+			}
+			if (event.type !== "agent_end" || event.requestId === "rpc-prompt-old" || !queueContinuation) return;
+			queueContinuation = false;
+			agent.steer({
+				role: "user",
+				content: [{ type: "text", text: "continue" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			});
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		const terminalEvents: Array<{ isTerminal?: boolean; requestId?: string }> = [];
+		const finalTerminal = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type !== "agent_end") return;
+			terminalEvents.push(event);
+			if (event.requestId === "rpc-prompt-1" && event.isTerminal !== false) finalTerminal.resolve();
+		});
+
+		await session.prompt("start", { requestId: "rpc-prompt-1" });
+		await finalTerminal.promise;
+
+		expect(terminalEvents).toEqual([
+			expect.objectContaining({ requestId: "rpc-prompt-old" }),
+			expect.objectContaining({ isTerminal: false, requestId: "rpc-prompt-1" }),
+			expect.objectContaining({ requestId: "rpc-prompt-1" }),
+		]);
+	});
+
 	it("drains a steer stranded in the agent queue when the session settles", async () => {
 		const { session, sessionManager, mock } = await createSession([
 			{ content: ["host answer"] },

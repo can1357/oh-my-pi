@@ -1215,7 +1215,7 @@ export async function runRpcMode(
 					if ("prompt" in builtinResult) {
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images, requestId: id }),
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
@@ -1238,6 +1238,7 @@ export async function runRpcMode(
 						session.prompt(command.message, {
 							images: command.images,
 							streamingBehavior: command.streamingBehavior,
+							requestId: command.streamingBehavior === undefined ? id : undefined,
 						}),
 					output,
 					onError: promptError => output(error(id, "prompt", promptError.message)),
