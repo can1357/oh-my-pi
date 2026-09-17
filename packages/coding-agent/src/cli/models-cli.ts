@@ -16,15 +16,22 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import * as readline from "node:readline/promises";
 import type { ConfigError } from "../config/config-file";
 import { ModelRegistry } from "../config/model-registry";
+import {
+	addCustomOpenAIProvider,
+	probeOpenAIEndpoint,
+	sanitizeBaseUrl,
+	validateBaseUrl,
+	validateProviderId,
+} from "../config/models-config-writer";
 import { Settings } from "../config/settings";
 import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
-
-export type ModelsAction = "ls" | "find" | "refresh";
+export type ModelsAction = "ls" | "find" | "refresh" | "add";
 
 export interface ModelsCommandArgs {
 	action: ModelsAction;
@@ -38,6 +45,18 @@ export interface ModelsCommandArgs {
 		noExtensions?: boolean;
 		/** Extra `config.yml` overlays to apply for this invocation. */
 		config?: string[];
+		provider?: string;
+		baseUrl?: string;
+		apiKey?: string;
+		auth?: string;
+		api?: string;
+		model?: string;
+		modelName?: string;
+		contextWindow?: number;
+		discovery?: boolean;
+		disableStrictTools?: boolean;
+		test?: boolean;
+		configPath?: string;
 	};
 }
 
@@ -51,6 +70,7 @@ const KNOWN_ACTIONS: Record<string, ModelsAction> = {
 	list: "ls",
 	find: "find",
 	refresh: "refresh",
+	add: "add",
 };
 
 /** Resolve the two positional args into an action + filter (provider names fall through to `ls`). */
@@ -363,6 +383,11 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 	const { action, pattern } = command;
 	const json = command.flags.json ?? false;
 
+	if (action === "add") {
+		await handleAddModelAction(command);
+		return;
+	}
+
 	if (action === "find" && (!pattern || pattern.trim().length === 0)) {
 		process.stderr.write("`omp models find` requires a search substring, e.g. `omp models find minimax`\n");
 		process.exitCode = 1;
@@ -397,5 +422,257 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 		});
 	} finally {
 		authStorage.close();
+	}
+}
+/**
+ * Handle `omp models add` action: add custom OpenAI-compatible provider and model
+ * either script-driven via CLI flags or interactively via terminal readline prompt.
+ */
+export async function handleAddModelAction(command: ModelsCommandArgs): Promise<void> {
+	const flags = command.flags;
+	const json = flags.json ?? false;
+
+	const provider = flags.provider?.trim() || command.pattern?.trim();
+	const baseUrl = flags.baseUrl?.trim();
+	const hasFlagParams = Boolean(provider || baseUrl || flags.model || flags.discovery || flags.apiKey);
+
+	if (hasFlagParams) {
+		if (!provider) {
+			const msg = "Missing required parameter: provider identifier (use --provider <id> or specify as argument)";
+			if (json) {
+				process.stdout.write(JSON.stringify({ error: msg }, null, 2) + "\n");
+			} else {
+				process.stderr.write(chalk.red(`Error: ${msg}\n`));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		const providerError = validateProviderId(provider);
+		if (providerError) {
+			if (json) {
+				process.stdout.write(JSON.stringify({ error: providerError }, null, 2) + "\n");
+			} else {
+				process.stderr.write(chalk.red(`Error: ${providerError}\n`));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		if (!baseUrl) {
+			const msg = "Missing required flag: --base-url <url>";
+			if (json) {
+				process.stdout.write(JSON.stringify({ error: msg }, null, 2) + "\n");
+			} else {
+				process.stderr.write(chalk.red(`Error: ${msg}\n`));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		const urlError = validateBaseUrl(baseUrl);
+		if (urlError) {
+			if (json) {
+				process.stdout.write(JSON.stringify({ error: urlError }, null, 2) + "\n");
+			} else {
+				process.stderr.write(chalk.red(`Error: ${urlError}\n`));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		if (!flags.model && !flags.discovery) {
+			const msg = "Specify either --model <id> for a manual model definition or --discovery for automatic discovery";
+			if (json) {
+				process.stdout.write(JSON.stringify({ error: msg }, null, 2) + "\n");
+			} else {
+				process.stderr.write(chalk.red(`Error: ${msg}\n`));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		const authMode = (flags.auth as "apiKey" | "none" | undefined) ?? (flags.apiKey ? "apiKey" : "none");
+		if (authMode === "apiKey" && !flags.apiKey) {
+			const msg = "API key is required when auth mode is apiKey. Provide --api-key <key>";
+			if (json) {
+				process.stdout.write(JSON.stringify({ error: msg }, null, 2) + "\n");
+			} else {
+				process.stderr.write(chalk.red(`Error: ${msg}\n`));
+			}
+			process.exitCode = 1;
+			return;
+		}
+
+		const api = (flags.api as "openai-completions" | "openai-responses" | undefined) ?? "openai-completions";
+
+		if (flags.test) {
+			if (!json && process.stderr.isTTY) {
+				process.stderr.write(`Testing connection to ${baseUrl}... `);
+			}
+			const probeResult = await probeOpenAIEndpoint(baseUrl, flags.apiKey);
+			if (!probeResult.ok) {
+				const msg = `Connection check failed: ${probeResult.error}`;
+				if (json) {
+					process.stdout.write(JSON.stringify({ error: msg }, null, 2) + "\n");
+				} else {
+					process.stderr.write(chalk.red(`\nError: ${msg}\n`));
+				}
+				process.exitCode = 1;
+				return;
+			}
+			if (!json && process.stderr.isTTY) {
+				process.stderr.write(chalk.green(`OK (${probeResult.models.length} models detected)\n`));
+			}
+		}
+
+		try {
+			const addResult = await addCustomOpenAIProvider(
+				{
+					provider,
+					baseUrl,
+					apiKey: flags.apiKey,
+					auth: authMode,
+					api,
+					discovery: flags.discovery,
+					disableStrictTools: flags.disableStrictTools ?? true,
+					model: flags.model
+						? {
+								id: flags.model,
+								name: flags.modelName || flags.model,
+								contextWindow: flags.contextWindow,
+							}
+						: undefined,
+				},
+				flags.configPath,
+			);
+			if (json) {
+				process.stdout.write(JSON.stringify(addResult, null, 2) + "\n");
+			} else {
+				process.stdout.write(chalk.green(`✓ Added custom provider "${addResult.provider}" to ${addResult.filePath}\n`));
+				if (addResult.modelId) {
+					process.stdout.write(`  Model: ${addResult.provider}/${addResult.modelId} (supportsTools: true)\n`);
+					process.stdout.write(`  Switch in session: /model ${addResult.provider}/${addResult.modelId}\n`);
+				} else {
+					process.stdout.write(`  Auto-discovery enabled: ${addResult.provider}/*\n`);
+					process.stdout.write(`  List models: omp models ${addResult.provider}\n`);
+				}
+			}
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			if (json) {
+				process.stdout.write(JSON.stringify({ error: msg }, null, 2) + "\n");
+			} else {
+				process.stderr.write(chalk.red(`Error: ${msg}\n`));
+			}
+			process.exitCode = 1;
+		}
+		return;
+	}
+
+	if (!process.stdin.isTTY) {
+		const msg = "Missing required parameters. Usage: omp models add --provider <id> --base-url <url> (--model <id> | --discovery)";
+		if (json) {
+			process.stdout.write(JSON.stringify({ error: msg }, null, 2) + "\n");
+		} else {
+			process.stderr.write(chalk.red(`Error: ${msg}\n`));
+		}
+		process.exitCode = 1;
+		return;
+	}
+
+	const rl = readline.createInterface({
+		input: process.stdin,
+		output: process.stdout,
+	});
+
+	try {
+		process.stdout.write(chalk.bold("\nAdd Custom OpenAI Provider\n\n"));
+
+		let inputProvider = "";
+		while (!inputProvider) {
+			const answer = (await rl.question("Provider identifier (e.g. my-vllm, deepseek-local): ")).trim();
+			const err = validateProviderId(answer);
+			if (err) {
+				process.stdout.write(chalk.red(`  ${err}\n`));
+			} else {
+				inputProvider = answer;
+			}
+		}
+
+		let inputBaseUrl = "";
+		while (!inputBaseUrl) {
+			const answer = (await rl.question("Endpoint Base URL [http://localhost:8000/v1]: ")).trim() || "http://localhost:8000/v1";
+			const err = validateBaseUrl(answer);
+			if (err) {
+				process.stdout.write(chalk.red(`  ${err}\n`));
+			} else {
+				inputBaseUrl = sanitizeBaseUrl(answer);
+			}
+		}
+
+		const authAnswer = (await rl.question("Authentication mode (none/apiKey) [none]: ")).trim().toLowerCase();
+		const authMode: "apiKey" | "none" = authAnswer === "apikey" ? "apiKey" : "none";
+
+		let apiKey: string | undefined;
+		if (authMode === "apiKey") {
+			apiKey = (await rl.question("API Key: ")).trim();
+		}
+
+		const modeAnswer = (await rl.question("Model mode (discovery/manual) [discovery]: ")).trim().toLowerCase();
+		const isDiscovery = modeAnswer !== "manual";
+
+		let manualModel: { id: string; name?: string; contextWindow?: number } | undefined;
+		if (!isDiscovery) {
+			let modelId = "";
+			while (!modelId) {
+				modelId = (await rl.question("Model identifier (e.g. llama-3-8b): ")).trim();
+				if (!modelId) process.stdout.write(chalk.red("  Model ID cannot be empty\n"));
+			}
+			const modelName = (await rl.question(`Display name [${modelId}]: `)).trim() || modelId;
+			const ctxWinAnswer = (await rl.question("Context window tokens [128000]: ")).trim();
+			const contextWindow = ctxWinAnswer ? Number.parseInt(ctxWinAnswer, 10) || 128000 : 128000;
+			manualModel = { id: modelId, name: modelName, contextWindow };
+		}
+
+		process.stdout.write(`\nTesting connection to ${inputBaseUrl}... `);
+		const probe = await probeOpenAIEndpoint(inputBaseUrl, apiKey);
+		if (probe.ok) {
+			process.stdout.write(chalk.green(`OK (${probe.models.length} models detected)\n`));
+			if (probe.models.length > 0) {
+				process.stdout.write(chalk.dim(`Detected: ${probe.models.slice(0, 5).join(", ")}${probe.models.length > 5 ? "..." : ""}\n`));
+			}
+		} else {
+			process.stdout.write(chalk.yellow(`Warning: ${probe.error}\n`));
+			const proceed = (await rl.question("Save anyway? (y/N): ")).trim().toLowerCase();
+			if (proceed !== "y" && proceed !== "yes") {
+				process.stdout.write("Aborted.\n");
+				return;
+			}
+		}
+		const addResult = await addCustomOpenAIProvider(
+			{
+				provider: inputProvider,
+				baseUrl: inputBaseUrl,
+				apiKey,
+				auth: authMode,
+				api: "openai-completions",
+				discovery: isDiscovery,
+				disableStrictTools: true,
+				model: manualModel,
+			},
+			flags.configPath,
+		);
+
+		process.stdout.write(chalk.green(`\n✓ Added custom provider "${addResult.provider}" to ${addResult.filePath}\n`));
+		if (addResult.modelId) {
+			process.stdout.write(`  Model: ${addResult.provider}/${addResult.modelId} (supportsTools: true)\n`);
+			process.stdout.write(`  Switch in session: /model ${addResult.provider}/${addResult.modelId}\n`);
+		} else {
+			process.stdout.write(`  Auto-discovery enabled: ${addResult.provider}/*\n`);
+			process.stdout.write(`  List models: omp models ${addResult.provider}\n`);
+		}
+	} finally {
+		rl.close();
 	}
 }

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/model add` interactive TUI wizard and `omp models add` CLI command to add custom OpenAI-compatible models (vLLM, Ollama, LM Studio, proxies) with full tool calling and MCP support enabled by default.
+
 ### Fixed
 
 - Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
