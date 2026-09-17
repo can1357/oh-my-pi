@@ -153,6 +153,22 @@
 	computer.close = async () => {
 		await invoke("close", {});
 	};
+	computer.candidatesFromElements = elements => {
+		if (!Array.isArray(elements)) {
+			throw new TypeError("computer.candidatesFromElements() expects an array");
+		}
+		return elements.map(element => {
+			const label = [element?.title, element?.description, element?.role, element?.ref]
+				.map(part => (typeof part === "string" ? part.trim() : ""))
+				.find(Boolean);
+			return {
+				id: element.ref,
+				label: label ?? element.ref,
+				role: element.role,
+				source: "ax",
+			};
+		});
+	};
 	computer.decide = async (state, options) => {
 		if (state === null || typeof state !== "object" || Array.isArray(state)) {
 			throw new TypeError("computer.decide() expects a state object");

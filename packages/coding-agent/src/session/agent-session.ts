@@ -7948,6 +7948,15 @@ export class AgentSession {
 		this.settings.set("skills.suggestion", mode);
 	}
 
+	/** `skills.suggestion.rerank` setting (`auto` / `always` / `off`). */
+	skillSuggestionRerankMode(): "auto" | "always" | "off" {
+		return this.settings.get("skills.suggestion.rerank");
+	}
+
+	setSkillSuggestionRerankMode(mode: "auto" | "always" | "off"): void {
+		this.settings.set("skills.suggestion.rerank", mode);
+	}
+
 	skillSuggestionStatus(): string {
 		const mode = this.skillSuggestionMode;
 		const armed = shouldRunSkillSuggestion(this.settings, this.modelRegistry);

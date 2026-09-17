@@ -217,6 +217,8 @@ declare const computer: ComputerDesktop & {
 	run<R = unknown>(code: string, options?: ComputerRunOptions): Promise<R>;
 	/** Return native backend capabilities and permission state. */
 	capabilities(): Promise<ComputerCapabilities | undefined>;
+	/** Map live AX element handles into decision candidates. */
+	candidatesFromElements(elements: readonly AxLikeElement[]): ComputerCandidate[];
 	/** End the persistent desktop session; later calls fail. */
 	close(): Promise<void>;
 	/**
@@ -228,6 +230,13 @@ declare const computer: ComputerDesktop & {
 		options?: { minConfidence?: number },
 	): Promise<ComputerDecisionPacket | null>;
 };
+
+interface AxLikeElement {
+	ref: string;
+	role?: string;
+	title?: string;
+	description?: string;
+}
 
 interface ComputerCandidate {
 	id: string;

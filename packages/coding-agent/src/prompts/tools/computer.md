@@ -9,6 +9,7 @@ Control the host desktop from JavaScript or Python Eval with the global `compute
 - Python helpers use the same names with keyword arguments becoming the trailing options object (`await win.click(10, 20, button="right")`); `win.raise_()` replaces the keyword `raise`. Python `computer.run(code, read_only=…, timeout=…)` accepts a JavaScript code string only.
 - Approval: inspection helpers (`windows`, `screenshot`, `ax`, `find`, `value`, `bounds`, `clipboard.read`, …) need read approval; input and mutation helpers need exec approval. `computer.run` uses `read_only: true` for the read tier, which also blocks facade mutation.
 - `computer.run` executes in the persistent JavaScript session with full Bun/Node and tool-bridge access; it is not sandboxed. Window handles, screenshot frames, and AX refs persist across calls.
+- `computer.candidatesFromElements(elements)` maps live AX element handles (`ref`, `title`, `role`) into `candidates[]` for `computer.decide()`.
 - `computer.decide(state, { minConfidence? })` runs deterministic rules → local semantic rerank → optional TypeSafe Jev (when `computer.jev` is armed). Returns a replayable decision packet or `null` when confidence is too low (fail-open to the planner). State carries `goal`, `candidates[]` (`id`, `label`, optional `role`/`source`), optional `recent_actions`, `focused_field`, `app`, `url` — no screenshots by default.
 - `computer.capabilities()` reports the native backend and permissions; `computer.close()` ends the desktop session and later calls fail.
 </instruction>
@@ -23,12 +24,7 @@ await save.press();
 const [field] = await win.find({ role: "textfield", title: "Search" });
 const packet = await computer.decide({
   goal: "Click Save",
-  candidates: (await win.find({ role: "button" })).map(el => ({
-    id: el.ref,
-    label: el.title || el.description || el.role,
-    role: el.role,
-    source: "ax",
-  })),
+  candidates: computer.candidatesFromElements(await win.find({ role: "button" })),
 });
 if (packet?.action === "click" && packet.target) {
   await (await win.ref(packet.target)).click();

@@ -416,6 +416,11 @@ Small typed decisions the agent makes about its own state (the `auto` thinking-l
 | `TYPESAFE_BASE_URL`      | API root override (default `https://api.typesafe.ai`); also used by `/login` validation |
 | `TYPESAFE_DEFAULT_MODEL` | System One model name (default `jev-latest`)                                |
 
+Related settings (not env vars): `skills.suggestion` (`auto`/`typesafe`/`off`), `skills.suggestion.rerank` (`auto`/`always`/`off`), `computer.jev` (`auto`/`on`/`off`), and `providers.judgmentProvider` (`auto`/`typesafe`/`llm`). Toggle skill suggestion with `/jev`; rerank with `/jev rerank`.
+
+When in-tree skill suggestion is active, set `OMP_NATIVE_SKILL_SUGGESTION=1` or `TYPESAFE_JEV_EXTENSION=off` in `~/.omp/.env` so the legacy `typesafe-jev` extension does not double-call System One.
+
+
 ---
 
 ## 4) Python tooling and kernel runtime

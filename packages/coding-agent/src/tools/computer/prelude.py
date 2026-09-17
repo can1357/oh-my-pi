@@ -248,6 +248,24 @@ def _make_computer():
             """End the persistent desktop session; later calls fail."""
             await _invoke("close", {})
 
+        @staticmethod
+        def candidates_from_elements(elements):
+            """Map live AX element handles into decision candidates."""
+            if not isinstance(elements, (list, tuple)):
+                raise TypeError("computer.candidates_from_elements() expects a sequence")
+            out = []
+            for element in elements:
+                parts = [
+                    element.get("title") if isinstance(element, dict) else getattr(element, "title", None),
+                    element.get("description") if isinstance(element, dict) else getattr(element, "description", None),
+                    element.get("role") if isinstance(element, dict) else getattr(element, "role", None),
+                    element.get("ref") if isinstance(element, dict) else getattr(element, "ref", None),
+                ]
+                label = next((str(p).strip() for p in parts if isinstance(p, str) and str(p).strip()), None)
+                ref = parts[3]
+                out.append({"id": ref, "label": label or ref, "role": parts[2] if isinstance(parts[2], str) else None, "source": "ax"})
+            return out
+
         async def decide(self, state, *, min_confidence=None):
             """Run rules → rerank → optional Jev for one computer-use step."""
             if not isinstance(state, dict):
