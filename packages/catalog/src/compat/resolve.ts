@@ -807,11 +807,7 @@ function resolveOpenAIResponsesPolicy(
 	) {
 		compat.omitReasoningEffort = true;
 	}
-	if (
-		provider === "xai-oauth" &&
-		axes.wire.supportsReasoningEffort === true &&
-		spec.compat?.supportsReasoningEffort !== false
-	) {
+	if (isXaiHost && axes.wire.supportsReasoningEffort === true && spec.compat?.supportsReasoningEffort !== false) {
 		// Stale cached rows written before a SKU joined the effort-capable
 		// rules still carry omitReasoningEffort; the rules are the live wire
 		// contract.

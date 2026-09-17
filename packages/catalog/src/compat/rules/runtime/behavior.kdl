@@ -138,9 +138,11 @@ behavior {
 	exclude-models provider="xiaomi-token-plan-ams" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-cn" substring="-tts" substring="-asr"
 	exclude-models provider="xiaomi-token-plan-sgp" substring="-tts" substring="-asr"
-	// SuperGrok's roster interleaves media models the chat picker cannot
-	// serve; the dedicated tool surfaces route them instead.
+	// xAI's rosters interleave media models the chat picker cannot serve.
+	// The API-only OAuth lane also excludes every Grok Build model so selecting
+	// it cannot silently route through the coding-product surface.
 	exclude-models provider="xai-oauth" prefix="grok-imagine-" prefix="grok-stt-" prefix="grok-voice-"
+	exclude-models provider="xai-api-oauth" exact="grok-composer-2.5-fast" prefix="grok-build" prefix="grok-imagine-" prefix="grok-stt-" prefix="grok-voice-"
 	// Meta's /v1/models lists image generation and transcription SKUs beside
 	// the Muse Spark chat models.
 	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-"
@@ -267,9 +269,12 @@ behavior {
 		alias "claude-sonnet-4-5" peer-id="claude-sonnet-4-5@20250929"
 		alias "claude-sonnet-4-6" peer-id="claude-sonnet-4-6@default"
 	}
-	// SuperGrok surfaces a few models under IDs that differ from their public
+	// xAI OAuth surfaces a few models under IDs that differ from their public
 	// xai equivalent, so the exact-id price mirror misses them.
 	pricing-peer provider="xai-oauth" peers="xai" {
+		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
+	}
+	pricing-peer provider="xai-api-oauth" peers="xai" {
 		alias "grok-4.20-multi-agent-0309" peer-id="grok-4.20-multi-agent-beta-latest"
 	}
 	hosted-default provider="zai-search" model="glm-4.7"

@@ -92,10 +92,9 @@ const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
  * - `fallback`: only when the provider's authoritative discovery did not succeed.
  * - `empty`: only when no other source produced a row for the provider.
  *
- * xai-oauth is the one projected seed: its rows are curated facts that
- * `buildXaiOAuthStaticSeed` bakes into full Responses specs, and the bundle
- * carries the baked form so `ModelRegistry.#loadModels()` honours a persisted
- * `modelRoles.default = "xai-oauth/<id>"` synchronously at boot.
+ * xAI OAuth providers use projected seeds: their curated facts are baked into
+ * full Responses specs, and the bundle carries that form so synchronous model
+ * role resolution works before runtime discovery.
  */
 function bundledSeedRows(
 	entry: CompiledProvider,
@@ -114,7 +113,10 @@ function bundledSeedRows(
 		case "always":
 			break;
 	}
-	return entry.id === "xai-oauth" ? buildXaiOAuthStaticSeed() : seedModels(entry.id);
+	if (entry.id === "xai-oauth" || entry.id === "xai-api-oauth") {
+		return buildXaiOAuthStaticSeed(undefined, entry.id);
+	}
+	return seedModels(entry.id);
 }
 
 /** Catalog providers whose seed rows carry the given precedence. */

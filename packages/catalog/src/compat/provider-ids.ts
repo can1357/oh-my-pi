@@ -68,6 +68,7 @@ export type KnownProvider =
 	| "vllm"
 	| "wafer-serverless"
 	| "xai"
+	| "xai-api-oauth"
 	| "xai-oauth"
 	| "xiaomi"
 	| "xiaomi-token-plan-ams"

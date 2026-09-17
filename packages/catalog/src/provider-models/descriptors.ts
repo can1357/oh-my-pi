@@ -142,6 +142,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	"wafer-serverless": config => waferServerlessModelManagerOptions(config),
 	coreweave: config => coreWeaveModelManagerOptions(config),
 	xai: config => xaiModelManagerOptions(config),
+	"xai-api-oauth": config => xaiOAuthModelManagerOptions({ ...config, providerId: "xai-api-oauth" }),
 	"xai-oauth": config => xaiOAuthModelManagerOptions(config),
 	xiaomi: config => xiaomiModelManagerOptions(config),
 	"xiaomi-token-plan-ams": config =>

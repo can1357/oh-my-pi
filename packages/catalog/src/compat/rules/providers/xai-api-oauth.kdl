@@ -1,0 +1,49 @@
+// Raw xAI API access using an OAuth token that intentionally omits grok-cli:access.
+provider "xai-api-oauth" {
+	default-model "grok-4.6"
+	env "XAI_API_OAUTH_TOKEN"
+	discovery label="xAI API OAuth (api:access only)" oauth-provider="xai-api-oauth"
+
+	// Reuse the reviewed first-party Grok metadata. Runtime exclusions remove
+	// Grok Build and non-chat products from this provider's static and live rosters.
+	seed api="openai-responses" base-url="https://api.x.ai/v1" bundle="always" {
+		models-from "xai-oauth"
+	}
+
+	prompt-cache-session-header "x-grok-conv-id"
+	reject-root-object-union #true
+	class "xai" {
+		family "grok" {
+			filter-reasoning-history #false
+			include-encrypted-reasoning #true
+			reasoning-effort-map {
+				minimal "low"
+				xhigh "high"
+				max "high"
+			}
+			supports-image-detail-original #false
+			supports-reasoning-summary #false
+			thinking-mode "effort"
+			revision ">=0.1 <4.3" {
+				omit-reasoning-effort #true
+			}
+			revision ">=4.3 <4.20" {
+				omit-reasoning-effort #false
+				supports-reasoning-effort #true
+			}
+		}
+	}
+	models "*reasoning" "grok-build" {
+		omit-reasoning-effort #true
+		supports-reasoning-effort #false
+	}
+	models "grok-4.6*" "grok-4.20-multi-agent*" priority=1 {
+		reasoning-effort-map {
+			minimal "low"
+		}
+	}
+	models "grok-4.20-multi-agent-0309" {
+		omit-reasoning-effort #false
+		supports-reasoning-effort #true
+	}
+}

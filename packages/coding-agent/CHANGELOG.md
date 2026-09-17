@@ -99,6 +99,7 @@
 
 ### Added
 
+- Added `/login xai-api-oauth` for raw xAI API OAuth access without the Grok Build scope; use `xai-api-oauth/grok-4.6` to keep this credential separate from SuperGrok/Grok Build ([#12280](https://github.com/can1357/oh-my-pi/pull/12280) by [@pinefin](https://github.com/pinefin)).
 - Added keyless Parallel web search when the provider is explicitly selected ([#9770](https://github.com/can1357/oh-my-pi/pull/9770) by [@georgeatparallel](https://github.com/georgeatparallel)).
 - Sloppy edits support `<SM:AFTER>` to insert new lines after an anchor without repeating or replacing it.
 - Fixed eligible full OpenAI Responses request-body timeouts by retrying once after conservative local tool-result elision, while preserving assistant/user history, unsafe partial output, and existing stateful retries ([#11878](https://github.com/can1357/oh-my-pi/pull/11878) by [@hellofrommorgan](https://github.com/hellofrommorgan)).

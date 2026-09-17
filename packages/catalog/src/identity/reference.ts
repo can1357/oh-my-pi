@@ -28,11 +28,11 @@ const REFERENCE_MARKER_SUFFIXES = (() => {
 	return suffixes;
 })();
 
-// xai-oauth subscription entries carry zero public pricing and inflated maxTokens;
-// keep them provider-local so they cannot outrank paid/public Grok references.
+// Zero-cost xAI OAuth entries carry subscription estimates and inflated
+// maxTokens; keep them provider-local so they cannot outrank public references.
 export function isZeroCostXaiOAuthReference(candidate: Model<Api>): boolean {
 	return (
-		candidate.provider === "xai-oauth" &&
+		(candidate.provider === "xai-oauth" || candidate.provider === "xai-api-oauth") &&
 		candidate.cost.input === 0 &&
 		candidate.cost.output === 0 &&
 		candidate.cost.cacheRead === 0 &&

@@ -1,6 +1,7 @@
 import { toClinePassWireModelId } from "@oh-my-pi/pi-catalog/cline-pass-model-id";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
+import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
@@ -336,7 +337,7 @@ export function resolveOpenAIRequestSetup(
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
 	}
 	// Attribute xAI traffic as omp unless a User-Agent is already set.
-	if (model.provider === "xai" || model.provider === "xai-oauth") {
+	if (modelMatchesHost(model, "xai")) {
 		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
 	}
 	const requestHeaders = { ...headers };

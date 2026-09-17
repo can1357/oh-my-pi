@@ -91,6 +91,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `mistral`        | `MISTRAL_API_KEY`                                                                                                                                |
 | `xai`            | `XAI_API_KEY`                                                                                                                                    |
 | `xai-oauth`      | `XAI_OAUTH_TOKEN`, then `XAI_API_KEY`                                                                                                            |
+| `xai-api-oauth`  | `XAI_API_OAUTH_TOKEN`                                                                                                                            |
 | `github-copilot` | `COPILOT_GITHUB_TOKEN`                                                                                                                           |
 | `cursor`         | `CURSOR_ACCESS_TOKEN`                                                                                                                            |
 | `azure`          | `AZURE_OPENAI_API_KEY`                                                                                                                           |
@@ -159,7 +160,9 @@ Each provider has one or more environment variables that supply a key when no st
 
 `charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
 
-OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `xai-api-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
+
+`xai-oauth` requests both `grok-cli:access` and `api:access` for the SuperGrok/Grok Build surface. Use `/login xai-api-oauth` and select `xai-api-oauth/grok-4.6` when the credential must omit Grok Build access; this provider requests only `api:access` and excludes `grok-build*` from static and discovered model rosters. The credentials are stored separately, so an existing `xai-oauth` login is not reused. xAI's Grok Build billing endpoint rejects API-only tokens, so `omp usage` has no quota report for `xai-api-oauth`.
 
 ### `.env` discovery and precedence
 

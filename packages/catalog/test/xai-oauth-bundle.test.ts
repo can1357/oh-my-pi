@@ -1,8 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import MODELS_JSON from "@oh-my-pi/pi-catalog/models.json" with { type: "json" };
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import { buildXaiOAuthStaticSeed } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import {
+	buildXaiOAuthStaticSeed,
+	xaiOAuthModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 // Pins the invariant: bundled `models.json` carries every entry the runtime
@@ -81,5 +85,57 @@ describe("xai-oauth bundled catalog (regression)", () => {
 			expect(model.maxTokens, `seed ${model.id} maxTokens`).toBe(model.contextWindow);
 			expect(bundled[model.id]?.maxTokens, `bundled ${model.id} maxTokens`).toBe(model.contextWindow);
 		}
+	});
+});
+
+describe("xai-api-oauth routing contract", () => {
+	const providerId = "xai-api-oauth";
+	const bundled =
+		(MODELS_JSON as unknown as Record<string, Record<string, ModelSpec<"openai-responses">>>)[providerId] ?? {};
+	const seed = buildXaiOAuthStaticSeed(undefined, providerId);
+
+	it("requests API access without Grok Build access", () => {
+		const auth = authPolicyFor(providerId);
+		expect(auth?.login?.kind).toBe("device-code");
+		if (auth?.login?.kind !== "device-code") throw new Error("Expected xAI API OAuth device-code login");
+		expect(auth.login.scopes).toContain("api:access");
+		expect(auth.login.scopes).not.toContain("grok-cli:access");
+	});
+
+	it("bundles grok-4.6 without Grok Build or SuperGrok Composer models", () => {
+		expect(providerEntry(providerId)?.defaultModel).toBe("grok-4.6");
+		expect(DEFAULT_MODEL_PER_PROVIDER[providerId]).toBe("grok-4.6");
+		expect(seed.some(model => model.id === "grok-4.6")).toBe(true);
+		expect(seed.some(model => model.id.startsWith("grok-build"))).toBe(false);
+		expect(seed.some(model => model.id === "grok-composer-2.5-fast")).toBe(false);
+		expect(Object.keys(bundled).sort()).toEqual(seed.map(model => model.id).sort());
+	});
+
+	it("prices API-only models from their public xAI peers", () => {
+		expect(bundled["grok-4.6"]?.cost.input).toBeGreaterThan(0);
+		expect(bundled["grok-4.20-multi-agent-0309"]?.cost.input).toBeGreaterThan(0);
+	});
+
+	it("filters non-API models and preserves per-model prices during live discovery", async () => {
+		const options = xaiOAuthModelManagerOptions({
+			providerId,
+			apiKey: "oauth-token",
+			fetch: async () =>
+				Response.json({
+					data: [
+						{ id: "grok-build", object: "model", created: 0, owned_by: "xai" },
+						{ id: "grok-composer-2.5-fast", object: "model", created: 0, owned_by: "xai" },
+						{ id: "grok-imagine-1.0", object: "model", created: 0, owned_by: "xai" },
+						{ id: "grok-4.6", object: "model", created: 0, owned_by: "xai" },
+					],
+				}),
+		});
+
+		const discovered = await options.fetchDynamicModels?.();
+		expect(discovered?.map(model => model.id)).not.toContain("grok-build");
+		expect(discovered?.map(model => model.id)).not.toContain("grok-composer-2.5-fast");
+		expect(discovered?.map(model => model.id)).not.toContain("grok-imagine-1.0");
+		expect(discovered?.map(model => model.id)).toContain("grok-4.6");
+		expect(discovered?.find(model => model.id === "grok-4.3")?.cost).toEqual(bundled["grok-4.3"]?.cost);
 	});
 });
