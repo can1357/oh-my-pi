@@ -175,6 +175,21 @@ function rerankCriteria(
 	}
 	return criteria;
 }
+function choiceAnswer(answer: unknown): { choice: string; probabilities?: Record<string, number> } | null {
+	if (!answer || typeof answer !== "object" || !("type" in answer) || answer.type !== "choice") return null;
+	const choice = "choice" in answer ? String(answer.choice ?? "") : "";
+	if (!choice) return null;
+	const probabilities =
+		"probabilities" in answer && answer.probabilities && typeof answer.probabilities === "object"
+			? (answer.probabilities as Record<string, number>)
+			: undefined;
+	return { choice, probabilities };
+}
+
+function noulValue(answer: unknown): number {
+	if (!answer || typeof answer !== "object" || !("type" in answer) || answer.type !== "noul") return 0;
+	return Number("noul" in answer ? answer.noul : 0);
+}
 
 async function rerankSkill(input: {
 	prompt: string;
@@ -219,20 +234,20 @@ async function rerankSkill(input: {
 		{ signal: input.signal },
 	);
 
-	const choice = String(result.answers.which?.choice ?? "");
-	if (!choice || choice === NONE_OF_THESE || !input.byName.has(choice)) return null;
+	const whichAnswer = choiceAnswer(result.answers.which);
+	if (!whichAnswer || whichAnswer.choice === NONE_OF_THESE || !input.byName.has(whichAnswer.choice)) return null;
 
 	const fitsValues = Object.entries(result.answers)
 		.filter(([key]) => key.startsWith("fits::"))
-		.map(([, answer]) => Number(answer?.noul ?? 0));
+		.map(([, answer]) => noulValue(answer));
 	const bestFits = fitsValues.length > 0 ? Math.max(...fitsValues) : 0;
-	const winnerFits = Number(result.answers[`fits::${choice}`]?.noul ?? bestFits);
+	const winnerFits = noulValue(result.answers[`fits::${whichAnswer.choice}`]) || bestFits;
 	if (bestFits < FITS_THRESHOLD) return null;
 
 	return {
-		name: choice,
+		name: whichAnswer.choice,
 		fits: winnerFits,
-		probability: Number(result.answers.which?.probabilities?.[choice] ?? 0),
+		probability: Number(whichAnswer.probabilities?.[whichAnswer.choice] ?? 0),
 		model: result.model,
 	};
 }
@@ -252,12 +267,12 @@ export async function suggestSkill(input: {
 	const criteria: Record<string, string | null> = {};
 	for (const skill of roster) criteria[skill.name] = skill.description || null;
 
-	const which: ChoiceQuestion = {
+	const whichQuestion: ChoiceQuestion = {
 		type: "choice",
 		instructions: CHOICE_INSTRUCTIONS,
 		criteria,
 	};
-	const questions: Record<string, ChoiceQuestion | NoulQuestion> = { which };
+	const questions: Record<string, ChoiceQuestion | NoulQuestion> = { which: whichQuestion };
 	for (const [key, text] of Object.entries(GATE_QUESTIONS)) {
 		questions[`gate::${key}`] = { type: "noul", instructions: text };
 	}
@@ -269,15 +284,15 @@ export async function suggestSkill(input: {
 		},
 		{ signal: input.signal },
 	);
-	const choice = String(result.answers.which?.choice ?? "");
-	if (!choice || !criteria[choice]) return null;
+	const which = choiceAnswer(result.answers.which);
+	if (!which || !criteria[which.choice]) return null;
 	const gate = gateMean(result.answers as Record<string, { noul?: number } | undefined>);
 	if (gate < GATE_THRESHOLD) return null;
 
-	const probability = Number(result.answers.which?.probabilities?.[choice] ?? 0);
+	const probability = Number(which.probabilities?.[which.choice] ?? 0);
 	const rerankMode = input.rerank ?? "auto";
 	const byName = new Map(roster.map(skill => [skill.name, skill]));
-	const [topProbability] = topChoiceProbabilities(result.answers.which?.probabilities);
+	const [topProbability] = topChoiceProbabilities(which.probabilities);
 
 	if (
 		!shouldRerank({
@@ -285,13 +300,13 @@ export async function suggestSkill(input: {
 			rosterSize: roster.length,
 			gate,
 			topProbability: topProbability ?? probability,
-			probabilities: result.answers.which?.probabilities,
+			probabilities: which.probabilities,
 		})
 	) {
-		return { name: choice, gate, probability, reranked: false, model: result.model };
+		return { name: which.choice, gate, probability, reranked: false, model: result.model };
 	}
 
-	const shortlist = rankedShortlist(result.answers.which?.probabilities, roster, SHORTLIST_SIZE);
+	const shortlist = rankedShortlist(which.probabilities, roster, SHORTLIST_SIZE);
 	const reranked = await rerankSkill({
 		prompt: input.prompt,
 		shortlist,
@@ -305,8 +320,8 @@ export async function suggestSkill(input: {
 	return {
 		name: reranked.name,
 		gate,
-		probability: reranked.probability,
 		fits: reranked.fits,
+		probability: reranked.probability,
 		reranked: true,
 		model: reranked.model,
 	};

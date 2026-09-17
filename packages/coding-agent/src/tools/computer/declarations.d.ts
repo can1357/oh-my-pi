@@ -225,10 +225,7 @@ declare const computer: ComputerDesktop & {
 	 * Bounded computer-use decision (rules → rerank → optional Jev).
 	 * Returns a replayable packet or null when confidence is too low (fail-open).
 	 */
-	decide(
-		state: ComputerDecisionState,
-		options?: { minConfidence?: number },
-	): Promise<ComputerDecisionPacket | null>;
+	decide(state: ComputerDecisionState, options?: { minConfidence?: number }): Promise<ComputerDecisionPacket | null>;
 };
 
 interface AxLikeElement {

@@ -10,8 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 
-export const GUI_E2E_SCRIPT =
-	process.env.GUI_E2E_SCRIPT ?? "/workspace/.files/scripts/gui-e2e-display.sh";
+export const GUI_E2E_SCRIPT = process.env.GUI_E2E_SCRIPT ?? "/workspace/.files/scripts/gui-e2e-display.sh";
 export const E2E_OUTPUT = process.env.GUI_E2E_OUTPUT ?? "HERMES_UI_TEST";
 export const E2E_WORKSPACE = Number(process.env.GUI_E2E_WORKSPACE ?? "99");
 export const PROTECTED_WORKSPACES = new Set([1, 2, 8]);
@@ -50,17 +49,14 @@ function canRunGuiE2e(): boolean {
 }
 
 /** Opt-in only — never auto-run GUI e2e on a shared desktop. */
-export const SHOULD_RUN_COMPUTER_E2E =
-	process.env.PI_COMPUTER_E2E === "1" || process.env.PI_HYPRLAND_E2E === "1";
+export const SHOULD_RUN_COMPUTER_E2E = process.env.PI_COMPUTER_E2E === "1" || process.env.PI_HYPRLAND_E2E === "1";
 
 /** @deprecated use SHOULD_RUN_COMPUTER_E2E */
 export const SHOULD_RUN_HYPRLAND_E2E = SHOULD_RUN_COMPUTER_E2E;
 
 /** Grim capture on Hyprland headless output — separate opt-in. */
 export const SHOULD_RUN_HYPRLAND_GRIM_E2E =
-	SHOULD_RUN_COMPUTER_E2E &&
-	process.env.PI_HYPRLAND_GRIM_E2E === "1" &&
-	canRunHyprHeadlessE2e();
+	SHOULD_RUN_COMPUTER_E2E && process.env.PI_HYPRLAND_GRIM_E2E === "1" && canRunHyprHeadlessE2e();
 
 function canRunHyprHeadlessE2e(): boolean {
 	if (!canRunGuiE2e()) return false;
@@ -166,9 +162,6 @@ function assertNoHostPopupLeak(beforeClientCount: number): void {
 		}
 	}
 }
-
-/** @deprecated alias — prefer GuiE2eHarness */
-export class HyprlandHeadlessHarness extends GuiE2eHarness {}
 
 export class GuiE2eHarness {
 	readonly runId: string;
@@ -336,3 +329,6 @@ export class GuiE2eHarness {
 		assertNoHostPopupLeak(this.hostClientCountBefore);
 	}
 }
+
+/** @deprecated alias — prefer GuiE2eHarness */
+export class HyprlandHeadlessHarness extends GuiE2eHarness {}

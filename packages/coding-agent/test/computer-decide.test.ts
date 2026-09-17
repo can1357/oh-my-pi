@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type { Judge } from "@oh-my-pi/pi-ai";
 import {
 	applyDeterministicRules,
@@ -44,7 +44,7 @@ describe("computer decide", () => {
 		expect(questions.action.type).toBe("choice");
 		expect(questions.target.type).toBe("choice");
 		expect(questions.needsVision.type).toBe("noul");
-		expect(Object.keys(questions.target.criteria)).toContain("e1");
+		expect(Object.keys(questions.target.criteria as Record<string, string | null>)).toContain("e1");
 	});
 
 	it("fail-opens when Jev is disabled and rules/rerank miss", async () => {
@@ -62,7 +62,7 @@ describe("computer decide", () => {
 	});
 
 	it("uses Jev when armed", async () => {
-		const judge: Judge = {
+		const judge = {
 			label: "mock",
 			async judge() {
 				return {
@@ -81,10 +81,17 @@ describe("computer decide", () => {
 						needsGeneration: { type: "noul", noul: 0.1 },
 						done: { type: "noul", noul: 0.1 },
 					},
-					usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
 				};
 			},
-		};
+		} as unknown as Judge;
 		const packet = await decideComputerStep({
 			state: {
 				goal: "ambiguous",
