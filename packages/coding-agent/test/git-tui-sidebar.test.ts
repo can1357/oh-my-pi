@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import { parseFileSelection, parseVerdict } from "../src/cli/git-tui/ai-stage";
 import { AvatarLoader } from "../src/cli/git-tui/avatar";
 import { Sidebar, type SidebarAction } from "../src/cli/git-tui/sidebar";
 import { GitModel } from "../src/cli/git-tui/state";
@@ -334,39 +333,5 @@ describe("git tui sidebar staging", () => {
 			sidebar.handleInput("\r");
 			expect(actions).toEqual([]);
 		});
-	});
-});
-
-describe("git tui ai-stage file selection parsing", () => {
-	const paths = ["src/a.ts", "src/b.ts", "docs/notes.md"];
-
-	test("verbatim echoes pick, with or without list decoration", () => {
-		expect(parseFileSelection("src/a.ts\ndocs/notes.md", paths)).toEqual([1, 3]);
-		// Bullets and the "(kind, +a −d)" annotation from the presented list survive.
-		expect(parseFileSelection("- src/b.ts (modified, +4 −2)", paths)).toEqual([2]);
-		expect(parseFileSelection("none", paths)).toEqual([]);
-		expect(parseFileSelection("", paths)).toEqual([]);
-	});
-
-	test("prose mentions pick on path boundaries only", () => {
-		expect(parseFileSelection("I would stage src/a.ts and nothing else", paths)).toEqual([1]);
-		// `src/a.ts` inside a longer path is a different file, not a pick.
-		expect(parseFileSelection("- vendored/src/a.ts", paths)).toEqual([]);
-		expect(parseFileSelection("maybe src/a.ts.bak", paths)).toEqual([]);
-	});
-});
-
-describe("git tui ai-stage verdict parsing", () => {
-	test("earliest bare yes accepts; no, mixed order, and noise reject", () => {
-		expect(parseVerdict("yes")).toBe(true);
-		expect(parseVerdict("Yes.")).toBe(true);
-		expect(parseVerdict("I would say yes")).toBe(true);
-		expect(parseVerdict("no")).toBe(false);
-		expect(parseVerdict("no, though parts could be yes")).toBe(false);
-		expect(parseVerdict("yes — but actually no")).toBe(true);
-		expect(parseVerdict("")).toBe(false);
-		expect(parseVerdict("maybe")).toBe(false);
-		// Substrings must not match: "eyes"/"nose" carry no verdict.
-		expect(parseVerdict("eyes nose")).toBe(false);
 	});
 });

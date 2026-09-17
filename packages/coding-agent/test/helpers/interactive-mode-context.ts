@@ -40,6 +40,7 @@ import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-m
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TokenRateMeter } from "@oh-my-pi/pi-coding-agent/utils/token-rate";
 import { type Component, Container } from "@oh-my-pi/pi-tui";
 
 type AnyFn = (...args: never[]) => unknown;
@@ -253,6 +254,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		streamingMessage: undefined,
 		lastAssistantUsage: undefined,
 		servedModelTracker: new ServedModelTracker(),
+		tokenRate: new TokenRateMeter(text => text.length),
 		loadingAnimation: undefined,
 		autoCompactionLoader: undefined,
 		retryLoader: undefined,

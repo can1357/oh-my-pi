@@ -114,7 +114,9 @@ function completionSnapshot(ref: EvalHandleRef, entry: CompletionHandleEntry): E
 			error: entry.error,
 		};
 	}
-	return { ...ref, status: "completed", text: entry.result?.text ?? "" };
+	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: entry.result?.text ?? "" };
+	if (entry.result && Object.hasOwn(entry.result, "data")) snapshot.data = entry.result.data;
+	return snapshot;
 }
 
 function snapshot(resolved: ResolvedHandle): EvalHandleSnapshot {
