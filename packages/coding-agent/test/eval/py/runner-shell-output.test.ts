@@ -90,6 +90,27 @@ async function runCell(code: string): Promise<RunnerFrame[]> {
 }
 
 describe("Python runner shell output streaming", () => {
+	it("preserves magic-looking lines in Python strings alongside real magics", async () => {
+		const contents = "first\n!literal\n%pwd\n%%bash\nvalue = !literal\nlast";
+		const frames = await runCell(
+			[
+				"%env OMP_STRING_PROBE=before",
+				`text = r'''${contents}'''`,
+				'formatted = f"""{2 + 3}\n!literal\n%%bash"""',
+				"%env OMP_STRING_PROBE=after",
+				"print(text, end='')",
+				"print(formatted, end='')",
+			].join("\n"),
+		);
+		expect(frames.find(frame => frame.type === "done")?.status).toBe("ok");
+		expect(
+			frames
+				.filter(frame => frame.type === "stdout")
+				.map(frame => frame.data)
+				.join(""),
+		).toBe(`${contents}5\n!literal\n%%bash`);
+	});
+
 	it("streams !cmd output chunks before the child process exits", async () => {
 		const child = [
 			"import sys,time",
