@@ -469,7 +469,8 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			if (signal) {
 				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
 				const onAbort = () => abortResolve();
-				signal.addEventListener("abort", onAbort, { once: true });
+				if (signal.aborted) onAbort();
+				else signal.addEventListener("abort", onAbort, { once: true });
 				racePromises.push(abortPromise);
 				try {
 					await Promise.race(racePromises);
