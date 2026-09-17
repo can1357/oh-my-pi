@@ -984,12 +984,29 @@ export class AgentSession {
 		for (const record of records) this.agent.followUp(record);
 	}
 
+	/** Observe a queued wake across the active turn and its follow-up. */
+	#observeQueuedIrcFollowUps(records: AgentMessage[]): void {
+		let finishObservation: ((error?: unknown) => void | Promise<void>) | undefined;
+		try {
+			finishObservation = this.#ircWakeTurnObserver?.(records);
+		} catch (error) {
+			logger.warn("IRC queued wake observer failed to start", { error: String(error) });
+			return;
+		}
+		if (!finishObservation) return;
+		void this.agent
+			.waitForIdle()
+			.then(() => finishObservation?.())
+			.catch(error => finishObservation?.(error))
+			.catch(error => logger.warn("IRC queued wake observer failed to finish", { error: String(error) }));
+	}
 	#wakeForIrc(records: AgentMessage[]): void {
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(records);
 			return;
 		}
 		if (this.agent.state.isStreaming) {
+			this.#observeQueuedIrcFollowUps(records);
 			this.#queueIrcFollowUps(records);
 			return;
 		}

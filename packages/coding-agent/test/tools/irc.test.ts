@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -1256,10 +1256,18 @@ describe("IRC", () => {
 			expect(event.type).toBe("irc_message");
 		});
 		it("queues an IRC wake when a competing turn wins the prompt race", async () => {
-			const { session } = createRealSession();
+			const started = Promise.withResolvers<void>();
+			const { session } = createStreamingSession(modelRegistry, [
+				() => {
+					started.resolve();
+					return { content: ["competing turn"], delayMs: 20 };
+				},
+				{ content: ["peer reply"] },
+			]);
 			sessions.push(session);
-			const promptSpy = vi.spyOn(session.agent, "prompt").mockRejectedValueOnce(new AgentBusyError());
 
+			const competingTurn = session.prompt("start competing turn");
+			await started.promise;
 			await expect(
 				session.deliverIrcMessage({
 					id: "msg-busy-race",
@@ -1268,12 +1276,18 @@ describe("IRC", () => {
 					body: "queued after race",
 					ts: Date.now(),
 				}),
-			).resolves.toBe("woken");
-			await Promise.resolve();
+			).resolves.toBe("injected");
+			await competingTurn;
+			await session.waitForIdle();
 
-			expect(promptSpy).toHaveBeenCalledTimes(1);
-			expect(session.agent.peekFollowUpQueue()).toContainEqual(
-				expect.objectContaining({ customType: "irc:incoming", content: expect.any(String) }),
+			expect(session.agent.state.messages).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						role: "custom",
+						customType: "irc:incoming",
+						details: expect.objectContaining({ id: "msg-busy-race" }),
+					}),
+				]),
 			);
 		});
 
