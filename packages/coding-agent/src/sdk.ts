@@ -3663,8 +3663,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (toolRegistry.size > 0) {
 			const canonicalizeMcpSpelling = (name: string): string => {
 				// Wildcards are matched against minted names and raw server metadata,
-				// never resolved as a whole-name alias; `exec` expands downstream.
-				if (name.endsWith("*") || name === "exec") return name;
+				// never resolved as a whole-name alias; `exec` (any case) expands downstream.
+				if (name.endsWith("*") || name.toLowerCase() === "exec") return name;
 				const canonical = resolveMCPToolAlias(name, candidate =>
 					toolRegistry.has(candidate) ? { name: candidate } : undefined,
 				);

@@ -128,7 +128,10 @@ export function withoutSiblingTools(names: readonly string[], isDisallowed: (nam
  * read-only classification so both see the same effective set.
  */
 export function expandDisallowedTools(patterns: readonly string[]): string[] {
-	if (!patterns.includes("exec")) return [...patterns];
+	// Case-insensitive alias: `Exec`/`EXEC` must expand like `exec`, or the
+	// execution tier silently survives (normalizeToolName preserves the case
+	// of non-canonical names, so the later exact checks would miss too).
+	if (!patterns.some(pattern => pattern.toLowerCase() === "exec")) return [...patterns];
 	const set = new Set(patterns);
 	set.add("eval");
 	set.add("bash");
@@ -140,8 +143,9 @@ export function expandExecToolAlias(
 	patterns: readonly string[],
 	backends: EvalBackendsAllowance,
 ): string[] {
-	if (!names.includes("exec")) return names.filter(name => !isToolDisallowed(name, patterns));
-	const withoutAlias = names.filter(name => name !== "exec");
+	if (!names.some(name => name.toLowerCase() === "exec"))
+		return names.filter(name => !isToolDisallowed(name, patterns));
+	const withoutAlias = names.filter(name => name.toLowerCase() !== "exec");
 	// `exec` is an alias for eval+bash: a deny on the alias blocks the whole
 	// expansion; an explicit deny on either child still wins downstream.
 	if (isToolDisallowed("exec", patterns)) return withoutAlias.filter(name => !isToolDisallowed(name, patterns));
@@ -261,7 +265,7 @@ export function isToolDisallowed(
 				continue;
 			}
 			if (name.startsWith(pattern.slice(0, -1))) return true;
-		} else if (name === pattern || (pattern === "exec" && (name === "eval" || name === "bash"))) {
+		} else if (name === pattern || (pattern.toLowerCase() === "exec" && (name === "eval" || name === "bash"))) {
 			return true;
 		}
 	}

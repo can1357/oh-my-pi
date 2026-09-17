@@ -2788,7 +2788,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// excludes its server everywhere else.
 		if (internalRouter.routesToMcpResources(url)) {
 			const mcpManager = MCPManager.instance();
-			const serverName = mcpManager ? resolveTargetServer(mcpManager, extractResourceUri(urlMeta)) : undefined;
+			// Resolve against the settled catalog, not the mid-handshake
+			// snapshot: without the wait below, a URI owned by a still-connecting
+			// server resolves to no server (fail-open), then the handler's own
+			// ensure+retry reads it anyway. The handler performs the same wait
+			// when its first lookup misses (mcp-protocol.ts), so mirror it here
+			// and re-resolve before judging the scope.
+			let serverName = mcpManager ? resolveTargetServer(mcpManager, extractResourceUri(urlMeta)) : undefined;
+			if (serverName === undefined && mcpManager) {
+				await mcpManager.waitForPendingConnections();
+				await Promise.allSettled(
+					mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)),
+				);
+				serverName = resolveTargetServer(mcpManager, extractResourceUri(urlMeta));
+			}
 			if (serverName !== undefined && this.session.isMCPServerResourceAllowed?.(serverName) === false) {
 				throw new ToolError(`No MCP server has resource "${url}".`);
 			}
