@@ -1,9 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { bindHistorySource, resolveHistoryScope } from "@oh-my-pi/pi-coding-agent/modes/history-scope";
-import type { HistorySearchComponent } from "@oh-my-pi/pi-coding-agent/modes/components/history-search";
+import type { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { Editor } from "@oh-my-pi/pi-tui";
 import { getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";

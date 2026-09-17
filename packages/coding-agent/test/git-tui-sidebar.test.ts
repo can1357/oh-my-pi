@@ -4,9 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
 import { AvatarLoader } from "../src/cli/git-tui/avatar";
-import { Sidebar, type SidebarAction } from "../src/cli/git-tui/sidebar";
+import { Sidebar, type SidebarAction } from "@oh-my-pi/pi-tui/apps/git/sidebar";
 import { GitModel } from "../src/cli/git-tui/state";
-import { initTheme } from "../src/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 beforeAll(async () => {
 	await initTheme(false);
@@ -277,7 +277,6 @@ describe("git tui sidebar staging", () => {
 				scope: "git-tui",
 				summary: "corrected generated commit flow",
 				body: ["Preserved staged-tree analysis."],
-				footers: [],
 			});
 			expect(sidebar.summary.getValue()).toBe("fix(git-tui): corrected generated commit flow");
 			expect(sidebar.description.getText()).toBe("- Preserved staged-tree analysis.");

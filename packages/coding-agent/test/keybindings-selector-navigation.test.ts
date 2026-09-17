@@ -1,14 +1,14 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionList } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-list";
-import type { Extension } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/types";
-import { HistorySearchComponent } from "@oh-my-pi/pi-coding-agent/modes/components/history-search";
-import { RewindSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/rewind-selector";
-import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { ExtensionList } from "@oh-my-pi/pi-tui/overlays/extensions/extension-list";
+import type { Extension } from "@oh-my-pi/pi-tui/overlays/extensions/types";
+import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
+import { RewindSelectorComponent } from "@oh-my-pi/pi-tui/overlays/rewind-selector";
+import { SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import type { SessionMessageEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
@@ -363,8 +363,13 @@ describe("selector navigation keybindings", () => {
 		const selected: string[] = [];
 		const storage = await createHistoryStorage(["old prompt", "middle prompt", "new prompt"]);
 		const selector = new HistorySearchComponent(
-			storage,
-			[{ kind: "global" }],
+			[
+				{
+					label: "all projects",
+					getRecent: limit => storage.getRecent(limit),
+					search: (query, limit) => storage.search(query, limit),
+				},
+			],
 			prompt => selected.push(prompt),
 			() => {},
 		);
@@ -380,8 +385,13 @@ describe("selector navigation keybindings", () => {
 		// Added oldest-first; getRecent returns newest-first, so index 0 is "p14", index 14 is "p0".
 		const storage = await createHistoryStorage(Array.from({ length: 15 }, (_, i) => `p${i}`));
 		const selector = new HistorySearchComponent(
-			storage,
-			[{ kind: "global" }],
+			[
+				{
+					label: "all projects",
+					getRecent: limit => storage.getRecent(limit),
+					search: (query, limit) => storage.search(query, limit),
+				},
+			],
 			prompt => selected.push(prompt),
 			() => {},
 		);

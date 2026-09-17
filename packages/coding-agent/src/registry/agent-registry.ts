@@ -11,9 +11,11 @@
 
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
-import { oneLineLabel } from "../task/types";
+import { oneLineLabel } from "@oh-my-pi/pi-tui/tools/task";
 
-export const MAIN_AGENT_ID = "Main";
+import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+export { MAIN_AGENT_ID };
+export type { AgentStatus, AgentMetricsSummary };
 
 /** Sidecar marker retained beside a child transcript after an explicit kill. */
 const AGENT_TOMBSTONE_SUFFIX = ".tombstone";
@@ -23,34 +25,12 @@ export function getAgentTombstonePath(sessionFile: string): string {
 }
 
 /**
- * - `running`: a turn is in flight.
- * - `idle`: live AgentSession in memory, awaiting work. Finished agents are
- *   `idle`, not removed.
- * - `parked`: session disposed; AgentRef + sessionFile retained, revivable.
- * - `aborted`: hard-killed, terminal.
- */
-export type AgentStatus = "running" | "idle" | "parked" | "aborted";
-/** Provenance of a displayed duration: active runtime, transcript span, or unavailable. */
-type AgentDurationKind = "active" | "span" | "unknown";
-/**
  * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
  * - `advisor`: a passive review transcript persisted like a subagent for usage
  *   attribution and Agent Hub observability, but never a peer — hidden from
  *   agent-facing rosters (`hub`, `history://`) and not messageable/revivable.
  */
 export type AgentKind = "main" | "sub" | "advisor";
-
-/** Persisted per-agent totals reconstructed from the child session transcript. */
-export interface AgentMetricsSummary {
-	tokens: number;
-	requests: number;
-	tools: number;
-	cost: number;
-	durationMs: number;
-	durationKind?: AgentDurationKind;
-	contextTokens?: number;
-	contextWindow?: number;
-}
 
 /**
  * Run lifecycle milestones, stamped as they happen and scoped to the CURRENT

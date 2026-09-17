@@ -1,7 +1,7 @@
-import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
+import { type ApiKey, type AuthStorage, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
 import { isRecord, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { callMCP } from "../../../mcp/json-rpc";
-import type { SearchResponse } from "../../../web/search/types";
+import type { SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
 import { SearchProviderError } from "../../../web/search/types";
 import {
 	PARALLEL_BETA_HEADER,
@@ -289,11 +289,7 @@ export class ParallelProvider extends SearchProvider {
 	readonly id = "parallel";
 	readonly label = "Parallel";
 
-	isAvailable(authStorage: AuthStorage) {
-		return !!getEnvApiKey("parallel") || authStorage.hasAuth("parallel");
-	}
-
-	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+	isAvailable(_authStorage: AuthStorage): boolean {
 		return true;
 	}
 

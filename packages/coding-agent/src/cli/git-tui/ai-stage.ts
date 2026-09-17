@@ -20,7 +20,8 @@ import { resolveJudge } from "../../judgment";
 import fileQuestionTemplate from "../../prompts/system/git-ai-stage-file.md" with { type: "text" };
 import { discoverAuthStorage, loadCliExtensionProviders } from "../../sdk";
 import { ONLINE_MEMORY_MODEL_KEY } from "../../tiny/models";
-import type { ChangedFile } from "./state";
+import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
+import type { AiStageOutcome } from "@oh-my-pi/pi-tui/apps/git/git-tui";
 
 /** Files per file-pass judgment; larger trees fan out one call per batch. */
 const FILE_BATCH = 80;
@@ -34,20 +35,6 @@ const HUNK_QUESTION: NoulQuestion = {
 	instructions:
 		"The state holds the user's staging instruction and the added (+) and removed (−) lines of one git hunk in `path`. Is this change what the user asked to stage?",
 };
-
-/** Counts reported back to the status line after an AI staging run. */
-export interface AiStageOutcome {
-	/** Files accepted by the file pass. */
-	matchedFiles: number;
-	/** Files evaluated in the file pass. */
-	totalFiles: number;
-	/** Hunks staged by the hunk pass. */
-	stagedHunks: number;
-	/** Hunks evaluated in matched files. */
-	totalHunks: number;
-	/** Untracked/binary files staged whole. */
-	wholeFiles: number;
-}
 
 /** Options for {@link aiStage}. */
 export interface AiStageOptions {

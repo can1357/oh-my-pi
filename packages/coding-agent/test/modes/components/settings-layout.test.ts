@@ -1,13 +1,15 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	SETTING_TABS,
-	SETTINGS_SCHEMA,
-	type SettingPath,
-	type SettingTab,
-	TAB_GROUPS,
-} from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { getSettingsForTab } from "@oh-my-pi/pi-coding-agent/modes/components/settings-defs";
+import { SETTINGS_SCHEMA, type SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
+import { getSettingsForTab, SETTING_TABS, type SettingTab, TAB_GROUPS } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
+import { createPluginSettingsHost } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/settings-host";
+import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
+import { initTheme, setTheme } from "@oh-my-pi/pi-tui/theme";
+
+beforeAll(async () => {
+	await initTheme();
+});
 
 interface UiShape {
 	tab: SettingTab;
@@ -40,7 +42,7 @@ describe("settings layout", () => {
 
 	it("getSettingsForTab returns contiguous groups in TAB_GROUPS order", () => {
 		for (const tab of SETTING_TABS) {
-			const defs = getSettingsForTab(tab);
+			const defs = getSettingsForTab(createSettingsHost().entries, tab);
 			expect(defs.length).toBeGreaterThan(0);
 
 			// Collapse the def sequence into the order groups first appear.
@@ -61,7 +63,9 @@ describe("settings layout", () => {
 	});
 
 	it("exposes native terminal progress in the appearance settings menu", () => {
-		const def = getSettingsForTab("appearance").find(def => def.path === "terminal.showProgress");
+		const def = getSettingsForTab(createSettingsHost().entries, "appearance").find(
+			def => def.path === "terminal.showProgress",
+		);
 
 		expect(def).toMatchObject({
 			type: "boolean",
@@ -71,7 +75,9 @@ describe("settings layout", () => {
 	});
 
 	it("exposes every accepted snapcompact shape in the settings submenu", () => {
-		const def = getSettingsForTab("context").find(def => def.path === "snapcompact.shape");
+		const def = getSettingsForTab(createSettingsHost().entries, "context").find(
+			def => def.path === "snapcompact.shape",
+		);
 
 		expect(def?.type).toBe("submenu");
 		if (def?.type !== "submenu") throw new Error("snapcompact.shape should render as a submenu");
@@ -82,8 +88,10 @@ describe("settings layout", () => {
 
 	it("hides advisor dependent settings when advisor is disabled", () => {
 		const advisorDependentPaths: SettingPath[] = ["advisor.syncBacklog", "advisor.immuneTurns"];
-		const advisorDependentPathSet = new Set(advisorDependentPaths);
-		const defs = getSettingsForTab("model").filter(def => advisorDependentPathSet.has(def.path));
+		const advisorDependentPathSet = new Set<string>(advisorDependentPaths);
+		const defs = getSettingsForTab(createSettingsHost().entries, "model").filter(def =>
+			advisorDependentPathSet.has(def.path),
+		);
 
 		expect(defs.map(def => def.path)).toEqual(advisorDependentPaths);
 		for (const def of defs) {
@@ -98,7 +106,9 @@ describe("settings layout", () => {
 	});
 
 	it("shows the unexpected-stop classifier setting only in smart mode", () => {
-		const def = getSettingsForTab("providers").find(item => item.path === "providers.unexpectedStopModel");
+		const def = getSettingsForTab(createSettingsHost().entries, "providers").find(
+			item => item.path === "providers.unexpectedStopModel",
+		);
 		if (!def?.condition) throw new Error("Unexpected Stop Model should be smart-mode only");
 
 		expect(def.condition()).toBe(false);
@@ -109,7 +119,9 @@ describe("settings layout", () => {
 	});
 
 	it("shows provider request limits as a providers services submenu setting", () => {
-		const [def] = getSettingsForTab("providers").filter(item => item.path === "providers.maxInFlightRequests");
+		const [def] = getSettingsForTab(createSettingsHost().entries, "providers").filter(
+			item => item.path === "providers.maxInFlightRequests",
+		);
 
 		expect(def).toMatchObject({
 			path: "providers.maxInFlightRequests",
@@ -120,7 +132,9 @@ describe("settings layout", () => {
 	});
 
 	it("exposes retry fallback chains as editable JSON in the model settings", () => {
-		const def = getSettingsForTab("model").find(item => item.path === "retry.fallbackChains");
+		const def = getSettingsForTab(createSettingsHost().entries, "model").find(
+			item => item.path === "retry.fallbackChains",
+		);
 
 		expect(def).toMatchObject({
 			path: "retry.fallbackChains",
@@ -138,7 +152,9 @@ describe("settings layout", () => {
 	});
 
 	it("exposes usage-aware fallback as an opt-in advanced policy", () => {
-		const defs = getSettingsForTab("model").filter(def => def.path.startsWith("retry.usage"));
+		const defs = getSettingsForTab(createSettingsHost().entries, "model").filter(def =>
+			def.path.startsWith("retry.usage"),
+		);
 		expect(defs.map(def => def.path)).toEqual([
 			"retry.usageAwareFallback",
 			"retry.usageReservePct",
@@ -153,12 +169,45 @@ describe("settings layout", () => {
 	});
 
 	it("exposes ask.enabled as a boolean under Available Tools", () => {
-		const def = getSettingsForTab("tools").find(def => def.path === "ask.enabled");
+		const def = getSettingsForTab(createSettingsHost().entries, "tools").find(def => def.path === "ask.enabled");
 
 		expect(def).toMatchObject({
 			type: "boolean",
 			label: "Ask",
 			group: "Available Tools",
 		});
+	});
+
+	it("renders preview inside SettingsSelectorComponent submenu without crashing", async () => {
+		await setTheme("dark");
+		const selector = new SettingsSelectorComponent(
+			{
+				availableThinkingLevels: [],
+				thinkingLevel: undefined,
+				availableThemes: ["dark", "light"],
+				providers: [],
+				settings: createSettingsHost(),
+				plugins: createPluginSettingsHost(process.cwd()),
+			},
+			{
+				onChange: () => {},
+				onCancel: () => {},
+			},
+		);
+
+		for (const ch of "composer shape") selector.handleInput(ch);
+		// Open the composer.shape submenu
+		selector.handleInput("\n");
+
+		const rendered = selector.render(80).join("\n");
+		expect(rendered).toContain("Composer Shape");
+		expect(rendered).toContain("Preview:");
+		expect(rendered).toContain("Ask anything");
+
+		// Cycle down to claude
+		selector.handleInput("\x1b[B");
+		const nextRendered = selector.render(80).join("\n");
+		expect(nextRendered).toContain("Claude Code");
+		expect(nextRendered).toContain("Preview:");
 	});
 });

@@ -7,6 +7,20 @@
 - `Editor.setHistoryStorage()` accepts an optional `sourceKey` callback: when the key changes, the editor re-seeds its list from `storage` at the start of the next navigation, carrying its own canceled drafts over. Omitted, the list stays fixed for the editor's lifetime and locally remembered drafts are never reloaded ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - `Editor.addToHistory()` records under the context active at the call, so a command that switches sessions or moves the working directory belongs to the host recording it before dispatch ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Added
+
+- Added composable forms, menus, split layouts, disclosures, tree views, tool cards, and data widgets for terminal extensions and standalone apps.
+- Added the full coding-agent terminal UI to this package: theme runtime (`@oh-my-pi/pi-tui/theme`), render primitives (`/render`), shared chrome (`/chrome`), tool renderers and registry (`/tools`), chat transcript components (`/chat/*`), overlays and hubs (`/overlays/*`), status line (`/status-line`), composer and autocomplete (`/prompt/*`), setup wizard (`/setup/*`), and standalone apps (`/apps/*`: git TUI, process top, debug viewers, boards, pickers). Components take host capabilities through structural interfaces and setters instead of reading application settings.
+- Added image input validation and automatic conversion for unsupported formats
+- Added MCP Add Wizard for streamlined server configuration
+- Added support for video preview rendering in chat
+- Added interactive task list renderer for managing subtasks
+- Added `autoresearch` tool renderer for tracking experiments
+- Enhanced merge conflict rendering with side-by-side diff support
+- Improved output rendering for GitHub workflow jobs and runs
+- Added performance improvements for long-running bash streaming output
+- Added the `dark-celestial` built-in theme: a twilight dark palette with pink/coral accents, purple keywords, cyan functions, and peach strings.
+
 ## [18.2.4] - 2026-09-17
 
 ### Fixed
