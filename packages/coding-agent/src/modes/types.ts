@@ -30,6 +30,7 @@ import type { ShakeMode } from "../session/shake-types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { LspStartupServerInfo } from "../tools";
 import type { EventBus } from "../utils/event-bus";
+import type { TokenRateMeter } from "../utils/token-rate";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import type { CustomEditor } from "./components/custom-editor";
@@ -245,6 +246,8 @@ export interface InteractiveModeContext {
 	 * Replaced by `renderSessionContext` on every rebuild/session switch.
 	 */
 	servedModelTracker: ServedModelTracker;
+	/** Live gen tok/s for the working row; fed by streamed deltas, reset per run. */
+	tokenRate: TokenRateMeter;
 	loadingAnimation: Loader | undefined;
 	autoCompactionLoader: Loader | undefined;
 	retryLoader: Loader | undefined;

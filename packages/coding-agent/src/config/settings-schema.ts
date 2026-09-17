@@ -782,6 +782,17 @@ export const SETTINGS_SCHEMA = {
 			options: "runtime",
 		},
 	},
+	"composer.tokenRate": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Composer",
+			label: "Generation Rate",
+			description:
+				"Show a live generation tok/s readout on the working row, docked right next to the session title. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
+		},
+	},
 
 	// Status line
 	"statusLine.preset": {
@@ -5782,6 +5793,31 @@ export const SETTINGS_SCHEMA = {
 			label: "Speech Vocalization Voice",
 			description: "Kokoro voice used when speaking the assistant's output aloud",
 			options: TTS_LOCAL_VOICE_OPTIONS,
+		},
+	},
+	"providers.judgmentProvider": {
+		type: "enum",
+		values: ["auto", "typesafe", "llm"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Tiny Model",
+			label: "Judgment Provider",
+			description:
+				"Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging, eval judge()). Auto uses TypeSafe when authenticated; failed TypeSafe requests fall back through tiny, smol, default, then the active session model.",
+			options: [
+				{ value: "auto", label: "Auto", description: "TypeSafe when authenticated, else the LLM bridge (default)" },
+				{
+					value: "typesafe",
+					label: "TypeSafe",
+					description: "Prefer TypeSafe; fall back through the online model roles on failure",
+				},
+				{
+					value: "llm",
+					label: "LLM",
+					description: "Never TypeSafe; keyword prompts to the tiny/smol or local model",
+				},
+			],
 		},
 	},
 	"providers.tinyModel": {

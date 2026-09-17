@@ -42,6 +42,10 @@
 			"types": "./src/error/index.ts",
 			"import": "./src/error/index.ts"
 		},
+		"./judgment": {
+			"types": "./src/judgment/index.ts",
+			"import": "./src/judgment/index.ts"
+		},
 		"./*": {
 			"types": "./src/*.ts",
 			"import": "./src/*.ts"

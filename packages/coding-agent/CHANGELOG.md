@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- `composer.tokenRate` (default off): a live generation tok/s readout docked on the working row beside the session title, smoothed over recent stream time and corrected by the provider's billed output counts so hidden reasoning is reflected; it stays visible between turns.
+- TypeSafe provider (`/login typesafe` or `TYPESAFE_API_KEY`): the `auto` thinking-level classifier, Smart unexpected-stop detection, and git TUI AI staging run as typed System One judgments with calibrated probabilities when a credential exists; `providers.judgmentProvider` (`auto`/`typesafe`/`llm`) pins the backend.
+- Eval `judge(state, questions)` helper (Python and JS): typed `choice`/`bool`/`score` judgments from cell code, returning an immediate handle whose `.wait()` yields the answers with probabilities; routes to TypeSafe when credentialed, else the tiny/smol chat model.
+
+### Changed
+
+- The difficulty, unexpected-stop, and AI-staging classifiers share one judgment interface; without TypeSafe, or when a TypeSafe request fails, they fall back through the `tiny`, `smol`, `default`, and active-session models. Agent-tuned small models receive guarded JSON state so they classify requests instead of emitting tool calls. AI staging now asks one yes/no question per file in a single batched request instead of echoing paths.
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes

@@ -685,6 +685,12 @@ export class EventController {
 		// cumulative snapshot is later superseded and never rebuilt.
 		this.#vocalizeDelta(event);
 		this.#vocalizedMessageUpdates.add(event);
+		// The rate meter is per-delta too: a coalesced-away snapshot still
+		// carried generated tokens.
+		const delta = event.assistantMessageEvent;
+		if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
+			this.ctx.tokenRate.push(delta.delta);
+		}
 		this.#pendingMessageUpdate = event;
 		if (this.#messageUpdateTimer) return;
 		this.#messageUpdateTimer = setTimeout(() => {
@@ -1034,6 +1040,7 @@ export class EventController {
 			this.#finalizeAbandonedPostToolSegments();
 			this.#lastVisibleBlockCount = 0;
 			this.#streamedToolCallIdByIndex.clear();
+			this.ctx.tokenRate.begin(event.message.timestamp);
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingMessage = event.message;
 			this.ctx.streamingComponent.pickReactionTarget(this.ctx.chatContainer.children);
@@ -1466,6 +1473,10 @@ export class EventController {
 			}
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
+			this.ctx.tokenRate.end(
+				event.message.usage?.output,
+				event.message.duration ? event.message.timestamp + event.message.duration : undefined,
+			);
 			this.ctx.streamingMessage = event.message;
 			this.#streamingReveal.stop();
 			this.#toolArgsReveal.flushAll();

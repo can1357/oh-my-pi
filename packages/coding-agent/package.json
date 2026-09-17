@@ -374,6 +374,10 @@
       "types": "./src/lsp/clients/*.ts",
       "import": "./src/lsp/clients/*.ts"
     },
+    "./judgment": {
+      "types": "./src/judgment/index.ts",
+      "import": "./src/judgment/index.ts"
+    },
     "./markit": {
       "types": "./src/markit/index.ts",
       "import": "./src/markit/index.ts"
