@@ -3,6 +3,7 @@ import type { Usage } from "@oh-my-pi/pi-ai/types";
 import {
 	CacheInvalidationMarkerComponent,
 	detectCacheInvalidation,
+	formatCacheBreakReason,
 } from "@oh-my-pi/pi-coding-agent/modes/components/cache-invalidation-marker";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
@@ -73,6 +74,39 @@ describe("detectCacheInvalidation", () => {
 		const prev = usage({ cacheRead: 40_000, cacheWrite: 1_000 });
 		expect(detectCacheInvalidation(prev, usage({ cacheRead: 0, input: 12 }))).toBeUndefined();
 	});
+
+	it("attaches the provider-named cause as display text on a flagged turn", () => {
+		const prev = usage({ cacheRead: 49_837, cacheWrite: 980 });
+		const current = usage({ cacheRead: 0, cacheWrite: 50_900, input: 99 });
+		expect(detectCacheInvalidation(prev, current, { kind: "tools", tool: "bash" })).toEqual({
+			reprocessedTokens: 50_999,
+			reason: "tool definitions changed (bash)",
+		});
+	});
+});
+
+describe("formatCacheBreakReason", () => {
+	it("signs a system-prompt delta in both directions", () => {
+		expect(formatCacheBreakReason({ kind: "system_prompt", charDelta: 412 })).toBe(
+			"system prompt changed (+412 chars)",
+		);
+		expect(formatCacheBreakReason({ kind: "system_prompt", charDelta: -88 })).toBe(
+			"system prompt changed (-88 chars)",
+		);
+	});
+
+	it("names the redefined tool, and omits the name when the provider cannot attribute one", () => {
+		expect(formatCacheBreakReason({ kind: "tools", tool: "bash" })).toBe("tool definitions changed (bash)");
+		expect(formatCacheBreakReason({ kind: "tools" })).toBe("tool definitions changed");
+	});
+
+	it("phrases a history rewrite", () => {
+		expect(formatCacheBreakReason({ kind: "history_rewrite" })).toBe("history rewritten");
+	});
+
+	it("shows the retention transition direction", () => {
+		expect(formatCacheBreakReason({ kind: "retention", from: "5m", to: "1h" })).toBe("cache retention 5m -> 1h");
+	});
 });
 
 describe("CacheInvalidationMarkerComponent", () => {
@@ -90,5 +124,15 @@ describe("CacheInvalidationMarkerComponent", () => {
 		const dividerWidth = Bun.stringWidth(lines[1]);
 		expect(dividerWidth).toBeGreaterThan(0);
 		expect(dividerWidth).toBeLessThan(80);
+	});
+
+	it("renders the cause after the token count", () => {
+		const lines = new CacheInvalidationMarkerComponent({
+			reprocessedTokens: 50_999,
+			reason: "system prompt changed (+412 chars)",
+		}).render(120);
+		expect(lines[1]).toContain("cache miss");
+		expect(lines[1]).toContain("51K tokens");
+		expect(lines[1]).toContain("system prompt changed (+412 chars)");
 	});
 });

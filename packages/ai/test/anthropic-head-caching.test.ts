@@ -453,6 +453,29 @@ describe("anthropic head caching (general API-key path)", () => {
 		expect(cached).not.toContain(26);
 	});
 
+	it("anchors the trailing breakpoint on a real user turn whose text is exactly Continue.", async () => {
+		// The synthetic trailing pad reads `Continue.` too, and it is excluded
+		// from the breakpoint window because the next turn replaces it. A user
+		// who types the same thing took a real turn that the next request keeps,
+		// so the text alone must never decide: the provenance marker does.
+		const messages: Message[] = [
+			{ role: "user", content: "Use the tools", timestamp: 1 },
+			assistantMessage("on it", 2),
+			{ role: "user", content: "Continue.", timestamp: 3 },
+		];
+
+		const body = await captureWireBody(undefined, { ...CONTEXT, messages });
+		expect(countCacheBreakpoints(body)).toBeLessThanOrEqual(4);
+
+		// The turn reaches the wire indistinguishable from a pad by content.
+		const trailing = body.messages[2];
+		expect(trailing?.role).toBe("user");
+		// Treating it as a pad would anchor the window one message earlier, on
+		// the assistant turn at index 1, and leave the real trailing turn
+		// uncached on every request that follows it.
+		expect(findCachedMessageIndices(body)).toContain(2);
+	});
+
 	it("preserves the decimation anchor when the trailing assistant turn is thinking-only", async () => {
 		const messages: Message[] = [];
 		for (let i = 1; i <= 15; i++) {
