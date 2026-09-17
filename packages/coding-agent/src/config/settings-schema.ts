@@ -5306,6 +5306,36 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
+	"skills.suggestion": {
+		type: "enum",
+		values: ["auto", "typesafe", "off"] as const,
+		default: "auto",
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skill Suggestion",
+			description:
+				"Before each user turn, ask TypeSafe Jev (System One) which installed skill to read and append a <skill_relevance> line. Auto runs only when TypeSafe is authenticated; off disables it. Never falls back to a chat model (Jev is not /model). Toggle with /jev.",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "TypeSafe when authenticated; otherwise skip (default)",
+				},
+				{
+					value: "typesafe",
+					label: "TypeSafe",
+					description: "Always use TypeSafe when a key exists, even if judgmentProvider is llm",
+				},
+				{
+					value: "off",
+					label: "Off",
+					description: "Never suggest skills via System One",
+				},
+			],
+		},
+	},
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -6335,6 +6365,7 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
+	suggestion?: "auto" | "typesafe" | "off";
 }
 
 /** Conventional commit generation and changelog limits. */
