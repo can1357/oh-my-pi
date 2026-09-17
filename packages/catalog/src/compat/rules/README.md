@@ -6,7 +6,7 @@ There are three ownership strata:
 
 - `taxonomy/*.kdl` defines identity: class membership, product families, revision extraction, reviewed exact corrections, and suffix collapse.
 - `classes/*.kdl` defines model-lineage truths: behavior inherent to a model line, optionally scoped to the providers or request adapters where the census established it.
-- `providers/*.kdl` defines deployment contracts: behavior imposed by a host, plus documented per-model residue that taxonomy cannot express exactly.
+- `providers/<id>.kdl` is a provider's entry: its catalog identity (default model, env keys, discovery wiring, optional authored seed rows — see [Provider catalog grammar](#provider-catalog-grammar)) plus its deployment contract: behavior imposed by the host and documented per-model residue that taxonomy cannot express exactly.
 - `runtime/behavior.kdl` defines heuristics used before or outside exact model lookup: responses routing, API routes, quota tiers, plan requirements, model limits, roster exclusions, hosted defaults, pricing peers.
 - `auth/<provider>.kdl` defines the provider's auth contract: display name, env-var fallback, credential storage/format, and the declarative login / refresh flow that `@oh-my-pi/pi-ai`'s registry engines interpret (see [Auth grammar](#auth-grammar)).
 
@@ -207,6 +207,43 @@ The three value shapes are:
 A rule cannot assign the same resolved axis twice in one block.
 One object axis carries a computed form: `long-context-cost` accepts either the absolute rates (`input-threshold` + `input`/`output`/`cache-read`/`cache-write`) or `input-threshold` + `multiplier` (with optional `input-threshold-inclusive`), which derives the tier from the row's live base price at build time so the rule tracks upstream list-price updates (xAI's SuperGrok 200K tier). Rows without a token price carry no tier.
 
+### Time-based pricing
+
+The catalog object axis `time-based-cost` materializes into `ModelCost.timeBased`. It uses **named child objects**, not KDL arrays or repeated anonymous windows. For example, inside a matching provider/model scope:
+
+```kdl
+time-based-cost {
+    off-peak-multiplier 0.5
+    peak-windows {
+        morning {
+            weekdays "1,2,3,4,5"
+            start-minute 60
+            end-minute 240
+        }
+        afternoon {
+            weekdays "1,2,3,4,5"
+            start-minute 360
+            end-minute 600
+        }
+    }
+    effective-rates {
+        flash-pricing {
+            effective-from "2026-09-14T04:00:00Z"
+            input 0.30
+            output 1.20
+            cache-read 0.006
+            cache-write 0
+        }
+    }
+}
+```
+
+`morning`, `afternoon`, and `flash-pricing` are arbitrary unique object names, discarded when the payload is normalized into arrays. `weekdays` is a comma-separated string of distinct UTC weekday numbers (`0` = Sunday through `6` = Saturday), without spaces. Each window has integer minutes with `0 <= start-minute < end-minute <= 1440`; its start is inclusive and end exclusive. Split overnight windows across days. Outside the union of peak windows, the nonnegative `off-peak-multiplier` applies to token costs.
+
+`effective-rates` is optional. Each entry requires a distinct valid ISO UTC `effective-from` (`YYYY-MM-DDTHH:mm:ssZ` or with three fractional-second digits) and all four nonnegative per-million-token rates. The latest entry at or before the request timestamp replaces the entire base card; before the first entry, the base card applies. An entry may contain a `long-context` object with `input-threshold`, optional `input-threshold-inclusive`, and all four absolute rates. Effective rates do not inherit the base card's long-context tier. Selection order is effective card, context tier, then tariff multiplier.
+
+The recurring schedule and dated DeepSeek transition above come from [DeepSeek's official pricing](https://api-docs.deepseek.com/quick_start/pricing); see `providers/deepseek.kdl` for the complete rules and [the catalog API](../../../README.md#cost-calculation) for timestamp semantics. This is catalog policy metadata, not a supported schedule syntax for the coding agent's `models.yml`.
+
 ### Precedence and ambiguity
 
 Rules resolve independently per axis. A matching rule is ranked by:
@@ -251,15 +288,17 @@ behavior {
         route "openai-completions" prefix="openai/" strip-prefix=#true
     }
     model-limits provider="github-copilot" { limits "gpt-5.6" context=272000 max-tokens=128000 }
+    exclude-discovery-modes "embedding" "moderation" provider="litellm"
     exclude-models provider="nanogpt" substring="embed" substring="tts"
     plan-requirement provider="openai-codex" { tier "pro" substring="-spark" }
+    retry-reset-timezone provider="zai" offset="+08:00"
     pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
         alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
     }
 }
 ```
 
-Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
+`exclude-discovery-modes` takes one or more exact, case-sensitive upstream mode strings plus `provider=`; discovery mappers preserve missing, malformed, and unknown modes unless the provider policy explicitly lists them. Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
 
 ## Auth grammar
 
@@ -302,6 +341,7 @@ auth "anthropic" {
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
     allows-missing-api-key #true
+    native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
     show-in-login-list #false
 }
@@ -315,6 +355,61 @@ Login kinds:
 - `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
 
 Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registry/hooks` by that package's `auth-hooks-registry` test. Values marked `encoding="base64"` are public OAuth client ids stored obfuscated to keep secret scanners quiet; they are decoded at runtime.
+
+## Provider catalog grammar
+
+The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entry next to the cascade rules. A file that declares `default-model` is a catalog provider (a member of the generated `KnownProvider` union in `src/compat/provider-ids.ts`); a file without it is wire-compat only (custom provider ids such as `llama.cpp`) and may not carry any other entry node. The compiled entries live in `rules.json` under `providers`, keyed by id; runtime accessors are in `src/compat/providers.ts`, and `provider-models/descriptors.ts` pairs each entry with its model-manager factory — the only provider fact that stays in code.
+
+```kdl
+provider "sakana" {
+    default-model "fugu"                          // required for a catalog entry
+    env "SAKANA_API_KEY" "FUGU_API_KEY"           // runtime API-key env fallback, in order
+    dynamic-models-authoritative #true            // discovery replaces bundled rows
+    allow-unauthenticated #true                   // runtime manager without a key
+    skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere
+    discovery label="Sakana AI" oauth-provider="sakana" allow-unauthenticated=#true {
+        env "SAKANA_GEN_KEY"                      // generation-time keys; defaults to the provider env
+    }
+    seed api="openai-responses" base-url="https://api.sakana.ai/v1" bundle="fallback" {
+        model "fugu-ultra" name="Fugu Ultra" {
+            reasoning #true
+            input "text"
+            cost input=5 output=30 cache-read=0.5 cache-write=0
+            limits context=1000000                // max-tokens omitted → null
+            thinking-mode "effort"                // thinking-* axes → row.thinking
+            thinking-efforts "high" "max"
+            include-encrypted-reasoning #false    // wire axes → row.compat
+        }
+    }
+
+    // cascade rules follow, as before
+    include-encrypted-reasoning #false
+}
+provider "muse-code" {
+    default-model "muse-spark-1.3"
+    seed api="openai-responses" base-url="https://api.meta.ai/v1" {
+        models-from "meta"                        // copies meta's seed rows under this provider
+    }
+}
+```
+
+Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
+
+### Seed rows
+
+A `seed` *defines* bundled rows for providers whose catalog cannot be discovered at generation time — credential-scoped rosters, unauthenticated regens, or models ahead of upstream catalogs. Every other stratum patches rows; this one authors them. Runtime model managers hand the rows to `staticModels` through `seedModels(provider)`; the generator bundles them per the seed's `bundle` policy. Values are literal — a seed never derives from another provider's row, and pricing is never borrowed.
+
+`seed` properties: `api` and `base-url` are per-row defaults (a `model` may override either with the same property names); `bundle` defaults to `always`; `precedence="seed"` is optional. `model` takes the wire id positionally, requires `name=`, and its body MUST declare `reasoning`, `input` (`"text"` and/or `"image"`), `cost` (all four per-million rates), and `limits` (`context=` / `max-tokens=`, an omitted limit is `null`); `supports-tools #true` is optional. Any other directive is an axis from the cascade vocabulary: thinking axes become the row's explicit `thinking` (then `thinking-mode` and `thinking-efforts` are both required), wire axes become its explicit `compat` and must apply to the row's API, and catalog axes are rejected because they stay rule-owned in the cascade block. Explicit `thinking`/`compat` on a seed row win over the cascade exactly as they do for any authored spec.
+
+`bundle` decides when the generator includes the rows:
+
+| Policy | Rows enter the bundle |
+| --- | --- |
+| `always` | Every regeneration. Same-id upstream/discovery rows win dedup. |
+| `fallback` | Only when the provider's authoritative catalog discovery did not succeed. |
+| `empty` | Only when no other source produced a row for the provider. |
+
+`precedence="seed"` prepends the rows after the previous-snapshot merge and cross-provider reference fills, so the authored row wins dedup and same-id rows on other hosts never overwrite its name or capabilities (QwenCloud Token Plan, Meta). The default `upstream` precedence appends before the snapshot merge, so the current seed — not a stale snapshot copy — is the fallback row.
 
 ## Vendoring provenance
 

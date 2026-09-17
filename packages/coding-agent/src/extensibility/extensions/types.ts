@@ -62,7 +62,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "../../modes/components/custom-editor";
 import type { Theme } from "../../modes/theme/theme";
-import type { AsyncJobSnapshot } from "../../session/agent-session";
+import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
@@ -418,6 +418,17 @@ export interface CompactOptions {
 	 * `customInstructions`.
 	 */
 	internalGuidance?: string;
+	/**
+	 * A manual compaction aborts any turn in flight and, once the summary is
+	 * committed (or at once when there was nothing to compact), resumes it with
+	 * the auto-continue nudge. Set this when the caller dispatches its own
+	 * follow-up turn after compaction — plan-mode "Approve and compact context" —
+	 * so the two don't double-prompt. Compactions that interrupt nothing never
+	 * continue. Steer/follow-up messages queued during the compaction are
+	 * unaffected: they always drain once compaction ends (issue #5800), before
+	 * and independent of this option.
+	 */
+	suppressContinuation?: boolean;
 }
 
 /**
@@ -642,6 +653,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	loadMode?: ToolLoadMode;
 	/** If true, tool may stage deferred changes that require explicit resolve/discard. */
 	deferrable?: boolean;
+	/** Whether this tool can read `skill://` instruction content. */
+	readsSkillUris?: boolean;
 	/** Tool approval tier. Defaults to `"exec"` when omitted.
 	 *  `"read"`: read-only operations. `"write"`: mutations. `"exec"`: code execution. */
 	approval?: ToolApproval;
@@ -652,6 +665,9 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** Previous public name when a rename changed minting. Forwarded through
+	 *  RegisteredToolAdapter so approval falls back to legacy `deny`/`prompt`. */
+	legacyName?: string;
 	/** Optional environment hook applied when the interactive user shell invokes this tool's shell surface. */
 	shellEnv?: ToolShellEnvironmentHook;
 	/** Authoritative originating file for a discovered custom-tool module. */
@@ -765,10 +781,12 @@ export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
 	type: "after_provider_response";
 }
 
-/** Fired after user submits prompt but before agent loop. */
+/** Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider. */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
+	/** Already-transformed text; queued batches join user messages with two newlines, excluding agent companions. */
 	prompt: string;
+	/** Already-normalized user images in delivery order. */
 	images?: ImageContent[];
 	systemPrompt: string[];
 }
@@ -1153,7 +1171,7 @@ export type { ToolResultEventResult } from "../shared-events";
 
 export interface BeforeAgentStartEventResult {
 	message?: CustomMessagePayload;
-	/** Replace the system prompt for this turn. If multiple extensions return this, they are chained. */
+	/** Replace policy for the next request and its continuations, until the next preparation. Extensions chain in order. */
 	systemPrompt?: string[];
 }
 
@@ -1448,10 +1466,7 @@ export interface ExtensionAPI {
 	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
 	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
 	 *  batch while streaming; idle still starts a turn. */
-	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" | "aside" },
-	): void;
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -1634,6 +1649,13 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = unknown> {
 	definition: ToolDefinition<TParams, TDetails>;
 	extensionPath: string;
+	/**
+	 * Upstream-shaped provenance mirroring {@link SourceInfo}. Extensions authored
+	 * against `@earendil-works/pi-coding-agent` — whose registered tools expose
+	 * `sourceInfo` — read `sourceInfo.path` off `getAllRegisteredTools()` entries,
+	 * so it carries the same value `SessionTools.getAllToolInfos()` synthesizes.
+	 */
+	sourceInfo: SourceInfo;
 }
 
 /** Internal observer invoked when an already-loaded extension registers or replaces a tool. */
@@ -1672,7 +1694,7 @@ export type SendMessageHandler = <T = unknown>(
  *  batch while streaming; idle still starts a turn. */
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
-	options?: { deliverAs?: "steer" | "followUp" | "aside" },
+	options?: SendUserMessageOptions,
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;

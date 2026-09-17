@@ -1,8 +1,7 @@
 /**
  * Cross-process daemon broker protocol shared by the tool, client, and broker.
  */
-/** Hidden CLI selector used to re-enter the daemon broker worker. */
-export const DAEMON_BROKER_WORKER_ARG = "__omp_worker_daemon_broker";
+export { DAEMON_BROKER_WORKER_ARG } from "../cli/worker-selectors";
 
 /** Fixed dimensions negotiated with every supervised PTY. */
 export const DAEMON_PTY_COLUMNS = 120;

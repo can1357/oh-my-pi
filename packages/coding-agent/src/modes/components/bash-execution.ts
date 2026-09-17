@@ -20,6 +20,7 @@ import {
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
 import { theme } from "../../modes/theme/theme";
+import type { OutputArtifactError } from "../../session/streaming-output";
 import { loadXtermTerminal } from "../../tools/bash-interactive";
 import type { TruncationMeta } from "../../tools/output-meta";
 import { resolveImageOptions } from "../../tools/render-utils";
@@ -61,6 +62,7 @@ export class BashExecutionComponent extends Container {
 	#exitCode: number | undefined = undefined;
 	#loader: Loader;
 	#truncation?: TruncationMeta;
+	#artifactError?: OutputArtifactError;
 	#expanded = false;
 	// Post-finalize mutation counter (FinalizableBlock.getTranscriptBlockVersion):
 	// a completed command's block still mutates on expansion toggles, and the
@@ -81,6 +83,7 @@ export class BashExecutionComponent extends Container {
 	#ptyQueue: string[] = [];
 	#ptyWriting = false;
 	#ptyRefreshQueued = false;
+	#ptyReplayFinalized = false;
 	#images: readonly ImageContent[] = [];
 	#showImages = true;
 	readonly #instanceId = nextBashExecutionId++;
@@ -111,7 +114,7 @@ export class BashExecutionComponent extends Container {
 	 * stay out of native scrollback until the command completes.
 	 */
 	isTranscriptBlockFinalized(): boolean {
-		return this.#status !== "running";
+		return this.#status !== "running" && (!this.#ptyMode || this.#ptyReplayFinalized);
 	}
 
 	getTranscriptBlockVersion(): number {
@@ -168,6 +171,7 @@ export class BashExecutionComponent extends Container {
 	appendPtyChunk(chunk: string): void {
 		if (this.#status !== "running" && !this.#ptyWriting && this.#ptyQueue.length === 0) return;
 		this.#ptyMode = true;
+		this.#ptyReplayFinalized = false;
 		this.#ptyQueue.push(chunk);
 		if (this.#ptyQueue.length > MAX_PTY_QUEUE_CHUNKS) {
 			const firstPending = this.#ptyWriting ? 1 : 0;
@@ -245,8 +249,10 @@ export class BashExecutionComponent extends Container {
 		this.#refreshPtyLines(true);
 		this.#ptyTerminal = undefined;
 		terminal.dispose();
+		this.#ptyReplayFinalized = true;
 		this.#blockVersion++;
 		this.#updateDisplay();
+		this.#ui.requestComponentRender(this);
 	}
 
 	setComplete(
@@ -255,6 +261,7 @@ export class BashExecutionComponent extends Container {
 		options?: {
 			output?: string;
 			truncation?: TruncationMeta;
+			artifactError?: OutputArtifactError;
 			images?: readonly ImageContent[];
 			showImages?: boolean;
 		},
@@ -262,6 +269,7 @@ export class BashExecutionComponent extends Container {
 		this.#exitCode = exitCode;
 		this.#status = resolveExecutionStatus(exitCode, cancelled);
 		this.#truncation = options?.truncation;
+		this.#artifactError = options?.artifactError;
 		this.#images = options?.images ?? [];
 		this.#showImages = options?.showImages ?? true;
 		if (options?.output !== undefined && !this.#ptyMode) {
@@ -353,6 +361,7 @@ export class BashExecutionComponent extends Container {
 				status: this.#status,
 				exitCode: this.#exitCode,
 				truncation: this.#truncation,
+				artifactError: this.#artifactError,
 				hiddenLineCount,
 				suppressHiddenCount: hasSixelOutput,
 			});

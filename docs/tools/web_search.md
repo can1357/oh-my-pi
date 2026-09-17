@@ -33,6 +33,7 @@
   - `packages/coding-agent/src/web/search/providers/searxng.ts` — self-hosted SearXNG adapter.
   - `packages/coding-agent/src/web/search/providers/startpage.ts` — Startpage (Google-proxied) form-flow scraper.
   - `packages/coding-agent/src/web/search/providers/synthetic.ts` — Synthetic search adapter.
+  - `packages/coding-agent/src/web/search/providers/ollama.ts` — Ollama web search adapter.
   - `packages/coding-agent/src/web/search/providers/tavily.ts` — Tavily search adapter.
   - `packages/coding-agent/src/web/search/providers/tinyfish.ts` — TinyFish search adapter.
   - `packages/coding-agent/src/web/search/providers/xai.ts` — xAI Responses web-search adapter.
@@ -106,13 +107,18 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 ## Modes / Variants
 - **Provider selection**
   - **Forced provider**: internal callers may pass `provider`; a non-`auto` value is the only attempted provider and uses `isExplicitlyAvailable()`, while `auto` (or omitting it) walks the configured chain. This field is not in the model-facing schema.
-  - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, and Firecrawl can use their unauthenticated/keyless paths.
+  - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, Firecrawl, and Parallel can use their unauthenticated/keyless paths.
   - **Excluded providers**: `setExcludedSearchProviders()` removes providers from the automatic/configured chain and Public Web fan-out. Wired from `providers.webSearchExclude` through `packages/coding-agent/src/config/provider-globals.ts`.
-  - **Default auto chain order** (23 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
+  - **Default auto chain order** (24 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
   - **Perplexity** — `packages/coding-agent/src/web/search/providers/perplexity.ts`
     - Availability: auth attempt order is `PERPLEXITY_COOKIES` -> OAuth token in `agent.db` -> direct Perplexity API key -> OpenRouter key -> anonymous ask-endpoint fallback. The automatic chain requires direct Perplexity auth (cookies, OAuth, or a Perplexity credential); explicit selection is always available and can use OpenRouter or anonymous search.
+    - Browser SSO: run `/login perplexity` (or select Perplexity in the setup wizard), then press Enter or enter `sso`. Complete sign-in in the dedicated browser window, choosing **Single sign-on (SSO)** for your organization. omp captures and validates the session automatically; no extension, DevTools, cookie copying, or logout from your normal browser is needed.
+    - Browser login requires a graphical session on the machine running omp. It uses an isolated Chromium profile and incognito context, preserves sandbox and TLS checks, and closes the browser when login finishes, is cancelled, or reaches the five-minute timeout. Press Escape in omp to cancel. Profile cleanup uses the existing retry-and-warn behavior if the operating system keeps files locked.
+    - The saved session uses the existing Perplexity subscription, including an Enterprise seat; browser SSO does not switch to separately billed API credentials. Sign in again if Perplexity expires or revokes the session. Enter `email` to use the existing email-code and authenticator-code flow instead.
+    - Legacy `ai.perplexity.mac` sessions may still be borrowed before the login prompt. Start omp with `PI_AUTH_NO_BORROW=1` to skip borrowing. Newer Mac app sessions in the restricted Keychain are not borrowed.
+    - SDK hosts can provide `OAuthController.onBrowserSession` to return the first non-empty cookie value matching `request.cookieNames`, checked in preference order. The callback returns the value privately; pi-ai validates it without importing browser automation. Hosts without that callback retain the email-code flow. RPC login does not launch a browser.
     - OAuth/cookie/anonymous mode: POSTs to `https://www.perplexity.ai/rest/sse/perplexity_ask`, consumes SSE, merges partial events, extracts answer and source URLs, sets `authMode: "oauth"` (`"anonymous"` for the unauthenticated fallback).
     - API-key mode: POSTs to `https://api.perplexity.ai/chat/completions` with `model: "sonar-pro"`, `search_mode: "web"`, `num_search_results`, optional `search_recency_filter`, `max_tokens`, `temperature`.
     - `num_search_results` controls upstream API breadth only in API-key mode. `limit` is preserved separately as `num_results` and slices returned `sources` after parsing in both auth modes.
@@ -195,8 +201,8 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..20`, default `10`.
     - Output: `sources`, `requestId`.
   - **Parallel** — `packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`
-    - Availability: env or `agent.db` credential for `parallel`.
-    - Querying: POST `https://api.parallel.ai/v1beta/search` with `objective=query`, `search_queries=[query]`, `mode:"fast"`, `max_chars_per_result: 10000`, beta header `search-extract-2025-10-10`.
+    - Availability: an env or `agent.db` credential for `parallel` admits it to the automatic chain. Explicit selection, either by listing `parallel` in `providers.webSearchOrder` or running `omp q --provider parallel "your query"`, also works without a credential.
+    - Querying: authenticated requests POST `https://api.parallel.ai/v1beta/search` with `objective=query`, `search_queries=[query]`, `mode:"fast"`, `max_chars_per_result: 10000`, and beta header `search-extract-2025-10-10`. Without a credential, explicit requests call `web_search` at `https://search.parallel.ai/mcp` with `objective`, operator-preserving `search_queries`, and the current session ID and exact active model ID when available. MCP requests identify the client as `omp/<version>`.
     - There is no provider fan-out here despite the name; the current adapter always sends a one-element `search_queries` array.
     - `limit` and `num_search_results` are collapsed together before dispatch, clamped to `1..40`, default `10`.
     - Output: `sources`, `requestId`.
@@ -205,6 +211,12 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Querying: POST `https://api.synthetic.new/v2/search` with `{ query }`.
     - Ignores `recency`, `max_tokens`, and `temperature`.
     - `limit` and `num_search_results` are collapsed together before dispatch.
+    - Output: `sources` only.
+  - **Ollama** — `packages/coding-agent/src/web/search/providers/ollama.ts`
+    - Availability: `OLLAMA_CLOUD_API_KEY` env or `agent.db` credential for `ollama-cloud`.
+    - Querying: POST `https://ollama.com/api/web_search` with `{ query, max_results }`, `Authorization: Bearer <key>`.
+    - Ignores `recency`, `max_tokens`, and `temperature`.
+    - `limit` and `num_search_results` are collapsed together before dispatch, clamped to `1..10`, default `5`.
     - Output: `sources` only.
   - **SearXNG** — `packages/coding-agent/src/web/search/providers/searxng.ts`
     - Availability: endpoint from `searxng.endpoint` setting or `SEARXNG_ENDPOINT` env.
@@ -246,7 +258,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - Many provider adapters accept `AbortSignal`; `WebSearchTool.execute()` passes the tool call signal into `executeSearch()`, which forwards it as `params.signal` to providers and rethrows cancellation during fallback.
 
 ## Limits & Caps
-- Provider auto-order length: 23 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`).
+- Provider auto-order length: 24 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`).
 - `formatForLLM()` truncates source snippets and citation text to 240 chars (`packages/coding-agent/src/web/search/index.ts`).
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).

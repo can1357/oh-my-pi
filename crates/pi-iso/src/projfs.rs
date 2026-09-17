@@ -399,16 +399,17 @@ mod imp {
 		};
 		if is_failed(start_hr) {
 			PROJFS_SESSIONS.lock().remove(&projection_key);
-			// SAFETY: `provider_context_ptr` comes from `Box::into_raw` above and start
-			// failed, so ProjFS never took ownership and this function remains the sole
-			// owner.
+			// SAFETY: `provider_context_ptr` comes from `Box::into_raw` above and
+			// start failed, so ProjFS never took ownership and this function
+			// remains the sole owner.
 			unsafe {
 				drop(Box::from_raw(provider_context_ptr));
 			}
 			if !virtualization_context.is_null() {
-				// SAFETY: `virtualization_context` is only used when ProjFS returned a non-null
-				// context during `PrjStartVirtualizing`; stopping it here prevents a partially
-				// started instance from remaining active after start failure.
+				// SAFETY: `virtualization_context` is only used when ProjFS
+				// returned a non-null context during `PrjStartVirtualizing`;
+				// stopping it here prevents a partially started instance from
+				// remaining active after start failure.
 				unsafe {
 					(api.prj_stop_virtualizing)(virtualization_context);
 				}

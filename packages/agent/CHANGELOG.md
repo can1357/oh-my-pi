@@ -2,6 +2,59 @@
 
 ## [Unreleased]
 
+## [18.2.1] - 2026-09-15
+
+### Added
+
+- Added optional queued-message preparation with cancellation-safe delivery and appended context ([#11835](https://github.com/can1357/oh-my-pi/pull/11835) by [@andrebrait](https://github.com/andrebrait)).
+
+### Fixed
+
+- Fixed streaming CPU blowup on long turns: per-delta `message_update` snapshots now deep-clone only the blocks the stream actually touched instead of the entire accumulated message, eliminating the quadratic cloning work that could freeze the TUI for tens of seconds to minutes while a subagent streams ([#10605](https://github.com/can1357/oh-my-pi/issues/10605)).
+- Native compaction now carries an existing local summary into the first provider-native request instead of losing the summarized history. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+- Subsequent native compactions preserve messages appended between a speculative snapshot and its commit, while honoring `/clear` boundaries. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+- Native replay compatibility checks the active provider and Responses API independently of whether future native compaction is enabled. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
+- Fixed compaction retaining oversized older steps beyond the recent-history budget and skipping previously retained history on later passes, preventing long tool loops from freeing enough context ([#11365](https://github.com/can1357/oh-my-pi/issues/11365)).
+- Fixed Codex remote compaction retries for both Bun and proxy socket-closure messages and stopped falling back to the unsupported `/responses/compact` endpoint after V2 failures.
+
+## [18.1.19] - 2026-09-12
+
+### Added
+
+- Added `Agent.getPendingToolResults()` for reconstructing live displays before buffered tool results are persisted ([#11868](https://github.com/can1357/oh-my-pi/pull/11868) by [@serverinspector](https://github.com/serverinspector)).
+- Added opt-in host authorization and exact-once streamed child execution for discard-safe local reads.
+
+### Changed
+
+- `Tool <name> not found` now also suggests mounted `xd://` devices, not just the advertised tool set, via the new `suggestFallbackToolNames` option ([#11516](https://github.com/can1357/oh-my-pi/issues/11516), [#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
+
+### Fixed
+
+- Speculative stream sessions are now discarded when a hook or argument transform replaces a call's arguments while keeping its ID, instead of releasing deferred work planned from the original code ([#11889](https://github.com/can1357/oh-my-pi/pull/11889) by [@h4vc](https://github.com/h4vc)).
+
+## [18.1.18] - 2026-09-11
+
+### Added
+
+- Anthropic server-side compaction as a `remote` compaction backend: model lines the beta supports (`compat.supportsServerCompaction`, rule-owned in the catalog: Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) on the official endpoint, resolved the way the provider routes requests, plus Anthropic-compatible routes with `remoteCompaction.enabled`, compact by re-issuing the live turn's own request — same system prompt, tools, and history, so it reads the prompt cache the last turn wrote — with the `compact_20260112` edit paused after the summary and the harness summary prompt as `instructions`. The instructions name where the retained tail begins so the summary covers only the history the rebuilt context drops. The API's summary is stored as the entry text and as `preserveData.anthropicCompaction`, replayed natively on later Anthropic requests and read as plain text by every other provider; the retained tail comes from session entries as with a local summary. Contexts below 55k tokens (the API trigger floor plus margin) keep summarizing locally, and a response without a summary is a native failure, like the OpenAI lanes. An aborted compaction response is the abort (a cancellation, never a native failure) and an error response keeps its HTTP status, so auth and timeout classification match the OpenAI lanes; the block's opaque `encrypted_content` is persisted as `preserveData.anthropicCompaction.encryptedContent` and replayed verbatim.
+
+### Fixed
+
+- `compact()` now forwards the caller's `oneshotRetry` opt-out to every summarization oneshot; auto-compaction's outer retry loop no longer multiplies with the inner transient-failure retries.
+
+## [18.1.17] - 2026-09-10
+
+### Changed
+
+- `Tool <name> not found` now names a plausible intended target when the advertised set contains one, e.g. `Tool mcp__abc123__xyz789_read not found. Did you mean read?`. A model that mis-transcribes a long opaque tool name reliably keeps the trailing segment, which is the only part carrying meaning, so the miss becomes recoverable in the same turn instead of costing a round trip. Purely advisory — the suggestion is only ever a string in the error, never a dispatch target, so an unrecognized name still fails ([#10109](https://github.com/can1357/oh-my-pi/issues/10109) by [@oldschoola](https://github.com/oldschoola)).
+
+### Fixed
+
+- Fixed the token estimator counting developer messages as free and ignoring images in user content, which let context budgeting, pruning and the compaction trigger read a transcript as far smaller than the one sent to the provider.
+- Fixed repeated local compaction omitting messages retained before the previous compaction record, while preserving original entry IDs and `/clear` boundaries.
+- Raised remote compaction request timeout from 3 minutes to 5 minutes so long Codex/gpt-6-astra compact streams can finish before the watchdog aborts them.
+- Fixed proxy responses dropping the cost the server reported; recorded costs are kept instead of being recomputed.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

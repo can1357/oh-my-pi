@@ -16,6 +16,7 @@ const SEVEN_DAYS = 7 * 24 * HOUR;
 
 function makeLimit(opts: {
 	id: string;
+	label?: string;
 	usedFraction: number;
 	durationMs?: number;
 	windowId?: string;
@@ -23,15 +24,17 @@ function makeLimit(opts: {
 	accountId?: string;
 	provider?: string;
 	notes?: string[];
+	sharedGroup?: string;
 }): UsageReport["limits"][number] {
 	return {
 		id: opts.id,
-		label: opts.id,
+		label: opts.label ?? opts.id,
 		scope: {
 			provider: opts.provider ?? "anthropic",
 			windowId: opts.windowId,
 			tier: opts.tier,
 			accountId: opts.accountId,
+			...(opts.sharedGroup !== undefined ? { shared: true, sharedGroup: opts.sharedGroup } : {}),
 		},
 		window:
 			opts.durationMs !== undefined
@@ -338,6 +341,47 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("Cerebras");
 		expect(text).toContain("API key — no usage data");
 		expect(text).toContain("capacity: 5h → 1.34/2 accounts used (0.66× quota left)");
+	});
+
+	it("renders marked Antigravity shared quotas once per account", () => {
+		const antigravity = makeReport("google-antigravity", "user@example.test", [
+			makeLimit({
+				id: "google-antigravity:google:default:gemini-5h",
+				label: "Gemini",
+				provider: "google-antigravity",
+				usedFraction: 0.25,
+				durationMs: FIVE_HOURS,
+				windowId: "5h",
+			}),
+			makeLimit({
+				id: "google-antigravity:google:default:gemini-weekly",
+				label: "Gemini",
+				provider: "google-antigravity",
+				usedFraction: 0.25,
+				durationMs: SEVEN_DAYS,
+				windowId: "weekly",
+			}),
+			...(["5h", "weekly"] as const).flatMap((windowId, index) =>
+				(["anthropic", "openai"] as const).map(counter =>
+					makeLimit({
+						id: `google-antigravity:${counter}:default:3p-${windowId}`,
+						label: "Claude & GPT (shared)",
+						provider: "google-antigravity",
+						usedFraction: 0.25,
+						durationMs: index === 0 ? FIVE_HOURS : SEVEN_DAYS,
+						windowId,
+						sharedGroup: `3p-${windowId}`,
+					}),
+				),
+			),
+		]);
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([antigravity], [], Date.now()));
+
+		expect(text.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
+		expect(text.match(/Gemini/g)).toHaveLength(2);
+		expect(text).not.toContain("Usage (Anthropic)");
+		expect(text).not.toContain("Usage (OpenAI)");
 	});
 
 	it("keeps near-exhausted capacity fractional instead of rounding it to an exact need", () => {

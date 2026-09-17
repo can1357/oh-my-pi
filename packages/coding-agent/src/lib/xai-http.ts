@@ -78,16 +78,17 @@ function resolveXAIBaseURL(
 /**
  * Resolve an xAI tool endpoint and its provider/model header overrides.
  */
-export function resolveXAIHttpTransport(
+export async function resolveXAIHttpTransport(
 	modelRegistry: ModelRegistry,
 	provider: XAIHttpProvider,
 	modelId?: string,
-): XAIHttpTransport {
+): Promise<XAIHttpTransport> {
+	const model = modelId ? modelRegistry.find(provider, modelId) : undefined;
 	return {
 		baseURL: resolveXAIBaseURL(modelRegistry, provider, modelId),
-		headers:
-			(modelId ? modelRegistry.find(provider, modelId)?.headers : undefined) ??
-			modelRegistry.getProviderHeaders(provider),
+		headers: model
+			? await modelRegistry.resolveModelHeaders(model)
+			: await modelRegistry.getProviderHeaders(provider),
 	};
 }
 

@@ -1,4 +1,3 @@
-import { scheduler } from "node:timers/promises";
 import {
 	type Agent,
 	AgentBusyError,
@@ -20,10 +19,11 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
-import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
 
@@ -39,6 +39,7 @@ import {
 	clampThinkingLevelToCeiling,
 	modelSupportsEffortCeiling,
 } from "../thinking";
+import type { EditMode } from "../utils/edit-mode";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type {
 	InitialRetryFallbackState,
@@ -168,6 +169,8 @@ export interface RecoveryCompactionResult {
 	historyRewritten?: boolean;
 }
 
+type RequestBodyReadTimeoutRecovery = "not-applicable" | "handled-retry" | "handled-terminal";
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface TurnRecoveryHost {
 	agent: Agent;
@@ -196,6 +199,7 @@ export interface TurnRecoveryHost {
 	abortInProgress(): boolean;
 	streamingEditAbortTriggered(): boolean;
 	promptGeneration(): number;
+	promptSequence(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	scheduleAgentContinue(options: {
@@ -210,6 +214,10 @@ export interface TurnRecoveryHost {
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
+	/** Edit mode resolved for the active model and settings, captured before a fallback swap. */
+	resolveActiveEditMode(): EditMode;
+	/** Rebuilds the model-dependent base system prompt when a swap changed the edit mode or model policy. */
+	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
 	/**
 	 * Spend a saved Codex reset for the blocked pool, if eligible.
@@ -230,8 +238,12 @@ export interface TurnRecoveryHost {
 			suppressHandoff?: boolean;
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
+			/** Skip `snapcompact` — a byte/payload-limit 413 recovery must not
+			 *  retry with an even larger, media-heavy request (#11482). */
+			excludeMediaMethods?: boolean;
 		},
 	): Promise<RecoveryCompactionResult>;
+	shakeForRequestBodyReadTimeout(generation: number): Promise<boolean>;
 	withBashBranchTransition<T>(operation: () => T): T;
 }
 
@@ -263,6 +275,7 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -562,7 +575,7 @@ export class TurnRecovery {
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
 		allowDefer: boolean,
-		options: { autoContinue: boolean; triggerContextTokens?: number },
+		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<RecoveryCompactionResult> {
 		return this.#runRecoveryCompactionWithRollback(reason, message, allowDefer, options);
 	}
@@ -1051,7 +1064,7 @@ export class TurnRecovery {
 		reason: "overflow" | "incomplete",
 		assistantMessage: AssistantMessage,
 		allowDefer: boolean,
-		options: { autoContinue: boolean; triggerContextTokens?: number },
+		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<RecoveryCompactionResult> {
 		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		await this.dropPersistedAssistantTurn(assistantMessage);
@@ -1059,6 +1072,7 @@ export class TurnRecovery {
 			autoContinue: options.autoContinue,
 			triggerContextTokens: options.triggerContextTokens,
 			phase: "mid_turn",
+			excludeMediaMethods: options.excludeMediaMethods,
 		});
 		const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		if (result.historyRewritten !== true && compactionEntryAfter === compactionEntryBefore) {
@@ -1227,6 +1241,47 @@ export class TurnRecovery {
 	}
 
 	/**
+	 * Own the exact Responses request-body-read timeout so terminal special outcomes
+	 * cannot fall through to the generic 408 replay path.
+	 */
+	async handleResponsesRequestBodyReadTimeout(message: AssistantMessage): Promise<RequestBodyReadTimeoutRecovery> {
+		if (message.stopReason !== "error" || !AIError.isResponsesRequestBodyReadTimeout(message)) {
+			return "not-applicable";
+		}
+		const generation = this.#host.promptGeneration();
+		const promptSequence = this.#host.promptSequence();
+		const replayUnsafe = this.#hasReplayUnsafeOutput(message);
+		const terminal = (): RequestBodyReadTimeoutRecovery => {
+			if (!replayUnsafe) this.removeAssistantMessageFromActiveContext(message, "request-body-timeout-terminal");
+			return "handled-terminal";
+		};
+		const retrySettings = this.#host.settings.getGroup("retry");
+		if (
+			this.#requestBodyReadTimeoutRecoveryPromptSequence === promptSequence ||
+			!retrySettings.enabled ||
+			retrySettings.maxRetries <= this.#retryAttempt ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress() ||
+			this.#host.isCompacting() ||
+			replayUnsafe
+		) {
+			return terminal();
+		}
+
+		this.#requestBodyReadTimeoutRecoveryPromptSequence = promptSequence;
+		const shook = await this.#host.shakeForRequestBodyReadTimeout(generation);
+		if (
+			!shook ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress()
+		) {
+			return terminal();
+		}
+		return (await this.#handleRetryableError(message, { allowModelFallback: false })) ? "handled-retry" : terminal();
+	}
+
+	/**
 	 * Check if an error is retryable (transient errors, usage limits, or
 	 * account-scoped policy denials that can rotate credentials).
 	 * Context overflow is NOT retryable (handled by compaction instead).
@@ -1234,6 +1289,7 @@ export class TurnRecovery {
 	isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
+		if (AIError.isResponsesRequestBodyReadTimeout(message)) return false;
 		const model = this.#host.model();
 		const immutableAnthropicThinkingError =
 			model?.api === "anthropic-messages" &&
@@ -1342,7 +1398,9 @@ export class TurnRecovery {
 			message.stopReason === "error" && STREAM_STALL_ERROR_RE.test(errorMessage) && AIError.retriable(id);
 		const transportReset =
 			message.stopReason === "error" &&
-			HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) &&
+			(HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
+				AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(errorMessage) ||
+				AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage)) &&
 			AIError.retriable(id) &&
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&
@@ -1811,6 +1869,11 @@ export class TurnRecovery {
 				: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
 		const candidateSelector = formatModelStringWithRouting(candidate);
 		const previousModel = this.#host.model();
+		// Capture the edit mode under the outgoing model so the base system prompt
+		// can be re-synced once the swap commits — `edit.modelVariants` and other
+		// model-dependent prompt policy would otherwise stay pinned to the
+		// chain-head model after an auto-fallback (issue #11983).
+		const previousEditMode = this.#host.resolveActiveEditMode();
 		// Mark routing BEFORE the swap: `setModelWithProviderSessionReset` moves the
 		// model and fans `model_changed` out to subscribers synchronously, and a
 		// listener reading attribution in that window must already see the incoming
@@ -1849,6 +1912,7 @@ export class TurnRecovery {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 		}
+		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
@@ -2008,12 +2072,14 @@ export class TurnRecovery {
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
+		const previousEditMode = this.#host.resolveActiveEditMode();
 		// A capability degrade is fallback routing too, even though it arms no
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
+		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
@@ -2070,6 +2136,7 @@ export class TurnRecovery {
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		const primarySelector = formatModelStringWithRouting(primaryModel);
+		const previousEditMode = this.#host.resolveActiveEditMode();
 		// Clear before the swap: `setModelWithProviderSessionReset` and
 		// `setThinkingLevel` both notify subscribers, and an observer reading
 		// attribution in that window would see the restored primary still tagged
@@ -2079,15 +2146,16 @@ export class TurnRecovery {
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
+		await this.#host.syncAfterModelChange(previousEditMode);
 		return true;
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
-		// Single call into the centralized parser: it merges every supported
+		// Single call into the provider-aware parser: it merges every supported
 		// form (account resets, retry-after-ms, legacy retry-after /
 		// x-ratelimit-reset text) by longest-wins, so a shorter reset phrase
 		// can never shadow a longer retry signal carried in the same message.
-		return extractRetryHint(undefined, errorMessage);
+		return extractProviderRetryHint(this.#host.model()?.provider, errorMessage);
 	}
 
 	/**
@@ -2465,12 +2533,15 @@ export class TurnRecovery {
 		// pattern instead of re-sampling the same stalled reasoning.
 		this.#maybeInjectThinkingLoopRedirect(id);
 
-		// Wait with exponential backoff (abortable).
+		// Day-scale provider waits (a monthly quota reset parsed from the error
+		// text) exceed the signed 32-bit timer limit; sleepLong chunks the sleep
+		// so the full wait elapses instead of overflowing the timer. `delayMs`
+		// stays exact for events and the retry deadline computation.
 		const retryAbortController = new AbortController();
 		this.#retryAbortController?.abort();
 		this.#retryAbortController = retryAbortController;
 		try {
-			await scheduler.wait(delayMs, { signal: retryAbortController.signal });
+			await sleepLong(delayMs, retryAbortController.signal);
 		} catch {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;
@@ -2630,10 +2701,18 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Toggle auto-retry setting.
+	 * Toggle auto-retry. When `persist` is false (the default) the change is a
+	 * session-scoped runtime override rather than a durable global write, so the
+	 * `set_auto_retry` RPC command configures only its own session instead of
+	 * mutating the machine-global `config.yml`.
 	 */
-	setAutoRetryEnabled(enabled: boolean): void {
-		this.#host.settings.set("retry.enabled", enabled);
+	setAutoRetryEnabled(enabled: boolean, persist = false): void {
+		if (persist) {
+			this.#host.settings.set("retry.enabled", enabled);
+			this.#host.settings.clearOverride("retry.enabled");
+		} else {
+			this.#host.settings.override("retry.enabled", enabled);
+		}
 	}
 	/**
 	 * Whether the transcript tail is a failed/aborted assistant turn whose most

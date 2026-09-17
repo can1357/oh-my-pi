@@ -42,6 +42,7 @@ function createPathContext(): SegmentContext {
 		prewalk: null,
 		goalMode: null,
 		vibeMode: null,
+		vim: null,
 		collab: null,
 		usageStats: {
 			input: 0,
@@ -155,6 +156,24 @@ describe("status line path segment", () => {
 			// Display is just the scratch-relative tail — no leading tmpdir, no ancestor segments.
 			expectContentToContainPath(rendered.content, path.basename(getProjectDir()));
 			expect(rendered.content).not.toContain(os.tmpdir());
+		} finally {
+			setProjectDir(originalProjectDir);
+			removeSyncWithRetries(scratchDir);
+		}
+	});
+
+	it("normalizes and classifies a project directory only once", () => {
+		const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-status-line-classify-"));
+		try {
+			setProjectDir(scratchDir);
+			const realpath = vi.spyOn(fs, "realpathSync");
+			renderSegment("path", createPathContext());
+			renderSegment("path", createPathContext());
+
+			const projectRealpaths = realpath.mock.calls.filter(
+				([input]) => path.resolve(String(input)) === path.resolve(scratchDir),
+			);
+			expect(projectRealpaths).toHaveLength(1);
 		} finally {
 			setProjectDir(originalProjectDir);
 			removeSyncWithRetries(scratchDir);

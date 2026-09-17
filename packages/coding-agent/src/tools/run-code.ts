@@ -55,6 +55,11 @@ export function renderRunArg(value: unknown): string {
 	return rendered;
 }
 
+/** Renders a helper call chain (`id(5).click()`) with arguments as JavaScript literals. */
+export function renderCallChain(chain: readonly { method: string; args: readonly unknown[] }[]): string {
+	return chain.map(step => `${step.method}(${step.args.map(renderRunArg).join(", ")})`).join(".");
+}
+
 /** Renders a function invocation with the requested run scope and positional arguments. */
 export function renderFunctionRun(fnSource: string, scopeNames: readonly string[], args: readonly unknown[]): string {
 	const scope = scopeNames.join(", ");

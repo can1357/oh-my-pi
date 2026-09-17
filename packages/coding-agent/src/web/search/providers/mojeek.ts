@@ -10,7 +10,7 @@ import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import type { LoadedHtmlPage } from "./browser-page";
 import { browserFetch } from "./browser-page";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeSearchText, withHardTimeout } from "./utils";
 
 const MOJEEK_ORIGIN = "https://www.mojeek.de";
 const MOJEEK_HOME_URL = `${MOJEEK_ORIGIN}/?arc=none&lang=en&lb=en&theme=dark`;
@@ -74,10 +74,10 @@ function parseHtmlResults(html: string): ParsedResult[] {
 		if (!href) continue;
 		const url = normalizeResultUrl(href);
 		if (!url) continue;
-		const title = (anchor?.textContent ?? "").replace(/\s+/g, " ").trim();
+		const title = normalizeSearchText(anchor?.textContent) ?? "";
 		if (!title) continue;
-		const snippet = (item.querySelector("p.s")?.textContent ?? "").replace(/\s+/g, " ").trim();
-		results.push({ title, url, snippet: snippet || undefined });
+		const snippet = normalizeSearchText(item.querySelector("p.s")?.textContent);
+		results.push({ title, url, snippet });
 	}
 	return results;
 }

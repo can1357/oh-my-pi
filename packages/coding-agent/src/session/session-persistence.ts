@@ -66,9 +66,8 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
  * True when an image payload sits in a persistence position whose base64 is
  * externalized to the blob store instead of truncated as a generic string: a
  * `content` image block, an `images[]` entry, or a snapcompact frame under
- * `frames[]`. Shared by the persist path ({@link shouldExternalizeImagePayload})
- * and the load path (`resolvePersistedBlobRefs`) so the two never drift and
- * strand a payload externalized on write but not resolved on read.
+ * `frames[]`. The eager load path uses the same position check but deliberately
+ * leaves snapcompact frames as references for lazy context rebuilding.
  */
 export function isExternalizableImagePosition(
 	value: unknown,
@@ -141,6 +140,19 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			};
 			if (isAnthropicServerToolHistoryBlock(validationView)) return obj;
 		}
+	}
+	// Anthropic server-side compaction replay state: `encrypted_content` is
+	// opaque provider state the API validates byte-for-byte on replay, so the
+	// carrier persists atomically with its summary and metadata — both as a
+	// message `providerPayload` (`type: "anthropicCompaction"`) and under the
+	// preserveData slot, whose object carries no `type` marker of its own.
+	if (
+		typeof obj === "object" &&
+		obj !== null &&
+		(("type" in obj && obj.type === "anthropicCompaction") ||
+			(key === "anthropicCompaction" && "content" in obj && typeof obj.content === "string"))
+	) {
+		return obj;
 	}
 	if (typeof obj === "object" && "type" in obj) {
 		const signed =

@@ -453,6 +453,11 @@ export class EventController {
 		}
 	}
 
+	inheritReadToolAssistant(toolCallId: string, component: AssistantMessageComponent | undefined): void {
+		if (component) this.#readToolCallAssistantComponents.set(toolCallId, component);
+		else this.#readToolCallAssistantComponents.delete(toolCallId);
+	}
+
 	#clearReadToolCall(toolCallId: string): void {
 		this.#readToolCallArgs.delete(toolCallId);
 		this.#readToolCallAssistantComponents.delete(toolCallId);
@@ -552,16 +557,19 @@ export class EventController {
 		toolCallId: string,
 		segment: AssistantMessage | undefined,
 		linkTargets?: ReadonlyMap<string, string>,
+		opts?: { transient?: boolean },
 	): AssistantMessageComponent | undefined {
 		if (!segment || !assistantHasVisibleContent(segment)) return undefined;
 		const existing = this.#postToolAssistantComponents.get(toolCallId);
 		if (existing) {
 			if (linkTargets) existing.setLinkTargets(linkTargets);
-			existing.updateContent(segment);
+			// Closed segments may already be committed to append-only terminal history.
+			if (existing.isTranscriptBlockFinalized()) return existing;
+			existing.updateContent(segment, opts);
 			return existing;
 		}
 		const component = createAssistantMessageComponent(this.ctx, undefined, linkTargets);
-		component.updateContent(segment);
+		component.updateContent(segment, opts);
 		this.#postToolAssistantComponents.set(toolCallId, component);
 		if (!this.#insertAfterTranscriptComponent(this.#toolTimelineComponents.get(toolCallId), component)) {
 			this.ctx.chatContainer.addChild(component);
@@ -766,6 +774,30 @@ export class EventController {
 		this.#lastTtsrNotification = undefined;
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.stop();
+		this.#seedHeldCompletionsFromPendingResults();
+	}
+
+	/** Restore display state without replaying completion notifications or persistence. */
+	#seedHeldCompletionsFromPendingResults(): void {
+		const pending = this.ctx.viewSession.agent.getPendingToolResults();
+		for (const result of pending) {
+			this.#orphanedToolCompletions.set(result.toolCallId, {
+				type: "tool_execution_end",
+				toolCallId: result.toolCallId,
+				toolName: result.toolName,
+				result: { content: result.content, details: result.details },
+				isError: result.isError,
+			});
+		}
+	}
+
+	/** Settle replay-created cards without waiting for another streaming update. */
+	restorePendingToolResults(): void {
+		this.#seedHeldCompletionsFromPendingResults();
+		for (const [toolCallId, component] of this.ctx.pendingTools) {
+			this.#toolTimelineComponents.set(toolCallId, component);
+			this.#settleHeldCompletionIfPresent(toolCallId, component);
+		}
 	}
 
 	async handleEvent(event: AgentSessionEvent): Promise<void> {
@@ -863,6 +895,7 @@ export class EventController {
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#resetReadGroup();
+		this.#seedHeldCompletionsFromPendingResults();
 		this.#resolveDisplaceableTodo();
 		this.#lastAssistantComponent = undefined;
 		// Restore terminal errors in transcript history when their banner clears.
@@ -945,7 +978,6 @@ export class EventController {
 			const matchedLocalSubmission = this.ctx.locallySubmittedUserSignatures.delete(signature);
 			const replacesOptimistic =
 				this.ctx.optimisticUserMessageSignature !== undefined && !wasOptimistic && !matchedLocalSubmission;
-			const wasLocallySubmitted = matchedLocalSubmission || wasOptimistic || replacesOptimistic;
 			if (wasOptimistic) {
 				this.ctx.clearOptimisticUserMessage();
 			} else if (replacesOptimistic) {
@@ -960,15 +992,15 @@ export class EventController {
 				this.ctx.addMessageToChat(event.message);
 			}
 
-			// Clear the editor only when the submission did not originate from a
-			// local submission (optimistic or queued-while-streaming). Both local
-			// paths already cleared the editor at submit time; clearing again here
-			// would race with the user typing the next prompt while the previous
-			// large redraw lands and erase their in-progress draft (#783).
+			// Never clear the editor here. A local submission (optimistic or
+			// queued-while-streaming) already cleared it at submit time, so clearing
+			// again races with the user typing the next prompt while the previous
+			// large redraw lands and erases their in-progress draft (#783). An inbound
+			// user message this session did not submit locally — an extension
+			// delivering `sendUserMessage`, e.g. HCOM — is a real non-synthetic prompt
+			// that arrives *while* the user may be composing, so it must not touch the
+			// draft either.
 			if (!event.message.synthetic) {
-				if (!wasLocallySubmitted) {
-					this.ctx.editor.setText("");
-				}
 				this.ctx.updatePendingMessagesDisplay();
 			}
 			this.ctx.ui.requestRender(true);
@@ -1111,6 +1143,27 @@ export class EventController {
 		this.#displaceableTodoComponent = undefined;
 		previous.seal();
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Detach both displacement trackers and return whichever components were
+	 * live, without touching their animation state. `#handleToolExecutionEnd`
+	 * settles a displaceable `hub`/`todo` result out of `pendingTools` into
+	 * these trackers instead (see the `isDisplaceableBlock()` branch there), so
+	 * a caller that enumerates only `pendingTools` before replacing the whole
+	 * transcript — the collab guest resync (`guest.ts#finalizeSnapshot`) —
+	 * misses a still-animated "waiting" card. That caller must fold this
+	 * method's result into its own live-block accounting.
+	 */
+	takeDisplaceableComponents(): ToolExecutionHandle[] {
+		const components: ToolExecutionHandle[] = [];
+		if (this.#displaceablePollComponent) components.push(this.#displaceablePollComponent);
+		if (this.#displaceableTodoComponent && this.#displaceableTodoComponent !== this.#displaceablePollComponent) {
+			components.push(this.#displaceableTodoComponent);
+		}
+		this.#displaceablePollComponent = undefined;
+		this.#displaceableTodoComponent = undefined;
+		return components;
 	}
 
 	/**
@@ -1257,16 +1310,19 @@ export class EventController {
 						continue;
 					}
 					if (readArgsCollapseIntoGroup(content.arguments)) {
-						if (!this.ctx.pendingTools.has(content.id)) this.#resolveDisplaceablePoll(renderToolName);
-						this.#trackReadToolCall(content.id, content.arguments);
-						const component = this.ctx.pendingTools.get(content.id);
-						if (component) {
-							component.updateArgs(content.arguments, content.id);
-						} else {
+						const existing = this.ctx.pendingTools.get(content.id);
+						if (existing) {
+							this.#trackReadToolCall(content.id, content.arguments);
+							existing.updateArgs(content.arguments, content.id);
+						} else if (!this.#toolTimelineComponents.has(content.id)) {
+							// A completed read remains in the timeline after leaving pendingTools.
+							this.#resolveDisplaceablePoll(renderToolName);
+							this.#trackReadToolCall(content.id, content.arguments);
 							const group = this.#getReadGroup();
 							group.updateArgs(content.arguments, content.id);
 							this.ctx.pendingTools.set(content.id, group);
 							this.#toolTimelineComponents.set(content.id, group);
+							this.#settleHeldCompletionIfPresent(content.id, group);
 						}
 						continue;
 					}
@@ -1336,7 +1392,16 @@ export class EventController {
 				}
 			}
 			for (const [toolCallId, segment] of timeline.afterToolCalls) {
-				this.#upsertPostToolAssistantSegment(toolCallId, segment);
+				if (this.#postToolAssistantComponents.get(toolCallId)?.isTranscriptBlockFinalized()) continue;
+				const closed = toolCallId !== timeline.lastToolCallId;
+				const linkTargets = closed ? await refreshAssistantMessageLinkTargets(this.ctx, [segment]) : undefined;
+				const component = this.#upsertPostToolAssistantSegment(
+					toolCallId,
+					segment,
+					linkTargets ? assistantMessageLinkTargets(segment, linkTargets) : undefined,
+					closed ? undefined : { transient: true },
+				);
+				if (closed) component?.markTranscriptBlockFinalized();
 			}
 
 			// Update working message with intent from streamed tool arguments
@@ -1365,6 +1430,24 @@ export class EventController {
 	}
 
 	async #handleMessageEnd(event: Extract<AgentSessionEvent, { type: "message_end" }>): Promise<void> {
+		// The persistence slot exists before message_end notification, unlike
+		// tool_execution_end. Resolve HUD identity only after canonical append.
+		if (event.message.role === "toolResult" && event.message.toolName === "todo" && !event.message.isError) {
+			const details = event.message.details as { op?: string; phases?: TodoPhase[] } | undefined;
+			if (details?.op !== "view" && details?.phases) {
+				const owner = this.ctx.viewSession;
+				const sessionId = owner.sessionManager.getSessionId();
+				const sessionFile = owner.sessionManager.getSessionFile();
+				await owner.settleInFlightMessagePersistence();
+				if (
+					this.ctx.viewSession === owner &&
+					owner.sessionManager.getSessionId() === sessionId &&
+					owner.sessionManager.getSessionFile() === sessionFile
+				) {
+					this.ctx.setTodos(owner.getTodoPhases());
+				}
+			}
+		}
 		if (event.message.role === "user") return;
 		const unlockedThinkingVisibility =
 			event.message.role === "assistant" && this.ctx.noteDisplayableThinkingContent(event.message);
@@ -1471,6 +1554,7 @@ export class EventController {
 				}
 				this.ctx.lastAssistantUsage = usage;
 			}
+			this.ctx.streamingComponent.setServedModelMismatch(this.ctx.servedModelTracker.check(event.message));
 			this.ctx.streamingComponent.markTranscriptBlockFinalized();
 			let lastPostToolAssistantComponent: AssistantMessageComponent | undefined;
 			for (const [toolCallId, segment] of displayTimeline.afterToolCalls) {
@@ -1560,14 +1644,12 @@ export class EventController {
 			}
 			if (renderToolName === "read" && readArgsCollapseIntoGroup(event.args)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
-				const component = this.ctx.pendingTools.get(event.toolCallId);
-				if (component) {
-					component.updateArgs(event.args, event.toolCallId);
-				} else {
+				if (!this.#toolTimelineComponents.has(event.toolCallId)) {
 					const group = this.#getReadGroup();
 					group.updateArgs(event.args, event.toolCallId);
 					this.ctx.pendingTools.set(event.toolCallId, group);
 					this.#toolTimelineComponents.set(event.toolCallId, group);
+					this.#settleHeldCompletionIfPresent(event.toolCallId, group);
 				}
 				this.#startToolApprovalPreview(event.toolCallId);
 				this.ctx.ui.requestRender();
@@ -1720,8 +1802,9 @@ export class EventController {
 		component: ToolExecutionHandle,
 		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 	): void {
-		component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
-		this.ctx.pendingTools.delete(event.toolCallId);
+		if (event.toolName === "read") this.#inlineReadToolImages(event.toolCallId, event.result);
+		this.#applyToolCompletion(component, event);
+		if (event.toolName === "read") this.#clearReadToolCall(event.toolCallId);
 		if (
 			component instanceof ToolExecutionComponent &&
 			component.isDisplaceableBlock() &&
@@ -1741,6 +1824,22 @@ export class EventController {
 			this.#displaceableTodoComponent = component;
 		}
 		this.ctx.ui.requestRender();
+	}
+
+	#applyToolCompletion(
+		component: ToolExecutionHandle,
+		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
+	): void {
+		const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
+		const isBackgroundTask = event.toolName === "task" && asyncState === "running";
+		component.updateResult({ ...event.result, isError: event.isError }, isBackgroundTask, event.toolCallId);
+		if (isBackgroundTask) {
+			component.parkAsBackground();
+			this.#backgroundTaskCallIds.add(event.toolCallId);
+		} else {
+			this.ctx.pendingTools.delete(event.toolCallId);
+			this.#backgroundTaskCallIds.delete(event.toolCallId);
+		}
 	}
 
 	async #handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): Promise<void> {
@@ -1790,45 +1889,31 @@ export class EventController {
 				this.#clearReadToolCall(event.toolCallId);
 				this.ctx.ui.requestRender();
 			} else {
-				let component = this.ctx.pendingTools.get(event.toolCallId);
+				const component = this.ctx.pendingTools.get(event.toolCallId);
 				if (!component) {
 					// A persisted result can win a mid-stream transcript rebuild
 					// before this live completion handler runs. Rebuild removes the
 					// pending handle and replay owns the completed card, but the
 					// original timeline entry remains as proof that a card already
 					// existed. Do not create a fallback read group beside replay
-					// (#6879); the fallback is only for a completion that genuinely
-					// outran every streamed card.
+					// (#6879). A completion that outran every streamed card is held
+					// and settled when the card is created, matching non-read tools.
 					if (this.#toolTimelineComponents.has(event.toolCallId)) {
 						this.#clearReadToolCall(event.toolCallId);
 						return;
 					}
-					const group = this.#getReadGroup();
-					const args = this.#readToolCallArgs.get(event.toolCallId);
-					if (args) {
-						group.updateArgs(args, event.toolCallId);
-					}
-					component = group;
-					this.ctx.pendingTools.set(event.toolCallId, group);
+					this.#orphanedToolCompletions.set(event.toolCallId, event);
+				} else {
+					component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
+					this.ctx.pendingTools.delete(event.toolCallId);
+					this.#clearReadToolCall(event.toolCallId);
+					this.ctx.ui.requestRender();
 				}
-				component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
-				this.ctx.pendingTools.delete(event.toolCallId);
-				this.#clearReadToolCall(event.toolCallId);
-				this.ctx.ui.requestRender();
 			}
 		} else {
 			const component = this.ctx.pendingTools.get(event.toolCallId);
 			if (component) {
-				const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
-				const isBackgroundTask = event.toolName === "task" && asyncState === "running";
-				component.updateResult({ ...event.result, isError: event.isError }, isBackgroundTask, event.toolCallId);
-				if (isBackgroundTask) {
-					component.parkAsBackground();
-					this.#backgroundTaskCallIds.add(event.toolCallId);
-				} else {
-					this.ctx.pendingTools.delete(event.toolCallId);
-					this.#backgroundTaskCallIds.delete(event.toolCallId);
-				}
+				this.#applyToolCompletion(component, event);
 				if (component instanceof ToolExecutionComponent && component.isDisplaceableBlock()) {
 					if (event.toolName === "hub" && component.canBeDisplacedBy("hub")) {
 						// Remember the waiting poll so the next `hub` call can displace it.
@@ -1859,13 +1944,11 @@ export class EventController {
 			}
 		}
 		if (syntheticFailureCard) this.#syntheticFailureCards.set(event.toolCallId, syntheticFailureCard);
-		// Update todo display when todo tool completes
 		if (event.toolName === "todo" && !event.isError) {
-			const details = event.result.details as { phases?: TodoPhase[] } | undefined;
-			if (details?.phases) {
-				this.ctx.setTodos(details.phases);
-			}
-		} else if (event.toolName === "todo" && event.isError) {
+			const details = event.result.details as { op?: string; phases?: TodoPhase[] } | undefined;
+			if (details?.op !== "view" && details?.phases) this.ctx.setTodos(details.phases);
+		}
+		if (event.toolName === "todo" && event.isError) {
 			const textContent = event.result.content.find(
 				(content: { type: string; text?: string }) => content.type === "text",
 			)?.text;
@@ -1964,6 +2047,9 @@ export class EventController {
 		setTerminalTitleState("idle");
 
 		await this.#finishAgentEnd(event);
+		// This settle may belong to an extension-started turn while the main
+		// input loop remains asleep. Do not await session-idle from its own event.
+		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
 	}
 
 	async #finishAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {

@@ -5,6 +5,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { Text } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {
 	await initTheme();
@@ -32,12 +33,13 @@ function createEditorSlot(...initial: unknown[]): EditorSlot {
 	};
 }
 
-function createCtx(slot: EditorSlot, editor: unknown) {
+function createCtx(slot: EditorSlot, editor: unknown, focused: unknown = editor) {
 	const setFocus = vi.fn();
 	const ctx = {
 		editor,
 		editorContainer: slot,
 		ui: {
+			getFocused: vi.fn(() => focused),
 			setFocus,
 			requestRender: vi.fn(),
 		},
@@ -91,6 +93,29 @@ describe("SelectorController.focusActiveEditorArea", () => {
 	});
 });
 
+describe("SelectorController.showSelector", () => {
+	it("restores an ask dialog and its draft editor after history search closes", () => {
+		const editor = new Text("editor", 0, 0);
+		const askDialog = new Text("ask", 0, 0);
+		const historySearch = new Text("history", 0, 0);
+		const slot = createEditorSlot(askDialog, editor);
+		const { ctx, setFocus } = createCtx(slot, editor, askDialog);
+		let finish: (() => void) | undefined;
+
+		new SelectorController(ctx).showSelector(done => {
+			finish = done;
+			return { component: historySearch, focus: historySearch };
+		});
+
+		expect(slot.children).toEqual([historySearch]);
+		expect(setFocus).toHaveBeenLastCalledWith(historySearch);
+		if (!finish) throw new Error("selector did not provide its completion callback");
+		finish();
+		expect(slot.children).toEqual([askDialog, editor]);
+		expect(setFocus).toHaveBeenLastCalledWith(askDialog);
+	});
+});
+
 describe("SelectorController session replacement overlay", () => {
 	it("keeps the fullscreen selector visible until the resumed transcript is ready", async () => {
 		const session: SessionInfo = {
@@ -118,6 +143,9 @@ describe("SelectorController session replacement overlay", () => {
 			sessionManager: {
 				getCwd: () => "/tmp",
 				getSessionDir: () => "/tmp",
+				// Live-session path: keeps the picker's current-marker/focus code live
+				// during the overlay assertions (single-row list stays deterministic).
+				getSessionFile: () => session.path,
 			},
 			ui: {
 				showOverlay: vi.fn(component => {

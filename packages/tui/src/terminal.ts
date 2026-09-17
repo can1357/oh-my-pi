@@ -1,16 +1,10 @@
 import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as fs from "node:fs";
 import { TtyWriter } from "@oh-my-pi/pi-natives";
-import {
-	$env,
-	isBunTestRuntime,
-	isTerminalHeadless,
-	isWsl,
-	logger,
-	postmortem,
-	restoreTerminalStderr,
-	suppressTerminalStderr,
-} from "@oh-my-pi/pi-utils";
+import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { restoreTerminalStderr, suppressTerminalStderr } from "@oh-my-pi/pi-utils/stderr-guard";
 import { setKittyProtocolActive } from "./keys";
 import { StdinBuffer } from "./stdin-buffer";
 import {
@@ -427,6 +421,7 @@ export function emergencyTerminalRestore(): void {
 					// buffer homes the cursor (unconditional CursorRestoreState
 					// with no prior save), corrupting the shell handoff on exit.
 					(altScreenActive ? "\x1b[?1049l\x1b[?1l\x1b>\x1b[<u" : "") + // Leave alt; reset main keyboard
+					"\x1b[0 q" + // Restore the terminal's configured cursor shape (DECSCUSR)
 					"\x1b[?25h", // Show cursor
 			);
 			altScreenActive = false;
@@ -461,6 +456,20 @@ export type TerminalAppearanceRequestToken = number;
  * set, 4 permanently reset) when the terminal answered DECRQM.
  */
 export type PrivateModeReportHandler = (mode: number, supported: boolean, confirmed?: boolean, status?: number) => void;
+
+/**
+ * Cursor shapes addressable via DECSCUSR (`CSI <n> SP q`). `"default"` (0) hands the shape back to
+ * the terminal's own configuration, which is what teardown restores rather than guessing a shape
+ * the user never chose.
+ */
+export type CursorShape = "default" | "block" | "underline" | "bar";
+
+export const CURSOR_SHAPE_CODES: Record<CursorShape, number> = {
+	default: 0,
+	block: 2,
+	underline: 4,
+	bar: 6,
+};
 export interface Terminal {
 	// Start the terminal with input, resize, and host-disconnect handlers.
 	start(
@@ -505,6 +514,20 @@ export interface Terminal {
 	 */
 	readonly pendingOutputBytes?: number;
 
+	/**
+	 * Whether a pseudoconsole host owns the grid this terminal writes to, so
+	 * neither the cursor nor the painted rows survive a resize under the
+	 * application's own model. Measured on Windows conhost: resizing the
+	 * pseudoconsole makes it re-emit its whole viewport from `CSI H` with
+	 * absolute addressing while the application writes nothing, and it re-homes
+	 * the cursor, so a DSR reply after a resize reports column 1 instead of the
+	 * column the application parked. The renderer's resize anchor recovery needs
+	 * both properties, so it takes the rebuild path instead when this is set.
+	 * Optional so custom Terminals built against older pi-tui versions keep
+	 * working; absent means the terminal itself owns the grid.
+	 */
+	readonly hostOwnsGridOnResize?: boolean;
+
 	// Whether Kitty keyboard protocol is active
 	get kittyProtocolActive(): boolean;
 
@@ -531,6 +554,12 @@ export interface Terminal {
 	// (crash/exit restore paths).
 	hideCursor(force?: boolean): void; // Hide the cursor
 	showCursor(force?: boolean): void; // Show the cursor
+
+	// Cursor shape (DECSCUSR). Written whenever it changes, whether or not the
+	// hardware cursor is currently visible: reshaping a hidden cursor has no
+	// visible effect, and `stop()` restores the user's configured shape. Hosts
+	// that render a software cursor simply never call this.
+	setCursorShape?(shape: CursorShape): void;
 
 	// Clear operations
 	clearLine(): void; // Clear current line
@@ -641,8 +670,9 @@ function isPrivateModeSupported(status: string): boolean {
 export interface ProcessTerminalOptions {
 	/**
 	 * Force ConPTY-hosted behavior on or off. Defaults to live detection via
-	 * {@link isConPTYHosted}. Tests set this so the kitty-flag and write-chunking
-	 * paths stay hermetic regardless of the ambient WSL env (`WSL_DISTRO_NAME` /
+	 * {@link isConPTYHosted}. Tests set this so the kitty-flag, write-chunking
+	 * and resize-routing ({@link Terminal.hostOwnsGridOnResize}) paths stay
+	 * hermetic regardless of the ambient WSL env (`WSL_DISTRO_NAME` /
 	 * `WSL_INTEROP`) — the suite must behave identically on WSL and on CI.
 	 */
 	conpty?: boolean;
@@ -682,6 +712,9 @@ export class ProcessTerminal implements Terminal {
 	// unknown (fresh start, resize, or an alt-screen switch newer than the
 	// last cursor sequence — some hosts keep DECTCEM per buffer).
 	#cursorVisible: boolean | undefined;
+	// Last DECSCUSR shape written, so per-keystroke mode changes dedupe.
+	// `undefined` = never set, i.e. the terminal's own configured shape.
+	#cursorShape: CursorShape | undefined;
 	// Captured at construction and re-read at start(): when true, every real
 	// terminal side effect (writes, probes, raw mode, SIGWINCH, timers) is
 	// suppressed. Defaults on under `bun test` — see isTerminalHeadless().
@@ -1733,6 +1766,13 @@ export class ProcessTerminal implements Terminal {
 		this.#safeWrite("\x1b[?2004l");
 		this.#safeWrite("\x1b[?5522l");
 
+		// Hand the cursor shape back to the user's terminal configuration; a Vim
+		// Normal-mode block must not outlive the session in their shell.
+		if (this.#cursorShape !== undefined && this.#cursorShape !== "default") {
+			this.#safeWrite(`\x1b[${CURSOR_SHAPE_CODES.default} q`);
+		}
+		this.#cursorShape = undefined;
+
 		// Disable mouse tracking (enabled only by fullscreen overlays; safe
 		// no-ops otherwise). Covers crash paths that reach stop() without the
 		// TUI's own overlay teardown running.
@@ -1964,6 +2004,14 @@ export class ProcessTerminal implements Terminal {
 		return process.stdout.writableLength ?? 0;
 	}
 
+	get hostOwnsGridOnResize(): boolean {
+		// #conpty, not a fresh isConPTYHosted() call: the construction override
+		// must gate every ConPTY-dependent path uniformly, or an injected
+		// `conpty` value models one host for writes and kitty flags and the
+		// opposite host for resize routing.
+		return this.#conpty;
+	}
+
 	/**
 	 * Reconcile the stdout backlog after a write or a poll. The watchdog runs an
 	 * episode from the moment the backlog crosses the arm cap until it drains to
@@ -2029,6 +2077,17 @@ export class ProcessTerminal implements Terminal {
 	showCursor(force = false): void {
 		if (!force && this.#cursorVisible === true) return;
 		this.#safeWrite("\x1b[?25h");
+	}
+
+	/**
+	 * Set the hardware cursor shape (DECSCUSR). Deduped against the last shape written so a
+	 * per-keystroke mode indicator does not add a sequence to every frame; {@link stop} restores
+	 * `"default"` so the user's own cursor configuration survives exit.
+	 */
+	setCursorShape(shape: CursorShape): void {
+		if (this.#cursorShape === shape) return;
+		this.#cursorShape = shape;
+		this.#safeWrite(`\x1b[${CURSOR_SHAPE_CODES[shape]} q`);
 	}
 
 	/**

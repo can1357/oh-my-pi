@@ -10,13 +10,12 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
-import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import {
-	type ApprovalMode,
 	denyError,
 	formatApprovalPrompt,
 	resolveApproval,
+	resolveApprovalFromContext,
 	truncateForPrompt,
 } from "../../tools/approval";
 import {
@@ -205,15 +204,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// the loop never saw — nested xd:// device dispatches and direct
 		// (non-loop) execution such as Cursor exec handlers.
 		const loopEmittedToolCall = this.runner.consumeToolCallEmitted(toolCallId, this.tool.name);
+		const settings = context?.settings;
 		// Resolve approval settings up front. A `deny` on the original input short-circuits before the
 		// runner is touched — an already-denied tool never emits `tool_call` — while the full gate below
 		// re-resolves against the (possibly revised) input so a handler cannot rewrite into a denied or
 		// newly prompt-gated command and have it run unapproved.
-		const cliAutoApprove = context?.autoApprove === true;
-		const settings: Settings | undefined = context?.settings;
-		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
-		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
-		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(
+			context ?? (this.runner.sessionSettings ? { settings: this.runner.sessionSettings } : undefined),
+		);
 		const preResolved = resolveApproval(this.tool, approvalArgs(params, context), approvalMode, userPolicies);
 		if (preResolved.policy === "deny") {
 			throw denyError(preResolved, this.tool.name);
@@ -269,17 +267,18 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			throw denyError(resolved, this.tool.name);
 		}
 		const pendingSafetyChecks = computerSafetyChecks(context);
-		// An xd:// device dispatch already cleared the write tool's outer gate at
-		// this tool's tier — re-prompting would double-ask for one action. The
-		// bypass only holds while the input is exactly what that outer gate
-		// approved: a handler revision here may have raised the tier, so revised
-		// input always faces the full gate. Explicit per-tool "prompt" policies
-		// and tool-demanded overrides still prompt. Provider safety checks are
-		// stronger: yolo, per-tool allow, and xdev approval never acknowledge
-		// them on the user's behalf.
+		// Outer approvals only cover the original input. `xd://` approval skips
+		// tier-only prompts while the same object flows through; ACP approval also
+		// satisfies explicit prompts, but compares against a deep snapshot because
+		// handlers can mutate the original argument object in place. Denies were
+		// enforced above, and provider safety checks remain independently required.
 		const explicitPrompt = resolved.override || Object.hasOwn(userPolicies, resolved.policyKey ?? this.tool.name);
 		const xdevBypass = context?.xdevApproved === true && effectiveParams === params;
-		const policyPrompts = resolved.policy === "prompt" && (explicitPrompt || !xdevBypass);
+		const acpBypass =
+			context !== undefined &&
+			Object.hasOwn(context, "acpApprovedArgs") &&
+			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
+		const policyPrompts = resolved.policy === "prompt" && !acpBypass && (explicitPrompt || !xdevBypass);
 
 		// Session approvals ("… Commands for Session" prompt options) can only
 		// downgrade a `prompt` resolution the user is free to answer once: they
@@ -340,7 +339,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		}
 
 		const approvalCheck = {
-			required: (pendingSafetyChecks.length > 0 || policyPrompts) && !sessionAllowed,
+			required: pendingSafetyChecks.length > 0 || (policyPrompts && !sessionAllowed),
 			reason: resolved.reason,
 		};
 
@@ -487,7 +486,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				),
 				content: result.content,
 				details: result.details,
-				isError: !!executionError,
+				isError: !!executionError || result.isError === true,
 			});
 
 			if (resultResult) {

@@ -2,6 +2,7 @@ import {
 	hashlineFileHash,
 	hashlineFormatHeader,
 	hashlineFormatNumberedLines,
+	hashlineIsReadTruncationNotice,
 	hashlineStripPrefixes,
 } from "@oh-my-pi/pi-natives";
 
@@ -33,6 +34,11 @@ export function splitAddressableFileLines(text: string): string[] {
 
 export function stripHashlinePrefixes(lines: string[]): string[] {
 	return hashlineStripPrefixes(lines);
+}
+
+/** Whether a row is a truncation notice emitted by `read`. */
+export function isReadTruncationNotice(line: string): boolean {
+	return hashlineIsReadTruncationNotice(line);
 }
 
 export function computeFileHash(text: string): string {

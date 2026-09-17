@@ -20,7 +20,6 @@ import {
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { parseStreamingJson, readSseJson } from "@oh-my-pi/pi-utils";
 
 // Event stream adapter for proxy SSE events
@@ -171,7 +170,7 @@ export function streamProxy(model: Model, context: Context, options: ProxyStream
 				response.body as ReadableStream<Uint8Array>,
 				options.signal,
 			)) {
-				const parsedEvent = processProxyEvent(model, event, partial, partialJsonByIndex);
+				const parsedEvent = processProxyEvent(event, partial, partialJsonByIndex);
 				if (parsedEvent) {
 					if (parsedEvent.type === "done" || parsedEvent.type === "error") {
 						sawTerminalEvent = true;
@@ -233,7 +232,6 @@ function scrubPartialJson(partial: AssistantMessage): void {
  * reads as still-streaming.
  */
 function processProxyEvent(
-	model: Model,
 	proxyEvent: ProxyAssistantMessageEvent,
 	partial: AssistantMessage,
 	partialJsonByIndex: Map<number, string>,
@@ -375,7 +373,6 @@ function processProxyEvent(
 			partial.stopReason = proxyEvent.reason;
 			partial.usage = proxyEvent.usage;
 			if (proxyEvent.content !== undefined) partial.content = proxyEvent.content;
-			calculateCost(model, partial.usage);
 			scrubPartialJson(partial);
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
@@ -384,7 +381,6 @@ function processProxyEvent(
 			partial.errorMessage = proxyEvent.errorMessage;
 			partial.usage = proxyEvent.usage;
 			if (proxyEvent.content !== undefined) partial.content = proxyEvent.content;
-			calculateCost(model, partial.usage);
 			scrubPartialJson(partial);
 			return { type: "error", reason: proxyEvent.reason, error: partial };
 	}

@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
-import { colorLuma, logger, relativeLuminance } from "@oh-my-pi/pi-utils";
+import { colorLuma, relativeLuminance } from "@oh-my-pi/pi-utils/color";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { SessionAccentTheme } from "../../utils/session-color";
 import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
@@ -618,6 +619,10 @@ export class Theme {
 			extensionPrompt: this.#symbols["icon.extensionPrompt"],
 			extensionContextFile: this.#symbols["icon.extensionContextFile"],
 			extensionInstruction: this.#symbols["icon.extensionInstruction"],
+			vimNormal: this.#symbols["icon.vimNormal"],
+			vimInsert: this.#symbols["icon.vimInsert"],
+			vimVisual: this.#symbols["icon.vimVisual"],
+			vimVisualLine: this.#symbols["icon.vimVisualLine"],
 			mic: this.#symbols["icon.mic"],
 			camera: this.#symbols["icon.camera"],
 		};

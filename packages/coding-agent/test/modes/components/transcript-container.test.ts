@@ -137,6 +137,35 @@ const finalAnswer: AssistantMessage = {
 const frame = { tick: 0, now: 0 };
 
 describe("TranscriptContainer", () => {
+	it("preserves retirement while externally reordered and replaced live children settle", () => {
+		const transcript = new TranscriptContainer();
+		const archived = new Block(["archived"], true);
+		transcript.addChild(archived);
+		const history = transcript.peekFlushBatch(80);
+		if (!history) throw new Error("Expected history batch");
+		transcript.acknowledgeFinalizedBatch(history.id);
+		const first = new Block(["first"], false);
+		const second = new Block(["second"], false);
+		transcript.addChild(first);
+		transcript.addChild(second);
+		transcript.children.splice(1, 2, second, first);
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["second", "", "first"]);
+		const replacement = new Block(["replacement"], false);
+		const external = [archived, second, replacement];
+		transcript.children = external;
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["second", "", "replacement"]);
+		external[1] = first;
+		first.finalize(["first done"]);
+		replacement.finalize(["replacement done"]);
+		const final = transcript.peekFlushBatch(80);
+		expect(final?.rows).toEqual(["first done", "", "replacement done", ""]);
+		if (!final) throw new Error("Expected live retirement batch");
+		transcript.acknowledgeFinalizedBatch(final.id);
+		expect(transcript.peekFlushBatch(80)).toBeUndefined();
+		transcript.beginReplay();
+		expect(transcript.peekReplayBatch(80)?.rows).toEqual(["archived", "", "first done", "", "replacement done", ""]);
+	});
+
 	it("captures mutable by default and append-only declarations permanently", () => {
 		const transcript = new TranscriptContainer();
 		const mutable = new Block(["mutable"], false) as Block & {
@@ -261,12 +290,10 @@ describe("TranscriptContainer", () => {
 		const block = new AppendBlock(["reasoning one", "reasoning two", "answer"], ["reasoning one", "reasoning two"]);
 		transcript.addChild(block);
 
+		// Under pressure the finished rows the overflow needs retire in one batch.
 		const first = transcript.peekFinalizedBatch(80, 1)!;
-		expect(first.rows).toEqual(["reasoning one"]);
+		expect(first.rows).toEqual(["reasoning one", "reasoning two"]);
 		transcript.acknowledgeFinalizedBatch(first.id);
-		const second = transcript.peekFinalizedBatch(80, 1)!;
-		expect(second.rows).toEqual(["reasoning two"]);
-		transcript.acknowledgeFinalizedBatch(second.id);
 		expect(transcript.emittedStableRows()).toEqual([2]);
 
 		// Ctrl+T hides thinking: the block now renders only its answer and drops
@@ -511,5 +538,60 @@ describe("TranscriptContainer", () => {
 		transcript.beginReplay();
 		transcript.cancelReplay();
 		expect(transcript.peekFlushBatch(80)?.rows).toEqual(["tail", ""]);
+	});
+});
+
+describe("TranscriptContainer viewport click spans", () => {
+	it("maps uncapped viewport rows to their blocks, skipping separators", () => {
+		const transcript = new TranscriptContainer();
+		const first = new Block(["a1", "a2"], false);
+		const second = new Block(["b1"], false);
+		transcript.addChild(first);
+		transcript.addChild(second);
+
+		expect(transcript.renderViewport(80, 10, frame)).toEqual(["a1", "a2", "", "b1"]);
+		expect(transcript.getLastViewportSpans()).toEqual([
+			{ component: first, start: 0, end: 2 },
+			{ component: second, start: 3, end: 4 },
+		]);
+	});
+
+	it("maps allocation-clipped rows to their surviving tails", () => {
+		const transcript = new TranscriptContainer();
+		const first = new Block(["a1", "a2", "a3", "a4"], false);
+		const second = new Block(["b1", "b2", "b3", "b4"], false);
+		transcript.addChild(first);
+		transcript.addChild(second);
+
+		expect(transcript.renderViewport(80, 5, frame)).toEqual(["a4", "b1", "b2", "b3", "b4"]);
+		expect(transcript.getLastViewportSpans()).toEqual([
+			{ component: first, start: 0, end: 1 },
+			{ component: second, start: 1, end: 5 },
+		]);
+	});
+
+	it("leaves the emergency summary row unmapped", () => {
+		const transcript = new TranscriptContainer();
+		transcript.addChild(new Block(["a1"], false));
+		transcript.addChild(new Block(["b1"], false));
+		transcript.addChild(new Block(["c1"], false));
+
+		expect(transcript.renderViewport(80, 1, frame)).toEqual(["2 more transcript blocks active"]);
+		expect(transcript.getLastViewportSpans()).toEqual([]);
+	});
+
+	it("clears spans when the tail is empty or cleared", () => {
+		const transcript = new TranscriptContainer();
+		const block = new Block(["a1"], false);
+		transcript.addChild(block);
+		transcript.renderViewport(80, 10, frame);
+		expect(transcript.getLastViewportSpans()).toHaveLength(1);
+
+		expect(transcript.renderViewport(80, 0, frame)).toEqual([]);
+		expect(transcript.getLastViewportSpans()).toEqual([]);
+
+		transcript.renderViewport(80, 10, frame);
+		transcript.clear();
+		expect(transcript.getLastViewportSpans()).toEqual([]);
 	});
 });

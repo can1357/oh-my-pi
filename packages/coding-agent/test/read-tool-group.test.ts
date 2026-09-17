@@ -215,6 +215,34 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${twoPath}`);
 	});
 
+	it("links every grouped delimited row from result-provided link paths", () => {
+		settings.override("tui.hyperlinks", "always");
+		const component = new ReadToolGroupComponent();
+		const oneLink = path.resolve("/workspace/src/one.ts");
+		const twoLink = path.resolve("/workspace/src/two.ts");
+		component.updateArgs({ path: "src/one.ts:1-5, src/two.ts:9-12" }, "read-grouped-link");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "combined" }],
+				details: {
+					displayReadTargets: ["src/one.ts:1-5", "src/two.ts:9-12"],
+					displayReadTargetLinks: [oneLink, twoLink],
+				},
+			},
+			false,
+			"read-grouped-link",
+		);
+
+		const rendered = component.render(120).join("\n");
+
+		// Plain file: URIs — the line location must stay out of the query (#12123).
+		const oneUri = url.pathToFileURL(oneLink).href;
+		const twoUri = url.pathToFileURL(twoLink).href;
+		expect(Bun.stripANSI(rendered)).toContain("Read (2)");
+		expect(extractLinkUris(rendered)).toEqual(expect.arrayContaining([oneUri, twoUri]));
+		expect(extractLinkTexts(rendered)).toEqual(expect.arrayContaining(["src/one.ts", "src/two.ts"]));
+	});
+
 	it("renders warning previews with warning styling instead of success styling", () => {
 		const component = new ReadToolGroupComponent({ showContentPreview: true });
 		const examplePath = path.resolve("/tmp/example.ts");
@@ -325,10 +353,9 @@ describe("ReadToolGroupComponent", () => {
 
 		const rendered = component.render(120).join("\n");
 
-		const exampleUri = new URL(url.pathToFileURL(path.resolve(examplePath)).href);
-		exampleUri.searchParams.set("line", "7");
+		const exampleUri = url.pathToFileURL(path.resolve(examplePath)).href;
 		expect(Bun.stripANSI(rendered)).toContain("Read src/example.ts:7-9");
-		expect(extractLinkUris(rendered)).toContain(exampleUri.href);
+		expect(extractLinkUris(rendered)).toContain(exampleUri);
 		expect(extractLinkTexts(rendered)).toContain("src/example.ts");
 		expect(extractLinkTexts(rendered)).not.toContain("src/example.ts:7-9");
 	});
@@ -349,10 +376,9 @@ describe("ReadToolGroupComponent", () => {
 
 		const rendered = component.render(120).join("\n");
 
-		const previewUri = new URL(url.pathToFileURL(path.resolve(previewPath)).href);
-		previewUri.searchParams.set("line", "20");
+		const previewUri = url.pathToFileURL(path.resolve(previewPath)).href;
 		expect(Bun.stripANSI(rendered)).toContain("Read src/preview.ts:20-22");
-		expect(extractLinkUris(rendered)).toContain(previewUri.href);
+		expect(extractLinkUris(rendered)).toContain(previewUri);
 		expect(extractLinkTexts(rendered)).toContain("src/preview.ts");
 		expect(extractLinkTexts(rendered)).not.toContain("src/preview.ts:20-22");
 	});

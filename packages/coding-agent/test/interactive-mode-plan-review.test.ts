@@ -14,7 +14,8 @@ import {
 	type PlanReviewAnnotationState,
 	PlanReviewOverlay,
 } from "@oh-my-pi/pi-coding-agent/modes/components/plan-review-overlay";
-import { InteractiveMode, planSaveFileName } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -1643,6 +1644,61 @@ describe("InteractiveMode plan review rendering", () => {
 			planFilePath,
 			reentry: true,
 		});
+	});
+	it("autosaves the approved plan when plan.autosave is enabled", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nAutosave me.");
+
+		await mode.handlePlanModeCommand();
+		session.settings.set("plan.autosave", true);
+
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and execute");
+		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const status = vi.spyOn(mode, "showStatus");
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "AUTOSAVE",
+		});
+
+		const saved = path.join(tempDir.path(), ".omp", "plans", "AUTOSAVE_PLAN.md");
+		expect(await Bun.file(saved).text()).toBe("# Plan\n\nAutosave me.");
+		expect(status).toHaveBeenCalledWith(expect.stringContaining("Saved plan to"));
+	});
+
+	it("continues approval with a warning when autosave fails", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nAutosave me.");
+
+		await mode.handlePlanModeCommand();
+		session.settings.set("plan.autosave", true);
+		const blocker = path.join(tempDir.path(), "blocker");
+		await Bun.write(blocker, "x");
+		session.settings.set("plan.autosaveDir", path.join(blocker, "sub"));
+
+		vi.spyOn(mode, "showPlanReview").mockResolvedValue("Approve and execute");
+		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
+		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const warning = vi.spyOn(mode, "showWarning");
+
+		await mode.handlePlanApproval({
+			planFilePath,
+			planExists: true,
+			title: "AUTOSAVE",
+		});
+
+		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(true);
+		expect(warning).toHaveBeenCalledWith(expect.stringContaining("Failed to autosave plan"));
 	});
 
 	it("Approve and compact context: ok outcome dispatches plan-approved after compaction", async () => {
