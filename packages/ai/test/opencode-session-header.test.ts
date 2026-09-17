@@ -6,6 +6,11 @@ import type { Model } from "@oh-my-pi/pi-ai/types";
 import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import {
+	OPENCODE_SESSION_RE,
+	OPENCODE_USER_AGENT,
+	canonicalizeOpenCodeSessionId,
+} from "../src/providers/inference-headers";
 
 const OPENCODE_SESSION_HEADER = "x-opencode-session";
 
@@ -103,15 +108,17 @@ function makeOpenCodeGoAnthropicModel(): Model<"anthropic-messages"> {
 }
 
 describe("opencode and gpt session header on OpenAI transports", () => {
-	it("sends the conversation session id to OpenCode", () => {
+	it("sends the canonical session id and OpenCode User-Agent to OpenCode", () => {
 		const setup = resolveOpenAIRequestSetup(OPENCODE_GO_COMPLETIONS_MODEL, {
 			apiKey: "key",
 			messages: [],
 			sessionId: "session-1",
 			promptCacheSessionId: "cache-1",
 		});
-		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("session-1");
-		expect(setup.headers["User-Agent"]).toBe(USER_AGENT);
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(canonicalizeOpenCodeSessionId("session-1"));
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toMatch(OPENCODE_SESSION_RE);
+		expect(setup.headers["User-Agent"]).toBe(OPENCODE_USER_AGENT);
+		expect(setup.headers["x-opencode-client"]).toBe("desktop");
 		expect(setup.headers.session_id).toBeUndefined();
 	});
 
@@ -121,10 +128,21 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 			messages: [],
 			promptCacheSessionId: "cache-1",
 		});
-		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("cache-1");
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(canonicalizeOpenCodeSessionId("cache-1"));
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toMatch(OPENCODE_SESSION_RE);
 	});
 
-	it("generates one session id at the inference boundary when the caller omitted it", async () => {
+	it("preserves canonical OpenCode session ids", () => {
+		const canonical = "ses_0123456789ababcdefghijklmn";
+		const setup = resolveOpenAIRequestSetup(OPENCODE_GO_COMPLETIONS_MODEL, {
+			apiKey: "key",
+			messages: [],
+			sessionId: canonical,
+		});
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(canonical);
+	});
+
+	it("generates one canonical session id at the inference boundary when the caller omitted it", async () => {
 		let sessionId: string | null = null;
 		const fetchMock = async (_input: string | URL | Request, init?: RequestInit) => {
 			sessionId = new Headers(init?.headers).get(OPENCODE_SESSION_HEADER);
@@ -138,7 +156,7 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 		);
 
 		expect(response.stopReason).toBe("stop");
-		expect(sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+		expect(sessionId).toMatch(OPENCODE_SESSION_RE);
 	});
 
 	it("replaces conflicting caller values with the authoritative session id", () => {
@@ -149,7 +167,7 @@ describe("opencode and gpt session header on OpenAI transports", () => {
 			sessionId: "session-1",
 		});
 		expect(setup.headers["X-OpenCode-Session"]).toBeUndefined();
-		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe("session-1");
+		expect(setup.headers[OPENCODE_SESSION_HEADER]).toBe(canonicalizeOpenCodeSessionId("session-1"));
 	});
 
 	it("sends session_id and x-client-request-id on OpenAI requests", () => {
@@ -241,8 +259,8 @@ describe("opencode session header on the Google transport", () => {
 
 		expect(response.stopReason).toBe("stop");
 		expect(headersSeen).toHaveLength(1);
-		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe("session-1");
-		expect(headersSeen[0]?.get("User-Agent")).toBe(USER_AGENT);
+		expect(headersSeen[0]?.get(OPENCODE_SESSION_HEADER)).toBe(canonicalizeOpenCodeSessionId("session-1"));
+		expect(headersSeen[0]?.get("User-Agent")).toBe(OPENCODE_USER_AGENT);
 	});
 });
 
@@ -253,9 +271,9 @@ describe("session header on the Anthropic transport", () => {
 			apiKey: "opencode_test_key",
 			sessionId: "session-1",
 		});
-		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("session-1");
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe(canonicalizeOpenCodeSessionId("session-1"));
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
-		expect(options.defaultHeaders["User-Agent"]).toBe(USER_AGENT);
+		expect(options.defaultHeaders["User-Agent"]).toBe(OPENCODE_USER_AGENT);
 	});
 
 	it("preserves the Claude fingerprint for OpenCode OAuth requests", () => {
@@ -312,7 +330,7 @@ describe("session header on the Anthropic transport", () => {
 			headers: { [OPENCODE_SESSION_HEADER]: "caller", "X-Claude-Code-Session-Id": "caller-claude" },
 			sessionId: "session-1",
 		});
-		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe("session-1");
+		expect(options.defaultHeaders[OPENCODE_SESSION_HEADER]).toBe(canonicalizeOpenCodeSessionId("session-1"));
 		expect(options.defaultHeaders["X-Claude-Code-Session-Id"]).toBe("session-1");
 	});
 });

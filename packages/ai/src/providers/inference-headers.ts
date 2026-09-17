@@ -28,6 +28,34 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
 	headers[name] = value;
 }
 
+/** Canonical OpenCode client user-agent. Required for free-tier validation (issue #12306). */
+export const OPENCODE_USER_AGENT = "opencode/1.18.31";
+
+/** Canonical OpenCode session identifier format: ses_ + 12 hex + 14 Base62 chars. */
+export const OPENCODE_SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/;
+
+const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+/**
+ * Format a caller-provided or fallback session id into OpenCode's canonical
+ * identifier format (`ses_<hex:12><base62:14>`), deterministic for the same
+ * input so conversational turns maintain attribution and prompt-cache affinity.
+ */
+export function canonicalizeOpenCodeSessionId(sessionId?: string): string {
+	if (typeof sessionId === "string" && OPENCODE_SESSION_RE.test(sessionId.trim())) {
+		return sessionId.trim();
+	}
+	const digest = new Bun.CryptoHasher("sha256")
+		.update(`opencode\0omp\0${sessionId || "default"}`)
+		.digest();
+	const timeHex = Buffer.from(digest.subarray(0, 6)).toString("hex");
+	let randomPart = "";
+	for (let i = 6; i < 20; i++) {
+		randomPart += BASE62_CHARS[digest[i] % 62];
+	}
+	return `ses_${timeHex}${randomPart}`;
+}
+
 /**
  * Project omp's identity and authoritative conversation id onto the headers
  * understood by the active inference protocol and host.
@@ -35,6 +63,16 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
 export function applyInferenceHeaders(headers: Record<string, string>, options: InferenceHeaderOptions): void {
 	const isOpenCode = options.provider === "opencode-go" || options.provider === "opencode-zen";
 	const sessionId = options.sessionId;
+
+	if (isOpenCode) {
+		const isClaudeOAuth = headers["User-Agent"]?.startsWith("claude-cli/");
+		if (!isClaudeOAuth) {
+			setHeader(headers, "User-Agent", OPENCODE_USER_AGENT);
+		}
+		setHeader(headers, "x-opencode-session", canonicalizeOpenCodeSessionId(sessionId));
+		setHeaderIfAbsent(headers, "x-opencode-client", "desktop");
+	}
+
 	if (!sessionId) return;
 
 	if (options.protocol === "anthropic") {
@@ -42,11 +80,6 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	} else if (options.protocol === "openai" && options.provider === "openai") {
 		setHeader(headers, "session_id", sessionId);
 		setHeader(headers, "x-client-request-id", sessionId);
-	}
-
-	if (isOpenCode) {
-		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
-		setHeader(headers, "x-opencode-session", sessionId);
 	}
 }
 

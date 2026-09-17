@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenCode Go and OpenCode Zen free-tier models failing with `403 FreeTierError: OpenCode's free tier can only be used from within OpenCode`: inference requests to OpenCode providers now send the canonical `opencode/1.18.31` client User-Agent and translate session identifiers to OpenCode's descending `ses_<hex:12><base62:14>` format ([#12306](https://github.com/can1357/oh-my-pi/issues/12306)).
+
 ## [18.2.4] - 2026-09-17
 
 ### Added
