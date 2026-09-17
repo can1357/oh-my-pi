@@ -2,16 +2,15 @@
 
 ## [Unreleased]
 
+## [18.2.5] - 2026-09-17
+
 ### Added
 
-- Added the `stencil` auth provider (stencil.so account, OAuth code + PKCE against `auth.stencil.so`; `STENCIL_API_KEY`, `STENCIL_AUTH_URL`, `STENCIL_BASE_URL` envs) used by `omp stream`. Auth-only: it is not a model provider. `oauth-code` logins gain `base-url`/`auth-url` nodes with `{base}`/`{auth}` URL placeholders.
+- Added the `stencil` authentication provider for `omp stream`, supporting OAuth code + PKCE sign-in with `auth.stencil.so`, configurable via `STENCIL_API_KEY`, `STENCIL_AUTH_URL`, and `STENCIL_BASE_URL`. This is an authentication-only provider, not a model provider; OAuth-code login configuration also supports `base-url` and `auth-url` nodes with `{base}` and `{auth}` URL placeholders.
 
 ### Fixed
 
-- Discovery validators reuse hoisted module-scope schemas instead of constructing a fresh schema per property per row.
-- Fixed Yolo-Auto advertising 1M context for Qwen Flash: `qwen3.8-flash` and the paid `yolo` route now resolve to the documented 256K deployment window with the Qwen chat-template reasoning dialect, and `qwen3.8-flash` is the provider default.
-- Model identity classification now uses a prebuilt override index and a bounded per-id memo instead of re-scanning the taxonomy on every call.
-- Compat glob patterns reuse cached wildcard segments instead of re-splitting on every match.
+- Corrected Yolo-Auto metadata for Qwen Flash: `qwen3.8-flash` and the paid `yolo` route now report the documented 256K context window and use the Qwen chat-template reasoning dialect, with `qwen3.8-flash` as the provider default.
 
 ## [18.2.4] - 2026-09-17
 

@@ -1,4 +1,5 @@
 import { isAnthropicServerToolHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { countNewlines } from "@oh-my-pi/pi-utils";
 import {
 	type BlobStore,
 	externalizeImageDataSync,
@@ -229,15 +230,8 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			lineCountEntry &&
 			typeof lineCountEntry[1] === "number"
 		) {
-			const content = contentEntry[1];
-			// Native indexOf scan, not split: identical count (N newlines ⇒
-			// N+1 lines) without the transient line array.
-			let lineCount = 1;
-			let pos = content.indexOf("\n");
-			while (pos !== -1) {
-				lineCount++;
-				pos = content.indexOf("\n", pos + 1);
-			}
+			// Same count as `content.split("\n").length` without the array.
+			const lineCount = countNewlines(contentEntry[1]) + 1;
 			const updatedEntries = entries.map(([childKey, value]) =>
 				childKey === "lineCount" ? ([childKey, lineCount] as const) : ([childKey, value] as const),
 			);

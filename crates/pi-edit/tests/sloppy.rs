@@ -108,7 +108,10 @@ async fn after_requires_all_even_when_ambiguous_insertions_have_identical_outcom
 /// its `</SM:EDIT>`, untouched.
 fn copy_ready_payload(message: &str, opener: &str) -> String {
 	let start = message.find(opener).expect("pathful copy-ready opener");
-	let end = message[start..].find("</SM:EDIT>").expect("complete payload") + "</SM:EDIT>".len();
+	let end = message[start..]
+		.find("</SM:EDIT>")
+		.expect("complete payload")
+		+ "</SM:EDIT>".len();
 	message[start..start + end].to_owned()
 }
 
@@ -117,8 +120,9 @@ async fn no_match_correction_resends_verbatim() {
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "const RUNNER = compute(1);\nkeep();\n");
 	let writer = DiskWriter::default();
-	let input = "<SM:EDIT path=\"a.txt\">\n<SM:FIND>\nconst RUNNER = computeValue(1);\n</SM:FIND>\n<SM:\
-	             PUT>\nconst RUNNER = compute(2);\n</SM:PUT>\n</SM:EDIT>";
+	let input = "<SM:EDIT path=\"a.txt\">\n<SM:FIND>\nconst RUNNER = \
+	             computeValue(1);\n</SM:FIND>\n<SM:PUT>\nconst RUNNER = \
+	             compute(2);\n</SM:PUT>\n</SM:EDIT>";
 	let error = workspace
 		.apply_json(&json!({ "input": input }), &writer)
 		.await

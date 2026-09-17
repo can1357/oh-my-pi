@@ -1,10 +1,11 @@
 /**
- * Benchmark: proxy toolcall_delta parse cost — unthrottled vs throttled.
+ * Benchmark: per-delta tool-call argument parsing — unthrottled vs throttled.
  *
- * Feeds a 100KB argument buffer as 1KB deltas through processProxyEvent's
- * parse path. The old path ran parseStreamingJson per delta (O(N^2)); the new
- * path uses parseStreamingJsonThrottled with per-index last-parsed length
- * (O(N log N)), matching every native provider.
+ * Feeds a 100KB argument buffer as 1KB deltas through the two parser entry
+ * points streamProxy chooses between: parseStreamingJson on every delta
+ * (O(N^2), the old proxy path) vs parseStreamingJsonThrottled with a
+ * last-parsed length plus one final full parse (O(N log N), what proxy.ts
+ * and every native provider now do).
  *
  * Run: bun packages/agent/bench/proxy-partial-json.bench.ts
  */

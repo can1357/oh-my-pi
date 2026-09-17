@@ -1,10 +1,9 @@
 /**
- * Benchmark: normalizeTools parameters identity stability (agent findings F1/F2).
+ * Benchmark: normalizeTools steady-state cost with intent injection.
  *
- * Before the fix, every normalizeTools call minted a fresh parameters object
- * via injectIntentIntoSchema, defeating stamp-keyed downstream memos. After
- * the fix, the injected object is memoized per input schema identity, so the
- * second call with the same tool array reuses parameters by reference.
+ * Injected parameters are memoized per input schema identity, so repeated
+ * calls over the same tool array should reuse wire schemas by reference
+ * (contract pinned in test/normalize-tools-prune.test.ts).
  *
  * Run: bun packages/agent/bench/normalize-tools.bench.ts
  */
@@ -31,14 +30,7 @@ function makeTool(name: string): AgentTool<typeof toolSchema, { path: string }> 
 
 const tools = Array.from({ length: 50 }, (_, i) => makeTool(`tool-${i}`));
 
-const first = normalizeTools(tools, { injectIntent: true });
-const second = normalizeTools(tools, { injectIntent: true });
-let stable = 0;
-for (let i = 0; i < tools.length; i++) {
-	if (first?.[i]?.parameters === second?.[i]?.parameters) stable++;
-}
-console.log(`parameters identity stable across calls: ${stable}/${tools.length}`);
-if (stable !== tools.length) throw new Error("injection memo miss: parameters identity churns per call");
+normalizeTools(tools, { injectIntent: true }); // warmup: populate schema memos
 
 const N = 200;
 const start = Bun.nanoseconds();

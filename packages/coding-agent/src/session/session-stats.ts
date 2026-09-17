@@ -146,27 +146,25 @@ export class SessionStatsTracker {
 			}
 		};
 		for (const message of state.messages) {
-			if (message.role === "user") userMessages++;
-			else if (message.role === "toolResult") {
+			if (message.role === "user") {
+				userMessages++;
+			} else if (message.role === "toolResult") {
 				toolResults++;
 				if (message.toolName === "task") {
 					const usage = taskToolUsage(message.details);
 					if (usage) addUsage(usage);
 				}
-				continue;
-			} else if (message.role !== "assistant") continue;
-			else {
+			} else if (message.role === "assistant") {
 				assistantMessages++;
-				const assistant = message;
-				for (const content of assistant.content) {
+				for (const content of message.content) {
 					if (content.type === "toolCall") toolCalls++;
 				}
 				// Persisted and imported transcripts can predate usage metadata despite the current message type.
-				const usage = assistant.usage;
+				const usage = message.usage;
 				if (!usage) continue;
 				addUsage(usage);
-				if (assistant.upstreamModel !== undefined) {
-					routedModels[assistant.upstreamModel] = (routedModels[assistant.upstreamModel] ?? 0) + 1;
+				if (message.upstreamModel !== undefined) {
+					routedModels[message.upstreamModel] = (routedModels[message.upstreamModel] ?? 0) + 1;
 				}
 			}
 		}

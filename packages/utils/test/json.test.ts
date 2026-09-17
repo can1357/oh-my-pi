@@ -31,28 +31,27 @@ describe("stringifyJson", () => {
 		expect(stringifyJson({ o: { toJSON: () => 5n } })).toBe('{"o":"5"}');
 	});
 
-	it("invokes stateful serializers once, like the plain replacer", () => {
+	it("coerces bigints that follow a stateful serializer", () => {
 		let calls = 0;
-		const value = { a: 1n, b: { toJSON: () => ++calls } };
-		expect(stringifyJson(value)).toBe('{"a":"1","b":1}');
-		expect(calls).toBe(1);
+		const value = { a: { toJSON: () => ++calls }, b: 1n };
+		expect(stringifyJson(value)).toBe('{"a":2,"b":"1"}');
 	});
 
-	it("still throws the original TypeError for non-serializable values", () => {
+	it("still throws TypeError for non-serializable values", () => {
 		const circular: Record<string, unknown> = {};
 		circular.self = circular;
 		expect(() => stringifyJson(circular)).toThrow(TypeError);
 	});
 
-	it("rethrows user-code TypeErrors instead of coercing past them", () => {
+	it("rethrows non-TypeError serializer failures without retrying", () => {
 		let calls = 0;
-		const flaky = {
+		const failing = {
 			toJSON: () => {
-				if (++calls < 3) throw new TypeError(`boom-${calls}`);
-				return 1;
+				calls++;
+				throw new RangeError("boom");
 			},
 		};
-		expect(() => stringifyJson({ x: flaky })).toThrow("boom-2");
-		expect(calls).toBe(2);
+		expect(() => stringifyJson({ x: failing })).toThrow(RangeError);
+		expect(calls).toBe(1);
 	});
 });

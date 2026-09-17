@@ -2158,11 +2158,12 @@ mod tests {
 	fn operation_payload_restores_inline_desired_text() {
 		let operation =
 			parse_operations("«\nconst \u{27ea}old\u{2502}new\u{27eb};", "const old;\n", "a.ts")
-			.unwrap()
-			.remove(0);
+				.unwrap()
+				.remove(0);
 		assert_eq!(
 			operation_payload(&operation, "a.ts", true, None),
-			"<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\nconst \u{27ea}old\u{2502}new\u{27eb};\n</SM:FIND>\n</SM:EDIT>"
+			"<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\nconst \
+			 \u{27ea}old\u{2502}new\u{27eb};\n</SM:FIND>\n</SM:EDIT>"
 		);
 	}
 }
