@@ -2,8 +2,8 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEexist, isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { FileLock, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
+import { isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
@@ -47,6 +47,13 @@ const RESTART_BACKOFF_BASE_MS = 1_000;
 const MAX_TERMINAL_DAEMONS_LISTED = 10;
 const TOKEN_FILE = "broker.token";
 const PID_FILE = "broker.pid";
+/**
+ * How long a live lease left by a broker without the native lock is given to
+ * bind its endpoint before the lease is treated as stale (issue #11080).
+ */
+const LEASE_HANDOFF_GRACE_MS = 500;
+/** Connect budget for the endpoint probe that answers "is a broker serving this scope?". */
+const LEASE_PROBE_TIMEOUT_MS = 250;
 const META_FILE = "meta.json";
 const LOG_FILE = "output.log";
 const PREVIOUS_LOG_FILE = "output.previous.log";
@@ -94,7 +101,8 @@ interface ManagedDaemon {
 
 interface BrokerLease {
 	path: string;
-	instanceId: string;
+	/** Process-owned native lock; the OS drops it however this broker exits. */
+	lock: FileLock;
 }
 
 interface DaemonLogRead {
@@ -287,47 +295,83 @@ class DaemonLog {
 	}
 }
 
-async function acquireBrokerLease(runtimeDir: string): Promise<BrokerLease | null> {
-	const pidPath = path.join(runtimeDir, PID_FILE);
-	for (let attempt = 0; attempt < 2; attempt++) {
-		try {
-			const handle = await fs.open(pidPath, "wx", 0o600);
-			const instanceId = crypto.randomUUID();
-			try {
-				await handle.writeFile(JSON.stringify({ pid: process.pid, instanceId }), "utf8");
-			} finally {
-				await handle.close();
-			}
-			return { path: pidPath, instanceId };
-		} catch (error) {
-			if (!isEexist(error)) throw error;
-			try {
-				const raw: unknown = await Bun.file(pidPath).json();
-				if (typeof raw === "object" && raw !== null && "pid" in raw && typeof raw.pid === "number") {
-					try {
-						process.kill(raw.pid, 0);
-						return null;
-					} catch {
-						// Stale PID file; the next loop iteration claims it.
-					}
-				}
-			} catch {
-				// Malformed or partially-written PID files are stale.
-			}
-			await fs.rm(pidPath, { force: true });
-		}
+/** Whether a broker is accepting connections on the scope endpoint right now. */
+function probeBrokerEndpoint(endpoint: string): Promise<boolean> {
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	const socket = net.createConnection({ path: endpoint });
+	let settled = false;
+	const finish = (connected: boolean): void => {
+		if (settled) return;
+		settled = true;
+		socket.destroy();
+		resolve(connected);
+	};
+	socket.once("connect", () => finish(true));
+	socket.once("error", () => finish(false));
+	socket.setTimeout(LEASE_PROBE_TIMEOUT_MS, () => finish(false));
+	return promise;
+}
+
+/**
+ * Whether a live lease left by a broker that predates the native lock still
+ * owns this scope. The recorded PID alone cannot answer it: PID reuse by an
+ * unrelated process looks exactly like a live broker, while a real broker only
+ * becomes observable when it binds the endpoint — milliseconds after writing
+ * the lease. Probe, allow one startup grace, then probe again.
+ */
+async function holdsLiveForeignLease(pidPath: string, endpoint: string): Promise<boolean> {
+	let pid: number | undefined;
+	try {
+		// `fs.readFile` (libuv) rather than `Bun.file().json()`: the CLI entry runs
+		// as a floating promise, so an await that completes without an active
+		// libuv handle lets Bun exit this worker before it ever listens — exactly
+		// what happens on the cold-start path when broker.pid is absent.
+		const raw: unknown = JSON.parse(await fs.readFile(pidPath, "utf8"));
+		if (typeof raw === "object" && raw !== null && "pid" in raw && typeof raw.pid === "number") pid = raw.pid;
+	} catch {
+		// Missing or torn lease: nothing to honor.
 	}
-	return null;
+	if (pid === undefined || pid === process.pid) return false;
+	try {
+		process.kill(pid, 0);
+	} catch {
+		return false; // Dead PID: the lease outlived its broker.
+	}
+	if (await probeBrokerEndpoint(endpoint)) return true;
+	await Bun.sleep(LEASE_HANDOFF_GRACE_MS);
+	return probeBrokerEndpoint(endpoint);
+}
+
+/**
+ * Claim the one-broker-per-scope lease. The native lock is process-owned, so
+ * the OS releases it however the broker dies — a crashed broker can never wedge
+ * the scope behind a stale lease again (issue #11080). `broker.pid` stays as
+ * human-readable metadata for `omp ps` and dead-scope pruning.
+ */
+async function acquireBrokerLease(runtimeDir: string, endpoint: string): Promise<BrokerLease | null> {
+	const pidPath = path.join(runtimeDir, PID_FILE);
+	const lock = FileLock.tryAcquire(pidPath);
+	if (!lock.acquired) return null;
+	try {
+		// A broker from a build without the native lock cannot be seen through it;
+		// adopt the scope instead of starting a duplicate supervisor.
+		if (await holdsLiveForeignLease(pidPath, endpoint)) {
+			lock.release();
+			return null;
+		}
+		await fs.writeFile(pidPath, JSON.stringify({ pid: process.pid }), { mode: 0o600 });
+		return { path: pidPath, lock };
+	} catch (error) {
+		lock.release();
+		throw error;
+	}
 }
 
 async function releaseBrokerLease(lease: BrokerLease): Promise<void> {
 	try {
-		const raw: unknown = await Bun.file(lease.path).json();
-		if (typeof raw === "object" && raw !== null && "instanceId" in raw && raw.instanceId === lease.instanceId) {
-			await fs.rm(lease.path, { force: true });
-		}
-	} catch (error) {
-		if (!isEnoent(error)) throw error;
+		await fs.rm(lease.path, { force: true });
+	} finally {
+		lease.lock.release();
 	}
 }
 
@@ -1409,7 +1453,10 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 			? requestedRestartBackoffBaseMs
 			: RESTART_BACKOFF_BASE_MS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
-	const lease = await acquireBrokerLease(runtimeDir);
+	const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+	// Hold the lease for the whole broker lifetime: it is a native lock the OS
+	// releases on exit, so keeping `lease` referenced keeps the scope owned.
+	const lease = await acquireBrokerLease(runtimeDir, endpoint);
 	if (!lease) return;
 	setProcessName("omp daemon broker");
 	// Record the scope's project dir so `omp ps` can map this hash-keyed runtime

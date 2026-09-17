@@ -109,6 +109,7 @@ function createCtx(leafEntry: SessionEntry, navigateTreeResult: unknown = { canc
 		session: { navigateTree, resumeAfterAskReanswer },
 		ui: {
 			setFocus: vi.fn(),
+			getFocused: () => undefined,
 			requestRender: vi.fn(),
 			terminal: { rows: 24 },
 		},

@@ -18,6 +18,9 @@ const START_TIMEOUT_MS = 10_000;
 const CLOSE_TIMEOUT_MS = 1_500;
 const GRACE_MS = 750;
 const SMOKE_TIMEOUT_MS = 5_000;
+// A capabilities request only ensures the native session and reads a getter, but
+// the first ensure may load the desktop addon, so it shares the start budget.
+const CAPABILITIES_TIMEOUT_MS = 10_000;
 const RESTART_MESSAGE = "computer worker restarted; captures and ax refs were reset";
 
 /** Runs desktop scripts and owns their persistent worker session. */
@@ -28,7 +31,7 @@ export interface ComputerController {
 		snapshot: ComputerSessionSnapshot,
 		signal?: AbortSignal,
 	): Promise<ComputerRunOk>;
-	capabilities(): Promise<DesktopCapabilities | undefined>;
+	capabilities(snapshot: ComputerSessionSnapshot, signal?: AbortSignal): Promise<DesktopCapabilities | undefined>;
 	close(): Promise<void>;
 }
 
@@ -66,6 +69,11 @@ interface PendingRun {
 	reject(error: unknown): void;
 	signal?: AbortSignal;
 	toolCalls: Map<string, AbortController>;
+}
+
+interface PendingCapabilities {
+	resolve(value: DesktopCapabilities | undefined): void;
+	reject(error: unknown): void;
 }
 
 function wrapWorker(worker: Worker): ComputerWorkerHandle {
@@ -142,7 +150,7 @@ export class ComputerSupervisor implements ComputerController {
 	#startPromise?: Promise<void>;
 	#startReject?: (error: unknown) => void;
 	#startResolve?: () => void;
-	#latestCapabilities?: DesktopCapabilities;
+	#pendingCapabilities = new Map<string, PendingCapabilities>();
 	#pending = new Map<string, PendingRun>();
 	#nextId = 0;
 	#closed = false;
@@ -163,8 +171,28 @@ export class ComputerSupervisor implements ComputerController {
 		this.#callSessionTool = callSessionTool;
 	}
 
-	async capabilities(): Promise<DesktopCapabilities | undefined> {
-		return this.#latestCapabilities;
+	async capabilities(
+		snapshot: ComputerSessionSnapshot,
+		signal?: AbortSignal,
+	): Promise<DesktopCapabilities | undefined> {
+		if (this.#closed) throw new ToolError("Computer session is closed");
+		if (signal?.aborted) throw new ToolAbortError();
+		await this.#start();
+		if (signal?.aborted) throw new ToolAbortError();
+
+		const id = `computer-cap-${++this.#nextId}`;
+		const { promise, resolve, reject } = Promise.withResolvers<DesktopCapabilities | undefined>();
+		this.#pendingCapabilities.set(id, { resolve, reject });
+		const abort = (): void => reject(signal?.reason instanceof Error ? signal.reason : new ToolAbortError());
+		if (signal?.aborted) abort();
+		else signal?.addEventListener("abort", abort, { once: true });
+		try {
+			this.#safeSend({ type: "capabilities", id, session: snapshot });
+			return await withTimeout(promise, CAPABILITIES_TIMEOUT_MS, "Timed out fetching computer capabilities");
+		} finally {
+			signal?.removeEventListener("abort", abort);
+			this.#pendingCapabilities.delete(id);
+		}
 	}
 
 	async run(
@@ -236,12 +264,16 @@ export class ComputerSupervisor implements ComputerController {
 			const pending = this.#pending.get(message.id);
 			if (!pending) return;
 			this.#pending.delete(message.id);
-			if (message.ok) {
-				this.#latestCapabilities = message.payload.capabilities;
-				pending.resolve(message.payload);
-			} else {
-				pending.reject(errorFromPayload(message.error));
-			}
+			if (message.ok) pending.resolve(message.payload);
+			else pending.reject(errorFromPayload(message.error));
+			return;
+		}
+		if (message.type === "capabilities") {
+			const pending = this.#pendingCapabilities.get(message.id);
+			if (!pending) return;
+			this.#pendingCapabilities.delete(message.id);
+			if (message.ok) pending.resolve(message.capabilities);
+			else pending.reject(errorFromPayload(message.error));
 			return;
 		}
 		if (message.type === "tool-call") {
@@ -328,6 +360,8 @@ export class ComputerSupervisor implements ComputerController {
 			pending.reject(reason);
 		}
 		this.#pending.clear();
+		for (const pending of this.#pendingCapabilities.values()) pending.reject(reason);
+		this.#pendingCapabilities.clear();
 		await worker?.terminate().catch(() => undefined);
 	}
 

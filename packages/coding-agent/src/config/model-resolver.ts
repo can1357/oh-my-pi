@@ -356,6 +356,7 @@ function resolveBedrockInferenceProfileModelId(
 		contextWindow: null,
 		maxTokens: null,
 		...(template.headers ? { headers: template.headers } : {}),
+		...(template.resolveHeaders ? { resolveHeaders: template.resolveHeaders } : {}),
 		...(template.transport !== undefined ? { transport: template.transport } : {}),
 		...(template.guardrailIdentifier !== undefined ? { guardrailIdentifier: template.guardrailIdentifier } : {}),
 		...(template.guardrailVersion !== undefined ? { guardrailVersion: template.guardrailVersion } : {}),
@@ -373,13 +374,15 @@ function resolveBedrockInferenceProfileReference(
 	return resolveBedrockInferenceProfileModelId(modelId, availableModels);
 }
 
-const UPSTREAM_ROUTING_SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i;
+/** Bare slug (`cerebras`) or tiered/regional slug (`google-ai-studio/priority`, `google-vertex/global/flex`). */
+const UPSTREAM_ROUTING_SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/i;
 
 /**
  * Split a trailing `@<upstream>` provider-routing selector off a model pattern.
  *
  * `openrouter/z-ai/glm-4.7@cerebras` -> base `openrouter/z-ai/glm-4.7`, upstream
- * `cerebras`. A `:thinking` suffix after the slug is kept on the base
+ * `cerebras`. Tiered upstreams keep their path (`...@google-ai-studio/priority`).
+ * A `:thinking` suffix after the slug is kept on the base
  * (`...@cerebras:high` -> base `...:high`). Returns undefined when there is no
  * `@` or the suffix is not a bare provider slug, so model ids that legitimately
  * contain `@` (`claude-opus-4-8@default`, `workers-ai/@cf/...`) are never split.
@@ -745,6 +748,15 @@ function isProviderLockedCrossMatch(pattern: string, matchedModel: Model<Api>): 
 	const provider = pattern.slice(0, slashIdx).toLowerCase();
 	const modelId = revisionSpellingKey(pattern.slice(slashIdx + 1));
 	if (matchedModel.provider.toLowerCase() === provider) {
+		return false;
+	}
+	// A cross-provider exact-id match on a provider that has no bundled
+	// catalog at all is a user-configured custom provider (models.json /
+	// models.yml): the user wrote this literal id explicitly, so resolving
+	// it is stated intent rather than an aggregator shadow, and the lock
+	// must not fire (#8800). Bundled providers (e.g. OpenRouter) keep the
+	// lock below unchanged.
+	if (getBundledModels(matchedModel.provider.toLowerCase() as GeneratedProvider).length === 0) {
 		return false;
 	}
 	// Case- and revision-spelling-insensitive on both halves: the surrounding
@@ -1138,23 +1150,67 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
 
 /**
  * Roles that have no priority.json chain of their own reuse another role's
- * list. The advisor — a second-opinion reviewer — defaults to the `slow`
- * reasoning chain, but (unlike the `slow` role, see
- * {@link shouldInheritDefaultBeforePriority}) never inherits the primary's
- * model, so it stays a distinct strong model out of the box. The `tiny` role —
- * the override for online title/memory/classifier tasks — reuses the `smol`
- * fast chain so an unset tiny role auto-resolves to the same fast model smol
- * would pick.
+ * list. The advisor — a second-opinion reviewer — uses a configured `slow`
+ * role before that list, but never inherits the primary's model when `slow`
+ * is unset, so it stays a distinct strong model out of the box. The `tiny`
+ * role — the override for online title/memory/classifier tasks — resolves
+ * through `smol` so it picks the same configured, inherited, or built-in fast
+ * model.
  */
 const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
 	advisor: "slow",
 	tiny: "smol",
 };
 
+interface ConfiguredRoleFallback {
+	role: ModelRole;
+	/** Skip the target role's default inheritance when it has no explicit configuration. */
+	configuredOnly: boolean;
+}
+
+const ROLE_CONFIGURED_FALLBACK: Partial<Record<ModelRole, ConfiguredRoleFallback>> = {
+	advisor: { role: "slow", configuredOnly: true },
+	tiny: { role: "smol", configuredOnly: false },
+};
+
 /** Built-in priority patterns for a role, following {@link ROLE_PRIORITY_ALIAS}. */
 function rolePriorityDefaults(role: ModelRole): string[] {
 	const key = ROLE_PRIORITY_ALIAS[role] ?? (role as keyof typeof MODEL_PRIO);
 	return normalizeModelPatternList(MODEL_PRIO[key]);
+}
+
+/** Resolve aliases inside a configured pattern list without leaking cycles to model matching. */
+function resolveNestedRolePatterns(
+	value: string,
+	roleDefaults: string[],
+	settings: ModelRoleLookup | undefined,
+	visited: Set<string>,
+): string[] {
+	const resolved: string[] = [];
+	for (const pattern of normalizeModelPatternList(value)) {
+		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
+			pattern,
+			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+			MAX_THINKING_SUFFIX_OPTIONS,
+		);
+		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
+		if (!aliasRole) {
+			resolved.push(pattern);
+			continue;
+		}
+		if (visited.has(aliasRole)) {
+			resolved.push(
+				...(thinkingLevel
+					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
+					: roleDefaults),
+			);
+			continue;
+		}
+
+		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+		if (recursed) resolved.push(...recursed);
+	}
+	return resolved;
 }
 
 function resolveDefaultInheritedPatterns(
@@ -1165,36 +1221,7 @@ function resolveDefaultInheritedPatterns(
 	visited: Set<string>,
 ): string[] {
 	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
-
-	const resolved: string[] = [];
-	for (const pattern of normalizeModelPatternList(configuredDefault)) {
-		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
-			pattern,
-			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-			MAX_THINKING_SUFFIX_OPTIONS,
-		);
-		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
-		if (aliasRole === role) {
-			// Self-alias (e.g. modelRoles.default = "@smol") would loop back to the
-			resolved.push(
-				...(thinkingLevel
-					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
-					: roleDefaults),
-			);
-			continue;
-		}
-		if (aliasRole && !visited.has(aliasRole)) {
-			// Cross-role alias (e.g. modelRoles.default = "@slow"): resolve the
-			// concrete model patterns instead of another role alias.
-			const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
-			if (recursed && recursed.length > 0) {
-				resolved.push(...recursed);
-				continue;
-			}
-		}
-		resolved.push(pattern);
-	}
-	return resolved;
+	return resolveNestedRolePatterns(configuredDefault, roleDefaults, settings, visited);
 }
 
 function resolveConfiguredRolePattern(
@@ -1218,11 +1245,20 @@ function resolveConfiguredRolePattern(
 	const configured = settings?.getModelRole(role)?.trim();
 	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
 	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
+	const configuredFallback = isModelRole(role) ? ROLE_CONFIGURED_FALLBACK[role] : undefined;
+	const fallbackPatterns =
+		configured ||
+		!configuredFallback ||
+		(configuredFallback.configuredOnly && !settings?.getModelRole(configuredFallback.role)?.trim())
+			? undefined
+			: resolveConfiguredRolePattern(formatModelRoleAlias(configuredFallback.role), settings, new Set(visited));
 	const resolved = configured
-		? normalizeModelPatternList(configured)
-		: isModelRole(role)
-			? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
-			: roleDefaults;
+		? resolveNestedRolePatterns(configured, roleDefaults, settings, visited)
+		: fallbackPatterns
+			? fallbackPatterns
+			: isModelRole(role)
+				? resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited)
+				: roleDefaults;
 	if (resolved.length === 0) {
 		resolved.push(...roleDefaults);
 	}
@@ -1580,6 +1616,9 @@ export function resolveModelOverride(
  * Resolve a list of override patterns to the first matching model, with an
  * auth-aware fallback to the parent session's active model.
  *
+ * Providers disabled through settings are removed before matching so ordered
+ * overrides skip them and an all-disabled list resolves to no model.
+ *
  * If the resolved subagent model has no working credentials (provider has no
  * usable auth), and the parent's active model resolves with working auth,
  * use the parent's model instead. This prevents subagent dispatch from
@@ -1615,7 +1654,13 @@ export async function resolveModelOverrideWithAuthFallback(
 	authFallbackUsed: boolean;
 	warning?: string;
 }> {
-	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
+	const disabledProviders = new Set(settings?.get("disabledProviders"));
+	let lookupRegistry: ModelLookupRegistry = modelRegistry;
+	if (disabledProviders.size > 0) {
+		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
+		lookupRegistry = { getAvailable: () => enabledModels };
+	}
+	const primary = resolveModelOverride(modelPatterns, lookupRegistry, settings);
 	if (!primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}
@@ -1625,7 +1670,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 
-	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings);
+	const fallback = resolveModelOverride([parentActiveModelPattern], lookupRegistry, settings);
 	if (!fallback.model) {
 		return { ...primary, authFallbackUsed: false };
 	}
@@ -1664,10 +1709,10 @@ export function resolveRoleSelection(
 /**
  * Resolve the model for the `advisor` role. A configured `modelRoles.advisor`
  * wins outright (a bad override surfaces as no model rather than silently
- * running something else); when unset it falls back to the `slow` priority
- * chain via {@link ROLE_PRIORITY_ALIAS} — a strong reasoning model that, unlike
- * the `slow` role itself, never inherits the primary's model. Returns undefined
- * only when no candidate in the resolved chain is available.
+ * running something else); when unset it uses a configured `slow` role before
+ * the built-in slow priority chain. It never inherits the primary model through
+ * an unconfigured `slow` role. Returns undefined only when no candidate in the
+ * resolved chain is available.
  */
 export function resolveAdvisorRoleSelection(
 	settings: Settings,
@@ -2080,7 +2125,10 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
-	let parsed = parseModelPattern(pattern, candidates, preferences, {
+	// Keep the explicit provider on the pattern: the raw-id phase provider-locks
+	// `google/gemini-x` to the bundled `google` provider unless the selector
+	// names the aggregator carrying it (`openrouter/google/gemini-x@upstream`).
+	let parsed = parseModelPattern(provider ? `${provider}/${pattern}` : pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
 	if (!parsed.model && !provider) {

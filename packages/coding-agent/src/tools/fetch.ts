@@ -30,7 +30,7 @@ import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { isReadableUrlPath, type LineRange, parseLineRanges, parseTailCount } from "./path-utils";
 import type { ParsedSelector } from "./read-selector";
-import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
+import { formatBytes, formatExpandHint, getDomain, sanitizeDisplayLines } from "./render-utils";
 import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -406,23 +406,32 @@ function getHtmlAttribute(tag: string, attribute: string): string | null {
 }
 
 /**
- * Extract bounded <head> markup to avoid expensive whole-page parsing
+ * Extract bounded <head> markup to avoid expensive whole-page parsing.
+ * Case-insensitive scan over a bounded prefix: the previous version lowercased
+ * the entire page (0.3ms/MB) before searching for two markers.
  */
 function extractHeadHtml(html: string): string {
-	const lower = html.toLowerCase();
-	const headStart = lower.indexOf("<head");
+	const SCAN_LIMIT = 256 * 1024;
+	const window = html.length > SCAN_LIMIT ? html.slice(0, SCAN_LIMIT) : html;
+	const headStart = window.search(/<head[\s>]/i);
 	if (headStart === -1) {
 		return html.slice(0, 32 * 1024);
 	}
 
 	const headTagEnd = html.indexOf(">", headStart);
-	if (headTagEnd === -1) {
+	if (headTagEnd === -1 || headTagEnd - headStart > 4096) {
 		return html.slice(headStart, headStart + 32 * 1024);
 	}
 
-	const headEnd = lower.indexOf("</head>", headTagEnd + 1);
-	const fallbackEnd = Math.min(html.length, headTagEnd + 1 + 32 * 1024);
-	return html.slice(headStart, headEnd === -1 ? fallbackEnd : headEnd + 7);
+	const tail = html.slice(headTagEnd + 1, headTagEnd + 1 + 128 * 1024);
+	const relativeEnd = tail.search(/<\/head\s*>/i);
+	if (relativeEnd === -1) {
+		// No close tag inside the scanned window: the head may legitimately
+		// run longer, so return everything scanned rather than shrinking to
+		// the first 32 KiB and dropping valid alternate links.
+		return html.slice(headStart, headTagEnd + 1 + tail.length);
+	}
+	return html.slice(headStart, headTagEnd + 1 + relativeEnd + 7);
 }
 
 /**
@@ -1821,7 +1830,7 @@ export function renderReadUrlResult(
 		const urlText = details?.finalUrl ?? details?.url ?? "";
 		const description = urlText ? formatReadUrlDescription(urlText) : undefined;
 		const header = renderStatusLine({ icon: "error", title: "Read", description }, uiTheme);
-		const errorLines = errorText.split("\n").map(line => uiTheme.fg("error", replaceTabs(line)));
+		const errorLines = sanitizeDisplayLines(errorText).map(line => uiTheme.fg("error", line));
 		const outputBlock = new CachedOutputBlock();
 		return markFramedBlockComponent({
 			render: (width: number) =>
@@ -1884,7 +1893,9 @@ export function renderReadUrlResult(
 			if (contentPreviewLines === undefined || lastExpanded !== expanded) {
 				const previewLimit = expanded ? 12 : 3;
 				const previewList = applyListLimit(contentLines, { headLimit: previewLimit });
-				const previewLines = previewList.items.map(line => line.trimEnd());
+				const previewLines = previewList.items
+					.flatMap(line => sanitizeDisplayLines(line))
+					.map(line => line.trimEnd());
 				const remaining = Math.max(0, contentLines.length - previewList.items.length);
 				contentPreviewLines =
 					previewLines.length > 0

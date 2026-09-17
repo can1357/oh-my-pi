@@ -7,7 +7,7 @@ import {
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
-import { createLiveConfigHeaders, type HeaderSource } from "./model-config-values";
+import { type ConfigHeaderResolver, type ConfigHeaderSource, createConfigHeaderResolver } from "./resolve-config-value";
 import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig } from "./model-patch";
 import { parseModelString } from "./model-resolver";
 import type { ModelOverride, ProviderAuthMode } from "./models-config-schema";
@@ -36,16 +36,16 @@ function mergeCustomModelHeaders(
 	modelHeaders: Record<string, string> | undefined,
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
-): Record<string, string> | undefined {
-	return createLiveConfigHeaders([providerHeaders, modelHeaders], { authHeader, apiKeyConfig });
+): ConfigHeaderResolver | undefined {
+	return createConfigHeaderResolver([providerHeaders, modelHeaders], { authHeader, apiKeyConfig });
 }
 
 export function mergeAuthHeaderSources(
-	sources: readonly HeaderSource[],
+	sources: readonly ConfigHeaderSource[],
 	authHeader: boolean | undefined,
 	apiKeyConfig: string | undefined,
-): Record<string, string> | undefined {
-	return createLiveConfigHeaders(sources, { authHeader, apiKeyConfig });
+): ConfigHeaderResolver | undefined {
+	return createConfigHeaderResolver(sources, { authHeader, apiKeyConfig });
 }
 
 /**
@@ -93,7 +93,7 @@ export function buildCustomModelOverlay(
 		maxTokens: modelDef.maxTokens,
 		omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
 		preferWebsockets: modelDef.preferWebsockets,
-		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
+		resolveHeaders: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
 		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,
@@ -121,7 +121,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		(options.useDefaults ? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } : undefined);
 	const input = resolvedModel.input ?? reference?.input ?? (options.useDefaults ? ["text"] : undefined);
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
-	return buildModel({
+	const built = buildModel({
 		id: resolvedModel.id,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
@@ -136,6 +136,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
 		headers: resolvedModel.headers,
+		resolveHeaders: resolvedModel.resolveHeaders,
 		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,
 		preferWebsockets: resolvedModel.preferWebsockets,
 		compat: mergeCompat(reference?.compatConfig, resolvedModel.compat),
@@ -146,6 +147,13 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
 	} as ModelSpec<Api>);
+	if (resolvedModel.cost) {
+		// Explicit custom prices outrank catalog corrections and schedules, just
+		// as they do for same-id model patches.
+		built.cost = { ...resolvedModel.cost };
+		delete built.cost.timeBased;
+	}
+	return built;
 }
 
 export function normalizeSuppressedSelector(

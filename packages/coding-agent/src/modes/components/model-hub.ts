@@ -13,7 +13,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import {
 	type Component,
 	extractPrintableText,
@@ -28,7 +28,14 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
-import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
+import {
+	formatModelSelectorValue,
+	type ModelRoleLookup,
+	parseModelString,
+	splitUpstreamRouting,
+	type ResolvedModelRoleValue,
+	resolveModelRoleValue,
+} from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
@@ -39,6 +46,7 @@ import {
 	buildBrowserItems,
 	ModelBrowser,
 	type ModelBrowserItem,
+	modelSearchText,
 	type RoleAssignments,
 	resolveRoleAssignments,
 	sortModelItems,
@@ -86,7 +94,7 @@ export interface ModelHubCallbacks {
 		thinkingLevel: ConfiguredThinkingLevel | undefined,
 		selector: string,
 		scope?: ModelRoleSelectionScope,
-	) => void;
+	) => void | boolean | Promise<void | boolean>;
 	/** Clear a configured role back to auto-selection. */
 	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void;
 	/** Persist a `retry.fallbackChains` entry — keyed by a role, `provider/model-id`, or `provider/*`; an empty chain clears the key. */
@@ -141,11 +149,15 @@ type StripState =
 			kind: "role" | "scope" | "thinking";
 			item: ModelBrowserItem;
 			role?: string;
+			/** Set when a thinking strip edits a fallback-chain entry instead of a role assignment. */
+			fallbackIndex?: number;
 			scope?: ModelRoleSelectionScope;
 			chips: StripChip[];
 			index: number;
 			/** Where to land when a scope or thinking strip closes. */
 			returnToRoles: boolean;
+			/** Thinking value already committed for this strip. */
+			initialThinkingLevel?: ConfiguredThinkingLevel;
 	  }
 	| {
 			/** Footer text input naming a new custom role. */
@@ -225,12 +237,16 @@ export class ModelHubComponent implements Component {
 
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
+	#assignmentPending = false;
+	#disposed = false;
 	/** Per-provider fuzzy match counts while a query is active; null when not searching. */
 	#searchCounts: Map<string, number> | null = null;
 
 	// Provider discovery refresh (debounced per sidebar selection, with spinner).
 	#refreshingProviders = new Set<string>();
 	#scheduledProviderRefreshes = new Map<string, Timer>();
+	/** F5 while a catalog-only refresh is in flight: re-run with credentials after it settles. */
+	#pendingCredentialRefreshProviders = new Set<string>();
 	#refreshSpinnerFrame = 0;
 	#refreshSpinnerInterval?: Timer;
 	// Frame geometry from the last render, for mouse hit-testing (the
@@ -276,9 +292,11 @@ export class ModelHubComponent implements Component {
 			this.#setActiveEntry("all");
 		}
 
-		// Reconcile with cached discovery state in the background. A --models
-		// scope is registry-independent, so the offline reload would only repeat
-		// the synchronous hydration above.
+		// Reconcile catalogs in the background. This is online discovery only —
+		// it must not re-run `!command` credential helpers (F5 / `omp models
+		// refresh` pass refreshCommandCredentials for that). A --models scope is
+		// registry-independent, so the reload would only repeat the hydration
+		// above.
 		if (this.#scopedModels.length === 0) {
 			this.#registry
 				.refresh("online")
@@ -292,9 +310,11 @@ export class ModelHubComponent implements Component {
 
 	/** Cancel pending provider refresh timers and the spinner. Host calls this on overlay close. */
 	dispose(): void {
+		this.#disposed = true;
 		for (const [, timer] of this.#scheduledProviderRefreshes) clearTimeout(timer);
 		this.#scheduledProviderRefreshes.clear();
 		this.#refreshingProviders.clear();
+		this.#pendingCredentialRefreshProviders.clear();
 		if (this.#refreshSpinnerInterval) {
 			clearInterval(this.#refreshSpinnerInterval);
 			this.#refreshSpinnerInterval = undefined;
@@ -655,7 +675,7 @@ export class ModelHubComponent implements Component {
 			this.#composeEntries();
 			return;
 		}
-		const matches = fuzzyFilter(this.#availableItems, query, ({ provider, id }) => `${provider}/${id}`);
+		const matches = fuzzyFilter(this.#availableItems, query, modelSearchText);
 		const counts = new Map<string, number>();
 		for (const item of matches) {
 			counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
@@ -730,6 +750,9 @@ export class ModelHubComponent implements Component {
 	}
 
 	#cancelScheduledRefreshesExcept(keepProviderId?: string): void {
+		// Hover debounce only. An explicit F5 queued behind an in-flight catalog
+		// fetch must still re-mint credentials after that fetch settles, even if
+		// the user has moved to All models or another provider.
 		for (const [providerId, timer] of this.#scheduledProviderRefreshes) {
 			if (providerId === keepProviderId) continue;
 			clearTimeout(timer);
@@ -740,24 +763,46 @@ export class ModelHubComponent implements Component {
 
 	#scheduleProviderRefresh(providerId: string, options?: { force?: boolean }): void {
 		if (this.#scopedModels.length > 0 || !providerId) return;
-		if (this.#scheduledProviderRefreshes.has(providerId) || this.#refreshingProviders.has(providerId)) return;
+		const force = options?.force === true;
+		if (force) {
+			const pending = this.#scheduledProviderRefreshes.get(providerId);
+			if (pending) {
+				// Selection already queued a catalog-only fetch. F5 upgrades it
+				// instead of returning at the pending-guard and dropping force.
+				clearTimeout(pending);
+				this.#scheduledProviderRefreshes.delete(providerId);
+				autoRefreshedProviders.add(providerId);
+				void this.#refreshProviderInBackground(providerId, true);
+				return;
+			}
+			if (this.#refreshingProviders.has(providerId)) {
+				this.#pendingCredentialRefreshProviders.add(providerId);
+				return;
+			}
+		} else if (this.#scheduledProviderRefreshes.has(providerId) || this.#refreshingProviders.has(providerId)) {
+			return;
+		}
 		// Hovering a provider must not re-fetch on every visit: auto-refresh runs
 		// at most once per provider for the process lifetime. F5 forces a re-fetch.
-		if (!options?.force && autoRefreshedProviders.has(providerId)) return;
+		if (!force && autoRefreshedProviders.has(providerId)) return;
 		this.#setProviderRefreshing(providerId, true);
 		const timer = setTimeout(() => {
 			// Consume the once-guard only when the fetch actually starts: hopping
 			// through a provider cancels the debounce and must not burn its slot.
 			autoRefreshedProviders.add(providerId);
 			this.#scheduledProviderRefreshes.delete(providerId);
-			void this.#refreshProviderInBackground(providerId);
+			void this.#refreshProviderInBackground(providerId, force);
 		}, PROVIDER_REFRESH_DEBOUNCE_MS);
 		this.#scheduledProviderRefreshes.set(providerId, timer);
 	}
 
-	async #refreshProviderInBackground(providerId: string): Promise<void> {
+	async #refreshProviderInBackground(providerId: string, refreshCommandCredentials = false): Promise<void> {
 		try {
-			await this.#registry.refreshProvider(providerId, "online");
+			if (refreshCommandCredentials) {
+				await this.#registry.refreshProvider(providerId, "online", { refreshCommandCredentials: true });
+			} else {
+				await this.#registry.refreshProvider(providerId, "online");
+			}
 			// The provider refresh already updated the registry snapshot;
 			// re-reading it here stays purely in-memory.
 			this.#syncFromRegistryState();
@@ -765,6 +810,11 @@ export class ModelHubComponent implements Component {
 			this.#configError = error instanceof Error ? error.message : String(error);
 		} finally {
 			this.#setProviderRefreshing(providerId, false);
+			if (!this.#disposed && this.#pendingCredentialRefreshProviders.delete(providerId)) {
+				this.#setProviderRefreshing(providerId, true);
+				autoRefreshedProviders.add(providerId);
+				void this.#refreshProviderInBackground(providerId, true);
+			}
 			this.#tui.requestRender();
 		}
 	}
@@ -850,6 +900,27 @@ export class ModelHubComponent implements Component {
 		const resolved = this.#roleForScope(role, scope);
 		return resolved.explicitThinkingLevel ? (resolved.thinkingLevel ?? ThinkingLevel.Inherit) : ThinkingLevel.Inherit;
 	}
+	#finishAssignment(result: void | boolean | Promise<void | boolean>, onSuccess: () => void): void {
+		if (!(result instanceof Promise)) {
+			if (result !== false) onSuccess();
+			else this.#tui.requestRender();
+			return;
+		}
+		this.#assignmentPending = true;
+		this.#tui.requestRender();
+		void result.then(
+			applied => {
+				this.#assignmentPending = false;
+				if (this.#disposed) return;
+				if (applied !== false) onSuccess();
+				else this.#tui.requestRender();
+			},
+			() => {
+				this.#assignmentPending = false;
+				if (!this.#disposed) this.#tui.requestRender();
+			},
+		);
+	}
 
 	/** Persist `role → item`, preserving a still-supported thinking level, then open the thinking strip. */
 	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
@@ -867,9 +938,11 @@ export class ModelHubComponent implements Component {
 		}
 		const supported = this.#thinkingOptionsFor(item.model);
 		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
-		this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
-		this.#refreshAfterMutation();
-		this.#openThinkingStrip(item, role, returnToRoles, scope);
+		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
+		this.#finishAssignment(result, () => {
+			this.#refreshAfterMutation();
+			this.#openThinkingStrip(item, role, returnToRoles, scope, level);
+		});
 	}
 
 	#unassignRole(role: string): void {
@@ -947,22 +1020,15 @@ export class ModelHubComponent implements Component {
 		role: string,
 		returnToRoles: boolean,
 		scope?: ModelRoleSelectionScope,
+		committedLevel?: ConfiguredThinkingLevel,
 	): void {
 		const options = this.#thinkingOptionsFor(item.model);
 		const current =
-			this.#settings.get("modelRoleStorage") === "project" && scope !== undefined
+			committedLevel ??
+			(this.#settings.get("modelRoleStorage") === "project" && scope !== undefined
 				? this.#thinkingLevelForScope(role, scope)
-				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit);
-		const chips: StripChip[] = options.map(level => {
-			const label = getConfiguredThinkingLevelMetadata(level).label;
-			const glyph = thinkingLevelGlyph(level, theme);
-			return {
-				label,
-				styled: glyph ? `${theme.fg("accent", glyph)} ${label}` : label,
-				action: "thinking",
-				thinkingLevel: level,
-			};
-		});
+				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit));
+		const chips = this.#thinkingChips(options);
 		const preselect = options.indexOf(current);
 		this.#strip = {
 			kind: "thinking",
@@ -972,7 +1038,146 @@ export class ModelHubComponent implements Component {
 			chips,
 			index: preselect >= 0 ? preselect : 0,
 			returnToRoles,
+			initialThinkingLevel: current,
 		};
+	}
+
+	/** Build the footer chips for a thinking strip from its level options. */
+	#thinkingChips(options: ConfiguredThinkingLevel[]): StripChip[] {
+		return options.map(level => {
+			const label = getConfiguredThinkingLevelMetadata(level).label;
+			const glyph = thinkingLevelGlyph(level, theme);
+			return {
+				label,
+				styled: glyph ? `${theme.fg("accent", glyph)} ${label}` : label,
+				action: "thinking",
+				thinkingLevel: level,
+			};
+		});
+	}
+
+	/**
+	 * Fallback-entry model lookup through the registry — the same
+	 * case-insensitive, alias-aware resolution the runtime uses, so
+	 * `OpenAI/GPT-5.5` edits the model it runs. Covers locked providers too:
+	 * effort support is a catalog fact, not an auth fact, and the row already
+	 * exists, so the strip changes no scope.
+	 */
+	#findFallbackModel(provider: string, id: string): ModelBrowserItem | undefined {
+		const model = this.#registry.find(provider, id);
+		if (!model) return undefined;
+		return { provider: model.provider, id: model.id, model, selector: `${model.provider}/${model.id}` };
+	}
+
+	/**
+	 * Split a fallback-chain entry into its model base, explicit effort, and
+	 * `@upstream` routing. An exact literal id wins over routing
+	 * (`google-vertex/claude-opus-4-8@default` is a real model, not a route —
+	 * mirroring the runtime's exact-first precedence); otherwise the routing
+	 * slug is kept verbatim so saves can re-attach it (`openrouter/id@fireworks`
+	 * looks up `openrouter/id` but persists with the route intact).
+	 */
+	#parseFallbackEntry(raw: string):
+		| {
+				provider: string;
+				id: string;
+				thinkingLevel?: ConfiguredThinkingLevel;
+				upstream: string | undefined;
+		  }
+		| undefined {
+		const trimmed = raw.trim();
+		const parse = (pattern: string) =>
+			parseModelString(pattern, {
+				allowMaxSuffix: true,
+				allowAutoAlias: true,
+				isLiteralModelId: (provider, id) => this.#findFallbackModel(provider, id) !== undefined,
+			});
+		const literal = parse(trimmed);
+		if (literal && this.#findFallbackModel(literal.provider, literal.id)) return { ...literal, upstream: undefined };
+		const routing = splitUpstreamRouting(trimmed);
+		if (!routing) {
+			if (!literal) return undefined;
+			return { ...literal, upstream: undefined };
+		}
+		const parsed = parse(routing.base.trim());
+		if (!parsed) return undefined;
+		return { ...parsed, upstream: routing.upstream };
+	}
+
+	/**
+	 * Resolve a fallback-chain entry to its browser item, explicit effort, and
+	 * routing. Undefined when the row is inert: `provider/*` wildcards (always
+	 * inherit) or models known neither live nor from the catalog.
+	 */
+	#resolveFallbackEntry(
+		role: string,
+		index: number,
+	):
+		| { item: ModelBrowserItem; thinkingLevel: ConfiguredThinkingLevel | undefined; upstream: string | undefined }
+		| undefined {
+		const raw = this.#fallbackChains()[role]?.[index];
+		if (!raw || raw.endsWith("/*")) return undefined;
+		const parsed = this.#parseFallbackEntry(raw);
+		if (!parsed) return undefined;
+		const item = this.#findFallbackModel(parsed.provider, parsed.id);
+		if (!item) return undefined;
+		return { item, thinkingLevel: parsed.thinkingLevel, upstream: parsed.upstream };
+	}
+
+	/**
+	 * Open the thinking strip for a fallback-chain entry (`t` on a `↳` row).
+	 * Wildcard entries (`provider/*`) always inherit by design, so `t` is inert on them.
+	 */
+	#openFallbackThinkingStrip(row: { role: string; chainIndex: number }): void {
+		const resolved = this.#resolveFallbackEntry(row.role, row.chainIndex);
+		if (!resolved) return;
+		const { item } = resolved;
+		// No `auto` chip: a hand-written `:auto` suffix collapses to inherit at
+		// apply time, so offering it would promise per-prompt classification the
+		// fallback never performs. A primary running `auto` is inherited anyway
+		// through the bare form.
+		const options: ConfiguredThinkingLevel[] = [
+			ThinkingLevel.Inherit,
+			ThinkingLevel.Off,
+			...getSupportedEfforts(item.model),
+		];
+		const current =
+			resolved.thinkingLevel === undefined || resolved.thinkingLevel === AUTO_THINKING
+				? ThinkingLevel.Inherit
+				: resolved.thinkingLevel;
+		const chips = this.#thinkingChips(options);
+		this.#strip = {
+			kind: "thinking",
+			item,
+			role: row.role,
+			fallbackIndex: row.chainIndex,
+			chips,
+			index: Math.max(0, options.indexOf(current)),
+			returnToRoles: true,
+		};
+	}
+
+	/** Persist a fallback entry's thinking choice: an explicit effort is suffixed, inherit is stored bare. */
+	#setFallbackThinking(role: string, index: number, level: ConfiguredThinkingLevel): void {
+		const chain = [...(this.#fallbackChains()[role] ?? [])];
+		if (index >= chain.length) return;
+		const resolved = this.#resolveFallbackEntry(role, index);
+		if (!resolved) return;
+		// Save the registry-canonical spelling (`OpenAI/GPT-5.5` persists as
+		// `openai/gpt-5.5:off`), re-attaching `@upstream` routing ahead of the
+		// effort suffix (`id@up:low` is the canonical order).
+		const base = `${resolved.item.provider}/${resolved.item.id}`;
+		const routed = resolved.upstream ? `${base}@${resolved.upstream}` : base;
+		const next = formatModelSelectorValue(routed, level);
+		chain[index] = next;
+		for (let i = chain.length - 1; i >= 0; i--) {
+			if (i !== index && chain[i] === next) chain.splice(i, 1);
+		}
+		this.#setFallbackChain(role, chain);
+		const rowIndex = this.#rolesRows.findIndex(
+			row => row.kind === "fallback" && row.role === role && row.selector === next,
+		);
+		if (rowIndex >= 0) this.#roleIndex = rowIndex;
 	}
 
 	#closeStrip(): void {
@@ -1026,19 +1231,31 @@ export class ModelHubComponent implements Component {
 					this.#assignRole(strip.item, strip.role, strip.returnToRoles, chip.scope);
 				}
 				return;
-			case "thinking":
-				if (strip.role && chip.thinkingLevel !== undefined) {
-					this.#callbacks.onAssign(
+			case "thinking": {
+				if (strip.role && chip.thinkingLevel !== undefined && strip.fallbackIndex !== undefined) {
+					this.#setFallbackThinking(strip.role, strip.fallbackIndex, chip.thinkingLevel);
+					this.#strip = null;
+					this.#chipRanges = [];
+					return;
+				}
+				// The preselected level is confirmation, not a force-reapply action;
+				// only a changed level should call setModel() again.
+				const changed = chip.thinkingLevel !== strip.initialThinkingLevel;
+				if (strip.role && chip.thinkingLevel !== undefined && changed) {
+					const result = this.#callbacks.onAssign(
 						strip.item.model,
 						strip.role,
 						chip.thinkingLevel,
 						strip.item.selector,
 						strip.scope,
 					);
-					this.#refreshAfterMutation();
+					this.#closeStrip();
+					this.#finishAssignment(result, () => this.#refreshAfterMutation());
+				} else {
+					this.#closeStrip();
 				}
-				this.#closeStrip();
 				return;
+			}
 		}
 	}
 
@@ -1064,7 +1281,12 @@ export class ModelHubComponent implements Component {
 		this.#browser.setQuery("");
 		if (index !== null) {
 			const selector = this.#fallbackChains()[role]?.[index];
-			if (selector) this.#browser.selectSelector(selector);
+			// Suffixed entries (`provider/id:low`) carry effort the browser rows
+			// don't show; match on the base so the current model preselects.
+			if (selector) {
+				const parsed = this.#parseFallbackEntry(selector);
+				this.#browser.selectSelector(parsed ? `${parsed.provider}/${parsed.id}` : selector);
+			}
 		}
 	}
 
@@ -1097,6 +1319,7 @@ export class ModelHubComponent implements Component {
 	/** Write the picked model into the target chain slot, dedupe, and land back on its Roles row. */
 	#commitFallback(item: ModelBrowserItem, target: { role: string; index: number | null }): void {
 		const chain = [...(this.#fallbackChains()[target.role] ?? [])];
+		// New picks are stored bare, i.e. inherit-the-primary; `t` on the row specializes the effort.
 		const selector = item.selector;
 		if (target.index !== null && target.index < chain.length) {
 			chain[target.index] = selector;
@@ -1214,6 +1437,10 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	handleInput(data: string): void {
+		if (this.#assignmentPending) {
+			if (matchesSelectCancel(data)) this.#callbacks.onCancel();
+			return;
+		}
 		if (data.startsWith("\x1b[<")) {
 			routeSgrMouseInput(data, event => this.#routeMouseEvent(event));
 			return;
@@ -1510,6 +1737,8 @@ export class ModelHubComponent implements Component {
 					selector: `${scopedModel.provider}/${scopedModel.id}`,
 				};
 				this.#openThinkingStrip(item, role, true, scope);
+			} else if (row?.kind === "fallback") {
+				this.#openFallbackThinkingStrip(row);
 			}
 			return;
 		}
@@ -1527,6 +1756,7 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#routeMouseEvent(event: SgrMouseEvent): boolean {
+		if (this.#assignmentPending) return true;
 		const contentLine = event.row - this.#contentRowStart;
 		const overContent = contentLine >= 0 && contentLine < this.#contentRowCount;
 		const sidebarColStart = 2;
@@ -1740,6 +1970,9 @@ export class ModelHubComponent implements Component {
 	}
 
 	#statusRow(width: number): string {
+		if (this.#assignmentPending) {
+			return truncateToWidth(theme.fg("accent", " Applying model…"), width);
+		}
 		if (this.#assigning !== null) {
 			if (this.#assigning.kind === "fallbackKey") {
 				return truncateToWidth(
@@ -1952,7 +2185,7 @@ export class ModelHubComponent implements Component {
 		lines.push("");
 		lines.push(truncateToWidth(theme.fg("warning", `  ${entry.label} has no credentials configured`), width));
 		lines.push("");
-		const envVars = entry.providerId ? (getCatalogProviderEntry(entry.providerId)?.envVars ?? []) : [];
+		const envVars = entry.providerId ? (providerEntry(entry.providerId)?.envVars ?? []) : [];
 		if (envVars.length > 0) {
 			lines.push(
 				truncateToWidth(
@@ -2009,7 +2242,12 @@ export class ModelHubComponent implements Component {
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			if (row?.kind === "fallback") {
-				return "↑/↓ rows · Enter replace · f add another · x remove · [/] reorder · ← providers";
+				// Advertise `t` only when the entry resolves: wildcards always
+				// inherit and unknown models have no ladder to offer, so the
+				// action would be inert there.
+				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
+				const thinking = editable ? " · t thinking" : "";
+				return `↑/↓ rows · Enter replace · f add another · x remove${thinking} · [/] reorder · ← providers`;
 			}
 			if (row?.kind === "chainKey") {
 				return "↑/↓ rows · Enter/f add fallback · x clear chain · ← providers";

@@ -107,6 +107,46 @@ export interface ReleaseBinaryAsset {
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
+type GitHubCliTokenRunner = (ghPath: string) => Promise<string | undefined>;
+
+async function readGitHubCliToken(ghPath: string): Promise<string | undefined> {
+	try {
+		const result = await $`${ghPath} auth token --hostname github.com`.quiet().nothrow();
+		if (result.exitCode !== 0) return undefined;
+		const token = result.text().trim();
+		return token.length > 0 ? token : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+async function resolveGitHubToken(
+	options: {
+		envToken?: string;
+		ghPath?: string | null;
+		runGhAuthToken?: GitHubCliTokenRunner;
+	} = {},
+): Promise<string | undefined> {
+	const envToken = options.envToken ?? ($env.GITHUB_TOKEN || $env.GH_TOKEN);
+	if (envToken) return envToken;
+
+	const ghPath = options.ghPath === null ? undefined : (options.ghPath ?? $which("gh"));
+	if (!ghPath) return undefined;
+
+	const token = await (options.runGhAuthToken ?? readGitHubCliToken)(ghPath);
+	return token?.trim() || undefined;
+}
+
+/** Test hook for the GitHub credential precedence without invoking a real CLI. */
+export async function resolveGitHubTokenForTest(
+	options: {
+		envToken?: string;
+		ghPath?: string | null;
+		runGhAuthToken?: GitHubCliTokenRunner;
+	} = {},
+): Promise<string | undefined> {
+	return resolveGitHubToken(options);
+}
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -246,15 +286,16 @@ async function getReleaseBinaryAsset(
 	expectedVersion: string,
 	binaryName: string,
 	fetchImpl: Fetch = fetch,
-	githubToken: string | undefined = $env.GITHUB_TOKEN || $env.GH_TOKEN,
+	githubToken?: string,
 	allowPrerelease = false,
 ): Promise<ReleaseBinaryAsset> {
 	const tag = `v${expectedVersion}`;
+	const resolvedGitHubToken = githubToken ?? (await resolveGitHubToken());
 	const headers: Record<string, string> = {
 		Accept: "application/vnd.github+json",
 		"X-GitHub-Api-Version": "2022-11-28",
 	};
-	if (githubToken) headers.Authorization = `Bearer ${githubToken}`;
+	if (resolvedGitHubToken) headers.Authorization = `Bearer ${resolvedGitHubToken}`;
 
 	let response: Response;
 	try {
@@ -269,7 +310,7 @@ async function getReleaseBinaryAsset(
 		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 		throw err;
 	}
-	if ((response.status === 403 && !githubToken) || response.status === 429) {
+	if ((response.status === 403 && !resolvedGitHubToken) || response.status === 429) {
 		throw new Error(
 			"GitHub API rate limit exceeded while fetching release metadata; retry later or set GITHUB_TOKEN or GH_TOKEN",
 		);
@@ -583,7 +624,7 @@ type UpdateTarget =
 	| { method: "nix" }
 	| { method: "bun"; path?: string }
 	| { method: "npm"; path?: string }
-	| { method: "binary"; path: string; replacesSymlink: boolean };
+	| { method: "binary"; path: string; replacesSymlink: boolean; validateExistingTarget: boolean };
 
 function resolveUpdateMethod(
 	ompPath: string,
@@ -708,7 +749,12 @@ export function resolveUpdateTargetFromPath(
 				ompLinkTarget,
 			}) !== "binary";
 		const binaryPath = ompIsSymlink && !managerLauncher ? (ompRealpath ?? ompPath) : ompPath;
-		return { method, path: binaryPath, replacesSymlink: ompIsSymlink && binaryPath === ompPath };
+		return {
+			method,
+			path: binaryPath,
+			replacesSymlink: ompIsSymlink && binaryPath === ompPath,
+			validateExistingTarget: ompIsSymlink && !managerLauncher,
+		};
 	}
 	if (method === "bun" || method === "npm") return { method, path: ompPath };
 	return { method };
@@ -1138,21 +1184,42 @@ function resolveOmpPath(): string | undefined {
  * being mistaken for an unreplaced launcher.
  */
 export function parseReportedVersion(output: string): string | undefined {
-	return output.match(/\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
+	if (!output.startsWith(`${APP_NAME}/`)) return undefined;
+	return output.slice(APP_NAME.length + 1).match(/^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/)?.[1];
+}
+
+async function reportedVersionAtPath(binaryPath: string): Promise<string | undefined> {
+	try {
+		const result = await $`${binaryPath} --version`.quiet().nothrow();
+		if (result.exitCode !== 0) return undefined;
+		return parseReportedVersion(result.text().trim());
+	} catch {
+		return undefined;
+	}
 }
 
 /**
  * Run a specific binary and check if it reports the expected version.
  */
 async function verifyBinaryAtPath(binaryPath: string, expectedVersion: string): Promise<InstalledVersionVerification> {
+	const actual = await reportedVersionAtPath(binaryPath);
+	return { ok: actual === expectedVersion, actual, path: binaryPath };
+}
+
+async function validateExistingUpdateTarget(targetPath: string): Promise<void> {
+	let hasShebang = false;
 	try {
-		const result = await $`${binaryPath} --version`.quiet().nothrow();
-		if (result.exitCode !== 0) return { ok: false, path: binaryPath };
-		const actual = parseReportedVersion(result.text().trim());
-		return { ok: actual === expectedVersion, actual, path: binaryPath };
-	} catch {
-		return { ok: false, path: binaryPath };
-	}
+		hasShebang = (await Bun.file(targetPath).slice(0, 2).text()) === "#!";
+	} catch {}
+
+	if (!hasShebang && (await reportedVersionAtPath(targetPath)) !== undefined) return;
+
+	const reason = hasShebang
+		? "is a shebang script, not an OMP binary"
+		: "does not report an OMP version when run directly";
+	throw new Error(
+		`Refusing to replace ${targetPath}: the resolved foreign symlink target ${reason}. Point PATH directly at the OMP binary you want to update, or reinstall with: ${installerHint()}`,
+	);
 }
 
 /**
@@ -1161,12 +1228,14 @@ async function verifyBinaryAtPath(binaryPath: string, expectedVersion: string): 
 async function verifyInstalledVersion(expectedVersion: string): Promise<InstalledVersionVerification> {
 	const ompPath = resolveOmpPath();
 	if (!ompPath) return { ok: false };
-	return await verifyBinaryAtPath(ompPath, expectedVersion);
+	const binaryPath = tryRealpath(ompPath) ?? ompPath;
+	return await verifyBinaryAtPath(binaryPath, expectedVersion);
 }
 
-function printVerifiedVersion(expectedVersion: string): void {
+function printVerifiedVersion(expectedVersion: string, binaryPath?: string): void {
 	const icon = theme?.status?.success ?? "✔";
-	console.log(chalk.green(`\n${icon} Updated to ${expectedVersion}`));
+	const location = binaryPath ? ` at ${binaryPath}` : "";
+	console.log(chalk.green(`\n${icon} Updated to ${expectedVersion}${location}`));
 }
 
 function formatVerificationFailure(result: InstalledVersionVerification, expectedVersion: string): string {
@@ -1181,7 +1250,7 @@ function formatVerificationFailure(result: InstalledVersionVerification, expecte
  */
 function printVerificationResult(result: InstalledVersionVerification, expectedVersion: string): void {
 	if (result.ok) {
-		printVerifiedVersion(expectedVersion);
+		printVerifiedVersion(expectedVersion, result.path);
 		return;
 	}
 	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
@@ -1206,12 +1275,33 @@ async function unlinkIfExists(filePath: string): Promise<void> {
  *
  * On Windows the executable that was just moved aside is still mapped as the
  * running process image, so unlinking it fails with EPERM/EACCES until this
- * process exits (issue #845). The replacement and verification already
- * succeeded by the time we get here, so every error is swallowed; the leftover
- * is reclaimed by {@link sweepStaleUpdateArtifacts} on the next update once it
- * is no longer in use. Returns whether the file is gone.
+ * process exits (issue #845). On macOS the same unlink would instead succeed
+ * while breaking the live process's TCC permission attribution — macOS
+ * resolves grants against the executable's on-disk image path — so a `.bak`
+ * still mapped by any process is retained for a later sweep. The replacement
+ * and verification already succeeded by the time we get here, so every error
+ * is swallowed; the leftover is reclaimed by {@link sweepStaleUpdateArtifacts}
+ * on the next update once it is no longer in use. Returns whether the file is
+ * gone.
  */
 async function removeBackupBestEffort(filePath: string): Promise<boolean> {
+	// macOS only, `.bak` only: a `.new` temp file is a download in progress,
+	// never an installed image, and Windows/Linux locking is already handled by
+	// the swallow below — so both stay ungated.
+	if (process.platform === "darwin" && filePath.endsWith(".bak")) {
+		// `/usr/sbin/lsof -t` prints the PIDs holding the file; exit 1 with
+		// empty stdout and stderr is the only result that proves the file is
+		// unused. Live users, a missing lsof, or diagnostics on stderr all
+		// retain the file for a later sweep.
+		let provenUnused = false;
+		try {
+			const result = await $`/usr/sbin/lsof -t -- ${filePath}`.quiet().nothrow();
+			provenUnused = result.exitCode === 1 && result.stdout.length === 0 && result.stderr.length === 0;
+		} catch {
+			// lsof missing or failed to spawn — retain conservatively.
+		}
+		if (!provenUnused) return false;
+	}
 	try {
 		await fs.promises.unlink(filePath);
 		return true;
@@ -1227,8 +1317,12 @@ async function removeBackupBestEffort(filePath: string): Promise<boolean> {
  * previous executable to `<binary>.<timestamp>.<pid>.bak` before swapping the
  * new one in. On Windows a backup cannot be deleted while the updating process
  * is alive (it is the running process image), so it is left for a later run to
- * reclaim once its owning process has exited. A `.new` temp file only survives
- * a hard kill mid-download; it is reaped once older than the download window,
+ * reclaim once its owning process has exited. On macOS the sweep must also
+ * spare a backup that any process still maps as its executable image —
+ * unlinking it would break the live process's TCC permission attribution — so
+ * a live image survives until its process exits. A `.new` temp file only
+ * survives a hard kill mid-download; it is reaped once older than the download
+ * window,
  * which a live download cannot exceed without timing out and cleaning up after
  * itself — so a concurrent run's in-progress temp is never deleted. Legacy
  * fixed `<binary>.bak` / `<binary>.new` names (from before suffixes were made
@@ -1300,8 +1394,10 @@ export async function replaceBinaryForUpdate(options: BinaryReplacementOptions):
 
 		backupReady = false;
 		// Swap done and verified. On Windows the backup is still the running
-		// process image and cannot be unlinked until this process exits, so a
-		// failure here must NOT fail an otherwise-successful update.
+		// process image and cannot be unlinked until this process exits, and on
+		// macOS unlinking the still-mapped backup would break the live image's
+		// TCC permission attribution, so either way a failure here must NOT fail
+		// an otherwise-successful update.
 		await removeBackupBestEffort(options.backupPath);
 		return verification;
 	} catch (err) {
@@ -1397,8 +1493,25 @@ export function buildHomebrewUpdateArgs(force: boolean): string[] {
 	return [force ? "reinstall" : "upgrade", HOMEBREW_FORMULA];
 }
 
-export function buildMiseUpgradeArgs(): string[] {
-	return ["upgrade", MISE_TOOL, "--bump"];
+/**
+ * Build the attended mise update command.
+ *
+ * `--before 0s` overrides global and per-tool release-age settings for this
+ * invocation. Unlike `MISE_MINIMUM_RELEASE_AGE`, the command option has the
+ * precedence required when the tool entry itself sets `minimum_release_age`.
+ * `--before` is accepted by mise releases with release-age filtering and is
+ * the hidden compatibility name for `--minimum-release-age` in current mise.
+ * Older mise releases predate the option and reject unknown flags, so callers
+ * omit it when the installed command help does not advertise either name.
+ */
+export function buildMiseUpgradeArgs(supportsReleaseAgeOverride = true): string[] {
+	return ["upgrade", MISE_TOOL, "--bump", ...(supportsReleaseAgeOverride ? ["--before", "0s"] : [])];
+}
+
+export function buildMiseUpdateEnv(
+	base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+	return { ...base, MISE_MINIMUM_RELEASE_AGE: "0s" };
 }
 
 export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
@@ -1672,15 +1785,18 @@ async function updateViaHomebrew(expectedVersion: string, force: boolean): Promi
 
 async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
 	console.log(chalk.dim("Updating via mise..."));
-	const args = buildMiseUpgradeArgs();
-	const result = await $`mise ${args}`.nothrow();
+	const env = buildMiseUpdateEnv();
+	const help = await $`mise upgrade --help`.env(env).quiet().nothrow();
+	const supportsReleaseAgeOverride = help.exitCode === 0 && /(?:--minimum-release-age|--before)\b/.test(help.text());
+	const args = buildMiseUpgradeArgs(supportsReleaseAgeOverride);
+	const result = await $`mise ${args}`.env(env).nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
 	}
 
 	if (force) {
 		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
-		const forceResult = await $`mise ${forceArgs}`.nothrow();
+		const forceResult = await $`mise ${forceArgs}`.env(env).nothrow();
 		if (forceResult.exitCode !== 0) {
 			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
 		}
@@ -1705,9 +1821,12 @@ export async function updateViaBinaryAt(
 		fetchImpl?: Fetch;
 		githubToken?: string;
 		allowPrerelease?: boolean;
+		/** Refuse replacement unless the existing path is a non-script OMP executable. */
+		validateExistingTarget?: boolean;
 		verifyInstalledVersion?: typeof verifyInstalledVersion;
 	} = {},
 ): Promise<void> {
+	if (options.validateExistingTarget) await validateExistingUpdateTarget(targetPath);
 	const binaryName = options.binaryName ?? getBinaryName();
 	// Unique per attempt so two overlapping `omp update` runs never share a temp
 	// or backup path. A fixed temp name (`<binary>.new`) let the second run's
@@ -1742,14 +1861,14 @@ export async function updateViaBinaryAt(
 	// overlapping `omp update` runs never replace the same binary concurrently
 	// or reclaim each other's live backup/temp files. The download above writes
 	// to a unique temp path and is safe to overlap; only the swap is shared.
-	await withFileLock(targetPath, async () => {
+	const verification = await withFileLock(targetPath, async () => {
 		console.log(chalk.dim("Installing update..."));
-		await replaceBinaryForUpdate({
+		const result = await replaceBinaryForUpdate({
 			targetPath,
 			tempPath,
 			backupPath,
 			expectedVersion,
-			verifyInstalledVersion: options.verifyInstalledVersion ?? verifyInstalledVersion,
+			verifyInstalledVersion: options.verifyInstalledVersion ?? (version => verifyBinaryAtPath(targetPath, version)),
 		});
 		// The launcher is no longer bun-managed: drop bun's metadata sidecar so
 		// the next update classifies this install as a standalone binary instead
@@ -1763,8 +1882,9 @@ export async function updateViaBinaryAt(
 		} catch {}
 		// Reclaim backups from earlier updates whose owning process has since exited.
 		await sweepStaleUpdateArtifacts(targetPath);
+		return result;
 	});
-	printVerifiedVersion(expectedVersion);
+	printVerifiedVersion(expectedVersion, verification.path ?? targetPath);
 	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
 }
 
@@ -2032,7 +2152,10 @@ export async function runUpdateCommand(opts: {
 			if (forceBinary && target.replacesSymlink) {
 				console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
 			}
-			await updateViaBinaryAt(target.path, release.version, { allowPrerelease });
+			await updateViaBinaryAt(target.path, release.version, {
+				allowPrerelease,
+				validateExistingTarget: target.validateExistingTarget,
+			});
 			if (forceBinary && target.replacesSymlink) {
 				console.log(
 					chalk.yellow(

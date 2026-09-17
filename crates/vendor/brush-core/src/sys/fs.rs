@@ -4,13 +4,19 @@ use std::{
 	borrow::Cow,
 	path::{Path, PathBuf},
 };
+#[cfg(windows)]
+use std::env;
+#[cfg(any(windows, test))]
+use std::{ffi::OsStr, path::Component};
 
 /// Normalizes shell-facing path aliases before `std::fs` sees them.
 #[allow(clippy::missing_const_for_fn, reason = "Windows implementation allocates")]
 pub fn normalize_shell_path(path: &Path) -> Cow<'_, Path> {
 	#[cfg(windows)]
 	{
-		translate_unix_drive_path(path).map_or(Cow::Borrowed(path), Cow::Owned)
+		translate_unix_drive_path(path)
+			.or_else(|| translate_unix_tmp_path(path, env::temp_dir))
+			.map_or(Cow::Borrowed(path), Cow::Owned)
 	}
 	#[cfg(not(windows))]
 	{
@@ -28,7 +34,7 @@ pub fn pattern_drive_alias_root(
 ) -> Option<(PathBuf, usize)> {
 	#[cfg(windows)]
 	{
-		pattern_drive_alias_root_impl(starts_with_forward_slash, first, second, third)
+		pattern_drive_alias_root_impl(starts_with_forward_slash, first, second, third, env::temp_dir)
 	}
 	#[cfg(not(windows))]
 	{
@@ -43,9 +49,16 @@ fn pattern_drive_alias_root_impl(
 	first: &str,
 	second: Option<&str>,
 	third: Option<&str>,
+	temp_dir: impl FnOnce() -> PathBuf,
 ) -> Option<(PathBuf, usize)> {
 	if !starts_with_forward_slash || !first.is_empty() {
 		return None;
+	}
+
+	// A bare `/tmp` glob root maps to the system temp dir, matching the
+	// non-pattern rewrite in `normalize_shell_path`.
+	if second == Some("tmp") {
+		return Some((temp_dir(), 2));
 	}
 
 	if let Some(drive) = second
@@ -96,6 +109,48 @@ fn translate_unix_drive_path(path: &Path) -> Option<PathBuf> {
 		native.push(if ch == '/' || ch == '\\' { '\\' } else { ch });
 	}
 	Some(PathBuf::from(native))
+}
+
+/// Maps the POSIX `/tmp` tree onto the Windows system temporary directory.
+///
+/// A bare `/tmp` under Win32 is drive-relative (`<cwd-drive>:\tmp`), not a
+/// scratch root; MSYS/Cygwin tools instead mount it at `%TEMP%`. Rewriting it
+/// here — the single boundary every shell path passes through — keeps the
+/// in-process builtins, `ls`, and redirections agreeing with those external
+/// tools instead of scattering files across a drive-root `tmp`.
+///
+/// `.`/`..` are collapsed against the logical POSIX path first, clamping at the
+/// root, so `/tmp/../tmp/f` resolves like `/tmp/f` instead of appending the raw
+/// remainder onto the nested `%TEMP%` (which would escape into a sibling dir).
+/// A `..` that climbs out of `/tmp` yields a non-`/tmp` path, i.e. no rewrite.
+#[cfg(any(windows, test))]
+fn translate_unix_tmp_path(path: &Path, temp_dir: impl FnOnce() -> PathBuf) -> Option<PathBuf> {
+	let mut components = path.components();
+	if components.next() != Some(Component::RootDir) {
+		return None;
+	}
+
+	let mut logical: Vec<&OsStr> = Vec::new();
+	for component in components {
+		match component {
+			Component::CurDir => {}
+			Component::ParentDir => {
+				logical.pop();
+			},
+			Component::Normal(part) => logical.push(part),
+			// A second root or a drive prefix cannot appear in a POSIX operand.
+			Component::RootDir | Component::Prefix(_) => return None,
+		}
+	}
+
+	let mut tail = logical.into_iter();
+	if tail.next() != Some(OsStr::new("tmp")) {
+		return None;
+	}
+
+	let mut native = temp_dir();
+	native.extend(tail);
+	Some(native)
 }
 
 #[cfg(any(windows, test))]
@@ -201,25 +256,71 @@ mod tests {
 	}
 
 	#[test]
+	fn unix_tmp_alias_maps_onto_system_temp_dir() {
+		let temp = PathBuf::from(r"C:\Users\Adam\AppData\Local\Temp");
+		assert_eq!(
+			translate_unix_tmp_path(Path::new("/tmp"), || temp.clone()).as_deref(),
+			Some(temp.as_path()),
+		);
+		assert_eq!(
+			translate_unix_tmp_path(Path::new("/tmp/probe/sub"), || temp.clone()).as_deref(),
+			Some(temp.join("probe").join("sub").as_path()),
+		);
+		// Only the `/tmp` component aliases; `/tmpfile` and `/var/tmp` do not.
+		assert_eq!(translate_unix_tmp_path(Path::new("/tmpfile"), || temp.clone()), None);
+		assert_eq!(translate_unix_tmp_path(Path::new("/var/tmp"), || temp.clone()), None);
+		// `.`/`..` collapse against the logical root before substitution.
+		assert_eq!(
+			translate_unix_tmp_path(Path::new("/tmp/../tmp/f"), || temp.clone()).as_deref(),
+			Some(temp.join("f").as_path()),
+		);
+		assert_eq!(
+			translate_unix_tmp_path(Path::new("/tmp/probe/../sub"), || temp.clone()).as_deref(),
+			Some(temp.join("sub").as_path()),
+		);
+		// A `..` that climbs out of `/tmp` is no longer a tmp path.
+		assert_eq!(translate_unix_tmp_path(Path::new("/tmp/.."), || temp.clone()), None);
+		assert_eq!(translate_unix_tmp_path(Path::new("/tmp/../var/f"), || temp.clone()), None);
+	}
+
+	#[test]
 	fn pattern_drive_alias_roots_report_consumed_components() {
 		assert_eq!(
-			pattern_drive_alias_root_impl(true, "", Some("d"), Some("project")),
+			pattern_drive_alias_root_impl(true, "", Some("d"), Some("project"), || PathBuf::from(r"C:\Temp")),
 			Some((PathBuf::from("D:/"), 2)),
 		);
 		assert_eq!(
-			pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("d")),
+			pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("d"), || PathBuf::from(r"C:\Temp")),
 			Some((PathBuf::from("D:/"), 3)),
 		);
 	}
 
 	#[test]
 	fn pattern_drive_alias_roots_require_forward_slash_prefix() {
-		assert_eq!(pattern_drive_alias_root_impl(false, "", Some("d"), Some("logs")), None);
+		let tmp = || PathBuf::from(r"C:\Temp");
+		assert_eq!(pattern_drive_alias_root_impl(false, "", Some("d"), Some("logs"), tmp), None);
 		assert_eq!(
-			pattern_drive_alias_root_impl(false, "", Some("mnt"), Some("d")),
+			pattern_drive_alias_root_impl(false, "", Some("mnt"), Some("d"), || PathBuf::from(r"C:\Temp")),
 			None,
 		);
-		assert_eq!(pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("data")), None);
+		assert_eq!(
+			pattern_drive_alias_root_impl(true, "", Some("mnt"), Some("data"), || PathBuf::from(r"C:\Temp")),
+			None,
+		);
+	}
+
+	#[test]
+	fn pattern_tmp_root_maps_to_system_temp() {
+		let temp = PathBuf::from(r"C:\Users\Adam\AppData\Local\Temp");
+		assert_eq!(
+			pattern_drive_alias_root_impl(true, "", Some("tmp"), Some("a"), || temp.clone()),
+			Some((temp.clone(), 2)),
+		);
+		// `/tmpfile` is not the tmp alias; it falls through to plain root handling.
+		assert_eq!(
+			pattern_drive_alias_root_impl(true, "", Some("tmpfile"), None, || temp.clone()),
+			None,
+		);
 	}
 
 	#[test]

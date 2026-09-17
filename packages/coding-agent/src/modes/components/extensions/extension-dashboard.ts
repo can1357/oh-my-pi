@@ -8,7 +8,7 @@
  *
  * Navigation:
  * - Tab/Shift+Tab or ←/→: switch provider tab
- * - Up/Down/j/k or wheel: move list selection
+ * - Up/Down or wheel: move list selection
  * - Space/Enter or click: toggle selected item (or provider master switch)
  * - Wheel over the inspector, or PageUp/PageDown when the inspector overflows: scroll the detail pane
  * - Esc: clear search (if active) then close
@@ -326,8 +326,11 @@ export class ExtensionDashboard implements Component {
 
 	/**
 	 * Provider disable is discovery-only: do not rewrite mcp.json. Disconnect
-	 * live MCP servers owned by this provider so their tools leave the session.
-	 * Re-enable does not auto-connect — startup/reload still owns that.
+	 * the MCP servers owned by this provider so their tools leave the session.
+	 * Every server, not only the connected ones: a lost remote server reads
+	 * "disconnected" between its scheduled reconnects, and only
+	 * `disconnectServer` ends that schedule. Re-enable does not auto-connect —
+	 * startup/reload still owns that.
 	 */
 	async #disconnectProviderMcpServers(providerId: string, level?: "user" | "project"): Promise<void> {
 		const names = [
@@ -338,8 +341,7 @@ export class ExtensionDashboard implements Component {
 							ext.kind === "mcp" &&
 							ext.source.provider === providerId &&
 							(level === undefined || ext.source.level === level) &&
-							!isShadowedExtension(ext) &&
-							this.mcpManager?.getConnectionStatus(ext.name) !== "disconnected",
+							!isShadowedExtension(ext),
 					)
 					.map(ext => ext.name),
 			),

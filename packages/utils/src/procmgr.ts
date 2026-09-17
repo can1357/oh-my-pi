@@ -4,8 +4,10 @@ import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Subprocess } from "bun";
 import { getAgentDir, MAIN_CONFIG_FILENAMES } from "./dirs";
 import { $env, filterChildShellEnv } from "./env";
+import { isExecutable } from "./executable";
 import { $which } from "./which";
 
+export { isExecutable };
 export interface ShellConfig {
 	shell: string;
 	args: string[];
@@ -19,18 +21,6 @@ export interface ShellConfigOptions {
 	configSource?: string;
 }
 let cachedShellConfig: ShellConfig | null = null;
-
-/**
- * Check if a shell binary is executable.
- */
-export function isExecutable(path: string): boolean {
-	try {
-		fs.accessSync(path, fs.constants.X_OK);
-		return true;
-	} catch {
-		return false;
-	}
-}
 
 /**
  * Build the spawn environment (cached).

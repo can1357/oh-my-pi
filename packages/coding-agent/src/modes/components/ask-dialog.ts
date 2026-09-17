@@ -22,7 +22,7 @@ import type {
 	ExtensionAskDialogResultItem,
 	ExtensionAskDialogSubmitResult,
 } from "../../extensibility/extensions";
-import { expandKeyHint } from "../../tools/render-utils";
+import { disambiguateDisplayLabels, expandKeyHint, sanitizeCarriageReturns } from "../../tools/render-utils";
 import { getTabBarTheme } from "../shared";
 import { getMarkdownTheme, highlightCode, theme } from "../theme/theme";
 import {
@@ -40,6 +40,11 @@ import { handleTabSwitchKey } from "./selector-helpers";
 
 const OTHER_OPTION = "Other (type your own)";
 const SUBMIT_OPTION = "Submit";
+
+// Action rows appended by the guest race participant. An option sanitizing
+// to one of these must disambiguate identically on both sides, or the same
+// question renders different rows depending on who answers.
+const GUEST_ACTION_LABELS = ["Chat about this", "Next →"];
 
 /** Fraction of the terminal the dialog may occupy. The box height is fixed
  *  at spawn from the tallest tab's content (re-measured only on viewport
@@ -60,6 +65,10 @@ const PROMPT_TITLE_CHROME_COLUMNS = 4;
  *  or multi-line question cannot push the option list off-screen. Mirrors the
  *  row-cap pattern used by boundPromptTitle for the prompt editor overlay. */
 const MAX_HEADER_ROWS = 4;
+/** Maximum number of wrapped lines shown for an option description before
+ *  Ctrl+O expansion. Mirrors the header row-cap above so long descriptions
+ *  cannot push later options off-screen. */
+const MAX_DESC_ROWS = 2;
 
 function promptTitleContentWidth(): number {
 	const cols = process.stdout.columns ?? 80;
@@ -140,13 +149,15 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function questionTabLabel(question: ExtensionAskDialogQuestion, index: number): string {
-	const base = question.header?.trim() || question.id || `Q${index + 1}`;
+	const base = question.header?.trim() || sanitizeCarriageReturns(question.id) || `Q${index + 1}`;
 	return truncateToWidth(replaceTabs(base), MAX_HEADER_CHIP_WIDTH, Ellipsis.Unicode);
 }
 
 function wrapQuestionTitle(question: ExtensionAskDialogQuestion, width: number): string[] {
 	const mdTheme = getMarkdownTheme();
-	const questionText = renderInlineMarkdown(replaceTabs(question.question), mdTheme, t => theme.fg("text", t));
+	const questionText = renderInlineMarkdown(replaceTabs(sanitizeCarriageReturns(question.question)), mdTheme, t =>
+		theme.fg("text", t),
+	);
 	return wrapTextWithAnsi(questionText, Math.max(1, width));
 }
 
@@ -157,6 +168,22 @@ function renderQuestionTitle(question: ExtensionAskDialogQuestion, width: number
 		...wrapped.slice(0, maxRows - 1),
 		truncateToWidth(wrapped.slice(maxRows - 1).join(" "), Math.max(1, width), Ellipsis.Unicode),
 	];
+}
+/** Wrap an option description exactly as the option list renders it, so
+ *  overflow detection and expanded rendering stay in sync with the row. */
+function wrapOptionDescription(description: string, contentWidth: number): string[] {
+	const mdTheme = getMarkdownTheme();
+	const rendered = renderInlineMarkdown(description.trim(), mdTheme, t => theme.fg("muted", t));
+	return wrapTextWithAnsi(rendered, Math.max(1, contentWidth - 6));
+}
+
+/** True when any option description of the question wraps past the collapsed
+ *  row-cap at the given content width. */
+function questionDescriptionsOverflow(question: ExtensionAskDialogQuestion, contentWidth: number): boolean {
+	return question.options.some(option => {
+		if (!option?.description?.trim()) return false;
+		return wrapOptionDescription(option.description, contentWidth).length > MAX_DESC_ROWS;
+	});
 }
 
 function splitPreviewSegments(preview: string): PreviewSegment[] {
@@ -260,8 +287,32 @@ function normalizedInlineInput(input: string): string {
 	return replaceTabs(input).replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Final display labels for a question's options: sanitized, badged, unique,
+ * and sentinel-safe. The recommendation badge goes on BEFORE collision
+ * disambiguation — badging itself can collide two rows (`Retry\rnow`
+ * recommended vs a literal `Retry now (Recommended)`). Mirrors the guest
+ * selector (`#runGuestAskQuestion`): same inputs, same rows, whichever
+ * participant answers. State and results keep originals.
+ */
+function displayOptionLabels(question: ExtensionAskDialogQuestion): string[] {
+	const recommendedSuffix = " (Recommended)";
+	const badged = question.options.map((option, index) => {
+		const base = sanitizeCarriageReturns(option.label);
+		return question.recommended === index && !base.endsWith(recommendedSuffix) ? `${base}${recommendedSuffix}` : base;
+	});
+	return disambiguateDisplayLabels(badged, [OTHER_OPTION, ...GUEST_ACTION_LABELS]);
+}
+
 function renderAnswerSummary(question: ExtensionAskDialogQuestion, state: QuestionState): string {
-	const selected = question.options.map(option => option.label).filter(label => state.selectedOptions.has(label));
+	const display = displayOptionLabels(question);
+	const selected = question.options
+		.map((option, index) => ({
+			raw: option.label,
+			display: display[index] ?? sanitizeCarriageReturns(option.label),
+		}))
+		.filter(entry => state.selectedOptions.has(entry.raw))
+		.map(entry => entry.display);
 	if (question.multi) {
 		const answers = [...selected];
 		if (state.customInput !== undefined) answers.push(`Other: “${normalizedInlineInput(state.customInput)}”`);
@@ -307,6 +358,7 @@ function renderRowLabel(
 	mdTheme: MarkdownTheme,
 	previewCache: PreviewRenderCache,
 	width: number,
+	expanded = false,
 ): string[] {
 	const isOption = rowItem.kind === "option";
 	const isOther = rowItem.kind === "other";
@@ -333,9 +385,9 @@ function renderRowLabel(
 	if (rowItem.kind === "option") {
 		const option = question.options[rowItem.optionIndex ?? -1];
 		if (option?.description?.trim()) {
-			const description = renderInlineMarkdown(option.description.trim(), mdTheme, t => theme.fg("muted", t));
-			const wrapped = wrapTextWithAnsi(description, Math.max(1, width - 6));
-			for (const line of wrapped.slice(0, 2)) {
+			const wrapped = wrapOptionDescription(option.description, width);
+			const shown = expanded ? wrapped : wrapped.slice(0, MAX_DESC_ROWS);
+			for (const line of shown) {
 				lines.push(`      ${truncateToWidth(line, Math.max(1, width - 6), Ellipsis.Unicode)}`);
 			}
 		}
@@ -360,7 +412,7 @@ function renderRowLabel(
  * entry throws and takes down the whole TUI render loop. Mirrors
  * `normalizeRenderQuestions` on the transcript path.
  */
-function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]): ExtensionAskDialogQuestion[] {
+export function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]): ExtensionAskDialogQuestion[] {
 	if (!Array.isArray(questions)) return [];
 	const out: ExtensionAskDialogQuestion[] = [];
 	for (const entry of questions) {
@@ -372,16 +424,23 @@ function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]): Exte
 				if (!opt || typeof opt !== "object") continue;
 				const o = opt as Partial<ExtensionAskDialogOption>;
 				options.push({
+					// The label is a caller-supplied correlation key echoed verbatim
+					// in results (matching the guest path) — sanitize only the
+					// display copy (`displayOptionLabels`).
 					label: typeof o.label === "string" ? o.label : "",
-					...(typeof o.description === "string" ? { description: o.description } : {}),
-					...(typeof o.preview === "string" ? { preview: o.preview } : {}),
+					...(typeof o.description === "string" ? { description: sanitizeCarriageReturns(o.description) } : {}),
+					...(typeof o.preview === "string" ? { preview: sanitizeCarriageReturns(o.preview) } : {}),
 				});
 			}
 		}
 		out.push({
+			// The id is a caller-supplied correlation key echoed verbatim in
+			// results — sanitize only the display copy (`questionTabLabel`).
 			id: typeof q.id === "string" ? q.id : "?",
+			// The question is echoed verbatim in results (matching the guest
+			// path) — sanitize only the display copy (`wrapQuestionTitle`).
 			question: typeof q.question === "string" ? q.question : "",
-			...(typeof q.header === "string" ? { header: q.header } : {}),
+			...(typeof q.header === "string" ? { header: sanitizeCarriageReturns(q.header) } : {}),
 			options,
 			...(typeof q.multi === "boolean" ? { multi: q.multi } : {}),
 			...(Number.isInteger(q.recommended) ? { recommended: q.recommended } : {}),
@@ -408,6 +467,7 @@ export class AskDialogComponent implements Component {
 	#expanded = false;
 	#contentWidth = 76;
 	#headerExpandable = false;
+	#descExpandable = false;
 	readonly #questions: ExtensionAskDialogQuestion[];
 
 	constructor(
@@ -453,17 +513,18 @@ export class AskDialogComponent implements Component {
 		this.#closed = true;
 		this.#countdown?.dispose();
 	}
-
 	/**
-	 * Toggle a truncated question header. Returns false when there is nothing
-	 * to expand so the global Ctrl+O listener can still expand transcript tools.
+	 * Toggle truncated question headers and option descriptions. Returns false
+	 * when there is nothing to expand so the global Ctrl+O listener can still
+	 * expand transcript tools.
 	 */
 	toggleQuestionExpansion(): boolean {
 		if (this.#closed || this.#isSubmitTab()) return false;
 		const question = this.#questions[this.#currentQuestionIndex()];
 		if (!question) return false;
-		const overflows = wrapQuestionTitle(question, this.#contentWidth).length > MAX_HEADER_ROWS;
-		if (!overflows) return false;
+		const headerOverflows = wrapQuestionTitle(question, this.#contentWidth).length > MAX_HEADER_ROWS;
+		const descOverflows = questionDescriptionsOverflow(question, this.#contentWidth);
+		if (!headerOverflows && !descOverflows && !this.#expanded) return false;
 		this.#expanded = !this.#expanded;
 		this.invalidate();
 		this.#requestRender();
@@ -568,7 +629,16 @@ export class AskDialogComponent implements Component {
 			const listRows = (listWidth: number): number => {
 				let total = 0;
 				for (const rowItem of rowItems) {
-					total += renderRowLabel(rowItem, question, state, false, mdTheme, this.#previewCache, listWidth).length;
+					total += renderRowLabel(
+						rowItem,
+						question,
+						state,
+						false,
+						mdTheme,
+						this.#previewCache,
+						listWidth,
+						this.#expanded,
+					).length;
 				}
 				return total;
 			};
@@ -627,6 +697,7 @@ export class AskDialogComponent implements Component {
 		}
 		if (this.#isSubmitTab()) {
 			this.#headerExpandable = false;
+			this.#descExpandable = false;
 			lines.push(theme.bold(theme.fg("accent", "Review answers")));
 			return lines;
 		}
@@ -634,17 +705,19 @@ export class AskDialogComponent implements Component {
 		const question = this.#questions[questionIndex];
 		if (!question) {
 			this.#headerExpandable = false;
+			this.#descExpandable = false;
 			return lines;
 		}
 		const wrapped = wrapQuestionTitle(question, width);
 		this.#headerExpandable = wrapped.length > MAX_HEADER_ROWS;
+		this.#descExpandable = questionDescriptionsOverflow(question, width);
 		const maxRows = this.#expanded ? maxTitleRows : MAX_HEADER_ROWS;
 		lines.push(...renderQuestionTitle(question, width, maxRows));
 		return lines;
 	}
 
 	#expandHint(): string {
-		if (!this.#headerExpandable) return "";
+		if (!this.#headerExpandable && !this.#descExpandable) return "";
 		return ` · ${expandKeyHint()} ${this.#expanded ? "collapse" : "expand"}`;
 	}
 
@@ -670,20 +743,15 @@ export class AskDialogComponent implements Component {
 	}
 
 	#questionRows(question: ExtensionAskDialogQuestion): QuestionRow[] {
+		const display = displayOptionLabels(question);
 		const rows: QuestionRow[] = question.options.map((option, index) => ({
 			kind: "option",
 			key: `option:${index}`,
-			label: this.#optionLabel(question, option.label, index),
+			label: display[index] ?? sanitizeCarriageReturns(option.label),
 			optionIndex: index,
 		}));
 		rows.push({ kind: "other", key: "other", label: OTHER_OPTION, optionIndex: undefined });
 		return rows;
-	}
-
-	#optionLabel(question: ExtensionAskDialogQuestion, label: string, index: number): string {
-		const suffix = " (Recommended)";
-		if (question.recommended !== index || label.endsWith(suffix)) return label;
-		return `${label}${suffix}`;
 	}
 
 	#activeQuestionState(): { question: ExtensionAskDialogQuestion; state: QuestionState } | undefined {
@@ -886,6 +954,7 @@ export class AskDialogComponent implements Component {
 						mdTheme,
 						this.#previewCache,
 						contentWidth,
+						this.#expanded,
 					),
 				);
 			}

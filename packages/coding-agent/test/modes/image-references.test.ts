@@ -2,25 +2,49 @@ import { describe, expect, it } from "bun:test";
 import {
 	chipLabel,
 	collapseImageMarkers,
+	collapseModelMentions,
+	collapseSkillTokens,
 	compactImageMarkers,
+	composerTokenRegex,
+	modelMentionChipLabel,
 	type PlaceholderKind,
 	renderPlaceholders,
 	shiftImageMarkers,
+	skillChipLabel,
 } from "@oh-my-pi/pi-coding-agent/modes/composer-attachments";
 
-function capture(text: string): {
+function capture(
+	text: string,
+	mentionLabels: readonly string[] = [],
+): {
 	out: string;
 	refs: Array<{ label: string; kind: PlaceholderKind; index: number; form: "marker" | "chip" }>;
+	skills: string[];
+	mentions: string[];
 } {
 	const refs: Array<{ label: string; kind: PlaceholderKind; index: number; form: "marker" | "chip" }> = [];
-	const out = renderPlaceholders(text, {
-		renderText: t => t,
-		renderReference: (label, kind, index, form) => {
-			refs.push({ label, kind, index, form });
-			return `<${kind}:${index}>`;
+	const skills: string[] = [];
+	const mentions: string[] = [];
+	const out = renderPlaceholders(
+		text,
+		{
+			renderText: t => t,
+			renderReference: (label, kind, index, form) => {
+				refs.push({ label, kind, index, form });
+				return `<${kind}:${index}>`;
+			},
+			renderSkill: (_label, name) => {
+				skills.push(name);
+				return `<skill:${name}>`;
+			},
+			renderMention: label => {
+				mentions.push(label);
+				return `<model:${label}>`;
+			},
 		},
-	});
-	return { out, refs };
+		composerTokenRegex(mentionLabels),
+	);
+	return { out, refs, skills, mentions };
 }
 
 describe("renderPlaceholders", () => {
@@ -77,6 +101,85 @@ describe("renderPlaceholders", () => {
 
 	it("does not treat a word ending in an ascii icon as a chip token", () => {
 		expect(capture("boximg #1").refs).toHaveLength(0);
+	});
+
+	it("routes skill chips to renderSkill with the bare name, stopping at punctuation", () => {
+		const { out, skills, refs } = capture(`use ${skillChipLabel("stencil-design")}, then ${skillChipLabel("v2.1")}.`);
+		expect(skills).toEqual(["stencil-design", "v2.1"]);
+		expect(refs).toHaveLength(0);
+		expect(out).toBe("use <skill:stencil-design>, then <skill:v2.1>.");
+	});
+
+	it("recognizes skill chips from every symbol preset", () => {
+		expect(capture("\uf0eb reviewer").skills).toEqual(["reviewer"]);
+		expect(capture("SK reviewer").skills).toEqual(["reviewer"]);
+		expect(capture("TASK reviewer").skills).toHaveLength(0);
+	});
+
+	it("routes registered model labels with spaces and parentheses as whole tokens", () => {
+		const short = modelMentionChipLabel("Claude");
+		const long = modelMentionChipLabel("Claude (Fast)");
+		const { out, mentions, refs } = capture(`ask ${long} then ${short}`, [short, long]);
+		expect(mentions).toEqual([long, short]);
+		expect(refs).toHaveLength(0);
+		expect(out).toBe(`ask <model:${long}> then <model:${short}>`);
+	});
+
+	it("dispatches an ASCII model label before bracketed attachment markers", () => {
+		const label = "[M] Claude (Fast)";
+		const { out, mentions, refs } = capture(`ask ${label} now`, [label]);
+		expect(mentions).toEqual([label]);
+		expect(refs).toHaveLength(0);
+		expect(out).toBe(`ask <model:${label}> now`);
+	});
+});
+
+describe("collapseModelMentions", () => {
+	const labelFor = (selector: string) => (selector === "a/x" ? modelMentionChipLabel("X One") : undefined);
+
+	it("collapses known whitespace-delimited selectors and registers their canonical expansion", () => {
+		const registered: Array<[string, string]> = [];
+		const out = collapseModelMentions("ask ^a/x now", labelFor, (label, expansion) =>
+			registered.push([label, expansion]),
+		);
+		expect(out).toBe(`ask ${modelMentionChipLabel("X One")} now`);
+		expect(registered).toEqual([[modelMentionChipLabel("X One"), "^a/x"]]);
+	});
+
+	it("keeps unknown and punctuation-attached selectors literal", () => {
+		expect(collapseModelMentions("^nope/z and ^a/x,", labelFor, () => {})).toBe("^nope/z and ^a/x,");
+	});
+
+	it("allows slash prompts but not local-execution drafts", () => {
+		expect(collapseModelMentions("/plan ask ^a/x now", labelFor, () => {})).toBe(
+			`/plan ask ${modelMentionChipLabel("X One")} now`,
+		);
+		expect(collapseModelMentions("!echo ^a/x", labelFor, () => {})).toBe("!echo ^a/x");
+		expect(collapseModelMentions("$ echo ^a/x", labelFor, () => {})).toBe("$ echo ^a/x");
+	});
+});
+
+describe("collapseSkillTokens", () => {
+	const known = (name: string) => name === "reviewer";
+
+	it("collapses known skill tokens into chips and registers the canonical token as expansion", () => {
+		const registered: Array<[string, string]> = [];
+		const out = collapseSkillTokens("fix it /skill:reviewer now", known, (label, expansion) =>
+			registered.push([label, expansion]),
+		);
+		expect(out).toBe(`fix it ${skillChipLabel("reviewer")} now`);
+		expect(registered).toEqual([[skillChipLabel("reviewer"), "/skill:reviewer"]]);
+	});
+
+	it("leaves unknown skills and glued tokens as literal text", () => {
+		expect(collapseSkillTokens("/skill:nope and x/skill:reviewer", known, () => {})).toBe(
+			"/skill:nope and x/skill:reviewer",
+		);
+	});
+
+	it("does not collapse inside a bash or foreign slash-command draft", () => {
+		expect(collapseSkillTokens("!echo /skill:reviewer", known, () => {})).toBe("!echo /skill:reviewer");
+		expect(collapseSkillTokens("/compact /skill:reviewer", known, () => {})).toBe("/compact /skill:reviewer");
 	});
 });
 

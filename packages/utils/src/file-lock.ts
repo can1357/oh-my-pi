@@ -15,6 +15,11 @@ export interface FileLockOptions {
 	retryDelayMs?: number;
 }
 
+/** An exclusive OS-backed lease. Releasing an already released handle is safe. */
+export interface FileLockHandle {
+	release(): void;
+}
+
 const DEFAULT_OPTIONS: Required<FileLockOptions> = {
 	retries: 50,
 	retryDelayMs: 100,
@@ -29,7 +34,8 @@ function tryAcquireLock(lockPath: string): NativeFileLock | null {
 	return lock.acquired ? lock : null;
 }
 
-async function acquireLock(filePath: string, options: FileLockOptions = {}): Promise<NativeFileLock> {
+/** Acquire an exclusive lease; callers must release it when their operation ends. */
+export async function acquireFileLock(filePath: string, options: FileLockOptions = {}): Promise<FileLockHandle> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
 	const lockPath = getLockPath(filePath);
 
@@ -42,15 +48,38 @@ async function acquireLock(filePath: string, options: FileLockOptions = {}): Pro
 	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
 }
 
+function acquireLockSync(filePath: string, options: FileLockOptions = {}): NativeFileLock {
+	const opts = { ...DEFAULT_OPTIONS, ...options };
+	const lockPath = getLockPath(filePath);
+
+	for (let attempt = 0; attempt < opts.retries; attempt++) {
+		const lock = tryAcquireLock(lockPath);
+		if (lock) return lock;
+		if (attempt + 1 < opts.retries && opts.retryDelayMs > 0) Bun.sleepSync(opts.retryDelayMs);
+	}
+
+	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);
+}
+
 /** Run `fn` while holding an OS-backed exclusive lock for `filePath`. */
 export async function withFileLock<T>(
 	filePath: string,
 	fn: () => Promise<T>,
 	options: FileLockOptions = {},
 ): Promise<T> {
-	const lock = await acquireLock(filePath, options);
+	const lock = await acquireFileLock(filePath, options);
 	try {
 		return await fn();
+	} finally {
+		lock.release();
+	}
+}
+
+/** Run synchronous `fn` while holding an OS-backed exclusive lock for `filePath`. */
+export function withFileLockSync<T>(filePath: string, fn: () => T, options: FileLockOptions = {}): T {
+	const lock = acquireLockSync(filePath, options);
+	try {
+		return fn();
 	} finally {
 		lock.release();
 	}

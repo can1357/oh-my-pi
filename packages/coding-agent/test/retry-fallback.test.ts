@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	expandDefaultRetryFallbackChains,
@@ -117,6 +118,15 @@ describe("retry fallback selector resolution", () => {
 		]);
 	});
 
+	it("carries per-entry thinking levels while bare entries inherit", () => {
+		const context = createContext({ default: ["openai/gpt-4o-mini:low", "google/gemini-2.5-flash"] });
+		const candidates = findRetryFallbackCandidates(context, "default", "openai/gpt-4o-mini");
+		expect(candidates.map(candidate => candidate.raw)).toEqual(["openai/gpt-4o-mini:low", "google/gemini-2.5-flash"]);
+		expect(candidates[0]?.thinkingLevel).toBe(ThinkingLevel.Low);
+		// Bare entries carry no level so the failing turn's effort applies at switch time.
+		expect(candidates[1]?.thinkingLevel).toBeUndefined();
+	});
+
 	it("inherits the default chain only for roles without an explicit chain", () => {
 		const defaultChain = ["openai/gpt-4o-mini"];
 		const expanded = expandDefaultRetryFallbackChains({ default: defaultChain, slow: ["google/gemini-2.5-flash"] }, [
@@ -126,5 +136,80 @@ describe("retry fallback selector resolution", () => {
 		]);
 		expect(expanded.task).toBe(defaultChain);
 		expect(expanded.slow).toEqual(["google/gemini-2.5-flash"]);
+	});
+
+	it("prefers an exact model+effort key over a different-effort key regardless of object order", () => {
+		const model = getBundledModel("google", "gemini-2.5-flash");
+		const low = "google/gemini-2.5-flash:low";
+		const max = "google/gemini-2.5-flash:max";
+
+		const maxFirst = createContext({ [max]: ["openai/gpt-4o-mini:max"], [low]: ["openai/gpt-4o-mini:low"] });
+		expect(resolveRetryFallbackChainKey(maxFirst, low, model)).toBe(low);
+		expect(findRetryFallbackCandidates(maxFirst, low, low, model).map(candidate => candidate.raw)).toEqual([
+			"openai/gpt-4o-mini:low",
+		]);
+
+		const lowFirst = createContext({ [low]: ["openai/gpt-4o-mini:low"], [max]: ["openai/gpt-4o-mini:max"] });
+		expect(resolveRetryFallbackChainKey(lowFirst, low, model)).toBe(low);
+	});
+
+	it("lets a suffixless key match any effort but an exact effort key still wins", () => {
+		const model = getBundledModel("google", "gemini-2.5-flash");
+		const low = "google/gemini-2.5-flash:low";
+		const suffixless = "google/gemini-2.5-flash";
+
+		const baseOnly = createContext({ [suffixless]: ["openai/gpt-4o-mini"] });
+		expect(resolveRetryFallbackChainKey(baseOnly, low, model)).toBe(suffixless);
+
+		const suffixlessFirst = createContext({
+			[suffixless]: ["openai/gpt-4o-mini"],
+			[low]: ["openai/gpt-4o-mini:low"],
+		});
+		expect(resolveRetryFallbackChainKey(suffixlessFirst, low, model)).toBe(low);
+	});
+
+	it("never escalates to a different-effort chain when no matching effort is configured", () => {
+		const model = getBundledModel("google", "gemini-2.5-flash");
+		const low = "google/gemini-2.5-flash:low";
+		const max = "google/gemini-2.5-flash:max";
+
+		const maxOnly = createContext({ [max]: ["openai/gpt-4o-mini:max"] });
+		expect(resolveRetryFallbackChainKey(maxOnly, low, model)).toBeUndefined();
+
+		const maxWithDefault = createContext({ [max]: ["openai/gpt-4o-mini:max"], default: ["openai/gpt-4o-mini"] });
+		expect(resolveRetryFallbackChainKey(maxWithDefault, low, model)).toBe("default");
+
+		const maxWithHint = createContext({ [max]: ["openai/gpt-4o-mini:max"], smol: ["openai/gpt-4o-mini:medium"] });
+		expect(resolveRetryFallbackChainKey(maxWithHint, low, model, "smol")).toBe("smol");
+	});
+
+	it("treats effort aliases as equivalent to their canonical form when matching keys", () => {
+		const model = getBundledModel("google", "gemini-2.5-flash");
+		const canonicalHigh = "google/gemini-2.5-flash:high";
+		const aliasKey = "google/gemini-2.5-flash:hi";
+
+		const context = createContext({ [aliasKey]: ["openai/gpt-4o-mini:high"] });
+		expect(resolveRetryFallbackChainKey(context, canonicalHigh, model)).toBe(aliasKey);
+		expect(
+			findRetryFallbackCandidates(context, aliasKey, canonicalHigh, model).map(candidate => candidate.raw),
+		).toEqual(["openai/gpt-4o-mini:high"]);
+	});
+
+	it("matches a requested effort key to the active model's clamped effort", () => {
+		const model = getBundledModel("google", "gemini-2.5-flash");
+		const high = "google/gemini-2.5-flash:high";
+		const max = "google/gemini-2.5-flash:max";
+
+		const maxOnly = createContext({ [max]: ["openai/gpt-4o-mini:max"] });
+		expect(resolveRetryFallbackChainKey(maxOnly, high, model)).toBe(max);
+		expect(findRetryFallbackCandidates(maxOnly, max, high, model).map(candidate => candidate.raw)).toEqual([
+			"openai/gpt-4o-mini:max",
+		]);
+
+		const exactHigh = createContext({
+			[max]: ["openai/gpt-4o-mini:max"],
+			[high]: ["openai/gpt-4o-mini:high"],
+		});
+		expect(resolveRetryFallbackChainKey(exactHigh, high, model)).toBe(high);
 	});
 });

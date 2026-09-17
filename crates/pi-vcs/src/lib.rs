@@ -1,11 +1,10 @@
 //! In-process version control for the coding agent.
 //!
 //! Collapses the git and Jujutsu CLI wrappers into one Rust interface:
-//! - **git** ([`git::GitRepo`]) runs on gitoxide. The git binary survives only
-//!   where an in-process implementation cannot reach parity: credential-bound
-//!   network transfers (push/fetch/clone reuse the user's ssh config and
-//!   credential helpers) and reftable repositories (no library implementation
-//!   of reftable exists yet).
+//! - **git** ([`git::GitRepo`]) runs primarily on gitoxide. The git binary
+//!   handles credential-bound network transfers, reftable repositories, and
+//!   whole-worktree status/untracked walks whose resource failures must stay
+//!   outside the driving process.
 //! - **jj** ([`jj::JjWorkspace`]) runs on jj-lib, which shares the same
 //!   gitoxide stack for its git backend. No subprocess at all.
 //!
@@ -142,6 +141,19 @@ impl Repo {
 			Self::Git(repo) => repo.diff_text(options),
 			Self::Jj(workspace) => {
 				require_jj_diff_options(options)?;
+				// Jujutsu rendering has no cap to enforce (`JjWorkspace::diff_text`
+				// takes no byte budget), so a caller-supplied `max_bytes` would
+				// silently go unhonored here; refuse it instead of pretending to
+				// bound memory we cannot bound. `changed_files`/`numstat` below
+				// share `require_jj_diff_options` for the cached/base/head checks
+				// but never render text, so a `max_bytes` inert for them must not
+				// be rejected (see the P2 finding on this validator).
+				if options.max_bytes.is_some() {
+					return Err(Error::Unsupported {
+						operation: "diffMaxBytes",
+						backend:   VcsKind::Jj,
+					});
+				}
 				workspace.diff_text(&options.files, true)
 			},
 		}
@@ -251,6 +263,12 @@ impl Repo {
 	}
 }
 
+/// Options rejected on every Jujutsu operation: staged diffs and revision
+/// ranges have no jj-lib equivalent this backend implements. `max_bytes` is
+/// deliberately excluded — it only constrains rendering, so `diff_text`
+/// checks it itself and `changed_files`/`numstat` (non-rendering, sharing
+/// this validator) must not reject a `DiffOptions` that merely happens to
+/// carry a cap meant for a sibling `diff_text` call.
 const fn require_jj_diff_options(options: &DiffOptions) -> Result<()> {
 	if options.cached {
 		return Err(Error::Unsupported { operation: "stagedDiff", backend: VcsKind::Jj });
@@ -276,6 +294,29 @@ pub fn detect(dir: &Path) -> Result<Option<Repo>> {
 	};
 	match git::GitRepo::discover(dir)? {
 		Some(repo) if !is_strict_descendant(jj.root(), repo.root()) => {
+			Ok(Some(Repo::Git(Arc::new(repo))))
+		},
+		_ => Ok(Some(Repo::Jj(Arc::new(jj)))),
+	}
+}
+
+/// Detect which VCS should present `dir` in the status line and footer.
+///
+/// Same as [`detect`], except equal-root jj+git ties prefer Jujutsu:
+/// colocated workspaces resolve to [`Repo::Jj`]. A strictly deeper nested
+/// git checkout still wins (it is the tree the user works in), and
+/// [`is_pure_jj`] keeps using [`detect`], so git-mutating automation policy
+/// is unchanged. Existing [`Repo`] dispatch serves both detectors without a
+/// colocated variant: presentation reads the label through the returned
+/// backend (status counts stay on the operational handle), while automation
+/// keeps the [`detect`] result.
+pub fn detect_for_display(dir: &Path) -> Result<Option<Repo>> {
+	let jj = jj::JjWorkspace::discover(dir)?;
+	let Some(jj) = jj else {
+		return Ok(git::GitRepo::discover(dir)?.map(|repo| Repo::Git(Arc::new(repo))));
+	};
+	match git::GitRepo::discover(dir)? {
+		Some(repo) if is_strict_descendant(repo.root(), jj.root()) => {
 			Ok(Some(Repo::Git(Arc::new(repo))))
 		},
 		_ => Ok(Some(Repo::Jj(Arc::new(jj)))),
@@ -356,6 +397,15 @@ mod tests {
 			operation: "revDiff",
 			backend:   VcsKind::Jj,
 		}));
+
+		let capped = repo
+			.diff_text(&DiffOptions { max_bytes: Some(1), ..DiffOptions::default() })
+			.unwrap_err();
+		assert_eq!(capped.kind(), "Unsupported");
+		assert!(matches!(capped, Error::Unsupported {
+			operation: "diffMaxBytes",
+			backend:   VcsKind::Jj,
+		}));
 	}
 
 	#[test]
@@ -376,7 +426,51 @@ mod tests {
 			.unwrap()
 			.uncommitted_diff(&[])
 			.unwrap();
+
 		assert_eq!(actual, expected);
+	}
+
+	#[test]
+	fn display_prefers_jj_on_equal_root_ties() {
+		let temp = tempfile::tempdir().unwrap();
+		init_git(temp.path());
+		fs::create_dir_all(temp.path().join(".jj/repo")).unwrap();
+		assert!(matches!(detect(temp.path()).unwrap(), Some(Repo::Git(_))));
+		assert!(matches!(detect_for_display(temp.path()).unwrap(), Some(Repo::Jj(_))));
+	}
+
+	#[test]
+	fn display_matches_detect_for_pure_and_nested_roots() {
+		// Pure git.
+		let git_dir = tempfile::tempdir().unwrap();
+		init_git(git_dir.path());
+		assert!(matches!(detect(git_dir.path()).unwrap(), Some(Repo::Git(_))));
+		assert!(matches!(detect_for_display(git_dir.path()).unwrap(), Some(Repo::Git(_))));
+
+		// Pure jj.
+		let jj_dir = tempfile::tempdir().unwrap();
+		fs::create_dir_all(jj_dir.path().join(".jj/repo")).unwrap();
+		assert!(matches!(detect(jj_dir.path()).unwrap(), Some(Repo::Jj(_))));
+		assert!(matches!(detect_for_display(jj_dir.path()).unwrap(), Some(Repo::Jj(_))));
+
+		// Nested git checkout under an outer jj workspace: the strictly
+		// deeper git root still wins in both detectors.
+		let outer = tempfile::tempdir().unwrap();
+		fs::create_dir_all(outer.path().join(".jj/repo")).unwrap();
+		let inner = outer.path().join("sub");
+		fs::create_dir_all(&inner).unwrap();
+		init_git(&inner);
+		assert!(matches!(detect(&inner).unwrap(), Some(Repo::Git(_))));
+		assert!(matches!(detect_for_display(&inner).unwrap(), Some(Repo::Git(_))));
+
+		// Jj nested inside an unrelated git checkout: the deeper root wins
+		// in both detectors.
+		let git_outer = tempfile::tempdir().unwrap();
+		init_git(git_outer.path());
+		let jj_inner = git_outer.path().join("sub");
+		fs::create_dir_all(jj_inner.join(".jj/repo")).unwrap();
+		assert!(matches!(detect(&jj_inner).unwrap(), Some(Repo::Jj(_))));
+		assert!(matches!(detect_for_display(&jj_inner).unwrap(), Some(Repo::Jj(_))));
 	}
 
 	#[test]

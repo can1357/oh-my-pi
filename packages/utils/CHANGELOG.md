@@ -2,6 +2,94 @@
 
 ## [Unreleased]
 
+## [18.2.3] - 2026-09-17
+
+### Fixed
+
+- Optimized model configuration command execution by deduplicating requests and adding failure backoff
+- Prevented unnecessary credential command execution when runtime API keys are configured
+- Retained `readLines()` results no longer change when later chunks reuse the internal buffer.
+- Long sleeps honor elapsed time and re-arm after premature timer wakes without overflowing native timer delays.
+
+## [18.2.2] - 2026-09-16
+
+### Added
+
+- Added asynchronous and synchronous SQLite database opening APIs with path-attributed errors, optional corruption recovery that preserves private database and sidecar backups, and automatic retries for transient busy errors during asynchronous opens.
+
+## [18.2.1] - 2026-09-15
+
+### Added
+
+- Added the public `postmortem.exitProcess()` utility for host-owned hard exits that must bypass temporary process-exit guards ([#11789](https://github.com/can1357/oh-my-pi/issues/11789)).
+- Added `readSseJsonOrText`: like `readSseJson`, but a `data:` frame that is not valid JSON is yielded as its raw text instead of raising a `SyntaxError`, so a consumer can classify a reverse proxy's plain-text throttle page (`429 Too Many Requests`) that arrives after the stream headers were already sent. `readSseJson` is unchanged and shares the framing with it.
+
+### Fixed
+
+- Reading an EPUB, PPTX or XLSX whose XML has a mismatched or stray end tag no longer hangs the session forever; the parser recovers and the document converts ([#12018](https://github.com/can1357/oh-my-pi/pull/12018) by [@kaluli123123](https://github.com/kaluli123123)).
+- Fixed `filterChildShellEnv` forwarding the host process's `GIT_DIR`, `GIT_WORK_TREE`, and related repo-location overrides to child shells, where `git` would ignore the command's `cwd`.
+- ACP JSON-RPC now drains accepted inbound requests on clean stdin EOF before resolving `closed`, so in-flight methods such as `session/new` still receive a success or explicit error response instead of being dropped on exit 0 ([#11567](https://github.com/can1357/oh-my-pi/issues/11567)).
+- Fixed provider-local usage-limit reset timestamps making `waitForUsageReset` sessions resume up to eight hours late while preserving longest-window semantics for naive UTC timestamps ([#11014](https://github.com/can1357/oh-my-pi/issues/11014)).
+- `registerStdioDisconnectHandling()` now drives graceful shutdown from `process.stdout`'s own `error` event, so a closed stdout consumer exits cleanly while an unrelated write EPIPE (subprocess stdin, socket) stays fatal ([#10930](https://github.com/can1357/oh-my-pi/issues/10930)).
+- Fixed Linux `ptree` timeout cleanup occasionally leaving session-escaped descendants running during subreaper adoption.
+
+## [18.2.0] - 2026-09-15
+
+### Breaking Changes
+
+- Removed the unused `globPaths`, `loadGitignorePatterns`, and `GlobPathsOptions` exports.
+- Browser helpers now manage Chrome only: removed `Browser`, `BrowserTag`, `resolveBuildId()`, `getInstalledBrowsers()`, and `browser` options/metadata; `getDownloadUrl()` now takes `(platform, buildId, baseUrl?)`.
+
+### Added
+
+- Added `relativePathWithinNormalizedRoot()` for reusing canonical paths across containment checks.
+- Added `sleepLong()` and `MAX_TIMER_DELAY_MS`: an abortable sleep that chunks delays past the signed 32-bit timer ceiling so day-scale provider waits elapse instead of overflowing the timer.
+
+### Changed
+
+- Log-retention cleanup now runs after logger construction without keeping short-lived commands alive.
+- Debugger support now loads only when SIGUSR1 requests it.
+
+### Fixed
+
+- Fixed `extractRetryHint` dropping OpenCode Go's `Resets in …` quota window (`45min`, `2hr 15min`, `3 days`): the `reset in` pattern now accepts `Resets` phrasing, `hr`/`day` units, and compound `2hr 15min` remainders, so exhausted Go credentials block for the server-stated window instead of the 60s heuristic guess. ([#12091](https://github.com/can1357/oh-my-pi/pull/12091) by [@H4vC](https://github.com/H4vC))
+- Async file-peek callbacks now receive stable `Uint8Array` windows with copying `slice()` semantics.
+- Dotenv loading now handles multiline values and escapes consistently with Bun, preventing project values from leaking into child-shell environments.
+- SSE readers now support lone-CR line endings and CRLF split across chunks without merging or delaying events.
+
+## [18.1.22] - 2026-09-14
+
+### Fixed
+
+- Fixed `extractRetryHint` sleeping hours past the provider's stated wait when a timezone-naive `reset at` timestamp overshoots the relative retry hint: the skewed stamp is now ignored instead of winning longest-wins ([#12070](https://github.com/can1357/oh-my-pi/pull/12070) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.21] - 2026-09-14
+
+### Added
+
+- Added `getBrowserProfilesDir()` (`~/.omp/browser-profiles`; XDG: `$XDG_STATE_HOME/omp/browser-profiles`) for profiles of Chromium browsers spawned by the browser tool.
+
+### Fixed
+
+- Timed out stalled Chrome-for-Testing metadata requests after 30 seconds when looking up download metadata
+- Concurrent browser installations share one download without replacing a running browser, and stalled downloads time out with partial files cleaned up for retry.
+
+## [18.1.19] - 2026-09-12
+
+### Added
+
+- Added public `acquireFileLock()` and `FileLockHandle` APIs for holding and explicitly releasing exclusive OS-backed file locks.
+
+### Fixed
+
+- Child-shell environment filtering now tolerates a removed process working directory by retaining the resolved project directory ([#11828](https://github.com/can1357/oh-my-pi/issues/11828)).
+
+## [18.1.16] - 2026-09-09
+
+### Fixed
+
+- Fixed `$which` capturing `Bun.which` at import on Linux and Windows, so `Bun.which` stubs installed later (e.g. per-test spies) are honoured and PATH-only language servers no longer leak into test results.
+
 ## [18.1.13] - 2026-09-07
 
 ### Fixed

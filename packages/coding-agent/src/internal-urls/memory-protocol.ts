@@ -95,7 +95,9 @@ export function splitMemoryGlobPattern(input: string): MemoryGlobPattern {
 	const url = parseInternalUrl(urlMatch[1]);
 	const namespace = url.rawHost || url.hostname;
 	if (url.protocol !== "memory:" || namespace !== MEMORY_NAMESPACE) {
-		throw new Error(`Memory glob patterns require the ${MEMORY_NAMESPACE} namespace: ${input}`);
+		throw new Error(
+			`Memory glob patterns require the ${MEMORY_NAMESPACE} namespace (e.g. memory://${MEMORY_NAMESPACE}/**); got: ${input}`,
+		);
 	}
 
 	const rawPathname = urlMatch[2] ?? "";
@@ -320,6 +322,31 @@ function unknownNamespaceError(namespace: string): Error {
 }
 
 /**
+ * Error for the file-backed `memory://root` namespace when it is unavailable.
+ * Only `memory.backend=local` owns this namespace; hindsight keeps memory
+ * server-side and mnemopi in SQLite banks. Non-local callers must not see
+ * potentially stale files left by an earlier local session. The backend-aware
+ * message points at the tools that can actually answer instead of prescribing
+ * "enable memories" to a caller whose backend is already healthy.
+ */
+function fileBackedRootUnavailableError(backend: string | undefined): Error {
+	if (backend === undefined || backend === "local") {
+		return new Error(
+			"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
+		);
+	}
+	const searchHint =
+		backend === "mnemopi"
+			? " Use `recall`/`reflect` to search Mnemopi memories, or `read memory://<memory-id>` for a full row."
+			: backend === "hindsight"
+				? " Use `recall`/`reflect` to search Hindsight memories."
+				: "";
+	return new Error(
+		`File-backed memory artifacts only exist with memory.backend=local (active backend: ${backend}).${searchHint}`,
+	);
+}
+
+/**
  * Look up a mnemopi memory row by id across every live session's scoped banks.
  * First hit wins; returns `null` when the id is not stored anywhere in scope.
  */
@@ -424,11 +451,17 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 			);
 		}
 
+		// A project may retain files from an earlier local session. Reject known
+		// non-local callers before probing the filesystem so those stale
+		// artifacts cannot leak across backend changes. Contextless legacy
+		// callers have no active backend to gate and retain the registry sweep.
+		if (backend !== undefined && backend !== "local") {
+			throw fileBackedRootUnavailableError(backend);
+		}
+
 		const roots = memoryRootsForContext(context, caller.session);
 		if (roots.length === 0) {
-			throw new Error(
-				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
-			);
+			throw fileBackedRootUnavailableError(backend);
 		}
 
 		let anyExists = false;
@@ -445,9 +478,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		}
 
 		if (!anyExists) {
-			throw new Error(
-				"Memory artifacts are not available for this project yet. Run a session with memories enabled first.",
-			);
+			throw fileBackedRootUnavailableError(backend);
 		}
 
 		throw new Error(`Memory file not found: ${url.href}`);
@@ -457,7 +488,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		const caller = resolveMemoryCaller(context);
 		if (caller.backend === "off") return [];
 		const completions: UrlCompletion[] = [];
-		if (memoryRootsForContext(context, caller.session).length > 0) {
+		if (caller.backend === "local") {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
 		}
 		const mnemopiAvailable = caller.legacy

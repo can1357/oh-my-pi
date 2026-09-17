@@ -27,6 +27,11 @@ export const cleanseHelp = {
 	description: "Detect and fix project diagnostics with weighted parallel subagents",
 } satisfies CommandMetadata;
 
+export const collabHelp = {
+	description:
+		"List active local Collab host metadata without URLs; use collab link <instanceId|pid> to retrieve a control link (--view for view-only)",
+} satisfies CommandMetadata;
+
 export const commitHelp = { description: "Generate a commit message and update changelogs" } satisfies CommandMetadata;
 
 export const completionsHelp = {

@@ -43,14 +43,13 @@ describe("kimi usage provider", () => {
 		expect(report).not.toBeNull();
 		expect(report!.limits).toHaveLength(2);
 
-		const total = report!.limits[0]!;
-		expect(total.label).toBe("Total quota");
-		expect(total.window?.resetsAt).toBe(Date.parse(usageReset));
+		const weekly = report!.limits[0]!;
+		expect(weekly.label).toBe("Weekly limit");
+		expect(weekly.window?.resetsAt).toBe(Date.parse(usageReset));
 		// The aggregate quota is the weekly subscription window; canonical id
 		// lets the status-line usage segment pick it up.
-		expect(total.window?.id).toBe("7d");
-		expect(total.scope?.windowId).toBe("7d");
-
+		expect(weekly.window?.id).toBe("7d");
+		expect(weekly.scope?.windowId).toBe("7d");
 		const fiveHour = report!.limits[1]!;
 		expect(fiveHour.label).toBe("5h limit");
 		expect(fiveHour.window?.durationMs).toBe(5 * 60 * 60 * 1000);
@@ -111,5 +110,43 @@ describe("kimi usage provider", () => {
 		);
 
 		expect(report?.metadata?.accountId).toBe("kimi-user-42");
+	});
+
+	it("parses totalQuota when extra purchased quota is present", async () => {
+		const report = await kimiUsageProvider.fetchUsage!(
+			{ provider: "kimi-code", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				usage: { limit: "100", used: "28", remaining: "72", resetTime: "2026-07-21T07:43:35.355947Z" },
+				totalQuota: {
+					limit: "500",
+					used: "100",
+					remaining: "400",
+					window: { duration: 30, timeUnit: "TIME_UNIT_DAY", resetTime: "2026-08-20T00:00:00.000Z" },
+				},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		expect(report!.limits).toHaveLength(2);
+		expect(report!.limits[0]!.label).toBe("Weekly limit");
+		expect(report!.limits[1]!.label).toBe("Total quota");
+		expect(report!.limits[1]!.amount.limit).toBe(500);
+		expect(report!.limits[1]!.amount.remaining).toBe(400);
+		expect(report!.limits[1]!.window?.id).toBe("30d");
+		expect(report!.limits[1]!.window?.resetsAt).toBe(Date.parse("2026-08-20T00:00:00.000Z"));
+	});
+
+	it("cleanly ignores empty totalQuota objects", async () => {
+		const report = await kimiUsageProvider.fetchUsage!(
+			{ provider: "kimi-code", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				usage: { limit: "100", remaining: "100" },
+				totalQuota: {},
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		expect(report!.limits).toHaveLength(1);
+		expect(report!.limits[0]!.label).toBe("Weekly limit");
 	});
 });

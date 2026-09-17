@@ -543,8 +543,20 @@ export interface SingleResult {
 	usage?: Usage;
 	/** Output path for the task result */
 	outputPath?: string;
+	/**
+	 * Ran inside an isolation worktree. Such agents are parked without a
+	 * reviver once the worktree is torn down, so they are never resumable or
+	 * messageable after the run — summaries must not suggest otherwise.
+	 */
+	isolated?: boolean;
 	/** Patch path for isolated worktree output */
 	patchPath?: string;
+	/**
+	 * Whether `patchPath` holds a non-empty root-repo diff. `false` when the
+	 * agent's changes all live in nested repos (see `nestedPatchPaths`), so
+	 * summaries do not claim the root patch captured anything.
+	 */
+	hasRootChanges?: boolean;
 	/** Branch name for isolated branch-mode output */
 	branchName?: string;
 	/**
@@ -555,6 +567,12 @@ export interface SingleResult {
 	branchBaseSha?: string;
 	/** Nested repo patches to apply after parent merge */
 	nestedPatches?: NestedRepoPatch[];
+	/**
+	 * On-disk copies of `nestedPatches`, one file per nested repo, written
+	 * before the isolation workspace is torn down. The workspace is the only
+	 * other copy of that work, so these paths are the durable record.
+	 */
+	nestedPatchPaths?: string[];
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**

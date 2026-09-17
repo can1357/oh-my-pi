@@ -4,7 +4,12 @@ import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { $ } from "bun";
 import { getDefaultPasteImageKeys } from "../../../src/config/keybindings";
-import { chipLabel } from "../../../src/modes/composer-attachments";
+import {
+	chipLabel,
+	COMPOSER_TOKEN_REGEX,
+	modelMentionChipLabel,
+	skillChipLabel,
+} from "../../../src/modes/composer-attachments";
 import {
 	CustomEditor,
 	extractBracketedImagePastePaths,
@@ -229,6 +234,170 @@ describe("CustomEditor bracketed path paste", () => {
 
 		expect(editor.getText()).toBe(chipLabel("video", 1));
 		expect(editor.composerChips()).toMatchObject([{ kind: "video", n: 1 }]);
+	});
+
+	describe("skill chips", () => {
+		function makeSkillEditor() {
+			const { editor } = makeEditor();
+			editor.skillFilePath = name => (name === "reviewer" ? "/skills/reviewer/SKILL.md" : undefined);
+			return editor;
+		}
+
+		it("snaps a typed `/skill:<name>` into a chip once whitespace terminates it, keeping the cursor", () => {
+			const editor = makeSkillEditor();
+			for (const ch of "use /skill:reviewer") editor.handleInput(ch);
+			// Still typing: no snap while the name could grow.
+			expect(editor.getText()).toBe("use /skill:reviewer");
+			editor.handleInput(" ");
+			const chip = skillChipLabel("reviewer");
+			expect(editor.getText()).toBe(`use ${chip} `);
+			expect(editor.getCursor()).toEqual({ line: 0, col: `use ${chip} `.length });
+			for (const ch of "now") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`use ${chip} now`);
+		});
+
+		it("leaves an unknown skill literal", () => {
+			const editor = makeSkillEditor();
+			for (const ch of "use /skill:nope ") editor.handleInput(ch);
+			expect(editor.getText()).toBe("use /skill:nope ");
+		});
+
+		it("deletes the chip as one unit and expands it back to the token on submit", () => {
+			const editor = makeSkillEditor();
+			for (const ch of "/skill:reviewer then") editor.handleInput(ch);
+			const chip = skillChipLabel("reviewer");
+			expect(editor.getText()).toBe(`${chip} then`);
+
+			let submitted: string | undefined;
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\r");
+			expect(submitted).toBe("/skill:reviewer then");
+
+			for (const ch of "a /skill:reviewer ") editor.handleInput(ch);
+			expect(editor.getText()).toBe(`a ${chip} `);
+			editor.handleInput("\x7f"); // trailing space
+			editor.handleInput("\x7f"); // whole chip
+			expect(editor.getText()).toBe("a ");
+		});
+
+		it("re-collapses a restored draft so the chip survives a failed submit", () => {
+			const editor = makeSkillEditor();
+			editor.setCollapsedText("fix it /skill:reviewer please");
+			expect(editor.getText()).toBe(`fix it ${skillChipLabel("reviewer")} please`);
+			expect(editor.getExpandedText()).toBe("fix it /skill:reviewer please");
+		});
+	});
+
+	describe("model mention chips", () => {
+		function makeModelEditor() {
+			const { editor } = makeEditor();
+			editor.modelMentionLabel = selector => {
+				if (selector === "a/x" || selector === "b/y") return modelMentionChipLabel("X One");
+				if (selector === "c/z") return modelMentionChipLabel("Zed");
+				return undefined;
+			};
+			editor.modelMentionSelector = agent => (agent === "m1" ? "a/x" : undefined);
+			return editor;
+		}
+
+		it("collapses a completed selector, expands it exactly, and deletes the chip atomically", () => {
+			const editor = makeModelEditor();
+			for (const ch of "use ^a/x") editor.handleInput(ch);
+			expect(editor.getText()).toBe("use ^a/x");
+
+			editor.handleInput(" ");
+			const chip = modelMentionChipLabel("X One");
+			expect(editor.getText()).toBe(`use ${chip} `);
+			expect(editor.getExpandedText()).toBe("use ^a/x ");
+
+			editor.handleInput("\x7f");
+			editor.handleInput("\x7f");
+			expect(editor.getText()).toBe("use ");
+		});
+
+		it("leaves unknown selectors literal", () => {
+			const editor = makeModelEditor();
+			for (const ch of "use ^nope/z ") editor.handleInput(ch);
+			expect(editor.getText()).toBe("use ^nope/z ");
+			expect(editor.getExpandedText()).toBe("use ^nope/z ");
+		});
+
+		it("restores known persisted tags and leaves dropped pseudonyms literal", () => {
+			const editor = makeModelEditor();
+			const dropped = '<model agent="m2" name="Gone"/>';
+			editor.setCollapsedText(`<model agent="m1" name="X One"/> ask ${dropped}`);
+
+			const chip = modelMentionChipLabel("X One");
+			expect(editor.getText()).toBe(`${chip} ask ${dropped}`);
+			expect(editor.getExpandedText()).toBe(`^a/x ask ${dropped}`);
+		});
+
+		it("keeps a colliding display name literal so it cannot expand to the wrong selector", () => {
+			const editor = makeModelEditor();
+			for (const ch of "^a/x then ^b/y ") editor.handleInput(ch);
+
+			const chip = modelMentionChipLabel("X One");
+			expect(editor.getText()).toBe(`${chip} then ^b/y `);
+			expect(editor.getExpandedText()).toBe("^a/x then ^b/y ");
+
+			let submitted: string | undefined;
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.handleInput("\r");
+			expect(submitted).toBe("^a/x then ^b/y");
+		});
+
+		it("keeps local execution literal while allowing mentions in slash prompts and shell interpolation text", () => {
+			for (const local of ["!echo ^a/x ", "  !echo ^a/x ", "$ ^a/x ", "$$ ^a/x "]) {
+				const editor = makeModelEditor();
+				for (const ch of local) editor.handleInput(ch);
+				expect(editor.getText()).toBe(local);
+				expect(editor.getExpandedText()).toBe(local);
+			}
+
+			const chip = modelMentionChipLabel("X One");
+			for (const [input, collapsed] of [
+				["/plan ask ^a/x ", `/plan ask ${chip} `],
+				[`\${HOME} ask ^a/x `, `\${HOME} ask ${chip} `],
+			]) {
+				const editor = makeModelEditor();
+				for (const ch of input) editor.handleInput(ch);
+				expect(editor.getText()).toBe(collapsed);
+				expect(editor.getExpandedText()).toBe(input);
+			}
+		});
+
+		it("collapses completed selectors after bracketed paste", () => {
+			const editor = makeModelEditor();
+			editor.handleInput(bracketedPaste("paste ^c/z "));
+
+			const chip = modelMentionChipLabel("Zed");
+			expect(editor.getText()).toBe(`paste ${chip} `);
+			expect(editor.getExpandedText()).toBe("paste ^c/z ");
+		});
+
+		it("self-heals the atomic token pattern after history restores mention atoms", () => {
+			const editor = makeModelEditor();
+			for (const ch of "use ^a/x ") editor.handleInput(ch);
+			const chip = modelMentionChipLabel("X One");
+			editor.rememberDraft();
+			editor.clearPasteState();
+			editor.setText("");
+			editor.atomicTokenPattern = COMPOSER_TOKEN_REGEX;
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe(`use ${chip} `);
+			editor.decorateText(editor.getText(), { line: 0, startCol: 0, endCol: editor.getText().length });
+			expect(editor.atomicTokenPattern.source).not.toBe(COMPOSER_TOKEN_REGEX.source);
+
+			editor.handleInput("\x05");
+			editor.handleInput("\x7f");
+			editor.handleInput("\x7f");
+			expect(editor.getText()).toBe("use ");
+		});
 	});
 
 	it("strips `file://` URLs to the local filesystem path before loading the image", () => {

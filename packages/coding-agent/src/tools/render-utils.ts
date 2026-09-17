@@ -23,6 +23,40 @@ import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
 export { Ellipsis } from "@oh-my-pi/pi-natives";
 export { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 
+/**
+ * Normalize stray carriage returns in model-authored display text. Some models
+ * (observed with GLM via OpenRouter) degenerate into injecting `\r` runs between
+ * words inside JSON string values; CommonMark treats a lone `\r` as a line
+ * ending, which splatters the text one word per row. CRLF becomes LF, CR runs
+ * collapse to a single space — word separators in prose, one indent unit in
+ * mangled code previews.
+ */
+export function sanitizeCarriageReturns(text: string): string {
+	if (!text.includes("\r")) return text;
+	return text.replaceAll("\r\n", "\n").replace(/\r+/g, " ");
+}
+
+/**
+ * Sanitize raw ask option labels into unique, action-safe display copies.
+ * Degenerate input can sanitize alike (`Retry\rnow`/`Retry now`) or match a
+ * runtime action row (`Other (type your own)`); both would answer the wrong
+ * row, so colliding entries take a numeric suffix. Order and length are
+ * preserved, so indices still align with the original labels for mapping
+ * answers and dialog state back. Every ask race participant (local dialog,
+ * guest selector) must call this with the same `reservedLabels` so a
+ * question renders identically wherever it is answered.
+ */
+export function disambiguateDisplayLabels(rawLabels: string[], reservedLabels: readonly string[]): string[] {
+	const taken = new Set<string>(reservedLabels);
+	return rawLabels.map(raw => {
+		const base = sanitizeCarriageReturns(raw);
+		let candidate = base;
+		for (let suffix = 2; taken.has(candidate); suffix++) candidate = `${base} (${suffix})`;
+		taken.add(candidate);
+		return candidate;
+	});
+}
+
 // =============================================================================
 // Standardized Display Constants
 // =============================================================================
@@ -316,6 +350,21 @@ export function formatMeta(meta: string[], theme: Theme): string {
 function sanitizeErrorText(message: string | undefined): string {
 	const clean = (message ?? "").replace(/^Error:\s*/, "").trim();
 	return clean ? replaceTabs(truncateToWidth(clean, TRUNCATE_LENGTHS.LINE)) : "Unknown error";
+}
+
+/**
+ * Split multi-line tool text into TUI-safe display lines.
+ * Splits CRLF/LF, collapses stray `\r` progress overwrites to the final
+ * segment (mirroring terminal rendering), and expands tabs — so raw
+ * subprocess or fetched output (e.g. Windows ssh emitting CRLF, tab-indented
+ * web content) can't corrupt the framed block layout with cursor-moving
+ * control characters or tab-stop width mismatches.
+ */
+export function sanitizeDisplayLines(text: string): string[] {
+	return text.split(/\r?\n/).map(line => {
+		const idx = line.lastIndexOf("\r");
+		return replaceTabs(idx < 0 ? line : line.slice(idx + 1));
+	});
 }
 
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {
@@ -769,11 +818,39 @@ export function truncateDiffByHunk(
 // Path Utilities
 // =============================================================================
 
+let cachedHomeDir: string | undefined;
+let cachedHomedir: typeof os.homedir | undefined;
+
+function defaultHomeDir(): string {
+	const homedir = os.homedir;
+	if (cachedHomeDir === undefined || cachedHomedir !== homedir) {
+		cachedHomedir = homedir;
+		cachedHomeDir = homedir();
+	}
+	return cachedHomeDir;
+}
+
+const homePatternCache = new Map<string, RegExp>();
+function homePatternFor(homeDir: string, windowsStyle: boolean): RegExp {
+	const key = `${windowsStyle ? 1 : 0} ${homeDir}`;
+	let pattern = homePatternCache.get(key);
+	if (pattern === undefined) {
+		const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		pattern = new RegExp(
+			`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
+			windowsStyle ? "gi" : "g",
+		);
+		if (homePatternCache.size >= 16) homePatternCache.clear();
+		homePatternCache.set(key, pattern);
+	}
+	return pattern;
+}
+
 export function shortenPath(filePath: unknown, homeDir?: string): string {
 	if (typeof filePath !== "string") {
 		return "";
 	}
-	const home = homeDir ?? os.homedir();
+	const home = homeDir ?? defaultHomeDir();
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
 	const hasHomePrefix = windowsStyle
 		? filePath.toLowerCase().startsWith(home.toLowerCase())
@@ -785,6 +862,50 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 		}
 	}
 	return filePath;
+}
+
+/** Shorten home-prefixed paths inside free text, preserving surrounding
+ * punctuation so error strings with embedded paths stay readable. */
+export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
+	const resolvedHome = homeDir ?? defaultHomeDir();
+	const shortenedHome = resolvedHome.length > 1 ? shortenPath(resolvedHome, resolvedHome) : resolvedHome;
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
+	const homePattern = homePatternFor(resolvedHome, windowsStyle);
+	const textWithShortenedHome =
+		shortenedHome !== resolvedHome ? text.replace(homePattern, match => shortenPath(match, resolvedHome)) : text;
+	return textWithShortenedHome
+		.split(" ")
+		.map(segment => {
+			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
+			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
+			const end = segment.length - trailing.length;
+			if (leading.length >= end) return segment;
+			const shortened = shortenPath(segment.slice(leading.length, end), resolvedHome);
+			const normalized = shortened.startsWith("~")
+				? shortened.replaceAll(path.win32.sep, path.posix.sep)
+				: shortened;
+			return `${leading}${normalized}${trailing}`;
+		})
+		.join(" ");
+}
+
+/** Sanitize warning text before showing it in TUI, including embedded home paths. */
+export function sanitizeDisplayWarning(text: string): string {
+	return shortenEmbeddedPaths(
+		replaceTabs(sanitizeText(text))
+			.replace(/[\r\n]+/g, " ")
+			.trim(),
+	);
+}
+
+/** Sanitize and bound warning text before showing it in TUI. */
+export function sanitizeDisplayWarnings(warnings: readonly string[]): string[] {
+	const visible = warnings
+		.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS)
+		.map(warning => truncateToWidth(sanitizeDisplayWarning(warning), TRUNCATE_LENGTHS.LONG));
+	const hidden = warnings.length - visible.length;
+	if (hidden > 0) visible.push(`… ${hidden} more ${pluralize("warning", hidden)}`);
+	return visible;
 }
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {

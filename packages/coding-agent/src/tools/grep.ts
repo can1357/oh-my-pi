@@ -27,7 +27,12 @@ import { InternalUrlRouter } from "../internal-urls/router";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import type { Theme } from "../modes/theme/theme";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
-import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead, truncateLine } from "../session/streaming-output";
+import {
+	DEFAULT_MAX_COLUMN,
+	type TruncationResult,
+	truncateHead,
+	truncateLineBytes,
+} from "../session/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import {
@@ -43,6 +48,7 @@ import {
 } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
+import { getExperimentalContextSession } from "./context-notes";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
@@ -55,6 +61,7 @@ import {
 	type LineRange,
 	parseLineRanges,
 	pathTargetsSsh,
+	probeLiteralPathExists,
 	type ResolvedSearchTarget,
 	resolveReadPath,
 	resolveToolSearchScope,
@@ -195,7 +202,7 @@ async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promi
 					`path entry "${entry}" — only line-range selectors like ":50-100" are supported (no ":raw"/":conflicts")`,
 				);
 			}
-			if (hasGlobPathChars(split.path)) {
+			if (hasGlobPathChars(split.path) && (await probeLiteralPathExists(split.path, cwd)) === "missing") {
 				throw new ToolError(`Line-range selector requires a single file, not a glob: ${entry}`);
 			}
 			clean = split.path;
@@ -548,7 +555,7 @@ async function nativeChunkedLineIndexes(
 }
 
 function makeContextLine(lines: readonly string[], lineIndex: number): { lineNumber: number; line: string } {
-	const { text } = truncateLine(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
+	const { text } = truncateLineBytes(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
 	return { lineNumber: lineIndex + 1, line: text };
 }
 
@@ -562,7 +569,7 @@ function makeVirtualMatch(
 	nextMatchLine: number,
 ): GrepMatch {
 	const lineNumber = lineIndex + 1;
-	const { text, wasTruncated } = truncateLine(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
+	const { text, wasTruncated } = truncateLineBytes(lines[lineIndex] ?? "", DEFAULT_MAX_COLUMN);
 	const match: GrepMatch = {
 		path: resource.path,
 		lineNumber,
@@ -781,6 +788,8 @@ async function resolveInternalSearchInputs(opts: {
 	skills?: ResolveContext["skills"];
 	rules?: ResolveContext["rules"];
 	sessionFile?: string;
+	experimentalContextManagement: boolean;
+	getSessionBranch: ResolveContext["getSessionBranch"];
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
 }): Promise<InternalSearchInputResolution> {
@@ -801,6 +810,8 @@ async function resolveInternalSearchInputs(opts: {
 		localProtocolOptions: opts.localProtocolOptions,
 		skills: opts.skills,
 		rules: opts.rules,
+		experimentalContextManagement: opts.experimentalContextManagement,
+		getSessionBranch: opts.getSessionBranch,
 		skipDirectoryListing: true,
 		// Try path-only first so large artifacts (and any other handler that
 		// separates path from content) resolve without materializing bytes.
@@ -1013,6 +1024,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					skills: this.session.skills,
 					rules: this.session.activeRules,
 					sessionFile: this.session.getSessionFile() ?? undefined,
+					experimentalContextManagement:
+						this.session.settings.get("compaction.experimentalContextManagement") === true,
+					getSessionBranch: () => getExperimentalContextSession(this.session).getBranch(),
 					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 					agentRegistry: this.session.agentRegistry,
 				});
@@ -1620,7 +1634,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				if (linesTruncated) details.linesTruncated = true;
 				const resultBuilder = toolResult(details)
 					.text(output)
-					.limits({ columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined });
+					.limits({ columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined, columnUnit: "bytes" });
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });
 				}

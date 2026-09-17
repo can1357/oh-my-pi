@@ -120,14 +120,40 @@ describe("SelectorController login", () => {
 		expect(editorSlot).toEqual([editor]);
 		expect(renderPresented(presentedBlocks)).not.toContain("Successfully logged in");
 	});
-	it("routes enhanced paste into a direct API-key prompt", async () => {
+	it("submits exact prompt values while hiding secret input and retained answers", async () => {
 		const tui = { requestRender: vi.fn() } as unknown as TUI;
 		const dialog = new LoginDialogComponent(tui, "openrouter", vi.fn());
-		const prompt = dialog.showPrompt("Paste your OpenRouter API key");
+		const ordinary = dialog.showPrompt({ message: "Paste your OpenRouter API key" });
 
 		dialog.pasteText("OMP_PASTE_TEST_123");
 		dialog.handleInput("\n");
+		await expect(ordinary).resolves.toBe("OMP_PASTE_TEST_123");
 
-		await expect(prompt).resolves.toBe("OMP_PASTE_TEST_123");
+		for (const nextPrompt of [
+			() => dialog.showPrompt({ message: "Account label" }),
+			() => dialog.showManualInput("Authorization code"),
+		]) {
+			const secretValue = crypto.randomUUID();
+			const secret = dialog.showPrompt({ message: "Consumer key", secret: true });
+			dialog.pasteText(secretValue);
+			const masked = dialog.render(120).join("\n");
+			expect(masked).not.toContain(secretValue);
+			dialog.handleInput("\x15"); // Retain the secret in the undo and kill histories.
+			dialog.handleInput("\x19");
+			dialog.handleInput("\n");
+			await expect(secret).resolves.toBe(secretValue);
+
+			const next = nextPrompt();
+			dialog.handleInput("\x1f");
+			dialog.handleInput("\x1f");
+			dialog.handleInput("\x19");
+			expect(dialog.render(120).join("\n")).not.toContain(secretValue);
+			dialog.pasteText("visible label");
+			const rendered = dialog.render(120).join("\n");
+			expect(rendered).not.toContain(secretValue);
+			expect(rendered).toContain("visible label");
+			dialog.handleInput("\n");
+			await expect(next).resolves.toBe("visible label");
+		}
 	});
 });

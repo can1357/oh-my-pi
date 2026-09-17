@@ -923,11 +923,17 @@ fn closest_fragment(content: &str, pattern: &str) -> (String, usize, f64) {
 	if pattern.len() <= 160 {
 		for (line, line_offset, normalized, _) in ranked {
 			let width = pattern.len().min(normalized.text.len());
+			// The tail window only adds coverage when `len - width` lands on a
+			// char boundary (e.g. width 0 appends `len`); `char_indices` already
+			// yields every other boundary, and an unaligned fallback slices
+			// inside multibyte chars (e.g. CJK) and panics.
+			let tail = normalized.text.len().saturating_sub(width);
+			let tail = normalized.text.is_char_boundary(tail).then_some(tail);
 			for start in normalized
 				.text
 				.char_indices()
 				.map(|(index, _)| index)
-				.chain(std::iter::once(normalized.text.len().saturating_sub(width)))
+				.chain(tail)
 			{
 				let end = start + width;
 				if end > normalized.text.len() || !normalized.text.is_char_boundary(end) {
@@ -954,6 +960,7 @@ fn same_rewrite_for_all(
 	candidates: &[Candidate],
 ) -> bool {
 	match &operation.rewrite {
+		OperationRewrite::After { .. } => true,
 		OperationRewrite::Explicit { text } => {
 			let gaps = text.matches(GAP).count();
 			pattern
@@ -1104,27 +1111,33 @@ pub(crate) fn locate(
 			standalone_operation,
 		));
 	}
-	if candidates.len() <= 4 && !operation.desired_state {
+	if candidates.len() <= 4
+		&& !operation.desired_state
+		&& !matches!(operation.rewrite, OperationRewrite::After { .. })
+	{
 		let outcomes = candidates
 			.iter()
-			.map(|candidate| match &operation.rewrite {
-				OperationRewrite::Explicit { text } => {
-					format!("{}{}{}", &content[..candidate.start], text, &content[candidate.end..])
-				},
-				OperationRewrite::Inline { replacements } => {
-					let mut result = content.to_owned();
-					let mut spans = candidate
-						.selection_spans
-						.iter()
-						.copied()
-						.zip(replacements)
-						.collect::<Vec<_>>();
-					spans.sort_by_key(|((start, _), _)| std::cmp::Reverse(*start));
-					for ((start, end), replacement) in spans {
-						result.replace_range(start..end, replacement);
-					}
-					result
-				},
+			.filter_map(|candidate| {
+				Some(match &operation.rewrite {
+					OperationRewrite::After { .. } => return None,
+					OperationRewrite::Explicit { text } => {
+						format!("{}{}{}", &content[..candidate.start], text, &content[candidate.end..])
+					},
+					OperationRewrite::Inline { replacements } => {
+						let mut result = content.to_owned();
+						let mut spans = candidate
+							.selection_spans
+							.iter()
+							.copied()
+							.zip(replacements)
+							.collect::<Vec<_>>();
+						spans.sort_by_key(|((start, _), _)| std::cmp::Reverse(*start));
+						for ((start, end), replacement) in spans {
+							result.replace_range(start..end, replacement);
+						}
+						result
+					},
+				})
 			})
 			.map(|outcome| normalize_text(&outcome).text)
 			.collect::<HashSet<_>>();
@@ -2180,6 +2193,29 @@ fn apply_operations(
 			candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.start));
 		}
 		match &operation.rewrite {
+			OperationRewrite::After { text } => {
+				for candidate in &candidates {
+					// Insert before the final anchor line's newline, retaining its EOF convention.
+					let end = candidate.match_end;
+					let offset = if end > 0 && content.as_bytes()[end - 1] == b'\n' {
+						end - 1
+					} else {
+						content[end..]
+							.find('\n')
+							.map_or(content.len(), |at| end + at)
+					};
+					let mut replacement = String::with_capacity(text.len());
+					replacement.push('\n');
+					replacement.push_str(text.strip_suffix('\n').unwrap_or(text));
+					planned.push(PlannedEdit {
+						start: offset,
+						end: offset,
+						replacement,
+						operation_number: number,
+					});
+					last_match = candidate.match_start;
+				}
+			},
 			OperationRewrite::Inline { replacements } => {
 				let replacements = replacements
 					.iter()

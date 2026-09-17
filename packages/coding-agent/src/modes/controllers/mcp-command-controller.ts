@@ -397,8 +397,9 @@ export class MCPCommandController {
 	 * Handle /mcp command and route to subcommands
 	 */
 	async handle(text: string): Promise<void> {
-		const parts = text.trim().split(/\s+/);
+		const parts = parseCommandArgs(text.trim());
 		const subcommand = parts[1]?.toLowerCase();
+		const serverName = parts.slice(2).join(" ") || undefined;
 
 		if (!subcommand || subcommand === "help") {
 			this.#showHelp();
@@ -417,19 +418,19 @@ export class MCPCommandController {
 				await this.#handleRemove(text);
 				break;
 			case "test":
-				await this.#handleTest(parts[2]);
+				await this.#handleTest(serverName);
 				break;
 			case "reauth":
-				await this.#handleReauth(parts[2]);
+				await this.#handleReauth(serverName);
 				break;
 			case "unauth":
-				await this.#handleUnauth(parts[2]);
+				await this.#handleUnauth(serverName);
 				break;
 			case "enable":
-				await this.#handleSetEnabled(parts[2], true);
+				await this.#handleSetEnabled(serverName, true);
 				break;
 			case "disable":
-				await this.#handleSetEnabled(parts[2], false);
+				await this.#handleSetEnabled(serverName, false);
 				break;
 			case "resources":
 				await this.#handleResources();
@@ -450,7 +451,7 @@ export class MCPCommandController {
 				await this.#handleSmitheryLogout();
 				break;
 			case "reconnect":
-				await this.#handleReconnect(parts[2]);
+				await this.#handleReconnect(serverName);
 				break;
 			case "reload":
 				await this.#handleReload();
@@ -2098,12 +2099,16 @@ export class MCPCommandController {
 		try {
 			this.#showMessage(["", theme.fg("muted", "Reloading MCP servers and runtime tools..."), ""].join("\n"));
 			await this.reloadServers();
-			const connectedCount = this.ctx.mcpManager?.getConnectedServers().length ?? 0;
+			const manager = this.ctx.mcpManager;
+			const connectedCount = manager?.getConnectedServers().length ?? 0;
+			const connectingCount =
+				manager?.getAllServerNames().filter(name => manager.getConnectionStatus(name) === "connecting").length ?? 0;
 			this.#showMessage(
 				[
 					"",
 					theme.fg("success", `${theme.icon.loop} MCP reload complete`),
 					`  Connected servers: ${connectedCount}`,
+					`  Connecting servers: ${connectingCount}`,
 					"",
 				].join("\n"),
 			);

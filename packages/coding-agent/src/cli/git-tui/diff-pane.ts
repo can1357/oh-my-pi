@@ -511,7 +511,8 @@ function palette(): DiffPalette {
 	const added = theme.getColorHex("toolDiffAdded");
 	const removed = theme.getColorHex("toolDiffRemoved");
 	const accent = theme.getColorHex("accent");
-	const dark = theme.statusLineLuminance === undefined || theme.statusLineLuminance <= 0.5;
+	const luminance = theme.statusLineLuminance;
+	const dark = luminance === undefined || luminance <= 0.5;
 	const canvas = canvasHex();
 	const text = textHex();
 	const key = `${added}\u0000${removed}\u0000${accent}\u0000${dark}\u0000${canvas}\u0000${text}`;
