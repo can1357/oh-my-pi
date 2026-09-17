@@ -714,4 +714,18 @@ describe("AuthStorage Claude tier reserve health", () => {
 		expect(health.state).toBe("depleted");
 		expect(health.accounts[0]?.resetsAt).toBeGreaterThan(Date.now());
 	});
+
+	it("resolves Anthropic OAuth for equal-rank ambiguous discovered ids", async () => {
+		const ambiguousId = "openai-compatible-chat-b524a192-5149-4722-ba4c-aec8d52dbaef/cohere/north-mini-code:free";
+		const storage = new AuthStorage(makeStore([oauthRow(1)]), {
+			rankingStrategyResolver: provider => (provider === "anthropic" ? claudeRankingStrategy : undefined),
+			configValueResolver: async value => value,
+		});
+		await storage.reload();
+		storages.push(storage);
+
+		const access = await storage.getOAuthAccess("anthropic", "session", { modelId: ambiguousId });
+		expect(access?.accessToken).toBe("access-1");
+		expect(access?.accountId).toBe("account-1");
+	});
 });

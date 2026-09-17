@@ -4551,7 +4551,7 @@ export function processInteractionUpdate(
 	} else if (updateCase === "turnEnded") {
 		output.stopReason = "stop";
 		if (
-			classifyModel("cursor", output.model).family === "k3" &&
+			classifyModel("cursor", output.model, { lenient: true }).family === "k3" &&
 			!output.content.some(item => item.type === "thinking" && item.thinking.length > 0)
 		) {
 			logger.warn(
@@ -4763,7 +4763,7 @@ type CursorRootPromptAssistantContentPart =
 function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | undefined): boolean {
 	return (
 		targetModelId !== undefined &&
-		classifyModel("cursor", targetModelId).family === "k3" &&
+		classifyModel("cursor", targetModelId, { lenient: true }).family === "k3" &&
 		msg.api === "cursor-agent" &&
 		msg.provider === "cursor" &&
 		msg.model === targetModelId
@@ -4811,7 +4811,7 @@ function assertCursorKimiK3HistoryReplayable(
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
 ): void {
-	if (!targetModelId || classifyModel("cursor", targetModelId).family !== "k3") return;
+	if (!targetModelId || classifyModel("cursor", targetModelId, { lenient: true }).family !== "k3") return;
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const missingThinkingTurns: number[] = [];
 	const newlyWarnedKeys: string[] = [];
@@ -5312,7 +5312,7 @@ function resolveCursorWireModel(
 	const collapsed = collapseVariantId("cursor", wireModelId);
 	const effort = collapsed.effort;
 	const base = effort !== undefined ? collapsed.logicalId : undefined;
-	if (effort !== undefined && base && classifyModel("cursor", base).class === "openai") {
+	if (effort !== undefined && base && classifyModel("cursor", base, { lenient: true }).class === "openai") {
 		if (effort === "off") {
 			return { modelId: base, parameters: [], maxMode };
 		}

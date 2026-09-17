@@ -802,7 +802,10 @@ export const claudeUsageProvider: UsageProvider = {
 function getClaudeModelKind(context: CredentialRankingContext | undefined): ClaudeModelKind | undefined {
 	const modelId = context?.modelId;
 	if (!modelId) return undefined;
-	const family = classifyModel("anthropic", modelId).family;
+	// AuthStorage OAuth selection calls blockScope on every request. Keep this
+	// runtime classify lenient so an equal-rank discovered/custom id becomes
+	// unknown instead of throwing AmbiguousIdentityError before send.
+	const family = classifyModel("anthropic", modelId, { lenient: true }).family;
 	return family === "opus" || family === "sonnet" || family === "fable" || family === "mythos" ? family : undefined;
 }
 

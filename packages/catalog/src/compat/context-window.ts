@@ -21,7 +21,7 @@ export function resolveMaxContextWindow(model: Model): number | undefined {
 	const key = `${model.provider} ${model.id} ${model.api}`;
 	let curated = ruleMaximumCache.get(key);
 	if (curated === undefined) {
-		const maximum = resolveModelPolicy(toModelSpec(model)).catalog.maxContextWindow;
+		const maximum = resolveModelPolicy(toModelSpec(model), { strict: false }).catalog.maxContextWindow;
 		curated = typeof maximum === "number" && Number.isFinite(maximum) && maximum > 0 ? maximum : null;
 		if (ruleMaximumCache.size >= RULE_POLICY_CACHE_MAX) ruleMaximumCache.clear();
 		ruleMaximumCache.set(key, curated);
@@ -56,7 +56,7 @@ export function clampsContextOverride(model: Model): boolean {
 	const key = `${model.provider} ${model.id} ${model.api}`;
 	const cached = clampOverrideCache.get(key);
 	if (cached !== undefined) return cached;
-	const clamps = resolveModelPolicy(toModelSpec(model)).catalog.clampContextOverride === true;
+	const clamps = resolveModelPolicy(toModelSpec(model), { strict: false }).catalog.clampContextOverride === true;
 	if (clampOverrideCache.size >= RULE_POLICY_CACHE_MAX) clampOverrideCache.clear();
 	clampOverrideCache.set(key, clamps);
 	return clamps;

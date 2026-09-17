@@ -5,6 +5,10 @@
 
 - Fixed Anthropic prompt-cache breakpoints stalling on sessions with mid-conversation tool changes: the rolling tail no longer parks on tool-control messages that cannot carry `cache_control`, so the growing message tail keeps its breakpoint instead of being re-billed as uncached input ([#12318](https://github.com/can1357/oh-my-pi/issues/12318)).
 
+### Fixed
+
+- Cursor request paths and Anthropic OAuth credential ranking classify discovered/custom model ids with `lenient: true`, so equal-rank taxonomy ties no longer throw `AmbiguousIdentityError` before the request is sent ([#10939](https://github.com/can1357/oh-my-pi/pull/10939)).
+
 ## [18.2.4] - 2026-09-17
 
 ### Added

@@ -5,6 +5,10 @@
 
 - Fixed Yolo-Auto advertising 1M context for Qwen Flash: `qwen3.8-flash` and the paid `yolo` route now resolve to the documented 256K deployment window with the Qwen chat-template reasoning dialect, and `qwen3.8-flash` is the provider default.
 
+### Fixed
+
+- `buildModel` no longer aborts the process when a discovered or custom model id ties two identity classes (for example OmniRoute `openai-compatible-chat-<uuid>/cohere/...` vs the `openai` namespace). Classification is lenient for runtime specs; curated generation explicitly uses strict identity validation, and policy rebaking remains strict by default.
+
 ## [18.2.4] - 2026-09-17
 
 ### Added
