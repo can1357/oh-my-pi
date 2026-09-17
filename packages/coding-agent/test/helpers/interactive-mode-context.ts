@@ -99,6 +99,8 @@ export function createSessionStub(
 		isCompacting: false,
 		isAborting: false,
 		isRetrying: false,
+		hasPendingAsyncWork: () => false,
+		queuedMessageCount: 0,
 		isTtsrAbortPending: false,
 		retryAttempt: 0,
 		messages: [],

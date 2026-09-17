@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+- A turn that settles without a final event no longer leaves the working row and the terminal title stuck, and a focused subagent's row is no longer reaped off an idle parent ([#12169](https://github.com/can1357/oh-my-pi/pull/12169) by [@Krontx](https://github.com/Krontx)).
 ## [18.2.4] - 2026-09-17
 
 ### Added
