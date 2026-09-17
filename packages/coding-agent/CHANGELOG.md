@@ -87,6 +87,8 @@
 - A corrupted or externally modified session file no longer leaves the session impossible to close; a subsequent Ctrl+C exits without rewriting the session log.
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- `tab.waitFor(ms)` on the browser tool now accepts a number of milliseconds as a documented bounded sleep on the tab surface, in addition to the selector form; the `call` action returns it directly instead of coercing through the handle-or-null check ([#12137](https://github.com/can1357/oh-my-pi/issues/12137)).
 
 ## [18.2.1] - 2026-09-15
 
