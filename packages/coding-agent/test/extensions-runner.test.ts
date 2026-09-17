@@ -3434,7 +3434,7 @@ describe("ExtensionRunner", () => {
 
 			// No extension subscribes to `agent_start`: no context allocation, and the
 			// handler-timeout machinery is never entered.
-			await runner.emit({ type: "agent_start" });
+			await runner.emit({ type: "agent_start", runId: 1 });
 			expect(createContextSpy).not.toHaveBeenCalled();
 			expect(errors).toHaveLength(0);
 

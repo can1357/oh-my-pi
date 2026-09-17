@@ -314,7 +314,7 @@ Cancelable pre-events:
 - `before_provider_request` (may replace provider request payload — the replacement is applied by every provider that fires the hook, which is all of them except `devin-agent`, which does not fire it)
 - `after_provider_response`
 - `context`
-- `agent_start` / `agent_end` — agent loop lifecycle notification; `agent_end` remains notification-only
+- `agent_start` / `agent_end` - matching `runId: number` values identify each loop, so extensions can ignore stale end notifications. IDs increase within an `AgentSession`, including continuations and same-object session changes. `agent_end` remains notification-only.
 - `session_stop` — main-session stop hook, awaited before settle. Advisory `{ continue: true, additionalContext }` requests are capped at 8 continuations. Explicit `{ decision: "block", reason }` refusals take precedence over advisory requests, do not consume that allowance, and remain blocking until the hook allows completion or the operator interrupts. A refusal without a reason receives a diagnostic continuation rather than permission to finish. This event never fires for task/subagent sessions and defers until agent-owned background jobs are fully idle (`#hasPendingAsyncWake` in `session/agent-session.ts`).
 - `turn_start` / `turn_end`
 - `message_start` / `message_update` / `message_end` — lifecycle notifications; `message_end` receives a detached message snapshot, so use `tool_result` or `context` when an extension needs to change provider context

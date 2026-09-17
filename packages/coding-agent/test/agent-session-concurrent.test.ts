@@ -706,7 +706,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await session.waitForIdle();
 
 		expect(mock.calls).toHaveLength(1);
-		expect(extensionRunner.emit).toHaveBeenCalledWith({ type: "agent_end", messages: expect.any(Array) });
+		expect(extensionRunner.emit).toHaveBeenCalledWith(expect.objectContaining({ type: "agent_end" }));
 		expect(extensionRunner.emitSessionStop).not.toHaveBeenCalled();
 	});
 
@@ -811,7 +811,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		await session.prompt("First message");
 		await publicAgentEnd;
-		expect(extensionRunner.emit).toHaveBeenCalledWith({ type: "agent_end", messages: expect.any(Array) });
+		expect(extensionRunner.emit).toHaveBeenCalledWith(expect.objectContaining({ type: "agent_end" }));
 
 		releaseExtension();
 		await session.waitForIdle();
@@ -1039,7 +1039,8 @@ describe("AgentSession TTSR resume gate", () => {
 		});
 		ttsrManager.addRule(testRule);
 
-		const extensionEmits: Array<{ type: string; willContinue?: boolean }> = [];
+		const extensionEmits: Array<{ type: string; runId: number; willContinue?: boolean }> = [];
+		const runStarts: number[] = [];
 		const continuationStarted = Promise.withResolvers<void>();
 
 		let streamCallCount = 0;
@@ -1070,8 +1071,11 @@ describe("AgentSession TTSR resume gate", () => {
 		const extensionRuntime = new ExtensionRuntime();
 		const extension = await loadExtensionFromFactory(
 			pi => {
+				pi.on("agent_start", event => {
+					runStarts.push(event.runId);
+				});
 				pi.on("agent_end", event => {
-					extensionEmits.push({ type: event.type, willContinue: event.willContinue });
+					extensionEmits.push({ type: event.type, runId: event.runId, willContinue: event.willContinue });
 				});
 			},
 			tempDir,
@@ -1122,6 +1126,10 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(ttsrEnds[0]?.willContinue).toBe(true);
 		expect(ttsrEnds.slice(1, -1).every(event => !event.willContinue)).toBe(true);
 		expect(ttsrEnds.at(-1)?.willContinue).toBeFalsy();
+		// Maintenance delayed the first end before its notification was built.
+		expect(runStarts[1]!).toBeGreaterThan(runStarts[0]!);
+		expect(ttsrEnds[0]?.runId).toBe(runStarts[0]);
+		expect(ttsrEnds.at(-1)?.runId).toBe(runStarts.at(-1));
 
 		extensionEmits.length = 0;
 		const ordinaryAgent = new Agent({
