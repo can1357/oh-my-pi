@@ -648,7 +648,7 @@ exit 64
 		// `$!` reports the real external PID, which is all this test checks.
 		const sleepBin = $which("sleep");
 		if (!sleepBin) throw new Error("sleep executable not found");
-		const result = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $!`, {
+		const result = await executeBash(`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $!`, {
 			cwd: tempDir,
 			timeout: 5000,
 		});
@@ -1418,10 +1418,13 @@ describe("executeBash :async: background retention", () => {
 				// sees it and the retain logic keeps the shell alive while the child
 				// runs. `$!` is the external child's own pid (no transparent wrapper
 				// to unwrap), so it is the process we assert on.
-				const res = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`, {
-					sessionKey: "retain-probe:async:job1",
-					cwd: tmp,
-				});
+				const res = await executeBash(
+					`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`,
+					{
+						sessionKey: "retain-probe:async:job1",
+						cwd: tmp,
+					},
+				);
 				expect(res.cancelled).toBe(false);
 				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
 				expect(Number.isInteger(pid)).toBe(true);
