@@ -20,6 +20,7 @@ import type { ILiveTransport } from "./transport-types";
 import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { DEFAULT_GROK_LIVE_VOICE, DEFAULT_LIVE_VOICE } from "./voices";
 
+const OUTPUT_ACTIVE_LEVEL = 0.015;
 
 /** Incremental or final transcript for one realtime conversational turn. */
 export interface LiveTranscript {
