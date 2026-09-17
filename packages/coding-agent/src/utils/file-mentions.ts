@@ -11,7 +11,11 @@ import type { EditStore } from "@oh-my-pi/pi-natives";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { formatAge, formatBytes, isProbablyBinary, readImageMetadata } from "@oh-my-pi/pi-utils";
-import { formatHashlineHeader, formatNumberedLines, splitAddressableFileLines } from "../tools/hashline-format";
+import {
+	formatHashlineHeader,
+	formatNumberedLines,
+	splitAddressableFileLines,
+} from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { normalizeToLF } from "../edit/normalize";
 import type { FileMentionMessage } from "../session/messages";
 import {
@@ -19,18 +23,11 @@ import {
 	formatHeadTruncationNotice,
 	truncateHead,
 	truncateHeadBytes,
-} from "../session/streaming-output";
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, resizeImage } from "./image-resize";
-import {
-	VideoError,
-	buildVideoContactSheetPng,
-	createVideoPreviewImage,
-	formatVideoDetails,
-	isVideoPath,
-	probeVideo,
-	videoMimeForPath,
-} from "./video";
+import { VideoError, buildVideoContactSheetPng, formatVideoDetails, probeVideo, videoMimeForPath } from "./video";
+import { createVideoPreviewImage, isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 
 /** Regex to match @filepath patterns in text */
 const FILE_MENTION_REGEX = /@(?:"([^"]+)"|'([^']+)'|([^\s@]+))/g;

@@ -5,7 +5,8 @@ import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { getBrowserProfilesDir } from "@oh-my-pi/pi-utils";
 import type { Socket } from "bun";
 import type { Browser, Page } from "puppeteer-core";
-import { ToolError, throwIfAborted } from "../tool-errors";
+import { throwIfAborted } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const ATTACH_TARGET_SKIP_PATTERN =
 	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;

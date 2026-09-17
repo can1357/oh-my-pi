@@ -4,9 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool, getEditStore, type PatchParams } from "@oh-my-pi/pi-coding-agent/edit";
-import { formatHashlineHeader } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
+import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { EditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const MODEL = "openai/gpt-5.6";

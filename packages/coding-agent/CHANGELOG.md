@@ -2,9 +2,31 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Moved every terminal-UI module (theme, tool renderers, chat/overlay/status-line/composer components, setup wizard, git/ps/debug apps) to `@oh-my-pi/pi-tui`; `@oh-my-pi/pi-coding-agent/modes/theme/*`, `/modes/components/*`, `/tui/*`, `/tools/render-utils` and related subpaths no longer exist. Names re-exported from the package root (`Theme`, `theme`, hook/editor components, tool Details types) are unchanged.
+
+### Changed
+
+- Keyless Parallel web search now leads the default provider chain ahead of Perplexity.
+
 ### Fixed
 
+- Fixed the `edit` tool splicing a literal `…` into the file when a `<SM:FIND>` opened or closed with an ellipsis (a line-end `…` spanning the rest of a line, or a whole-line `…` at either edge) and `<SM:PUT>` re-emitted it. An edge gap captures nothing, so the matching `<SM:PUT>` ellipsis now re-emits nothing and the anchor keeps its own newline; an identical `<SM:FIND>`/`<SM:PUT>` pair reports no change instead of writing the marker. A leading gap combined with an inner gap no longer panics.
+- Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
 - Extension lifecycle events now carry matching run IDs so integrations can ignore stale completion notifications ([#12301](https://github.com/can1357/oh-my-pi/pull/12301) by [@ryxli](https://github.com/ryxli)).
+
+## [18.2.4] - 2026-09-17
+
+### Added
+
+- Added an optional live generation speed readout via `composer.tokenRate`, showing smoothed tokens-per-second output in the working row and keeping the rate visible between turns.
+- Added TypeSafe provider support through `/login typesafe` or `TYPESAFE_API_KEY`. TypeSafe can power thinking-level detection, unexpected-stop detection, and AI-assisted git staging with calibrated judgment probabilities; configure `providers.judgmentProvider` as `auto`, `typesafe`, or `llm` to select the judgment backend.
+- Added the `judge(state, questions)` evaluation helper for Python and JavaScript cell code, supporting typed choice, boolean, and score judgments. It returns a handle whose `.wait()` method provides answers and probabilities, using TypeSafe when configured and available or a fallback chat model otherwise.
+
+### Changed
+
+- Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
 
 ## [18.2.3] - 2026-09-17
 

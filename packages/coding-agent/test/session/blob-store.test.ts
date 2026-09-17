@@ -1,11 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import {
 	BlobStore,
-	blobExtensionForImageMimeType,
 	externalizeImageData,
 	parseBlobRef,
 	resolveImageData,
 } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("BlobStore image display paths", () => {

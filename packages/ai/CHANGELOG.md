@@ -1,6 +1,19 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed Anthropic prompt-cache breakpoints stalling on sessions with mid-conversation tool changes: the rolling tail no longer parks on tool-control messages that cannot carry `cache_control`, so the growing message tail keeps its breakpoint instead of being re-billed as uncached input ([#12318](https://github.com/can1357/oh-my-pi/issues/12318)).
+
+## [18.2.4] - 2026-09-17
+
+### Added
+
+- Added the `judgment` module for typed questions over JSON state, including choice, yes/no, and score judgments through the `Judge` interface.
+- Added `TypeSafeJudge` support with TypeSafe System One authentication, credential rotation on unauthorized responses, and retry-aware backoff.
+- Added `TextJudge` and `chatTextBackend` for model-based judgments, with structured state rendering and safeguards that prevent embedded requests from being executed.
+- Added automatic format-correction retries to `TextJudge` when models return malformed output.
+- Added the `guardState` option to `TextBackend` to control whether safety guidance is included in prompts.
 
 ## [18.2.3] - 2026-09-17
 

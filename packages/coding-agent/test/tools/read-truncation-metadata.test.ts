@@ -5,11 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
-import type { ReadToolDetails, ReadTruncationStats, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { formatTruncationMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { ReadTool, readToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-tui/theme";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ReadToolDetails, ReadTruncationStats } from "@oh-my-pi/pi-tui/tools/read";
+import { formatTruncationMetaNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { readToolRenderer } from "@oh-my-pi/pi-tui/tools/read";
 import { writeArchive } from "@oh-my-pi/pi-utils/ar";
 
 function textOutput(result: AgentToolResult<ReadToolDetails>): string {

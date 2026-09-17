@@ -185,6 +185,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		}
 	}
 
+	// Shares the completion handle registry; the host settles it with the typed
+	// answers as structured data, so `wait()` never falls back to text parsing.
+	class JudgmentHandle extends CompletionHandle {
+		toString() {
+			return `<judgment ${this.id}>`;
+		}
+	}
+
 	// Immediate-return wrapper for the async `completion()`/`agent()` factories.
 	// JS cannot hand back a handle synchronously — the bridge allocates the id
 	// over an async round-trip — so the factory returns this thenable instead:
@@ -297,6 +305,18 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			const result = await globalThis.__omp_call_tool__("__completion__", { prompt, ...options });
 			if (!result || typeof result.id !== "string") throw new Error("completion() did not return a handle");
 			return new CompletionHandle(result.id, options.schema);
+		})();
+		return new PendingHandle(promise);
+	};
+
+	const judge = (state, questions) => {
+		const promise = (async () => {
+			if (questions === null || typeof questions !== "object" || Array.isArray(questions)) {
+				throw new TypeError("judge(state, questions) expects questions as an object keyed by id");
+			}
+			const result = await globalThis.__omp_call_tool__("__judge__", { state, questions });
+			if (!result || typeof result.id !== "string") throw new Error("judge() did not return a handle");
+			return new JudgmentHandle(result.id);
 		})();
 		return new PendingHandle(promise);
 	};
@@ -487,6 +507,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.wait = wait;
 	globalThis.AgentHandle = AgentHandle;
 	globalThis.CompletionHandle = CompletionHandle;
+	globalThis.judge = judge;
+	globalThis.JudgmentHandle = JudgmentHandle;
 	globalThis.workpool = workpool;
 	globalThis.WorkPool = WorkPool;
 	globalThis.log = log;
