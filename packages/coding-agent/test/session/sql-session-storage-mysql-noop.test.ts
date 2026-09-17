@@ -64,12 +64,15 @@ function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeR
 					rows.set(path, { content, mtimeMs });
 					return mysqlResult(1, [{ path }]);
 				}
-				if (values.length === 3) {
+				if (sql.includes("CONCAT(content, ?)")) {
 					const existing = rows.get(path);
-					rows.set(path, { content: (existing?.content ?? "") + content, mtimeMs });
+					rows.set(path, {
+						content: (existing?.content ?? "") + (values[3] as string),
+						mtimeMs: values[4] as number,
+					});
 					return mysqlResult(existing ? 2 : 1);
 				}
-				rows.set(path, { content, mtimeMs });
+				rows.set(path, { content: values[6] as string, mtimeMs: values[7] as number });
 				return mysqlResult(1);
 			}
 			if (sql.startsWith("UPDATE")) {
@@ -95,6 +98,9 @@ function mysqlFake(): { client: SqlSessionStorageClient; rows: Map<string, FakeR
 				return mysqlResult(1);
 			}
 			throw new Error(`mysqlFake: unhandled statement: ${sql.slice(0, 60)}`);
+		},
+		async transaction(callback) {
+			return callback(client);
 		},
 	};
 	return { client, rows };

@@ -530,7 +530,7 @@ function getSettingsTabs(): Tab[] {
 	return [
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
-			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
+			const icon = theme.symbol(meta.icon);
 			return { id, label: `${icon} ${meta.label}`, short: icon };
 		}),
 		{ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package },
@@ -884,7 +884,7 @@ export class SettingsSelectorComponent implements Component {
 			const meta = TAB_METADATA[result.tab];
 			items.push({
 				id: `__tab:${result.tab}`,
-				label: `${theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0])} ${meta.label}`,
+				label: `${theme.symbol(meta.icon)} ${meta.label}`,
 				currentValue: "",
 				heading: true,
 			});
@@ -931,7 +931,7 @@ export class SettingsSelectorComponent implements Component {
 		const matchedIds = new Set<SettingTab>(matchedTabOrder);
 		for (const id of matchedTabOrder) {
 			const meta = TAB_METADATA[id];
-			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
+			const icon = theme.symbol(meta.icon);
 			const count = counts.get(id) ?? 0;
 			if (count > 0) {
 				matched.push({ id, label: `${icon} ${meta.label} (${count})`, short: `${icon} ${count}` });
@@ -940,11 +940,16 @@ export class SettingsSelectorComponent implements Component {
 		for (const id of SETTING_TABS) {
 			if (matchedIds.has(id)) continue;
 			const meta = TAB_METADATA[id];
-			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
+			const icon = theme.symbol(meta.icon);
 			empty.push({ id, label: `${icon} ${meta.label}`, short: icon, muted: true });
 		}
 		// Plugins hosts its own UI; it is not part of the schema-backed search.
-		empty.push({ id: "plugins", label: `${theme.icon.package} Plugins`, short: theme.icon.package, muted: true });
+		empty.push({
+			id: "plugins",
+			label: `${theme.icon.package} Plugins`,
+			short: theme.icon.package,
+			muted: true,
+		});
 		return [...matched, ...empty];
 	}
 

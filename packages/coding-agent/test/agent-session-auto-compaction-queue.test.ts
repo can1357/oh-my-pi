@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { scheduler } from "node:timers/promises";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -15,6 +14,7 @@ import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/une
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
 
@@ -1626,7 +1626,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("retry.maxRetries", 1);
 		session.settings.set("retry.modelFallback", false);
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
 		});

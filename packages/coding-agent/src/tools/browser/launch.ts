@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which, getPuppeteerDir, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
-import type { Browser, CDPSession, Page, default as Puppeteer, Target } from "puppeteer-core";
+import type { Browser, CDPSession, JSHandle, Page, default as Puppeteer, Target } from "puppeteer-core";
 import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
 import stealthActivityScript from "../puppeteer/01_stealth_activity.txt" with { type: "text" };
 import stealthHairlineScript from "../puppeteer/02_stealth_hairline.txt" with { type: "text" };
@@ -81,6 +81,12 @@ const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
  */
 let puppeteerCwdFailed = false;
 let puppeteerCwdFailure: unknown;
+let jsHandleConstructor: typeof JSHandle | undefined;
+
+/** Identify handles using the lazily loaded Puppeteer instance without triggering an early import. */
+export function isPuppeteerHandle(value: unknown): value is JSHandle {
+	return jsHandleConstructor !== undefined && value instanceof jsHandleConstructor;
+}
 async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppeteer> {
 	const cwdDescriptor = Object.getOwnPropertyDescriptor(process, "cwd");
 	if (!cwdDescriptor || typeof cwdDescriptor.value !== "function") {
@@ -102,7 +108,9 @@ async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppe
 	try {
 		try {
 			// Dynamic import is intentional: Puppeteer probes cwd during module initialization.
-			loaded = (await import("puppeteer-core")).default;
+			const module = await import("puppeteer-core");
+			loaded = module.default;
+			jsHandleConstructor = module.JSHandle;
 		} catch (error) {
 			importFailed = true;
 			importFailure = error;

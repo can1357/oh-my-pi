@@ -513,8 +513,10 @@ export interface CreateAgentSessionOptions {
 	 */
 	preloadedExtensionPaths?: string[];
 	/**
-	 * Session-independent imported extension factories. Child sessions rebind
-	 * these to their own ExtensionAPI without re-evaluating the module graph.
+	 * Session-independent imported extension factories. Child sessions, including
+	 * restricted children, rebind these to their own ExtensionAPI without
+	 * re-evaluating the module graph. Restricted children retain hooks/providers,
+	 * but never expose extension-contributed tools.
 	 * @internal
 	 */
 	preloadedPreparedExtensions?: readonly PreparedExtension[];
@@ -789,18 +791,22 @@ export async function discoverExtensions(cwd?: string): Promise<LoadExtensionsRe
  * runtime) is its own.
  */
 export async function discoverSessionExtensionPaths(
-	options: Pick<CreateAgentSessionOptions, "disableExtensionDiscovery" | "additionalExtensionPaths">,
+	options: Pick<
+		CreateAgentSessionOptions,
+		"disableExtensionDiscovery" | "additionalExtensionPaths" | "extensionRoots"
+	>,
 	cwd: string,
 	settings: Settings,
 ): Promise<string[]> {
-	const configuredPaths = options.disableExtensionDiscovery
-		? (options.additionalExtensionPaths ?? [])
-		: [...(options.additionalExtensionPaths ?? []), ...(settings.get("extensions") ?? [])];
-	const disabledExtensionIds = options.disableExtensionDiscovery
-		? undefined
-		: (settings.get("disabledExtensions") ?? []);
+	const roots = options.extensionRoots?.();
+	const explicit = roots?.explicit ?? options.additionalExtensionPaths ?? [];
+	const explicitOnly = roots ? roots.mode === "explicit-only" : options.disableExtensionDiscovery;
+	const configuredPaths = explicitOnly
+		? [...explicit]
+		: [...explicit, ...(roots?.configured ?? settings.get("extensions") ?? [])];
+	const disabledExtensionIds = explicitOnly ? undefined : (settings.get("disabledExtensions") ?? []);
 	return discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, {
-		ambient: !options.disableExtensionDiscovery,
+		ambient: !explicitOnly,
 	});
 }
 
@@ -1882,6 +1888,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
 			getSessionSpawns: () => options.spawns ?? "*",
+			getSessionAgents: () => session?.getSessionAgents() ?? [],
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -2176,7 +2183,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// re-bind under their own `CustomToolAPI` while skipping the FS scan.
 		toolSession.customToolPaths = customToolPaths;
 
-		// Load extensions. Three paths:
+		// Load extensions. Four paths:
 		//   1. `preloadedExtensions` (CLI): caller already loaded — reuse the
 		//      Extension instances. Shallow-clone `extensions` so the inline
 		//      push below cannot mutate the caller's array. `runtime` is shared
@@ -2191,12 +2198,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
-			// Allocate a session runtime without evaluating caller-provided extension
-			// instances, paths, or factories.
-			extensionPaths = [];
-			extensionsResult = await loadExtensions([], cwd, eventBus);
-		} else if (options.preloadedExtensions) {
+		if (!restrictToolNames && options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,
 				extensions: [...options.preloadedExtensions.extensions],
@@ -2206,12 +2208,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)
 				.filter(p => !p.startsWith("<inline"));
-		} else if (options.preloadedPreparedExtensions) {
-			extensionPaths = options.preloadedPreparedExtensions.map(prepared => prepared.path);
+		} else if (restrictToolNames || options.preloadedPreparedExtensions) {
+			// Restricted children retain parent hooks, not ambient discovery, new
+			// extension inputs, or parent-bound instances. Tool admission stays clamped.
+			const preparedExtensions = options.preloadedPreparedExtensions ?? [];
+			extensionPaths = preparedExtensions.map(prepared => prepared.path);
 			extensionsResult = await logger.time(
 				"bindPreparedExtensions",
 				bindPreparedExtensions,
-				options.preloadedPreparedExtensions,
+				preparedExtensions,
 				cwd,
 				eventBus,
 			);

@@ -10,7 +10,7 @@ import { resolveSpeculationMethod } from "../../session/compaction-methods";
 import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../session/snapcompact-inline";
 import { resolveSpeculationLeadTokens } from "../../session/speculation-lead";
 import type { Tool } from "../../tools";
-import type { theme as Theme } from "../theme/theme";
+import type { Theme } from "../theme/theme";
 
 const GRID_COLS = 20;
 const GRID_ROWS = 10;
@@ -519,7 +519,7 @@ function percentString(part: number, whole: number, fractionDigits = 1): string 
 	return `${pct.toFixed(fractionDigits)}%`;
 }
 
-function buildLegendLines(breakdown: ContextBreakdown, theme: typeof Theme): string[] {
+function buildLegendLines(breakdown: ContextBreakdown, theme: Theme): string[] {
 	const lines: string[] = [];
 	const { model, contextWindow, categories, usedTokens, autoCompactBufferTokens, freeTokens } = breakdown;
 
@@ -617,7 +617,7 @@ function buildLegendLines(breakdown: ContextBreakdown, theme: typeof Theme): str
  * Render a colorful context-usage panel as ANSI text. Output is a series of
  * lines pairing the grid (left) with the legend (right).
  */
-export function renderContextUsage(breakdown: ContextBreakdown, theme: typeof Theme): string {
+export function renderContextUsage(breakdown: ContextBreakdown, theme: Theme): string {
 	if (breakdown.contextWindow <= 0) {
 		return theme.fg("muted", "Context usage is unavailable: no model is selected for this session.");
 	}

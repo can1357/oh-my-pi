@@ -35,7 +35,7 @@ import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
-import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
+import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
 import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
@@ -1781,7 +1781,7 @@ function resolveProviderAuthMode(authStorage: AuthStorage, provider: string): st
 	return "unknown";
 }
 
-export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<typeof theme, "fg">): string {
+export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<Theme, "fg">): string {
 	const lines: string[] = [];
 	lines.push(`${uiTheme.fg("dim", "Name:")} ${details.provider}`);
 	for (const field of details.fields) {
@@ -1805,7 +1805,7 @@ function formatLimitTitle(limit: UsageLimit): string {
 	return limit.label;
 }
 
-function formatWindowSuffix(label: string, windowLabel: string, uiTheme: typeof theme): string {
+function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme): string {
 	const normalizedLabel = label.toLowerCase();
 	const normalizedWindow = windowLabel.toLowerCase();
 	if (normalizedWindow === "quota window") return "";
@@ -1861,7 +1861,7 @@ function formatAccountHeaderRow(
 	reports: UsageReport[],
 	nowMs: number,
 	columnWidth: number,
-	uiTheme: typeof theme,
+	uiTheme: Theme,
 	activeAccount?: OAuthAccountIdentity,
 ): string[] {
 	const parts = limits.map((limit, index) => {
@@ -2030,7 +2030,7 @@ export function formatCompactQuota(
 	return `Quota: ${lines.join(" │ ")}`;
 }
 
-function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: typeof theme): string {
+function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): string {
 	if (status === "neutral") return uiTheme.fg("dim", uiTheme.status.info);
 	if (status === "exhausted") return uiTheme.fg("error", uiTheme.status.error);
 	if (status === "warning") return uiTheme.fg("warning", uiTheme.status.warning);
@@ -2045,7 +2045,7 @@ function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning"
 	return "dim";
 }
 
-function renderUsageBar(limit: UsageLimit, uiTheme: typeof theme, barWidth: number): string {
+function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): string {
 	const usedAmount = limit.amount.used;
 	if (usedAmount !== undefined && isUsedOnlyAbsoluteAmount(limit)) {
 		const used =
@@ -2087,7 +2087,7 @@ function resolveColumnWidth(count: number, available: number, trailing: number):
 
 export function renderUsageReports(
 	reports: UsageReport[],
-	uiTheme: typeof theme,
+	uiTheme: Theme,
 	nowMs: number,
 	availableWidth: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,

@@ -2113,8 +2113,7 @@ export class SelectorController {
 					// opens the browser best-effort.
 					dialog.showAuth(info.url, info.instructions, info.launchUrl);
 				},
-				onPrompt: (prompt: { message: string; placeholder?: string }) =>
-					dialog.showPrompt(prompt.message, prompt.placeholder),
+				onPrompt: prompt => dialog.showPrompt(prompt),
 				onProgress: (message: string) => {
 					dialog.showProgress(message);
 				},

@@ -84,6 +84,9 @@ Pass large payloads via `local://<path>` URIs, NEVER inline text.
 Agent spawning is currently disabled.
 {{else}}
 Pick the most specific agent. Omit `agent` only when the spawn-policy default is that agent.
+{{#if hasModelMentions}}
+Agents named `m<N>` are models the user tagged in this conversation (`<model agent="m<N>" name="…"/>` in their message): the general-purpose task agent pinned to that model. Spawn one only when the user's request names it; never substitute it for a specialist on your own.
+{{/if}}
 {{#list agents join="\n"}}
 ### {{name}}{{#if readOnly}} (READ-ONLY){{/if}}{{#if blocking}} (BLOCKING: inline result){{/if}}
 {{description}}

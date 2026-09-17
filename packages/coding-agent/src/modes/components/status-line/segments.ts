@@ -251,14 +251,14 @@ const modelSegment: StatusLineSegment = {
 				// question-box marker; once resolved it shows `<level>`.
 				const resolved = ctx.session.autoResolvedThinkingLevel();
 				thinkingDisplay = resolved
-					? (theme.thinking[resolved as keyof typeof theme.thinking] ?? resolved)
+					? (theme.thinking[resolved as keyof Theme["thinking"]] ?? resolved)
 					: `${theme.thinking.autoPending} auto`;
 			} else {
 				const level = state.thinkingLevel ?? ThinkingLevel.Off;
 				thinkingDisplay =
 					level === ThinkingLevel.Off
 						? `${theme.status.disabled} off`
-						: (theme.thinking[level as keyof typeof theme.thinking] ?? level);
+						: (theme.thinking[level as keyof Theme["thinking"]] ?? level);
 			}
 		}
 
