@@ -15,7 +15,15 @@
 import { describe, expect, it } from "bun:test";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { AssistantMessage, CacheRetention, Context, Message, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	CacheRetention,
+	Context,
+	Message,
+	Model,
+	ModelSpec,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai/types";
 import { markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -506,6 +514,59 @@ describe("anthropic head caching (general API-key path)", () => {
 		expect(cached).toContain(58);
 		expect(cached).toContain(69);
 		expect(cached).toHaveLength(2);
+	});
+
+	it("skips undecoratable trailing messages so tool-control turns keep a rolling tail breakpoint", async () => {
+		const oAuthModel = buildModel({ ...MODEL_SPEC, id: "claude-fable-5-1", name: "Claude Fable 5.1" });
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const flap = (turn: number): Context["tools"] =>
+			turn % 2 === 0
+				? [
+						...(CONTEXT.tools ?? []),
+						{
+							name: "extra",
+							description: "Extra tool",
+							parameters: { type: "object", properties: {}, additionalProperties: false },
+						},
+					]
+				: CONTEXT.tools;
+		const captureFlap = (messages: Message[], tools: Context["tools"]): Promise<MessageCreateParams> => {
+			const controller = new AbortController();
+			const { promise, resolve } = Promise.withResolvers<MessageCreateParams>();
+			const stream = streamAnthropic(
+				oAuthModel,
+				{ systemPrompt: ["You are helpful."], messages, tools },
+				{
+					apiKey: "sk-ant-api-test",
+					signal: controller.signal,
+					isOAuth: true,
+					sessionId: "sess-1",
+					providerSessionState,
+					onPayload: payload => {
+						resolve(payload as unknown as MessageCreateParams);
+						controller.abort();
+					},
+				},
+			);
+			void stream.result().catch(() => undefined);
+			return promise;
+		};
+		const history: Message[] = [
+			{ role: "user", content: "hello", timestamp: 1 },
+			{ role: "developer", content: "Session policy reminder.", timestamp: 2 },
+		];
+		let flapBody: MessageCreateParams | undefined;
+		for (let turn = 1; turn <= 32; turn++) {
+			flapBody = await captureFlap([...history], flap(turn));
+			history.push(assistantMessage(`answer ${turn}`, turn * 2 + 10));
+			history.push({ role: "user", content: `question ${turn}`, timestamp: turn * 2 + 11 });
+		}
+		if (!flapBody) throw new Error("wire body was not captured");
+		expect(countCacheBreakpoints(flapBody)).toBeLessThanOrEqual(4);
+		const flapCached = findCachedMessageIndices(flapBody);
+		const last = (flapBody.messages?.length ?? 0) - 1;
+		expect(flapCached).toContain(last - 1);
+		expect(flapCached).not.toContain(last);
 	});
 
 	it("allocates additional decimation checkpoints when head breakpoints are absent", async () => {
