@@ -103,7 +103,13 @@ class TabState {
 	groupId: number;
 	/** Whether `chrome.debugger` is currently attached to this tab. */
 	attached = false;
-	/** Set when attach failed or the user cancelled the debugger; cleared on navigation. */
+	/**
+	 * Set on a genuine chrome.debugger detach (user cancelled, replaced with
+	 * DevTools, or the tab closed) — durable enough that reattaching is
+	 * pointless until the tab navigates. Never set for a merely failed or
+	 * not-yet-retried attach attempt; those stay eligible for a normal
+	 * reattach on the next command.
+	 */
 	banned = false;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
@@ -843,7 +849,16 @@ export class RelayBridge {
 		tab.attached = false;
 		tab.attaching = null;
 		this.#resetRuntime(tab);
-		tab.banned = true;
+		// "reattach_failed" is synthetic (#onHello's best-effort recovery from an
+		// MV3 service-worker restart), not a real chrome.debugger.onDetach event —
+		// the extension merely wasn't ready yet. Retract the stale session so the
+		// caller sees an immediate, actionable error, but stay eligible for a
+		// normal reattach on the next command. Only a genuine extension-reported
+		// detach (target_closed, canceled_by_user, replaced_with_devtools) is
+		// durable enough to ban the tab until it navigates — otherwise one
+		// transient hiccup mid-session would fail every later command against an
+		// otherwise-healthy tab.
+		if (reason !== "reattach_failed") tab.banned = true;
 		// The user dismissed the debugger infobar (or the attach was torn
 		// down): release the tab's omp-group membership too.
 		this.#syncTabGrouping(tab);
@@ -1103,7 +1118,14 @@ export class RelayBridge {
 					url: tab.url,
 					error: err instanceof Error ? err.message : String(err),
 				});
-				if (!(err instanceof ExtensionReplacedError)) tab.banned = true;
+				// Not banned: an attach RPC can fail transiently (extension busy,
+				// tab still settling right after creation). A durable cause —
+				// another debugger genuinely attached, the user declining — is
+				// reported separately by the extension's own "detached" event
+				// (#onTabDetached), which does ban. Leaving this retryable means
+				// the next command's #ensureAttached call gets a clean second try
+				// instead of every later command on an otherwise-healthy tab
+				// failing forever.
 				return false;
 			})
 			.finally(() => {

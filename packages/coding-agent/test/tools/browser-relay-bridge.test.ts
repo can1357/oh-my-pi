@@ -617,6 +617,87 @@ describe("RelayBridge attachment release", () => {
 		expect(detached).toBeDefined();
 	});
 
+	it("does not ban a tab on a transient attach RPC rejection: a retry can still succeed", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+
+		const firstAttemptId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: firstAttemptId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+		);
+		nack(bridge, ext, "attach", "debugger unavailable");
+		await flush();
+		expect(cdp.sessionFor(firstAttemptId)).toBeUndefined();
+
+		const retryId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: retryId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+		);
+		ack(bridge, ext, "attach");
+		await flush();
+		expect(cdp.sessionFor(retryId)).toBeDefined();
+	});
+
+	it("stays retryable after a failed reconnect reattach: a later attach still succeeds", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		// MV3 service-worker restart: the replacement hello's best-effort
+		// reattach for the still-held session fails.
+		const replacement = new FakeExtSocket();
+		connect(bridge, replacement, [tab({ tabId: 1 })]);
+		expect(replacement.pending("attach")).toHaveLength(1);
+		nack(bridge, replacement, "attach", "debugger unavailable");
+		await flush();
+
+		// A later command driving the same tab must not be permanently
+		// blocked by that one transient reattach failure.
+		const reattachId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+		);
+		ack(bridge, replacement, "attach");
+		await flush();
+		expect(cdp.sessionFor(reattachId)).toBeDefined();
+	});
+
+	it("still bans a tab on a genuine chrome.debugger detach, unlike a synthetic reattach failure", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		// A real extension-reported detach: e.g. the user dismissed the
+		// "controlled by automated software" infobar.
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user", relayInitiated: false }),
+		);
+		await flush();
+
+		const reattachId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
+		);
+		await flush();
+		// Banned: the bridge never even asks the extension to reattach.
+		expect(ext.pending("attach")).toHaveLength(0);
+		expect(cdp.sessionFor(reattachId)).toBeUndefined();
+	});
+
 	it("reconciles a delayed detach after replacement hello still reports the old attachment", async () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
 		const ext = new FakeExtSocket();
