@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional request identity on agent prompts and their terminal events so embedding hosts can correlate a run without inferring ownership from event timing. ([#12331](https://github.com/can1357/oh-my-pi/pull/12331) by [@omercnet](https://github.com/omercnet))
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

@@ -699,13 +699,15 @@ function buildAgentEndEvent(
 	messages: AgentMessage[],
 	telemetry: AgentTelemetry | undefined,
 	stepCount: number,
+	requestId?: string,
 ): Extract<AgentEvent, { type: "agent_end" }> {
-	if (!telemetry) return { type: "agent_end", messages };
+	const identity = requestId ? { requestId } : {};
+	if (!telemetry) return { type: "agent_end", messages, ...identity };
 	const snapshot = telemetry.collector.snapshot({ stepCount });
 	if (telemetry.collector.markRunEnded()) {
 		fireOnRunEnd(telemetry, snapshot.summary, snapshot.coverage);
 	}
-	return { type: "agent_end", messages, telemetry: snapshot.summary, coverage: snapshot.coverage };
+	return { type: "agent_end", messages, ...identity, telemetry: snapshot.summary, coverage: snapshot.coverage };
 }
 /**
  * Push a `turn_end` event and run the awaited per-turn hook when the run is
@@ -1051,8 +1053,9 @@ function endAgentStream(
 	newMessages: AgentMessage[],
 	telemetry: AgentTelemetry | undefined,
 	stepCount: number,
+	requestId?: string,
 ): void {
-	stream.push(buildAgentEndEvent(newMessages, telemetry, stepCount));
+	stream.push(buildAgentEndEvent(newMessages, telemetry, stepCount, requestId));
 	stream.end(newMessages);
 }
 function emitInputMessages(stream: EventStream<AgentEvent, AgentMessage[]>, messages: readonly AgentMessage[]): void {
@@ -1125,7 +1128,7 @@ async function runLoopBody(
 		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
 			emitInputMessages(stream, messagesToEmit);
-			endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+			endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.requestId);
 			return;
 		}
 		// Check for steering messages at start (user may have typed while waiting).
@@ -1185,7 +1188,7 @@ async function runLoopBody(
 			// A tool hook may mark its completed result as terminal (e.g. subagent
 			// yield) — same stop-before-next-model-call rule as the main loop.
 			if (signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON) {
-				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+				endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.requestId);
 				return;
 			}
 		}
@@ -1198,7 +1201,7 @@ async function runLoopBody(
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
 				if (isDeadlineExceeded(config.deadline)) {
 					emitInputMessages(stream, messagesToEmit);
-					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.requestId);
 					return;
 				}
 				// Yield at the top of each iteration to prevent busy-wait when
@@ -1304,7 +1307,7 @@ async function runLoopBody(
 						turnOpen = false;
 					}
 					preserveSoftRequirementState = !signal?.aborted;
-					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.requestId);
 					return;
 				}
 
@@ -1440,7 +1443,7 @@ async function runLoopBody(
 					await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, { willContinue: false });
 					turnOpen = false;
 
-					stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
+					stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count, config.requestId));
 					stream.end(newMessages);
 					return;
 				}
@@ -1593,7 +1596,7 @@ async function runLoopBody(
 				turnOpen = false;
 
 				if (isDeadlineExceeded(config.deadline)) {
-					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.requestId);
 					return;
 				}
 				// On external abort (user interrupt), leave the steering queue intact: the
@@ -1616,7 +1619,7 @@ async function runLoopBody(
 			}
 
 			if (isDeadlineExceeded(config.deadline)) {
-				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+				endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.requestId);
 				return;
 			}
 
@@ -1624,7 +1627,7 @@ async function runLoopBody(
 			await config.onBeforeYield?.();
 
 			if (isDeadlineExceeded(config.deadline)) {
-				endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+				endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.requestId);
 				return;
 			}
 			// Skip queue drains when externally aborted (same stranding hazard as above).
@@ -1644,7 +1647,7 @@ async function runLoopBody(
 			break;
 		}
 
-		endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+		endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.requestId);
 	} finally {
 		discardAsides(pendingMessages, new Error("Aside message was not committed before the agent loop ended"));
 		if (!preserveSoftRequirementState) {

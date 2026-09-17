@@ -859,6 +859,7 @@ export class AgentSession {
 	#promptSequence = 0;
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
+	#activeTerminalRequestId: string | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
@@ -1239,7 +1240,11 @@ export class AgentSession {
 			this.#canAutoContinueForFollowUp() &&
 			this.agent.hasQueuedMessages();
 		const ircContinuation = canDrain && !this.#isDisposed && !this.#planModeState?.enabled && this.#irc.hasPending();
-		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
+		const willContinue = queuedContinuation || ircContinuation;
+		this.#emit(willContinue ? { ...pending, isTerminal: false } : pending);
+		if (!willContinue && pending.requestId === this.#activeTerminalRequestId) {
+			this.#activeTerminalRequestId = undefined;
+		}
 	}
 
 	/**
@@ -2616,19 +2621,40 @@ export class AgentSession {
 				await extensionEmit;
 			}
 			await previousGate;
+			let subscriberEvent = event;
+			if (event.type === "agent_end") {
+				const requestId = event.requestId ?? this.#activeTerminalRequestId;
+				if (requestId) {
+					if (!this.#activeTerminalRequestId) this.#activeTerminalRequestId = requestId;
+					if (!event.requestId) subscriberEvent = { ...event, requestId };
+				}
+			}
 			// Hold the wire-level agent_end until in-flight prompts unwind. Subscribers
 			// (rpc-mode, ACP, Cursor) treat agent_end as the "session is idle" signal;
 			// emitting while #promptInFlightCount > 0 lets a client fire its next
 			// `prompt` into a session that still reports isStreaming === true. Flush
-			// happens in #endInFlight / #resetInFlight. A later agent_end (e.g. from
-			// an auto-compaction turn that starts before the original prompt unwinds)
-			// supersedes the pending one, which is what subscribers want — they only
-			// care about the final settle.
-			if (event.type === "agent_end" && this.#promptInFlightCount > 0) {
-				this.#pendingAgentEndEmit = event;
+			// happens in #endInFlight / #resetInFlight. A terminal for another request
+			// is emitted immediately instead of replacing the active request's pending end.
+			if (subscriberEvent.type === "agent_end" && this.#promptInFlightCount > 0) {
+				if (
+					subscriberEvent.requestId &&
+					this.#activeTerminalRequestId &&
+					subscriberEvent.requestId !== this.#activeTerminalRequestId
+				) {
+					this.#emit(subscriberEvent);
+					return;
+				}
+				this.#pendingAgentEndEmit = subscriberEvent;
 				return;
 			}
-			this.#emit(event);
+			this.#emit(subscriberEvent);
+			if (
+				subscriberEvent.type === "agent_end" &&
+				subscriberEvent.isTerminal !== false &&
+				subscriberEvent.requestId === this.#activeTerminalRequestId
+			) {
+				this.#activeTerminalRequestId = undefined;
+			}
 		} finally {
 			releaseGate();
 		}
@@ -6543,7 +6569,7 @@ export class AgentSession {
 			// a message that was never persisted).
 			this.#promptDropped?.({ text: typedText, images: options?.images });
 		}
-		return true;
+		return dispatched;
 	}
 
 	/**
@@ -6790,7 +6816,7 @@ export class AgentSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
+		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "requestId"> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 			acceptTerminalEmptyStop?: boolean;
@@ -6966,7 +6992,10 @@ export class AgentSession {
 				);
 			}
 
-			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
+			const agentPromptOptions =
+				options?.toolChoice || options?.requestId
+					? { toolChoice: options.toolChoice, requestId: options.requestId }
+					: undefined;
 			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer);
 			const contextWindow = this.model?.contextWindow ?? 0;
 			const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
@@ -6991,6 +7020,7 @@ export class AgentSession {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			if (options?.requestId) this.#activeTerminalRequestId = options.requestId;
 			try {
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {

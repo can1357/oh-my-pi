@@ -349,6 +349,8 @@ export interface AgentOptions {
 
 export interface AgentPromptOptions {
 	toolChoice?: ToolChoice;
+	/** Opaque identity copied to the terminal event for this run. */
+	requestId?: string;
 }
 
 /** Buffered Cursor exec-channel tool result waiting to be emitted after the assistant message. */
@@ -1563,6 +1565,7 @@ export class Agent {
 			hideThinkingSummary: this.#hideThinkingSummary,
 			interruptMode: this.#interruptMode,
 			sessionId: this.#sessionId,
+			requestId: options?.requestId,
 			deadline: this.#deadline,
 			promptCacheKey: this.#promptCacheKey,
 			metadata: this.#metadataResolver ? undefined : this.#metadata,
@@ -1845,11 +1848,11 @@ export class Agent {
 				}
 				this.#emit({ type: "turn_end", message: errorMsg, toolResults });
 				turnOpen = false;
-				this.#emit({ type: "agent_end", messages: [errorMsg, ...toolResults] });
+				this.#emit({ type: "agent_end", messages: [errorMsg, ...toolResults], requestId: options?.requestId });
 			} else {
 				this.appendMessage(errorMsg);
 				this.#state.error = errorMessage;
-				this.#emit({ type: "agent_end", messages: [errorMsg] });
+				this.#emit({ type: "agent_end", messages: [errorMsg], requestId: options?.requestId });
 			}
 		} finally {
 			this.#restoreUndeliveredQueuedMessages(loopAbortController);

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+- Fixed RPC hosts being unable to correlate direct prompt completion by carrying the prompt request ID on its terminal `agent_end`, including across nonterminal queued continuations. ([#12331](https://github.com/can1357/oh-my-pi/pull/12331) by [@omercnet](https://github.com/omercnet))
 ## [18.2.4] - 2026-09-17
 
 ### Added

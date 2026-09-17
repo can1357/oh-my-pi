@@ -229,8 +229,12 @@ function overflowFrame(frame: object): object {
 	if (frame.type === "agent_end") {
 		return {
 			type: "agent_end",
+			...(typeof frame.requestId === "string"
+				? { requestId: shrinkString(frame.requestId, METADATA_STRING_CAP) }
+				: {}),
 			messages: [],
 			messageCount: typeof frame.messageCount === "number" ? frame.messageCount : 0,
+			...(typeof frame.isTerminal === "boolean" ? { isTerminal: frame.isTerminal } : {}),
 		};
 	}
 	return {
