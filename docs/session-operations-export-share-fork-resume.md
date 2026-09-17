@@ -322,6 +322,8 @@ Cross-project id match behavior:
 
 For compatibility, `--continue <full-UUID>` is normalized to `--resume <UUID>` when the UUID is the sole positional message. The `autoResume` setting invokes the same `continueRecent` behavior when no explicit session flag/session directory is supplied, and restores session model/thinking state when a prior transcript was found.
 
+`autoResume` applies to interactive runs only. A `--print` run, a run whose prompt arrived on piped stdin, and an explicit mode (`--mode`) start a fresh session instead of adopting the most recent one, because such a run is normally issued while that conversation is still live in another process — adopting it would put two writers on one transcript and replay the pending tool calls a resume carries in. Explicit `--continue` and `--resume` resume from any mode.
+
 This is startup-only behavior; there is no interactive `/continue` slash command.
 
 ## How session switching actually mutates runtime state
