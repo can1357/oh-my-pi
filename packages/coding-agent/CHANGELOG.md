@@ -64,6 +64,10 @@
 
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
 
+### Added
+
+- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply` and placed after the other keyed providers in the built-in auto chain, that forwards Google search operators (`site:`, `filetype:`, `intitle:`, quoted phrases, `OR`, `-exclusions`, `after:`/`before:`) verbatim instead of translating them onto vendor-specific filters ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio)).
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes
@@ -212,8 +216,6 @@
 - Reduced default startup resident memory by constructing the default-off ComputerTool ArkType schema only on first parameter access, then reusing it across tool instances without changing validation or tool behavior ([#6742](https://github.com/can1357/oh-my-pi/pull/6742) by [@usr-bin-roygbiv](https://github.com/usr-bin-roygbiv)).
 - Reduced startup CPU and memory by loading the bundled changelog only when needed, while preserving source, npm bundle, standalone binary, and native absolute-path fallback resolution.
 - Moved PTY log replay into the shared project launch broker, so normal CLI and Hub startup no longer load the xterm runtime while launch logs return validated rendered terminal rows.
-- `@upstream` routing selectors accept tiered OpenRouter slugs (`openrouter/google/gemini-3.8-flash@google-ai-studio/priority`), and `omp bench` labels each routed model with its upstream.
-- Added a Serply web-search provider (`serply`), authenticated with `SERPLY_API_KEY` or `/login serply` and placed after the other keyed providers in the built-in auto chain, that forwards Google search operators (`site:`, `filetype:`, `intitle:`, quoted phrases, `OR`, `-exclusions`, `after:`/`before:`) verbatim instead of translating them onto vendor-specific filters ([#12021](https://github.com/can1357/oh-my-pi/pull/12021) by [@googio](https://github.com/googio)).
 
 ### Fixed
 
