@@ -85,12 +85,19 @@ declare module "puppeteer-core" {
 
 declare global {
 	interface Element extends HTMLElement {}
+	/** Minimal shape of the transient overlay div created by {@link flashActionHighlight}. */
+	interface ActionHighlightBox {
+		style: { cssText: string; opacity: string };
+		remove(): void;
+	}
 	function getComputedStyle(element: Element): Record<string, unknown>;
 	var innerWidth: number;
 	var innerHeight: number;
 	var document: {
 		elementFromPoint(x: number, y: number): Element | null;
 		readonly visibilityState: "visible" | "hidden";
+		createElement(tagName: string): ActionHighlightBox;
+		readonly documentElement: { appendChild(node: ActionHighlightBox): void };
 	};
 }
 
@@ -902,6 +909,55 @@ async function isClickActionable(handle: ElementHandle): Promise<ActionabilityRe
 	})) as ActionabilityResult;
 }
 
+/**
+ * Best-effort visual cue for user-driven (relay/connected) tabs: briefly
+ * outlines the element about to be acted on so a human watching the real
+ * browser can see where the agent is working, mirroring the highlight
+ * Claude in Chrome shows before each action. Purely cosmetic — a detached
+ * handle, closed page, or CSP that blocks the inline style is swallowed and
+ * never affects the underlying click/type/fill.
+ */
+function flashActionHighlight(handle: ElementHandle): void {
+	void handle
+		.evaluate(el => {
+			const element = el as HTMLElement;
+			const rect = element.getBoundingClientRect();
+			if (rect.width < 1 || rect.height < 1) return;
+			const box = globalThis.document.createElement("div");
+			box.style.cssText = [
+				"position:fixed",
+				`left:${rect.left}px`,
+				`top:${rect.top}px`,
+				`width:${rect.width}px`,
+				`height:${rect.height}px`,
+				"border:2px solid #ff5722",
+				"border-radius:3px",
+				"background:rgba(255,87,34,0.15)",
+				"pointer-events:none",
+				"z-index:2147483647",
+				"transition:opacity 250ms ease-out",
+			].join(";");
+			globalThis.document.documentElement.appendChild(box);
+			setTimeout(() => {
+				box.style.opacity = "0";
+				setTimeout(() => box.remove(), 250);
+			}, 300);
+		})
+		.catch(() => undefined);
+}
+
+/** {@link flashActionHighlight} for actions addressed by CSS selector rather than an already-resolved handle. */
+function flashActionHighlightAt(page: Page, selector: string): void {
+	void page
+		.$(selector)
+		.then(async handle => {
+			if (!handle) return;
+			flashActionHighlight(handle);
+			await handle.dispose().catch(() => undefined);
+		})
+		.catch(() => undefined);
+}
+
 async function clickQueryHandlerText(
 	page: Page,
 	selector: string,
@@ -1623,6 +1679,9 @@ export class WorkerCore {
 		active: ActiveRun,
 	): TabApi {
 		const page = this.#requirePage();
+		// Only flash for user-driven (relay/connected/spawned) backends — a
+		// human might actually be watching a headless, project-shared page.
+		const showHighlight = this.#mode === "attach";
 		const { budgetBound, quickOpMs, actionOpMs } = resolveOpTimeouts(timeoutMs);
 		const waitMs = (explicit?: number): number => resolveWaitTimeout(timeoutMs, explicit);
 		const INF = Number.POSITIVE_INFINITY;
@@ -1725,6 +1784,7 @@ export class WorkerCore {
 						if (parseAriaRefSelector(selector) !== null) {
 							const handle = await this.#resolveAriaRef(selector);
 							try {
+								if (showHighlight) flashActionHighlight(handle);
 								await untilAborted(sig, () => handle.click());
 							} finally {
 								await handle.dispose().catch(() => undefined);
@@ -1732,6 +1792,7 @@ export class WorkerCore {
 							return;
 						}
 						const resolved = normalizeSelector(selector);
+						if (showHighlight) flashActionHighlightAt(page, resolved);
 						if (resolved.startsWith("text/")) await clickQueryHandlerText(page, resolved, actionOpMs, sig);
 						else
 							await untilAborted(sig, () =>
@@ -1747,6 +1808,7 @@ export class WorkerCore {
 					async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
+							if (showHighlight) flashActionHighlight(handle);
 							await untilAborted(sig, () => handle.type(text, { delay: 0 }));
 						} finally {
 							await handle.dispose().catch(() => undefined);
@@ -1762,14 +1824,17 @@ export class WorkerCore {
 						if (parseAriaRefSelector(selector) !== null) {
 							const handle = await this.#resolveAriaRef(selector);
 							try {
+								if (showHighlight) flashActionHighlight(handle);
 								await fillViaHandle(handle, value, sig);
 							} finally {
 								await handle.dispose().catch(() => undefined);
 							}
 							return;
 						}
+						const resolved = normalizeSelector(selector);
+						if (showHighlight) flashActionHighlightAt(page, resolved);
 						await untilAborted(sig, () =>
-							page.locator(normalizeSelector(selector)).setTimeout(actionOpMs).fill(value, { signal: sig }),
+							page.locator(resolved).setTimeout(actionOpMs).fill(value, { signal: sig }),
 						);
 					},
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
@@ -1781,11 +1846,16 @@ export class WorkerCore {
 						if (parseAriaRefSelector(selector) !== null) {
 							const handle = await this.#resolveAriaRef(selector);
 							try {
+								if (showHighlight) flashActionHighlight(handle);
 								await untilAborted(sig, () => handle.focus());
 							} finally {
 								await handle.dispose().catch(() => undefined);
 							}
-						} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
+						} else {
+							const resolved = normalizeSelector(selector);
+							if (showHighlight) flashActionHighlightAt(page, resolved);
+							await untilAborted(sig, () => page.focus(resolved));
+						}
 					}
 					await untilAborted(sig, () => page.keyboard.press(key));
 				}),

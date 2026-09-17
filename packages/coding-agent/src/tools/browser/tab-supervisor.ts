@@ -1223,15 +1223,22 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			timeoutMs: opts.timeoutMs,
 		};
 	}
-	// Connected and relay browsers are user-driven. When no target is requested,
-	// adopt the visible tab and avoid raising it before screenshots. An explicit
-	// target may be backgrounded, so retain activation for target-correct pixels.
+	// Connected and relay browsers are user-driven — a real, logged-in browser
+	// carrying the human's own tabs. An explicit target opts into attaching to
+	// one of those tabs (matched by URL/title substring); without one, silently
+	// adopting whatever tab happens to be on top would hijack content the user
+	// is reading. Open a dedicated new tab instead — the backend still
+	// claims/groups it the same way (see #claimRelayTarget in tab-worker.ts),
+	// so it stays visually and organizationally isolated from the user's tabs.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
-	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const page = await pickElectronTarget(browser.browser, {
-		matcher: opts.target,
-		preferVisible: !activateForScreenshot,
-	});
+	const forceNewTab = userDriven && !opts.target;
+	const activateForScreenshot = forceNewTab || !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
+	const page = forceNewTab
+		? await browser.browser.newPage()
+		: await pickElectronTarget(browser.browser, {
+				matcher: opts.target,
+				preferVisible: !activateForScreenshot,
+			});
 	const targetId = await targetIdForPage(page);
 	return {
 		mode: "attach",
