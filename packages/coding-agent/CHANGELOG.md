@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+- Python eval preserves multiline strings containing magic-looking lines such as `!cmd` or `%%bash`. ([#12334](https://github.com/can1357/oh-my-pi/pull/12334) by [@iliaal](https://github.com/iliaal))
 ## [18.2.4] - 2026-09-17
 
 ### Added
