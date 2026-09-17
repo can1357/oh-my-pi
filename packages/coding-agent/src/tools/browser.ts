@@ -18,6 +18,7 @@ import {
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveRelayKind } from "./browser/relay/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
+import { resolveBrowserEngine } from "./browser/lightpanda";
 import type { ScreenshotResult } from "./browser/tab-protocol";
 import type { OutputMeta } from "./output-meta";
 import {
@@ -145,6 +146,11 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	});
 	if (cmuxKind) {
 		return cmuxKind;
+	}
+	const engineSetting = session.settings.get("browser.engine");
+	const engine = resolveBrowserEngine(typeof engineSetting === "string" ? engineSetting : undefined);
+	if (engine === "lightpanda") {
+		return { kind: "lightpanda" };
 	}
 	const headless = session.settings.get("browser.headless");
 	return { kind: "headless", headless };
@@ -457,6 +463,8 @@ function describeBrowser(handle: BrowserHandle): string {
 	switch (handle.kind.kind) {
 		case "headless":
 			return `headless browser (${handle.kind.headless ? "hidden" : "visible"}${handle.sharedDaemon ? ", shared" : ""})`;
+		case "lightpanda":
+			return "lightpanda browser";
 		case "spawned":
 			return `spawned ${handle.kind.path} (pid ${handle.pid ?? "?"})`;
 		case "connected":
@@ -470,6 +478,8 @@ function describeKind(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
 			return `headless ${kind.headless ? "hidden" : "visible"}`;
+		case "lightpanda":
+			return "lightpanda";
 		case "spawned":
 			return `spawned:${kind.path}`;
 		case "connected":
