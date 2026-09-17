@@ -5,6 +5,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildBrowserItems,
+	buildSearchAffinity,
+	rankModelItems,
 	ModelBrowser,
 	type RoleAssignments,
 	resolveRoleAssignments,
@@ -84,6 +86,25 @@ describe("resolveRoleAssignments", () => {
 });
 
 describe("ModelBrowser search ranking", () => {
+	test("headless candidates preserve picker relevance and affinity ordering", () => {
+		const models = [makeModel("a", "example-2"), makeModel("b", "example-2"), makeModel("a", "other")];
+		const roles: RoleAssignments = {};
+		const mruOrder = ["b/example-2", "a/example-2"];
+		const providerOrder = ["a"];
+		const browser = makeBrowser(models, mruOrder, { roles, providerOrder });
+		const query = "example";
+		browser.setQuery(query);
+		const items = buildBrowserItems(models);
+		const ranked = rankModelItems(query, items, {
+			roles,
+			mruOrder,
+			affinity: buildSearchAffinity(providerOrder, roles, mruOrder),
+		});
+		expect(ranked.map(item => item.selector)).toEqual(["b/example-2", "a/example-2"]);
+		expect(browser.getSelected()?.selector).toBe(ranked[0].selector);
+		expect(ranked.length).toBe(browser.visibleCount);
+	});
+
 	test("an exact query match outranks the MRU model", () => {
 		// Regression: with gpt-5.6-sol as the active (MRU) model, typing
 		// "gpt-5.5" must select gpt-5.5, not keep the MRU pinned on top.

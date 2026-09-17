@@ -37,6 +37,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -3823,7 +3824,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 		});
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Retry Google token quota");
@@ -3837,7 +3838,6 @@ describe("AgentSession retry fallback", () => {
 			delayMs: 50,
 			errorMessage,
 		});
-		expect(waitSpy).toHaveBeenCalledWith(50, { signal: expect.any(AbortSignal) });
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		const lastAssistant = getLastAssistantMessage(session);
@@ -3889,7 +3889,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 		});
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") {
@@ -3914,7 +3914,6 @@ describe("AgentSession retry fallback", () => {
 			delayMs: 200,
 			errorMessage: "rate limit exceeded retry-after-ms=200",
 		});
-		expect(waitSpy).toHaveBeenCalledWith(200, { signal: expect.any(AbortSignal) });
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		expect(fallbackAppliedEvents).toHaveLength(0);
@@ -4490,7 +4489,7 @@ describe("AgentSession retry fallback", () => {
 			modelRegistry,
 		});
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("Retry once, then surface a terminal validation failure");
 		await session.waitForIdle();
@@ -4543,7 +4542,7 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry,
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
 
 		await session.prompt("Retry the bare abort error");
@@ -6497,7 +6496,7 @@ describe("AgentSession retry fallback", () => {
 			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
 			if (event.type === "auto_retry_start") retryStartEvents.push(event);
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("Plan the ticket, then act");
 		await session.waitForIdle();

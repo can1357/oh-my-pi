@@ -63,6 +63,36 @@ describe("readLines", () => {
 
 		expect(output).toEqual(["alpha", "beta", "gamma"]);
 	});
+
+	it("keeps retained split lines stable after the stream drains", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of ["hel", "lo\nwor", "ld\n"]) {
+					controller.enqueue(encoder.encode(chunk));
+				}
+				controller.close();
+			},
+		});
+
+		const lines = await collectAsync(readLines(readable));
+		const dec = new TextDecoder();
+		expect(lines.map(line => dec.decode(line))).toEqual(["hello", "world"]);
+	});
+
+	it("keeps a retained split line stable beside an unterminated tail", async () => {
+		const readable = new ReadableStream<Uint8Array>({
+			start(controller) {
+				for (const chunk of ["hel", "lo\nwor", "ld"]) {
+					controller.enqueue(encoder.encode(chunk));
+				}
+				controller.close();
+			},
+		});
+
+		const lines = await collectAsync(readLines(readable));
+		const dec = new TextDecoder();
+		expect(lines.map(line => dec.decode(line))).toEqual(["hello", "world"]);
+	});
 });
 
 describe("abortableSource (via readLines)", () => {
