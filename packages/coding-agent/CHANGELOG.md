@@ -85,6 +85,10 @@
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
 
+### Fixed
+
+- The `security-reviewer` agent no longer has every finding rejected with `findings/N/optionalProperties: is required`, and can now report `anchor` and `remediation` for a finding ([#12208](https://github.com/can1357/oh-my-pi/pull/12208) by [@Sandu1213](https://github.com/Sandu1213)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Breaking Changes
