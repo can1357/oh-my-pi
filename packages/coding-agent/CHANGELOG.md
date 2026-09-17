@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `task.isolation.allowNested` (default `false`) to reject nested isolated subagent spawns; inside an isolated session the `isolated` field is hidden from the `task` tool and eval `agent()`, and an explicit `isolated: true` fails preflight with a clear error. Set it to `true` to restore nested isolation ([#3760](https://github.com/can1357/oh-my-pi/issues/3760)).
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes
@@ -12,7 +16,6 @@
 
 ### Added
 
-- Added `task.isolation.allowNested` (default `false`) to reject nested isolated subagent spawns; inside an isolated session the `isolated` field is hidden from the `task` tool and eval `agent()`, and an explicit `isolated: true` fails preflight with a clear error. Set it to `true` to restore nested isolation ([#3760](https://github.com/can1357/oh-my-pi/issues/3760)).
 - Type `^` to tag a model for delegation, with atomic display-name chips and session-persisted `m1`, `m2`, … agents available to task and eval.
 - Provider login and setup support masked secret prompts; RPC rejects secret prompts rather than requesting ordinary input.
 
