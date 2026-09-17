@@ -165,7 +165,7 @@ OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-
 
 A model listed under `opencode-zen` is not necessarily available to OMP. Zen can restrict free-tier access to the OpenCode client even when the same API key works there.
 
-If a request returns HTTP 403 with `FreeTierError` and `OpenCode's free tier can only be used from within OpenCode`, use that free model in OpenCode, or select a model and plan that Zen permits third-party clients to use. Re-authenticating with the same key does not change that client restriction.
+If a request returns HTTP 403 with `FreeTierError` and the message `OpenCode's free tier can only be used from within OpenCode`, Zen is restricting that free model to its own client: use the model in OpenCode, or select a model and plan that Zen permits third-party clients to use. Re-authenticating with the same key does not lift this restriction.
 
 This response was reported for `opencode-zen/muse-spark-1.3-contributor-free` in [#12306](https://github.com/can1357/oh-my-pi/issues/12306). It does not establish that every Zen free model is restricted. OMP's session and User-Agent attribution headers identify requests; they do not grant access to OpenCode-only offers.
 
