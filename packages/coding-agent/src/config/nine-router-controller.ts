@@ -105,6 +105,7 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 				"ag/claude-sonnet-4-6",
 				"ag/gemini-pro-agent",
 				"gc/gemini-3.1-pro-preview",
+				"9rdeepseek",
 				"clinepass-deepseek-v4-flash",
 				"fast-fallback",
 				"deepseek-v4-flash-fallback",
@@ -139,6 +140,7 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 			role: "balanced",
 			candidates: [
 				"fast-fallback",
+				"9rdeepseek",
 				"clinepass-deepseek-v4-flash",
 				"deepseek-v4-flash-rr",
 				"deepseek-v4-flash-fallback",
@@ -222,6 +224,7 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 			role: "task",
 			candidates: [
 				"fast-fallback",
+				"9rdeepseek",
 				"clinepass-deepseek-v4-flash",
 				"deepseek-v4-flash-rr",
 				"deepseek-v4-flash-fallback",
@@ -255,6 +258,7 @@ export function defaultNineRouterSlots(): NineRouterSlot[] {
 		{
 			role: "budget",
 			candidates: [
+				"9rdeepseek",
 				"clinepass-deepseek-v4-flash",
 				"deepseek-v4-flash-rr",
 				"deepseek-v4-flash-fallback",

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the optional `9rdeepseek` 9router combo candidate to the default, balanced, task, and budget routing slots.
 - Added opt-in managed-skill evolution: bounded candidate generation against training cases, an independent held-out text benchmark gate, retained evaluation evidence, and explicit compare-and-swap promotion without overwriting authored skills or replaying partial promotions.
 - Added optional Auto-Learn records in an existing Obsidian vault, including vault-only lesson capture, secret-redacted lesson notes, separate evaluation/promotion summaries, and explicit partial-failure reporting without creating missing vaults.
 - Completed the Autonomous Fusion Workflow loop (`fusion.mode=autonomous`): durable `native_task` jobs that settle outside an inline dispatch — external runners, recovered leases, or `/fusion` controls — now emit bounded handoff messages that are injected into the planning root's next turn and drained once, so the planner replans on worker completion/failure instead of stalling; the inline dispatch marks its own settled job reported to prevent double delivery.
