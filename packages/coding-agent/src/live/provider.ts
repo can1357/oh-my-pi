@@ -95,12 +95,6 @@ export async function resolveLiveTransport(config: ResolveLiveTransportConfig): 
 		return create(id);
 	}
 
-	for (const id of NATIVE_DUPLEX_ORDER) {
-		if (id === "codex" && !codexAvailable(config.authStorage)) continue;
-		if (id === "grok" && !(await grokAvailable(config.authStorage, config.sessionId))) continue;
-		return create(id);
-	}
-
 	throw new Error(
 		`No realtime voice provider is available. ${errors.join("; ") || "Configure Codex OAuth or xAI Grok OAuth."}`,
 	);
