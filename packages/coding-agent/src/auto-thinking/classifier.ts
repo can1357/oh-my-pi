@@ -12,8 +12,9 @@
  * Throws on any failure (no judge, no key, unparseable output, abort/timeout);
  * the caller falls back to a concrete level and continues the turn.
  */
-import { type ChoiceQuestion, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type ChoiceAnswer, type ChoiceQuestion, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import bucketQuestionInstructions from "../prompts/system/auto-thinking-bucket-question.md" with { type: "text" };
 import type { Settings } from "../config/settings";
@@ -23,6 +24,16 @@ import { preprocessTinyMessage } from "../tiny/message-preproc";
 
 type Level = "low" | "medium" | "high" | "xhigh" | "max";
 type Bucket = "trivial" | "moderate" | "hard";
+
+/** Ladder order, lowest effort first; the tie-break below resolves toward its head. */
+const LEVEL_ORDER: readonly Level[] = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * TypeSafe's documented floor below which an answer is "genuinely uncertain"
+ * (https://docs.typesafe.ai/confidence). Keyword judges report `confidence: 1`
+ * with a one-hot distribution, so the tie-break only fires on a calibrated one.
+ */
+const TORN_CONFIDENCE = 0.5;
 
 const LEVEL_EFFORT: Record<Level, Effort> = {
 	low: Effort.Low,
@@ -87,6 +98,34 @@ export interface ClassifyDifficultyDeps {
 }
 
 /**
+ * Apply the level question's own tie-break in code. Jev reads instructions
+ * literally and answers with its most probable option, so "if torn between
+ * levels, choose the lower one" cannot be delegated to the judge: when it
+ * reports an uncertain answer, take the lower of the two most probable levels. A torn xhigh/max
+ * pair did not clearly meet the max conditions, so the general rule applies
+ * there too. A confident answer stands as returned.
+ */
+function resolveTornLevel(answer: ChoiceAnswer<Level> | ChoiceAnswer<Exclude<Level, "max">>): Level {
+	if (!(answer.confidence < TORN_CONFIDENCE)) return answer.choice;
+	const probabilities: Partial<Record<Level, number>> = answer.probabilities;
+	// Stable sort: an exact tie keeps ladder order, so the lower level leads.
+	const ranked = LEVEL_ORDER.filter(level => probabilities[level] !== undefined).sort(
+		(a, b) => (probabilities[b] ?? 0) - (probabilities[a] ?? 0),
+	);
+	if (ranked.length < 2) return answer.choice;
+	const [first, second] = ranked;
+	const resolved = LEVEL_ORDER.indexOf(first) < LEVEL_ORDER.indexOf(second) ? first : second;
+	if (resolved !== answer.choice) {
+		logger.debug("Auto thinking resolved a torn classification to the lower level", {
+			choice: answer.choice,
+			resolved,
+			confidence: answer.confidence,
+		});
+	}
+	return resolved;
+}
+
+/**
  * Highest effort this turn's classification may resolve to: the configured
  * ceiling, further limited by what the target model actually exposes. The
  * default keeps `auto` one tier below the top, so only an explicit
@@ -131,7 +170,7 @@ export async function classifyDifficulty(
 		ceiling = autoEffortCeiling(deps);
 		const level = ceiling === Effort.Max ? LEVEL_QUESTION_WITH_MAX : LEVEL_QUESTION;
 		const { answers } = await judge.judge({ state, questions: { level } }, options);
-		effort = LEVEL_EFFORT[answers.level.choice];
+		effort = LEVEL_EFFORT[resolveTornLevel(answers.level)];
 	}
 	// The ceiling goes into the clamp itself: capping the request alone is not
 	// enough, because a sparse ladder snaps an excluded request back up.
