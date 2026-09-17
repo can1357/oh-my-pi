@@ -248,6 +248,25 @@ def _make_computer():
             """End the persistent desktop session; later calls fail."""
             await _invoke("close", {})
 
+        async def decide(self, state, *, min_confidence=None):
+            """Run rules → rerank → optional Jev for one computer-use step."""
+            if not isinstance(state, dict):
+                raise TypeError("computer.decide() expects a state dict")
+            payload = {"state": state}
+            if min_confidence is not None:
+                payload["minConfidence"] = min_confidence
+            result = await asyncio.to_thread(_bridge_call, "__computer_decide__", payload)
+            if isinstance(result, dict):
+                data = result.get("data")
+                if data is not None:
+                    return data
+                text = result.get("text")
+                if isinstance(text, str) and text:
+                    import json
+                    parsed = json.loads(text)
+                    return parsed
+            return None
+
     return _Computer()
 
 

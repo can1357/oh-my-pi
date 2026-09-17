@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added optional TypeSafe Jev (`computer.jev`: auto|on|off) for bounded computer-use decisions via `computer.decide(state)` in the Eval prelude: deterministic rules → local semantic rerank → factorized System One questions (ACTION, TARGET, needsVision, needsGeneration, done). Fail-open to the planner when confidence is low; replayable packets omit screenshots by default.
 - Added TypeSafe Jev skill suggestion: before each user turn, System One names at most one installed skill and appends a `<skill_relevance>` line. Default `skills.suggestion: auto` runs only when TypeSafe is authenticated (`/login typesafe` or `TYPESAFE_API_KEY`); `/jev` prints status. Fail-open at 2.5s with no chat-model fallback — Jev is not `/model`.
 - Added cookbook call 2 rerank (`skills.suggestion.rerank: auto|always|off`): top-three shortlist with SKILL.md excerpts and per-candidate fits nouls when the roster is large or the top two choices collide.
 

@@ -4367,6 +4367,36 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"computer.jev": {
+		type: "enum",
+		values: ["auto", "on", "off"] as const,
+		default: "auto",
+		ui: {
+			tab: "tools",
+			group: "Computer",
+			label: "Computer Use Jev",
+			description:
+				"Optional TypeSafe Jev backend for bounded computer-use decisions (factorized ACTION/TARGET questions). Auto runs when TypeSafe is authenticated; off keeps rules/rerank only. Fail-open to the planner when uncertain.",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Jev when TypeSafe is authenticated (default)",
+				},
+				{
+					value: "on",
+					label: "On",
+					description: "Require Jev when a key exists",
+				},
+				{
+					value: "off",
+					label: "Off",
+					description: "Never call Jev for computer-use decisions",
+				},
+			],
+		},
+	},
+
 	"images.questionTimeoutMs": {
 		type: "number",
 		default: 300_000,

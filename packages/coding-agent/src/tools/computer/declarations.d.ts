@@ -219,4 +219,43 @@ declare const computer: ComputerDesktop & {
 	capabilities(): Promise<ComputerCapabilities | undefined>;
 	/** End the persistent desktop session; later calls fail. */
 	close(): Promise<void>;
+	/**
+	 * Bounded computer-use decision (rules → rerank → optional Jev).
+	 * Returns a replayable packet or null when confidence is too low (fail-open).
+	 */
+	decide(
+		state: ComputerDecisionState,
+		options?: { minConfidence?: number },
+	): Promise<ComputerDecisionPacket | null>;
 };
+
+interface ComputerCandidate {
+	id: string;
+	label: string;
+	role?: string;
+	region?: string;
+	source?: "ax" | "ocr" | "ax+ocr";
+}
+
+interface ComputerDecisionState {
+	goal: string;
+	recent_actions?: readonly string[];
+	focused_field?: { label?: string; placeholder?: string; value?: string };
+	candidates: readonly ComputerCandidate[];
+	app?: string;
+	url?: string;
+}
+
+interface ComputerDecisionPacket {
+	action: "click" | "type" | "key" | "scroll" | "wait" | "done" | "escalate";
+	target?: string;
+	needsVision: boolean;
+	needsGeneration: boolean;
+	done: boolean;
+	confidence: number;
+	backend: "rules" | "rerank" | "jev" | "none";
+	model?: string;
+	latencyMs: number;
+	state: ComputerDecisionState;
+	scores?: Record<string, number>;
+}

@@ -107,11 +107,12 @@ function formatComputerUseStatus(session: AgentSession): string {
 		display: session.settings.get("computer.display"),
 		maxWidth: session.settings.get("computer.maxWidth"),
 		maxHeight: session.settings.get("computer.maxHeight"),
+		jev: session.settings.get("computer.jev"),
 	};
 	return [
 		`Computer use: ${enabled ? "enabled" : "disabled"}`,
 		`prelude: ${active ? "active" : "inactive"}`,
-		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}`,
+		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}, jev=${configured.jev}`,
 	].join(" · ");
 }
 
