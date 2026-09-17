@@ -1,9 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Fixed
 
 - Fixed Anthropic prompt-cache breakpoints stalling on sessions with mid-conversation tool changes: the rolling tail no longer parks on tool-control messages that cannot carry `cache_control`, so the growing message tail keeps its breakpoint instead of being re-billed as uncached input ([#12318](https://github.com/can1357/oh-my-pi/issues/12318)).
+- Fixed google-antigravity agent requests failing with a synthetic 429 RESOURCE_EXHAUSTED by adding a channel-level fallback to fold system instructions into user turns and session-scoped nonce tagging to avoid server-side prompt fingerprinting without busting prompt caches ([#11918](https://github.com/can1357/oh-my-pi/pull/11918) by [@vasyza](https://github.com/vasyza)).
 
 ## [18.2.4] - 2026-09-17
 

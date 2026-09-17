@@ -32,7 +32,7 @@ export const getGeminiCliHeaders = (modelId?: string) => ({
  * client the version and manifest are captured from, independent of the host
  * platform. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = "2.8.0";
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.13.0";
 
 const ANTIGRAVITY_VERSION_MANIFEST_URL =
 	"https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
