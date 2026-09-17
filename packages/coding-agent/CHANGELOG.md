@@ -6,6 +6,10 @@
 
 - Moved every terminal-UI module (theme, tool renderers, chat/overlay/status-line/composer components, setup wizard, git/ps/debug apps) to `@oh-my-pi/pi-tui`; `@oh-my-pi/pi-coding-agent/modes/theme/*`, `/modes/components/*`, `/tui/*`, `/tools/render-utils` and related subpaths no longer exist. Names re-exported from the package root (`Theme`, `theme`, hook/editor components, tool Details types) are unchanged.
 
+### Added
+
+- Added `examples/extensions/typesafe-jev.ts`: a `before_agent_start` hook that asks TypeSafe Jev which installed skill (if any) to read, then appends a per-turn `<skill_relevance>` line. Jev is not a chat model; copy the file to `~/.omp/agent/extensions/` and use `/login typesafe` or `TYPESAFE_API_KEY`. Fail-open on missing key, timeout, or HTTP error.
+
 ### Changed
 
 - Keyless Parallel web search now leads the default provider chain ahead of Perplexity.
