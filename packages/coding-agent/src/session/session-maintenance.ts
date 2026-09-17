@@ -27,6 +27,7 @@ import {
 	DEFAULT_SHAKE_CONFIG,
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
+	hasOpenAiRemoteCompactionPayload,
 	invalidateMessageCache,
 	isTranscriptUsageAnchor,
 	NativeCompactionError,
@@ -78,6 +79,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
+import { appendCoverageNote } from "./compaction-coverage";
 import {
 	type CompactionMethod,
 	canUseRemoteCompaction,
@@ -1365,7 +1367,7 @@ export class SessionMaintenance {
 						},
 						compactionCandidates,
 					);
-					summary = result.summary;
+					summary = await this.#withCoverageNote(result, preparation, compactionAbortController.signal);
 					shortSummary = result.shortSummary;
 					firstKeptEntryId = result.firstKeptEntryId;
 					tokensBefore = result.tokensBefore;
@@ -3222,6 +3224,41 @@ export class SessionMaintenance {
 		);
 	}
 
+	/**
+	 * Opt-in `compaction.coverageCheck` pass over an LLM-generated summary; see
+	 * `compaction-coverage.ts`. Fail-open, so a judge outage never fails the
+	 * compaction that reached this point. An OpenAI remote compaction keeps its
+	 * history in the provider replay and stores only a placeholder as summary
+	 * text, so there is nothing to check.
+	 */
+	async #withCoverageNote(
+		result: CompactionResult,
+		preparation: CompactionPreparation,
+		signal: AbortSignal,
+	): Promise<string> {
+		if (hasOpenAiRemoteCompactionPayload(result.preserveData)) return result.summary;
+		const usageOwner = {
+			sessionId: this.#host.sessionManager.getSessionId(),
+			parentId: this.#host.sessionManager.getLeafId(),
+		};
+		return appendCoverageNote(result.summary, {
+			settings: this.#host.settings,
+			registry: this.#host.modelRegistry,
+			messages: preparation.messagesToSummarize.concat(preparation.turnPrefixMessages),
+			model: this.#model,
+			sessionId: this.#host.sessionId(),
+			signal,
+			metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+			onUsage: usage => {
+				const entryId = this.#host.sessionManager.appendModelUsage(
+					{ purpose: "compaction-coverage", ...usage },
+					usageOwner,
+				);
+				if (entryId) usageOwner.parentId = entryId;
+			},
+		});
+	}
+
 	async #compactWithFallbackModel(
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
@@ -4768,7 +4805,7 @@ export class SessionMaintenance {
 					throw new Error("Compaction failed: no available model");
 				}
 
-				summary = compactResult.summary;
+				summary = await this.#withCoverageNote(compactResult, preparation, autoCompactionSignal);
 				shortSummary = compactResult.shortSummary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
 				tokensBefore = compactResult.tokensBefore;

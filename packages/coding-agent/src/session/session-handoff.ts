@@ -16,6 +16,7 @@ import type { Settings } from "../config/settings";
 import { obfuscateProviderContext } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
+import { appendCoverageNote } from "./compaction-coverage";
 import type { SessionManager } from "./session-manager";
 
 function createHandoffFileName(date = new Date()): string {
@@ -206,13 +207,37 @@ export class SessionHandoff {
 				throw new Error("Handoff generation produced no content");
 			}
 
+			// Opt-in `compaction.coverageCheck`: list the user requests the document
+			// fails to preserve. Fail-open, so the handoff never fails on the judge.
+			const usageOwner = {
+				sessionId: this.#host.sessionManager.getSessionId(),
+				parentId: this.#host.sessionManager.getLeafId(),
+			};
+			const document = await appendCoverageNote(handoffText, {
+				settings: this.#host.settings,
+				registry: this.#host.modelRegistry,
+				messages: this.#host.agent.state.messages,
+				model,
+				sessionId: this.#host.sessionId(),
+				signal: handoffSignal,
+				metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+				onUsage: usage => {
+					const entryId = this.#host.sessionManager.appendModelUsage(
+						{ purpose: "compaction-coverage", ...usage },
+						usageOwner,
+					);
+					if (entryId) usageOwner.parentId = entryId;
+				},
+			});
+			throwIfHandoffAborted(handoffSignal);
+
 			let savedPath: string | undefined;
 			if (options?.autoTriggered && this.#host.settings.get("compaction.handoffSaveToDisk")) {
 				const artifactsDir = this.#host.sessionManager.getArtifactsDir();
 				if (artifactsDir) {
 					const handoffFilePath = path.join(artifactsDir, createHandoffFileName());
 					try {
-						await Bun.write(handoffFilePath, `${handoffText}\n`);
+						await Bun.write(handoffFilePath, `${document}\n`);
 						savedPath = handoffFilePath;
 					} catch (error) {
 						logger.warn("Failed to save handoff document to disk", {
@@ -225,7 +250,7 @@ export class SessionHandoff {
 				}
 			}
 
-			return { document: handoffText, savedPath };
+			return { document, savedPath };
 		} catch (error) {
 			// Only a genuine cancellation (user Esc or an unreasoned source-signal
 			// abort) maps to "Handoff cancelled". A harness-provided abort reason and

@@ -1,0 +1,1 @@
+Does `summary` preserve what the user asked for or required in `requests[{{index}}]`? The state holds a compaction summary and the user messages it replaces. Yes if the summary states that request, its constraint, or its outcome; no if the summary omits it.

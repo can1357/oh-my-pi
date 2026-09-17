@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the opt-in `compaction.coverageCheck` setting: after a compaction summary or handoff document is generated, the judgment provider is asked which of the compacted user requests it fails to preserve, and those are appended to the summary verbatim so they survive the cut ([#12340](https://github.com/can1357/oh-my-pi/pull/12340) by [@eggpeat](https://github.com/eggpeat)).
+
 ### Fixed
 
 - Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
