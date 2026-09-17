@@ -25,7 +25,8 @@ import {
 	tokenUsage,
 } from "./types";
 
-export const TYPESAFE_PROVIDER = "typesafe";
+/** Canonical auth id for TypeSafe System One (aliases: `typesafe`, `typesafe-ai`). */
+export const TYPESAFE_PROVIDER = "jev";
 export const TYPESAFE_DEFAULT_BASE_URL = "https://api.typesafe.ai";
 export const TYPESAFE_DEFAULT_MODEL = "jev-latest";
 

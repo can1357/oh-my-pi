@@ -28,8 +28,8 @@ function fakeJudge(
 					: ((answersByStage as Record<string, Record<string, unknown>>)[calls === 1 ? "wide" : "rerank"] ??
 						{});
 			return {
-				api: "typesafe",
-				provider: "typesafe",
+				api: "jev",
+				provider: "jev",
 				model: opts.model ?? "jev-test",
 				answers: answers as JudgmentResult<Q>["answers"],
 				usage: {
@@ -234,7 +234,11 @@ describe("shouldRerank", () => {
 
 describe("shouldRunSkillSuggestion", () => {
 	function registry(hasTypesafe: boolean) {
-		return { authStorage: { hasAuth: (provider: string) => hasTypesafe && provider === "typesafe" } };
+		return {
+			authStorage: {
+				hasAuth: (provider: string) => hasTypesafe && (provider === "jev" || provider === "typesafe"),
+			},
+		};
 	}
 
 	function settings(map: Record<string, unknown>) {

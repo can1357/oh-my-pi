@@ -6,6 +6,7 @@ import { bedrockMantleTransport } from "./bedrock-mantle";
 import { buildProviderDefinition, type ProviderTransport } from "./build";
 import { cloudflareAiGatewayTransport } from "./cloudflare-ai-gateway";
 import { museCodeTransport } from "./muse-code";
+import { resolveAuthProviderId } from "./jev-auth";
 import type { ProviderDefinition } from "./types";
 
 /**
@@ -35,7 +36,7 @@ export const PROVIDER_REGISTRY: readonly ProviderDefinition[] = authProviders().
 const BY_ID: Record<string, ProviderDefinition> = Object.fromEntries(PROVIDER_REGISTRY.map(p => [p.id, p]));
 
 export function getProviderDefinition(id: string): ProviderDefinition | undefined {
-	return BY_ID[id];
+	return BY_ID[id] ?? BY_ID[resolveAuthProviderId(id)];
 }
 
 /** Compile-time completeness: every catalog chat-model provider must have an auth policy. */

@@ -1,4 +1,4 @@
-const TYPESAFE_PROVIDER = "typesafe";
+import { TYPESAFE_PROVIDER } from "@oh-my-pi/pi-ai";
 
 export type SkillSuggestionMode = "auto" | "typesafe" | "off";
 

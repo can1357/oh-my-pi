@@ -5,8 +5,8 @@
  *
  * Backend precedence, governed by `providers.judgmentProvider`:
  *
- * 1. **TypeSafe** (`typesafe`, or `auto` with a stored / env credential): the
- *    native System One API, keyed by `AuthStorage` so `/login typesafe` and
+ * 1. **TypeSafe Jev** (`jev`, or `auto` with a stored / env credential): the
+ *    native System One API, keyed by `AuthStorage` so `/login jev` (or `/login typesafe`) and
  *    `TYPESAFE_API_KEY` both work and 401s rotate credentials.
  * 2. **Local on-device model** when the feature's backend setting names one:
  *    keyword prompts through the shared tiny-model worker.

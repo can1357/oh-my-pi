@@ -162,7 +162,7 @@ describe("classifyUnexpectedStop", () => {
 			},
 		} as never;
 		const registry = {
-			authStorage: { hasAuth: (provider: string) => provider === "typesafe", resolver: () => "ts-key" },
+			authStorage: { hasAuth: (provider: string) => provider === "jev" || provider === "typesafe", resolver: () => "ts-key" },
 			getAvailable: () => [],
 		} as never;
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple");

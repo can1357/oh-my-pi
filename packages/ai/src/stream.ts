@@ -16,6 +16,7 @@ import {
 import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { resolveAuthProviderId } from "./registry/jev-auth";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
 import * as AIError from "./error";
@@ -861,7 +862,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
  * Checks Bun.env, then cwd/.env, then ~/.env.
  */
 export function getEnvApiKey(provider: string): string | undefined {
-	const resolver = serviceProviderMap[provider];
+	const resolver = serviceProviderMap[provider] ?? serviceProviderMap[resolveAuthProviderId(provider)];
 	if (typeof resolver === "string") {
 		return $env[resolver];
 	}
@@ -876,7 +877,7 @@ export function getEnvApiKey(provider: string): string | undefined {
  * single variable name describes the source.
  */
 export function getEnvApiKeyName(provider: string): string | undefined {
-	const resolver = serviceProviderMap[provider];
+	const resolver = serviceProviderMap[provider] ?? serviceProviderMap[resolveAuthProviderId(provider)];
 	return typeof resolver === "string" ? resolver : undefined;
 }
 
