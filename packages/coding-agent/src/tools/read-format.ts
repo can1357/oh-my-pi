@@ -1,6 +1,7 @@
 import { type ElidedRange, formatSingleLine } from "@oh-my-pi/pi-tui/tools/read";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { countNewlines } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 import {
 	formatHashlineHeader,
@@ -134,18 +135,9 @@ export function formatLineEntriesWithMode(
 	return entries.map(entry => formatLineEntryWithMode(entry, shouldAddHashLines, shouldAddLineNumbers)).join("\n");
 }
 
+/** Line count of file content: 0 for empty text, otherwise N newlines ⇒ N+1 lines. */
 export function countTextLines(text: string): number {
-	if (text.length === 0) return 0;
-	// Native indexOf scan instead of a per-code-unit JS loop: identical
-	// result (N newlines ⇒ N+1 lines for non-empty text) at roughly an order
-	// of magnitude less CPU on multi-MiB reads.
-	let lines = 1;
-	let pos = text.indexOf("\n");
-	while (pos !== -1) {
-		lines++;
-		pos = text.indexOf("\n", pos + 1);
-	}
-	return lines;
+	return text.length === 0 ? 0 : countNewlines(text) + 1;
 }
 
 export function contiguousLineNumbers(startLine: number, count: number): number[] {

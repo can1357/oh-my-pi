@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
+## [18.2.5] - 2026-09-17
+
 ### Fixed
 
-- Steady-state `StablePrefix.build` calls now return early on unchanged live references instead of re-normalizing the tool catalog and re-stringifying every schema per model call.
-- Intent-field schema injection is now memoized per input schema, so repeated model calls reuse tool parameters by reference instead of re-cloning the catalog and defeating downstream schema caches.
-- Proxied tool-call argument buffers now use the same throttled streaming-JSON parse as native providers instead of re-parsing the whole buffer on every delta.
+- Improved agent performance by reducing redundant tool-schema processing during repeated model calls and optimizing streamed tool-call argument parsing.
 
 ## [18.2.1] - 2026-09-15
 

@@ -202,7 +202,9 @@ function ranksInClass(classId: string, model: string, lenient: boolean): Omit<Cl
 }
 
 // Lowercase override index built once per process: avoids re-lowercasing every
-// override model/provider string on every classifyModel call.
+// override model/provider string on every classifyModel call. First override
+// in tree order wins per (model, provider) slot, matching the linear scan it
+// replaced.
 interface OverrideBucket {
 	byProvider: Map<string, CompiledIdentityOverride>;
 	agnostic: CompiledIdentityOverride | undefined;
@@ -222,7 +224,8 @@ function getOverrideIndex(): Map<string, OverrideBucket> {
 				index.set(key, bucket);
 			}
 			if (override.provider !== undefined) {
-				bucket.byProvider.set(override.provider.toLowerCase(), override);
+				const providerKey = override.provider.toLowerCase();
+				if (!bucket.byProvider.has(providerKey)) bucket.byProvider.set(providerKey, override);
 			} else {
 				bucket.agnostic ??= override;
 			}

@@ -2,22 +2,18 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- SSE `raw` wire lines are captured only when a reader opts in; the default token path returns empty `raw` with no per-line slices.
-- The rotating file sink holds one append fd per active file instead of open/write/close per log line.
+## [18.2.5] - 2026-09-17
 
 ### Added
 
-- Added getDotenvEnvValues helper to retrieve environment values sourced from dotenv
-- Added callback support to filterChildShellEnv for custom processing of filtered values
-- Exported paletteToRgb utility function
-- Added stringifyYamlConfig utility to strip trailing spaces from YAML block headers
+- Added utilities for reading dotenv-sourced environment values, customizing filtered child-shell environment values, converting color palettes to RGB, cleaning trailing spaces from YAML block headers, and counting newlines in text.
 
 ### Fixed
 
-- `stringifyJson` now tries the plain serializer first and only retries with bigint coercion when a bigint is actually present, avoiding the replacer slow path on every call.
-- `$which` cache keys embed the raw lookup options instead of their hashes, so distinct PATH/cwd combinations can no longer collide and return each other's binary.
+- Improved rotating file logging performance by reusing an append file descriptor for each active log file.
+- Improved JSON serialization performance by avoiding unnecessary bigint handling when serializing values without bigints.
+- Fixed `$which` cache collisions for lookups using different PATH or working-directory options.
+- SSE token reads now expose raw wire-line data only when explicitly requested; the default token path no longer includes per-line raw slices.
 
 ## [18.2.3] - 2026-09-17
 

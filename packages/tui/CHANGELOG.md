@@ -2,50 +2,28 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Transcript containers memoize stable-prefix row counts and reuse unchanged prefix arrays instead of re-rendering the prefix to read its length per frame.
-- Assistant stable renders cache up to 64 prefix snapshots instead of thrashing a 2-entry LRU across per-frame count variants.
-- Select lists memoize sanitized labels and descriptions per item instead of re-sanitizing up to 3x per item per frame.
-- Edit call facts recompute only after payload growth past a threshold (final frame always) with a last-input cache, instead of re-parsing the whole streamed payload per reveal frame.
+## [18.2.5] - 2026-09-17
 
 ### Added
 
-- Added stream segment to status line for displaying live viewer counts
-- Added details and notes fields to todo items
-- Added support for inline summary rendering of structured task outputs
-- Added `TUIOptions.onPaint` / `TUI.setPaintListener` so hosts can observe the rows each paint commits to scrollback and the live viewport (used by `omp stream`).
-- Added HubFrame component for consistent fullscreen sidebar and footer layouts
-- Added scrollable sidebar navigation with focus tracking for overlay screens
-- Added interactive footer chip rendering in overlays with mouse hit-testing
-- Added composable forms, menus, split layouts, disclosures, tree views, tool cards, and data widgets for terminal extensions and standalone apps.
-- Added the full coding-agent terminal UI to this package: theme runtime (`@oh-my-pi/pi-tui/theme`), render primitives (`/render`), shared chrome (`/chrome`), tool renderers and registry (`/tools`), chat transcript components (`/chat/*`), overlays and hubs (`/overlays/*`), status line (`/status-line`), composer and autocomplete (`/prompt/*`), setup wizard (`/setup/*`), and standalone apps (`/apps/*`: git TUI, process top, debug viewers, boards, pickers). Components take host capabilities through structural interfaces and setters instead of reading application settings.
-- Added image input validation and automatic conversion for unsupported formats
-- Added MCP Add Wizard for streamlined server configuration
-- Added support for video preview rendering in chat
-- Added interactive task list renderer for managing subtasks
-- Added `autoresearch` tool renderer for tracking experiments
-- Enhanced merge conflict rendering with side-by-side diff support
-- Improved output rendering for GitHub workflow jobs and runs
-- Added performance improvements for long-running bash streaming output
-- Added the `dark-celestial` built-in theme: a twilight dark palette with pink/coral accents, purple keywords, cyan functions, and peach strings.
+- Added the full coding-agent terminal UI to the package, including themed rendering primitives, shared chrome, tool renderers, chat transcripts, overlays and hubs, status lines, prompt and autocomplete controls, setup flows, and standalone utilities such as the Git TUI, process viewer, debug viewers, boards, and pickers.
+- Added reusable terminal UI components for forms, menus, split layouts, disclosures, tree views, tool cards, data widgets, fullscreen hubs, scrollable overlay navigation, and interactive footer chips.
+- Added live viewer counts to the status line and exposed paint observers through `TUIOptions.onPaint` and `TUI.setPaintListener` for hosts that need to track committed scrollback and viewport rows.
+- Added details and notes fields to todo items, plus an interactive task-list renderer for managing subtasks.
+- Added inline summaries for structured task outputs.
+- Added image input validation with automatic conversion of unsupported formats and support for video previews in chat.
+- Added the MCP Add Wizard for streamlined server configuration.
+- Added an `autoresearch` tool renderer for tracking experiments.
+- Added side-by-side diff rendering for merge conflicts and improved presentation of GitHub Actions workflow jobs and runs.
+- Added the `dark-celestial` built-in theme with a twilight palette and pink, coral, purple, cyan, and peach accents.
 
 ### Changed
 
-- Overhauled JSON tree visualization with syntax highlighting, item counts, and improved indentation
-- Simplified JSON tree layout by removing icons and updating root connector styling
-- Enhanced agent task and evaluation displays with improved layout truncation and metric support
-- Updated live spinner animations to use theme-consistent frames
-- Standardized form labels, descriptions, and styling across overlays
-- Improved text rendering to collapse newlines instead of trimming in overlays
-- Refined output notice stripping for more consistent tool output displays
-- Improved alignment and layout consistency in agent and model hub screens
-
-### Fixed
-
-- Editor undo snapshots now copy the line array instead of running structuredClone over the whole buffer on every edit keystroke.
-- ScrollView rows now pad with the shared space buffer instead of allocating per-row padding strings.
-- Streaming Markdown skips the whole-document tab scan on append-only frames, expanding only the streamed delta.
+- Overhauled JSON tree visualization with syntax highlighting, item counts, clearer indentation, and a simplified layout.
+- Improved agent task, evaluation, hub, and model displays with clearer layouts, better truncation, and metric support.
+- Standardized form labels, descriptions, and overlay styling, and improved overlay text rendering by collapsing newlines consistently.
+- Updated spinner animations to use theme-consistent frames and refined tool-output notice stripping for more consistent display.
+- Improved performance and responsiveness when rendering long-running Bash streams and large or continuously updating terminal content.
 
 ## [18.2.4] - 2026-09-17
 

@@ -242,7 +242,7 @@ function processProxyEvent(
 	proxyEvent: ProxyAssistantMessageEvent,
 	partial: AssistantMessage,
 	partialJsonByIndex: Map<number, string>,
-	parsedLenByIndex?: Map<number, number>,
+	parsedLenByIndex: Map<number, number>,
 ): AssistantMessageEvent | undefined {
 	switch (proxyEvent.type) {
 		case "start":
@@ -343,7 +343,7 @@ function processProxyEvent(
 				[kStreamingPartialJson]: "",
 			} as ToolCall & StreamingPartialJsonCarrier;
 			partialJsonByIndex.set(proxyEvent.contentIndex, "");
-			parsedLenByIndex?.set(proxyEvent.contentIndex, 0);
+			parsedLenByIndex.set(proxyEvent.contentIndex, 0);
 			return { type: "toolcall_start", contentIndex: proxyEvent.contentIndex, partial };
 		case "toolcall_delta": {
 			const content = partial.content[proxyEvent.contentIndex];
@@ -353,11 +353,11 @@ function processProxyEvent(
 				// Geometric throttle (same contract as native providers): the
 				// authoritative parse lands at toolcall_end; mid-stream
 				// previews refresh at most ~3% late on large buffers.
-				const lastLen = parsedLenByIndex?.get(proxyEvent.contentIndex) ?? 0;
+				const lastLen = parsedLenByIndex.get(proxyEvent.contentIndex) ?? 0;
 				const parsed = parseStreamingJsonThrottled(acc, lastLen);
 				if (parsed !== null) {
 					content.arguments = parsed.value || {};
-					parsedLenByIndex?.set(proxyEvent.contentIndex, parsed.parsedLen);
+					parsedLenByIndex.set(proxyEvent.contentIndex, parsed.parsedLen);
 				}
 				setStreamingPartialJson(content, acc);
 				partial.content[proxyEvent.contentIndex] = { ...content }; // Trigger reactivity
@@ -380,7 +380,7 @@ function processProxyEvent(
 				const acc = partialJsonByIndex.get(proxyEvent.contentIndex);
 				if (acc !== undefined && acc.length > 0) content.arguments = parseStreamingJson(acc) || {};
 				partialJsonByIndex.delete(proxyEvent.contentIndex);
-				parsedLenByIndex?.delete(proxyEvent.contentIndex);
+				parsedLenByIndex.delete(proxyEvent.contentIndex);
 				clearStreamingPartialJson(content);
 				return {
 					type: "toolcall_end",
@@ -399,7 +399,7 @@ function processProxyEvent(
 			else finalizeBufferedArguments(partial, partialJsonByIndex);
 			scrubPartialJson(partial);
 			partialJsonByIndex.clear();
-			parsedLenByIndex?.clear();
+			parsedLenByIndex.clear();
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
 		case "error":
@@ -410,7 +410,7 @@ function processProxyEvent(
 			else finalizeBufferedArguments(partial, partialJsonByIndex);
 			scrubPartialJson(partial);
 			partialJsonByIndex.clear();
-			parsedLenByIndex?.clear();
+			parsedLenByIndex.clear();
 			return { type: "error", reason: proxyEvent.reason, error: partial };
 	}
 }
