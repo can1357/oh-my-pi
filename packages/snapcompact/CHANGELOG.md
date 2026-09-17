@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.2.1] - 2026-09-15
+
+### Changed
+
+- `historyBlocks()` now resolves persisted frame payloads lazily, keeps the newest frames within a byte budget, and drops unresolved blob references instead of sending them to providers ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
+
 ## [18.1.18] - 2026-09-11
 
 ### Fixed

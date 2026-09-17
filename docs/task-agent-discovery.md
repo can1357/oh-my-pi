@@ -35,7 +35,7 @@ Parsing comes from frontmatter via `parseAgentFields()` (`src/discovery/helpers.
 
 - missing `name` or `description` => invalid (`null`), caller treats as parse failure
 - `tools` accepts CSV or array; if provided, `yield` is auto-added. A declared `tools` list is a **hard allowlist** for the subagent: custom, extension, and MCP proxy tools not named in it are excluded from the active set and the `xd://` catalog (built-ins are filtered as before). Subagents that do not declare `tools` inherit the full parent tool set; top-level sessions are unaffected. The semantics match Claude Code's subagent `tools:` contract, so the frontmatter of `.claude/agents/*.md` definitions ports as-is (copy it into an OMP discovery root — direct cross-harness roots are not scanned, see below).
-- `disallowedTools` accepts CSV or array of exact tool names or `mcp__*` / `mcp__<server>_*` wildcards (trailing `*` = prefix match), removed from the subagent's active set after the allowlist. `disallowedTools: [mcp__*]` drops all MCP tools; `disallowedTools: [mcp__db_*]` drops one server. Works with or without a `tools` allowlist. Mirrors Claude Code's `disallowedTools` semantics with omp's `mcp__<server>_<tool>` naming. The `<server>` in a wildcard is the **sanitized** tool-name prefix (`createMCPToolName` lowercases and collapses non-`[a-z_]` characters — a server named `db2` mints `mcp__db_query`, so the pattern is `mcp__db_*`). Hidden protocol tools (`yield`, `goal`, `think`) can never be disallowed — stripping the subagent terminator would leave a `requireYieldTool` session unable to yield. Disallowing `read` or `write` also suppresses `xd://` mounting for custom/extension/MCP tools: the transport they depend on is unavailable, so the tools surface top-level instead and are never advertised as `xd://` targets the model cannot reach. A lone `disallowedTools: ["*"]` strips every non-hidden tool (bare `*` is the deny-everything-but-protocol escape hatch). Pattern matching is case-sensitive for non-MCP names: frontmatter `mcp__*` patterns normalize to the minted lowercase form, but an exact custom-tool pattern must match the registered name.
+- `disallowedTools` accepts CSV or array of exact tool names or `mcp__*` / `mcp__<server>_*` wildcards (trailing `*` = prefix match), removed from the subagent's active set after the allowlist. `disallowedTools: [mcp__*]` drops all MCP tools; `disallowedTools: [mcp__db_*]` drops one server. Works with or without a `tools` allowlist. Mirrors Claude Code's `disallowedTools` semantics with omp's `mcp__<server>_<tool>` naming. The `<server>` in a wildcard is the **sanitized** tool-name prefix (`createMCPToolName` lowercases, keeps digits, and collapses other non-`[a-z0-9_]` characters — a server named `db-2` mints `mcp__db_2_query`, so the pattern is `mcp__db_2_*`). Hidden protocol tools (`yield`, `goal`, `think`) can never be disallowed — stripping the subagent terminator would leave a `requireYieldTool` session unable to yield. Disallowing `read` or `write` also suppresses `xd://` mounting for custom/extension/MCP tools: the transport they depend on is unavailable, so the tools surface top-level instead and are never advertised as `xd://` targets the model cannot reach. A lone `disallowedTools: ["*"]` strips every non-hidden tool (bare `*` is the deny-everything-but-protocol escape hatch). Pattern matching is case-sensitive for non-MCP names: frontmatter `mcp__*` patterns normalize to the minted lowercase form, but an exact custom-tool pattern must match the registered name.
 - `spawns` accepts `*`, CSV, or array
 - backward-compat behavior: if `spawns` missing but `tools` includes `task`, `spawns` becomes `*`
 - `output` is passed through as opaque schema data
@@ -86,6 +86,16 @@ For a dispatch, set the agent name and task:
 ```
 
 `/model`'s Roles view can assign and persist custom role mappings such as `review`, `fast`, and `good`. Changing only the active or default session selection does not remap those roles.
+
+## User-tagged model agents
+
+Type `^` in the composer to choose a model from the same scope and ranking as the `Alt+P` session picker. Accepting a completion inserts an atomic chip showing its display name. For example, type `Have ^`, pick a model, then finish with `review this change`.
+
+On submit, each first-mentioned model receives a branch-local pseudonym (`m1`, `m2`, …). The user message carries `<model agent="m1" name="Display Name"/>`; the task description lists its provider/model selector. `task`, eval `agent()`, and `workpool()` accept that pseudonym as their `agent`. These agents use the bundled general-purpose task template, not a specialist template, and are intended only for requests explicitly naming the tagged model.
+
+Pseudonyms survive `/resume`; rewinding before a model's first mention frees its number. Repeating a selector reuses its pseudonym. Unknown selectors remain literal, as do mentions in `!`/`$` local-execution drafts. Tokens require whitespace boundaries: autocomplete adds the trailing space. When two models share a display name in one draft, the second remains a literal selector to avoid ambiguous expansion.
+
+Session definitions are appended after discovered agents, so an existing agent with the same name wins. Normal spawn restrictions and model-override precedence still apply. Synthetic prompts cannot register models.
 
 ## Watch running agents
 
@@ -189,7 +199,7 @@ Lookup is exact-name linear search:
 1. atomically reloads the live session's persisted global, project, and explicit overlay settings while preserving runtime overrides
 2. resolves the omitted or explicit agent name from the parent spawn policy
 3. enforces depth, blocked-self-recursion, and parent spawn-policy guards
-4. rediscovers agents with `discoverAgents(session.cwd)` and performs exact lookup
+4. rediscovers agents with `discoverAgents(session.cwd)`, appends user-tagged session agents, and performs exact lookup
 5. checks `task.disabledAgents`
 6. resolves plan-mode restrictions, output schema, model policy, and isolation policy
 
@@ -197,7 +207,7 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 ### Description vs execution-time discovery
 
-`TaskTool.create()` memoizes discovery per resolved working directory when building the model-facing tool description. Execution rediscovers agents, so the runtime set can differ from the earlier description if agent or extension files changed mid-session. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
+`TaskTool.create()` memoizes discovery per resolved working directory when building the model-facing tool description. Each description read also includes the current session's user-tagged model agents. Execution rediscovers agents and merges those session agents, so the runtime set can differ from the earlier description if agent or extension files changed mid-session. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
 
 ## Model and structured-output precedence
 

@@ -114,7 +114,7 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 					signal: deps.signal,
 				},
 			),
-		{ signal: deps.signal },
+		{ signal: deps.signal, provider: model.provider },
 	);
 
 	if (response.stopReason === "error") {

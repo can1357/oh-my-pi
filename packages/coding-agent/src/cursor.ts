@@ -30,8 +30,7 @@ import {
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
 import type { MCPResourceReadResult } from "./mcp/types";
-import type { ApprovalMode } from "./tools/approval";
-import { resolveApproval } from "./tools/approval";
+import { resolveApproval, resolveApprovalFromContext } from "./tools/approval";
 import { confineToWorkspace, resolveToCwd } from "./tools/path-utils";
 import type { TodoPhase, TodoStatus } from "./tools/todo";
 
@@ -407,15 +406,12 @@ function allowsDirectFileMutation(options: CursorExecBridgeOptions): boolean {
  * proceed, or the refusal text to answer with.
  */
 function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string, pathArg: string): string | null {
-	const context = options.getToolContext?.();
-	const settings = context?.settings;
-	const approvalMode: ApprovalMode =
-		context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+	const { approvalMode, userPolicies } = resolveApprovalFromContext(options.getToolContext?.());
 	const approval = resolveApproval(
 		{ name: toolName, approval: "write" },
 		{ path: pathArg },
 		approvalMode,
-		(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+		userPolicies,
 	);
 	if (approval.policy === "allow") return null;
 	return approval.policy === "deny"
@@ -989,7 +985,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * feeds `details.phases` straight into `setTodos`, so echoing the current list
 	 * back would let a call that changed nothing overwrite live UI state.
 	 */
-	todoSync(snapshot: CursorTodoSnapshot | null, toolCallId: string, error: string | null = null): ToolResultMessage {
+	todoSync(
+		snapshot: CursorTodoSnapshot | null,
+		toolCallId: string,
+		error: string | null = null,
+		origin: "read" | "update" = "update",
+	): ToolResultMessage {
 		// `update_todos` / `read_todos` are resolved server-side and dispatched
 		// straight here, never passing through `resolveFrameTool`'s scope gate.
 		// A scope that denies `todo` must therefore be checked in-band: without
@@ -997,6 +998,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		// persisted by calls the scope refuses everywhere else. The call still
 		// settles (the interactive card resolves on this result), it just never
 		// mirrors — the same "leave local state untouched" contract as a refused
+		// read. Runtime liveness matters too: the executor strips `todo` as
+		// parent-owned bookkeeping after construction (unless prewalk owns it),
+		// which a static scope predicate cannot see — so an explicit executor
+		// removal (isToolActive false) also suppresses mirroring. Read-origin
+		// calls skip persisting unchanged snapshots (the `origin` check below);
+		// a scoped-out call never reaches that check.
 		const todoScopedOut =
 			(this.options.isToolExecutable !== undefined && !this.options.isToolExecutable("todo")) ||
 			// Removed at runtime by the executor rather than by the scope: mirroring
@@ -1052,9 +1059,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				grouped.delete(phase.name);
 			}
 			for (const [name, tasks] of grouped) next.push({ name, tasks });
-			setPhases(next);
-			this.options.persistTodoPhases?.(next);
-			phases = next;
+			if (origin === "read" && JSON.stringify(next) === JSON.stringify(existing)) {
+				phases = undefined;
+			} else {
+				setPhases(next);
+				this.options.persistTodoPhases?.(next);
+				phases = next;
+			}
 		}
 
 		const result = buildTodoSyncResult(toolCallId, phases, error);
@@ -1117,15 +1128,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
 		const tool = preferReplace ? this.options.getEditReplaceTool?.() : resolveFrameTool(this.options, toolName);
 		if (!tool) return false;
-		const context = this.options.getToolContext?.();
-		const settings = context?.settings;
-		const approvalMode: ApprovalMode =
-			context?.autoApprove === true ? "yolo" : (settings?.get("tools.approvalMode") ?? "yolo");
+		const { approvalMode, userPolicies } = resolveApprovalFromContext(this.options.getToolContext?.());
 		const approval = resolveApproval(
 			tool,
 			preferReplace ? normalizeCursorReplaceArgs(args) : args,
 			approvalMode,
-			(settings?.get("tools.approval") ?? {}) as Record<string, unknown>,
+			userPolicies,
 		);
 		return approval.policy === "allow";
 	}

@@ -8,12 +8,12 @@ const probePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension
 const healthProbePath = path.resolve(import.meta.dir, "fixtures", "legacy-pi-extension-cache-health-probe.ts");
 const tempDirs: TempDir[] = [];
 
-async function runProbe(cacheRoot: string, script: string = probePath): Promise<string> {
+async function runProbe(cacheRoot: string, script: string = probePath, args: string[] = []): Promise<string> {
 	const env: Record<string, string | undefined> = { ...process.env, XDG_CACHE_HOME: cacheRoot };
 	for (const key of ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE", "PI_CONFIG_DIR"]) {
 		delete env[key];
 	}
-	const proc = Bun.spawn([process.execPath, script], {
+	const proc = Bun.spawn([process.execPath, script, ...args], {
 		cwd: path.resolve(import.meta.dir, "../.."),
 		env,
 		stderr: "pipe",
@@ -32,7 +32,7 @@ afterEach(async () => {
 	for (const dir of tempDirs.splice(0)) await dir.remove();
 });
 
-test("legacy extension analysis persists and reads its SQLite parse cache", async () => {
+test("warm extension analysis preserves import rewriting without reparsing", async () => {
 	const tempDir = TempDir.createSync("@legacy-pi-extension-cache-");
 	tempDirs.push(tempDir);
 	const cacheRoot = tempDir.path();
@@ -40,17 +40,9 @@ test("legacy extension analysis persists and reads its SQLite parse cache", asyn
 
 	expect(await runProbe(cacheRoot)).toBe('import value from "./dependency.js?mtime=7";\n');
 
-	const cachePath = path.join(cacheRoot, "omp", "cache", "legacy-pi-extension-cache.db");
-	const db = new Database(cachePath);
-	const result = db.run(
-		"UPDATE extension_parse_cache SET [references] = '[]' WHERE [references] LIKE '%dependency.js%'",
+	expect(await runProbe(cacheRoot, probePath, ["--expect-cache-hit"])).toBe(
+		'import value from "./dependency.js?mtime=7";\n',
 	);
-	expect(result.changes).toBeGreaterThan(0);
-	db.close();
-
-	// A fresh process has no memory cache. The unchanged output proves it read
-	// the deliberately altered persisted row instead of parsing the source again.
-	expect(await runProbe(cacheRoot)).toBe('import value from "./dependency.js";\n');
 });
 
 test("legacy extension parse cache drops obsolete CommonJS export-analysis columns", async () => {

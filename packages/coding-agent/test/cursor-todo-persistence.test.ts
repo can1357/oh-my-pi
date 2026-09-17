@@ -250,6 +250,41 @@ describe("cursor todo persistence", () => {
 		expect(h.reload()).toEqual(h.current());
 	});
 
+	it("keeps an unchanged read snapshot from replacing dismissed HUD state", () => {
+		const h = newHarness([{ name: "Auth", tasks: [{ content: "oauth", status: "completed" }] }]);
+		const before = h.current();
+
+		const result = h.handlers.todoSync(
+			{ merged: false, todos: [{ content: "oauth", status: "completed" }] },
+			"read-call",
+			null,
+			"read",
+		);
+
+		expect(h.current()).toBe(before);
+		expect(h.entries).toEqual([]);
+		expect(h.uiTodos()).toBeNull();
+		expect(result.details).toBeUndefined();
+	});
+
+	it("still replaces and persists a changed read snapshot", () => {
+		const h = newHarness([{ name: "Auth", tasks: [{ content: "oauth", status: "pending" }] }]);
+		const before = h.current();
+
+		const result = h.handlers.todoSync(
+			{ merged: false, todos: [{ content: "oauth", status: "completed" }] },
+			"read-call",
+			null,
+			"read",
+		);
+
+		expect(h.current()).not.toBe(before);
+		expect(h.entries).toHaveLength(1);
+		expect(h.reload()).toEqual(h.current());
+		expect(h.uiTodos()).toEqual(h.current());
+		expect(result.details).toEqual({ phases: h.current(), storage: "session" });
+	});
+
 	it("settles the call without phases when the session exposes no todo state", () => {
 		// The visible block exists either way — it is rendered from the stream,
 		// not from local state — so it still needs a completion to stop

@@ -1,13 +1,39 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	KeybindingsManager as AppKeybindingsManager,
 	setKeyHintPlatform,
 } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import type { ModelBrowserItem } from "@oh-my-pi/pi-coding-agent/modes/components/model-browser";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-coding-agent/modes/prompt-action-autocomplete";
-import { getSelectListTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getSelectListTheme, initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { KeybindingsManager, SelectList, setKeybindings, TUI_KEYBINDINGS } from "@oh-my-pi/pi-tui";
 
+function modelMentionItem(provider: string, id: string, name: string): ModelBrowserItem {
+	return {
+		provider,
+		id,
+		selector: `${provider}/${id}`,
+		model: buildModel({
+			id,
+			name,
+			api: "ollama-chat",
+			provider,
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 1024,
+		}),
+	};
+}
+
 describe("prompt action autocomplete", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
 	beforeEach(() => {
 		setKeybindings(
 			new KeybindingsManager({
@@ -278,5 +304,114 @@ describe("prompt action autocomplete", () => {
 		});
 
 		expect(provider.trySyncSlashCompletion("hello")).toBeNull();
+	});
+
+	it("suggests model mentions and reanchors completion to the live token", async () => {
+		const candidate = modelMentionItem("a", "x", "X One");
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			modelMentions: query => (query === "" || candidate.selector.includes(query) ? [candidate] : []),
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const suggestions = await provider.getSuggestions(["see ^a"], 0, 6);
+		expect(suggestions).toEqual({
+			prefix: "^a",
+			items: [
+				{
+					value: "a/x",
+					label: "a/x",
+					description: "X One",
+					icon: theme.symbol("icon.model"),
+				},
+			],
+		});
+		if (!suggestions) throw new Error("expected model mention suggestion");
+
+		const liveLine = "see ^a-extra";
+		const completion = provider.applyCompletion(
+			[liveLine],
+			0,
+			liveLine.length,
+			suggestions.items[0]!,
+			suggestions.prefix,
+		);
+		expect(completion).toEqual({
+			lines: ["see ^a/x "],
+			cursorLine: 0,
+			cursorCol: 9,
+		});
+	});
+
+	it("limits model mention suggestions to the first twenty ranked candidates", async () => {
+		const candidates = Array.from({ length: 21 }, (_, index) =>
+			modelMentionItem("demo", `model-${index + 1}`, `Model ${index + 1}`),
+		);
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			modelMentions: () => candidates,
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const suggestions = await provider.getSuggestions(["^"], 0, 1);
+		expect(suggestions?.items).toHaveLength(20);
+		expect(suggestions?.items[0]?.value).toBe("demo/model-1");
+		expect(suggestions?.items[19]?.value).toBe("demo/model-20");
+	});
+
+	it("does not suggest a model mention without a left token boundary", async () => {
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			modelMentions: () => [modelMentionItem("a", "x", "X One")],
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		expect(await provider.getSuggestions(["a^b"], 0, 3)).toBeNull();
+	});
+
+	it("suggests model mentions inside slash command arguments", async () => {
+		const candidate = modelMentionItem("a", "x", "X One");
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [{ name: "btw", description: "By the way", allowArgs: true }],
+			basePath: "/tmp",
+			modelMentions: query => (candidate.selector.includes(query) ? [candidate] : []),
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const line = "/btw ^a";
+		const suggestions = await provider.getSuggestions([line], 0, line.length);
+		expect(suggestions?.prefix).toBe("^a");
+		expect(suggestions?.items.map(item => item.value)).toEqual(["a/x"]);
 	});
 });

@@ -90,16 +90,16 @@ describe("isToolDisallowed", () => {
 	});
 
 	test("mcpServerName metadata sanitizes the raw name against the pattern segment", () => {
-		// `DB2` raw config name sanitizes to `db` (digits collapse into `_` and
-		// trim away), exactly the prefix a `mcp__db_*` pattern names.
-		expect(isToolDisallowed("mcp__db_query", ["mcp__db_*"], "DB2")).toBe(true);
+		// `DB2` raw config name sanitizes to `db2` (digits kept, like the mint),
+		// exactly the segment a `mcp__db2_*` pattern names.
+		expect(isToolDisallowed("mcp__db2_query", ["mcp__db2_*"], "DB2")).toBe(true);
 		// The match is by sanitized server, not by tool name prefix: another
 		// tool owned by the same raw server still matches.
-		expect(isToolDisallowed("mcp__other_tool", ["mcp__db_*"], "DB2")).toBe(true);
+		expect(isToolDisallowed("mcp__other_tool", ["mcp__db2_*"], "DB2")).toBe(true);
 		// A raw name with case/space differences sanitizes to the same segment.
 		expect(isToolDisallowed("mcp__anything", ["mcp__foo_bar_*"], "Foo Bar")).toBe(true);
 		// A pattern whose segment does not match the sanitized raw name stays inert.
-		expect(isToolDisallowed("mcp__other_tool", ["mcp__db2_*"], "DB2")).toBe(false);
+		expect(isToolDisallowed("mcp__other_tool", ["mcp__db_*"], "DB2")).toBe(false);
 	});
 
 	test("mcpServerName metadata never affects non-mcp patterns", () => {
@@ -189,7 +189,7 @@ describe("mcpDisallowTargetsServer", () => {
 		expect(mcpDisallowTargetsServer(["mcp__foo_*"], "foo")).toBe(true);
 		expect(mcpDisallowTargetsServer(["mcp__foo_*"], "bar")).toBe(false);
 		// Raw config names sanitize exactly like minted tool-name prefixes.
-		expect(mcpDisallowTargetsServer(["mcp__db_*"], "DB2")).toBe(true);
+		expect(mcpDisallowTargetsServer(["mcp__db2_*"], "DB2")).toBe(true);
 		expect(mcpDisallowTargetsServer(["mcp__foo_bar_*"], "Foo Bar")).toBe(true);
 		// A capped server name still matches through the sanitized segment.
 		expect(mcpDisallowTargetsServer([LONG_SERVER_PATTERN], LONG_SERVER_NAME)).toBe(true);

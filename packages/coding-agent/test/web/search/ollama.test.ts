@@ -287,6 +287,28 @@ describe("Ollama searchOllama response mapping", () => {
 		expect(response.sources[1]?.title).toBe("https://example.com/empty-title");
 	});
 
+	it("collapses tabs and newlines in title and snippet", async () => {
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					results: [
+						{
+							title: "Line one\n\tline two",
+							url: "https://example.com/messy",
+							content: "first\nsecond\t\tthird",
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const response = await searchOllama({ ...makeParams("test"), fetch: fetchMock });
+
+		expect(response.sources).toHaveLength(1);
+		expect(response.sources[0]?.title).toBe("Line one line two");
+		expect(response.sources[0]?.snippet).toBe("first second third");
+	});
+
 	it("skips results with missing or non-string url", async () => {
 		const fetchMock: FetchImpl = async () =>
 			new Response(

@@ -101,7 +101,7 @@ export class SpeechEnhancer {
 						},
 					);
 				},
-				{ signal },
+				{ signal, provider: model.provider },
 			);
 			if (response.stopReason === "error") {
 				logger.debug("speech-enhancer: rewrite errored", { error: response.errorMessage });

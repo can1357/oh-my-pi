@@ -157,16 +157,17 @@ export function isMCPToolName(name: string): boolean {
 }
 
 /**
- * Sanitize an MCP server/tool name into the lowercase `[a-z_]` fragment used by
+ * Sanitize an MCP server/tool name into the lowercase `[a-z0-9_]` fragment used by
  * minted tool names (`createMCPToolName`). Canonical definition:
  * `isToolDisallowed`'s ownership fallback matches a pattern's server segment
  * against this, so raw config server names (registry `mcpServerName` metadata)
  * map to the exact segment a user writes in `mcp__<server>_*`.
+ * `keepDigits: false` reproduces the pre-rename mint for the legacy-name fallback.
  */
-export function sanitizeMCPToolNamePart(value: string, fallback: string): string {
+export function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits = true): string {
 	const sanitized = value
 		.toLowerCase()
-		.replace(/[^a-z_]+/g, "_")
+		.replace(keepDigits ? /[^a-z0-9_]+/g : /[^a-z_]+/g, "_")
 		.replace(/_+/g, "_")
 		.replace(/^_+|_+$/g, "");
 
@@ -219,10 +220,10 @@ export function mcpDisallowTargetsServer(patterns: readonly string[], serverName
  *
  * Hidden protocol tools (`yield`, `goal`, `think`) are never disallowable:
  * stripping the subagent terminator would leave a `requireYieldTool` session
- * unable to yield. The `<server>` in an `mcp__<server>_*` pattern is the
- * sanitized tool-name prefix (`createMCPToolName` lowercases and collapses
- * non-`[a-z_]` characters), not the raw config server name — a server named
- * `db2` mints `mcp__db_query`, so the pattern is `mcp__db_*`.
+ * sanitized tool-name prefix (`createMCPToolName` lowercases, keeps digits,
+ * and collapses other non-`[a-z0-9_]` characters), not the raw config server
+ * name — a server named `db-2` mints `mcp__db_2_query`, so the pattern is
+ * `mcp__db_2_*`.
  *
  * Minted names over 64 chars are length-capped (`capMCPToolNameLength`), so the
  * `mcp__<server>_` prefix is truncated and hash-suffixed — a plain prefix match

@@ -4,7 +4,7 @@
  * only when a caller requests a link.
  */
 import { formatAge } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	COLLAB_REGISTRY_VERSION,
 	type CollabHostSnapshot,

@@ -403,6 +403,42 @@ async function reconnectWithAbort(
 const MCP_TOOL_NAME_PREFIX = "mcp__";
 
 /**
+ * Shared mint pipeline. `keepDigits` selects the sanitizer variant: the
+ * current mint keeps `0-9`, the legacy variant strips them exactly as the
+ * pre-fix `sanitizeMCPToolNamePart` did. Both halves route through this one
+ * function so the two mints can only ever differ by that character class —
+ * if the prefix-strip or cap rules change, the legacy alias changes with them.
+ */
+function mintMCPToolName(serverName: string, toolName: string, keepDigits: boolean): string {
+	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server", keepDigits);
+	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool", keepDigits);
+
+	// Strip redundant server name prefix from tool name if present
+	const prefixWithUnderscore = `${sanitizedServerName}_`;
+
+	let normalizedToolName = sanitizedToolName;
+	if (sanitizedToolName.startsWith(prefixWithUnderscore)) {
+		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
+	}
+
+	return capMCPToolNameLength(`mcp__${sanitizedServerName}_${normalizedToolName}`);
+}
+
+/**
+ * Mint the name {@link createMCPToolName} produced before digits were kept in
+ * sanitized parts (`[^a-z_]+` collapsed to `_`). Digit-bearing servers/tools
+ * were renamed by that fix, so user config keys written against the old form
+ * (`tools.approval`, `tools.xdevInlineDevices`) would no longer match.
+ * Approval resolution consults this legacy key as a fail-closed fallback.
+ * Returns `undefined` when minting is unchanged (no digits involved).
+ */
+export function createLegacyMCPToolName(serverName: string, toolName: string): string | undefined {
+	const legacyName = mintMCPToolName(serverName, toolName, false);
+	const currentName = createMCPToolName(serverName, toolName);
+	return legacyName !== currentName ? legacyName : undefined;
+}
+
+/**
  * Longest tool name strict validators accept. OpenAI Responses/Completions and
  * Meta Responses enforce `^[a-zA-Z0-9_-]{1,64}$`; names over 64 chars are
  * rejected with HTTP 400 `name must be at most 64 characters` (#9130).
@@ -434,18 +470,7 @@ function capMCPToolNameLength(name: string): string {
  * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
  */
 export function createMCPToolName(serverName: string, toolName: string): string {
-	const sanitizedServerName = sanitizeMCPToolNamePart(serverName, "server");
-	const sanitizedToolName = sanitizeMCPToolNamePart(toolName, "tool");
-
-	// Strip redundant server name prefix from tool name if present
-	const prefixWithUnderscore = `${sanitizedServerName}_`;
-
-	let normalizedToolName = sanitizedToolName;
-	if (sanitizedToolName.startsWith(prefixWithUnderscore)) {
-		normalizedToolName = sanitizedToolName.slice(prefixWithUnderscore.length);
-	}
-
-	return capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedServerName}_${normalizedToolName}`);
+	return mintMCPToolName(serverName, toolName, true);
 }
 
 /**
@@ -512,7 +537,7 @@ export function canonicalMCPToolNameCandidates(name: string): string[] {
 	}
 	// The whole-suffix candidate has no boundary, so there is no minted fallback
 	// shape to reproduce: a suffix that sanitizes away is a dead end.
-	const sanitizedSuffix = sanitizeMCPToolNamePart(suffix, "");
+	const sanitizedSuffix = sanitizeMCPToolNamePart(suffix, "", true);
 	if (sanitizedSuffix.length > 0) {
 		add(capMCPToolNameLength(`${MCP_TOOL_NAME_PREFIX}${sanitizedSuffix}`));
 	}
@@ -643,6 +668,12 @@ export function parseMCPToolName(name: string): { serverName: string; toolName: 
  */
 export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly name: string;
+	/**
+	 * Name this tool had before digits were kept in minted names, if different.
+	 * Approval resolution honors `deny`/`prompt` user policies written against
+	 * this key so the rename cannot silently unblock a restricted MCP server.
+	 */
+	readonly legacyName?: string;
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
@@ -672,6 +703,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
+		this.legacyName = createLegacyMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
 		this.description = tool.description ?? `MCP tool from ${connection.name}`;
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
@@ -755,6 +787,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
  */
 export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly name: string;
+	/** See {@link MCPTool.legacyName}. */
+	readonly legacyName?: string;
 	readonly label: string;
 	readonly description: string;
 	readonly parameters: TSchema;
@@ -790,6 +824,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
+		this.legacyName = createLegacyMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
 		this.description = tool.description ?? `MCP tool from ${serverName}`;
 		this.parameters = normalizeSchemaForMCP(tool.inputSchema) as TSchema;
