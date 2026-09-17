@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -1514,15 +1516,17 @@ def test_run_git_kills_hung_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     timeout."""
     from robomp.git_ops import GitCommandError, _run_git
 
+    sleep = shutil.which("sleep")
+    assert sleep is not None
+
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
     fake_git = fakebin / "git"
-    # Use `exec /bin/sleep 30` so the kill from `subprocess.run`'s timeout
-    # actually terminates the wait — `sh` with a non-exec `sleep` would
-    # keep the parent alive on SIGTERM, and the absolute path means the
-    # shim doesn't depend on PATH (we point PATH at fakebin so `git`
-    # itself resolves to our shim).
-    fake_git.write_text("#!/bin/sh\nexec /bin/sleep 30\n")
+    # Use `exec` with an absolute path so the kill from `subprocess.run`'s
+    # timeout actually terminates the wait — `sh` with a non-exec `sleep`
+    # would keep the parent alive on SIGTERM, and the shim must not depend on
+    # PATH (we point PATH at fakebin so `git` itself resolves to our shim).
+    fake_git.write_text(f"#!/bin/sh\nexec {shlex.quote(sleep)} 30\n")
     fake_git.chmod(0o755)
     monkeypatch.setenv("PATH", str(fakebin))
 
