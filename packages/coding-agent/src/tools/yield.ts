@@ -144,16 +144,48 @@ function formatYieldLabels(labels: readonly string[]): string {
 }
 
 /**
+ * True when `value` is a JSON-schema node whose instances are always objects.
+ *
+ * Every disjunction has to be object-only, because one scalar alternative makes
+ * a scalar instance legal: a `type` array qualifies only when it lists nothing
+ * but `"object"`, and `anyOf`/`oneOf` only when every variant is object-typed.
+ * `allOf` qualifies when any member is object-typed, because the intersection
+ * admits nothing that member rejects.
+ */
+function isObjectTypedSchema(value: unknown): boolean {
+	if (value === null || typeof value !== "object") return false;
+	const record = value as Record<string, unknown>;
+	if (record.type === "object") return true;
+	if (Array.isArray(record.type)) return record.type.length > 0 && record.type.every(entry => entry === "object");
+	for (const key of ["anyOf", "oneOf"] as const) {
+		const variants = record[key];
+		if (Array.isArray(variants) && variants.length > 0 && variants.every(isObjectTypedSchema)) return true;
+	}
+	const allOf = record.allOf;
+	if (Array.isArray(allOf) && allOf.some(isObjectTypedSchema)) return true;
+	return false;
+}
+
+/**
  * Expand a plain-object `data` schema into a strict union that ALSO accepts each
- * top-level section value (and array element) on its own. Agents that yield
- * incrementally (`type: ["findings"]`, `type: ["confidence"]`, …) submit one
- * section per call, so `data` is a single finding object or a lone verdict value
- * — never the full output object. Without this, strict-mode providers constrain
- * `data` to the whole schema and reject/—under constrained decoding—forbid the
- * partial. Every branch is a typed sub-schema, so strict representability holds;
- * the full-output object stays the first (terminal) branch. The assembled whole
- * is still validated against the full schema at finalization. Non-object / loose
- * schemas are returned unchanged.
+ * object-typed top-level section value (and object-typed array element) on its
+ * own. Agents that yield incrementally (`type: ["findings"]`, …) submit one
+ * section per call, so `data` is a single finding object rather than the full
+ * output object. Without this, strict-mode providers constrain `data` to the
+ * whole schema and reject — under constrained decoding, forbid — the partial.
+ *
+ * Only object branches are offered. A scalar or array branch makes a bare
+ * string or list a legal `data`, and a model that sees one stops treating
+ * `data` as the place for its result: it fills the plainly typed sibling
+ * `error` instead, or both fields, which `execute()` rejects until the child
+ * aborts. A scalar-valued or whole-array section value therefore travels inside
+ * the terminal object.
+ *
+ * Every branch either declares a type or carries a combinator, which is what
+ * `enforceStrictSchema` requires of a node; the full-output object
+ * stays the first (terminal) branch. The assembled whole is still validated
+ * against the full schema at finalization. Non-object / loose schemas are
+ * returned unchanged.
  */
 function withSectionVariants(dataSchema: Record<string, unknown>): Record<string, unknown> {
 	if (dataSchema.type !== "object") return dataSchema;
@@ -170,13 +202,16 @@ function withSectionVariants(dataSchema: Record<string, unknown>): Record<string
 		seen.add(key);
 		branches.push(schema);
 	};
+	const addObject = (schema: unknown): void => {
+		if (isObjectTypedSchema(schema)) add(schema);
+	};
 	add(fullWithoutDescription);
 	for (const name in propRecord) {
 		const prop = propRecord[name];
-		add(prop);
+		addObject(prop);
 		if (prop !== null && typeof prop === "object") {
 			const propObj = prop as Record<string, unknown>;
-			if (propObj.type === "array") add(propObj.items);
+			if (propObj.type === "array") addObject(propObj.items);
 		}
 	}
 	if (branches.length <= 1) return dataSchema;
