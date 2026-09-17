@@ -661,6 +661,16 @@ describe("gh request host derivation", () => {
 		);
 		expect(ghRequestRepo("github.example.com/owner/repo", "7")).toBe("github.example.com/owner/repo");
 		expect(ghRequestRepo(undefined, "https://github.com/o/r/pull/1")).toBe("https://github.com/o/r/pull/1");
+		// The scheme is case-insensitive and `http` is a URL as much as `https`;
+		// reading either as a branch name would keep a competing `--repo`.
+		expect(ghRequestRepo("github.com/victim/secret", "HTTPS://github.example.com/o/r/pull/1")).toBe(
+			"HTTPS://github.example.com/o/r/pull/1",
+		);
+		expect(ghRequestRepo("github.com/victim/secret", "http://github.example.com/o/r/pull/1")).toBe(
+			"http://github.example.com/o/r/pull/1",
+		);
+		// A branch name is not a URL, whatever it contains.
+		expect(ghRequestRepo("owner/repo", "feature/https://x")).toBe("owner/repo");
 		expect(ghRequestRepo("owner/repo", undefined)).toBe("owner/repo");
 	});
 
@@ -815,6 +825,34 @@ esac`);
 		expect(invocations[0].argv).not.toContain("--repo");
 		expect(invocations[0].env).toEqual({});
 	});
+
+	// A URL scheme is case-insensitive, and `gh` follows an `http://` URL to its
+	// host too, so neither spelling may be mistaken for a branch name: that
+	// reading leaves the conflicting `--repo` in the argv and states its
+	// github.com host while the child talks to the enterprise instance.
+	for (const prRef of [
+		"http://github.example.com/owner/repo/pull/1",
+		"HTTPS://github.example.com/owner/repo/pull/1",
+	]) {
+		it(`follows an off-host PR URL written as ${prRef.split("/")[0]} over a conflicting repo`, async () => {
+			const fixture = await fakeGh(`case "$1" in
+auth) printf 'ghp_unwanted-token\\n' ;;
+*) printf '{"number":1}' ;;
+esac`);
+
+			await checkoutPullRequest(session(fixture.dir), undefined, {
+				prRef,
+				repo: "github.com/victim/secret",
+				force: false,
+				authHost: PUBLIC,
+			}).catch(() => undefined);
+
+			const invocations = await fixture.invocations();
+			expect(invocations.map(entry => entry.argv[0])).toEqual(["pr"]);
+			expect(invocations[0].argv).not.toContain("--repo");
+			expect(invocations[0].env).toEqual({});
+		});
+	}
 
 	it("still acquires a credential for a public PR URL beside an enterprise repo", async () => {
 		const fixture = await fakeGh(`case "$1" in

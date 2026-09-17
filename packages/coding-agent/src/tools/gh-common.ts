@@ -48,9 +48,24 @@ export function requireNonEmpty(value: string | null | undefined, label: string)
  * competing `--repo`, so the URL outranks `repo`. Everything that has to agree
  * with the arguments `gh` receives — the flag below, and the request's auth
  * host — reads this one answer, so the two cannot drift apart.
+ *
+ * `gh` reads that identifier by parsing it as a URL and accepting an http(s)
+ * one that names a repository. A URL scheme is case-insensitive, so testing for
+ * a literal `https://` prefix would call `HTTPS://ghe.example.com/o/r/pull/1` a
+ * plain branch name, leave the competing `--repo` in the argv, and state that
+ * repo's host while `gh` follows the URL to another one.
  */
 export function ghRequestRepo(repo: string | undefined, identifier: string | undefined): string | undefined {
-	return identifier?.startsWith("https://") ? identifier : repo;
+	if (identifier === undefined) return repo;
+	let url: URL;
+	try {
+		url = new URL(identifier);
+	} catch {
+		return repo;
+	}
+	// `URL` lowercases the scheme, so this reads it the way `gh` does.
+	if (url.protocol !== "https:" && url.protocol !== "http:") return repo;
+	return ghRepoRef(identifier) === undefined ? repo : identifier;
 }
 
 export function appendRepoFlag(args: string[], repo: string | undefined, identifier?: string): void {
