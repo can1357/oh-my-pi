@@ -526,6 +526,7 @@
 
 ### Fixed
 
+- Prompts the agent is waiting on now announce themselves, not just the `ask` tool: tool approvals and the coding-plan reserve question ("switch to the fallback model?"). Such a prompt raised while the pane sits in the background used to be invisible — the turn simply stopped. Dialogs the human opens mid-turn (the large-paste menu, slash-command pickers, user-run extension commands) stay silent, and the `ask.notify` switch governs these too ([#11055](https://github.com/can1357/oh-my-pi/pull/11055) by [@lemonleks](https://github.com/lemonleks)).
 - Fixed Flatpak Chromium launcher executables (including `com.google.Chrome`, `org.chromium.Chromium`, and `io.github.ungoogled_software.ungoogled_chromium`) so `app.path` is treated as a browser and gets managed Chromium profile handling
 - Fixed Chromium `--user-data-dir` handling by normalizing `--user-data-dir <dir>` and relative profile paths to absolute `--user-data-dir=...` values before launch
 - Browser automation now works alongside an already-running Chrome using an isolated profile, keeps requested profiles separate, and never kills reused browser processes.
