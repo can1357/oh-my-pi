@@ -313,6 +313,21 @@ describe("Exa MCP filtering", () => {
 
 		expect(Object.keys(result.configs)).toEqual(["exa"]);
 	});
+	test("reads a stdio endpoint URL with URL semantics, like the HTTP branch", () => {
+		// A stdio wrapper often forwards the endpoint URL verbatim. A `#fragment`
+		// is never sent to the endpoint, and `+` decodes to a space there — the
+		// synthetic advertised set must match the HTTP branch, or a server whose
+		// selected non-native tool the endpoint really serves is dropped.
+		for (const args of [
+			["-y", "mcp-remote", "https://mcp.exa.ai/mcp?tools=web_fetch_exa#section"],
+			["-y", "mcp-remote", "https://mcp.exa.ai/mcp?tools=web_search_exa%2C+web_fetch_exa"],
+		]) {
+			const configs: Record<string, MCPServerConfig> = {
+				exa: { type: "stdio", command: "npx", args, enabledTools: ["web_fetch_exa"] },
+			};
+			expect(Object.keys(filterExaMCPServers(configs, { exa: SOURCE }).configs)).toEqual(["exa"]);
+		}
+	});
 
 	test("keeps a differently-cased native name, which the native integration does not provide", () => {
 		// MCP tool names are case-sensitive, so `WEB_SEARCH_EXA` is not the native

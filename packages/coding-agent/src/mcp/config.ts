@@ -291,6 +291,17 @@ function getRequestedExaMcpTools(config: MCPServerConfig): string[] | null {
 			const args = stdioConfig.args ?? [];
 			for (let i = 0; i < args.length; i++) {
 				if (/^--?tools$/i.test(args[i])) return decodeExaToolList(args[i + 1]);
+				// A stdio wrapper often forwards the endpoint URL verbatim
+				// (`mcp-remote https://mcp.exa.ai/mcp?tools=…`). Parse URL-shaped
+				// arguments with the same semantics as the HTTP branch: a `#fragment`
+				// is never sent to the endpoint, and `+` decodes to a space.
+				try {
+					const fromQuery = new URL(args[i]).searchParams.get("tools");
+					if (fromQuery) return fromQuery;
+				} catch {
+					// Not URL-shaped (bare argv value, relative path) — fall through
+					// to the argv regexes below.
+				}
 				const match = args[i].match(/(?:^|[\s?&])tools=([^&\s]+)/i) ?? args[i].match(/--?tools[=\s]([^\s]+)/i);
 				if (match) return decodeExaToolList(match[1]);
 			}
