@@ -221,6 +221,100 @@ describe("browser init deadline carry-over", () => {
 		30_000,
 	);
 });
+
+describe("OMP-owned browser evaluation", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"adopts isolated element arguments into the main world without consuming caller handles",
+		async () => {
+			const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+			const name = `handle-evaluate-${process.pid}`;
+			const session = {
+				cwd: process.cwd(),
+				hasUI: false,
+				settings: { get: () => undefined },
+				getSessionFile: () => null,
+			} as unknown as ToolSession;
+			try {
+				await acquireTab(name, browser, {
+					url: `data:text/html,${encodeURIComponent('<button id="first">First</button><button id="second">Second</button>')}`,
+					timeoutMs: 30_000,
+				});
+				const result = await runInTab(name, {
+					code: `
+						await tab.evaluate("globalThis.__ompPageMarker = 'main-world'");
+						const first = await tab.waitForSelector("#first");
+						const second = await tab.waitForSelector("#second");
+						if (!first || !second) throw new Error("Expected both buttons");
+
+						const mainElement = await page.evaluateHandle(() => {
+							//!world=main
+							return document.querySelector("#first");
+						});
+						const mainObject = await page.evaluateHandle(() => {
+							//!world=main
+							return { value: 9 };
+						});
+						const plain = { asElement: "ordinary-data", nested: { value: 4 } };
+
+						const evaluated = await tab.evaluate(
+							(firstElement, secondElement, existingMainElement, existingMainObject, data) => ({
+								marker: globalThis.__ompPageMarker,
+								texts: [firstElement.textContent, secondElement.textContent],
+								mainText: existingMainElement.textContent,
+								mainValue: existingMainObject.value,
+								plain: data,
+							}),
+							first,
+							second,
+							mainElement,
+							mainObject,
+							plain,
+						);
+
+						let callbackFailure = "";
+						try {
+							await tab.evaluate(() => {
+								throw new Error("expected callback failure");
+							}, first, second);
+						} catch (error) {
+							callbackFailure = error instanceof Error ? error.message : String(error);
+						}
+
+						const stringMarker = await tab.evaluate("globalThis.__ompPageMarker", first, second);
+						const handlesAfterward = [
+							await first.evaluate(element => element.textContent),
+							await second.evaluate(element => element.textContent),
+							await mainElement.evaluate(element => element.textContent),
+							await mainObject.evaluate(object => object.value),
+						];
+						await Promise.all([first.dispose(), second.dispose(), mainElement.dispose(), mainObject.dispose()]);
+						return { evaluated, callbackFailure, stringMarker, handlesAfterward };
+					`,
+					timeoutMs: 15_000,
+					session,
+				});
+				expect(result.returnValue).toEqual({
+					evaluated: {
+						marker: "main-world",
+						texts: ["First", "Second"],
+						mainText: "First",
+						mainValue: 9,
+						plain: { asElement: "ordinary-data", nested: { value: 4 } },
+					},
+					callbackFailure: expect.stringContaining("expected callback failure"),
+					stringMarker: "main-world",
+					handlesAfterward: ["First", "Second", "First", 9],
+				});
+			} finally {
+				await releaseTab(name, { kill: true });
+				if (browser.browser.connected) await releaseBrowser(browser, { kill: true });
+			}
+		},
+		45_000,
+	);
+});
+
 describe("OMP-owned browser input", () => {
 	it.skipIf(!CHROMIUM_AVAILABLE)(
 		"clicks background tabs through selector, observed handle, and raw Puppeteer actions",

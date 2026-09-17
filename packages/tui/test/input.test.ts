@@ -224,6 +224,16 @@ describe("Input component", () => {
 		expect(submitted).toBe("a😀e\u0301z");
 	});
 
+	it("does not disclose masked input through debug inspection", () => {
+		const value = crypto.randomUUID();
+		const input = new Input();
+		input.mask = true;
+		input.setValue(value);
+
+		expect(JSON.stringify(input.debugState())).not.toContain(value);
+		expect(input.getValue()).toBe(value);
+	});
+
 	it("keeps masked Unicode input within narrow viewports", () => {
 		const input = setupAtEnd("😀e\u0301".repeat(20));
 		input.mask = true;

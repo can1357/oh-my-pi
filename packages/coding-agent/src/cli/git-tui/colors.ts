@@ -31,7 +31,8 @@ export function fgAnsi(hex: string): string {
 
 /** True when the theme sits on a dark surface. */
 export function isDark(): boolean {
-	return theme.statusLineLuminance === undefined || theme.statusLineLuminance <= 0.5;
+	const luminance = theme.statusLineLuminance;
+	return luminance === undefined || luminance <= 0.5;
 }
 
 /** The theme's canvas color: the surface diff tints and pills blend toward. */

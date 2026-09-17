@@ -356,6 +356,7 @@ function resolveBedrockInferenceProfileModelId(
 		contextWindow: null,
 		maxTokens: null,
 		...(template.headers ? { headers: template.headers } : {}),
+		...(template.resolveHeaders ? { resolveHeaders: template.resolveHeaders } : {}),
 		...(template.transport !== undefined ? { transport: template.transport } : {}),
 		...(template.guardrailIdentifier !== undefined ? { guardrailIdentifier: template.guardrailIdentifier } : {}),
 		...(template.guardrailVersion !== undefined ? { guardrailVersion: template.guardrailVersion } : {}),

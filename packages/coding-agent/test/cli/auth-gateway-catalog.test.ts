@@ -1,25 +1,26 @@
-import { describe, expect, test } from "bun:test";
-import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { afterEach, describe, expect, test } from "bun:test";
+import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createSerializedRebuilder, indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
-function stubAuthStorage(configKeys?: string[]): AuthStorage {
-	const stub = {
-		setFallbackResolver: () => {},
-		clearConfigApiKeys: () => {},
-		setConfigApiKey: (provider: string) => configKeys?.push(provider),
-		removeConfigApiKey: () => {},
-		hasAuth: () => true,
-		getAll: () => ({ anthropic: {} }),
-	};
-	return stub as unknown as AuthStorage;
+const authStores: AuthStorage[] = [];
+
+async function createAuthStorage(): Promise<AuthStorage> {
+	const storage = await AuthStorage.create(":memory:");
+	authStores.push(storage);
+	return storage;
 }
 
+afterEach(() => {
+	for (const storage of authStores.splice(0)) storage.close();
+});
+
 describe("indexModelsByRequestId (auth-gateway catalog)", () => {
-	test("resolves a discovery-only model absent from the bundled catalog", () => {
-		const registry = new ModelRegistry(stubAuthStorage());
+	test("resolves a discovery-only model absent from the bundled catalog", async () => {
+		using tempDir = TempDir.createSync("@omp-auth-gateway-catalog-");
+		const registry = new ModelRegistry(await createAuthStorage(), tempDir.join("models.yml"));
 		// Simulate a model reached via provider discovery but not compiled into
 		// the bundle (e.g. a post-release id). registerProvider merges it into
 		// getAll() exactly as runtime discovery does.
@@ -71,16 +72,16 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		// A normal client registry applies the local overrides and installs the
 		// config API keys into AuthStorage.
-		const clientKeys: string[] = [];
-		const clientRegistry = new ModelRegistry(stubAuthStorage(clientKeys), modelsPath);
+		const clientAuthStorage = await createAuthStorage();
+		const clientRegistry = new ModelRegistry(clientAuthStorage, modelsPath);
 		expect(clientRegistry.find("anthropic", "claude-sonnet-4-5")?.baseUrl).toBe("http://127.0.0.1:18899");
 		expect(clientRegistry.getAll().find(model => model.provider === "openai")?.transport).toBe("pi-native");
-		expect(clientKeys).toContain("anthropic");
+		expect(await clientAuthStorage.getApiKey("anthropic")).toBe("gateway-token");
 
 		// The gateway registry ignores models.yml entirely: bundled routing wins,
 		// no config key reaches AuthStorage, and no pi-native self-route survives.
-		const gatewayKeys: string[] = [];
-		const gatewayRegistry = new ModelRegistry(stubAuthStorage(gatewayKeys), modelsPath, {
+		const gatewayAuthStorage = await createAuthStorage();
+		const gatewayRegistry = new ModelRegistry(gatewayAuthStorage, modelsPath, {
 			ignoreLocalModelConfig: true,
 		});
 		const gatewayModel = gatewayRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -89,15 +90,16 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		expect(gatewayModel.baseUrl).toBe(bundledModel.baseUrl);
 		expect(gatewayModel.transport).toBeUndefined();
-		expect(gatewayKeys).toHaveLength(0);
+		expect(await gatewayAuthStorage.getApiKey("anthropic")).not.toBe("gateway-token");
 		expect(gatewayRegistry.getAll().find(model => model.provider === "openai")?.transport).toBeUndefined();
 		expect(indexModelsByRequestId(gatewayRegistry.getAll(), new Set(["anthropic"])).get(gatewayModel.id)).toBe(
 			gatewayModel,
 		);
 	});
 
-	test("scopes the catalog to providers with credentials", () => {
-		const registry = new ModelRegistry(stubAuthStorage());
+	test("scopes the catalog to providers with credentials", async () => {
+		using tempDir = TempDir.createSync("@omp-auth-gateway-catalog-");
+		const registry = new ModelRegistry(await createAuthStorage(), tempDir.join("models.yml"));
 		const all = registry.getAll();
 		const anthropicModel = all.find(m => m.provider === "anthropic");
 		const foreignModel = all.find(m => m.provider !== "anthropic");

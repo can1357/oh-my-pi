@@ -378,7 +378,10 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 		if (action === "refresh" && !json && process.stderr.isTTY) {
 			process.stderr.write("Refreshing models from all providers…\n");
 		}
-		await modelRegistry.refresh(action === "refresh" ? "online" : "online-if-uncached");
+		await modelRegistry.refresh(
+			action === "refresh" ? "online" : "online-if-uncached",
+			action === "refresh" ? { refreshCommandCredentials: true } : undefined,
+		);
 
 		const cliExtensionPaths = command.flags.extensions ?? [];
 		await runModelsListing({

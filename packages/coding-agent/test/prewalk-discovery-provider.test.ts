@@ -17,6 +17,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -89,6 +90,7 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
 		authStorage.setRuntimeApiKey("my-provider", "test-provider-key");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		return new ModelRegistry(authStorage, writeDiscoveryConfig(), {
 			fetch: mockDiscovery(["some-model"]),
 		});
@@ -122,6 +124,47 @@ describe("issue #11820 prewalk into a models.yml discovery provider target", () 
 		expect(options.prewalk?.target.provider).toBe("my-provider");
 		expect(options.prewalk?.target.id).toBe("some-model");
 		expect(requestedUrls).not.toContain(`${unrelatedBaseUrl}/models`);
+	});
+
+	test("checks an earlier discovery-backed fallback before a later static model", async () => {
+		const modelRegistry = registry();
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallbackModel) throw new Error("expected claude-sonnet-4-5 to be bundled");
+
+		const settings = Settings.isolated();
+		settings.setModelRole("default", `my-provider/some-model,${fallbackModel.provider}/${fallbackModel.id}`);
+
+		const options = await buildSessionOptions(
+			parseArgs(["--prewalk-into", "@default"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+
+		expect(options.prewalk?.target.provider).toBe("my-provider");
+		expect(options.prewalk?.target.id).toBe("some-model");
+		expect(requestedUrls).toContain(`${baseUrl}/models`);
+		expect(requestedUrls).not.toContain(`${unrelatedBaseUrl}/models`);
+	});
+
+	test("continues discovery through ordered fallback providers", async () => {
+		const modelRegistry = registry();
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "my-provider/missing,unrelated-provider/unrelated-model");
+
+		const options = await buildSessionOptions(
+			parseArgs(["--prewalk-into", "@default"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+
+		expect(options.prewalk?.target.provider).toBe("unrelated-provider");
+		expect(options.prewalk?.target.id).toBe("unrelated-model");
+		expect(requestedUrls).toContain(`${baseUrl}/models`);
+		expect(requestedUrls).toContain(`${unrelatedBaseUrl}/models`);
 	});
 
 	test("does not probe discovery providers for an unqualified missing target", async () => {
