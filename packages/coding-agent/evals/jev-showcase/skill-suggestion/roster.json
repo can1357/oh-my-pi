@@ -1,0 +1,13 @@
+[
+  { "name": "apple-notes", "description": "Manage Apple Notes via memo CLI: create, search, edit." },
+  { "name": "pptx-author", "description": "Build PowerPoint decks headless with python-pptx." },
+  { "name": "xurl", "description": "X/Twitter via xurl CLI: raw post search, posting, DM, media." },
+  { "name": "computer-use", "description": "Drive the user's desktop in the background." },
+  { "name": "1password", "description": "Set up 1Password CLI and inject secrets at runtime." },
+  { "name": "github", "description": "GitHub CLI (gh): issues, PRs, repos, actions, API queries." },
+  { "name": "systematic-debugging", "description": "Debug a failure with evidence and bisection." },
+  { "name": "typesafe-jev", "description": "Native TypeSafe Jev skill routing and eval judge()." },
+  { "name": "hermes-agent", "description": "Configure Hermes CLI, models, providers, tools, skills." },
+  { "name": "no-mistakes", "description": "Run no-mistakes validation pipeline before push." },
+  { "name": "create-skill", "description": "Author a new agent skill with SKILL.md structure." }
+]
