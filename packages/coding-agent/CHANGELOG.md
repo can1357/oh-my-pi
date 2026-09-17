@@ -32,6 +32,28 @@
 - Fixed generation token-rate displays for subagents and restored the main session's reading after switching focus.
 - Fixed subagent HUD labels and plan filenames being populated with example prompt text on smaller models.
 - Improved shell, file, session, and persistence operations to avoid unnecessary repeated work, improving responsiveness and resource usage.
+- models.yml `compat` now accepts the `replayReasoningContent` and `qwenPreserveThinking` keys, so remote OpenAI-compatible endpoints that require historical reasoning content (e.g. DashScope Qwen 3.8) can opt into reasoning-history replay instead of the schema rejecting the override ([#12376](https://github.com/can1357/oh-my-pi/issues/12376)).
+- Fixed `edit` auto-repair silently stalling the tool result for 60s when the `smol` model didn't answer; the ceiling is now 20s and the repair start and timeout (with the model name) are logged.
+- Fixed subagents leaving parent messages queued after a tool interruption when an extension notification stalls.
+- Fixed `browser.open({ app: { relay: true } })` hanging into the 30s tool timeout when the relay extension is not installed or nothing is listening; the open now fails immediately with the actionable "extension never connected" / "not reachable" message, and only waits out the 35s service-worker revival window when an extension has connected before.
+- Bash calls cache the `.envrc` walk-up result per directory and memoize the filtered parent environment instead of re-walking and re-copying per call.
+- The `read` tool resolves paths with non-blocking probes (macOS-only filename variants skipped off-darwin).
+- Session branch lookups are memoized per leaf generation and shared read-only instead of re-walking with a fresh array and Set per call.
+- Session persistence pre-scans entries allocation-free and only rebuilds nodes that actually change.
+- Streamed tool-argument string fields accumulate in per-update chunk lists with run-sliced appends instead of one concat per character.
+
+- Fixed the `edit` tool splicing a literal `…` into the file when a `<SM:FIND>` opened or closed with an ellipsis (a line-end `…` spanning the rest of a line, or a whole-line `…` at either edge) and `<SM:PUT>` re-emitted it. An edge gap captures nothing, so the matching `<SM:PUT>` ellipsis now re-emits nothing and the anchor keeps its own newline; an identical `<SM:FIND>`/`<SM:PUT>` pair reports no change instead of writing the marker. A leading gap combined with an inner gap no longer panics.
+- Fixed the `edit` tool treating a closing tag glued to a content line (`foo</SM:FIND>`, `bar</SM:PUT>`) as part of the text, which reported `has 0 occurrences` against an anchor that was in the file; glued open and close tags now delimit the block.
+- Fixed `edit` copy-ready corrections and retries omitting the `path=` on `<SM:EDIT>`, so resending them verbatim failed with `Missing file target`.
+- Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+- Fixed a subagent burning its whole run on `yield` calls that never finish it: a turn whose only tool call is an incremental `yield` no longer slips past the soft request budget, and the reminder ladder's forced final `yield` now ends the run even when the model answers with another incremental section. ([#12351](https://github.com/can1357/oh-my-pi/pull/12351) by [@pedropaulovc](https://github.com/pedropaulovc))
+- Fixed `edit` applying hashline hunks the tool documents as rejected: a hunk anchored on a line the tagged read never displayed was auto-repaired onto a neighbouring statement instead of refused, so `edit.enforceSeenLines` now defaults on and such a hunk is rejected with the actual content of the anchored lines ([#12369](https://github.com/can1357/oh-my-pi/pull/12369) by [@pedropaulovc](https://github.com/pedropaulovc)).
+- Fixed stale-tag anchor recovery landing a hunk in an identically shaped sibling construct — the next entry of the same dict, list, or block — when the line map aligned the anchor's row with its duplicate; recovery now refuses a remap whose enclosing constructs differ and reports the stale tag instead ([#12369](https://github.com/can1357/oh-my-pi/pull/12369) by [@pedropaulovc](https://github.com/pedropaulovc)).
+- Fixed the generation tok/s readout (`composer.tokenRate`) staying blank while viewing a subagent and losing the main session's reading on return; each session now meters its own stream, and the reading survives focus round-trips and resumes.
+- Fixed subagent HUD labels (and plan filenames) showing the prompt's own example text — e.g. every spawn labelled `Audit client fetch calls for abort-signal wiring` — on small tiny/smol models that echoed the few-shot examples.
+- File line counting now scans with the native substring search instead of a per-character loop.
+- Session statistics now accumulate role, tool-call, and usage counts in a single pass instead of re-walking the message list.
+- Session persistence recomputes truncated line counts without allocating a transient line array.
 
 ## [18.2.4] - 2026-09-17
 

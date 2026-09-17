@@ -110,6 +110,23 @@ provider "alibaba-token-plan" {
 			supports-reasoning-effort #true
 		}
 	}
+	// Every remote DashScope Qwen 3.8 SKU steers thinking depth through the
+	// OpenAI `reasoning_effort` control and replays reasoning_content across
+	// turns (preserve_thinking defaults on). The exact `qwen3.8-max` /
+	// `qwen3.8-flash` rows keep their reviewed ladders; discovered siblings
+	// (e.g. `qwen3.8-plus`) inherit this wire contract instead of silently
+	// dropping effort selections on the Qwen dialect.
+	class "qwen" {
+		revision ">=3.8 <3.9" {
+			replay-reasoning-content #true
+			when-thinking {
+				extra-body {
+					enable_thinking #true
+				}
+				thinking-format "openai"
+			}
+		}
+	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek-v4-pro" {
 		thinking-format "qwen"
@@ -119,17 +136,15 @@ provider "alibaba-token-plan" {
 	models "qwen3.8-max-preview" {
 		thinking-efforts "low" "high" "xhigh"
 		thinking-requires-effort #true
-	}
-	// Max and Flash steer thinking depth through the OpenAI reasoning_effort
-	// control and replay reasoning_content across turns (preserve_thinking
-	// defaults on for both).
-	models "qwen3.8-max" "qwen3.8-flash" {
-		replay-reasoning-content #true
+		// The class-revision wire contract would swap preview to the OpenAI
+		// dialect; re-pin the Qwen dialect so it keeps emitting only the binary
+		// toggle (replay stays on — DashScope preserve_thinking covers preview
+		// too, and an unacknowledged reasoning_effort is worse than a replayed
+		// reasoning_content the template strips).
 		when-thinking {
 			extra-body {
 				enable_thinking #true
 			}
-			thinking-format "openai"
 		}
 	}
 	// Max exposes a distinct low/medium/xhigh ladder; Flash retains its
