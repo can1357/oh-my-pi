@@ -9,6 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import {
 	listTables,
+	openSqliteReadConnection,
 	parseSqlitePathCandidates,
 	parseSqliteSelector,
 	renderTable,
@@ -168,6 +169,27 @@ describe("SQLite tool support", () => {
 		await fs.copyFile(`${dbPath}.source`, dbPath);
 		return dbPath;
 	}
+	/**
+	 * Stamps a WAL-mode database with a committed frame still in the WAL and
+	 * no `-shm` — the shape of a database whose WAL is coordinated elsewhere
+	 * (copied out from under a live writer, or owned by a foreign engine).
+	 */
+	async function stampHotWalDb(name: string): Promise<string> {
+		const dbPath = path.join(tmpDir, name);
+		const writer = new Database(`${dbPath}.source`);
+		try {
+			writer.run("PRAGMA journal_mode = WAL");
+			writer.run("CREATE TABLE entries (id INTEGER PRIMARY KEY, value TEXT NOT NULL)");
+			writer.prepare("INSERT INTO entries (value) VALUES (?)").run("in-wal");
+			// Copy while the writer holds the connection open so the committed
+			// frame stays in the WAL instead of being checkpointed on close.
+			await fs.copyFile(`${dbPath}.source`, dbPath);
+			await fs.copyFile(`${dbPath}.source-wal`, `${dbPath}-wal`);
+		} finally {
+			writer.close();
+		}
+		return dbPath;
+	}
 
 	beforeAll(async () => {
 		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "sqlite-tool-test-"));
@@ -257,6 +279,63 @@ describe("SQLite tool support", () => {
 		});
 
 		expect(getText(result)).toContain("| 1");
+	});
+
+	it("reads a WAL database with pending frames through a private copy, leaving the original untouched", async () => {
+		const walPath = await stampHotWalDb("hot-wal.sqlite");
+		const walSizeBefore = (await fs.stat(`${walPath}-wal`)).size;
+		const dbSizeBefore = (await fs.stat(walPath)).size;
+		expect(walSizeBefore).toBeGreaterThan(0);
+
+		const result = await readTool.execute("sqlite-hot-wal", { path: walPath });
+
+		// The committed frame is visible through the WAL on the copy…
+		expect(getText(result)).toContain("entries (1 rows)");
+		// …and the original, its WAL, and its directory are untouched: no
+		// checkpoint, no truncation, no sidecar creation.
+		expect((await fs.stat(`${walPath}-wal`)).size).toBe(walSizeBefore);
+		expect((await fs.stat(walPath)).size).toBe(dbSizeBefore);
+		await expect(fs.access(`${walPath}-shm`)).rejects.toThrow();
+		await expect(fs.access(`${walPath}-journal`)).rejects.toThrow();
+	});
+
+	it("leaves a database with a foreign WAL sidecar (-tshm) completely untouched", async () => {
+		const walPath = await stampHotWalDb("foreign-wal.sqlite");
+		await fs.writeFile(`${walPath}-tshm`, "");
+		const walSizeBefore = (await fs.stat(`${walPath}-wal`)).size;
+		const filesBefore = new Set(await fs.readdir(tmpDir));
+
+		const result = await readTool.execute("sqlite-foreign-wal", { path: walPath });
+
+		expect(getText(result)).toContain("entries (1 rows)");
+		expect((await fs.stat(`${walPath}-wal`)).size).toBe(walSizeBefore);
+		for (const entry of await fs.readdir(tmpDir)) {
+			if (!filesBefore.has(entry)) {
+				throw new Error(`read created a file next to the database: ${entry}`);
+			}
+		}
+	});
+
+	it("removes the private copy when the connection closes", async () => {
+		const walPath = await stampHotWalDb("copy-cleanup.sqlite");
+		const tmpBefore = new Set(await fs.readdir(os.tmpdir()));
+
+		const db = await openSqliteReadConnection(walPath);
+
+		// os.tmpdir() is shared with the rest of the machine, so scope the
+		// diff to this module's private-copy directories.
+		const created = (await fs.readdir(os.tmpdir())).filter(
+			entry => !tmpBefore.has(entry) && entry.startsWith("omp-sqlite-read-"),
+		);
+		expect(created.length).toBe(1);
+		expect(listTables(db).map(table => table.name)).toContain("entries");
+
+		db.close();
+
+		const tmpAfter = new Set(await fs.readdir(os.tmpdir()));
+		for (const entry of created) {
+			expect(tmpAfter.has(entry)).toBe(false);
+		}
 	});
 
 	it("lists tables for a .db database when the magic bytes match SQLite", async () => {
