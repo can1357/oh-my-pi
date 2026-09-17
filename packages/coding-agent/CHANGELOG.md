@@ -17,6 +17,7 @@
 
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
 - Python eval preserves multiline strings containing magic-looking lines such as `!cmd` or `%%bash`.
+- Python eval preserves multiline strings containing magic-looking lines such as `!cmd` or `%%bash`. ([#12334](https://github.com/can1357/oh-my-pi/pull/12334) by [@iliaal](https://github.com/iliaal))
 
 ## [18.2.3] - 2026-09-17
 
