@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added `async.waitBackoffMs` to customize consecutive hub job/message waits while retaining the existing default intervals. ([#12320](https://github.com/can1357/oh-my-pi/pull/12320) by [@luken](https://github.com/luken))
+
 ### Fixed
 
 - Already-aborted hub job waits return promptly even when peer messaging is unavailable. ([#12320](https://github.com/can1357/oh-my-pi/pull/12320) by [@luken](https://github.com/luken))

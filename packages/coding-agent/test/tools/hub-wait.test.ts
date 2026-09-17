@@ -14,11 +14,12 @@ import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
 
 const SELF_ID = "Main";
 
-function makeSession(manager: AsyncJobManager | undefined): ToolSession {
+function makeSession(manager: AsyncJobManager | undefined, settings: Record<string, unknown> = {}): ToolSession {
 	const stub = {
 		cwd: process.cwd(),
 		settings: {
 			get(key: string): unknown {
+				if (key in settings) return settings[key];
 				if (key === "irc.timeoutMs") return 120_000;
 				return undefined;
 			},
@@ -104,6 +105,45 @@ describe("hub unified wait", () => {
 			manager.cancel(job.id);
 		}
 	});
+
+	test("configured waits repeat the last interval and reset after a minute away", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const job = registerHangingJob(manager, "configured wait");
+		const tool = new HubTool(makeSession(manager, { "async.waitBackoffMs": [20, 40] }));
+		try {
+			for (const interval of [20, 40, 40]) {
+				let settled = false;
+				const pending = tool.execute("configured", { op: "wait" }).then(result => {
+					settled = true;
+					return result;
+				});
+				vi.advanceTimersByTime(interval - 1);
+				for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+				expect(settled).toBe(false);
+				vi.advanceTimersByTime(1);
+				expect((await pending).details).toMatchObject({ jobs: [{ id: job.id, status: "running" }] });
+			}
+			vi.advanceTimersByTime(60_000);
+			const restarted = tool.execute("reset", { op: "wait" });
+			vi.advanceTimersByTime(20);
+			expect((await restarted).useless).toBe(true);
+		} finally {
+			manager.cancel(job.id);
+		}
+	});
+
+	test.each([[], [0], [0.5], [Infinity], [2_147_483_648], ["20"], "20"].map(backoff => ({ backoff })))(
+		"invalid wait backoff %j returns an actionable error",
+		async ({ backoff }) => {
+			const tool = new HubTool(makeSession(undefined, { "async.waitBackoffMs": backoff }));
+			const result = await tool.execute("invalid", { op: "wait" });
+			expect(result.isError).toBe(true);
+			expect(result.content).toEqual([
+				{ type: "text", text: expect.stringContaining("async.waitBackoffMs must be") },
+			]);
+		},
+	);
 
 	test("an incoming message settles the wait while watched jobs keep running", async () => {
 		const registry = AgentRegistry.global();
