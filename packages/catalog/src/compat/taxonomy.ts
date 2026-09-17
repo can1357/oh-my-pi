@@ -201,28 +201,57 @@ function ranksInClass(classId: string, model: string, lenient: boolean): Omit<Cl
 	return out;
 }
 
+// Lowercase override index built once per process: avoids re-lowercasing every
+// override model/provider string on every classifyModel call.
+interface OverrideBucket {
+	byProvider: Map<string, CompiledIdentityOverride>;
+	agnostic: CompiledIdentityOverride | undefined;
+}
+
+let overrideIndex: Map<string, OverrideBucket> | undefined;
+
+function getOverrideIndex(): Map<string, OverrideBucket> {
+	if (overrideIndex !== undefined) return overrideIndex;
+	const index = new Map<string, OverrideBucket>();
+	for (const cls of rules.taxonomy.classes) {
+		for (const override of cls.overrides) {
+			const key = override.model.toLowerCase();
+			let bucket = index.get(key);
+			if (bucket === undefined) {
+				bucket = { byProvider: new Map(), agnostic: undefined };
+				index.set(key, bucket);
+			}
+			if (override.provider !== undefined) {
+				bucket.byProvider.set(override.provider.toLowerCase(), override);
+			} else {
+				bucket.agnostic ??= override;
+			}
+		}
+	}
+	overrideIndex = index;
+	return index;
+}
+
 function findIdentityOverride(
 	provider: string,
 	bareModel: string,
 	observedAtMs: number | undefined,
 ): CompiledIdentityOverride | undefined {
-	const lowerModel = bareModel.toLowerCase();
-	const lowerProvider = provider.toLowerCase();
-	let agnostic: CompiledIdentityOverride | undefined;
-	for (const cls of rules.taxonomy.classes) {
-		for (const override of cls.overrides) {
-			if (override.model.toLowerCase() !== lowerModel) continue;
-			if (override.expiresAtMs !== undefined && observedAtMs !== undefined && observedAtMs >= override.expiresAtMs) {
-				continue;
-			}
-			if (override.provider !== undefined) {
-				if (override.provider.toLowerCase() === lowerProvider) return override;
-			} else {
-				agnostic ??= override;
-			}
+	const bucket = getOverrideIndex().get(bareModel.toLowerCase());
+	if (bucket === undefined) return undefined;
+	const scoped = bucket.byProvider.get(provider.toLowerCase());
+	if (scoped !== undefined) {
+		if (scoped.expiresAtMs === undefined || observedAtMs === undefined || observedAtMs < scoped.expiresAtMs) {
+			return scoped;
 		}
 	}
-	return agnostic;
+	const agnostic = bucket.agnostic;
+	if (agnostic !== undefined) {
+		if (agnostic.expiresAtMs === undefined || observedAtMs === undefined || observedAtMs < agnostic.expiresAtMs) {
+			return agnostic;
+		}
+	}
+	return undefined;
 }
 
 /** Result of collapsing a wire id through the suffix vocabulary. */
@@ -330,10 +359,37 @@ export function stripThinkingVariantSuffix(model: string): string | undefined {
  * Classifies a model into its structured identity: reviewed override first,
  * then suffix collapse, then class/family/revision ranks over the logical id.
  *
+ * Results are memoized per (provider, model, lenient) — the rule tree is
+ * static per process. Cached identities are frozen and each caller receives
+ * a shallow copy, so a consumer that mutates its copy (e.g. `buildModel`
+ * storing `policy.identity` on the model) cannot poison the cache or any
+ * other model classified under the same key. Calls with an explicit
+ * observedAtMs skip the memo so override expiry stays exact.
+ *
  * @throws AmbiguousIdentityError on equal-rank cross-class or cross-family
  * matches unless `opts.lenient`.
  */
+const classifyMemo = new Map<string, ModelIdentity>();
+const CLASSIFY_MEMO_MAX = 4096;
+
+function classifyMemoKey(provider: string, modelId: string, lenient: boolean): string {
+	return `${provider.length}:${provider}${modelId.length}:${modelId}${lenient ? 1 : 0}`;
+}
+
 export function classifyModel(provider: string, modelId: string, opts?: ClassifyOptions): ModelIdentity {
+	if (opts?.observedAtMs === undefined) {
+		const key = classifyMemoKey(provider, modelId, opts?.lenient === true);
+		const cached = classifyMemo.get(key);
+		if (cached !== undefined) return { ...cached };
+		const identity = classifyModelUncached(provider, modelId, opts);
+		if (classifyMemo.size >= CLASSIFY_MEMO_MAX) classifyMemo.clear();
+		classifyMemo.set(key, Object.freeze(identity));
+		return { ...identity };
+	}
+	return classifyModelUncached(provider, modelId, opts);
+}
+
+function classifyModelUncached(provider: string, modelId: string, opts?: ClassifyOptions): ModelIdentity {
 	const lenient = opts?.lenient === true;
 	const trimmed = modelId.trim();
 	const bare = bareOf(trimmed);

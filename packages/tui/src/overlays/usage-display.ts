@@ -1,5 +1,14 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 
+/** Include the usage tier in a limit title unless its label already names it. */
+export function formatLimitTitle(limit: UsageLimit): string {
+	const tier = limit.scope.tier;
+	if (tier && !limit.label.toLowerCase().includes(tier.toLowerCase())) {
+		return `${limit.label} (${tier})`;
+	}
+	return limit.label;
+}
+
 function collapseSharedLimits(limits: UsageLimit[]): UsageLimit[] {
 	const seenGroups = new Set<string>();
 	let collapsed: UsageLimit[] | undefined;

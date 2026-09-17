@@ -19,7 +19,36 @@ export function tryParseJson<T = unknown>(content: string): T | null {
  * only lossless JSON representation.
  */
 export function stringifyJson(value: unknown, space?: string | number): string | undefined {
-	return JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item), space);
+	// Fast path: the replacer closure forces the slow stringify on every
+	// call, but bigint payloads are vanishingly rare. Try plain stringify
+	// first; on a TypeError, probe with a one-shot replacer that throws a
+	// sentinel at the first bigint and aborts the walk immediately, then pay
+	// for the full bigint-coercing pass only when the probe finds one. Only
+	// the sentinel authorizes the retry — an unrelated TypeError from user
+	// code (getter/toJSON throwing on its own) is rethrown untouched, so a
+	// serializer that fails twice then succeeds still surfaces its original
+	// error exactly like the previous single-pass replacer did.
+	try {
+		return JSON.stringify(value, undefined, space);
+	} catch (error) {
+		if (!(error instanceof TypeError) || !containsBigint(value)) throw error;
+		return JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? item.toString() : item), space);
+	}
+}
+
+class FoundBigint extends Error {}
+
+function containsBigint(value: unknown): boolean {
+	try {
+		JSON.stringify(value, (_key, item) => {
+			if (typeof item === "bigint") throw new FoundBigint();
+			return item;
+		});
+	} catch (error) {
+		if (error instanceof FoundBigint) return true;
+		throw error;
+	}
+	return false;
 }
 
 function stableJsonClone(value: unknown): unknown {

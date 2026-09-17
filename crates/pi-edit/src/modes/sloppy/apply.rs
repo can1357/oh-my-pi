@@ -11,7 +11,9 @@ use std::{
 };
 
 use super::{
-	parse::{has_marker_lines, missing_unmarked_lines, operation_payload, parse_operations},
+	parse::{
+		edit_header, has_marker_lines, missing_unmarked_lines, operation_payload, parse_operations,
+	},
 	types::{
 		ATOMICITY_NOTICE, Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES,
 		MAX_COMBINATIONS, NormalizedText, Occurrence, Operation, OperationRewrite, ParsedPattern,
@@ -911,7 +913,7 @@ fn no_match_error(
 			let corrected = operation.pattern_text.replacen(literal, &closest.0, 1);
 			format!(
 				"Copy-ready corrected operation:\n{}",
-				operation_payload(operation, if operation.all { "*" } else { "" }, Some(&corrected))
+				operation_payload(operation, path, operation.all, Some(&corrected))
 			)
 		} else if standalone {
 			"No copy-ready correction — the closest current text is only a fuzzy match. Re-read the \
@@ -1180,7 +1182,7 @@ pub(crate) fn locate(
 			format!(
 				"Near line {}:\n{}",
 				line_number_at(content, candidate.start),
-				operation_payload(operation, "", None)
+				operation_payload(operation, path, false, None)
 			)
 		})
 		.collect::<Vec<_>>()
@@ -1188,7 +1190,7 @@ pub(crate) fn locate(
 	let all_retry = if same_rewrite_for_all(pattern, operation, &candidates) {
 		format!(
 			"All candidates receive the same rewrite; retry every match:\n{}\n\n",
-			operation_payload(operation, "*", None)
+			operation_payload(operation, path, true, None)
 		)
 	} else {
 		String::new()
@@ -2244,7 +2246,7 @@ fn apply_operations(
 	context: &mut ApplyContext<'_>,
 ) -> Result<String, EditError> {
 	let payload = fnv_payload(input);
-	let operations = parse_operations(input, content)?;
+	let operations = parse_operations(input, content, context.path)?;
 	let mut removed = vec![None; operations.len()];
 	let mut planned = Vec::new();
 	let mut recovery_notes = Vec::new();
@@ -2446,11 +2448,7 @@ fn apply_operations(
 				{
 					let one_line = base.split_whitespace().collect::<Vec<_>>().join(" ");
 					let repeated = vec![one_line; pattern.selection_ranges.len()];
-					let header = if operation.all {
-						"<SM:EDIT all>"
-					} else {
-						"<SM:EDIT>"
-					};
+					let header = edit_header(context.path, operation.all);
 					let candidate = &candidates[0];
 					return Err(EditError::matched(
 						[
@@ -2633,9 +2631,9 @@ fn apply_operations(
 			previous.operation_number,
 			current.operation_number,
 			previous.operation_number,
-			operation_payload(&operations[previous.operation_number - 1], "", None),
+			operation_payload(&operations[previous.operation_number - 1], context.path, false, None),
 			current.operation_number,
-			operation_payload(&operations[current.operation_number - 1], "", None)
+			operation_payload(&operations[current.operation_number - 1], context.path, false, None)
 		)));
 	}
 	let mut result = content.to_owned();

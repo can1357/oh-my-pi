@@ -1,4 +1,5 @@
 import type { Theme, ThemeColor } from "./theme";
+import { FG_RESET } from "./color";
 
 // ─── Animation velocity ──────────────────────────────────────────────────────
 // Band/head travel speed in border cells per second. Driving position by a fixed
@@ -22,7 +23,6 @@ const TIER_HIGH = 0.65;
 const TIER_MID = 0.22;
 
 // ─── Raw ANSI codes ──────────────────────────────────────────────────────────
-const FG_RESET = "\x1b[39m";
 const BOLD_OPEN = "\x1b[1m";
 const BOLD_CLOSE = "\x1b[22m";
 

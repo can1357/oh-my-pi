@@ -27,7 +27,7 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "./messages";
-import { type TranscriptEntryLike as TranscriptEntry, transcriptEntryMessage } from "./transcript-entry";
+import { textContent, type TranscriptEntryLike as TranscriptEntry, transcriptEntryMessage } from "./transcript-entry";
 import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,
@@ -74,15 +74,6 @@ export interface ChatTranscriptBuilderDeps {
 	/** Session-scoped resolved destinations for model-authored Markdown links. */
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
-}
-
-/** Extracts the plain-text content of a user message (string or text blocks). */
-function userMessageText(message: Extract<AgentMessage, { role: "user" }>): string {
-	if (typeof message.content === "string") return message.content;
-	return message.content
-		.filter((block): block is { type: "text"; text: string } => block.type === "text")
-		.map(block => block.text)
-		.join("");
 }
 
 export class ChatTranscriptBuilder {
@@ -306,8 +297,8 @@ export class ChatTranscriptBuilder {
 				// A user prompt closes the poll-displacement window, same as the live path.
 				if (message.role === "user") this.#resolveWaitingPoll();
 				if (message.role === "user") this.#resolveTodoSnapshot();
-				const textContent = message.role === "user" ? userMessageText(message) : "";
-				if (textContent) {
+				const userText = message.role === "user" ? textContent(message.content) : "";
+				if (userText) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					// Synthetic (agent-attributed) inputs — chiefly the advisor's `Session
 					// update` replay dumps — can be hundreds of KiB of Markdown each.
@@ -315,11 +306,11 @@ export class ChatTranscriptBuilder {
 					// collapse them behind a compact summary that builds Markdown only on
 					// ctrl+o expand. Real user prompts stay fully rendered.
 					if (isSynthetic) {
-						const collapsed = new CollapsedSyntheticMessageComponent(textContent);
+						const collapsed = new CollapsedSyntheticMessageComponent(userText);
 						this.#trackExpandable(collapsed);
 						this.container.addChild(collapsed);
 					} else {
-						this.container.addChild(new UserMessageComponent(textContent));
+						this.container.addChild(new UserMessageComponent(userText));
 					}
 				}
 				break;

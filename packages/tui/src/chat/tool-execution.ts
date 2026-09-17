@@ -1,5 +1,6 @@
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
+import { SPINNER_ADVANCE_MS } from "../components/loader";
 import { Image } from "../components/image";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
@@ -180,20 +181,10 @@ export interface ToolExecutionHandle extends Component {
 	seal(): void;
 }
 
-/** Redraw live tool blocks at the spinner's glyph-advance rate. Rendering more
- * often produced identical frames — the previous 30fps cadence emitted ~2.4
- * paints per glyph step, and although the terminal I/O layer dedupes those, the
- * compose pipeline still ran end-to-end per frame (issue #4353). Matching the
- * render tick to the glyph tick halves the paints during tool execution with no
- * visible change. */
-export const SPINNER_RENDER_INTERVAL_MS = 80;
-/** Advance the spinner glyph at its classic ~12.5fps step (mirrors `Loader`). */
-export const SPINNER_GLYPH_ADVANCE_MS = 80;
-
 /** Phase-locked spinner glyph index shared by every live tool block so parallel
  * spinners advance in lockstep instead of each tracking its own start time. */
 export function sharedSpinnerFrame(frameCount: number, now: number = performance.now()): number {
-	return frameCount > 0 ? Math.floor(now / SPINNER_GLYPH_ADVANCE_MS) % frameCount : 0;
+	return frameCount > 0 ? Math.floor(now / SPINNER_ADVANCE_MS) % frameCount : 0;
 }
 
 /** Live tool blocks currently driving a spinner. A single shared ticker (below)
@@ -211,7 +202,7 @@ function ensureSharedSpinnerTicker(): void {
 		const frame = sharedSpinnerFrame(theme.spinnerFrames.length);
 		// Removing the current block mid-iteration is safe on a Set.
 		for (const block of liveSpinnerBlocks) block.tickSpinner(frame);
-	}, SPINNER_RENDER_INTERVAL_MS);
+	}, SPINNER_ADVANCE_MS);
 }
 
 /** Register a live block with the shared ticker, starting it on first use. */

@@ -1,4 +1,5 @@
-import { padding, truncateToWidth, visibleWidth } from "../../utils";
+import { centerLine, visibleWidth } from "../../utils";
+import { padToWidth } from "../../render/utils";
 import { gradientEscape, gradientLogo, PI_LOGO, type ShineConfig } from "../../prompt/welcome";
 import { theme } from "../../theme/theme";
 
@@ -30,18 +31,6 @@ const WATER_RAMP = [
 	{ min: 0.36, char: "▒" },
 	{ min: 0.24, char: "░" },
 ];
-
-function clampLine(line: string, width: number): string {
-	const truncated = truncateToWidth(line, width);
-	return truncated + padding(Math.max(0, width - visibleWidth(truncated)));
-}
-
-function centerLine(line: string, width: number): string {
-	const lineWidth = visibleWidth(line);
-	if (lineWidth >= width) return truncateToWidth(line, width);
-	const left = Math.floor((width - lineWidth) / 2);
-	return padding(left) + line + padding(width - left - lineWidth);
-}
 
 function starAt(x: number, y: number, frame: number): string {
 	const hash = (x * 73856093) ^ (y * 19349663) ^ (frame * 83492791);
@@ -195,8 +184,9 @@ function renderCompactSplash(width: number, height: number, phase: number, shine
 	const lines: string[] = [];
 	for (let y = 0; y < height; y++) {
 		const item = content[y - start];
-		lines.push(clampLine(item !== undefined ? centerLine(item, width) : "", width));
+		lines.push(width > 0 ? padToWidth(item !== undefined ? centerLine(item, width) : "", width) : "");
 	}
-	if (height > 2) lines[height - 2] = clampLine(centerLine(theme.fg("dim", SKIP_HINT), width), width);
+	if (height > 2)
+		lines[height - 2] = width > 0 ? padToWidth(centerLine(theme.fg("dim", SKIP_HINT), width), width) : "";
 	return lines;
 }

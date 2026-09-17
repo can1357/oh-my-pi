@@ -17,7 +17,6 @@ export type { RetrySettings, SkillsSettings } from "./config/settings";
 export { Settings, settings } from "./config/settings";
 // Custom commands
 export type * from "./extensibility/custom-commands/types";
-export type * from "./extensibility/custom-tools";
 // Custom tools
 export * from "./extensibility/custom-tools";
 export type * from "./extensibility/extensions";

@@ -14,6 +14,23 @@ import { getSymbolTheme, theme } from "../theme/theme";
 import type { OutputArtifactError } from "../tools/streaming-output";
 import { formatArtifactErrorNotice, formatTruncationMetaNotice, type TruncationMeta } from "../tools/output-meta";
 import { DynamicBorder } from "../chrome/dynamic-border";
+import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
+
+/** Output rows shown while an execution is collapsed. */
+export const PREVIEW_LINES = 20;
+
+/** Maximum visible columns retained from an execution output line. */
+export const MAX_DISPLAY_LINE_CHARS = 4000;
+
+/** Clamp execution output by visible width without splitting ANSI sequences. */
+export function clampDisplayLine(line: string): string {
+	const visible = visibleWidth(line);
+	if (visible <= MAX_DISPLAY_LINE_CHARS) {
+		return line;
+	}
+	const omitted = visible - MAX_DISPLAY_LINE_CHARS;
+	return `${truncateToWidth(line, MAX_DISPLAY_LINE_CHARS, Ellipsis.Omit)}… [${omitted} visible columns omitted]`;
+}
 
 export type ExecutionStatus = "running" | "complete" | "cancelled" | "error";
 

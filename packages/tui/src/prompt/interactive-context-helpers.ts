@@ -1,6 +1,7 @@
 /** Shared assistant transcript construction and model-authored link caching. */
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { getMarkdownLinkUrls } from "../index";
+import { EMPTY_LINK_TARGETS } from "../render/render-utils";
 import type { ImageBudget } from "../components/image";
 import type { AssistantThinkingRenderer } from "../chat/extension-types";
 import { AssistantMessageComponent } from "../chat/assistant-message";
@@ -23,7 +24,6 @@ export interface AssistantMessageHost {
 }
 
 const kMarkdownLinkTargets = Symbol("markdownLinkTargets");
-const EMPTY_LINK_TARGETS: ReadonlyMap<string, string> = new Map();
 type SessionWithMarkdownLinkTargets = AssistantMessageSession & {
 	[kMarkdownLinkTargets]?: ReadonlyMap<string, string>;
 };

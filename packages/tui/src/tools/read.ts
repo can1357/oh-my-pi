@@ -1,5 +1,6 @@
 import type { SummaryResult } from "@oh-my-pi/pi-natives";
 import { formatNumberedLine } from "./hashline-format";
+import { LINE_RANGE_CHUNK_SOURCE, parseLineRanges } from "./line-ranges";
 import * as path from "node:path";
 import type { Component } from "../tui";
 import { Text } from "../components/text";
@@ -58,12 +59,10 @@ export interface ReadToolDetails {
 	displayReadTargetLinks?: Array<string | null>;
 }
 
-// A single line-range chunk: `N`, `N-M`, `N+K`, or open-ended `N-`. `..` is
-// accepted everywhere `-` is, as a forgiving alias for Rust/Python-style ranges
-// (e.g. `2724..2727` == `2724-2727`, `2724..` == `2724-`); it is normalized to
-// `-` in parseLineRangeChunk. Keep this fragment and LINE_RANGE_CHUNK_RE in sync.
-const RANGE_CHUNK_SRC = String.raw`L?\d+(?:(?:[-+]|\.\.)L?\d+|-|\.\.)?`;
-const RANGE_LIST_SRC = `${RANGE_CHUNK_SRC}(?:,${RANGE_CHUNK_SRC})*`;
+// Parsing also recognizes incomplete counts to explain their errors; path splitting
+// only peels complete selectors (not a trailing `+` or `L`).
+const RANGE_SELECTOR_CHUNK = `${LINE_RANGE_CHUNK_SOURCE}(?<=[\\d.-])`;
+const RANGE_LIST_SRC = `${RANGE_SELECTOR_CHUNK}(?:,${RANGE_SELECTOR_CHUNK})*`;
 // A tail selector: `-N` reads the last N lines. Keep in sync with TAIL_SELECTOR_RE.
 const TAIL_CHUNK_SRC = String.raw`-\d+`;
 const FILE_LINE_RANGE_RE = new RegExp(`^(?:${RANGE_LIST_SRC}|${TAIL_CHUNK_SRC}|raw|conflicts|img)$`, "i");
@@ -195,24 +194,19 @@ export function isReadableUrlPath(value: string): boolean {
 
 /** Return the first selected line when every range has valid one-based bounds. */
 export function readSelectorRangeStart(selector: string): number | undefined {
-	let first = Number.POSITIVE_INFINITY;
-	for (const chunk of selector.split(",")) {
-		const match = /^L?(\d+)(?:(\.\.|[-+])L?(\d+)?)?$/i.exec(chunk);
-		if (!match) return undefined;
-		const start = Number.parseInt(match[1]!, 10);
-		const end = match[3] ? Number.parseInt(match[3], 10) : undefined;
-		if (start < 1 || (match[2] === "+" ? end === undefined || end < 1 : end !== undefined && end < start))
-			return undefined;
-		first = Math.min(first, start);
+	try {
+		const start = parseLineRanges(selector)?.[0].startLine;
+		return start !== undefined && Number.isFinite(start) ? start : undefined;
+	} catch {
+		return undefined;
 	}
-	return Number.isFinite(first) ? first : undefined;
 }
 
 // =============================================================================
 // TUI Renderer
 // =============================================================================
 
-interface ReadRenderArgs {
+export interface ReadRenderArgs {
 	path?: unknown;
 	file_path?: unknown;
 	// Legacy fields from old schema — tolerated for in-flight tool calls during transition
@@ -241,9 +235,9 @@ function firstReadSelectorLine(sel: string | undefined): number | undefined {
  * target when the structured `resolvedPath` isn't set (the common plain-file and
  * image reads only record the path in `meta.source`). URL/internal sources are
  * not fs paths, so only `type: "path"` qualifies. */
-function readSourceFsPath(details: ReadToolDetails | undefined): string | undefined {
+export function readSourceFsPath(details: ReadToolDetails | undefined): string | undefined {
 	const source = details?.meta?.source;
-	return source?.type === "path" ? source.value : undefined;
+	return source?.type === "path" && typeof source.value === "string" ? source.value : undefined;
 }
 
 function formatReadPathLink(

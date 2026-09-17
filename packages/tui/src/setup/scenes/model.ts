@@ -3,12 +3,11 @@ import type { SgrMouseEvent } from "../../mouse";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
 import { buildBrowserItems, ModelBrowser, resolveRoleAssignments, sortModelItems } from "../../overlays/model-browser";
+import { BROWSER_FRAME_ROWS } from "../../overlays/model-picker";
 import { theme } from "../../theme/theme";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
 const MAX_VISIBLE_MODELS = 10;
-/** ModelBrowser chrome: search row + blank above the list, blank + two detail rows below. */
-const BROWSER_FRAME_ROWS = 5;
 
 class ModelSceneController implements SetupSceneController {
 	title = "Choose your default model";

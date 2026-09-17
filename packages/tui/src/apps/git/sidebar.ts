@@ -64,7 +64,7 @@ type Target =
 interface Row {
 	text?: string;
 	/** File/dir rows are formatted only when they enter the viewport. */
-	entry?: FileEntry;
+	entry?: SidebarFileEntry;
 	target?: Target;
 	/** Column-scoped hit targets for rows carrying several buttons. */
 	hits?: { from: number; to: number; target: Target }[];
@@ -105,7 +105,7 @@ function targetKey(target: Target): string {
 	return target.kind;
 }
 /** One rendered entry of a file section: nested dirs (tree mode) or flat files. */
-interface FileEntry {
+interface SidebarFileEntry {
 	target: FileTarget;
 	/** Tree indentation depth; omitted in flat path mode. */
 	depth?: number;
@@ -132,7 +132,7 @@ class GitFileTree {
 	readonly #collapsed: ReadonlySet<string>;
 	#files: readonly ChangedFile[] | undefined;
 	#version = -1;
-	#entries: FileEntry[] = [];
+	#entries: SidebarFileEntry[] = [];
 
 	constructor(section: string, collapsed: ReadonlySet<string>) {
 		this.#section = section;
@@ -147,7 +147,7 @@ class GitFileTree {
 		});
 	}
 
-	entries(files: readonly ChangedFile[], version: number): FileEntry[] {
+	entries(files: readonly ChangedFile[], version: number): SidebarFileEntry[] {
 		if (files !== this.#files) {
 			this.#files = files;
 			this.#roots.splice(0, this.#roots.length, ...this.#buildNodes(files));
@@ -265,7 +265,7 @@ function fileRowText(file: ChangedFile, width: number, selected: boolean, focuse
 	return selected && focused ? `${withBg(line, selectionBgAnsi())}\x1b[0m` : line;
 }
 /** Directory row in tree mode: chevron + compressed dir-chain name. */
-function dirRowText(entry: FileEntry, width: number, selected: boolean, focused: boolean): string {
+function dirRowText(entry: SidebarFileEntry, width: number, selected: boolean, focused: boolean): string {
 	const bar = selected ? theme.fg("accent", "▎") : " ";
 	const chevron = entry.collapsed ? "▸" : "▾";
 	const indent = " ".repeat(entry.depth ?? 0);
@@ -338,7 +338,7 @@ export class Sidebar {
 			files: readonly ChangedFile[];
 			style: "path" | "tree";
 			treeVersion: number;
-			entries: FileEntry[];
+			entries: SidebarFileEntry[];
 			rows: Row[];
 		}
 	>();
@@ -465,13 +465,13 @@ export class Sidebar {
 	}
 
 	/** Section entries in display order: tree dirs + files, or flat files. */
-	#fileEntries(files: readonly ChangedFile[], section: string): FileEntry[] {
+	#fileEntries(files: readonly ChangedFile[], section: string): SidebarFileEntry[] {
 		const cached = this.#fileEntryCache.get(section);
 		if (cached?.files === files && cached.style === this.viewStyle && cached.treeVersion === this.#treeVersion) {
 			return cached.entries;
 		}
 
-		let entries: FileEntry[];
+		let entries: SidebarFileEntry[];
 		if (this.viewStyle === "path") {
 			entries = files.map(file => ({ target: { kind: "file", file } as const, file }));
 		} else {
@@ -513,7 +513,7 @@ export class Sidebar {
 			targets.push(target);
 			this.#targetByKey.set(targetKey(target), target);
 		};
-		const pushEntry = (entry: FileEntry): void => {
+		const pushEntry = (entry: SidebarFileEntry): void => {
 			this.#entryDepth.set(targetKey(entry.target), entry.depth ?? 0);
 			pushTarget(entry.target);
 		};

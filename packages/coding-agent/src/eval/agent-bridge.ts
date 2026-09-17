@@ -12,9 +12,8 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentIsolationControls,
 	type StructuredSubagentResult,
-	type StructuredSubagentSchemaMode,
 } from "../task/structured-subagent";
-import type { AgentProgress, SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";

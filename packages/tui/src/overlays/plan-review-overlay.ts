@@ -43,7 +43,6 @@ import {
 	bottomBorder,
 	divider,
 	dividerSplit,
-	fit,
 	row,
 	splitBodyWidth,
 	splitRow,
@@ -51,6 +50,7 @@ import {
 	topBorderSplit,
 } from "../chrome/overlay-box";
 import { joinPlanSections, parsePlanSections, sectionDeletionSpan } from "./plan-toc";
+import { padToWidth } from "../render/utils";
 import { renderSegmentTrack } from "../chrome/segment-track";
 
 /** Title shown in the overlay's top border. */
@@ -1132,7 +1132,7 @@ export class PlanReviewOverlay implements Component {
 		// subtle; the focused row also gets the full-row highlight.
 		const gutter = selected ? "›" : glow ? "▎" : " ";
 		const line = gutter + body;
-		if (selected) return theme.bg("selectedBg", theme.bold(fit(line, width)));
+		if (selected) return theme.bg("selectedBg", theme.bold(width > 0 ? padToWidth(line, width) : ""));
 		if (glow) return theme.fg("accent", line);
 		return theme.fg("muted", line);
 	}

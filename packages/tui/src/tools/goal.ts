@@ -1,8 +1,7 @@
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import { formatNumber, formatDuration } from "@oh-my-pi/pi-utils";
 import type { Theme, ThemeColor } from "../theme/theme";
-import { formatErrorDetail, TRUNCATE_LENGTHS } from "../render/render-utils";
+import { formatDuration, formatErrorDetail, formatNumber, TRUNCATE_LENGTHS } from "../render/render-utils";
 import { renderStatusLine, truncateToWidth } from "../render/index";
 import { framedToolCard } from "../render/tool-card";
 import type { RenderResultOptions, ToolRenderer } from "./renderer";

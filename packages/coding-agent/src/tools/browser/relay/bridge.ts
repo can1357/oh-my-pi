@@ -551,6 +551,7 @@ export class RelayBridge {
 	} | null = null;
 	/** Bounds the interval where a connected extension has not completed hello. */
 	#helloTimer: NodeJS.Timeout | null = null;
+	#extensionSeen = false;
 	#pendingRpc = new Map<
 		number,
 		{
@@ -585,6 +586,11 @@ export class RelayBridge {
 	/** True once the extension has completed its hello handshake. */
 	get ready(): boolean {
 		return this.#ext !== null && this.#extInfo !== null;
+	}
+
+	/** True after the first hello, and stays true: separates a reaped service worker from an absent extension. */
+	get extensionSeen(): boolean {
+		return this.#extensionSeen;
 	}
 
 	/** Payload for `GET /json/version`. */
@@ -741,6 +747,7 @@ export class RelayBridge {
 			browserVersion: msg.browserVersion,
 			hardwareConcurrency: msg.hardwareConcurrency,
 		};
+		this.#extensionSeen = true;
 		const seen = new Set<number>();
 		const attachedNow = new Set(msg.attachedTabIds);
 		// An older extension predates the orphan guard and omits `recoverableTabIds`

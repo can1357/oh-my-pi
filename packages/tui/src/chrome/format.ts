@@ -11,7 +11,7 @@ export function formatProviderName(provider: string): string {
 }
 
 /** Format a millisecond duration as a coarse-grained human label. */
-export function formatDuration(ms: number): string {
+export function formatCoarseDuration(ms: number): string {
 	const seconds = Math.max(0, Math.round(ms / 1000));
 	if (seconds < 60) return `${seconds}s`;
 	const minutes = Math.round(seconds / 60);

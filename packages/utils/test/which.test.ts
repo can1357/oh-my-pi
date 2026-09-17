@@ -67,4 +67,19 @@ describe("$which", () => {
 		expect($which(command, { cache: WhichCachePolicy.Bypass })).toBe(stubbedPath);
 		expect(whichSpy).toHaveBeenCalledWith(command, expect.objectContaining({ PATH: process.env.PATH }));
 	});
+
+	it("does not alias cache entries when cwd/PATH contain the old separator byte", () => {
+		const sep = "";
+		const first = `/tmp/which-first-${process.pid}`;
+		const second = `/tmp/which-second-${process.pid}`;
+		const whichSpy = vi
+			.spyOn(Bun, "which")
+			.mockImplementation((command: string, options?: Bun.WhichOptions) =>
+				options?.cwd === "a" && options?.PATH === `b${sep}c` ? first : second,
+			);
+
+		expect($which("cmd", { cwd: "a", PATH: `b${sep}c` })).toBe(first);
+		expect($which("cmd", { cwd: `a${sep}b`, PATH: "c" })).toBe(second);
+		expect(whichSpy).toHaveBeenCalledTimes(2);
+	});
 });

@@ -38,21 +38,29 @@ import { isLayoutMouseRoutable } from "../components/layout/geometry";
 import { SplitPane } from "../components/layout/split-pane";
 import { Stack } from "../components/layout/stack";
 
+/** One advisor declared in `WATCHDOG.yml`; its instructions specialize the shared baseline. */
 export interface AdvisorConfig {
 	name: string;
+	/** Model selector with an optional `:level` thinking suffix, resolved like any other model override. */
 	model?: string;
+	/** Built-in tool names, including mutating tools; omitted uses read/grep/glob plus available recall, empty grants none. */
 	tools?: string[];
 	instructions?: string;
+	/** Defaults to true; false retains the advisor in the roster and status displays without building its runtime. */
 	enabled?: boolean;
+	/** Maximum non-blocker notes per advisor prompt update (default 4); blockers are exempt. */
 	maxNotesPerUpdate?: number;
 }
 
+/** Which level a `WATCHDOG.yml` lives at: the project root or the user agent dir. */
 export type AdvisorConfigScope = "project" | "user";
 
+/** Editable raw contents of one `WATCHDOG.yml`, without cross-level merging or `@import` expansion, for exact round trips. */
 export interface WatchdogConfigDoc {
 	instructions?: string;
 	maxNotesPerUpdate?: number;
 	advisors: AdvisorConfig[];
+	/** Per-entry problems found while loading (dropped entries). Shown when the file becomes active in the editor. */
 	warnings?: string[];
 }
 
@@ -147,7 +155,7 @@ export function formatCompactQuota(
 	return `Quota: ${lines.join(" │ ")}`;
 }
 
-function previewLine(text: string | undefined): string {
+function previewLineOrNone(text: string | undefined): string {
 	if (!text?.trim()) return "(none)";
 	const first = text.trim().split("\n", 1)[0] ?? "";
 	return first.length > PREVIEW_WIDTH ? `${first.slice(0, PREVIEW_WIDTH - 1)}…` : first;
@@ -486,7 +494,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 			description: this.#advisorSummary(advisor),
 		}));
 		items.push({ value: "add", label: "+ Add advisor" });
-		items.push({ value: "shared", label: "Shared instructions", description: previewLine(this.#doc.instructions) });
+		items.push({
+			value: "shared",
+			label: "Shared instructions",
+			description: previewLineOrNone(this.#doc.instructions),
+		});
 		items.push({ value: "scope", label: `Scope: ${this.#scope}`, description: `→ ${this.#otherScope()}` });
 		items.push({ value: "save", label: "Save & apply" });
 		items.push({ value: "close", label: "Close" });
@@ -577,7 +589,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		}
 		items.push(
 			{ value: "tools", label: "Tools", description: toolsDescription },
-			{ value: "instructions", label: "Instructions", description: previewLine(advisor.instructions) },
+			{ value: "instructions", label: "Instructions", description: previewLineOrNone(advisor.instructions) },
 			{ value: "delete", label: "Delete this advisor" },
 			{ value: "back", label: "Back" },
 		);

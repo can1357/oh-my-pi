@@ -1,5 +1,5 @@
 import { maskNonProse } from "./markdown-prose";
-import { detectColorMode } from "../theme/color";
+import { detectColorMode, FG_RESET } from "../theme/color";
 import { theme } from "../theme/theme";
 
 /** A gradient keyword highlighter.
@@ -11,8 +11,6 @@ import { theme } from "../theme/theme";
  *   derived values to animate a shimmer. Defaults to `0` (the static
  *   sent-bubble palette). */
 export type KeywordHighlighter = (text: string, resetTo?: string, phase?: number) => string;
-
-const FG_RESET = "\x1b[39m";
 
 /** Declarative spec for {@link createGradientHighlighter}. */
 export interface GradientHighlightSpec {
