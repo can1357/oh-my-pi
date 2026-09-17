@@ -18,6 +18,7 @@ import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { highlightCode, type Theme } from "../modes/theme/theme";
 import bashDescription from "../prompts/tools/bash.md" with { type: "text" };
 import type { ClientBridgeTerminalExitStatus, ClientBridgeTerminalOutput } from "../session/client-bridge";
+import { isFusionIoDelegationActive } from "../session/fusion-io-policy";
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap, streamTailUpdates, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
@@ -746,11 +747,15 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// Check both the original command and the cwd-normalized command so
 		// leading `cd ... &&` wrappers do not hide either shell-navigation rules
 		// or the dedicated-tool command that follows the directory change.
-		if (this.session.settings.get("bashInterceptor.enabled")) {
-			const rules = this.session.settings.getBashInterceptorRules();
+		const fusionIoDelegation =
+			(this.session.taskDepth ?? 0) === 0 && isFusionIoDelegationActive(this.session.settings);
+		if (this.session.settings.get("bashInterceptor.enabled") || fusionIoDelegation) {
+			const rules = this.session.settings.get("bashInterceptor.enabled")
+				? this.session.settings.getBashInterceptorRules()
+				: [];
 			const commandsToCheck = rawCommand === command ? [command] : [rawCommand, command];
 			for (const commandToCheck of commandsToCheck) {
-				const interception = checkBashInterception(commandToCheck, ctx?.toolNames ?? [], rules);
+				const interception = checkBashInterception(commandToCheck, ctx?.toolNames ?? [], rules, fusionIoDelegation);
 				if (interception.block) {
 					throw new ToolError(interception.message ?? "Command blocked");
 				}

@@ -39,6 +39,10 @@ describe("/fusion argument completion", () => {
 			"strong",
 			"compact",
 			"pool",
+			"jobs",
+			"pause",
+			"resume",
+			"stop",
 		]);
 	});
 

@@ -85,6 +85,10 @@ async function pickFusionMode(ctx: InteractiveModeContext): Promise<string | und
 			description:
 				"Token savings: default model for 2 calls/simple tasks, planning to thinking/max-int, delegated to task, browser to browser, context to smol",
 		},
+		{
+			label: "autonomous",
+			description: "Autonomous workflow: planning-only root, durable isolated workers, handoffs drive replanning",
+		},
 		{ label: "off", description: "Disable fusion behavior while keeping settings" },
 	]);
 }
@@ -151,7 +155,10 @@ export async function showFusionMenu(ctx: InteractiveModeContext): Promise<void>
 		const pool = parseFusionPoolEntries(cfg.get("fusion.modelPool") ?? []);
 		const items: ExtensionUISelectItem[] = [
 			{ label: `Fusion: ${enabled ? "ON" : "OFF"}`, description: "Toggle cost mode (fusion.enabled)" },
-			{ label: `Mode: ${cfg.get("fusion.mode")}`, description: "escalate | delegate | token-savings | off" },
+			{
+				label: `Mode: ${cfg.get("fusion.mode")}`,
+				description: "escalate | delegate | token-savings | autonomous | off",
+			},
 			{
 				label: `Sidekick model: ${cfg.get("fusion.sidekickModel") || "pi/smol"}`,
 				description: "Cheap warm subagent for menial work",

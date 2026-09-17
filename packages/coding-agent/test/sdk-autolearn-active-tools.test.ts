@@ -37,7 +37,7 @@ describe("createAgentSession auto-learn tool activation", () => {
 		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
 
-	async function activeToolNames(settings: Settings): Promise<string[]> {
+	async function activeToolNames(settings: Settings, taskDepth = 0): Promise<string[]> {
 		const { session } = await createAgentSession({
 			cwd: registryDir,
 			agentDir: registryDir,
@@ -47,6 +47,7 @@ describe("createAgentSession auto-learn tool activation", () => {
 			model: getBundledModel("openai", "gpt-4o-mini"),
 			disableExtensionDiscovery: true,
 			toolNames: ["read"],
+			taskDepth,
 		});
 		sessions.push(session);
 		return session.getActiveToolNames();
@@ -79,6 +80,23 @@ describe("createAgentSession auto-learn tool activation", () => {
 		sessions.push(session);
 
 		expect(session.getHindsightSessionState()).toBeDefined();
+	});
+
+	it("activates vault-only learning without a memory backend", async () => {
+		const names = await activeToolNames(
+			Settings.isolated({ "autolearn.enabled": true, "memory.backend": "off", "autolearn.vaultPath": registryDir }),
+		);
+		expect(names).toContain("learn");
+		expect(names).toContain("manage_skill");
+	});
+
+	it("does not widen a restricted child session with vault-only learning", async () => {
+		const names = await activeToolNames(
+			Settings.isolated({ "autolearn.enabled": true, "memory.backend": "off", "autolearn.vaultPath": registryDir }),
+			1,
+		);
+		expect(names).not.toContain("learn");
+		expect(names).not.toContain("manage_skill");
 	});
 
 	it("omits manage_skill from a restricted session when auto-learn is off", async () => {

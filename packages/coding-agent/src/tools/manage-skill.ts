@@ -1,6 +1,8 @@
 import * as path from "node:path";
 import type { AgentTool, AgentToolResult } from "@pk-nerdsaver-ai/pi-agent-core";
 import { type } from "arktype";
+import { executeSkillEvolution } from "../autolearn/evolution-tool";
+import { evolutionInputSchema } from "../autolearn/evolution-types";
 import {
 	deleteManagedSkill,
 	formatManagedSkillValidationIssues,
@@ -13,21 +15,27 @@ import manageSkillDescription from "../prompts/tools/manage-skill.md" with { typ
 import type { ToolSession } from ".";
 
 const manageSkillSchema = type({
-	action: "'create' | 'update' | 'delete'",
+	action: "'create' | 'update' | 'delete' | 'evolve' | 'promote'",
 	name: type("string").describe("kebab-case skill name"),
 	"description?": type("string").describe(
 		"one-line description of when to use the skill (required for create/update)",
 	),
 	"body?": type("string").describe("the SKILL.md body in markdown, no frontmatter (required for create/update)"),
+	"evolution?": evolutionInputSchema.describe(
+		"training-only candidate search and independent held-out text benchmarks (evolve only)",
+	),
+	"runId?": type("string").describe("eligible evolution run ID (promote only)"),
 }).narrow(
 	(p, ctx) =>
+		(p.action === "evolve" && p.evolution !== undefined) ||
+		(p.action === "promote" && p.runId !== undefined) ||
 		p.action === "delete" ||
-		(p.description !== undefined && p.body !== undefined) ||
+		((p.action === "create" || p.action === "update") && p.description !== undefined && p.body !== undefined) ||
 		// Enforce the action/field contract at validation time rather than only in
 		// execute. Kept as a cross-field narrow (not a discriminated union) so the
 		// wire schema stays a single root object — strict structured-output mode and
 		// the Anthropic tool-schema builder both require that.
-		ctx.mustBe('used with both "description" and "body" for "create" and "update"'),
+		ctx.mustBe("used with description/body for create/update, evolution for evolve, or runId for promote"),
 );
 
 export type ManageSkillParams = typeof manageSkillSchema.infer;
@@ -44,16 +52,22 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 	readonly parameters = manageSkillSchema;
 	readonly strict = true;
 	readonly loadMode = "essential" as const;
-	readonly summary = "Create, update, or delete an isolated managed skill";
+	readonly summary = "Manage skills; evaluate candidates on held-out cases before explicit promotion";
 
-	// No session state needed: createIf reads settings; writes target the
-	// home-based managed-skills dir directly.
+	readonly #session: ToolSession | undefined;
+	constructor(session?: ToolSession) {
+		this.#session = session;
+	}
 	static createIf(session: ToolSession): ManageSkillTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
-		return new ManageSkillTool();
+		return new ManageSkillTool(session);
 	}
 
-	async execute(_id: string, params: ManageSkillParams): Promise<AgentToolResult> {
+	async execute(_id: string, params: ManageSkillParams, signal?: AbortSignal): Promise<AgentToolResult> {
+		if (params.action === "evolve" || params.action === "promote") {
+			if (!this.#session) throw new Error("Skill evolution requires a session.");
+			return executeSkillEvolution(this.#session, { ...params, action: params.action }, signal);
+		}
 		if (params.action === "delete") {
 			await deleteManagedSkill(params.name);
 			return {

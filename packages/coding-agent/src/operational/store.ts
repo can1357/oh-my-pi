@@ -752,6 +752,17 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 		return row ? this.#toJob(row) : null;
 	}
 
+	/** Exact counts without the list API's pagination limit. */
+	countJobsByStatus(type: string): Record<JobStatus, number> {
+		this.#assertOpen();
+		const counts = Object.fromEntries(JOB_STATUSES.map(status => [status, 0])) as Record<JobStatus, number>;
+		const rows = this.#db
+			.prepare("SELECT status, COUNT(*) AS count FROM jobs WHERE type = ? GROUP BY status")
+			.all(type) as Array<{ status: JobStatus; count: number }>;
+		for (const row of rows) counts[row.status] = row.count;
+		return counts;
+	}
+
 	listJobs(filter: JobListFilter = {}): DurableJob[] {
 		this.#assertOpen();
 		const limit = this.#normalizeLimit(filter.limit ?? 100);
@@ -936,7 +947,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 		const set = this.#db.transaction(() => {
 			const row = this.#getJobStmt.get(jobId) as JobRow | null;
 			if (!row) throw new Error(`job not found: ${jobId}`);
-			if (row.status !== "running" || row.lease_owner !== owner) {
+			if (row.status !== "running" || row.lease_owner !== owner || (row.lease_expires_at ?? 0) <= this.#now()) {
 				throw new Error(`stale lease owner for job ${jobId}`);
 			}
 			const now = this.#now();
@@ -995,7 +1006,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			if (row.status !== "running") {
 				throw new Error(`cannot renew lease for job ${jobId} in status ${row.status}`);
 			}
-			if (row.lease_owner !== owner) {
+			if (row.lease_owner !== owner || (row.lease_expires_at ?? 0) <= this.#now()) {
 				throw new Error(`stale lease owner for job ${jobId}`);
 			}
 			const now = this.#now();

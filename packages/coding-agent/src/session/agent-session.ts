@@ -236,6 +236,7 @@ import {
 	estimateToolSchemaTokens,
 } from "../modes/utils/context-usage";
 import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
+import { OperationalStore } from "../operational/store";
 import { ApproachRegistry } from "../orchestration/approach-registry";
 import { authorizeIrcDelivery, type CollaborationPolicy } from "../orchestration/collaboration-policy";
 import {
@@ -352,6 +353,9 @@ import {
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { findCompactMode, SNAPCOMPACT_RETIREMENT_ERROR } from "./compact-modes";
+import { type DelegatedIo, getDelegatedIoToolBlockReason } from "./delegated-io";
+import { collectAutonomousTaskHandoffs } from "./fusion-autonomous-jobs";
+import { getAutonomousRootToolBlockReason, isAutonomousRoot, resolveFusionIoMinLines } from "./fusion-io-policy";
 import {
 	classifyFusionRoute,
 	type FusionPoolTier,
@@ -547,6 +551,9 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** SDK-owned threshold resolver with session-local environment and warning state. */
+	getFusionIoMinLines?: () => number;
+	delegatedIo?: DelegatedIo;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
 	/** External client capabilities installed before this session can execute tools. */
@@ -1250,6 +1257,8 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	readonly getFusionIoMinLines: () => number;
+	readonly #delegatedIo: DelegatedIo | undefined;
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	#autoApprove: boolean;
@@ -1278,6 +1287,8 @@ export class AgentSession {
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
+	/** Durable native_task job ids whose terminal state already reached the planner. */
+	#reportedAutonomousTaskJobs = new Set<string>();
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
 	/** Latched true when the user deliberately interrupts (USER_INTERRUPT_LABEL);
@@ -1756,6 +1767,9 @@ export class AgentSession {
 		this.agent.setCacheAttribution(this.#cacheAttribution);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#delegatedIo = config.delegatedIo;
+		this.getFusionIoMinLines =
+			config.getFusionIoMinLines ?? (() => resolveFusionIoMinLines(this.settings, undefined));
 		this.#autoApprove = config.autoApprove === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
@@ -4975,7 +4989,25 @@ export class AgentSession {
 	 * Get a tool by name from the registry.
 	 */
 	getToolByName(name: string): AgentTool | undefined {
-		return this.#toolRegistry.get(name);
+		const tool = this.#toolRegistry.get(name);
+		if (!tool) return undefined;
+		// Eval's tool.* bridge uses this registry directly, bypassing Agent.beforeToolCall.
+		// Check at execution time so a handle obtained before a mode change cannot bypass it.
+		return new Proxy(tool, {
+			get: (target, property) => {
+				if (property === "execute") {
+					return async (...params: Parameters<AgentTool["execute"]>) => {
+						const reason =
+							getDelegatedIoToolBlockReason(this.#delegatedIo, name) ??
+							getAutonomousRootToolBlockReason(this.settings, this.#agentKind, name, params[1]);
+						if (reason) throw new ToolError(reason);
+						return target.execute(...params);
+					};
+				}
+				const value = Reflect.get(target, property, target);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
 	}
 
 	getXdevRegistry(): XdevRegistry | undefined {
@@ -5003,6 +5035,10 @@ export class AgentSession {
 		signal?: AbortSignal,
 		context?: AgentToolContext,
 	): Promise<XdevWriteResult> {
+		const reason =
+			getDelegatedIoToolBlockReason(this.#delegatedIo, name) ??
+			getAutonomousRootToolBlockReason(this.settings, this.#agentKind, name, args);
+		if (reason) throw new ToolError(reason);
 		const registry = this.getXdevRegistry();
 		const tool = registry?.get(name);
 		if (!registry || !tool) throw new ToolError(`Tool is not mounted under xd://: ${name}`);
@@ -6949,6 +6985,12 @@ export class AgentSession {
 				messages.push(msg);
 			}
 			this.#pendingNextTurnMessages = [];
+			// Autonomous mode: handoffs for durable tasks that settled outside an
+			// inline dispatch (external runner, recovery, CLI control) reach the
+			// planner here so the next evaluation can replan.
+			for (const handoff of this.drainAutonomousTaskHandoffs()) {
+				messages.push(handoff);
+			}
 
 			// Auto-read @filepath mentions
 			const fileMentions = extractFileMentions(expandedText);
@@ -7302,6 +7344,45 @@ export class AgentSession {
 
 	queueDeferredMessage(message: CustomMessage): void {
 		this.#queueHiddenNextTurnMessage(message, true);
+	}
+
+	/**
+	 * Mark a durable native_task job's terminal state as already delivered to
+	 * the planner (the inline dispatch returns it as the tool result), so the
+	 * handoff drain does not re-report it.
+	 */
+	markAutonomousTaskJobReported(jobId: string): void {
+		this.#reportedAutonomousTaskJobs.add(jobId);
+	}
+
+	/**
+	 * Autonomous mode only, planning root only: collect handoff messages for
+	 * this session's durable `native_task` jobs that reached a terminal state
+	 * outside the inline dispatch (external runner, recovered lease, CLI
+	 * pause/cancel). Each job is reported at most once per session. Store
+	 * failures degrade to an empty result — the prompt path must never break
+	 * on operational telemetry.
+	 */
+	drainAutonomousTaskHandoffs(): CustomMessage[] {
+		if (!isAutonomousRoot(this.settings, this.#agentKind)) return [];
+		let store: OperationalStore | undefined;
+		try {
+			store = OperationalStore.open();
+			const { messages, reportedIds } = collectAutonomousTaskHandoffs({
+				store,
+				sessionId: this.sessionManager.getSessionId(),
+				reported: this.#reportedAutonomousTaskJobs,
+			});
+			for (const id of reportedIds) this.#reportedAutonomousTaskJobs.add(id);
+			return messages;
+		} catch (error) {
+			logger.debug("autonomous task handoff drain failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return [];
+		} finally {
+			store?.close();
+		}
 	}
 
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
@@ -12876,6 +12957,8 @@ export class AgentSession {
 	}
 
 	assertEvalExecutionAllowed(): void {
+		const reason = getAutonomousRootToolBlockReason(this.settings, this.#agentKind, "eval", undefined);
+		if (reason) throw new ToolError(reason);
 		if (this.#evalExecutionDisposing) {
 			throw new Error("Python execution is unavailable while session disposal is in progress");
 		}

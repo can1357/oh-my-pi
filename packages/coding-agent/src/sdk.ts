@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
 	Agent,
 	type AgentEvent,
@@ -123,6 +124,7 @@ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } fr
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import { estimateToolSchemaTokens } from "./modes/utils/context-usage";
+import type { JobExecutorContext } from "./operational/runner";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -136,9 +138,17 @@ import {
 	SecretObfuscator,
 } from "./secrets";
 import { AgentSession } from "./session/agent-session";
+import { ArtifactManager } from "./session/artifacts";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import type { ClientBridge } from "./session/client-bridge";
+import { type DelegatedIo, getDelegatedIoToolBlockReason } from "./session/delegated-io";
+import {
+	getAutonomousRootToolBlockReason,
+	getFusionIoThresholdWarning,
+	isFusionIoDelegationActive,
+	resolveFusionIoMinLines,
+} from "./session/fusion-io-policy";
 import { isTokenSavingsFusionMode, parseFusionPoolEntries } from "./session/fusion-router";
 import {
 	type CustomMessage,
@@ -614,6 +624,10 @@ export interface CreateAgentSessionOptions {
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/** Internal restricted native I/O worker capability contract. */
+	delegatedIo?: DelegatedIo;
+	/** Trusted internal native spawn whose lifecycle is already owned by DurableRunner. */
+	nativeTaskExecution?: JobExecutorContext;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
@@ -1254,6 +1268,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const settings = await (options.settings ??
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
+	const fusionIoEnvValue = Bun.env.SHUNT_MIN_LINES;
+	let fusionIoThresholdWarned = false;
+	const getFusionIoMinLines = (): number => {
+		const warning = getFusionIoThresholdWarning(settings, fusionIoEnvValue);
+		if (warning && !fusionIoThresholdWarned) {
+			fusionIoThresholdWarned = true;
+			logger.warn(warning);
+		}
+		return resolveFusionIoMinLines(settings, fusionIoEnvValue);
+	};
 	const fusionPoolEntries = settings.get("fusion.modelPool") ?? [];
 	const fusionPoolSelectors = fusionPoolEntries.map(entry => parseFusionPoolEntries([entry])[0]?.selector ?? "");
 	const structuralSpawnDiagnostics = validateSpawnSelectorsStructural({
@@ -1679,6 +1703,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			assignmentContractActive: options.assignmentContractActive,
 			toolProfile: options.toolProfile,
 			taskDepth: options.taskDepth ?? 0,
+			delegatedIo: options.delegatedIo,
+			getFusionIoMinLines,
+			nativeTaskExecution: options.nativeTaskExecution,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
 			getEvalSessionId: () =>
@@ -1717,6 +1744,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),
 			getClientBridge: () => session?.clientBridge,
 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
+			queueDeferredMessage: message => session?.queueDeferredMessage(message),
+			drainAutonomousTaskHandoffs: () => session?.drainAutonomousTaskHandoffs() ?? [],
+			markAutonomousTaskJobReported: jobId => session?.markAutonomousTaskJobReported(jobId),
 			bumpFileMutationVersion: path => {
 				const next = (fileMutationVersions.get(path) ?? 0) + 1;
 				fileMutationVersions.set(path, next);
@@ -1768,7 +1798,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					return {};
 				}
 			},
-			getArtifactManager: () => sessionManager.getArtifactManager(),
+			getArtifactManager: () => {
+				let manager = sessionManager.getArtifactManager();
+				if (!manager) {
+					// Native delegated artifacts must remain addressable even for headless/in-memory parents.
+					manager = new ArtifactManager(
+						path.join(getAgentDir(), "sessions", "in-memory", sessionManager.getSessionId()),
+					);
+					sessionManager.adoptArtifactManager(manager);
+				}
+				return manager;
+			},
 			settings,
 			authStorage,
 			modelRegistry,
@@ -1818,7 +1858,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// Discover MCP tools from .mcp.json files
 		let mcpManager: MCPManager | undefined = options.mcpManager;
 		toolSession.mcpManager = mcpManager;
-		const enableMCP = options.enableMCP ?? true;
+		const enableMCP = !options.delegatedIo && (options.enableMCP ?? true);
 		const deferMCPDiscoveryForUI = enableMCP && !mcpManager && options.hasUI === true;
 		const mcpHostInteraction = options.hasUI === true ? createMCPHostInteractionBridge() : undefined;
 		let deferredMCPDiscoveryStarted = false;
@@ -2354,6 +2394,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
+		if (options.delegatedIo) {
+			// Restricted contracts use native implementations only, never same-name extension overrides.
+			toolRegistry.clear();
+			for (const tool of builtinTools) toolRegistry.set(tool.name, tool);
+		}
 		// Wrap every tool with `ExtensionToolWrapper` so the per-tool approval gate runs on every
 		// call site, regardless of whether any user extensions are loaded. See the runner-construction
 		// comment above for the safety invariant this enforces.
@@ -2372,7 +2417,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const hasDeferrableTools = Array.from(toolRegistry.values()).some(tool => tool.deferrable === true);
 		const planModeAvailable = settings.get("plan.enabled");
 		const needsResolveTool = hasDeferrableTools || planModeAvailable;
-		if (!needsResolveTool) {
+		if (options.delegatedIo || !needsResolveTool) {
 			toolRegistry.delete("resolve");
 		} else if (!toolRegistry.has("resolve")) {
 			const resolveTool = await logger.time("createTools:resolve:session", HIDDEN_TOOLS.resolve, toolSession);
@@ -2384,10 +2429,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// `let`: the deferred MCP discovery closure upgrades these when the real
 		// MCP tool count pushes `auto` past its threshold; `rebuildSystemPrompt`
 		// below reads the live bindings.
-		let effectiveDiscoveryMode = resolveEffectiveToolDiscoveryMode(
-			settings,
-			countToolsForAutoDiscovery(toolRegistry.keys()),
-		);
+		let effectiveDiscoveryMode = options.delegatedIo
+			? ("off" as const)
+			: resolveEffectiveToolDiscoveryMode(settings, countToolsForAutoDiscovery(toolRegistry.keys()));
 		if (effectiveDiscoveryMode !== "off" && !toolRegistry.has("search_tool_bm25")) {
 			const searchTool: Tool | null = SearchToolBm25Tool.create(toolSession, {
 				toolProfile: options.toolProfile ?? toolSession.toolProfile,
@@ -2417,6 +2461,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			tools: toolRegistry,
 			getToolContext: () => toolContextStore.getContext(),
+			getToolBlockReason: (name, args) =>
+				getDelegatedIoToolBlockReason(options.delegatedIo, name) ??
+				getAutonomousRootToolBlockReason(settings, agentKind, name, args),
 			emitEvent: event => cursorEventEmitter?.(event),
 		});
 
@@ -2549,6 +2596,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					agentKind === "main" &&
 					settings.get("fusion.enabled") === true &&
 					isTokenSavingsFusionMode(settings.get("fusion.mode")),
+				fusionIoDelegation: agentKind === "main" && isFusionIoDelegationActive(settings),
+				fusionIoMinLines: getFusionIoMinLines(),
 				fusionAutonomous:
 					agentKind === "main" &&
 					settings.get("fusion.enabled") === true &&
@@ -2914,34 +2963,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				tools: initialTools,
 			},
 			beforeToolCall: async context => {
-				const isAutonomous =
-					settings.get("fusion.enabled") === true && settings.get("fusion.mode") === "autonomous";
-				if (isAutonomous && agentKind === "main") {
-					const toolName = context.toolCall.name.toLowerCase();
-					const RESTRICTED_ROOT_TOOLS = new Set(["edit", "write", "ast_edit", "memory_edit"]);
-					if (RESTRICTED_ROOT_TOOLS.has(toolName)) {
-						return {
-							block: true,
-							reason: `[Autonomous Fusion Mode] Direct modification via "${toolName}" is restricted for the planning-only root session. Delegate implementation to an isolated task worker via the \`task\` tool with defined targets, explicit changes, and acceptance criteria.`,
-						};
-					}
-					if (toolName === "bash") {
-						const cmd = String(context.args?.command ?? "").trim();
-						const destructivePatterns = [
-							/\b(git\s+(commit|push|merge|rebase|cherry-pick|tag|branch\s+-[dD]))\b/i,
-							/\b(rm|del|rmdir|unlink)\s+/i,
-							/\b(mkdir|touch)\s+/i,
-							/>\s*[^&|]/,
-						];
-						if (destructivePatterns.some(p => p.test(cmd))) {
-							return {
-								block: true,
-								reason: `[Autonomous Fusion Mode] Mutating shell command "${cmd}" is restricted for the planning-only root session. Delegate mutations to a task worker via the \`task\` tool.`,
-							};
-						}
-					}
-				}
-				return undefined;
+				const reason =
+					getDelegatedIoToolBlockReason(options.delegatedIo, context.toolCall.name) ??
+					getAutonomousRootToolBlockReason(settings, agentKind, context.toolCall.name, context.args);
+				return reason ? { block: true, reason } : undefined;
 			},
 			convertToLlm: convertToLlmFinal,
 			onPayload,
@@ -3117,6 +3142,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			sessionManager,
 			settings,
+			getFusionIoMinLines,
 			autoApprove: options.autoApprove,
 			clientBridge: options.clientBridge,
 			evalKernelOwnerId,
@@ -3127,6 +3153,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			ownedAsyncJobManager: asyncJobManager,
 			asyncJobManager: scopedAsyncJobManager,
 			scopedModels: options.scopedModels,
+			delegatedIo: options.delegatedIo,
 			promptTemplates,
 			slashCommands,
 			extensionRunner,

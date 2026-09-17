@@ -21,10 +21,12 @@ import type { IrcIpc } from "../irc/ipc";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { JobExecutorContext } from "../operational/runner";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
+import { type DelegatedIo, delegatedIoToolNames } from "../session/delegated-io";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
@@ -241,6 +243,8 @@ export interface ToolSession {
 	requireYieldTool?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	delegatedIo?: DelegatedIo;
+	nativeTaskExecution?: JobExecutorContext;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
@@ -312,6 +316,8 @@ export interface ToolSession {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
+	/** Effective session-local Fusion I/O threshold, including the validated environment override. */
+	getFusionIoMinLines?: () => number;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
@@ -413,6 +419,12 @@ export interface ToolSession {
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
+	/** Autonomous planning root: collect handoff messages for this session's
+	 *  durable native_task jobs that settled outside the inline dispatch. */
+	drainAutonomousTaskHandoffs?(): CustomMessage[];
+	/** Mark a durable native_task job's terminal state as already delivered to
+	 *  the planner via an inline task result (suppresses the handoff drain). */
+	markAutonomousTaskJobReported?(jobId: string): void;
 	/** Queue late LSP diagnostics (arrived after an edit/write returned) to be shown
 	 *  in the transcript and delivered to the model at the next yield, like background
 	 *  job results. */
@@ -590,6 +602,20 @@ export type ToolName = BuiltinToolName;
  * Create tools from BUILTIN_TOOLS registry.
  */
 export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
+	if (session.delegatedIo) {
+		return Promise.all(
+			delegatedIoToolNames(session.delegatedIo).map(async name => {
+				const source = inferToolSource(name);
+				if (!source || !isAllowedByToolProfile(session.toolProfile, source, name))
+					throw new Error(`Restricted native worker requires unavailable tool: ${name}`);
+				const factory = name === "yield" ? HIDDEN_TOOLS.yield : BUILTIN_TOOLS[name as BuiltinToolName];
+				const tool = await factory?.(session);
+				if (!tool || tool.name !== name)
+					throw new Error(`Restricted native worker requires unavailable native tool: ${name}`);
+				return wrapToolWithMetaNotice(tool);
+			}),
+		);
+	}
 	const toolProfile = session.toolProfile;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
@@ -688,7 +714,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0) {
 			if (!requestedTools.includes("manage_skill")) requestedTools.push("manage_skill");
 			if (
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") &&
+				(["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") ||
+					Boolean(session.settings.get("autolearn.vaultPath"))) &&
 				!requestedTools.includes("learn")
 			) {
 				requestedTools.push("learn");
@@ -736,7 +763,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return (
 				session.settings.get("autolearn.enabled") &&
 				(session.taskDepth ?? 0) === 0 &&
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+				(["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "") ||
+					Boolean(session.settings.get("autolearn.vaultPath")))
 			);
 		}
 		if (name === "task") {

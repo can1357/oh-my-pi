@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in managed-skill evolution: bounded candidate generation against training cases, an independent held-out text benchmark gate, retained evaluation evidence, and explicit compare-and-swap promotion without overwriting authored skills or replaying partial promotions.
+- Added optional Auto-Learn records in an existing Obsidian vault, including vault-only lesson capture, secret-redacted lesson notes, separate evaluation/promotion summaries, and explicit partial-failure reporting without creating missing vaults.
+- Completed the Autonomous Fusion Workflow loop (`fusion.mode=autonomous`): durable `native_task` jobs that settle outside an inline dispatch — external runners, recovered leases, or `/fusion` controls — now emit bounded handoff messages that are injected into the planning root's next turn and drained once, so the planner replans on worker completion/failure instead of stalling; the inline dispatch marks its own settled job reported to prevent double delivery.
+- Added session-scoped workflow controls `/fusion jobs`, `/fusion pause [job]`, `/fusion resume [job]`, and `/fusion stop [job]` (alias `cancel`), which list and transition only this session's durable native task jobs by job id or agent id using `DurableRunner` pause/resume/cancel semantics; `/fusion status` now shows this session's active/paused/settled task counts alongside the global totals, and `autonomous` is selectable in the interactive `/fusion` mode menu.
+- Verified native token-savings autonomous task execution and added the token savings benchmark suite (`scripts/benchmark-token-savings.ts` and `test/benchmark-token-savings.test.ts`), measuring frontier context reduction across direct vs. delegated workspaces (>350-line read and 100-line generation parity with source separation and receipt validation).
+
 ## [16.4.18] - 2026-09-09
 
 ### Added

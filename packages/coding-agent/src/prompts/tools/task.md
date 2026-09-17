@@ -25,6 +25,7 @@
   - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
   - `difficulty?`: `low` (bounded/simple), `medium` (normal implementation), `high` (architecture/debugging/review) — routes through fixed `smol`/`task`/`slow` model roles, independent from `agent.tier`; explicit `model` wins when both are set. Fresh spawns only — errors with `fork: true`, which inherits the parent's model
   - `evidenceDigest?`: `{ paths: string[], question: string }` — bulk read-only evidence work with named paths and one exact question; returns concise [path:line] bullets covering relevant exports and side effects, never implementation dumps. Fresh spawns only. Token-savings mode uses the task model role unless an explicit model, difficulty, or configured agent override wins
+  - `codeWrite?`: `{ spec: string, reference: string, target: string }` — isolated new-file generation from an existing local text reference. Nonempty strings; target must be absent, distinct, and inside spawn cwd. No traversal, fork, evidenceDigest, or output schemas. Assignment must retain acceptance checks. Returns only `{kind:'code-write',target,lines,bytes,sha256,changesApplied}` after observed successful integration; failure retains recovery artifacts.
   - `cwd?`: working directory; defaults to parent session cwd
   - `fork?`: inherit the parent's exact context (system prompt, tools, model, and a snapshot of this conversation's history) instead of a fresh one — the provider re-reads the parent's warm prompt cache; agent-specific prompts/tools and output schemas are ignored. Use fresh (default) for independent work
 {{#if isolationEnabled}}
@@ -42,6 +43,7 @@
 - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
 - `difficulty?`: `low` (bounded/simple), `medium` (normal implementation), `high` (architecture/debugging/review) — routes through fixed `smol`/`task`/`slow` model roles, independent from `agent.tier`; explicit `model` wins when both are set. Fresh spawns only — errors with `fork: true`, which inherits the parent's model
 - `evidenceDigest?`: `{ paths: string[], question: string }` — bulk read-only evidence work with named paths and one exact question; returns concise [path:line] bullets covering relevant exports and side effects, never implementation dumps. Fresh spawns only. Token-savings mode uses the task model role unless an explicit model, difficulty, or configured agent override wins
+- `codeWrite?`: `{ spec: string, reference: string, target: string }` — isolated new-file generation from an existing local text reference. Nonempty strings; target must be absent, distinct, and inside spawn cwd. No traversal, fork, evidenceDigest, or output schemas. Assignment must retain acceptance checks. Returns only `{kind:'code-write',target,lines,bytes,sha256,changesApplied}` after observed successful integration; failure retains recovery artifacts.
 - `cwd?`: working directory; defaults to parent session cwd
 {{#if isolationEnabled}}
 - `isolated?`: run in isolated env; returns patches. Agent is torn down at completion — not addressable afterwards
@@ -60,6 +62,12 @@
 - **Harness is parent-chosen.** Orchestration assigns each child a simple / standard / full harness from tier, work class, and agent type (`explore` → simple; `quick_task` → standard/bound). Children do not widen tools, skills, or decision scope.
 - Overlap: isolated patches, exclusive owner/path, or named integration owner; else split; disjoint work parallel.
 </rules>
+
+<native-io>
+- Bulk evidence: `task({agent:"task",assignment:"Verify exports; cite exact source lines and missing files.",evidenceDigest:{paths:["src/service.ts"],question:"Which exports mutate state?"}})`. The child is restricted to read/search/yield; its answer is capped at 8,000 UTF-8 bytes, with incomplete-output notice and full artifact. Citations are not edit anchors: re-read a bounded source range before editing.
+- New boilerplate: `task({agent:"task",assignment:"Create the new adapter; acceptance: match reference exports and naming, report unavailable checks.",codeWrite:{spec:"Implement the settled adapter shape",reference:"src/reference.ts",target:"src/new-adapter.ts"}})`. The child uses read/write/yield in isolation; native integration produces the receipt. Existing target or unexpected changed paths is failure, never overwrite.
+- For root reasoning use bounded read ranges within the effective Fusion I/O threshold, including when no worker is available. Do not offload debugging, architecture, or safety-critical judgment as mechanical evidence or generation.
+</native-io>
 
 <adaptive-portfolio>
 For uncertain or investigative work, structure exploration as adaptive rounds rather than a single large batch:

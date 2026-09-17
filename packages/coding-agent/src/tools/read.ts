@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createReadStream } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -34,6 +35,7 @@ import type { InternalUrl } from "../internal-urls/types";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { isFusionIoDelegationActive, resolveFusionIoMinLines } from "../session/fusion-io-policy";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -772,6 +774,44 @@ function isRawSelector(parsed: ParsedSelector): boolean {
 /** Returns true when the selector requested multiple line ranges. */
 function isMultiRange(parsed: ParsedSelector): boolean {
 	return parsed.kind === "lines" && parsed.ranges.length > 1;
+}
+
+/** Count only requested lines and stop once the limit is exceeded. Never load the source corpus. */
+async function exceedsLocalReadLimit(
+	filePath: string,
+	sel: ParsedSelector,
+	limit: number,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	if (sel.kind === "conflicts") return false;
+	const ranges = sel.kind === "lines" ? sel.ranges : [{ startLine: 1, endLine: undefined }];
+	const span = ranges.reduce(
+		(sum, range) => sum + (range.endLine === undefined ? Infinity : range.endLine - range.startLine + 1),
+		0,
+	);
+	if (span <= limit) return false;
+	if (ranges.every(range => range.endLine !== undefined)) return true;
+	const maxEnd = Math.max(...ranges.map(range => range.endLine ?? Infinity));
+	let line = 1;
+	let selected = 0;
+	let pending = false;
+	const stream = createReadStream(filePath, { signal });
+	try {
+		for await (const chunk of stream) {
+			signal?.throwIfAborted();
+			for (const byte of chunk as Buffer) {
+				pending = byte !== 10;
+				if (byte !== 10) continue;
+				if (ranges.some(range => line >= range.startLine && line <= (range.endLine ?? Infinity))) selected++;
+				if (selected > limit) return true;
+				if (++line > maxEnd) return false;
+			}
+		}
+		if (pending && ranges.some(range => line >= range.startLine && line <= (range.endLine ?? Infinity))) selected++;
+		return selected > limit;
+	} finally {
+		stream.destroy();
+	}
 }
 
 function parseSel(sel: string | undefined): ParsedSelector {
@@ -1995,6 +2035,7 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 		if (readPath.startsWith("file://")) {
 			readPath = expandPath(readPath);
 		}
+		const isPlainLocalPath = !/^[a-z][a-z\d+.-]*:\/\//i.test(readPath);
 
 		const conflictUri = parseConflictUri(readPath);
 		if (conflictUri) {
@@ -2180,6 +2221,23 @@ export class ReadTool implements AgentTool<typeof readSchema | typeof lightReadS
 		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
+		if (
+			isPlainLocalPath &&
+			!mimeType &&
+			!shouldConvertWithMarkit &&
+			!isNotebookPath(absolutePath) &&
+			(this.session.taskDepth ?? 0) === 0 &&
+			isFusionIoDelegationActive(this.session.settings)
+		) {
+			const minimum =
+				this.session.getFusionIoMinLines?.() ?? resolveFusionIoMinLines(this.session.settings, undefined);
+			if (await exceedsLocalReadLimit(absolutePath, parsed, minimum, signal)) {
+				throw new ToolError(
+					`[Fusion I/O] Bulk read blocked. Use task with evidenceDigest: { paths: [${JSON.stringify(absolutePath)}], question: <exact-question> }, or read a bounded line range.`,
+				);
+			}
+		}
+
 		// Read the file based on type
 		let content: Array<TextContent | ImageContent> | undefined;
 		let details: ReadToolDetails = {};

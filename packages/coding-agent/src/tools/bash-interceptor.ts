@@ -43,9 +43,24 @@ export function checkBashInterception(
 	command: string,
 	availableTools: string[],
 	rules: BashInterceptorRule[] = DEFAULT_BASH_INTERCEPTOR_RULES,
+	fusionIoDelegation = false,
 ): InterceptionResult {
 	// Normalize command for pattern matching
 	const normalizedCommand = command.trim();
+	// Convenience routing, not a shell sandbox: autonomous arbitrary execution is separately denied.
+	if (
+		fusionIoDelegation &&
+		/(?:^|[;&|\n])\s*(?:&\s*)?(?:["'](?:[^"'\r\n]*[\\/])?(?:cat|head|tail|less|more|type|get-content)(?:\.exe)?["']|(?:[^\s"';&|]*[\\/])?(?:cat|head|tail|less|more|type|get-content)(?:\.exe)?)(?=\s|$|[;&|])/i.test(
+			normalizedCommand,
+		)
+	) {
+		return {
+			block: true,
+			suggestedTool: "read",
+			message:
+				"[Fusion I/O] Use native read for file contents or grep for matching lines; bulk reads require an evidenceDigest task or a bounded range.",
+		};
+	}
 	const compiled = compileRules(rules);
 
 	for (const { rule, regex } of compiled) {

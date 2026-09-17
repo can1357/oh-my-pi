@@ -86,6 +86,9 @@ export interface WriteManagedSkillInput {
 	name: string;
 	description: string;
 	body: string;
+	agentDir?: string;
+	/** Compare-and-swap guard used by evaluated promotions; null requires absence. */
+	expectedContent?: string | null;
 }
 
 export type ManagedSkillValidationCode =
@@ -309,8 +312,8 @@ function serializeSkillMutation<T>(name: string, op: () => Promise<T>): Promise<
  * valid name write/delete outside the isolated directory (e.g. onto authored
  * skills). Checked before composing any child path.
  */
-async function assertManagedRootSafe(): Promise<void> {
-	const rootStat = await fs.lstat(getManagedSkillsDir()).catch(err => {
+async function assertManagedRootSafe(agentDir?: string): Promise<void> {
+	const rootStat = await fs.lstat(getManagedSkillsDir(agentDir)).catch(err => {
 		if (isEnoent(err)) return null;
 		throw err;
 	});
@@ -330,6 +333,37 @@ function assertManagedSkillFileSafeForUpdate(name: string, fileStat: Stats): voi
 	}
 }
 
+export interface ManagedSkillSnapshot {
+	content: string;
+	description: string;
+	body: string;
+}
+
+/** Read only a regular, isolated managed file; never follow authored-skill links. */
+export async function readManagedSkill(name: string, agentDir?: string): Promise<ManagedSkillSnapshot | null> {
+	const safe = sanitizeSkillName(name);
+	await assertManagedRootSafe(agentDir);
+	const dir = path.join(getManagedSkillsDir(agentDir), safe);
+	const dirStat = await fs.lstat(dir).catch(err => {
+		if (isEnoent(err)) return null;
+		throw err;
+	});
+	if (!dirStat) return null;
+	if (!dirStat.isDirectory() || dirStat.isSymbolicLink()) throw new Error("Unsafe managed skill directory.");
+	const file = path.join(dir, "SKILL.md");
+	const stat = await fs.lstat(file).catch(err => {
+		if (isEnoent(err)) return null;
+		throw err;
+	});
+	if (!stat) return null;
+	assertManagedSkillFileSafeForUpdate(safe, stat);
+	if (stat.size > MAX_MANAGED_SKILL_BYTES + 4096) throw new Error("Managed skill snapshot is oversized.");
+	const content = await Bun.file(file).text();
+	const { frontmatter, body } = parseFrontmatter(content, { source: file });
+	if (typeof frontmatter.description !== "string") throw new Error("Managed skill has no description.");
+	return { content, description: frontmatter.description, body };
+}
+
 /** Create or update a managed `SKILL.md`. Returns the resolved file path. */
 export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<{ path: string }> {
 	// Structural validation runs before any disk mutation (and is reusable dry-run).
@@ -338,9 +372,16 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 		throw new Error(formatManagedSkillValidationIssues(validation.issues));
 	}
 	const { name, content } = validation.normalized;
-	return serializeSkillMutation(name, async () => {
-		await assertManagedRootSafe();
-		const dir = path.join(getManagedSkillsDir(), name);
+	const root = getManagedSkillsDir(input.agentDir);
+	return serializeSkillMutation(path.join(root, name), async () => {
+		await assertManagedRootSafe(input.agentDir);
+		if (input.expectedContent !== undefined) {
+			const current = await readManagedSkill(name, input.agentDir);
+			if ((current?.content ?? null) !== input.expectedContent) {
+				throw new Error("Managed skill changed since evaluation; refusing stale promotion.");
+			}
+		}
+		const dir = path.join(root, name);
 		const file = path.join(dir, "SKILL.md");
 		// Reject a symlinked skill directory: an intermediate symlink would let the
 		// write escape the isolated managed root. lstat does not follow the final
@@ -398,6 +439,9 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 				throw new Error(`Managed skill "${name}" SKILL.md became a symlink; refusing to replace it.`);
 			}
 			assertManagedSkillFileSafeForUpdate(name, currentStat);
+			if (input.expectedContent !== undefined && (await Bun.file(file).text()) !== input.expectedContent) {
+				throw new Error("Managed skill changed during promotion; refusing replacement.");
+			}
 			await fs.rename(tempFile, file);
 			tempCreated = false;
 		} finally {
@@ -410,7 +454,7 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 /** Delete a managed skill directory. Throws when it does not exist. */
 export async function deleteManagedSkill(name: string): Promise<void> {
 	const safe = sanitizeSkillName(name);
-	await serializeSkillMutation(safe, async () => {
+	await serializeSkillMutation(path.join(getManagedSkillsDir(), safe), async () => {
 		await assertManagedRootSafe();
 		const dir = path.join(getManagedSkillsDir(), safe);
 		// Refuse to follow a symlinked skill directory (rm would delete the target).

@@ -18,12 +18,25 @@ import * as os from "node:os";
 import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@pk-nerdsaver-ai/pi-agent-core";
 import type { Usage } from "@pk-nerdsaver-ai/pi-ai";
-import { $env, logger, prompt, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
+import { $env, getAgentDir, logger, prompt, Snowflake } from "@pk-nerdsaver-ai/pi-utils";
 import type { ToolSession } from "..";
 import { resolveModelOverride } from "../config/model-resolver";
 import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
+import {
+	createNativeTaskExecutor,
+	getNativeTaskRuntime,
+	parseNativeTaskReceipt,
+} from "../operational/native-task-executor";
+import {
+	nativeTaskJson,
+	parseNativeTaskCheckpoint,
+	parseNativeTaskDefinition,
+	parseNativeTaskJobPayload,
+	parseNativeTaskPolicy,
+} from "../operational/native-task-payload";
+import { DurableRunner } from "../operational/runner";
 import { OperationalStore } from "../operational/store";
 import {
 	type AgentHarness,
@@ -50,10 +63,18 @@ import subagentPrefetchEvidenceTemplate from "../prompts/system/subagent-prefetc
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
+import {
+	assertCodeWriteTarget,
+	type DelegatedIo,
+	delegatedIoToolNames,
+	isPathWithinWorkspace,
+} from "../session/delegated-io";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/irc";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import type { ResolvedToolProfile } from "../tools/tool-profiles";
+import { type CodeWriteReceipt, observeCodeWrite, type PreparedCodeWrite, prepareCodeWrite } from "./code-write";
+import { integrateTaskResult } from "./integration";
 import {
 	composeTaskSpawnPolicyResult,
 	createSpawnPlan,
@@ -65,6 +86,7 @@ import {
 import {
 	type AgentDefinition,
 	type AgentProgress,
+	type CodeWriteRequest,
 	canSpawnAtDepth,
 	type EvidenceDigestRequest,
 	getTaskSchema,
@@ -82,8 +104,8 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { generateCommitMessage } from "../utils/commit-message-generator";
-import * as git from "../utils/git";
 import type { AssignmentVerifierRunners } from "./assignment-verifier";
+import { projectDelegatedIoResult, projectEvidenceDigest } from "./delegated-output";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import { generateTaskName } from "./name-generator";
@@ -94,16 +116,13 @@ import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { buildRepoEvidence, formatRepoEvidence } from "./repo-evidence";
 import {
-	applyNestedPatches,
 	captureBaseline,
 	captureDeltaPatch,
 	cleanupIsolation,
-	cleanupTaskBranches,
 	commitToBranch,
 	ensureIsolation,
 	getRepoRoot,
 	type IsolationHandle,
-	mergeTaskBranches,
 	parseIsolationMode,
 	type WorktreeBaseline,
 } from "./worktree";
@@ -112,6 +131,7 @@ interface RenderSubagentPromptOptions {
 	readonly assignment: string;
 	readonly prefetchEvidence?: string;
 	readonly evidenceDigest?: EvidenceDigestRequest;
+	readonly codeWrite?: CodeWriteRequest;
 }
 
 interface PrefetchEvidenceResult {
@@ -162,6 +182,7 @@ interface PreparedSpawn {
 	readonly toolProfile: ResolvedToolProfile;
 	readonly collaborationPolicy: CollaborationPolicy;
 	readonly extensionRunner: ExtensionRunner | undefined;
+	readonly codeWrite?: PreparedCodeWrite;
 }
 
 type SpawnPreparationResult =
@@ -185,6 +206,7 @@ function renderSubagentUserPrompt(options: RenderSubagentPromptOptions): string 
 		assignment: options.assignment.trim(),
 		prefetchEvidence: evidence,
 		evidenceDigest: options.evidenceDigest,
+		codeWrite: options.codeWrite,
 	});
 }
 
@@ -386,14 +408,21 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  * Reject fields the current configuration does not accept. `schema` is never
  * accepted (structured output comes from the agent definition's `output`
  * frontmatter, the inherited session schema, or an eval-workflow
- * `agent(..., schema)` call); `tasks`/`context` require `task.batch`.
+ * `agent(..., schema)` call); `tasks`/`context` require `task.batch`, except
+ * authenticated native replay may retain shared `context` for its single spawn.
  */
-function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
+function validateShapeParams(
+	batchEnabled: boolean,
+	params: TaskParams,
+	allowNativeContext = false,
+): string | undefined {
 	if ((params as Record<string, unknown>).schema !== undefined) {
 		return "The task tool does not accept `schema`. Rely on the selected agent definition's `output` schema or the inherited session schema; workflows needing ad-hoc structured output use eval `agent(prompt, schema)`.";
 	}
 	if (!batchEnabled) {
-		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
+		const disallowed = (["tasks", "context"] as const).filter(
+			field => params[field] !== undefined && (field !== "context" || !allowNativeContext),
+		);
 		if (disallowed.length > 0) {
 			return `task.batch is disabled, so the task tool does not accept ${disallowed.map(f => `\`${f}\``).join(" or ")}. Spawn one agent per call with \`assignment\`, or enable the task.batch setting.`;
 		}
@@ -494,6 +523,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 			model: params.model,
 			difficulty: params.difficulty,
 			evidenceDigest: params.evidenceDigest,
+			codeWrite: params.codeWrite,
 			assignment: params.assignment,
 			executionProfile: internal.executionProfile,
 			toolProfile: internal.toolProfile,
@@ -526,6 +556,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): OrchestratedTaskPar
 	if (item.model !== undefined) spawn.model = item.model;
 	if (item.difficulty !== undefined) spawn.difficulty = item.difficulty;
 	if (item.evidenceDigest !== undefined) spawn.evidenceDigest = item.evidenceDigest;
+	if (item.codeWrite !== undefined) spawn.codeWrite = item.codeWrite;
 	if (item.assignment !== undefined) spawn.assignment = item.assignment;
 	if (item.fork !== undefined) spawn.fork = item.fork;
 	if (params.context !== undefined) spawn.context = params.context;
@@ -730,7 +761,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#spawnSemaphore: Semaphore | undefined;
 
 	get parameters(): TaskToolSchemaInstance {
-		const isolationEnabled = this.session.settings.get("task.isolation.mode") !== "none";
+		// codeWrite may require isolation even when the ordinary default is none.
+		const isolationEnabled = true;
 		return getTaskSchema({ isolationEnabled, batchEnabled: this.#isBatchEnabled() });
 	}
 
@@ -772,7 +804,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 	async #prepareSpawn(params: OrchestratedTaskParams, signal?: AbortSignal): Promise<SpawnPreparationResult> {
 		const startedAt = Date.now();
-		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd);
+		const native = this.session.nativeTaskExecution
+			? getNativeTaskRuntime(this.session.nativeTaskExecution)
+			: undefined;
+		const { agents, projectAgentsDir } = native
+			? { agents: [parseNativeTaskDefinition(native.payload.agentDefinition)], projectAgentsDir: null }
+			: await discoverAgents(this.session.cwd);
 		const fail = (text: string): SpawnPreparationResult => ({
 			ok: false,
 			result: {
@@ -818,7 +855,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				tool => PLAN_MODE_AGENT_TOOL_ALLOWLIST.has(tool) && !planModeBaseTools.includes(tool),
 			),
 		];
-		const effectiveAgent: AgentDefinition = planModeState?.enabled
+		let effectiveAgent: AgentDefinition = planModeState?.enabled
 			? {
 					...agent,
 					systemPrompt: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`,
@@ -826,6 +863,24 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawns: undefined,
 				}
 			: agent;
+		let codeWrite: PreparedCodeWrite | undefined;
+		if (params.codeWrite !== undefined) {
+			if (params.evidenceDigest !== undefined) return fail("Task codeWrite cannot be combined with evidenceDigest.");
+			if (params.fork === true) return fail("Task codeWrite requires a fresh spawn; fork is not supported.");
+			if (effectiveAgent.output !== undefined || this.session.outputSchema !== undefined)
+				return fail("Task codeWrite rejects output schemas; its native receipt is the only result contract.");
+			if (planModeState?.enabled) return fail("Task codeWrite is unavailable in read-only plan mode.");
+			try {
+				codeWrite = await prepareCodeWrite(
+					params.codeWrite,
+					path.resolve(this.session.cwd, params.cwd ?? "."),
+					signal,
+				);
+				params.codeWrite = codeWrite.request;
+			} catch (error) {
+				return fail(`Task codeWrite validation failed: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
 
 		if (params.evidenceDigest !== undefined) {
 			const digest = params.evidenceDigest;
@@ -843,6 +898,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				return fail("Task evidenceDigest requires a fresh spawn; fork mode inherits the parent's model.");
 			}
 		}
+		if (params.evidenceDigest || codeWrite) {
+			effectiveAgent = {
+				...effectiveAgent,
+				tools: delegatedIoToolNames(codeWrite ? { kind: "code-write", ...codeWrite } : { kind: "evidence-digest" }),
+				spawns: [],
+				readSummarize: false,
+			};
+		}
+		if (
+			(codeWrite ||
+				(this.session.settings.get("fusion.enabled") === true &&
+					this.session.settings.get("fusion.mode") === "autonomous" &&
+					!isReadOnlyAgent(effectiveAgent))) &&
+			params.isolated === false
+		) {
+			return fail("Isolation is required for this task.");
+		}
 
 		if (params.difficulty && params.fork === true) {
 			return fail(
@@ -854,7 +926,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const routingResult = resolveSubagentModelRouting({
 			requestedModel: explicitModelSelector,
 			requestedDifficulty: params.difficulty,
-			taskKind: params.evidenceDigest ? "evidence-digest" : undefined,
+			taskKind: params.codeWrite ? "code-write" : params.evidenceDigest ? "evidence-digest" : undefined,
 			agentName,
 			agentModelDefault: effectiveAgent.model,
 			settings: this.session.settings,
@@ -961,7 +1033,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			contextPolicy: params.contextPolicy,
 			siblingFindingsRevealed: stagedFindingsRevealed,
 		});
-		const toolProfile = params.toolProfile ?? harness.toolProfile;
+		const toolProfile =
+			params.toolProfile ??
+			(params.evidenceDigest || codeWrite
+				? Object.freeze({
+						...harness.toolProfile,
+						// The native contract supplies the exact capability ceiling, independently of
+						// legacy harness aliases (find/search versus glob/grep) and discovery defaults.
+						maximum: Object.freeze(
+							effectiveAgent.tools!.map(name =>
+								Object.freeze({ source: name === "yield" ? ("hidden" as const) : ("builtin" as const), name }),
+							),
+						),
+						allowDiscovery: false,
+						toolsConstrained: true,
+					})
+				: harness.toolProfile);
 		const collaborationPolicy = clampCollaborationPolicyForContext(
 			params.collaborationPolicy ?? harness.collaborationPolicy,
 			params.contextPolicy,
@@ -1072,6 +1159,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				toolProfile,
 				collaborationPolicy,
 				extensionRunner,
+				codeWrite,
 			},
 		};
 	}
@@ -1080,7 +1168,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(session.cwd);
+		const { agents } = session.nativeTaskExecution
+			? {
+					agents: [
+						parseNativeTaskDefinition(getNativeTaskRuntime(session.nativeTaskExecution).payload.agentDefinition),
+					],
+				}
+			: await discoverAgentsForCreate(session.cwd);
 		return new TaskTool(session, agents);
 	}
 
@@ -1090,16 +1184,50 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		const params = repairTaskParams(rawParams as TaskParams);
-		const batchEnabled = this.#isBatchEnabled();
-		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
+		let params = repairTaskParams(rawParams as TaskParams);
+		const nativeExecution = this.session.nativeTaskExecution !== undefined;
+		if (this.session.nativeTaskExecution !== undefined) {
+			const native = getNativeTaskRuntime(this.session.nativeTaskExecution);
+			const policy = parseNativeTaskPolicy(native.payload.policy);
+			params = {
+				...params,
+				model: native.payload.effectiveModel,
+				difficulty: undefined,
+				...{
+					executionProfile: policy.executionProfile,
+					toolProfile: policy.toolProfile,
+					collaborationPolicy: policy.collaborationPolicy,
+				},
+			};
+		}
+		const batchEnabled = !nativeExecution && this.#isBatchEnabled();
+		const validationError =
+			validateShapeParams(batchEnabled, params, nativeExecution) ?? validateSpawnParams(params, batchEnabled);
 		if (validationError) {
 			return createTaskModeError(validationError);
+		}
+		const requests = [params, ...(params.tasks ?? [])];
+		if (
+			requests.some(request => request.codeWrite) &&
+			requests.some(request => Object.hasOwn(request, "output") || Object.hasOwn(request, "outputSchema"))
+		) {
+			return createTaskModeError(
+				"Task codeWrite rejects output schemas; its native receipt is the only result contract.",
+			);
+		}
+
+		// Autonomous planning root: surface handoffs from durable jobs that
+		// settled outside an inline dispatch (external runner, recovery, or
+		// /fusion controls); the queued messages drive the next planning turn.
+		if (this.session.drainAutonomousTaskHandoffs) {
+			for (const handoff of this.session.drainAutonomousTaskHandoffs()) {
+				this.session.queueDeferredMessage?.(handoff);
+			}
 		}
 
 		const spawnItems = resolveSpawnItems(params);
 		const selectedAgent = this.#discoveredAgents.find(agent => agent.name === params.agent);
-		const asyncEnabled = this.session.settings.get("async.enabled");
+		const asyncEnabled = !this.session.nativeTaskExecution && this.session.settings.get("async.enabled");
 		const manager = asyncEnabled ? this.session.asyncJobManager : undefined;
 		const depthCapacity = canSpawnAtDepth(
 			this.session.settings.get("task.maxRecursionDepth") ?? 2,
@@ -1110,15 +1238,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// call returns (async). In the sync fallback they have already completed,
 		// so a "coordinate while they run" hint would misfire.
 		const willRunAsync = !!manager && selectedAgent?.blocking !== true;
-		const advisory = this.session.suppressSpawnAdvisory
-			? undefined
-			: composeSpawnAdvisory({
-					agentName: params.agent,
-					items: spawnItems,
-					depthCapacity,
-					ircEnabled,
-					willRunAsync,
-				});
+		const advisory =
+			this.session.suppressSpawnAdvisory || spawnItems.some(item => item.codeWrite || item.evidenceDigest)
+				? undefined
+				: composeSpawnAdvisory({
+						agentName: params.agent,
+						items: spawnItems,
+						depthCapacity,
+						ircEnabled,
+						willRunAsync,
+					});
 		// Returns a fresh result (copied content array, copied text part) rather
 		// than mutating the caller's — task results are short-lived here, but an
 		// in-place edit on a shared/cached AgentToolResult would be a hidden trap.
@@ -1147,6 +1276,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const itemParams = spawnParamsFor(params, item);
 			const preparation = await this.#prepareSpawn(itemParams, signal);
 			if (!preparation.ok) return withAdvisory(preparation.result);
+			if (preparation.prepared.codeWrite) item.codeWrite = preparation.prepared.codeWrite.request;
 			preparedItems.push({ item, spawnParams: itemParams, prepared: preparation.prepared });
 		}
 
@@ -1195,7 +1325,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agent: agentLabel,
 					agentSource: prepared.agent.source,
 					status: "pending",
-					task: renderSubagentUserPrompt({ assignment, evidenceDigest: item.evidenceDigest }),
+					task: renderSubagentUserPrompt({
+						assignment,
+						evidenceDigest: item.evidenceDigest,
+						codeWrite: item.codeWrite,
+					}),
 					assignment,
 					description: item.description,
 					executionProfile: prepared.plan.profile,
@@ -1362,6 +1496,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			onSettled,
 		} = options;
 		const buildFollowUpHint = (aborted: boolean): string => {
+			if (spawnParams.codeWrite || spawnParams.evidenceDigest) return "";
 			if (aborted) {
 				return `\n\n${agentId} was aborted — transcript at history://${agentId}`;
 			}
@@ -1504,7 +1639,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					spawnParamsFor(params, spawnItems[0]),
 					signal,
 					onUpdate,
-					undefined,
+					this.session.nativeTaskExecution
+						? getNativeTaskRuntime(this.session.nativeTaskExecution).payload.agentId
+						: undefined,
 					0,
 					false,
 					preparedItems[0],
@@ -1668,7 +1805,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			extensionRunner,
 		} = prepared;
 		const agentName = agent.name;
-		const rawSharedContext = this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined;
+		const rawSharedContext =
+			this.session.nativeTaskExecution !== undefined || this.#isBatchEnabled()
+				? params.context?.trim() || undefined
+				: undefined;
 		const { context: sharedContext } = compileLanePolicy({
 			contextPolicy: params.contextPolicy,
 			sharedContext: rawSharedContext,
@@ -1677,16 +1817,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				params.contextPolicy === "staged" && params.revealSiblingFindings ? params.siblingFindings : undefined,
 		});
 		const assignment = (params.assignment ?? "").trim();
-		const isolationMode = this.session.settings.get("task.isolation.mode");
+		const configuredIsolationMode = this.session.settings.get("task.isolation.mode");
+		const spawnCwd = prepared.codeWrite?.workspaceRoot ?? path.resolve(this.session.cwd, params.cwd ?? ".");
 		const isAutonomous =
 			this.session.settings.get("fusion.enabled") === true &&
 			this.session.settings.get("fusion.mode") === "autonomous";
-		const isWritingWorker =
-			!effectiveAgent.tools ||
-			effectiveAgent.tools.some(t => ["edit", "write", "ast_edit"].includes(t.toLowerCase()));
-		const isolationRequested =
-			"isolated" in params ? params.isolated === true : isAutonomous && isWritingWorker && isolationMode !== "none";
-		const isIsolated = isolationMode !== "none" && isolationRequested;
+		const mandatoryIsolation = Boolean(prepared.codeWrite) || (isAutonomous && !isReadOnlyAgent(effectiveAgent));
+		if (mandatoryIsolation && params.isolated === false)
+			return createTaskModeError("Isolation is required for this task.");
+		const isolationMode = mandatoryIsolation && configuredIsolationMode === "none" ? "auto" : configuredIsolationMode;
+		const isIsolated = isolationMode !== "none" && (mandatoryIsolation || params.isolated === true);
 		const mergeMode = this.session.settings.get("task.isolation.merge");
 		const commitStyle = this.session.settings.get("task.isolation.commits");
 		const taskDepth = this.session.taskDepth ?? 0;
@@ -1709,11 +1849,143 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// structured output go through eval agent(prompt, schema).
 		const effectiveOutputSchema = effectiveAgent.output ?? this.session.outputSchema;
 
+		if (isAutonomous && !this.session.nativeTaskExecution) {
+			let store: OperationalStore | undefined;
+			try {
+				if ((this.session as VerificationCapableToolSession).assignmentVerifierRunners)
+					throw new Error("Native task dependency unavailable: in-memory assignment verifier runners.");
+				if (params.fork) throw new Error("Native task dependency unavailable: forked parent context.");
+				if (!this.session.modelRegistry) throw new Error("Native task dependency unavailable: model registry.");
+				const selected = resolveModelOverride(
+					Array.isArray(modelOverride) ? modelOverride : modelOverride ? [modelOverride] : [],
+					this.session.modelRegistry,
+					this.session.settings,
+				).model;
+				if (!selected) throw new Error("Native task dependency unavailable: pinned worker model.");
+				store = OperationalStore.open();
+				const outputManager =
+					this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+				const agentId = preAllocatedId ?? (await outputManager.allocate(params.id?.trim() || generateTaskName()));
+				const payload = parseNativeTaskJobPayload(
+					nativeTaskJson({
+						version: 1,
+						cwd: spawnCwd,
+						agentId,
+						parentSessionId: this.session.getSessionId?.() ?? null,
+						taskDepth,
+						params: { ...params, cwd: "." },
+						effectiveModel: `${selected.provider}/${selected.id}`,
+						agentDefinition: effectiveAgent,
+						policy: {
+							isolationMode,
+							mergeMode,
+							maxRecursionDepth: this.session.settings.get("task.maxRecursionDepth"),
+							maxRuntimeMs: spawnPlan.maxRuntimeMs,
+							outputSchema: effectiveOutputSchema ?? null,
+							executionProfile: spawnPlan.profile ?? null,
+							toolProfile: toolProfile ?? null,
+							collaborationPolicy: collaborationPolicy ?? null,
+						},
+					}),
+				);
+				const runner = new DurableRunner({
+					store,
+					executor: createNativeTaskExecutor({
+						store,
+						artifactsDir: path.join(getAgentDir(), "operational", "native-tasks"),
+					}),
+				});
+				const job = runner.enqueue({ type: "native_task", payload: nativeTaskJson(payload) });
+				const settled = await runner.runJobById(job.id, signal);
+				if (!settled) throw new Error(`Native task could not claim durable job ${job.id}.`);
+				// The tool result below is this job's handoff; the autonomous
+				// drain must not re-report it as an externally settled update.
+				// Only terminal states are suppressed — a still-queued or paused
+				// job must remain eligible for a later handoff.
+				if (settled.status === "completed" || settled.status === "failed" || settled.status === "cancelled") {
+					this.session.markAutonomousTaskJobReported?.(job.id);
+				}
+				const receipt = settled.status === "completed" ? parseNativeTaskReceipt(settled.result) : undefined;
+				let output =
+					receipt?.output ??
+					`Native task ${settled.id} is ${settled.status}. ${settled.error ?? "Inspect its checkpoint for recovery artifacts."}`;
+				let truncated = false;
+				// Reconstructed sessions have a different artifact registry. Publish only the
+				// projected receipt/digest to the original parent's canonical agent handle.
+				const parentArtifacts = this.session.getArtifactManager?.();
+				const parentOutputDir = this.session.getArtifactsDir?.();
+				const parentOutputPath = parentOutputDir
+					? path.join(parentOutputDir, `${agentId}.md`)
+					: receipt?.outputPath;
+				const checkpoint = store.getCheckpoint(job.id)?.data;
+				const recovery = checkpoint ? parseNativeTaskCheckpoint(checkpoint) : undefined;
+				const rawTranscript = receipt?.artifacts.find(file => file.endsWith(".delegated.log"));
+				const successfulDigest = Boolean(params.evidenceDigest) && receipt?.exitCode === 0;
+				const rawText =
+					rawTranscript && (parentArtifacts || successfulDigest)
+						? await fs.readFile(rawTranscript, "utf8")
+						: undefined;
+				const transcriptArtifact =
+					parentArtifacts && rawText !== undefined
+						? `artifact://${await parentArtifacts.save(rawText, "native-task")}`
+						: rawTranscript;
+				if (successfulDigest) {
+					if (rawText === undefined || !transcriptArtifact) {
+						throw new Error("Native evidence digest is missing its retained full-output artifact.");
+					}
+					({ output, truncated } = projectEvidenceDigest(rawText, transcriptArtifact));
+				}
+				if (parentOutputPath) {
+					await fs.mkdir(path.dirname(parentOutputPath), { recursive: true });
+					await fs.writeFile(parentOutputPath, output);
+				}
+				const result: SingleResult = {
+					index: spawnIndex,
+					id: agentId,
+					agent: agentName,
+					agentSource: effectiveAgent.source,
+					task: assignment,
+					assignment,
+					description: params.description,
+					exitCode: receipt?.exitCode ?? 1,
+					output,
+					stderr: "",
+					truncated,
+					durationMs: Date.now() - startTime,
+					tokens: 0,
+					requests: 0,
+					isError: settled.status !== "completed",
+					error: settled.status !== "completed" ? output : undefined,
+					durableJobId: job.id,
+					changesApplied: receipt?.changesApplied ?? false,
+					mergeSummary: receipt?.mergeSummary,
+					outputPath: parentOutputPath,
+					outputMeta: { lineCount: output.split("\n").length, charCount: output.length },
+					transcriptArtifact,
+					patchPath: recovery?.patchPaths.find(file => file.endsWith("root.patch")),
+					branchName: receipt?.branchName ?? recovery?.branchName ?? undefined,
+					delegatedIoKind: params.codeWrite ? "code-write" : params.evidenceDigest ? "evidence-digest" : undefined,
+				};
+				return this.#buildResultPayload(
+					result,
+					projectAgentsDir,
+					Date.now() - startTime,
+					result.mergeSummary ?? "",
+				);
+			} catch (error) {
+				return createTaskModeError(
+					`Native durable task blocked: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			} finally {
+				store?.close();
+			}
+		}
+
 		let repoRoot: string | null = null;
 		let baseline: WorktreeBaseline | null = null;
 		if (isIsolated) {
 			try {
-				repoRoot = await getRepoRoot(this.session.cwd);
+				repoRoot = await getRepoRoot(spawnCwd);
 				baseline = await captureBaseline(repoRoot);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
@@ -1726,12 +1998,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				};
 			}
 		}
+		const nativeRuntime = this.session.nativeTaskExecution
+			? getNativeTaskRuntime(this.session.nativeTaskExecution)
+			: undefined;
+		nativeRuntime?.prepare(baseline);
 
 		const preferredIsolationBackend = parseIsolationMode(isolationMode);
 
 		// Derive artifacts directory
+		const parentArtifactManager = this.session.getArtifactManager?.() ?? undefined;
 		const sessionFile = this.session.getSessionFile();
-		const artifactsDir = sessionFile ? sessionFile.slice(0, -6) : null;
+		const artifactsDir =
+			nativeRuntime?.artifactsDir ??
+			this.session.getArtifactsDir?.() ??
+			(sessionFile ? sessionFile.slice(0, -6) : null);
 		const tempArtifactsDir = artifactsDir ? null : path.join(os.tmpdir(), `omp-task-${Snowflake.next()}`);
 		const effectiveArtifactsDir = artifactsDir || tempArtifactsDir!;
 
@@ -1739,10 +2019,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			getArtifactsDir: this.session.getArtifactsDir ?? (() => null),
 			getSessionId: this.session.getSessionId ?? (() => null),
 		};
-
-		// Subagents adopt the parent's ArtifactManager so artifact IDs are unique
-		// across the whole tree and outputs land flat in the parent's dir.
-		const parentArtifactManager = this.session.getArtifactManager?.() ?? undefined;
 
 		// When the session is executing an approved plan, hand the overall plan to
 		// every subagent so they share the main agent's plan context. Skipped in
@@ -1763,27 +2039,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const outputManager =
 				this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
 			const agentId = preAllocatedId ?? (await outputManager.allocate(params.id?.trim() || generateTaskName()));
-			let durableJobId: string | undefined;
-			if (isAutonomous) {
-				try {
-					const store = OperationalStore.open();
-					durableJobId = `task-${agentId}-${Date.now()}`;
-					store.createJob({
-						id: durableJobId,
-						type: "native_task",
-						payload: {
-							agentId,
-							agent: effectiveAgent.name,
-							role: params.role ?? null,
-							assignment: assignment.slice(0, 500),
-							isIsolated,
-						},
-					});
-					store.claimJobById(durableJobId, `session-${this.session.getSessionId?.() ?? "root"}`);
-				} catch {
-					// Non-fatal to task execution
-				}
-			}
 
 			const availableSkills = filterSkillsForHarness(harness, this.session.skills ?? [], agent.autoloadSkills);
 			// Resolve autoload skills from agent definition against the harness-filtered set
@@ -1807,7 +2062,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agent: agentName,
 				agentSource: agent.source,
 				status: "pending",
-				task: renderSubagentUserPrompt({ assignment, evidenceDigest: params.evidenceDigest }),
+				task: renderSubagentUserPrompt({
+					assignment,
+					evidenceDigest: params.evidenceDigest,
+					codeWrite: params.codeWrite,
+				}),
 				assignment,
 				executionProfile: spawnPlan.profile,
 				toolProfile,
@@ -1852,14 +2111,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						}
 					: undefined;
 
-			// Working directory override: relative paths resolve against the parent
-			// session's cwd; absolute paths pass through. Omitted → inherit parent.
-			const spawnCwd = params.cwd
-				? path.isAbsolute(params.cwd)
-					? params.cwd
-					: path.resolve(this.session.cwd, params.cwd)
-				: this.session.cwd;
-
 			const prefetch = await resolvePrefetchEvidence({
 				agent: effectiveAgent,
 				cwd: spawnCwd,
@@ -1877,8 +2128,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				prefetchEvidence: prefetch.evidence,
 				evidenceDigest: params.evidenceDigest,
+				codeWrite: params.codeWrite,
 			});
 
+			let generatedReceipt: CodeWriteReceipt | undefined;
 			const sharedRunOptions = {
 				cwd: spawnCwd,
 				agent: effectiveAgent,
@@ -1893,6 +2146,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				detached,
 				id: agentId,
 				taskDepth,
+				delegatedIo: params.evidenceDigest ? { kind: "evidence-digest" as const } : undefined,
+				pinnedModel: nativeRuntime?.payload.effectiveModel,
+				keepAlive: nativeRuntime || params.codeWrite || params.evidenceDigest ? false : undefined,
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
 				spawnPlan,
@@ -1916,7 +2172,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				thinkingLevel: thinkingLevelOverride,
 				outputSchema: effectiveOutputSchema,
 				sessionFile,
-				persistArtifacts: !!artifactsDir,
+				persistArtifacts: !!artifactsDir || Boolean(params.codeWrite || params.evidenceDigest),
 				artifactsDir: effectiveArtifactsDir,
 				maxRuntimeMs: spawnPlan.maxRuntimeMs,
 				enableLsp: subagentLspEnabled,
@@ -1926,7 +2182,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					// Shallow snapshot; recentTools is mutated in place by the
 					// executor, the rest is reassigned or immutable. A deep clone
 					// here cost O(extractedToolData) per progress event.
-					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };
+					latestProgress = params.codeWrite
+						? {
+								...progress,
+								recentTools: [],
+								recentOutput: [],
+								extractedToolData: undefined,
+								retryFailure: undefined,
+								lastIntent: undefined,
+							}
+						: { ...progress, recentTools: progress.recentTools.slice() };
 					emitProgress();
 				},
 				authStorage: this.session.authStorage,
@@ -1953,6 +2218,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 			const runTask = async (): Promise<SingleResult> => {
 				if (!isIsolated) {
+					nativeRuntime?.executing(null);
 					return runSubprocess(sharedRunOptions);
 				}
 
@@ -1964,53 +2230,82 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					}
 					const taskBaseline = structuredClone(baseline);
 
-					isolationHandle = await ensureIsolation(repoRoot, agentId, preferredIsolationBackend);
+					isolationHandle = await ensureIsolation(
+						repoRoot,
+						nativeRuntime
+							? `${agentId}-attempt-${nativeRuntime.checkpoint.attempt}-${Snowflake.next()}`
+							: agentId,
+						preferredIsolationBackend,
+					);
 					const isolationDir = isolationHandle.mergedDir;
+					nativeRuntime?.executing(isolationDir);
 
+					const isolatedCwd = path.resolve(isolationDir, path.relative(repoRoot, spawnCwd));
+					const code = prepared.codeWrite;
+					const delegatedIo: DelegatedIo | undefined = code
+						? {
+								kind: "code-write",
+								workspaceRoot: isolatedCwd,
+								reference: isPathWithinWorkspace(repoRoot, code.reference)
+									? path.resolve(isolationDir, path.relative(repoRoot, code.reference))
+									: code.reference,
+								target: path.resolve(isolatedCwd, code.request.target),
+							}
+						: sharedRunOptions.delegatedIo;
+					if (delegatedIo?.kind === "code-write") await assertCodeWriteTarget(delegatedIo);
 					// Isolated runs re-discover extensions/custom tools inside the
 					// worktree instead of reusing the parent's source paths.
 					const result = await runSubprocess({
 						...sharedRunOptions,
-						worktree: isolationDir,
+						worktree: isolatedCwd,
+						delegatedIo,
+						task:
+							code && delegatedIo?.kind === "code-write"
+								? renderSubagentUserPrompt({
+										assignment,
+										codeWrite: {
+											...code.request,
+											reference: delegatedIo.reference,
+											target: delegatedIo.target,
+										},
+									})
+								: renderedTask,
 						preloadedExtensionPaths: undefined,
 						preloadedCustomToolPaths: undefined,
 					});
-					if (mergeMode === "branch" && result.exitCode === 0 && result.isError !== true) {
-						try {
-							const commitResult = await commitToBranch(
+					try {
+						const delta = await captureDeltaPatch(isolationDir, taskBaseline);
+						result.patchPath = path.join(effectiveArtifactsDir, `${agentId}.patch`);
+						await Bun.write(result.patchPath, delta.rootPatch);
+						result.nestedPatches = delta.nestedPatches;
+						if (code && delegatedIo?.kind === "code-write") {
+							const expected = path.relative(repoRoot, code.target).replaceAll("\\", "/");
+							const touched = delta.rootTouchedFiles;
+							if (delta.nestedPatches.length || touched.length !== 1 || touched[0] !== expected)
+								throw new Error("codeWrite changed paths other than its target, or produced no target patch.");
+							generatedReceipt = await observeCodeWrite(delegatedIo, code.request.target);
+						}
+						if (
+							mergeMode === "branch" &&
+							result.exitCode === 0 &&
+							!result.error &&
+							!result.isError &&
+							!result.aborted
+						) {
+							const committed = await commitToBranch(
 								isolationDir,
 								taskBaseline,
 								agentId,
 								params.description,
-								buildCommitMessageFn(),
+								code ? undefined : buildCommitMessageFn(),
+								delta,
 							);
-							return {
-								...result,
-								branchName: commitResult?.branchName,
-								nestedPatches: commitResult?.nestedPatches,
-							};
-						} catch (mergeErr) {
-							// Agent succeeded but branch commit failed — clean up stale branch
-							const branchName = `omp/task/${agentId}`;
-							await git.branch.tryDelete(repoRoot, branchName);
-							const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
-							return { ...result, error: `Merge failed: ${msg}` };
+							result.branchName = committed?.branchName;
 						}
-					}
-					if (result.exitCode === 0 && result.isError !== true) {
-						try {
-							const delta = await captureDeltaPatch(isolationDir, taskBaseline);
-							const patchPath = path.join(effectiveArtifactsDir, `${agentId}.patch`);
-							await Bun.write(patchPath, delta.rootPatch);
-							return {
-								...result,
-								patchPath,
-								nestedPatches: delta.nestedPatches,
-							};
-						} catch (patchErr) {
-							const msg = patchErr instanceof Error ? patchErr.message : String(patchErr);
-							return { ...result, error: `Patch capture failed: ${msg}` };
-						}
+					} catch (error) {
+						result.error = error instanceof Error ? error.message : String(error);
+						result.exitCode = 1;
+						result.isError = true;
 					}
 					return result;
 				} catch (err) {
@@ -2042,6 +2337,15 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			};
 
 			const result = await runTask();
+			if (nativeRuntime) {
+				await nativeRuntime.complete(result, baseline, generatedReceipt);
+				return this.#buildResultPayload(
+					result,
+					projectAgentsDir,
+					Date.now() - startTime,
+					result.mergeSummary ?? "",
+				);
+			}
 			// Emit spawn_result telemetry
 			{
 				const telemetrySink = this.session.getOrchestrationTelemetry?.() ?? { emit: () => {}, events: [] };
@@ -2099,133 +2403,51 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 			let mergeSummary = "";
 			let changesApplied: boolean | null = null;
-			let hadAnyChanges = false;
-			let mergedBranchForNestedPatches = false;
 			if (isIsolated && repoRoot) {
-				try {
-					if (mergeMode === "branch") {
-						if (!result.branchName || result.exitCode !== 0 || result.aborted || result.isError === true) {
-							changesApplied = true;
-							mergeSummary = "\n\nNo changes to apply.";
-						} else {
-							const mergeResult = await mergeTaskBranches(repoRoot, [
-								{ branchName: result.branchName, taskId: result.id, description: result.description },
-							]);
-							mergedBranchForNestedPatches = mergeResult.merged.includes(result.branchName);
-							changesApplied = mergeResult.failed.length === 0;
-							hadAnyChanges = changesApplied && mergeResult.merged.length > 0;
-
-							if (changesApplied) {
-								mergeSummary = hadAnyChanges
-									? `\n\nMerged branch: ${result.branchName}`
-									: "\n\nNo changes to apply.";
-							} else {
-								const conflictPart = mergeResult.conflict ? `\nConflict: ${mergeResult.conflict}` : "";
-								mergeSummary = `\n\n<system-notification>Branch merge failed: ${result.branchName}.${conflictPart}\nThe unmerged branch remains for manual resolution.</system-notification>`;
-							}
-							if (mergeResult.stashConflict) {
-								mergeSummary += `\n\n<system-notification>${mergeResult.stashConflict}</system-notification>`;
-							}
-
-							// Clean up the merged branch (keep failed ones for manual resolution)
-							if (changesApplied) {
-								await cleanupTaskBranches(repoRoot, [result.branchName]);
-							}
-						}
-					} else {
-						// Patch mode: apply the patch from a successful run. A failed or
-						// aborted run has nothing to apply and must not block the result.
-						const succeeded =
-							result.exitCode === 0 && !result.error && !result.aborted && result.isError !== true;
-						if (!succeeded) {
-							changesApplied = true;
-							hadAnyChanges = false;
-						} else if (!result.patchPath) {
-							changesApplied = false;
-							hadAnyChanges = false;
-						} else {
-							const patchText = await Bun.file(result.patchPath).text();
-							if (!patchText.trim()) {
-								changesApplied = true;
-								hadAnyChanges = false;
-							} else {
-								const normalized = patchText.endsWith("\n") ? patchText : `${patchText}\n`;
-								changesApplied = await git.patch.canApplyText(repoRoot, normalized);
-								if (changesApplied) {
-									try {
-										await git.patch.applyText(repoRoot, normalized);
-										hadAnyChanges = true;
-									} catch {
-										changesApplied = false;
-										hadAnyChanges = false;
-									}
-								}
-							}
-						}
-
-						if (changesApplied) {
-							mergeSummary = hadAnyChanges ? "\n\nApplied patches: yes" : "\n\nNo changes to apply.";
-						} else {
-							const notification =
-								"<system-notification>Patches were not applied and must be handled manually.</system-notification>";
-							const patchList = result.patchPath ? `\n\nPatch artifact:\n- ${result.patchPath}` : "";
-							mergeSummary = `\n\n${notification}${patchList}`;
-						}
-					}
-				} catch (mergeErr) {
-					const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
-					changesApplied = false;
-					hadAnyChanges = false;
-					mergeSummary = `\n\n<system-notification>Merge phase failed: ${msg}\nTask outputs are preserved but changes were not applied.</system-notification>`;
-				}
-			}
-
-			// Apply nested repo patches (separate from parent git)
-			if (isIsolated && repoRoot && (mergeMode === "branch" || changesApplied !== false)) {
-				const nestedPatches = result.nestedPatches ?? [];
-				const eligible =
-					nestedPatches.length > 0 &&
-					result.exitCode === 0 &&
-					!result.aborted &&
-					result.isError !== true &&
-					(mergeMode !== "branch" || mergedBranchForNestedPatches);
-				if (eligible) {
-					try {
-						await applyNestedPatches(repoRoot, nestedPatches, buildCommitMessageFn());
-					} catch {
-						// Nested patch failures are non-fatal to the parent merge
-						mergeSummary +=
-							"\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>";
-					}
-				}
+				await integrateTaskResult({
+					result,
+					repoRoot,
+					mergeMode,
+					signal,
+					commitMessage: buildCommitMessageFn(),
+					codeWrite: prepared.codeWrite ? { kind: "code-write", ...prepared.codeWrite } : undefined,
+				});
+				changesApplied = result.changesApplied ?? false;
+				mergeSummary = result.mergeSummary ?? "";
 			}
 
 			// Cleanup temp directory if used
 			const shouldCleanupTempArtifacts =
-				tempArtifactsDir && (!isIsolated || changesApplied === true || changesApplied === null);
+				tempArtifactsDir && !isIsolated && !params.evidenceDigest && !params.codeWrite;
 			if (shouldCleanupTempArtifacts) {
 				await fs.rm(tempArtifactsDir, { recursive: true, force: true });
 			}
 
 			result.changesApplied = changesApplied ?? undefined;
 			result.mergeSummary = mergeSummary || undefined;
-			if (durableJobId) {
-				result.durableJobId = durableJobId;
-				try {
-					const store = OperationalStore.open();
-					store.transitionJob(durableJobId, {
-						to: result.exitCode === 0 && !result.isError ? "completed" : "failed",
-						leaseOwner: `session-${this.session.getSessionId?.() ?? "root"}`,
-						result: {
-							exitCode: result.exitCode,
-							changesApplied: result.changesApplied ?? null,
-							durationMs: result.durationMs,
-						},
-						error: result.exitCode === 0 && !result.isError ? undefined : (result.error ?? "Task failed"),
-					});
-				} catch {
-					// Non-fatal
+			if (params.codeWrite || params.evidenceDigest) {
+				if (prepared.codeWrite && generatedReceipt && result.exitCode === 0 && !result.error && !result.isError) {
+					try {
+						const observed = await observeCodeWrite(
+							{ kind: "code-write", ...prepared.codeWrite },
+							prepared.codeWrite.request.target,
+						);
+						// Git applies configured worktree conversions (for example core.autocrlf).
+						// The receipt describes the integrated file, not its pre-integration byte representation.
+						generatedReceipt = { ...observed, changesApplied: result.changesApplied === true };
+					} catch (error) {
+						result.exitCode = 1;
+						result.isError = true;
+						result.error = error instanceof Error ? error.message : String(error);
+					}
 				}
+				await projectDelegatedIoResult({
+					result,
+					kind: params.codeWrite ? "code-write" : "evidence-digest",
+					artifactsDir: effectiveArtifactsDir,
+					artifactManager: parentArtifactManager,
+					receipt: generatedReceipt,
+				});
 			}
 			return this.#buildResultPayload(result, projectAgentsDir, Date.now() - startTime, mergeSummary);
 		} catch (err) {
@@ -2247,6 +2469,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		totalDurationMs: number,
 		mergeSummary: string,
 	): AgentToolResult<TaskToolDetails> {
+		if (result.delegatedIoKind) {
+			return {
+				content: [{ type: "text", text: result.output }],
+				details: { projectAgentsDir, results: [result], totalDurationMs, usage: result.usage },
+			};
+		}
 		const status = result.aborted
 			? "cancelled"
 			: result.isError === true

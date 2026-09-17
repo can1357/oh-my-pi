@@ -6,7 +6,7 @@
  */
 
 import * as path from "node:path";
-import { getProjectDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
+import { getAgentDir, getProjectDir } from "@pk-nerdsaver-ai/pi-utils/dirs";
 import {
 	type DurableJob,
 	DurableRunner,
@@ -20,6 +20,7 @@ import {
 	type TrajectoryEvent,
 	validateCron,
 } from "../operational";
+import { createNativeTaskExecutor } from "../operational/native-task-executor";
 import {
 	composeNotificationSinks,
 	createFileNotificationSink,
@@ -258,8 +259,14 @@ function buildOperationalContext(store: OperationalStore, job: DurableJob): stri
 }
 
 function createRunner(store: OperationalStore, flags: RuntimeCommandFlags, deps: RuntimeCliDeps): DurableRunner {
-	const executor =
-		deps.executor ?? createOmpProcessExecutor({ getOperationalContext: job => buildOperationalContext(store, job) });
+	const native = createNativeTaskExecutor({
+		store,
+		artifactsDir: path.join(getAgentDir(), "operational", "native-tasks"),
+	});
+	const processExecutor = createOmpProcessExecutor({
+		getOperationalContext: job => buildOperationalContext(store, job),
+	});
+	const executor = deps.executor ?? (ctx => (ctx.job.type === "native_task" ? native(ctx) : processExecutor(ctx)));
 	return new DurableRunner({
 		store,
 		executor,

@@ -445,7 +445,10 @@ export interface BuildSystemPromptOptions {
 	fusionEscalate?: boolean;
 	/** Fusion token savings mode: inject the token savings delegation and model policy. */
 	fusionTokenSavings?: boolean;
-	/** Fusion autonomous mode: inject planning-only root and durable isolation policy. */
+	/** Shared bulk-I/O guidance, composed independently of root-model steering. */
+	fusionIoDelegation?: boolean;
+	fusionIoMinLines?: number;
+	/** Fusion autonomous mode: inject the planning-only root capability policy. */
 	fusionAutonomous?: boolean;
 	/** Sidekick model selector advertised in the fusion delegation policy. */
 	sidekickModel?: string;
@@ -509,6 +512,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		fusionEscalate = false,
 		fusionTokenSavings = false,
 		fusionAutonomous = false,
+		fusionIoDelegation = fusionTokenSavings || fusionAutonomous,
+		fusionIoMinLines = 350,
 		sidekickModel = "pi/smol",
 		sidekickId = "Sidekick",
 		secretsEnabled = false,
@@ -782,6 +787,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		fusionEscalate,
 		fusionTokenSavings,
 		fusionAutonomous,
+		fusionIoDelegation,
+		fusionIoMinLines,
 		sidekickModel,
 		sidekickId,
 		secretsEnabled,
@@ -794,13 +801,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// Keep mode-dependent policy after project context, including with a custom base.
 	const savingsBlockPattern = /<fusion-token-savings>[\s\S]*?<\/fusion-token-savings>/g;
 	const autonomousBlockPattern = /<fusion-autonomous>[\s\S]*?<\/fusion-autonomous>/g;
+	const ioBlockPattern = /<bulk-work-delegation>[\s\S]*?<\/bulk-work-delegation>/g;
 	const savingsEnabled = fusionTokenSavings && toolNames.includes("task");
 	const autonomousEnabled = fusionAutonomous && toolNames.includes("task");
+	const ioEnabled = fusionIoDelegation && toolNames.includes("task");
 	const savingsSource = savingsEnabled && resolvedCustomPrompt ? prompt.render(systemPromptTemplate, data) : rendered;
 	const autonomousSource =
 		autonomousEnabled && resolvedCustomPrompt ? prompt.render(systemPromptTemplate, data) : rendered;
 	const savingsPolicy = savingsEnabled ? savingsSource.match(savingsBlockPattern)?.at(-1) : undefined;
 	const autonomousPolicy = autonomousEnabled ? autonomousSource.match(autonomousBlockPattern)?.at(-1) : undefined;
+	const ioSource = ioEnabled && resolvedCustomPrompt ? prompt.render(systemPromptTemplate, data) : rendered;
+	const ioPolicy = ioEnabled ? ioSource.match(ioBlockPattern)?.at(-1) : undefined;
 	const systemPrompt = [rendered];
 	// Custom prompt templates already render context files and append text; the
 	// project footer still carries environment, cwd, workspace, and dir-context.
@@ -818,12 +829,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// This also removes stale policy when mode or task capability changes on rebuild.
 	const terminalSystemPrompt = systemPrompt
 		.map(block => {
-			const stripped = block.replace(savingsBlockPattern, "").replace(autonomousBlockPattern, "");
+			const stripped = block
+				.replace(savingsBlockPattern, "")
+				.replace(autonomousBlockPattern, "")
+				.replace(ioBlockPattern, "");
 			return stripped === block ? block : stripped.trim();
 		})
 		.filter(block => block.length > 0);
 	if (savingsPolicy) terminalSystemPrompt.push(savingsPolicy);
 	if (autonomousPolicy) terminalSystemPrompt.push(autonomousPolicy);
+	if (ioPolicy) terminalSystemPrompt.push(ioPolicy);
 
 	return { systemPrompt: terminalSystemPrompt };
 }

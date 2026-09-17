@@ -444,6 +444,10 @@ const FUSION_SUBCOMMANDS: SubcommandDef[] = [
 	{ name: "strong", description: "Assign the strong sidekick model", usage: "<model-or-alias|clear>" },
 	{ name: "compact", description: "Assign the compaction downgrade model", usage: "<model-or-alias|clear>" },
 	{ name: "pool", description: "Manage the routing pool", usage: "[list|set <1-5> <model>|remove <1-5>|clear]" },
+	{ name: "jobs", description: "List this session's durable native task jobs" },
+	{ name: "pause", description: "Pause this session's durable tasks", usage: "[job]" },
+	{ name: "resume", description: "Resume paused/failed durable tasks", usage: "[job]" },
+	{ name: "stop", description: "Cancel this session's durable tasks", usage: "[job]" },
 ];
 
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [

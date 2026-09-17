@@ -71,7 +71,7 @@ describe("system prompt fusion sidekick policy", () => {
 		expect(rendered).not.toContain("Sidekick (cost mode)");
 	});
 	it.each([false, true])(
-		"appends one complete savings block after project and active-repo context (custom=%j)",
+		"appends savings and I/O blocks after project and active-repo context (custom=%j)",
 		async custom => {
 			fs.mkdirSync(path.join(tempDir, "active-project", ".git"), { recursive: true });
 			const opts = {
@@ -82,14 +82,14 @@ describe("system prompt fusion sidekick policy", () => {
 			};
 			const normal = await renderBlocks(opts);
 			const savings = await renderBlocks({ ...opts, fusionTokenSavings: true });
-			const terminal = savings.at(-1) ?? "";
-			expect(savings.slice(0, -1)).toEqual(normal);
+			const terminal = savings.at(-2) ?? "";
+			expect(savings.slice(0, -2)).toEqual(normal);
 			expect(normal.join("\n")).toContain("<active-repo-context>");
 			expect(normal.join("\n")).toContain("<test-append-context />");
 			expect(normal.join("\n")).toContain("<test-project-context />");
 			expect(terminal.trim()).toMatch(/^<fusion-token-savings>[\s\S]*<\/fusion-token-savings>$/);
 			expect(terminal.match(/<fusion-token-savings>/g)).toHaveLength(1);
-			expect(terminal.match(/<bulk-work-delegation>/g)).toHaveLength(1);
+			expect(savings.at(-1)?.match(/<bulk-work-delegation>/g)).toHaveLength(1);
 		},
 	);
 
@@ -127,7 +127,28 @@ describe("system prompt fusion sidekick policy", () => {
 	])("preserves distinct eager delegation behavior (%j)", async eagerOptions => {
 		const normal = await renderBlocks(eagerOptions);
 		const savings = await renderBlocks({ ...eagerOptions, fusionTokenSavings: true });
-		expect(savings.slice(0, -1)).toEqual(normal);
+		expect(savings.slice(0, -2)).toEqual(normal);
 		expect(savings.join("\n").match(/<bulk-work-delegation>/g)).toHaveLength(1);
 	});
+
+	it.each([false, true])("composes autonomous I/O once after stable context (custom=%j)", async custom => {
+		const opts = { resolvedCustomPrompt: custom ? "<custom-base />" : undefined };
+		const normal = await renderBlocks(opts);
+		const autonomous = await renderBlocks({ ...opts, fusionAutonomous: true, fusionIoMinLines: 175 });
+		expect(autonomous.slice(0, -2)).toEqual(normal);
+		expect(autonomous.at(-2)).toContain("<fusion-autonomous>");
+		expect(autonomous.at(-1)).toContain("beyond 175 lines");
+		expect(autonomous.join("\n").match(/<bulk-work-delegation>/g)).toHaveLength(1);
+		expect(autonomous.join("\n")).not.toContain("<fusion-token-savings>");
+		expect(autonomous.join("\n")).not.toContain("at most two calls");
+	});
+
+	it.each([{ fusionTokenSavings: true }, { fusionAutonomous: true }])(
+		"honors I/O opt-out without removing mode policy (%j)",
+		async mode => {
+			const rendered = await render({ ...mode, fusionIoDelegation: false });
+			expect(rendered).not.toContain("<bulk-work-delegation>");
+			expect(rendered).toContain(mode.fusionAutonomous ? "<fusion-autonomous>" : "<fusion-token-savings>");
+		},
+	);
 });

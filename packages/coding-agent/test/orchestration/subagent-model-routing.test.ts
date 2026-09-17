@@ -591,3 +591,47 @@ describe("resolveSubagentModelRouting — explicit evidence digest", () => {
 		);
 	});
 });
+
+describe("resolveSubagentModelRouting — autonomous I/O composition", () => {
+	test.each([
+		{ source: "fusion-token-savings", selectors: ["pi/task"] },
+		{ requestedModel: "openai/gpt-4o", source: "explicit", selectors: ["openai/gpt-4o"] },
+		{ requestedDifficulty: "high" as const, source: "difficulty-profile", selectors: ["pi/slow"] },
+		{ override: "openai/gpt-4o-mini", source: "agent-override", selectors: ["openai/gpt-4o-mini"] },
+	])("retains precedence for $source", ({ source, selectors, override, ...request }) => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "autonomous",
+			modelRoles: baseModelRoles,
+			"task.agentModelOverrides": override ? { explore: override } : {},
+		});
+		const result = resolveSubagentModelRouting({
+			...request,
+			taskKind: "evidence-digest",
+			agentName: "explore",
+			settings,
+			modelRegistry: registry,
+		});
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.error.message);
+		expect(result.decision.source).toBe(source);
+		expect(result.modelPatterns).toEqual(selectors);
+	});
+
+	test("I/O opt-out restores normal fallback, not root-model steering", () => {
+		const result = resolveSubagentModelRouting({
+			agentName: "task",
+			parentActiveModelPattern: "openai/gpt-4o",
+			modelRegistry: registry,
+			settings: Settings.isolated({
+				"fusion.enabled": true,
+				"fusion.mode": "autonomous",
+				"fusion.ioDelegation.enabled": false,
+			}),
+		});
+		expect(result.ok).toBe(true);
+		if (!result.ok) throw new Error(result.error.message);
+		expect(result.decision.source).toBe("parent-active");
+		expect(result.modelPatterns).toEqual(["openai/gpt-4o"]);
+	});
+});

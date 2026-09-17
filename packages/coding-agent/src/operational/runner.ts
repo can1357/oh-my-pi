@@ -427,6 +427,12 @@ export class DurableRunner {
 					}
 					return current ?? claimed;
 				}
+				if (
+					current?.status !== "running" ||
+					current.leaseOwner !== this.#workerId ||
+					(current.leaseExpiresAt ?? 0) <= this.#now()
+				)
+					return current ?? claimed;
 				if (outerSignal?.aborted) {
 					const interrupted = this.#store.transitionJob(claimed.id, {
 						to: "queued",
@@ -462,7 +468,12 @@ export class DurableRunner {
 
 			const current = this.#store.getJob(claimed.id);
 			if (!current) return claimed;
-			if (current.status !== "running") return current;
+			if (
+				current.status !== "running" ||
+				current.leaseOwner !== this.#workerId ||
+				(current.leaseExpiresAt ?? 0) <= this.#now()
+			)
+				return current;
 
 			const completed = this.#store.transitionJob(claimed.id, {
 				to: "completed",

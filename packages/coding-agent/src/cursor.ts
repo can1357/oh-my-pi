@@ -21,6 +21,8 @@ interface CursorExecBridgeOptions {
 	tools: Map<string, AgentTool>;
 	getToolContext?: () => AgentToolContext | undefined;
 	emitEvent?: (event: AgentEvent) => void;
+	/** Live SDK capability policy, also covering provider-side dispatch outside the Agent loop. */
+	getToolBlockReason?: (name: string, args: Record<string, unknown>) => string | undefined;
 }
 
 function createToolResultMessage(
@@ -53,6 +55,8 @@ async function executeTool(
 	toolCallId: string,
 	args: Record<string, unknown>,
 ): Promise<ToolResultMessage> {
+	const reason = options.getToolBlockReason?.(toolName, args);
+	if (reason) return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(reason), true);
 	const tool = options.tools.get(toolName);
 	if (!tool) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
@@ -105,6 +109,8 @@ async function executeTool(
 
 async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
 	const toolName = "delete";
+	const reason = options.getToolBlockReason?.(toolName, { path: pathArg });
+	if (reason) return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(reason), true);
 	options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: { path: pathArg } });
 
 	const absolutePath = resolveToCwd(pathArg, options.cwd);
@@ -219,18 +225,19 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const toolName = "bash";
-		const tool = this.options.tools.get(toolName);
-		if (!tool) {
-			const result = buildToolErrorResult(`Tool "${toolName}" not available`);
-			return createToolResultMessage(toolCallId, toolName, result, true);
-		}
-
 		const timeoutSeconds = args.timeout && args.timeout > 0 ? args.timeout : undefined;
 		const toolArgs: Record<string, unknown> = {
 			command: args.command,
 			cwd: args.workingDirectory || undefined,
 			timeout: timeoutSeconds,
 		};
+		const reason = this.options.getToolBlockReason?.(toolName, toolArgs);
+		if (reason) return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(reason), true);
+		const tool = this.options.tools.get(toolName);
+		if (!tool) {
+			const result = buildToolErrorResult(`Tool "${toolName}" not available`);
+			return createToolResultMessage(toolCallId, toolName, result, true);
+		}
 
 		this.options.emitEvent?.({ type: "tool_execution_start", toolCallId, toolName, args: toolArgs });
 
@@ -325,6 +332,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	async mcp(call: CursorMcpCall) {
 		const toolName = call.toolName || call.name;
 		const toolCallId = decodeToolCallId(call.toolCallId);
+		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
+		const reason = this.options.getToolBlockReason?.(toolName, args);
+		if (reason) return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(reason), true);
 		const tool = this.options.tools.get(toolName);
 		if (!tool) {
 			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
@@ -333,7 +343,6 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
 
-		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const toolResultMessage = await executeTool(this.options, toolName, toolCallId, args);
 		return toolResultMessage;
 	}

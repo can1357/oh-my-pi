@@ -264,6 +264,15 @@ describe("AgentSession — Fusion Token Savings Mode call limit", () => {
 		expect(harness.agent.peekSteeringQueue()).toHaveLength(0);
 	});
 
+	it("keeps the selected autonomous planning model after repeated continuing calls", async () => {
+		const harness = await createSavingsHarness({ "fusion.mode": "autonomous" });
+		cleanups.push(harness.cleanup);
+		const context = makeContinuingContext();
+		for (let call = 0; call < 4; call++) await harness.onTurnEndFn([context.message], undefined, context);
+		expect(harness.session.model?.id).toBe(defaultModel.id);
+		expect(harness.agent.peekSteeringQueue()).toHaveLength(0);
+	});
+
 	it("does not enforce the limit when fusion.mode is off", async () => {
 		const harness = await createSavingsHarness({
 			"fusion.mode": "off",

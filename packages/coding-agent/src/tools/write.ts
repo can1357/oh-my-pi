@@ -24,6 +24,7 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import { getLanguageFromPath, highlightCode, type Theme } from "../modes/theme/theme";
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
+import { assertCodeWriteTarget } from "../session/delegated-io";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
@@ -824,6 +825,22 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// (line ranges, malformed tails) throws before any handler/SSH op runs.
 		const path = peelWriteUrlSelector(unwrapHashlineHeaderPath(rawPath));
 		return untilAborted(signal, async () => {
+			if (this.session.delegatedIo?.kind === "code-write") {
+				const absolutePath = resolvePlanPath(this.session, path);
+				await assertCodeWriteTarget(this.session.delegatedIo, absolutePath);
+				enforcePlanModeWrite(this.session, absolutePath, { op: "create" });
+				await fs.mkdir(absolutePath.replace(/[\\/][^\\/]+$/, ""), { recursive: true });
+				await assertCodeWriteTarget(this.session.delegatedIo, absolutePath);
+				signal?.throwIfAborted();
+				// Exclusive creation also fences a target appearing between validation and write.
+				await fs.writeFile(absolutePath, content, { flag: "wx", signal });
+				invalidateFsScanAfterWrite(absolutePath);
+				this.session.bumpFileMutationVersion?.(absolutePath);
+				return {
+					content: [{ type: "text", text: "Created the assigned codeWrite target." }],
+					details: { resolvedPath: absolutePath },
+				};
+			}
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
 			const internalRouter = InternalUrlRouter.instance();

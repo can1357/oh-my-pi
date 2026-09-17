@@ -6,6 +6,7 @@ import {
 	validateManagedSkillPayload,
 	writeManagedSkill,
 } from "../autolearn/managed-skills";
+import { writeVaultLesson } from "../autolearn/vault";
 import { isNameClaimedByAuthoredSkill } from "../extensibility/skills";
 import { localBackend } from "../memory-backend/local-backend";
 import learnDescription from "../prompts/tools/learn.md" with { type: "text" };
@@ -34,7 +35,9 @@ export type LearnParams = typeof learnSchema.infer;
 export class LearnTool implements AgentTool<typeof learnSchema> {
 	readonly name = "learn";
 	readonly approval = (args: unknown) =>
-		(args as Partial<LearnParams>).skill || this.session.settings.get("memory.backend") === "local"
+		(args as Partial<LearnParams>).skill ||
+		this.session.settings.get("autolearn.vaultPath") ||
+		this.session.settings.get("memory.backend") === "local"
 			? "write"
 			: "read";
 	readonly label = "Learn";
@@ -49,7 +52,13 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 	static createIf(session: ToolSession): LearnTool | null {
 		if (!session.settings.get("autolearn.enabled")) return null;
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "local") return null;
+		if (
+			backend !== "hindsight" &&
+			backend !== "mnemopi" &&
+			backend !== "local" &&
+			!session.settings.get("autolearn.vaultPath")
+		)
+			return null;
 		return new LearnTool(session);
 	}
 
@@ -57,47 +66,93 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 		// 1) Persist or queue the lesson to long-term memory (mirrors MemoryRetainTool).
 		const backend = this.session.settings.get("memory.backend");
 		let memoryMessage = "Lesson stored";
-		if (backend === "mnemopi") {
-			const state = this.session.getMnemopiSessionState?.();
-			if (!state) {
-				throw new Error("Mnemopi backend is not initialised for this session.");
+		let memoryError: Error | undefined;
+		try {
+			if (backend === "mnemopi") {
+				const state = this.session.getMnemopiSessionState?.();
+				if (!state) {
+					throw new Error("Mnemopi backend is not initialised for this session.");
+				}
+				const id = state.rememberScoped(params.memory, {
+					source: "coding-agent-learn",
+					importance: 0.8,
+					metadata: {
+						session_id: state.sessionId,
+						cwd: state.session.sessionManager.getCwd(),
+						context: params.context ?? null,
+						tool: "learn",
+					},
+					scope: "bank",
+					extract: true,
+					extractEntities: true,
+					veracity: "tool",
+					memoryType: "fact",
+				});
+				// rememberScoped returns undefined when the retain failed (closed DB /
+				// disk error); mirror mnemopiBackend.save and fail loudly rather than
+				// reporting (and minting a skill for) a lesson that was silently dropped.
+				if (!id) {
+					throw new Error("Mnemopi did not store the lesson (no memory id returned).");
+				}
+			} else if (backend === "local") {
+				const result = await localBackend.save?.(
+					{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.settings.getCwd() },
+					{ content: params.memory, context: params.context, source: "coding-agent-learn", importance: 0.8 },
+				);
+				if (!result || result.stored === 0) {
+					throw new Error("Lesson was empty after sanitization; nothing stored.");
+				}
+			} else if (backend === "hindsight") {
+				const state = this.session.getHindsightSessionState?.();
+				if (!state) {
+					throw new Error("Hindsight backend is not initialised for this session.");
+				}
+				state.enqueueRetain(params.memory, params.context);
+				memoryMessage = "Lesson queued for retention";
+			} else {
+				memoryMessage = "No memory backend enabled";
 			}
-			const id = state.rememberScoped(params.memory, {
-				source: "coding-agent-learn",
-				importance: 0.8,
-				metadata: {
-					session_id: state.sessionId,
-					cwd: state.session.sessionManager.getCwd(),
-					context: params.context ?? null,
-					tool: "learn",
-				},
-				scope: "bank",
-				extract: true,
-				extractEntities: true,
-				veracity: "tool",
-				memoryType: "fact",
-			});
-			// rememberScoped returns undefined when the retain failed (closed DB /
-			// disk error); mirror mnemopiBackend.save and fail loudly rather than
-			// reporting (and minting a skill for) a lesson that was silently dropped.
-			if (!id) {
-				throw new Error("Mnemopi did not store the lesson (no memory id returned).");
+		} catch (error) {
+			memoryError = error instanceof Error ? error : new Error(String(error));
+			memoryMessage = `Memory capture failed: ${memoryError.message}`;
+		}
+
+		let vaultPath: string | undefined;
+		const vaultRoot = this.session.settings.get("autolearn.vaultPath");
+		if (vaultRoot) {
+			try {
+				vaultPath = await writeVaultLesson(
+					{
+						root: vaultRoot,
+						project: this.session.settings.get("autolearn.vaultProject"),
+						cwd: this.session.settings.getCwd(),
+					},
+					params.memory,
+					params.context,
+				);
+				memoryMessage += `. Lesson stored in Obsidian: ${vaultPath}`;
+			} catch (error) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `${memoryMessage}. Obsidian storage failed: ${error instanceof Error ? error.message : String(error)}. No skill was written.`,
+						},
+					],
+					isError: true,
+					details: { vaultPath: null, skill: null },
+				};
 			}
-		} else if (backend === "local") {
-			const result = await localBackend.save?.(
-				{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.settings.getCwd() },
-				{ content: params.memory, context: params.context, source: "coding-agent-learn", importance: 0.8 },
-			);
-			if (!result || result.stored === 0) {
-				throw new Error("Lesson was empty after sanitization; nothing stored.");
-			}
-		} else {
-			const state = this.session.getHindsightSessionState?.();
-			if (!state) {
-				throw new Error("Hindsight backend is not initialised for this session.");
-			}
-			state.enqueueRetain(params.memory, params.context);
-			memoryMessage = "Lesson queued for retention";
+		} else if (backend !== "local" && backend !== "mnemopi" && backend !== "hindsight") {
+			throw new Error("Auto-Learn requires a memory backend or an existing configured Obsidian vault.");
+		}
+		if (memoryError) {
+			if (!vaultPath) throw memoryError;
+			return {
+				content: [{ type: "text", text: `${memoryMessage}. No skill was written; the vault lesson is retained.` }],
+				isError: true,
+				details: { vaultPath, skill: null },
+			};
 		}
 
 		// 2) Optionally mint/enhance a managed skill. A failure here is surfaced
@@ -122,7 +177,7 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 						},
 					],
 					isError: true,
-					details: { skill: null, shadowed: true },
+					details: { skill: null, shadowed: true, vaultPath },
 				};
 			}
 			const validation = validateManagedSkillPayload(params.skill);
@@ -135,7 +190,7 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 						},
 					],
 					isError: true,
-					details: { skill: null, issues: validation.issues },
+					details: { skill: null, issues: validation.issues, vaultPath },
 				};
 			}
 			try {
@@ -147,13 +202,13 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 			const verb = params.skill.action === "create" ? "Created" : "Updated";
 			return {
 				content: [{ type: "text", text: `${memoryMessage}. ${verb} managed skill "${params.skill.name}".` }],
-				details: { skill: params.skill.name },
+				details: { skill: params.skill.name, vaultPath },
 			};
 		}
 
 		return {
 			content: [{ type: "text", text: `${memoryMessage}.` }],
-			details: { skill: null },
+			details: { skill: null, vaultPath },
 		};
 	}
 }

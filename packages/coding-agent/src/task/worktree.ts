@@ -144,7 +144,10 @@ export async function captureBaseline(repoRoot: string): Promise<WorktreeBaselin
 	return { root, nested };
 }
 
-async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline): Promise<string> {
+async function captureRepoDeltaPatch(
+	repoDir: string,
+	rb: RepoBaseline,
+): Promise<{ patch: string; touchedFiles: string[] }> {
 	const currentHead = (await git.head.sha(repoDir)) ?? "";
 	const currentStaged = await git.diff(repoDir, { binary: true, cached: true });
 	const currentUnstaged = await git.diff(repoDir, { binary: true });
@@ -158,15 +161,17 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline): Promise
 		currentUntrackedPatch,
 	]);
 
-	return git.diff.tree(repoDir, baselineTree, currentTree, {
-		allowFailure: true,
-		binary: true,
-	});
+	const [patch, touchedFiles] = await Promise.all([
+		git.diff.tree(repoDir, baselineTree, currentTree, { binary: true }),
+		git.diff.treePaths(repoDir, baselineTree, currentTree),
+	]);
+	return { patch, touchedFiles };
 }
 
 export interface NestedRepoPatch {
 	relativePath: string;
 	patch: string;
+	touchedFiles?: string[];
 }
 
 function unquoteGitDiffPath(rawPath: string): string {
@@ -194,6 +199,7 @@ function parseDiffGitLinePaths(line: string): string[] {
 	return [...new Set(paths)];
 }
 
+// Legacy nested-patch staging fallback only; never use diff-header tokenization for authorization.
 function patchTouchedFiles(patch: string): string[] {
 	const files = new Set<string>();
 	for (const line of patch.split("\n")) {
@@ -204,11 +210,13 @@ function patchTouchedFiles(patch: string): string[] {
 
 export interface DeltaPatchResult {
 	rootPatch: string;
+	/** Lossless Git names from the exact baseline/current trees used for rootPatch. */
+	rootTouchedFiles: string[];
 	nestedPatches: NestedRepoPatch[];
 }
 
 export async function captureDeltaPatch(isolationDir: string, baseline: WorktreeBaseline): Promise<DeltaPatchResult> {
-	const rootPatch = await captureRepoDeltaPatch(isolationDir, baseline.root);
+	const root = await captureRepoDeltaPatch(isolationDir, baseline.root);
 	const nestedPatches: NestedRepoPatch[] = [];
 
 	for (const { relativePath, baseline: nb } of baseline.nested) {
@@ -218,11 +226,12 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
 		} catch {
 			continue;
 		}
-		const patch = await captureRepoDeltaPatch(nestedDir, nb);
-		if (patch.trim()) nestedPatches.push({ relativePath, patch });
+		const delta = await captureRepoDeltaPatch(nestedDir, nb);
+		if (delta.patch.trim())
+			nestedPatches.push({ relativePath, patch: delta.patch, touchedFiles: delta.touchedFiles });
 	}
 
-	return { rootPatch, nestedPatches };
+	return { rootPatch: root.patch, rootTouchedFiles: root.touchedFiles, nestedPatches };
 }
 
 /**
@@ -267,7 +276,7 @@ export async function applyNestedPatches(
 		}
 
 		const combinedDiff = repoPatches.map(p => p.patch).join("\n");
-		const touchedFiles = [...new Set(repoPatches.flatMap(p => patchTouchedFiles(p.patch)))];
+		const touchedFiles = [...new Set(repoPatches.flatMap(p => p.touchedFiles ?? patchTouchedFiles(p.patch)))];
 
 		// Preserve any pre-existing dirty state (tracked + untracked) so we
 		// commit only the agent delta, not the user's in-flight work.
@@ -464,8 +473,9 @@ export async function commitToBranch(
 	taskId: string,
 	description: string | undefined,
 	commitMessage?: (diff: string) => Promise<string | null>,
+	capturedDelta?: DeltaPatchResult,
 ): Promise<CommitToBranchResult | null> {
-	const { rootPatch, nestedPatches } = await captureDeltaPatch(isolationDir, baseline);
+	const { rootPatch, nestedPatches } = capturedDelta ?? (await captureDeltaPatch(isolationDir, baseline));
 	if (!rootPatch.trim() && nestedPatches.length === 0) return null;
 
 	const repoRoot = baseline.root.repoRoot;

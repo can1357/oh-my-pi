@@ -52,6 +52,7 @@ import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
 import type { ClientBridge } from "../session/client-bridge";
+import { type DelegatedIo, delegatedIoToolNames } from "../session/delegated-io";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
@@ -406,6 +407,8 @@ export interface ExecutorOptions {
 	/** Internal marker for the persistent Fusion warm sidekick spawn. */
 	fusionSidekick?: boolean;
 	modelOverride?: string | string[];
+	/** Durable worker pin: no auth/model fallback or undeclared required tools. */
+	pinnedModel?: string;
 	/** Immutable model-routing provenance for this spawn's resolved route. See {@link AgentProgress.modelRouting}. */
 	modelRouting?: SubagentModelRoutingDecision;
 	/**
@@ -450,6 +453,7 @@ export interface ExecutorOptions {
 	allocateRecoveryId?: (attempt: RecoveryAttempt) => Promise<string>;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	delegatedIo?: DelegatedIo;
 	/**
 	 * Decision-surface guidance from the orchestration harness, injected into the
 	 * subagent system prompt as a compact constraint block. Absent for full harness
@@ -1032,6 +1036,7 @@ interface RunMonitorArgs {
 	parentToolCallId?: string;
 	detached?: boolean;
 	sessionFile?: string;
+	delegatedIo?: DelegatedIo;
 	/** Soft assistant-request budget; 0 disables the guard. */
 	softRequestBudget: number;
 	/** Wall-clock cap in ms; 0 disables the timer. */
@@ -1204,9 +1209,21 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 	const emitProgressNow = () => {
 		progress.durationMs = Date.now() - startTime;
-		onProgress?.({ ...progress });
+		const parentProgress =
+			args.delegatedIo?.kind === "code-write"
+				? {
+						...progress,
+						recentTools: [],
+						recentOutput: [],
+						extractedToolData: undefined,
+						retryFailure: undefined,
+						lastIntent: undefined,
+					}
+				: { ...progress };
+		onProgress?.(parentProgress);
 		const activityGist =
-			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
+			parentProgress.lastIntent ??
+			(parentProgress.currentTool ? `running ${parentProgress.currentTool}` : undefined);
 		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
 		if (args.eventBus) {
 			args.eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
@@ -1217,7 +1234,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				parentToolCallId: args.parentToolCallId,
 				detached: args.detached,
 				assignment,
-				progress: { ...progress },
+				progress: parentProgress,
 				sessionFile: args.sessionFile,
 			});
 		}
@@ -1930,6 +1947,7 @@ interface FinalizeRunArgs {
 	outputSchema?: unknown;
 	signal?: AbortSignal;
 	artifactsDir?: string;
+	delegatedIo?: DelegatedIo;
 	eventBus?: EventBus;
 	parentToolCallId?: string;
 	detached?: boolean;
@@ -2028,7 +2046,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	let outputMeta: { lineCount: number; charCount: number } | undefined;
 	let outputPath: string | undefined;
 	if (args.artifactsDir) {
-		outputPath = path.join(args.artifactsDir, `${id}.md`);
+		outputPath = path.join(args.artifactsDir, args.delegatedIo ? `${id}.delegated-raw.txt` : `${id}.md`);
 		try {
 			await Bun.write(outputPath, rawOutput);
 			outputMeta = {
@@ -2209,6 +2227,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const subagentSettings = createSubagentSettings(settings, {
 		serviceTier: subagentServiceTier,
 		...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+		...(options.delegatedIo ? { "tools.discoveryMode": "off", "read.summarize.enabled": false } : undefined),
 	});
 	const executionProfile = options.executionProfile ?? options.spawnPlan?.profile;
 	const toolPolicyActive =
@@ -2285,16 +2304,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (toolNames && toolProfile) {
 		toolNames = filterAutoToolNames(toolProfile, toolNames);
 	}
+	if (options.delegatedIo) toolNames = delegatedIoToolNames(options.delegatedIo);
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;
-	const spawnsEnv = atMaxDepth
-		? ""
-		: agent.spawns === undefined
+	const spawnsEnv =
+		options.delegatedIo || atMaxDepth
 			? ""
-			: agent.spawns === "*"
-				? "*"
-				: agent.spawns.join(",");
+			: agent.spawns === undefined
+				? ""
+				: agent.spawns === "*"
+					? "*"
+					: agent.spawns.join(",");
 
 	const lspEnabled = enableLsp ?? true;
 	const ircEnabled =
@@ -2317,6 +2338,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
+		delegatedIo: options.delegatedIo,
 		softRequestBudget,
 		maxRuntimeMs,
 	});
@@ -2358,6 +2380,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		let aborted = false;
 		let abortReasonText: string | undefined;
 		let releaseProviderSpawnSlot: (() => void) | undefined;
+		let startupManager: SessionManager | undefined;
 		// runSubagent defers abort classification to the finally block below; the
 		// helper still throws so control flow mirrors the prior inline implementation.
 		const { checkAbort, awaitAbortable } = createAbortHelpers(abortSignal, () => {});
@@ -2400,7 +2423,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				? await awaitAbortable(
 						resolveModelOverrideWithAuthFallback(
 							modelPatterns,
-							options.parentActiveModelPattern,
+							options.pinnedModel ? undefined : options.parentActiveModelPattern,
 							modelRegistry,
 							settings,
 						),
@@ -2410,6 +2433,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						authFallbackUsed: false,
 						fallbackKind: undefined,
 					};
+			if (
+				options.pinnedModel &&
+				(!model || `${model.provider}/${model.id}` !== options.pinnedModel || authFallbackUsed)
+			) {
+				throw new Error(`Native task dependency unavailable: pinned model ${options.pinnedModel}.`);
+			}
 			if (authFallbackUsed && model) {
 				if (fallbackKind === "priority-list") {
 					logger.warn(
@@ -2429,14 +2458,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					});
 				}
 			}
-			const retryFallbackRole = installSubagentRetryFallbackChain({
-				settings: subagentSettings,
-				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, settings),
-				model,
-				authFallbackUsed,
-				fallbackKind,
-			});
+			const retryFallbackRole = options.pinnedModel
+				? undefined
+				: installSubagentRetryFallbackChain({
+						settings: subagentSettings,
+						id,
+						candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, settings),
+						model,
+						authFallbackUsed,
+						fallbackKind,
+					});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {
 					role: retryFallbackRole,
@@ -2470,14 +2501,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			checkAbort();
 
 			const effectiveCwd = worktree ?? cwd;
-			const sessionManager = sessionFile
-				? await awaitAbortable(
-						SessionManager.open(sessionFile, undefined, undefined, {
-							initialCwd: effectiveCwd,
-							suppressBreadcrumb: true,
-						}),
-					)
-				: SessionManager.inMemory(effectiveCwd);
+			const openingManager = sessionFile
+				? SessionManager.open(sessionFile, undefined, undefined, {
+						initialCwd: effectiveCwd,
+						suppressBreadcrumb: true,
+					})
+				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+			const sessionManager = options.pinnedModel ? await openingManager : await awaitAbortable(openingManager);
+			if (options.pinnedModel) startupManager = sessionManager;
+			checkAbort();
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
@@ -2562,6 +2594,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			};
 			const buildSubagentSessionOptions = (sessionManagerForRun: SessionManager): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
+				delegatedIo: options.delegatedIo,
 				authStorage,
 				modelRegistry,
 				settings: subagentSettings,
@@ -2653,7 +2686,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			});
 			let session: AgentSession;
 			try {
-				({ session } = await awaitAbortable(sessionPromise));
+				// Durable execution must settle SDK ownership before closing its store/artifact roots.
+				({ session } = options.pinnedModel ? await sessionPromise : await awaitAbortable(sessionPromise));
 			} catch (err) {
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
@@ -2661,9 +2695,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
 				throw err;
 			}
+			if (options.pinnedModel) {
+				const available = new Set(session.getAllToolNames());
+				const required = options.delegatedIo ? delegatedIoToolNames(options.delegatedIo) : (agent.tools ?? []);
+				for (const name of required)
+					if (!available.has(name)) {
+						await session.dispose();
+						throw new Error(`Native task dependency unavailable: required tool ${name}.`);
+					}
+			}
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			startupManager = undefined;
+			checkAbort();
 			installRegistryStatusSync(session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
@@ -2856,6 +2901,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					reviveSession,
 				});
 			}
+			await startupManager?.close();
 		}
 
 		// Launch-latency breakdown (subagent invocation → first chat dispatch).
@@ -2913,6 +2959,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		outputSchema,
 		signal,
 		artifactsDir: options.artifactsDir,
+		delegatedIo: options.delegatedIo,
 		eventBus: options.eventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,

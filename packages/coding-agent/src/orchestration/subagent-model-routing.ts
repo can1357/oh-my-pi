@@ -45,7 +45,7 @@ import {
 	resolveSubagentModelAlias,
 	type SubagentAliasRegistry,
 } from "../config/subagent-model-aliases";
-import { isTokenSavingsFusionActive } from "../session/fusion-router";
+import { isFusionIoDelegationActive } from "../session/fusion-io-policy";
 
 /** Independent difficulty vocabulary for a fresh subagent spawn. Never aliased to {@link AgentTier}. */
 export type SubagentTaskDifficulty = "low" | "medium" | "high";
@@ -107,7 +107,7 @@ export interface SubagentModelRoutingRequest {
 	/** Requested subtask difficulty; independent from `AgentTier`. */
 	readonly requestedDifficulty?: SubagentTaskDifficulty;
 	/** Explicit semantic workload; never inferred from assignment prose or a specialist's display name. */
-	readonly taskKind?: "evidence-digest";
+	readonly taskKind?: "evidence-digest" | "code-write";
 	/** Agent type name, used to look up `task.agentModelOverrides[agentName]`. */
 	readonly agentName?: string;
 	/** Agent definition's own `model` field (frontmatter default). */
@@ -384,8 +384,7 @@ export function isThinkingOrMaxIntelligencePattern(pattern: string | undefined, 
 }
 
 /**
- * In explicit Token Savings Mode:
- * - The default model is restricted to two calls and simple tasks (never used for subagents).
+ * Under the Fusion I/O policy (savings or autonomous), for subagents only:
  * - Planning and intelligence route to thinking (pi/slow) and max-intelligence (pi/max-intelligence).
  * - Tasks/work delegated by those models (or general delegated tasks) go to the task model (pi/task).
  * - Browser work goes to browser models (pi/browser-control / pi/browser-operation).
@@ -408,7 +407,7 @@ function resolveTokenSavingsFallbackRoute(request: SubagentModelRoutingRequest):
 	}
 
 	let targetSelectors: string[];
-	if (request.taskKind === "evidence-digest") {
+	if (request.taskKind === "evidence-digest" || request.taskKind === "code-write") {
 		// Bulk evidence synthesis is task work even when a context-gathering agent performs it.
 		targetSelectors = ["pi/task"];
 	} else if (isBrowserAgent(agentName)) {
@@ -476,7 +475,7 @@ export function resolveSubagentModelRouting(request: SubagentModelRoutingRequest
 		return resolveDifficultyRoute(requestedDifficulty, settings, modelRegistry);
 	}
 
-	if (isTokenSavingsFusionActive(settings)) {
+	if (isFusionIoDelegationActive(settings)) {
 		return resolveTokenSavingsFallbackRoute(request);
 	}
 

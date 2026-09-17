@@ -99,6 +99,10 @@ const evidenceDigestSchema = type({
 });
 export type EvidenceDigestRequest = typeof evidenceDigestSchema.infer;
 
+/** Reference-based new-file generation; the parent receives only an observed receipt. */
+const codeWriteSchema = type({ spec: "string > 0", reference: "string > 0", target: "string > 0", "+": "delete" });
+export type CodeWriteRequest = typeof codeWriteSchema.infer;
+
 export const taskItemSchema = type({
 	"id?": "string",
 	"description?": "string",
@@ -106,6 +110,7 @@ export const taskItemSchema = type({
 	"model?": "string",
 	"difficulty?": "'low'|'medium'|'high'",
 	"evidenceDigest?": evidenceDigestSchema,
+	"codeWrite?": codeWriteSchema,
 	assignment: "string",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -119,6 +124,7 @@ const taskItemSchemaIsolated = type({
 	"model?": "string",
 	"difficulty?": "'low'|'medium'|'high'",
 	"evidenceDigest?": evidenceDigestSchema,
+	"codeWrite?": codeWriteSchema,
 	"isolated?": "boolean",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -139,6 +145,8 @@ export interface TaskItem {
 	difficulty?: SubagentTaskDifficulty;
 	/** Read the named paths to answer one exact question with a cited evidence digest. Fresh spawns only. */
 	evidenceDigest?: EvidenceDigestRequest;
+	/** Generate a new target from a local reference in mandatory isolation. */
+	codeWrite?: CodeWriteRequest;
 	/** The work; required by the schema. */
 	assignment?: string;
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
@@ -185,6 +193,7 @@ export const taskSchema = type({
 	"model?": "string",
 	"difficulty?": "'low'|'medium'|'high'",
 	"evidenceDigest?": evidenceDigestSchema,
+	"codeWrite?": codeWriteSchema,
 	assignment: "string",
 	"isolated?": "boolean",
 	"fork?": "boolean",
@@ -199,6 +208,7 @@ const taskSchemaNoIsolation = type({
 	"model?": "string",
 	"difficulty?": "'low'|'medium'|'high'",
 	"evidenceDigest?": evidenceDigestSchema,
+	"codeWrite?": codeWriteSchema,
 	assignment: "string",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -251,6 +261,8 @@ export interface TaskParams {
 	difficulty?: SubagentTaskDifficulty;
 	/** Explicit bulk-evidence contract (flat form). See {@link TaskItem.evidenceDigest}. */
 	evidenceDigest?: EvidenceDigestRequest;
+	/** Reference-based new-file generation (flat form). */
+	codeWrite?: CodeWriteRequest;
 	/** The work (flat form). */
 	assignment?: string;
 	/** Batch form (`task.batch`): one subagent per item. */
@@ -509,6 +521,9 @@ export interface SingleResult {
 	mergeSummary?: string;
 	/** OperationalStore durable job tracking ID */
 	durableJobId?: string;
+	/** Native parent projection mode; never trust worker prose as a receipt. */
+	delegatedIoKind?: "evidence-digest" | "code-write";
+	transcriptArtifact?: string;
 }
 
 /** Tool details for TUI rendering */

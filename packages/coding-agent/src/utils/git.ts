@@ -1012,6 +1012,15 @@ export const diff = Object.assign(
 			if (result.exitCode === 1) return true;
 			throw new GitCommandError(args, result);
 		},
+		/** Lossless names from the same immutable trees as a captured patch, including both rename endpoints. */
+		async treePaths(cwd: string, base: string, headRef: string): Promise<string[]> {
+			const output = await runText(
+				cwd,
+				["diff-tree", "-r", "--no-commit-id", "--name-only", "--no-renames", "-z", base, headRef],
+				{ readOnly: true },
+			);
+			return output.split("\0").filter(Boolean);
+		},
 		/** Diff between two tree-ish objects (`git diff-tree`). */
 		async tree(
 			cwd: string,
@@ -1604,10 +1613,10 @@ export const ls = {
 		cwd: string,
 		options: { others?: boolean; excludeStandard?: boolean; signal?: AbortSignal } = {},
 	): Promise<string[]> {
-		const args = ["ls-files"];
+		const args = ["ls-files", "-z"];
 		if (options.others) args.push("--others");
 		if (options.excludeStandard) args.push("--exclude-standard");
-		return splitLines(await runText(cwd, args, { readOnly: true, signal: options.signal }));
+		return (await runText(cwd, args, { readOnly: true, signal: options.signal })).split("\0").filter(Boolean);
 	},
 
 	/** List untracked files (excludes ignored). */
@@ -1617,6 +1626,11 @@ export const ls = {
 
 	/** List submodule paths (recursive). */
 	async submodules(cwd: string, signal?: AbortSignal): Promise<string[]> {
+		// `git submodule` launches a shell even when there are no gitlinks. On Windows
+		// that dominates tiny isolation baselines. Inspect the NUL-delimited index
+		// first; keep the existing recursive command whenever any gitlink is present.
+		const index = await git(cwd, ["ls-files", "--stage", "-z"], { readOnly: true, signal });
+		if (index.exitCode === 0 && !index.stdout.split("\0").some(entry => entry.startsWith("160000 "))) return [];
 		const output = await git(cwd, ["submodule", "--quiet", "foreach", "--recursive", "echo $sm_path"], {
 			readOnly: true,
 			signal,

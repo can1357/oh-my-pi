@@ -1,4 +1,11 @@
+import { OperationalStore } from "../../operational/store";
 import { AgentRegistry } from "../../registry/agent-registry";
+import {
+	controlSessionNativeTasks,
+	formatNativeTaskJobLine,
+	sessionNativeTasks,
+} from "../../session/fusion-autonomous-jobs";
+import { isFusionIoDelegationActive, resolveFusionIoMinLines } from "../../session/fusion-io-policy";
 import {
 	FUSION_POOL_MAX_TIER,
 	FUSION_POOL_MIN_TIER,
@@ -51,7 +58,30 @@ export function buildFusionStatusText(runtime: SlashCommandRuntime): string {
 	const strong = runtime.settings.get("fusion.sidekickStrongModel")?.trim();
 	const compact = runtime.settings.get("fusion.compactModel")?.trim();
 	const pool = parseFusionPoolEntries(runtime.settings.get("fusion.modelPool") ?? []);
+	const ioDelegation = isFusionIoDelegationActive(runtime.settings);
+	const ioMinLines =
+		runtime.session.getFusionIoMinLines?.() ?? resolveFusionIoMinLines(runtime.settings, Bun.env.SHUNT_MIN_LINES);
 
+	let nativeTasks = "unavailable";
+	let sessionTasks: string | undefined;
+	let operationalStore: OperationalStore | undefined;
+	try {
+		operationalStore = OperationalStore.open();
+		const counts = operationalStore.countJobsByStatus("native_task");
+		nativeTasks = `${counts.running} running / ${counts.queued} queued / ${counts.failed} failed`;
+		const sessionId = runtime.sessionManager.getSessionId();
+		if (sessionId) {
+			const owned = sessionNativeTasks(operationalStore, sessionId);
+			const active = owned.filter(job => job.status === "queued" || job.status === "running").length;
+			const paused = owned.filter(job => job.status === "paused").length;
+			const settled = owned.length - active - paused;
+			sessionTasks = `${active} active / ${paused} paused / ${settled} settled`;
+		}
+	} catch {
+		/* Status must remain available when operational storage cannot be opened. */
+	} finally {
+		operationalStore?.close();
+	}
 	const active = enabled && mode !== "off";
 	const sidekickState = describeSidekickState(runtime);
 	const header = `Fusion is ${active ? "ON" : "OFF"}${enabled && mode === "off" ? ' (enabled, but fusion.mode is "off")' : ""}${
@@ -59,7 +89,11 @@ export function buildFusionStatusText(runtime: SlashCommandRuntime): string {
 	}`;
 	const lines = [
 		header,
-		`  Mode:            ${mode}${mode === "autonomous" ? " (planning-only root, isolated durable workers)" : ""}`,
+		`  Mode:            ${mode}${enabled && mode === "autonomous" ? " (planning-only root)" : ""}`,
+		`  I/O delegation: ${ioDelegation ? "on" : "off"}`,
+		`  I/O threshold:  ${ioMinLines} lines`,
+		`  Native tasks:   ${nativeTasks}`,
+		...(sessionTasks !== undefined ? [`  Session tasks:  ${sessionTasks}`] : []),
 		`  Sidekick model:  ${sidekick}`,
 		`  Sidekick state:  ${sidekickState.label}`,
 		`  Strong sidekick: ${strong || "(unset)"}`,
@@ -185,7 +219,58 @@ export function disableFusion(runtime: SlashCommandRuntime): string {
 }
 
 export const FUSION_USAGE =
-	"Usage: /fusion [on|off|status|mode <off|delegate|escalate|token-savings|autonomous>|routing <on|off>|sidekick <model>|strong <model|clear>|compact <model|clear>|pool <list|set|remove|clear>]";
+	"Usage: /fusion [on|off|status|mode <off|delegate|escalate|token-savings|autonomous>|routing <on|off>|sidekick <model>|strong <model|clear>|compact <model|clear>|pool <list|set|remove|clear>|jobs|pause [job]|resume [job]|stop [job]]";
+
+/**
+ * `/fusion jobs|pause|resume|stop` — session-scoped durable native_task
+ * controls. `stop` cancels queued/running/paused jobs; `pause` suspends
+ * queued/running jobs; `resume` requeues paused/failed jobs. All take an
+ * optional job id or agent id and default to every eligible job this session
+ * dispatched. Transitions follow DurableRunner semantics, so pausing or
+ * cancelling a running job also aborts its worker on the next lease touch.
+ */
+async function handleFusionJobsControl(
+	action: "list" | "pause" | "resume" | "cancel",
+	jobId: string | undefined,
+	runtime: SlashCommandRuntime,
+): Promise<SlashCommandResult> {
+	const sessionId = runtime.sessionManager.getSessionId();
+	let store: OperationalStore | undefined;
+	try {
+		store = OperationalStore.open();
+	} catch {
+		await runtime.output("Operational store unavailable; no durable task jobs can be listed or controlled.");
+		return commandConsumed();
+	}
+	try {
+		if (action === "list") {
+			const jobs = sessionNativeTasks(store, sessionId);
+			if (jobs.length === 0) {
+				await runtime.output("No durable native task jobs for this session.");
+			} else {
+				await runtime.output(
+					`Durable native task jobs for this session (${jobs.length}):\n${jobs.map(formatNativeTaskJobLine).join("\n")}`,
+				);
+			}
+			return commandConsumed();
+		}
+		const result = controlSessionNativeTasks({ store, sessionId, action, jobId });
+		const verb = action === "cancel" ? "stopped" : `${action}d`;
+		const lines: string[] = [];
+		if (result.changed.length > 0) {
+			lines.push(
+				`${verb === "paused" ? "Paused" : verb === "resumed" ? "Resumed" : "Stopped"} ${result.changed.length} job(s):`,
+			);
+			lines.push(...result.changed.map(formatNativeTaskJobLine));
+		}
+		for (const failure of result.failures) lines.push(`Skipped: ${failure}`);
+		if (result.changed.length === 0 && result.failures.length === 0) lines.push("Nothing to change.");
+		await runtime.output(lines.join("\n"));
+		return commandConsumed();
+	} finally {
+		store.close();
+	}
+}
 /**
  * Text/ACP handler for `/fusion`. Bare invocation prints status (the TUI
  * dispatcher intercepts bare `/fusion` earlier and shows the menu instead).
@@ -248,6 +333,15 @@ export async function handleFusionCommand(
 			return handleModelRoleVerb(verb, rest, runtime);
 		case "pool":
 			return handleFusionPoolArgs(rest, runtime);
+		case "jobs":
+			return handleFusionJobsControl("list", undefined, runtime);
+		case "pause":
+			return handleFusionJobsControl("pause", rest.trim() || undefined, runtime);
+		case "resume":
+			return handleFusionJobsControl("resume", rest.trim() || undefined, runtime);
+		case "stop":
+		case "cancel":
+			return handleFusionJobsControl("cancel", rest.trim() || undefined, runtime);
 		default:
 			return usage(FUSION_USAGE, runtime);
 	}

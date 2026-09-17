@@ -231,6 +231,9 @@ interface NumberDef {
 	type: "number";
 	default: number;
 	ui?: UiNumber;
+	/** Optional numeric constraints, enforced by the consuming policy. */
+	minimum?: number;
+	integer?: boolean;
 }
 
 interface EnumDef<T extends readonly string[]> {
@@ -943,6 +946,17 @@ export const SETTINGS_SCHEMA = {
 			],
 			condition: "fusionEnabled",
 		},
+	},
+
+	"fusion.ioDelegation.enabled": {
+		type: "boolean",
+		default: true,
+	},
+	"fusion.ioDelegation.minLines": {
+		type: "number",
+		default: 350,
+		minimum: 1,
+		integer: true,
 	},
 
 	"fusion.sidekickModel": {
@@ -2511,6 +2525,13 @@ export const SETTINGS_SCHEMA = {
 	},
 	// Config-file-only knob (numbers without `options` are hidden from the UI).
 	"autolearn.minToolCalls": { type: "number", default: 5 },
+	/** Optional existing Obsidian vault; no machine-specific path is baked into the harness. */
+	"autolearn.vaultPath": { type: "string", default: "" },
+	"autolearn.vaultProject": { type: "string", default: "" },
+	"autolearn.evolution.enabled": { type: "boolean", default: false },
+	"autolearn.evolution.maxCalls": { type: "number", default: 24 },
+	"autolearn.evolution.maxOutputTokens": { type: "number", default: 2048 },
+	"autolearn.evolution.timeoutSeconds": { type: "number", default: 120 },
 
 	// Mnemopi local SQLite memory backend.
 	"mnemopi.dbPath": {
@@ -5681,6 +5702,8 @@ export type MoaEnabled = SettingValue<"moa.enabled">;
 export interface FusionSettings {
 	enabled: boolean;
 	mode: FusionMode;
+	"ioDelegation.enabled": boolean;
+	"ioDelegation.minLines": number;
 	sidekickModel: string;
 	compactModel: string;
 	sidekickRequestBudget: number;

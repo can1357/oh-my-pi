@@ -742,6 +742,9 @@ import * as bundledPiCodingAgentOkf from "@pk-nerdsaver-ai/pi-coding-agent/okf";
 import * as bundledPiCodingAgentOkfParser from "@pk-nerdsaver-ai/pi-coding-agent/okf/parser";
 import * as bundledPiCodingAgentOperational from "@pk-nerdsaver-ai/pi-coding-agent/operational";
 import * as bundledPiCodingAgentOperationalCron from "@pk-nerdsaver-ai/pi-coding-agent/operational/cron";
+import * as bundledPiCodingAgentOperationalNativeTaskExecutor from "@pk-nerdsaver-ai/pi-coding-agent/operational/native-task-executor";
+import * as bundledPiCodingAgentOperationalNativeTaskLock from "@pk-nerdsaver-ai/pi-coding-agent/operational/native-task-lock";
+import * as bundledPiCodingAgentOperationalNativeTaskPayload from "@pk-nerdsaver-ai/pi-coding-agent/operational/native-task-payload";
 import * as bundledPiCodingAgentOperationalNotificationSinks from "@pk-nerdsaver-ai/pi-coding-agent/operational/notification-sinks";
 import * as bundledPiCodingAgentOperationalOmpProcessExecutor from "@pk-nerdsaver-ai/pi-coding-agent/operational/omp-process-executor";
 import * as bundledPiCodingAgentOperationalRunner from "@pk-nerdsaver-ai/pi-coding-agent/operational/runner";
@@ -764,6 +767,9 @@ import * as bundledPiCodingAgentSessionBlobStore from "@pk-nerdsaver-ai/pi-codin
 import * as bundledPiCodingAgentSessionClientBridge from "@pk-nerdsaver-ai/pi-coding-agent/session/client-bridge";
 import * as bundledPiCodingAgentSessionCodexAutoReset from "@pk-nerdsaver-ai/pi-coding-agent/session/codex-auto-reset";
 import * as bundledPiCodingAgentSessionCompactModes from "@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes";
+import * as bundledPiCodingAgentSessionDelegatedIo from "@pk-nerdsaver-ai/pi-coding-agent/session/delegated-io";
+import * as bundledPiCodingAgentSessionFusionAutonomousJobs from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-autonomous-jobs";
+import * as bundledPiCodingAgentSessionFusionIoPolicy from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-io-policy";
 import * as bundledPiCodingAgentSessionFusionRouter from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-router";
 import * as bundledPiCodingAgentSessionFusionSidekick from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-sidekick";
 import * as bundledPiCodingAgentSessionFusionUsage from "@pk-nerdsaver-ai/pi-coding-agent/session/fusion-usage";
@@ -820,9 +826,12 @@ import * as bundledPiCodingAgentTask from "@pk-nerdsaver-ai/pi-coding-agent/task
 import * as bundledPiCodingAgentTaskAgents from "@pk-nerdsaver-ai/pi-coding-agent/task/agents";
 import * as bundledPiCodingAgentTaskAssignmentContract from "@pk-nerdsaver-ai/pi-coding-agent/task/assignment-contract";
 import * as bundledPiCodingAgentTaskAssignmentVerifier from "@pk-nerdsaver-ai/pi-coding-agent/task/assignment-verifier";
+import * as bundledPiCodingAgentTaskCodeWrite from "@pk-nerdsaver-ai/pi-coding-agent/task/code-write";
 import * as bundledPiCodingAgentTaskCommands from "@pk-nerdsaver-ai/pi-coding-agent/task/commands";
+import * as bundledPiCodingAgentTaskDelegatedOutput from "@pk-nerdsaver-ai/pi-coding-agent/task/delegated-output";
 import * as bundledPiCodingAgentTaskDiscovery from "@pk-nerdsaver-ai/pi-coding-agent/task/discovery";
 import * as bundledPiCodingAgentTaskExecutor from "@pk-nerdsaver-ai/pi-coding-agent/task/executor";
+import * as bundledPiCodingAgentTaskIntegration from "@pk-nerdsaver-ai/pi-coding-agent/task/integration";
 import * as bundledPiCodingAgentTaskIsolationRunner from "@pk-nerdsaver-ai/pi-coding-agent/task/isolation-runner";
 import * as bundledPiCodingAgentTaskNameGenerator from "@pk-nerdsaver-ai/pi-coding-agent/task/name-generator";
 import * as bundledPiCodingAgentTaskOmpCommand from "@pk-nerdsaver-ai/pi-coding-agent/task/omp-command";
@@ -2855,6 +2864,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 	"@pk-nerdsaver-ai/pi-coding-agent/operational/cron": bundledPiCodingAgentOperationalCron as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/native-task-executor":
+		bundledPiCodingAgentOperationalNativeTaskExecutor as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/native-task-lock":
+		bundledPiCodingAgentOperationalNativeTaskLock as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/operational/native-task-payload":
+		bundledPiCodingAgentOperationalNativeTaskPayload as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/operational/notification-sinks":
 		bundledPiCodingAgentOperationalNotificationSinks as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/operational/omp-process-executor":
@@ -2905,6 +2920,12 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentSessionCodexAutoReset as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/compact-modes":
 		bundledPiCodingAgentSessionCompactModes as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/delegated-io":
+		bundledPiCodingAgentSessionDelegatedIo as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/fusion-autonomous-jobs":
+		bundledPiCodingAgentSessionFusionAutonomousJobs as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/session/fusion-io-policy":
+		bundledPiCodingAgentSessionFusionIoPolicy as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/fusion-router":
 		bundledPiCodingAgentSessionFusionRouter as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/session/fusion-sidekick":
@@ -3033,13 +3054,21 @@ export const BUNDLED_PI_REGISTRY: Readonly<Record<string, Readonly<Record<string
 		bundledPiCodingAgentTaskAssignmentContract as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/assignment-verifier":
 		bundledPiCodingAgentTaskAssignmentVerifier as unknown as Readonly<Record<string, unknown>>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/code-write": bundledPiCodingAgentTaskCodeWrite as unknown as Readonly<
+		Record<string, unknown>
+	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/commands": bundledPiCodingAgentTaskCommands as unknown as Readonly<
 		Record<string, unknown>
 	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/delegated-output":
+		bundledPiCodingAgentTaskDelegatedOutput as unknown as Readonly<Record<string, unknown>>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/discovery": bundledPiCodingAgentTaskDiscovery as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/executor": bundledPiCodingAgentTaskExecutor as unknown as Readonly<
+		Record<string, unknown>
+	>,
+	"@pk-nerdsaver-ai/pi-coding-agent/task/integration": bundledPiCodingAgentTaskIntegration as unknown as Readonly<
 		Record<string, unknown>
 	>,
 	"@pk-nerdsaver-ai/pi-coding-agent/task/isolation-runner":

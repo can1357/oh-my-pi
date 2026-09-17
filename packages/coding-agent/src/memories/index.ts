@@ -1179,7 +1179,7 @@ function boundChars(text: string, maxChars: number): string {
  * FIRST, then redact secrets (so delimiter stripping can't reassemble a token
  * the redactor would have caught), then bound the length.
  */
-function normalizeLearnedText(text: string, maxChars: number): string {
+export function normalizeLearnedText(text: string, maxChars: number): string {
 	return boundChars(redactSecrets(neutralizeInjection(text)).trim(), maxChars);
 }
 
