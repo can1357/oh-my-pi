@@ -62,11 +62,25 @@ interface TransformersRuntime {
 			device: TinyModelDevice;
 			dtype: TinyModelDtype;
 			progress_callback: (info: ProgressInfo) => void;
+			session_options?: { intraOpNumThreads?: number };
 		},
 	) => Promise<TextGenerationPipeline>;
 }
 
 const pipelines = new Map<TinyLocalModelKey, Promise<TextGenerationPipeline>>();
+
+// ORT defaults intra-op threads to all logical cores; with N ompk instances each
+// worker would spawn a full-core pool. Tiny models don't benefit past a couple
+// of threads, so cap it (env-overridable for benchmarking).
+function resolveTinyIntraOpThreads(): number {
+	const raw = Bun.env.OMP_TINY_INTRA_OP_THREADS;
+	if (raw) {
+		const parsed = Number.parseInt(raw, 10);
+		if (Number.isFinite(parsed) && parsed > 0) return parsed;
+	}
+	return 2;
+}
+const tinyIntraOpThreads = resolveTinyIntraOpThreads();
 
 function getTransformersRuntimeKey(): string {
 	return getTransformersVersionSpec().replace(/[^A-Za-z0-9._-]/g, "_");
@@ -123,6 +137,7 @@ async function loadPipelineOnDevice(
 		device,
 		dtype: tinyModelDtypeOverride ?? spec.dtype,
 		progress_callback: info => sendProgress(transport, requestId, modelKey, info),
+		session_options: { intraOpNumThreads: tinyIntraOpThreads },
 	});
 }
 
