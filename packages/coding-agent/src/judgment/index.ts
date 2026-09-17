@@ -147,6 +147,7 @@ class LocalJudge extends TextJudge implements ResolvedJudge {
 class LocalTextBackend implements TextBackend {
 	readonly api = "tiny-local";
 	readonly provider = "local";
+	readonly guardState = false;
 	readonly model: string;
 	readonly #reasoning: boolean;
 

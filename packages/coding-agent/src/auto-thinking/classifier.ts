@@ -15,6 +15,7 @@
 import { type ChoiceQuestion, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import type { ModelRegistry } from "../config/model-registry";
+import bucketQuestionInstructions from "../prompts/system/auto-thinking-bucket-question.md" with { type: "text" };
 import type { Settings } from "../config/settings";
 import { type JudgmentUsage, resolveJudge } from "../judgment";
 import { clampAutoThinkingEffort } from "../thinking";
@@ -67,7 +68,7 @@ const LEVEL_QUESTION_WITH_MAX: ChoiceQuestion<Level> = {
 /** Coarse 3-bucket question for on-device models. */
 const BUCKET_QUESTION: ChoiceQuestion<Bucket> = {
 	type: "choice",
-	instructions: "The state is a coding request. Classify its difficulty into one bucket by the reasoning it needs.",
+	instructions: bucketQuestionInstructions,
 	criteria: {
 		trivial: "Obvious, mechanical, or a direct question: rename, typo, one-liner, simple lookup.",
 		moderate: "A real localized task: small feature, normal bug fix, code explanation.",
@@ -115,7 +116,7 @@ export async function classifyDifficulty(
 		metadataResolver: deps.metadataResolver,
 		onUsage: deps.onUsage,
 	});
-	const state = preprocessTinyMessage(promptText);
+	const state = { request: preprocessTinyMessage(promptText) };
 	const options = { signal: deps.signal };
 	// The 3-bucket local question cannot select `max`, so its ceiling stays at
 	// XHigh whatever the setting says — otherwise a sparse ladder would snap its

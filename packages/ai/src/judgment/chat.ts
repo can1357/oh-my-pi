@@ -2,10 +2,11 @@
  * {@link TextBackend} over a chat model: the bridge that lets any smol/tiny
  * LLM serve {@link TextJudge} when no native judgment provider is configured.
  */
+import { type } from "@oh-my-pi/omptype";
 import * as AIError from "../error";
 import { retryTransientCompletion } from "../oneshot-retry";
 import { completeSimple } from "../stream";
-import type { Api, AssistantMessage, Model, SimpleStreamOptions } from "../types";
+import type { Api, AssistantMessage, Model, SimpleStreamOptions, Tool } from "../types";
 import type { TextBackend, TextCompletion, TextPrompt } from "./text";
 import type { JudgeOptions } from "./types";
 
@@ -25,6 +26,13 @@ import type { JudgeOptions } from "./types";
  */
 export const JUDGMENT_CHAT_MAX_TOKENS = 4096;
 
+const SUBMIT_JUDGMENT: Tool = {
+	name: "submit_judgment",
+	description: "Submit the exact requested answer label, or the requested question-id lines for a batched judgment.",
+	parameters: type({ answer: "string" }),
+	strict: true,
+};
+
 export type ChatTextBackendOptions = Pick<SimpleStreamOptions, "apiKey" | "sessionId" | "metadata"> & {
 	/** Receives every completed attempt (including transient failures) for usage accounting. */
 	onAttempt?: (message: AssistantMessage) => void;
@@ -36,6 +44,7 @@ export function chatTextBackend(model: Model<Api>, options: ChatTextBackendOptio
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
+		parseRetries: 2,
 		async complete(prompt: TextPrompt, judge: JudgeOptions): Promise<TextCompletion> {
 			const response = await retryTransientCompletion(
 				() =>
@@ -44,6 +53,7 @@ export function chatTextBackend(model: Model<Api>, options: ChatTextBackendOptio
 						{
 							systemPrompt: [prompt.system],
 							messages: [{ role: "user", content: prompt.user, timestamp: Date.now() }],
+							tools: prompt.retry ? [SUBMIT_JUDGMENT] : undefined,
 						},
 						{
 							apiKey: options.apiKey,
@@ -52,6 +62,7 @@ export function chatTextBackend(model: Model<Api>, options: ChatTextBackendOptio
 							maxTokens: JUDGMENT_CHAT_MAX_TOKENS,
 							temperature: 0,
 							disableReasoning: true,
+							toolChoice: prompt.retry ? { type: "function", name: SUBMIT_JUDGMENT.name } : undefined,
 							signal: judge.signal,
 							onAttempt: options.onAttempt,
 						},
@@ -71,6 +82,10 @@ export function chatTextBackend(model: Model<Api>, options: ChatTextBackendOptio
 			let text = "";
 			for (const block of response.content) {
 				if (block.type === "text") text += (text ? " " : "") + block.text;
+				if (prompt.retry && block.type === "toolCall" && block.name === SUBMIT_JUDGMENT.name) {
+					const answer = block.arguments.answer;
+					if (typeof answer === "string") text += (text ? " " : "") + answer;
+				}
 			}
 			return { text: text.trim(), usage: response.usage };
 		},

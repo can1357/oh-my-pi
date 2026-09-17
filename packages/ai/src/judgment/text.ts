@@ -15,6 +15,7 @@
 import { escapeXmlAttribute, escapeXmlText, prompt } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type { Usage } from "../types";
+import textJudgeRetryTemplate from "./text-judge-retry.md" with { type: "text" };
 import textJudgeStateTemplate from "./text-judge-state.md" with { type: "text" };
 import textJudgeTemplate from "./text-judge.md" with { type: "text" };
 import {
@@ -34,6 +35,8 @@ import {
 export interface TextPrompt {
 	system: string;
 	user: string;
+	/** Format-correction attempt; chat backends may enforce tool suppression on the wire. */
+	retry?: boolean;
 }
 
 export interface TextCompletion {
@@ -47,6 +50,10 @@ export interface TextBackend {
 	readonly api: string;
 	readonly provider: string;
 	readonly model: string;
+	/** State guard for agent-tuned chat models; on-device classifier workers may disable it. */
+	readonly guardState?: boolean;
+	/** Format-correction retries after a completion cannot be parsed. */
+	readonly parseRetries?: number;
 	complete(prompt: TextPrompt, options: JudgeOptions): Promise<TextCompletion>;
 }
 
@@ -97,7 +104,7 @@ function renderStateField(key: string, value: JsonValue): string {
  * on a bare request (answer it, emit tool calls) instead of classifying it —
  * explicit tags and the trailing cue keep them on task.
  */
-export function renderJudgmentPrompt(request: JudgmentRequest): TextPrompt {
+export function renderJudgmentPrompt(request: JudgmentRequest, options: { guardState?: boolean } = {}): TextPrompt {
 	const questions: RenderedQuestion[] = [];
 	for (const id in request.questions) {
 		const question = request.questions[id];
@@ -121,10 +128,12 @@ export function renderJudgmentPrompt(request: JudgmentRequest): TextPrompt {
 		questions.push(rendered);
 	}
 	const multi = questions.length > 1;
+	const guardState = options.guardState !== false;
 	return {
-		system: prompt.render(textJudgeTemplate, { questions, multi }),
+		system: prompt.render(textJudgeTemplate, { questions, multi, guardState }),
 		user: prompt.render(textJudgeStateTemplate, {
 			...questions[0],
+			guardState,
 			multi,
 			state: renderJudgmentState(request.state),
 		}),
@@ -259,20 +268,42 @@ export class TextJudge implements Judge {
 	): Promise<JudgmentResult<Q>> {
 		const ids = Object.keys(request.questions);
 		if (ids.length === 0) throw new Error("judgment request has no questions");
-		const completion = await this.#backend.complete(renderJudgmentPrompt(request), options);
-		const replies = ids.length === 1 ? new Map([[ids[0], completion.text]]) : splitAnswerLines(completion.text, ids);
-		const answers: Record<string, Answer> = {};
-		for (const id of ids) {
-			const reply = replies.get(id);
-			if (reply === undefined) throw new JudgmentParseError(id, completion.text, "no answer line for question");
-			answers[id] = parseAnswer(id, request.questions[id], reply);
+		const rendered = renderJudgmentPrompt(request, { guardState: this.#backend.guardState });
+		const retries = this.#backend.parseRetries ?? 0;
+		for (let attempt = 0; ; attempt++) {
+			const textPrompt =
+				attempt === 0
+					? rendered
+					: {
+							system: prompt.render(textJudgeRetryTemplate, {
+								system: rendered.system,
+								multi: ids.length > 1,
+							}),
+							user: rendered.user,
+							retry: true,
+						};
+			const completion = await this.#backend.complete(textPrompt, options);
+			try {
+				const replies =
+					ids.length === 1 ? new Map([[ids[0], completion.text]]) : splitAnswerLines(completion.text, ids);
+				const answers: Record<string, Answer> = {};
+				for (const id of ids) {
+					const reply = replies.get(id);
+					if (reply === undefined) {
+						throw new JudgmentParseError(id, completion.text, "no answer line for question");
+					}
+					answers[id] = parseAnswer(id, request.questions[id], reply);
+				}
+				return {
+					api: this.#backend.api,
+					provider: this.#backend.provider,
+					model: this.#backend.model,
+					answers: answers as JudgmentResult<Q>["answers"],
+					usage: completion.usage ?? tokenUsage(0, 0),
+				};
+			} catch (error) {
+				if (!(error instanceof JudgmentParseError) || attempt >= retries) throw error;
+			}
 		}
-		return {
-			api: this.#backend.api,
-			provider: this.#backend.provider,
-			model: this.#backend.model,
-			answers: answers as JudgmentResult<Q>["answers"],
-			usage: completion.usage ?? tokenUsage(0, 0),
-		};
 	}
 }

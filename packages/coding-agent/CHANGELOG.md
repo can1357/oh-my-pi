@@ -2,15 +2,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+## [18.2.4] - 2026-09-17
+
 ### Added
 
-- `composer.tokenRate` (default off): a live generation tok/s readout docked on the working row beside the session title, smoothed over recent stream time and corrected by the provider's billed output counts so hidden reasoning is reflected; it stays visible between turns.
-- TypeSafe provider (`/login typesafe` or `TYPESAFE_API_KEY`): the `auto` thinking-level classifier, Smart unexpected-stop detection, and git TUI AI staging run as typed System One judgments with calibrated probabilities when a credential exists; `providers.judgmentProvider` (`auto`/`typesafe`/`llm`) pins the backend.
-- Eval `judge(state, questions)` helper (Python and JS): typed `choice`/`bool`/`score` judgments from cell code, returning an immediate handle whose `.wait()` yields the answers with probabilities; routes to TypeSafe when credentialed, else the tiny/smol chat model.
+- Added an optional live generation speed readout via `composer.tokenRate`, showing smoothed tokens-per-second output in the working row and keeping the rate visible between turns.
+- Added TypeSafe provider support through `/login typesafe` or `TYPESAFE_API_KEY`. TypeSafe can power thinking-level detection, unexpected-stop detection, and AI-assisted git staging with calibrated judgment probabilities; configure `providers.judgmentProvider` as `auto`, `typesafe`, or `llm` to select the judgment backend.
+- Added the `judge(state, questions)` evaluation helper for Python and JavaScript cell code, supporting typed choice, boolean, and score judgments. It returns a handle whose `.wait()` method provides answers and probabilities, using TypeSafe when configured and available or a fallback chat model otherwise.
 
 ### Changed
 
-- The difficulty, unexpected-stop, and AI-staging classifiers share one judgment interface; without TypeSafe, or when a TypeSafe request fails, they fall back through the `tiny`, `smol`, `default`, and active-session models. Agent-tuned small models receive guarded JSON state so they classify requests instead of emitting tool calls. AI staging now asks one yes/no question per file in a single batched request instead of echoing paths.
+- Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
 
 ## [18.2.3] - 2026-09-17
 

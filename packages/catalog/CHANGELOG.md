@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [18.2.4] - 2026-09-17
+
 ### Added
 
-- `typesafe` auth policy (`TYPESAFE_API_KEY`, API-key login validated against `/v1/models`) for TypeSafe System One judgments.
+- Added `typesafe` authentication for TypeSafe System One judgments via the `TYPESAFE_API_KEY` configuration and API-key validation against the TypeSafe models endpoint.
 
 ## [18.2.3] - 2026-09-17
 

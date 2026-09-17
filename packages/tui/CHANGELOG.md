@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [18.2.4] - 2026-09-17
+
 ### Fixed
 
-- Inline images no longer vanish after a terminal resize on kitty and Ghostty: the settled repaint now erases the screen before re-sending image data (both terminals reclaim not-yet-placed images on an erase), and images stay visible on the borrowed resize buffer instead of blanking for the duration of the drag.
+- Fixed inline images disappearing or temporarily blanking when resizing the terminal in kitty and Ghostty.
 
 ## [18.2.3] - 2026-09-17
 

@@ -77,7 +77,7 @@ export async function classifyUnexpectedStop(
 			metadataResolver: deps.metadataResolver,
 		});
 		const { answers } = await judge.judge(
-			{ state: text, questions: { stopped: UNEXPECTED_STOP_QUESTION } },
+			{ state: { message: text }, questions: { stopped: UNEXPECTED_STOP_QUESTION } },
 			{ signal: deps.signal },
 		);
 		return answers.stopped.noul >= UNEXPECTED_STOP_THRESHOLD;
