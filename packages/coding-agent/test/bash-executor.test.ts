@@ -16,7 +16,7 @@ import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
 // OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
@@ -645,9 +645,10 @@ exit 64
 
 		// Redirect the backgrounded job's stdout so it doesn't hold the executor's
 		// output pipe open (which would add the ~250ms background-drain grace);
-		// `$!` still reports the real external PID, which is all this test checks.
-		const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
-		const result = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $!`, {
+		// `$!` reports the real external PID, which is all this test checks.
+		const sleepBin = $which("sleep");
+		if (!sleepBin) throw new Error("sleep executable not found");
+		const result = await executeBash(`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $!`, {
 			cwd: tempDir,
 			timeout: 5000,
 		});
@@ -1407,19 +1408,23 @@ describe("executeBash :async: background retention", () => {
 		"keeps a per-job :async: shell's plain-`&` background process alive across turns",
 		async () => {
 			const pidFile = path.join(tmp, "pid");
-			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+			const sleepBin = $which("sleep");
+			if (!sleepBin) throw new Error("sleep executable not found");
 			let pid: number | undefined;
 			try {
 				// A per-job `:async:` key: its shell is removed from the reuse map at
 				// teardown, which would SIGKILL the backgrounded child (kill-on-drop).
 				// A plain `&` job stays a child of the shell, so `liveBackgroundJobCount`
 				// sees it and the retain logic keeps the shell alive while the child
-				// runs. `$!` is the external child's own pid (no transparent wrapper to
-				// unwrap), so it is the process we assert on.
-				const res = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`, {
-					sessionKey: "retain-probe:async:job1",
-					cwd: tmp,
-				});
+				// runs. `$!` is the external child's own pid (no transparent wrapper
+				// to unwrap), so it is the process we assert on.
+				const res = await executeBash(
+					`${shellQuote(sleepBin)} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`,
+					{
+						sessionKey: "retain-probe:async:job1",
+						cwd: tmp,
+					},
+				);
 				expect(res.cancelled).toBe(false);
 				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
 				expect(Number.isInteger(pid)).toBe(true);

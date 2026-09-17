@@ -19,7 +19,7 @@ describe("RpcClient.start", () => {
 		using client = new RpcClient({
 			command: args => {
 				received = args;
-				return ["/usr/bin/false"];
+				return [process.execPath, "--eval", "process.exit(1)"];
 			},
 			provider: "openrouter",
 			model: "example/model",
