@@ -51,6 +51,7 @@ export type { EditorBorderStyle, EditorTopBorder };
 import { type SelectItem, SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list";
 
 const PASSTHROUGH_COLOR = (text: string): string => text;
+const MENTION_CONTEXT_RE = /(?:^|\s)\^[^\s]*$/;
 
 /** Prompt-history capacity: entries kept for Up/Down, and the window loaded from storage. */
 const HISTORY_LIMIT = 100;
@@ -2468,6 +2469,11 @@ export class Editor implements Component, Focusable {
 		return this.#state.lines.join("\n");
 	}
 
+	/** Host-registered atomic chip labels mapped to their submit-time expansions. */
+	get atoms(): ReadonlyMap<string, string> {
+		return this.#atoms;
+	}
+
 	/** Monotonic buffer-content revision for render caches. Cursor-only movement does not advance it. */
 	get textRevision(): number {
 		return this.#textRevision;
@@ -2863,6 +2869,16 @@ export class Editor implements Component, Focusable {
 					this.#tryTriggerAutocomplete();
 				}
 			}
+			// Auto-trigger for "^" model mentions
+			else if (char === "^") {
+				const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
+				// Only trigger if ^ is after whitespace or at start of line
+				const charBeforeCaret = textBeforeCursor[textBeforeCursor.length - 2];
+				if (textBeforeCursor.length === 1 || charBeforeCaret === " " || charBeforeCaret === "\t") {
+					this.#tryTriggerAutocomplete();
+				}
+			}
 			// Auto-trigger for "#" prompt actions anywhere in the current token
 			else if (char === "#") {
 				this.#tryTriggerAutocomplete();
@@ -2881,6 +2897,10 @@ export class Editor implements Component, Focusable {
 				}
 				// Check if we're in an @ file reference context
 				else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+					this.#tryTriggerAutocomplete();
+				}
+				// Check if we're in a model mention context
+				else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
 					this.#tryTriggerAutocomplete();
 				}
 				// Check if we're in a # prompt action context
@@ -3001,6 +3021,8 @@ export class Editor implements Component, Focusable {
 		if (this.#isInSlashAutocompleteContext()) {
 			this.#tryTriggerAutocomplete();
 		} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+			this.#tryTriggerAutocomplete();
+		} else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
 			this.#tryTriggerAutocomplete();
 		} else if (textBeforeCursor.match(/#[^\s#]*$/)) {
 			this.#tryTriggerAutocomplete();
@@ -3177,6 +3199,10 @@ export class Editor implements Component, Focusable {
 			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
 				this.#tryTriggerAutocomplete();
 			}
+			// model mention context
+			else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
+				this.#tryTriggerAutocomplete();
+			}
 			// # prompt action context
 			else if (textBeforeCursor.match(/#[^\s#]*$/)) {
 				this.#tryTriggerAutocomplete();
@@ -3339,6 +3365,8 @@ export class Editor implements Component, Focusable {
 			if (this.#isInSlashAutocompleteContext()) {
 				this.#tryTriggerAutocomplete();
 			} else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
+				this.#tryTriggerAutocomplete();
+			} else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
 				this.#tryTriggerAutocomplete();
 			} else if (textBeforeCursor.match(/#[^\s#]*$/)) {
 				this.#tryTriggerAutocomplete();
@@ -3676,6 +3704,10 @@ export class Editor implements Component, Focusable {
 			else if (textBeforeCursor.match(/(?:^|[\s])@[^\s]*$/)) {
 				this.#tryTriggerAutocomplete();
 			}
+			// model mention context
+			else if (MENTION_CONTEXT_RE.test(textBeforeCursor)) {
+				this.#tryTriggerAutocomplete();
+			}
 			// # prompt action context
 			else if (textBeforeCursor.match(/#[^\s#]*$/)) {
 				this.#tryTriggerAutocomplete();
@@ -3967,6 +3999,10 @@ export class Editor implements Component, Focusable {
 
 		if (this.#autocompletePrefix.startsWith("@")) {
 			return /(?:^|\s)@[^\s]*$/.test(currentTextBeforeCursor);
+		}
+
+		if (this.#autocompletePrefix.startsWith("^")) {
+			return MENTION_CONTEXT_RE.test(currentTextBeforeCursor);
 		}
 
 		return currentTextBeforeCursor.endsWith(this.#autocompletePrefix);

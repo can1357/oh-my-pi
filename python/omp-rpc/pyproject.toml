@@ -13,13 +13,13 @@ license-files = ["LICENSE"]
 authors = [{ name = "Stencil Labs, Inc." }]
 keywords = ["omp", "rpc", "agent", "coding-agent", "jsonl", "stdio"]
 classifiers = [
-	"Development Status :: 3 - Alpha",
-	"Intended Audience :: Developers",
-	"Programming Language :: Python :: 3",
-	"Programming Language :: Python :: 3.11",
-	"Programming Language :: Python :: 3.12",
-	"Topic :: Software Development :: Libraries :: Python Modules",
-	"Topic :: Software Development :: Libraries",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries",
 ]
 
 [project.urls]

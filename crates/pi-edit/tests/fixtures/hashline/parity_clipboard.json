@@ -323,7 +323,9 @@
 					"text": "x\ny",
 					"clipboard": {
 						"named": {
-							"r": ["a"]
+							"r": [
+								"a"
+							]
 						}
 					},
 					"input": "PUT >$ @r",
@@ -427,8 +429,13 @@
 					"text": "b1\n",
 					"path": "b.ts",
 					"clipboard": {
-						"lines": ["move1", "move2"],
-						"pendingAnonCuts": ["CUT 2.=3"]
+						"lines": [
+							"move1",
+							"move2"
+						],
+						"pendingAnonCuts": [
+							"CUT 2.=3"
+						]
 					},
 					"input": "PUT >$",
 					"expect": {

@@ -13,6 +13,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const recordToolSchema = type({ value: type("string") });
 
@@ -294,7 +295,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("caps provider-empty recovery without consuming generic retries and accepts the next prompt", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[emptyProviderResponse(), emptyProviderResponse(), emptyProviderResponse(), emptyProviderResponse()],
 			{
@@ -607,7 +608,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("ends auto-retry state when empty stop retries hit the cap", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[{ throw: "503 service unavailable: overloaded_error" }, emptyStop(), emptyStop(), emptyStop(), emptyStop()],
 			{
@@ -676,7 +677,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("preserves auto-retry budget across empty stop continuations", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[
 				{ throw: "503 service unavailable: overloaded_error" },

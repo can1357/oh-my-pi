@@ -33,10 +33,10 @@ Example:
 
 ```yaml
 modelRoles:
-   advisor: anthropic/claude-sonnet-4-5:medium
+  advisor: anthropic/claude-sonnet-4-5:medium
 
 advisor:
-   enabled: true
+  enabled: true
 ```
 
 Model selectors use normal role/model resolution, including provider-prefixed ids, canonical ids, fallback lists, and optional thinking suffixes.
@@ -123,8 +123,8 @@ A normal yield the agent drove itself is treated differently from a deliberate i
 
 - **While the loop is still streaming**, blockers can steer into the live turn. Nits and concerns from an in-progress review remain deferred until a final boundary.
 - **Once the loop has yielded and gone idle**, delivery keys on how the turn ended:
-   - If the primary's tail is a **terminal text answer with no queued work**, a late `concern` is preserved as a visible card rather than waking the agent to restate a completed turn (#4840) — it re-enters context on the next resume (a new message, `.`/`c`, or a steer/follow-up), exactly like the interrupt case. A `blocker` is the exception: it normally steers a triggered turn, because it means the agent handed off broken or unexercised work that must be acknowledged before the turn is considered done (#5628).
-   - Otherwise (the agent yielded mid-work, no terminal answer), an idle `concern`/`blocker` normally triggers a fresh turn so the advice is acted on immediately.
+  - If the primary's tail is a **terminal text answer with no queued work**, a late `concern` is preserved as a visible card rather than waking the agent to restate a completed turn (#4840) — it re-enters context on the next resume (a new message, `.`/`c`, or a steer/follow-up), exactly like the interrupt case. A `blocker` is the exception: it normally steers a triggered turn, because it means the agent handed off broken or unexercised work that must be acknowledged before the turn is considered done (#5628).
+  - Otherwise (the agent yielded mid-work, no terminal answer), an idle `concern`/`blocker` normally triggers a fresh turn so the advice is acted on immediately.
 
 Two session/client constraints can still preserve a note whose normal delivery path is steering:
 
@@ -263,22 +263,22 @@ Example:
 
 ```yaml
 instructions: |
-   Everyone: prefer diffs that keep tests unified.
+  Everyone: prefer diffs that keep tests unified.
 
 advisors:
-   - name: Architecture
-     enabled: true
-     model: anthropic/claude-sonnet-4-5:medium
-     tools: [read, grep, glob]
-     instructions: |
-        Watch cross-module coupling and public-API growth.
+  - name: Architecture
+    enabled: true
+    model: anthropic/claude-sonnet-4-5:medium
+    tools: [read, grep, glob]
+    instructions: |
+      Watch cross-module coupling and public-API growth.
 
-   - name: Fixer
-     enabled: false
-     model: anthropic/claude-sonnet-4-5:high
-     tools: [read, grep, glob, edit, bash]
-     instructions: |
-        You may edit and run tests to prove a fix locally, then advise.
+  - name: Fixer
+    enabled: false
+    model: anthropic/claude-sonnet-4-5:high
+    tools: [read, grep, glob, edit, bash]
+    instructions: |
+      You may edit and run tests to prove a fix locally, then advise.
 ```
 
 Fields:

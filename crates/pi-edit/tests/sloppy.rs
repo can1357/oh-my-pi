@@ -328,3 +328,23 @@ async fn missing_file_target_uses_the_taught_opener() {
 		"Missing file target: start the payload with <SM:EDIT path=\"relative/path.ts\">."
 	);
 }
+
+#[tokio::test]
+async fn miss_with_cjk_content_returns_match_error_without_panicking() {
+	// `closest_fragment` slides a byte-width window over the normalized line and
+	// appends a `len - width` tail fallback. With normalized `ab戸cd` (7 bytes)
+	// and a 4-byte needle the tail is byte 3, inside `戸` (bytes 2..5): slicing
+	// there panicked instead of reporting the miss.
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "ab戸cd\n");
+	let error = workspace
+		.apply_json(
+			&json!({
+				"input": "<SM:EDIT path=\"a.txt\">\n<SM:FIND>\nwxyz\n</SM:FIND>\n<SM:PUT>\nnew();\n</SM:PUT>\n</SM:EDIT>\n",
+			}),
+			&DiskWriter::default(),
+		)
+		.await
+		.expect_err("CJK miss must surface a match error, not panic");
+	assert!(error.to_string().contains("did not match"));
+}

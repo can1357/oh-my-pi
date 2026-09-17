@@ -6,6 +6,12 @@ import { parseStreamingJson } from "./json-parse";
 const LF = 0x0a;
 const CR = 0x0d;
 
+/**
+ * Split a byte stream on LF boundaries.
+ *
+ * Every yielded line owns its bytes and remains unchanged after the generator
+ * advances or drains. Line terminators are excluded.
+ */
 export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
 	const buffer = new ConcatSink();
 	const source = abortableSource(stream, signal);
@@ -131,7 +137,13 @@ export class ConcatSink {
 		this.#length = 0;
 	}
 
-	*appendAndFlushLines(chunk: Uint8Array) {
+	/**
+	 * Append a chunk and yield each complete LF-delimited line.
+	 *
+	 * Yielded lines are owned snapshots. Unlike {@link flush}, they remain
+	 * valid after this sink or the input chunk is mutated.
+	 */
+	*appendAndFlushLines(chunk: Uint8Array): Generator<Uint8Array> {
 		let pos = 0;
 		while (pos < chunk.length) {
 			const nl = chunk.indexOf(LF, pos);
@@ -142,12 +154,12 @@ export class ConcatSink {
 			const suffix = chunk.subarray(pos, nl);
 			pos = nl + 1;
 			if (this.isEmpty) {
-				yield suffix;
+				yield new Uint8Array(suffix);
 			} else {
 				this.append(suffix);
 				const payload = this.flush();
 				if (payload) {
-					yield payload;
+					yield new Uint8Array(payload);
 					this.clear();
 				}
 			}

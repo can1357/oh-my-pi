@@ -54,12 +54,12 @@ If `bashInterceptor.enabled` is true, `BashTool` loads rules from settings (`get
 Interception behavior:
 
 - command is blocked **only** when:
-   - regex rule matches, and
-   - the suggested tool is present in `ctx.toolNames`.
+  - regex rule matches, and
+  - the suggested tool is present in `ctx.toolNames`.
 - invalid regex rules are silently skipped.
 - on block, `BashTool` throws `ToolError` with message:
-   - `Blocked: ...`
-   - original command included.
+  - `Blocked: ...`
+  - original command included.
 - heredocs, parameter expansion, command substitutions, backticks, grouping, and malformed quoting do not produce extra fragments; they retain only the complete-input check. Interception is best-effort routing to dedicated tools, not a shell-security policy.
 
 Default rule patterns (defined in code) target common misuses:

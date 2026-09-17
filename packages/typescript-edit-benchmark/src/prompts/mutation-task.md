@@ -65,7 +65,6 @@ The bug is near the end of the file.
 {{#when ../hunkCount ">" 1}}
 
 ## Change {{add @index 1}}
-
 {{/when}}
 
 {{#if isDelete}}Delete this block{{#if startLine}} (starting on line {{startLine}}){{/if}}:{{else}}Replace this{{#if startLine}} (starting on line {{startLine}}){{/if}}:{{/if}}

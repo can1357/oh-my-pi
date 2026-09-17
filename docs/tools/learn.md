@@ -3,7 +3,6 @@
 > Capture a reusable lesson into long-term memory and optionally create or update a managed skill.
 
 ## Source
-
 - Entry: `packages/coding-agent/src/tools/learn.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/learn.md`
 - Managed-skill helper: `packages/coding-agent/src/autolearn/managed-skills.ts`
@@ -11,7 +10,6 @@
 - Local lesson persistence: `packages/coding-agent/src/memories/index.ts` (`saveLearnedLesson(...)`)
 
 ## Registration / Visibility
-
 - `loadMode = "essential"` and `strict = true`, so the tool remains top-level rather than mounting under `xd://`.
 - Approval is dynamic: a call containing `skill`, or any call while `memory.backend = "local"`, has `approval = "write"`; a memory-only Hindsight/Mnemopi call has `approval = "read"`.
 - Registration requires `autolearn.enabled = true` (default `false`) and `memory.backend` equal to `"hindsight"`, `"mnemopi"`, or `"local"`.
@@ -20,24 +18,22 @@
 
 ## Inputs
 
-| Field     | Type                                                                                | Required | Description                                                                                                                                                                          |
-| --------- | ----------------------------------------------------------------------------------- | -------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `memory`  | `string`                                                                            |      Yes | Durable, self-contained lesson to remember: what, when, and why. The schema has no minimum length; backend-specific sanitization/storage determines whether an empty value succeeds. |
-| `context` | `string`                                                                            |       No | Source context for the lesson.                                                                                                                                                       |
-| `skill`   | `{ action: "create" \| "update"; name: string; description: string; body: string }` |       No | Managed skill to create or enhance after the lesson succeeds. `body` is Markdown without frontmatter.                                                                                |
+| Field | Type | Required | Description |
+|---|---|---:|---|
+| `memory` | `string` | Yes | Durable, self-contained lesson to remember: what, when, and why. The schema has no minimum length; backend-specific sanitization/storage determines whether an empty value succeeds. |
+| `context` | `string` | No | Source context for the lesson. |
+| `skill` | `{ action: "create" \| "update"; name: string; description: string; body: string }` | No | Managed skill to create or enhance after the lesson succeeds. `body` is Markdown without frontmatter. |
 
 ## Outputs
-
 - Lesson only:
-   - `content[0].text = "Lesson stored."` or `"Lesson queued for retention."`
-   - `details = { skill: null }`
+  - `content[0].text = "Lesson stored."` or `"Lesson queued for retention."`
+  - `details = { skill: null }`
 - Lesson plus skill:
-   - `content[0].text = "<lesson result>. Created managed skill \"<name>\"."` or `"... Updated ..."`
-   - `details = { skill: "<name>" }`
+  - `content[0].text = "<lesson result>. Created managed skill \"<name>\"."` or `"... Updated ..."`
+  - `details = { skill: "<name>" }`
 - Authored-skill name conflict returns `isError: true` after storing/queueing the lesson and reports `details = { skill: null, shadowed: true }`.
 
 ## Flow
-
 1. `LearnTool.createIf(...)` exposes the tool only when `autolearn.enabled` is true and `memory.backend` is `"hindsight"`, `"mnemopi"`, or `"local"`.
 2. `execute(...)` stores the lesson before attempting any skill mutation:
    - Mnemopi: calls `rememberScoped(...)` with `source: "coding-agent-learn"`, `importance: 0.8`, `scope: "bank"`, extraction enabled, `veracity: "tool"`, `memoryType: "fact"`, and session/cwd/context metadata; an absent returned id is treated as failure.
@@ -49,24 +45,21 @@
 6. Unlike `manage_skill`, `learn` does not call the session's `refreshSkills` callback after writing. The managed skill is discovered on a later skill refresh/session.
 
 ## Modes / Variants
-
 - Memory-only lesson capture.
 - Lesson plus managed skill create/update for repeatable procedures worth codifying as `SKILL.md`.
 - Backend-specific persistence: queued Hindsight, scoped Mnemopi SQLite, or project-scoped local `learned.md`.
 - `create` fails if the managed skill file exists; `update` fails if it does not. Same-name in-process mutations are serialized.
 
 ## Side Effects
-
 - Filesystem:
-   - Local backend writes `<agent-dir>/memories/<encoded-cwd>/learned.md`.
-   - Managed skills write `<agent-dir>/managed-skills/<sanitized-name>/SKILL.md`; the default agent directory is `~/.omp/agent`.
-   - Mnemopi writes its scoped SQLite database.
+  - Local backend writes `<agent-dir>/memories/<encoded-cwd>/learned.md`.
+  - Managed skills write `<agent-dir>/managed-skills/<sanitized-name>/SKILL.md`; the default agent directory is `~/.omp/agent`.
+  - Mnemopi writes its scoped SQLite database.
 - Network: Hindsight queue flushes to the configured server later. Mnemopi can schedule configured embedding/fact-extraction provider work after the synchronous row write; local file-backed storage itself is offline.
 - Session state: reads backend state, settings, cwd, and session id. A skill created here is not immediately injected into the active skill list.
 - Background work: Hindsight retention and Mnemopi extraction/embedding can continue after the tool result.
 
 ## Limits & Caps
-
 - Availability requires `autolearn.enabled` plus a supported memory backend; both settings default to disabled/off.
 - Managed skill names are trimmed and lowercased, then must match `[a-z0-9][a-z0-9-]{0,63}`.
 - Managed descriptions are collapsed to one line and stripped of control/format characters, angle brackets, backticks, and repeated tildes.
@@ -75,7 +68,6 @@
 - Local lessons are newest-first and deduplicated by normalized rendered line, with at most 100 lesson bullets. Lesson content is capped at 2,000 characters and context at 400 after prompt-injection neutralization and secret redaction.
 
 ## Errors
-
 - `Mnemopi backend is not initialised for this session.` when Mnemopi state is missing.
 - `Mnemopi did not store the lesson (no memory id returned).` when the local Mnemopi write returns no id; the optional skill is not attempted.
 - `Lesson was empty after sanitization; nothing stored.` when local-backend normalization yields no lesson; the optional skill is not attempted.
@@ -84,7 +76,6 @@
 - Managed-skill validation, create/update, safety, or size failures throw `<lesson result>, but the managed skill could not be written: <reason>` after the lesson succeeds.
 
 ## Notes
-
 - Use this tool sparingly. One precise reusable lesson is better than several vague memories.
 - Put `skill` only on repeatable procedures; ordinary facts should remain memory-only.
 - Managed skill frontmatter is generated from the normalized name and sanitized description; `body` must not include frontmatter.

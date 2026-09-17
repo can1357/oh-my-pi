@@ -15,11 +15,11 @@ Parse `$ARGUMENTS`.
 - Explicit numbers/URLs: use verbatim.
 - Otherwise `github` `op: search_issues`. No args:
 
-   ```
-   github { op: "search_issues", query: "is:open", since: "3d", limit: 50 }
-   ```
+  ```
+  github { op: "search_issues", query: "is:open", since: "3d", limit: 50 }
+  ```
 
-   User qualifiers verbatim in `query`; add `is:open` unless present. Time window (`3d`, `2w`, `12h`, ISO date; see `github` docs) → `since`. `dateField` defaults `created`; set `"updated"` only for explicitly requested recently-touched issues.
+  User qualifiers verbatim in `query`; add `is:open` unless present. Time window (`3d`, `2w`, `12h`, ISO date; see `github` docs) → `since`. `dateField` defaults `created`; set `"updated"` only for explicitly requested recently-touched issues.
 
 Print resolved set before fan-out for scope confirmation.
 

@@ -2,7 +2,7 @@
 
 Anthropic's Claude is a closed, hosted model family; there are no released weights and therefore no `--tool-call-parser` flag to set. The canonical tool-calling convention is the **Messages API** (`POST /v1/messages`, header `anthropic-version: 2023-06-01`): tools are advertised in a top-level `tools` array, the model returns structured `tool_use` **content blocks** with `stop_reason: "tool_use"`, and you feed results back as `tool_result` content blocks inside a `user` message. Tool use is "enabled" simply by including the `tools` parameter (optionally with `tool_choice`); the API then injects a tool-use system prompt and parses the model's output back into JSON blocks for you. This applies to all current models (Claude Opus / Sonnet / Haiku 3.x, 4, 4.x) and is mirrored by gateways such as LiteLLM and by third-party Claude-compatible servers.
 
-Under the hood the model is trained to emit an **XML** function-call syntax (`<function_calls>` / `<invoke>` / `<parameter>`); the API serializes your JSON-Schema tools into a system prompt and converts the model's XML output into JSON `tool_use` blocks. That underlying format is documented as the _secondary_ convention below, together with the older, now-retired prompt-based **legacy XML** format (`<tool_name>` / `<parameters>` / `<function_results>`) that pre-dates the Messages API and still surfaces when you do tool use purely through prompting.
+Under the hood the model is trained to emit an **XML** function-call syntax (`<function_calls>` / `<invoke>` / `<parameter>`); the API serializes your JSON-Schema tools into a system prompt and converts the model's XML output into JSON `tool_use` blocks. That underlying format is documented as the *secondary* convention below, together with the older, now-retired prompt-based **legacy XML** format (`<tool_name>` / `<parameters>` / `<function_results>`) that pre-dates the Messages API and still surfaces when you do tool use purely through prompting.
 
 The primary, authoritative shape for any parser/renderer is the JSON content-block format. The XML is informational (and the only thing visible if you reconstruct prompts at the token level).
 
@@ -12,50 +12,50 @@ The primary, authoritative shape for any parser/renderer is the JSON content-blo
 
 Anthropic has no token-level tool delimiters in the public API. The unit is the **content block**: every `message.content` is an array of typed blocks. Tool calling adds two block types and one stop reason; streaming adds a delta type.
 
-| Item                                   | Where              | Shape / meaning                                                                                                                                                                                                                                                            |
-| -------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `text` block                           | assistant & user   | `{"type":"text","text":"..."}`. Plain prose. Assistant may emit text _before_ its tool calls.                                                                                                                                                                              |
-| `tool_use` block                       | assistant          | `{"type":"tool_use","id":"toolu_...","name":"<tool>","input":{...}}`. The function call. `input` is a **nested JSON object** (already parsed), conforming to the tool's `input_schema`.                                                                                    |
-| `tool_result` block                    | user               | `{"type":"tool_result","tool_use_id":"toolu_...","content":<string \| block[]>,"is_error":<bool?>}`. The executed result, sent back in a `user` message.                                                                                                                   |
-| `server_tool_use` block                | assistant          | `{"type":"server_tool_use","id":"srvtoolu_...","name":"web_search","input":{...}}`. Emitted for Anthropic-executed server tools; you do **not** return a `tool_result` for these.                                                                                          |
-| `web_search_tool_result` (and similar) | assistant          | Server-tool output, injected by Anthropic inline in the assistant turn.                                                                                                                                                                                                    |
-| `thinking` / `redacted_thinking` block | assistant          | Extended-thinking reasoning blocks; carry a `signature`. Must be preserved verbatim across turns when thinking + tools are combined.                                                                                                                                       |
-| `stop_reason: "tool_use"`              | response top level | The model invoked one or more tools and is waiting for results. Drives the agentic loop.                                                                                                                                                                                   |
-| `stop_reason: "end_turn"`              | response top level | Natural completion (no tool call); the loop exits.                                                                                                                                                                                                                         |
-| Other `stop_reason`                    | response top level | `"max_tokens"`, `"stop_sequence"`, `"pause_turn"` (long server-tool turn, resend as-is to continue), `"refusal"`, `"sensitive"` (output flagged by safety filters), `"model_context_window_exceeded"` (output truncated at the context window, treated like `max_tokens`). |
-| `id` prefixes                          | —                  | Messages `msg_…`; client tool calls `toolu_…`; server tool calls `srvtoolu_…`.                                                                                                                                                                                             |
+| Item | Where | Shape / meaning |
+| --- | --- | --- |
+| `text` block | assistant & user | `{"type":"text","text":"..."}`. Plain prose. Assistant may emit text *before* its tool calls. |
+| `tool_use` block | assistant | `{"type":"tool_use","id":"toolu_...","name":"<tool>","input":{...}}`. The function call. `input` is a **nested JSON object** (already parsed), conforming to the tool's `input_schema`. |
+| `tool_result` block | user | `{"type":"tool_result","tool_use_id":"toolu_...","content":<string \| block[]>,"is_error":<bool?>}`. The executed result, sent back in a `user` message. |
+| `server_tool_use` block | assistant | `{"type":"server_tool_use","id":"srvtoolu_...","name":"web_search","input":{...}}`. Emitted for Anthropic-executed server tools; you do **not** return a `tool_result` for these. |
+| `web_search_tool_result` (and similar) | assistant | Server-tool output, injected by Anthropic inline in the assistant turn. |
+| `thinking` / `redacted_thinking` block | assistant | Extended-thinking reasoning blocks; carry a `signature`. Must be preserved verbatim across turns when thinking + tools are combined. |
+| `stop_reason: "tool_use"` | response top level | The model invoked one or more tools and is waiting for results. Drives the agentic loop. |
+| `stop_reason: "end_turn"` | response top level | Natural completion (no tool call); the loop exits. |
+| Other `stop_reason` | response top level | `"max_tokens"`, `"stop_sequence"`, `"pause_turn"` (long server-tool turn, resend as-is to continue), `"refusal"`, `"sensitive"` (output flagged by safety filters), `"model_context_window_exceeded"` (output truncated at the context window, treated like `max_tokens`). |
+| `id` prefixes | — | Messages `msg_…`; client tool calls `toolu_…`; server tool calls `srvtoolu_…`. |
 
 Streaming adds these SSE events / delta types (full list under [Roles / channels](#roles--channels--turn-structure) and [Tool-call format](#tool-call-format)):
 
-| Streaming item                                              | Shape / meaning                                                                                                                        |
-| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `message_start`                                             | Carries a `Message` skeleton with empty `content`, `stop_reason: null`.                                                                |
-| `content_block_start`                                       | Opens a block at `index`. For a tool call: `content_block.{type:"tool_use",id,name,input:{}}` — `input` starts as an **empty object**. |
-| `content_block_delta` / `input_json_delta`                  | `{"type":"input_json_delta","partial_json":"<chunk>"}` — a **partial JSON string** fragment of `tool_use.input`.                       |
-| `content_block_delta` / `text_delta`                        | `{"type":"text_delta","text":"..."}`.                                                                                                  |
-| `content_block_delta` / `thinking_delta`, `signature_delta` | Extended-thinking content / signature.                                                                                                 |
-| `content_block_stop`                                        | Closes the block at `index`; this is when accumulated `partial_json` is complete and safe to `JSON.parse`.                             |
-| `message_delta`                                             | Top-level updates; carries the final `delta.stop_reason` (e.g. `"tool_use"`) and **cumulative** `usage`.                               |
-| `message_stop`                                              | End of stream.                                                                                                                         |
-| `ping` / `error`                                            | Keep-alive; `error` (e.g. `overloaded_error`) may appear mid-stream.                                                                   |
+| Streaming item | Shape / meaning |
+| --- | --- |
+| `message_start` | Carries a `Message` skeleton with empty `content`, `stop_reason: null`. |
+| `content_block_start` | Opens a block at `index`. For a tool call: `content_block.{type:"tool_use",id,name,input:{}}` — `input` starts as an **empty object**. |
+| `content_block_delta` / `input_json_delta` | `{"type":"input_json_delta","partial_json":"<chunk>"}` — a **partial JSON string** fragment of `tool_use.input`. |
+| `content_block_delta` / `text_delta` | `{"type":"text_delta","text":"..."}`. |
+| `content_block_delta` / `thinking_delta`, `signature_delta` | Extended-thinking content / signature. |
+| `content_block_stop` | Closes the block at `index`; this is when accumulated `partial_json` is complete and safe to `JSON.parse`. |
+| `message_delta` | Top-level updates; carries the final `delta.stop_reason` (e.g. `"tool_use"`) and **cumulative** `usage`. |
+| `message_stop` | End of stream. |
+| `ping` / `error` | Keep-alive; `error` (e.g. `overloaded_error`) may appear mid-stream. |
 
 ### Legacy XML tags (prompt-based, pre-Messages-API)
 
 The retired prompt-based format used these tags. They are nested-element tags (no attributes), distinct from the modern attribute form (`<invoke name="…">`). Verified against Anthropic's archived "Legacy tool use" doc (see [Sources](#sources)).
 
-| Tag                            | Role                   | Notes                                                                                                            |
-| ------------------------------ | ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `<tools>` … `</tools>`         | tool advertising       | Container in the system prompt wrapping all `<tool_description>` entries.                                        |
-| `<tool_description>`           | tool advertising       | One per tool: holds `<tool_name>`, `<description>`, `<parameters>`.                                              |
-| `<tool_name>`                  | both                   | Function name (used in definitions, calls, and results).                                                         |
-| `<parameters>` / `<parameter>` | definition             | `<parameters>` wraps `<parameter>` entries, each with `<name>`, `<type>`, `<description>`.                       |
-| `<function_calls>`             | model output           | Wraps one or more `<invoke>` blocks.                                                                             |
-| `<invoke>`                     | model output           | One function call; contains `<tool_name>` + a `<parameters>` block of `<paramName>value</paramName>` child tags. |
-| `<function_results>`           | tool result (fed back) | Wraps `<result>` (success) or `<error>` (failure).                                                               |
-| `<result>` / `<stdout>`        | tool result            | `<result>` holds `<tool_name>` + `<stdout>`; the output text goes in `<stdout>`.                                 |
-| `<error>`                      | tool result            | Replaces `<result>` when the function raised.                                                                    |
-| `</function_calls>`            | stop sequence          | Passed as `stop_sequence` so generation halts after a call.                                                      |
-| `<scratchpad>` / `<answer>`    | model output           | Conventionally used for chain-of-thought and final answer in legacy prompts.                                     |
+| Tag | Role | Notes |
+| --- | --- | --- |
+| `<tools>` … `</tools>` | tool advertising | Container in the system prompt wrapping all `<tool_description>` entries. |
+| `<tool_description>` | tool advertising | One per tool: holds `<tool_name>`, `<description>`, `<parameters>`. |
+| `<tool_name>` | both | Function name (used in definitions, calls, and results). |
+| `<parameters>` / `<parameter>` | definition | `<parameters>` wraps `<parameter>` entries, each with `<name>`, `<type>`, `<description>`. |
+| `<function_calls>` | model output | Wraps one or more `<invoke>` blocks. |
+| `<invoke>` | model output | One function call; contains `<tool_name>` + a `<parameters>` block of `<paramName>value</paramName>` child tags. |
+| `<function_results>` | tool result (fed back) | Wraps `<result>` (success) or `<error>` (failure). |
+| `<result>` / `<stdout>` | tool result | `<result>` holds `<tool_name>` + `<stdout>`; the output text goes in `<stdout>`. |
+| `<error>` | tool result | Replaces `<result>` when the function raised. |
+| `</function_calls>` | stop sequence | Passed as `stop_sequence` so generation halts after a call. |
+| `<scratchpad>` / `<answer>` | model output | Conventionally used for chain-of-thought and final answer in legacy prompts. |
 
 ---
 
@@ -77,7 +77,6 @@ The agentic loop is keyed on `stop_reason`:
 5. Repeat while `stop_reason == "tool_use"`; exit on `end_turn` (or another terminal reason).
 
 Strict ordering rules (a 400 otherwise):
-
 - `tool_result` blocks must come **first** in the `user` message's `content` array (any text after them).
 - The `tool_result` `user` message must **immediately follow** the assistant `tool_use` message — nothing in between.
 - Every `tool_use.id` must be answered by a `tool_result.tool_use_id` in that next message.
@@ -95,23 +94,23 @@ Tools are passed in the top-level `tools` array. Each user-defined (client) tool
 
 ```json
 {
-	"name": "get_weather",
-	"description": "Get the current weather in a given location",
-	"input_schema": {
-		"type": "object",
-		"properties": {
-			"location": {
-				"type": "string",
-				"description": "The city and state, e.g. San Francisco, CA"
-			},
-			"unit": {
-				"type": "string",
-				"enum": ["celsius", "fahrenheit"],
-				"description": "The unit of temperature, either 'celsius' or 'fahrenheit'"
-			}
-		},
-		"required": ["location"]
-	}
+  "name": "get_weather",
+  "description": "Get the current weather in a given location",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "location": {
+        "type": "string",
+        "description": "The city and state, e.g. San Francisco, CA"
+      },
+      "unit": {
+        "type": "string",
+        "enum": ["celsius", "fahrenheit"],
+        "description": "The unit of temperature, either 'celsius' or 'fahrenheit'"
+      }
+    },
+    "required": ["location"]
+  }
 }
 ```
 
@@ -132,7 +131,6 @@ Other constraints—including `pattern`, string-length limits, numeric ranges, `
 OMP sends `strict: true` only for eligible built-in tools (`bash`, `python`, `edit`, and `find`) when neither `PI_NO_STRICT` nor provider compatibility/runtime fallback has disabled strict tools, the tool has not opted out, the raw schema avoids `oneOf`, `allOf`, `$ref`, `patternProperties`, and `propertyNames`, and every object is closed. Selection is capped at 20 strict tools per request and shares budgets of 24 optional properties and 16 union uses: after the optional budget is exhausted, another optional property must be converted to required-and-nullable using union budget or that tool remains non-strict. Other tools use the normalized non-strict schema. OMP sends `eager_input_streaming: true` only when the model compatibility data and effective endpoint support it: first-party Anthropic endpoints qualify, as do custom endpoints explicitly configured for that capability; a canonical model rerouted to an unqualified non-Anthropic endpoint does not.
 
 `tool_choice` controls invocation (four options):
-
 - `{"type":"auto"}` — model decides (default when `tools` present).
 - `{"type":"any"}` — must call some tool.
 - `{"type":"tool","name":"get_weather"}` — must call that specific tool.
@@ -164,30 +162,29 @@ The wire format your application consumes is JSON. A single call is one `tool_us
 
 ```json
 {
-	"id": "msg_01Aq9w938a90dw8q",
-	"type": "message",
-	"role": "assistant",
-	"model": "claude-opus-4-8",
-	"content": [
-		{
-			"type": "text",
-			"text": "I'll check the current weather in San Francisco for you."
-		},
-		{
-			"type": "tool_use",
-			"id": "toolu_01A09q90qw90lq917835lq9",
-			"name": "get_weather",
-			"input": { "location": "San Francisco, CA", "unit": "celsius" }
-		}
-	],
-	"stop_reason": "tool_use",
-	"stop_sequence": null,
-	"usage": { "input_tokens": 472, "output_tokens": 65 }
+  "id": "msg_01Aq9w938a90dw8q",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-8",
+  "content": [
+    {
+      "type": "text",
+      "text": "I'll check the current weather in San Francisco for you."
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_01A09q90qw90lq917835lq9",
+      "name": "get_weather",
+      "input": { "location": "San Francisco, CA", "unit": "celsius" }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 472, "output_tokens": 65 }
 }
 ```
 
 Key facts for a parser:
-
 - `tool_use.input` is an already-parsed **object**, never a JSON string.
 - A leading `text` block is optional and informational; do not rely on its wording.
 - Match calls to results by `id` → `tool_use_id`.
@@ -223,22 +220,22 @@ Parallel calls are the default. Claude emits **multiple `tool_use` blocks in a s
 
 ```json
 {
-	"role": "assistant",
-	"content": [
-		{ "type": "text", "text": "Let me check both cities." },
-		{
-			"type": "tool_use",
-			"id": "toolu_01weather_sf",
-			"name": "get_weather",
-			"input": { "location": "San Francisco, CA" }
-		},
-		{
-			"type": "tool_use",
-			"id": "toolu_02weather_nyc",
-			"name": "get_weather",
-			"input": { "location": "New York, NY" }
-		}
-	]
+  "role": "assistant",
+  "content": [
+    { "type": "text", "text": "Let me check both cities." },
+    {
+      "type": "tool_use",
+      "id": "toolu_01weather_sf",
+      "name": "get_weather",
+      "input": { "location": "San Francisco, CA" }
+    },
+    {
+      "type": "tool_use",
+      "id": "toolu_02weather_nyc",
+      "name": "get_weather",
+      "input": { "location": "New York, NY" }
+    }
+  ]
 }
 ```
 
@@ -246,19 +243,19 @@ You return **all** results in **one** `user` message, one `tool_result` per call
 
 ```json
 {
-	"role": "user",
-	"content": [
-		{
-			"type": "tool_result",
-			"tool_use_id": "toolu_01weather_sf",
-			"content": "San Francisco: 68F, partly cloudy"
-		},
-		{
-			"type": "tool_result",
-			"tool_use_id": "toolu_02weather_nyc",
-			"content": "New York: 45F, clear skies"
-		}
-	]
+  "role": "user",
+  "content": [
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_01weather_sf",
+      "content": "San Francisco: 68F, partly cloudy"
+    },
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_02weather_nyc",
+      "content": "New York: 45F, clear skies"
+    }
+  ]
 }
 ```
 
@@ -276,14 +273,14 @@ A result is a `tool_result` block inside a `user` message:
 
 ```json
 {
-	"role": "user",
-	"content": [
-		{
-			"type": "tool_result",
-			"tool_use_id": "toolu_01A09q90qw90lq917835lq9",
-			"content": "15 degrees"
-		}
-	]
+  "role": "user",
+  "content": [
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_01A09q90qw90lq917835lq9",
+      "content": "15 degrees"
+    }
+  ]
 }
 ```
 
@@ -291,15 +288,15 @@ Error result:
 
 ```json
 {
-	"role": "user",
-	"content": [
-		{
-			"type": "tool_result",
-			"tool_use_id": "toolu_01A09q90qw90lq917835lq9",
-			"content": "ConnectionError: the weather service API is not available (HTTP 500)",
-			"is_error": true
-		}
-	]
+  "role": "user",
+  "content": [
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_01A09q90qw90lq917835lq9",
+      "content": "ConnectionError: the weather service API is not available (HTTP 500)",
+      "is_error": true
+    }
+  ]
 }
 ```
 
@@ -307,20 +304,20 @@ Rich result (text + image blocks):
 
 ```json
 {
-	"role": "user",
-	"content": [
-		{
-			"type": "tool_result",
-			"tool_use_id": "toolu_01A09q90qw90lq917835lq9",
-			"content": [
-				{ "type": "text", "text": "15 degrees" },
-				{
-					"type": "image",
-					"source": { "type": "base64", "media_type": "image/jpeg", "data": "/9j/4AAQSkZJRg..." }
-				}
-			]
-		}
-	]
+  "role": "user",
+  "content": [
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_01A09q90qw90lq917835lq9",
+      "content": [
+        { "type": "text", "text": "15 degrees" },
+        {
+          "type": "image",
+          "source": { "type": "base64", "media_type": "image/jpeg", "data": "/9j/4AAQSkZJRg..." }
+        }
+      ]
+    }
+  ]
 }
 ```
 
@@ -353,28 +350,26 @@ A complete multi-turn weather exchange. All JSON is valid.
 
 ```json
 {
-	"model": "claude-opus-4-8",
-	"max_tokens": 1024,
-	"system": "You are a helpful weather assistant. Use the provided tools to answer.",
-	"tools": [
-		{
-			"name": "get_weather",
-			"description": "Get the current weather in a given location",
-			"input_schema": {
-				"type": "object",
-				"properties": {
-					"location": { "type": "string", "description": "The city and state, e.g. San Francisco, CA" },
-					"unit": {
-						"type": "string",
-						"enum": ["celsius", "fahrenheit"],
-						"description": "Unit for the temperature"
-					}
-				},
-				"required": ["location"]
-			}
-		}
-	],
-	"messages": [{ "role": "user", "content": "What's the weather in San Francisco?" }]
+  "model": "claude-opus-4-8",
+  "max_tokens": 1024,
+  "system": "You are a helpful weather assistant. Use the provided tools to answer.",
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the current weather in a given location",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "location": { "type": "string", "description": "The city and state, e.g. San Francisco, CA" },
+          "unit": { "type": "string", "enum": ["celsius", "fahrenheit"], "description": "Unit for the temperature" }
+        },
+        "required": ["location"]
+      }
+    }
+  ],
+  "messages": [
+    { "role": "user", "content": "What's the weather in San Francisco?" }
+  ]
 }
 ```
 
@@ -382,22 +377,22 @@ A complete multi-turn weather exchange. All JSON is valid.
 
 ```json
 {
-	"id": "msg_01Aq9w938a90dw8q",
-	"type": "message",
-	"role": "assistant",
-	"model": "claude-opus-4-8",
-	"content": [
-		{ "type": "text", "text": "I'll check the current weather in San Francisco for you." },
-		{
-			"type": "tool_use",
-			"id": "toolu_01A09q90qw90lq917835lq9",
-			"name": "get_weather",
-			"input": { "location": "San Francisco, CA", "unit": "celsius" }
-		}
-	],
-	"stop_reason": "tool_use",
-	"stop_sequence": null,
-	"usage": { "input_tokens": 472, "output_tokens": 65 }
+  "id": "msg_01Aq9w938a90dw8q",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-8",
+  "content": [
+    { "type": "text", "text": "I'll check the current weather in San Francisco for you." },
+    {
+      "type": "tool_use",
+      "id": "toolu_01A09q90qw90lq917835lq9",
+      "name": "get_weather",
+      "input": { "location": "San Francisco, CA", "unit": "celsius" }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 472, "output_tokens": 65 }
 }
 ```
 
@@ -405,52 +400,48 @@ A complete multi-turn weather exchange. All JSON is valid.
 
 ```json
 {
-	"model": "claude-opus-4-8",
-	"max_tokens": 1024,
-	"system": "You are a helpful weather assistant. Use the provided tools to answer.",
-	"tools": [
-		{
-			"name": "get_weather",
-			"description": "Get the current weather in a given location",
-			"input_schema": {
-				"type": "object",
-				"properties": {
-					"location": { "type": "string", "description": "The city and state, e.g. San Francisco, CA" },
-					"unit": {
-						"type": "string",
-						"enum": ["celsius", "fahrenheit"],
-						"description": "Unit for the temperature"
-					}
-				},
-				"required": ["location"]
-			}
-		}
-	],
-	"messages": [
-		{ "role": "user", "content": "What's the weather in San Francisco?" },
-		{
-			"role": "assistant",
-			"content": [
-				{ "type": "text", "text": "I'll check the current weather in San Francisco for you." },
-				{
-					"type": "tool_use",
-					"id": "toolu_01A09q90qw90lq917835lq9",
-					"name": "get_weather",
-					"input": { "location": "San Francisco, CA", "unit": "celsius" }
-				}
-			]
-		},
-		{
-			"role": "user",
-			"content": [
-				{
-					"type": "tool_result",
-					"tool_use_id": "toolu_01A09q90qw90lq917835lq9",
-					"content": "15 degrees Celsius, partly cloudy"
-				}
-			]
-		}
-	]
+  "model": "claude-opus-4-8",
+  "max_tokens": 1024,
+  "system": "You are a helpful weather assistant. Use the provided tools to answer.",
+  "tools": [
+    {
+      "name": "get_weather",
+      "description": "Get the current weather in a given location",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "location": { "type": "string", "description": "The city and state, e.g. San Francisco, CA" },
+          "unit": { "type": "string", "enum": ["celsius", "fahrenheit"], "description": "Unit for the temperature" }
+        },
+        "required": ["location"]
+      }
+    }
+  ],
+  "messages": [
+    { "role": "user", "content": "What's the weather in San Francisco?" },
+    {
+      "role": "assistant",
+      "content": [
+        { "type": "text", "text": "I'll check the current weather in San Francisco for you." },
+        {
+          "type": "tool_use",
+          "id": "toolu_01A09q90qw90lq917835lq9",
+          "name": "get_weather",
+          "input": { "location": "San Francisco, CA", "unit": "celsius" }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "tool_result",
+          "tool_use_id": "toolu_01A09q90qw90lq917835lq9",
+          "content": "15 degrees Celsius, partly cloudy"
+        }
+      ]
+    }
+  ]
 }
 ```
 
@@ -458,14 +449,16 @@ A complete multi-turn weather exchange. All JSON is valid.
 
 ```json
 {
-	"id": "msg_01EeFG3hijk2lmno4PqrSt",
-	"type": "message",
-	"role": "assistant",
-	"model": "claude-opus-4-8",
-	"content": [{ "type": "text", "text": "It's currently 15 degrees Celsius and partly cloudy in San Francisco." }],
-	"stop_reason": "end_turn",
-	"stop_sequence": null,
-	"usage": { "input_tokens": 530, "output_tokens": 18 }
+  "id": "msg_01EeFG3hijk2lmno4PqrSt",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-4-8",
+  "content": [
+    { "type": "text", "text": "It's currently 15 degrees Celsius and partly cloudy in San Francisco." }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 530, "output_tokens": 18 }
 }
 ```
 
@@ -537,26 +530,25 @@ Reassembly: concatenate every `partial_json` for a given `index` (`"" + "{\"loca
 
 Anthropic integrates tools into the `user`/`assistant` message structure rather than using OpenAI's separate `tool` role and `function` wrapper. Field-by-field:
 
-| Concept                    | Anthropic Messages API                                                  | OpenAI Chat Completions                                                           |
-| -------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| Tool definition wrapper    | flat `{"name","description","input_schema"}` in `tools[]`               | `{"type":"function","function":{"name","description","parameters"}}` in `tools[]` |
-| Tool schema key            | `input_schema` (JSON Schema)                                            | `parameters` (JSON Schema)                                                        |
-| "Must call a tool"         | `tool_choice:{"type":"any"}` / `{"type":"tool","name":…}`               | `tool_choice:"required"` / `{"type":"function","function":{"name":…}}`            |
-| Disable parallel calls     | `tool_choice:{…,"disable_parallel_tool_use":true}`                      | `parallel_tool_calls:false` (top level)                                           |
-| Assistant call container   | `tool_use` **content block** in `content[]`                             | `tool_calls[]` on the assistant `message`                                         |
-| Call id                    | `tool_use.id` = `toolu_…`                                               | `tool_calls[].id` = `call_…`                                                      |
-| Function name              | `tool_use.name`                                                         | `tool_calls[].function.name`                                                      |
-| Function arguments         | `tool_use.input` = **nested JSON object** (parsed)                      | `tool_calls[].function.arguments` = **JSON string** (must `JSON.parse`)           |
-| "Tools were called" signal | `stop_reason:"tool_use"`                                                | `finish_reason:"tool_calls"`                                                      |
-| Result message role        | `user` message containing `tool_result` block(s)                        | dedicated `{"role":"tool",…}` message(s)                                          |
-| Result ↔ call linkage      | `tool_result.tool_use_id`                                               | `tool` message `tool_call_id`                                                     |
-| Result payload             | `tool_result.content` = string **or** block array (text/image/document) | `tool` message `content` = string                                                 |
-| Error result               | `tool_result` with `is_error:true`                                      | no dedicated flag; encode in `content`                                            |
-| System prompt              | top-level `system` param (no `system` role)                             | `{"role":"system",…}` message                                                     |
-| Streamed args              | `input_json_delta.partial_json` fragments                               | `tool_calls[].function.arguments` string deltas                                   |
+| Concept | Anthropic Messages API | OpenAI Chat Completions |
+| --- | --- | --- |
+| Tool definition wrapper | flat `{"name","description","input_schema"}` in `tools[]` | `{"type":"function","function":{"name","description","parameters"}}` in `tools[]` |
+| Tool schema key | `input_schema` (JSON Schema) | `parameters` (JSON Schema) |
+| "Must call a tool" | `tool_choice:{"type":"any"}` / `{"type":"tool","name":…}` | `tool_choice:"required"` / `{"type":"function","function":{"name":…}}` |
+| Disable parallel calls | `tool_choice:{…,"disable_parallel_tool_use":true}` | `parallel_tool_calls:false` (top level) |
+| Assistant call container | `tool_use` **content block** in `content[]` | `tool_calls[]` on the assistant `message` |
+| Call id | `tool_use.id` = `toolu_…` | `tool_calls[].id` = `call_…` |
+| Function name | `tool_use.name` | `tool_calls[].function.name` |
+| Function arguments | `tool_use.input` = **nested JSON object** (parsed) | `tool_calls[].function.arguments` = **JSON string** (must `JSON.parse`) |
+| "Tools were called" signal | `stop_reason:"tool_use"` | `finish_reason:"tool_calls"` |
+| Result message role | `user` message containing `tool_result` block(s) | dedicated `{"role":"tool",…}` message(s) |
+| Result ↔ call linkage | `tool_result.tool_use_id` | `tool` message `tool_call_id` |
+| Result payload | `tool_result.content` = string **or** block array (text/image/document) | `tool` message `content` = string |
+| Error result | `tool_result` with `is_error:true` | no dedicated flag; encode in `content` |
+| System prompt | top-level `system` param (no `system` role) | `{"role":"system",…}` message |
+| Streamed args | `input_json_delta.partial_json` fragments | `tool_calls[].function.arguments` string deltas |
 
 Conversion gotchas:
-
 - **Object vs string:** to emit OpenAI shape, `JSON.stringify(tool_use.input)`; to consume OpenAI shape into Anthropic, `JSON.parse(arguments)`.
 - **Role reshaping:** collapse N OpenAI `tool` messages into one Anthropic `user` message of N `tool_result` blocks (order them before any text), and vice-versa.
 - **No `type:"function"`** wrapper on Anthropic custom tools; add/remove it when translating.
@@ -566,7 +558,7 @@ Conversion gotchas:
 
 ## Parsing notes & gotchas
 
-- **`input` is an object, not a string.** Unlike OpenAI's `arguments`, do not `JSON.parse` `tool_use.input` from a non-streamed response — it is already an object. Only the _streaming_ `partial_json` fragments are strings.
+- **`input` is an object, not a string.** Unlike OpenAI's `arguments`, do not `JSON.parse` `tool_use.input` from a non-streamed response — it is already an object. Only the *streaming* `partial_json` fragments are strings.
 - **Streaming tool args need reassembly.** `content_block_start` for a `tool_use` always has `input: {}`. Buffer `partial_json` per `index` and parse only at `content_block_stop`; mid-stream fragments are not valid JSON on their own (e.g. `{"location":`). Current models emit one complete key/value at a time, so expect bursts and gaps.
 - **`stop_reason` placement.** In streaming, `stop_reason` is `null` in `message_start` and final value (`"tool_use"`/`"end_turn"`) arrives in `message_delta`, not `message_stop`. `usage` in `message_delta` is **cumulative**.
 - **Ordering is enforced.** `tool_result` blocks must be first in their `user` message and must immediately follow the assistant `tool_use` message; every `tool_use.id` needs a matching `tool_result.tool_use_id`, or you get HTTP 400 ("tool_use ids were found without tool_result blocks immediately after").

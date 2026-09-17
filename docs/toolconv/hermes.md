@@ -8,17 +8,17 @@ Verified against: the NousResearch `Hermes-Function-Calling` README (read in ful
 
 Only the ChatML markers are control tokens; the tool and reasoning markers are text-level strings inside the turn body. Token **IDs are model-specific** (each Hermes release has its own tokenizer), so they are deliberately not listed here.
 
-| Marker (verbatim)                  | Kind                         | Purpose                                                              |
-| ---------------------------------- | ---------------------------- | -------------------------------------------------------------------- |
-| `<\|im_start\|>`                   | ChatML control token         | Start of a turn; followed immediately by the role name + `\n`        |
-| `<\|im_end\|>`                     | ChatML control token         | End of a turn                                                        |
-| `<tool_call>`                      | Text-level marker            | Opens one tool call                                                  |
-| `</tool_call>`                     | Text-level marker            | Closes one tool call                                                 |
-| `<tool_response>`                  | Text-level marker            | Opens one tool result                                                |
-| `</tool_response>`                 | Text-level marker            | Closes one tool result                                               |
-| `<tools>` … `</tools>`             | Plain text                   | Wrapper around the tool list in the system turn                      |
-| `<scratch_pad>` … `</scratch_pad>` | Text-level marker (Hermes 3) | GOAP reasoning sections before calls                                 |
-| `<think>` … `</think>`             | Not in the Hermes 2 Pro spec | Thinking markers recognized by the omp scanner (R1-style fine-tunes) |
+| Marker (verbatim) | Kind | Purpose |
+|---|---|---|
+| `<\|im_start\|>` | ChatML control token | Start of a turn; followed immediately by the role name + `\n` |
+| `<\|im_end\|>` | ChatML control token | End of a turn |
+| `<tool_call>` | Text-level marker | Opens one tool call |
+| `</tool_call>` | Text-level marker | Closes one tool call |
+| `<tool_response>` | Text-level marker | Opens one tool result |
+| `</tool_response>` | Text-level marker | Closes one tool result |
+| `<tools>` … `</tools>` | Plain text | Wrapper around the tool list in the system turn |
+| `<scratch_pad>` … `</scratch_pad>` | Text-level marker (Hermes 3) | GOAP reasoning sections before calls |
+| `<think>` … `</think>` | Not in the Hermes 2 Pro spec | Thinking markers recognized by the omp scanner (R1-style fine-tunes) |
 
 Notes on exactness:
 
@@ -142,21 +142,21 @@ The repository's `hermes` dialect is an **owned in-band converter**, registered 
 
 Force the dialect with `tools.format: hermes` or `PI_DIALECT=hermes` (`resolveOwnedDialectFromEnv`, `packages/agent/src/agent-loop.ts:171-191`, consumed at `agent-loop.ts:1527`). The `tools.format` enum (`packages/coding-agent/src/config/settings-schema.ts:2655-2671`; UI labels at `2679-2697`) offers:
 
-| `tools.format` value | UI label  | Meaning                                                                                                                 |
-| -------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `auto`               | Auto      | Native tool calls unless the model is marked as not supporting them, then the model-family owned dialect (GLM fallback) |
-| `native`             | Native    | Provider-native tool calls                                                                                              |
-| `glm`                | GLM       | GLM-style in-band tool calls                                                                                            |
-| `hermes`             | Hermes    | This dialect                                                                                                            |
-| `kimi`               | Kimi      | Kimi-style in-band tool calls                                                                                           |
-| `xml`                | XML       | Generic XML in-band tool calls                                                                                          |
-| `anthropic`          | Anthropic | Anthropic-style in-band tool calls                                                                                      |
-| `deepseek`           | DeepSeek  | DeepSeek-style in-band tool calls                                                                                       |
-| `harmony`            | Harmony   | Harmony-style in-band tool calls                                                                                        |
-| `qwen3`              | Qwen3     | The Qwen3 owned dialect                                                                                                 |
-| `gemini`             | Gemini    | The Gemini owned dialect                                                                                                |
-| `gemma`              | Gemma     | The Gemma owned dialect                                                                                                 |
-| `minimax`            | MiniMax   | The MiniMax owned dialect                                                                                               |
+| `tools.format` value | UI label | Meaning |
+|---|---|---|
+| `auto` | Auto | Native tool calls unless the model is marked as not supporting them, then the model-family owned dialect (GLM fallback) |
+| `native` | Native | Provider-native tool calls |
+| `glm` | GLM | GLM-style in-band tool calls |
+| `hermes` | Hermes | This dialect |
+| `kimi` | Kimi | Kimi-style in-band tool calls |
+| `xml` | XML | Generic XML in-band tool calls |
+| `anthropic` | Anthropic | Anthropic-style in-band tool calls |
+| `deepseek` | DeepSeek | DeepSeek-style in-band tool calls |
+| `harmony` | Harmony | Harmony-style in-band tool calls |
+| `qwen3` | Qwen3 | The Qwen3 owned dialect |
+| `gemini` | Gemini | The Gemini owned dialect |
+| `gemma` | Gemma | The Gemma owned dialect |
+| `minimax` | MiniMax | The MiniMax owned dialect |
 
 No model family maps to `hermes` automatically: `preferredDialect` (`packages/catalog/src/identity/dialect.ts:18-42`) never returns it, and `auto`'s fallback is `glm` (`packages/coding-agent/src/sdk.ts:628-633`). The dialect is reachable only by forcing it explicitly.
 

@@ -1,12 +1,12 @@
-import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
+import type { Database, SQLQueryBindings, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
 	checkpointWal,
-	getDbBusyTimeoutMs,
 	getHistoryDbPath,
 	logger,
 	normalizePathForComparison,
+	openSqliteDatabaseSync,
 	postmortem,
 } from "@oh-my-pi/pi-utils";
 import { primaryRootOrCwd } from "../utils/active-repo-context";
@@ -133,15 +133,8 @@ export class HistoryStorage {
 	/** `PRAGMA data_version` last observed; it moves only for commits by another connection. */
 	#dataVersion = 0;
 
-	private constructor(dbPath: string) {
-		this.#ensureDir(dbPath);
-
-		this.#db = new Database(dbPath);
-
-		// Install the busy handler BEFORE any lock-taking statement. See #2421.
-		// Headless hosts bound the wait so lock contention cannot freeze the
-		// protocol loop for the full interactive timeout.
-		this.#db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
+	private constructor(db: Database) {
+		this.#db = db;
 
 		const hadFts = this.#db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
 		this.#db.run(`
@@ -179,18 +172,27 @@ ON CONFLICT(prompt) DO UPDATE SET
 		this.#dataVersion = this.#readDataVersion();
 	}
 
-	/** Opens the process-wide prompt history database. */
+	/** Opens the process-wide prompt history database, quarantining a corrupt store once. */
 	static open(dbPath: string = getHistoryDbPath()): HistoryStorage {
 		const existing = HistoryStorage.#instance;
 		if (existing) return existing;
 
-		const instance = new HistoryStorage(dbPath);
-		// Exit-only: a keep-alive cleanup leaves the handle valid so the editor can
-		// keep submitting prompts; the real exit closes. Register before publishing
-		// so a real-exit-in-progress late registration cannot close this instance.
-		cancelExitCleanup = postmortem.register("history-storage", () => HistoryStorage.close(), { exitOnly: true });
-		HistoryStorage.#instance = instance;
-		return instance;
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+		return openSqliteDatabaseSync(
+			dbPath,
+			db => {
+				const instance = new HistoryStorage(db);
+				// Exit-only: a keep-alive cleanup leaves the handle valid so the editor can
+				// keep submitting prompts; the real exit closes. Register before publishing
+				// so a real-exit-in-progress late registration cannot close this instance.
+				cancelExitCleanup = postmortem.register("history-storage", () => HistoryStorage.close(), {
+					exitOnly: true,
+				});
+				HistoryStorage.#instance = instance;
+				return instance;
+			},
+			{ recoverCorruption: true },
+		);
 	}
 
 	/** Checkpoints and closes the process-wide database, and permits reopening it. */
@@ -342,11 +344,6 @@ ON CONFLICT(prompt) DO UPDATE SET
 			ids.push(id);
 		}
 		return ids;
-	}
-
-	#ensureDir(dbPath: string): void {
-		const dir = path.dirname(dbPath);
-		fs.mkdirSync(dir, { recursive: true });
 	}
 
 	#historySchemaHasColumn(column: string): boolean {

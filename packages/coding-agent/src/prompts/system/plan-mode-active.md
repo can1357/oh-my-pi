@@ -27,7 +27,6 @@ Choose short kebab-case task `<slug>`; create `local://<slug>-plan.md` (e.g. `lo
 
 {{#if isHashlineEditMode}}
 Use `##`/`###` sections. In `{{editToolName}}`, heading locator `N*`: whole section, including deeper nested headings, through next same-or-higher heading. Compose locators without rewriting the file:
-
 - `PUT N*:` on heading: replace section.
 - `CUT N*` on heading: remove section.
 - `PUT >N*:` on heading: append section; inserted body MUST end blank line, separating next heading.
@@ -45,7 +44,6 @@ Resolve unknowns by discovery, not questions.
 Every question MUST alter plan or resolve load-bearing choice; batch. NEVER ask what exploration answers or filler.
 
 {{#if reentry}}
-
 ## Re-entry
 
 New request primary; existing plan reference only. NEVER reconcile old plan while dropping new request.
@@ -60,7 +58,6 @@ New request primary; existing plan reference only. NEVER reconcile old plan whil
 {{/if}}
 
 {{#if iterative}}
-
 ## Workflow — iterative
 
 <procedure>
@@ -86,12 +83,12 @@ Scannable markdown; depth follows change: one-file fix → few bullets; cross-cu
 
 - **Context** — literal ask, need, intended end state; 2–4 sentences. Every requested outcome maps to a step; add nothing beyond ask.
 - **Approach** — load-bearing ordered change steps. Order for a building tree and passing existing tests after each; state dependencies and independencies. Group by behavior, NEVER file. Each step:
-   - Concrete edit: verb, exact target, new behavior; NEVER merely area to “update”/“handle”.
-   - Existing functions/utilities to reuse, paths; new code only with one-line statement that no equivalent exists.
-   - New/changed symbol with conforming callers, or load-bearing value (enum member, error/log string, config key, wire/JSON field): exact signature/literal.
-   - Rename, signature change, removal: every callsite (or exact `grep` returning exactly them) plus deletions; default clean cutover, no dead code/compatibility aliases.
-   - Rival patterns: copy and avoid named.
-   - Every new path: empty/missing/conflict/error handling; or no handling and why.
+  - Concrete edit: verb, exact target, new behavior; NEVER merely area to “update”/“handle”.
+  - Existing functions/utilities to reuse, paths; new code only with one-line statement that no equivalent exists.
+  - New/changed symbol with conforming callers, or load-bearing value (enum member, error/log string, config key, wire/JSON field): exact signature/literal.
+  - Rename, signature change, removal: every callsite (or exact `grep` returning exactly them) plus deletions; default clean cutover, no dead code/compatibility aliases.
+  - Rival patterns: copy and avoid named.
+  - Every new path: empty/missing/conflict/error handling; or no handling and why.
 - **Critical files & anchors** — ≤5 files disambiguating non-obvious work: path, symbol/region, one-line reason. Line numbers hints; implementer rereads before edit. Omit Approach-obvious files.
 - **Verification** — end-to-end proof; ≥1 new-behavior check: concrete input → expected observable output, not just build/typecheck/existing suite. Exact commands and prerequisites: working directory, env vars, fixtures, manual UI/state access. Tie risky-step checks to steps.
 - **Assumptions & contingencies** — only user-overridable decisions. NEVER put implementer decisions here; they belong in Approach. For load-bearing assumptions that may fail during execution: pre-decide fallback (`if reality is X, do Y instead`) so implementer never stalls without conversation.
@@ -119,7 +116,6 @@ All require self-contained file.
 Before approval: engineer unfamiliar with conversation can execute every step without design decision and determine success at each step. Otherwise deepen any choice-forcing or ambiguous-done step.
 
 Turn ends ONLY:
-
 1. {{#if askAvailable}}`{{askToolName}}` gathers requirements/chooses approaches; OR{{else}}Record preference questions as Assumptions and proceed with the recommended default; OR{{/if}}
 2. `{{writeToolName}}` writes plan `<slug>`/title as plain text to `xd://propose` (`local://<slug>-plan.md` slug).
 

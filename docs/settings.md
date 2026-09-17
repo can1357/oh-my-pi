@@ -138,14 +138,14 @@ Use nested YAML mappings for dotted setting paths:
 
 ```yaml
 theme:
-   dark: titanium
-   light: light
+  dark: titanium
+  light: light
 
 tools:
-   approvalMode: write
-   approval:
-      bash: prompt
-      read: allow
+  approvalMode: write
+  approval:
+    bash: prompt
+    read: allow
 ```
 
 ### Bash command approval patterns
@@ -156,15 +156,15 @@ By default, an `allow` rule must match the entire command and cannot approve a c
 
 ```yaml
 tools:
-   approvalMode: write
-   approval:
-      bash: allow
+  approvalMode: write
+  approval:
+    bash: allow
 
 bash:
-   allowCompoundCommands: true
-   patterns:
-      - match: "rm -f *"
-        approval: allow
+  allowCompoundCommands: true
+  patterns:
+    - match: "rm -f *"
+      approval: allow
 ```
 
 With this configuration, `cmp tmp/result.json artifacts/result.json && rm -f tmp/result.json` can run without a prompt. OMP resolves the ordered rules independently for each original segment: `rm` is explicitly allowed, while the unmatched `cmp` segment inherits the normal standalone bash policy. When any segment is unmatched, the command retains the `exec` tier with no explicit policy, so the generic resolver applies `tools.approval.bash` and then the active approval mode. An unmatched segment therefore prompts only if that tool-wide policy or mode requires it.
@@ -187,11 +187,11 @@ Valid rule approvals are `allow`, `prompt`, and `deny`. Regardless of the opt-in
 
 ```yaml
 bashInterceptor:
-   enabled: true
-   patterns:
-      - pattern: '^\s*(cat|head|tail)\s+'
-        tool: read
-        message: "Use the read tool instead."
+  enabled: true
+  patterns:
+    - pattern: '^\s*(cat|head|tail)\s+'
+      tool: read
+      message: "Use the read tool instead."
 ```
 
 The named replacement tool must be available in the current session or the interceptor does not block the Bash call. For a detailed comparison of permission policy and dedicated-tool routing, including compound-command behavior and ordering, see [the Bash tool documentation](tools/bash.md#command-policy-and-dedicated-tool-routing).
@@ -201,33 +201,33 @@ The named replacement tool must be available in the current session or the inter
 ```yaml
 # ~/.omp/agent/config.yml
 tools:
-   approvalMode: write
-   approval:
-      bash: prompt
-      read: allow
+  approvalMode: write
+  approval:
+    bash: prompt
+    read: allow
 disabledProviders:
-   - anthropic
-   - openai
-   - google
+  - anthropic
+  - openai
+  - google
 
 # <repo>/.omp/config.yml
 tools:
-   approval:
-      bash: allow
+  approval:
+    bash: allow
 disabledProviders:
-   - groq
+  - groq
 ```
 
 Effective settings inside `<repo>`:
 
 ```yaml
 tools:
-   approvalMode: write # kept from global (object deep-merge)
-   approval:
-      bash: allow # overridden by project
-      read: allow # kept from global
+  approvalMode: write # kept from global (object deep-merge)
+  approval:
+    bash: allow # overridden by project
+    read: allow # kept from global
 disabledProviders:
-   - groq # project array REPLACES the global array
+  - groq # project array REPLACES the global array
 ```
 
 Array replacement is the most common surprise: the project's `disabledProviders` does not extend the global list — it becomes the entire list for that project. The same applies to `enabledModels`, `cycleOrder`, `extensions`, and every other array-typed setting.
@@ -239,21 +239,21 @@ Create `<repo>/.omp/config.yml` when a repository needs its own settings:
 ```yaml
 # <repo>/.omp/config.yml
 modelRoles:
-   default: anthropic/claude-sonnet-4-5
-   smol: openai/gpt-4.1-mini
-   slow: anthropic/claude-opus-4-5:high
+  default: anthropic/claude-sonnet-4-5
+  smol: openai/gpt-4.1-mini
+  slow: anthropic/claude-opus-4-5:high
 
 tools:
-   approvalMode: write
-   approval:
-      bash: prompt
+  approvalMode: write
+  approval:
+    bash: prompt
 
 compaction:
-   methodOrder: [snapcompact, remote, soft]
-   thresholdPercent: 80
+  methodOrder: [snapcompact, remote, soft]
+  thresholdPercent: 80
 
 theme:
-   dark: titanium
+  dark: titanium
 ```
 
 Keep secrets out of committed project config unless your repository policy allows it. Prefer environment variables, stored auth, an auth broker, or an untracked `--config` overlay for credentials.
@@ -279,19 +279,19 @@ Three array settings — `enabledModels`, `enabledProviders`, and `disabledProvi
 
 ```yaml
 enabledModels:
-   - claude-sonnet-4-5 # applies everywhere
-   - path: ~/work/high-context
-     models:
-        - anthropic/claude-opus-4-5
+  - claude-sonnet-4-5 # applies everywhere
+  - path: ~/work/high-context
+    models:
+      - anthropic/claude-opus-4-5
 
 disabledProviders:
-   - ollama # applies everywhere
-   - paths:
-        - ~/projects/sensitive
-        - ~/clients/acme
-     providers:
-        - anthropic
-        - openai
+  - ollama # applies everywhere
+  - paths:
+      - ~/projects/sensitive
+      - ~/clients/acme
+    providers:
+      - anthropic
+      - openai
 ```
 
 Bare string entries apply everywhere. A scoped entry applies when the current working directory **is** the configured path or is **under** it. `~` expands to your home directory and relative paths are resolved before matching.
@@ -323,12 +323,12 @@ Because arrays replace rather than append, a project that sets `disabledProvider
 ```yaml
 # ~/.omp/agent/config.yml
 disabledProviders:
-   - anthropic
-   - openai
+  - anthropic
+  - openai
 
 # <repo>/.omp/config.yml — inside this repo ONLY groq is disabled
 disabledProviders:
-   - groq
+  - groq
 ```
 
 The default is an empty array (nothing disabled). For the two subsystems' provider ids and ordering, see [Providers](./providers.md) and [Context files](./context-files.md).
@@ -343,37 +343,37 @@ The catalog below highlights common settings; it is not the complete schema. `om
 
 ```yaml
 modelRoles:
-   default: anthropic/claude-sonnet-4-5
-   smol: openai/gpt-4.1-mini
-   slow: anthropic/claude-opus-4-5:high
-   vision: google/gemini-3.1-pro-preview
-   plan: anthropic/claude-opus-4-5
-   advisor: anthropic/claude-sonnet-4-5:medium
+  default: anthropic/claude-sonnet-4-5
+  smol: openai/gpt-4.1-mini
+  slow: anthropic/claude-opus-4-5:high
+  vision: google/gemini-3.1-pro-preview
+  plan: anthropic/claude-opus-4-5
+  advisor: anthropic/claude-sonnet-4-5:medium
 
 cycleOrder:
-   - smol
-   - default
-   - slow
+  - smol
+  - default
+  - slow
 
 modelProviderOrder:
-   - anthropic
-   - openai
+  - anthropic
+  - openai
 
 enabledModels:
-   - claude-sonnet-4-5
+  - claude-sonnet-4-5
 ```
 
-| Key                    | Type    | Default                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                |
-| ---------------------- | ------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Key                    | Type    | Default                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------------- | ------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `modelRoles`           | record  | `{}`                        | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`. The `tiny` role overrides the online model for lightweight background tasks (titles, memory, auto-thinking, unexpected-stop), else `@smol`. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`; configure the advisor with `modelRoles.advisor`. |
-| `modelRoleStorage`     | enum    | `global`                    | `global` saves model-selector role assignments in the active global/profile config; `project` saves only those role assignments in `<cwd>/.omp/config.yml`. Missing project roles fall back to global roles.                                                                                                                                                                                         |
-| `modelTags`            | record  | `{}`                        | Custom role/tag metadata; can introduce additional roles.                                                                                                                                                                                                                                                                                                                                            |
-| `modelProviderOrder`   | array   | `[]`                        | Preferred provider order when a model id is ambiguous.                                                                                                                                                                                                                                                                                                                                               |
-| `cycleOrder`           | array   | `["smol","default","slow"]` | Roles cycled by the model switcher.                                                                                                                                                                                                                                                                                                                                                                  |
-| `enabledModels`        | array   | `[]`                        | Allow-list of models; supports [path-scoped entries](#path-scoped-arrays). Empty means all available models.                                                                                                                                                                                                                                                                                         |
-| `enabledProviders`     | array   | `[]`                        | Foreign user-level discovery sources to load; supports path-scoped entries. See [above](#provider-and-source-disabling).                                                                                                                                                                                                                                                                             |
-| `disabledProviders`    | array   | `[]`                        | Disabled model/discovery providers; supports path-scoped entries. See [above](#provider-and-source-disabling).                                                                                                                                                                                                                                                                                       |
-| `includeModelInPrompt` | boolean | `true`                      | Include the active model name in the system prompt.                                                                                                                                                                                                                                                                                                                                                  |
+| `modelRoleStorage`     | enum    | `global`                    | `global` saves model-selector role assignments in the active global/profile config; `project` saves only those role assignments in `<cwd>/.omp/config.yml`. Missing project roles fall back to global roles.                                                                                                                                                                                                     |
+| `modelTags`            | record  | `{}`                        | Custom role/tag metadata; can introduce additional roles.                                                                                                                                                                                                                                                                                                                                                        |
+| `modelProviderOrder`   | array   | `[]`                        | Preferred provider order when a model id is ambiguous.                                                                                                                                                                                                                                                                                                                                                           |
+| `cycleOrder`           | array   | `["smol","default","slow"]` | Roles cycled by the model switcher.                                                                                                                                                                                                                                                                                                                                                                              |
+| `enabledModels`        | array   | `[]`                        | Allow-list of models; supports [path-scoped entries](#path-scoped-arrays). Empty means all available models.                                                                                                                                                                                                                                                                                                     |
+| `enabledProviders`     | array   | `[]`                        | Foreign user-level discovery sources to load; supports path-scoped entries. See [above](#provider-and-source-disabling).                                                                                                                                                                                                                                                                                          |
+| `disabledProviders`    | array   | `[]`                        | Disabled model/discovery providers; supports path-scoped entries. See [above](#provider-and-source-disabling).                                                                                                                                                                                                                                                                                                   |
+| `includeModelInPrompt` | boolean | `true`                      | Include the active model name in the system prompt.                                                                                                                                                                                                                                                                                                                                                              |
 
 See [Models](./models.md) for the `models.yml` schema and custom-provider definitions.
 
@@ -383,13 +383,13 @@ The advisor is a second model that reviews each completed turn and can inject ad
 
 See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, and bounded catch-up semantics.
 
-| Key                         | Type    | Default | Notes                                                                                                                                                                                                      |
-| --------------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `advisor.enabled`           | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                                                                       |
-| `task.agentAdvisor`         | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub.                                               |
-| `advisor.syncBacklog`       | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold.                                                       |
-| `advisor.immuneTurns`       | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.                                                                  |
-| `advisor.maxNotesPerUpdate` | number  | `4`     | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
+| Key                   | Type    | Default | Notes                                                                                                                                                |
+| --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `advisor.enabled`     | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                 |
+| `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
+| `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
+| `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
+| `advisor.maxNotesPerUpdate` | number | `4` | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
 
 ### Thinking
 
@@ -397,100 +397,100 @@ See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATC
 defaultThinkingLevel: high
 hideThinkingBlock: false
 thinkingBudgets:
-   minimal: 1024
-   low: 2048
-   medium: 8192
-   high: 16384
-   xhigh: 32768
-   max: 32768
+  minimal: 1024
+  low: 2048
+  medium: 8192
+  high: 16384
+  xhigh: 32768
+  max: 32768
 ```
 
-| Key                               | Type    | Default | Values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| --------------------------------- | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `defaultThinkingLevel`            | enum    | `high`  | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto`. Override per run with `--thinking`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `hideThinkingBlock`               | boolean | `false` | Hide thinking blocks in output. `--hide-thinking` sets it for the run (display only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `thinkingBudgets.minimal`         | number  | `1024`  | Token budget for the `minimal` level.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `thinkingBudgets.low`             | number  | `2048`  | Token budget for `low`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `thinkingBudgets.medium`          | number  | `8192`  | Token budget for `medium`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `thinkingBudgets.high`            | number  | `16384` | Token budget for `high`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `thinkingBudgets.xhigh`           | number  | `32768` | Token budget for `xhigh`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `thinkingBudgets.max`             | number  | `32768` | Token budget for `max`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Key                               | Type    | Default | Values                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------- | ------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `defaultThinkingLevel`            | enum    | `high`  | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `auto`. Override per run with `--thinking`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `hideThinkingBlock`               | boolean | `false` | Hide thinking blocks in output. `--hide-thinking` sets it for the run (display only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `thinkingBudgets.minimal`         | number  | `1024`  | Token budget for the `minimal` level.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `thinkingBudgets.low`             | number  | `2048`  | Token budget for `low`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `thinkingBudgets.medium`          | number  | `8192`  | Token budget for `medium`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `thinkingBudgets.high`            | number  | `16384` | Token budget for `high`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `thinkingBudgets.xhigh`           | number  | `32768` | Token budget for `xhigh`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `thinkingBudgets.max`             | number  | `32768` | Token budget for `max`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `providers.autoThinkingMaxEffort` | enum    | `xhigh` | Highest effort `defaultThinkingLevel: auto` may resolve. `xhigh` keeps the classifier one tier below the top, so only `ultrathink` reaches `max`; `max` lets the classifier bill the top tier on models that expose it. The local on-device classifier stays capped at `xhigh` either way. This governs what `auto` _resolves_: a model whose ladder offers nothing under the ceiling gets no auto level at all, and one whose metadata requires explicit effort still receives its lowest supported effort from the transport — on a `["max"]` ladder that is `max`, because the model accepts nothing else. |
 
 ### Sampling
 
 A value of `-1` means "use the provider/model default" — `omp` does not send that parameter.
 
-| Key                              | Type   | Default   | Notes                                                                                                                                                                                                                                                                                                                                                |
-| -------------------------------- | ------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `temperature`                    | number | `-1`      | Sampling temperature.                                                                                                                                                                                                                                                                                                                                |
-| `topP`                           | number | `-1`      | Nucleus sampling.                                                                                                                                                                                                                                                                                                                                    |
-| `topK`                           | number | `-1`      | Top-K sampling.                                                                                                                                                                                                                                                                                                                                      |
-| `minP`                           | number | `-1`      | Minimum-probability cutoff.                                                                                                                                                                                                                                                                                                                          |
-| `presencePenalty`                | number | `-1`      | Presence penalty.                                                                                                                                                                                                                                                                                                                                    |
-| `repetitionPenalty`              | number | `-1`      | Repetition penalty.                                                                                                                                                                                                                                                                                                                                  |
-| `textVerbosity`                  | enum   | `medium`  | `low`, `medium`, `high`. Sent as response verbosity by OpenAI Responses and Codex transports.                                                                                                                                                                                                                                                        |
-| `tier.openai`                    | enum   | `none`    | `none`, `auto`, `default`, `flex`, `scale`, `priority`. Sent as `service_tier` for OpenAI / OpenAI-Codex and OpenAI-family OpenRouter models. Launch with `--service-tier <value>` for a one-session OpenAI override; the flag is not persisted (`none` omits `service_tier`).                                                                       |
-| `tier.anthropic`                 | enum   | `none`    | `none`, `priority`. `priority` realizes fast mode on supported direct Claude models (ignored on Bedrock/Vertex and via OpenRouter).                                                                                                                                                                                                                  |
-| `tier.google`                    | enum   | `none`    | `none`, `flex`, `priority`. Gemini API sends it in the body; Vertex sends `priority` via header (`flex` is a no-op on Vertex).                                                                                                                                                                                                                       |
-| `tier.subagent`                  | enum   | `inherit` | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the spawned model's family; `inherit` tracks the main agent.                                                                                                                                                                                                           |
-| `task.agentServiceTierOverrides` | record | `{}`      | Sparse exact-name overrides for agents spawned by task/eval dispatch (Vibe workers keep `tier.subagent`). Values: `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. An entry overrides `tier.subagent`; concrete values apply only when supported by the resolved model's provider family. A non-mapping value fails settings load. |
-| `tier.advisor`                   | enum   | `none`    | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the advisor model's family.                                                                                                                                                                                                                                            |
-| `personality`                    | enum   | `default` | `default`, `friendly`, `pragmatic`, `none`. A user-level `<agent dir>/PERSONALITY.md` replaces the selected preset's text; `none` still omits the block. See [system-prompt-customization](./system-prompt-customization.md).                                                                                                                        |
+| Key                 | Type   | Default   | Notes                                                                                                                                                                                                                                                                          |
+| ------------------- | ------ | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `temperature`       | number | `-1`      | Sampling temperature.                                                                                                                                                                                                                                                          |
+| `topP`              | number | `-1`      | Nucleus sampling.                                                                                                                                                                                                                                                              |
+| `topK`              | number | `-1`      | Top-K sampling.                                                                                                                                                                                                                                                                |
+| `minP`              | number | `-1`      | Minimum-probability cutoff.                                                                                                                                                                                                                                                    |
+| `presencePenalty`   | number | `-1`      | Presence penalty.                                                                                                                                                                                                                                                              |
+| `repetitionPenalty` | number | `-1`      | Repetition penalty.                                                                                                                                                                                                                                                            |
+| `textVerbosity`     | enum   | `medium`  | `low`, `medium`, `high`. Sent as response verbosity by OpenAI Responses and Codex transports.                                                                                                                                                                                  |
+| `tier.openai`       | enum   | `none`    | `none`, `auto`, `default`, `flex`, `scale`, `priority`. Sent as `service_tier` for OpenAI / OpenAI-Codex and OpenAI-family OpenRouter models. Launch with `--service-tier <value>` for a one-session OpenAI override; the flag is not persisted (`none` omits `service_tier`). |
+| `tier.anthropic`    | enum   | `none`    | `none`, `priority`. `priority` realizes fast mode on supported direct Claude models (ignored on Bedrock/Vertex and via OpenRouter).                                                                                                                                            |
+| `tier.google`       | enum   | `none`    | `none`, `flex`, `priority`. Gemini API sends it in the body; Vertex sends `priority` via header (`flex` is a no-op on Vertex).                                                                                                                                                 |
+| `tier.subagent`     | enum   | `inherit` | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the spawned model's family; `inherit` tracks the main agent.                                                                                                                                     |
+| `task.agentServiceTierOverrides` | record | `{}` | Sparse exact-name overrides for agents spawned by task/eval dispatch (Vibe workers keep `tier.subagent`). Values: `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. An entry overrides `tier.subagent`; concrete values apply only when supported by the resolved model's provider family. A non-mapping value fails settings load. |
+| `tier.advisor`      | enum   | `none`    | `inherit`, `none`, `auto`, `default`, `flex`, `scale`, `priority`. Applied to the advisor model's family.                                                                                                                                                                      |
+| `personality`       | enum   | `default` | `default`, `friendly`, `pragmatic`, `none`. A user-level `<agent dir>/PERSONALITY.md` replaces the selected preset's text; `none` still omits the block. See [system-prompt-customization](./system-prompt-customization.md).                                                  |
 
 ### Retry and fallback
 
 ```yaml
 retry:
-   enabled: true
-   maxRetries: 10
-   baseDelayMs: 500
-   maxDelayMs: 300000
-   modelFallback: true
-   fallbackRevertPolicy: cooldown-expiry
-   fallbackChains:
-      # Any role without an explicit chain inherits the "default" chain.
-      default:
-         - anthropic/claude-opus-4-5
-         - openai/gpt-5.5
-         - google/gemini-3-pro
-      # Per-role chains override the default (roles from `modelRoles`,
-      # including custom roles). Selectors accept an optional thinking
-      # suffix, e.g. openai/gpt-5.5:low.
-      smol:
-         - openai/gpt-5.5-mini
-         - anthropic/claude-haiku-4-5
-      # Model-selector keys (any key containing "/") attach the chain to the
-      # model itself: it applies whenever that model is active, no matter
-      # which role it is assigned to, and survives role reassignment.
-      google/gemini-3-pro:
-         - google-vertex/gemini-3-pro
-      # A `provider/*` KEY covers every model of a provider — current or
-      # future. A `provider/*` ENTRY keeps the failing model's id and swaps
-      # the provider: google-antigravity/x -> google/x -> google-vertex/x.
-      # Ids missing on the target provider are skipped (near-miss ids resolve
-      # fuzzily); exact model keys override the wildcard for a specific model.
-      google-antigravity/*:
-         - google/*
-         - google-vertex/*
+  enabled: true
+  maxRetries: 10
+  baseDelayMs: 500
+  maxDelayMs: 300000
+  modelFallback: true
+  fallbackRevertPolicy: cooldown-expiry
+  fallbackChains:
+    # Any role without an explicit chain inherits the "default" chain.
+    default:
+      - anthropic/claude-opus-4-5
+      - openai/gpt-5.5
+      - google/gemini-3-pro
+    # Per-role chains override the default (roles from `modelRoles`,
+    # including custom roles). Selectors accept an optional thinking
+    # suffix, e.g. openai/gpt-5.5:low.
+    smol:
+      - openai/gpt-5.5-mini
+      - anthropic/claude-haiku-4-5
+    # Model-selector keys (any key containing "/") attach the chain to the
+    # model itself: it applies whenever that model is active, no matter
+    # which role it is assigned to, and survives role reassignment.
+    google/gemini-3-pro:
+      - google-vertex/gemini-3-pro
+    # A `provider/*` KEY covers every model of a provider — current or
+    # future. A `provider/*` ENTRY keeps the failing model's id and swaps
+    # the provider: google-antigravity/x -> google/x -> google-vertex/x.
+    # Ids missing on the target provider are skipped (near-miss ids resolve
+    # fuzzily); exact model keys override the wildcard for a specific model.
+    google-antigravity/*:
+      - google/*
+      - google-vertex/*
 
 providers:
-   anthropic:
-      serverSideFallback: false
+  anthropic:
+    serverSideFallback: false
 ```
 
-| Key                                          | Type    | Default           | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| -------------------------------------------- | ------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `retry.enabled`                              | boolean | `true`            | Retry transient provider errors.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `retry.maxRetries`                           | number  | `10`              | Max retries per request.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `retry.baseDelayMs`                          | number  | `500`             | Initial backoff.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `retry.maxDelayMs`                           | number  | `300000`          | Backoff ceiling (5 min). Provider-stated waits longer than this fail fast instead of sleeping when no credential or model fallback succeeds; `0` disables the cap (to auto-resume through provider-stated quota resets).                                                                                                                                                                                                                                                                                                                     |
-| `retry.modelFallback`                        | boolean | `true`            | Fall back to another model when one is unavailable. Also used by online auto-thinking classification and session titles (tiny/smol/commit). When `false`, these background tasks only attempt their first resolvable role model, without hopping to other roles or configured fallback models.                                                                                                                                                                                                                                               |
-| `retry.fallbackChains`                       | record  | `{}`              | Maps roles, model selectors, or `provider/*` wildcards to ordered fallback selectors. Keys containing `/` are model-oriented and win over roles: `provider/model-id` matches that exact model, `provider/*` matches every model of the provider. A `provider/*` _entry_ keeps the failing model's id and swaps the provider. The `default` chain covers every assigned role without its own chain. Unknown models/providers or malformed chains are reported as config warnings at startup.                                                  |
-| `retry.fallbackRevertPolicy`                 | enum    | `cooldown-expiry` | `cooldown-expiry` returns to the primary model once its suppression window ends; `never` stays on the fallback until switched manually.                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `providers.anthropic.serverSideFallback`     | boolean | `false`           | Opt in to Anthropic's `server-side-fallback-2026-06-01` beta. Only direct `anthropic` provider requests using the `anthropic-messages` API for Claude Fable or Mythos models are eligible. On an Anthropic safety-classifier block, the provider may retry server-side with `claude-opus-4-8`; every other provider, API, and model is unaffected.                                                                                                                                                                                           |
-| `providers.openai-codex.codeMode`            | enum    | `off`             | Codex Code Mode for `code_mode_only` models (GPT-5.6 Sol/Terra/Luna), mirroring codex-rs: the direct tool surface collapses to `eval`/`ask`/`todo` and every other session tool is invoked from `eval` cells via its `tool.<name>()` bridge, collapsing multi-step tool work into one model round trip. `auto` follows the model catalog's `tool_mode` flag; `on` forces it for any Codex model; `off` (default) leaves the full direct surface. The turn metadata carries codex-rs's `tool_namespaces_info` exposure snapshot while active. |
-| `providers.openai-codex.codeModeDirectTools` | array   | `[]`              | Extra tool names to keep directly callable alongside `eval`/`ask`/`todo` when Codex Code Mode is active; entries that are not enabled in the session are ignored.                                                                                                                                                                                                                                                                                                                                                                            |
+| Key                                      | Type    | Default           | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------------------------- | ------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `retry.enabled`                          | boolean | `true`            | Retry transient provider errors.                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `retry.maxRetries`                       | number  | `10`              | Max retries per request.                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `retry.baseDelayMs`                      | number  | `500`             | Initial backoff.                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `retry.maxDelayMs`                       | number  | `300000`          | Backoff ceiling (5 min). Provider-stated waits longer than this fail fast instead of sleeping when no credential or model fallback succeeds; `0` disables the cap (to auto-resume through provider-stated quota resets).                                                                                                                                                                                                                                                                                                                  |
+| `retry.modelFallback`                    | boolean | `true`            | Fall back to another model when one is unavailable. Also used by online auto-thinking classification and session titles (tiny/smol/commit). When `false`, these background tasks only attempt their first resolvable role model, without hopping to other roles or configured fallback models.                                                                                                                                                                                                                                                          |
+| `retry.fallbackChains`                   | record  | `{}`              | Maps roles, model selectors, or `provider/*` wildcards to ordered fallback selectors. Keys containing `/` are model-oriented and win over roles: `provider/model-id` matches that exact model, `provider/*` matches every model of the provider. A `provider/*` _entry_ keeps the failing model's id and swaps the provider. The `default` chain covers every assigned role without its own chain. Unknown models/providers or malformed chains are reported as config warnings at startup. |
+| `retry.fallbackRevertPolicy`             | enum    | `cooldown-expiry` | `cooldown-expiry` returns to the primary model once its suppression window ends; `never` stays on the fallback until switched manually.                                                                                                                                                                                                                                                                                                                                                     |
+| `providers.anthropic.serverSideFallback` | boolean | `false`           | Opt in to Anthropic's `server-side-fallback-2026-06-01` beta. Only direct `anthropic` provider requests using the `anthropic-messages` API for Claude Fable or Mythos models are eligible. On an Anthropic safety-classifier block, the provider may retry server-side with `claude-opus-4-8`; every other provider, API, and model is unaffected.                                                                                                                                          |
+| `providers.openai-codex.codeMode`           | enum    | `off`             | Codex Code Mode for `code_mode_only` models (GPT-5.6 Sol/Terra/Luna), mirroring codex-rs: the direct tool surface collapses to `eval`/`ask`/`todo` and every other session tool is invoked from `eval` cells via its `tool.<name>()` bridge, collapsing multi-step tool work into one model round trip. `auto` follows the model catalog's `tool_mode` flag; `on` forces it for any Codex model; `off` (default) leaves the full direct surface. The turn metadata carries codex-rs's `tool_namespaces_info` exposure snapshot while active. |
+| `providers.openai-codex.codeModeDirectTools` | array   | `[]`              | Extra tool names to keep directly callable alongside `eval`/`ask`/`todo` when Codex Code Mode is active; entries that are not enabled in the session are ignored. |
 
 When the active model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default`. If several roles assign the same model, yaml key order does not decide: the live session role wins, and `default` wins over other matching roles when the session is not on those roles. It skips models whose selectors are still cooling down and switches for the rest of the turn. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
 
@@ -498,13 +498,13 @@ When the active model keeps failing (429s, quota walls, provider outages) and `r
 
 ```yaml
 tools:
-   format: auto
-   approvalMode: yolo # default
-   approval:
-      bash: prompt
-      edit: allow
-   maxTimeout: 0
-   intentTracing: true
+  format: auto
+  approvalMode: yolo # default
+  approval:
+    bash: prompt
+    edit: allow
+  maxTimeout: 0
+  intentTracing: true
 ```
 
 | Key                            | Type    | Default | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -528,15 +528,15 @@ The disabled-by-default `computer` Eval prelude captures and controls real host 
 
 ```yaml
 computer:
-   enabled: true
-   display: all
-   maxWidth: 3840
-   maxHeight: 2400
+  enabled: true
+  display: all
+  maxWidth: 3840
+  maxHeight: 2400
 ```
 
 | Key                  | Type    | Default | Notes                                                                                                                                                                                                                                                        |
 | -------------------- | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `computer.enabled`   | boolean | `false` | Enable the window-aware `computer` Eval prelude; the `/computer` slash command toggles it for the current session only.                                                                                                                                      |
+| `computer.enabled`   | boolean | `false` | Enable the window-aware `computer` Eval prelude; the `/computer` slash command toggles it for the current session only.                                                                        |
 | `computer.display`   | string  | `all`   | Controls the `desktop` target only: composite all active displays, or use one numeric display ID.                                                                                                                                                            |
 | `computer.maxWidth`  | number  | `3840`  | Maximum composite screenshot width in pixels. Image transports that cannot preserve original detail, including GitHub Copilot Responses and xAI OAuth, cap the effective width at `1280`; Claude-family models use the same cap as a compatibility fallback. |
 | `computer.maxHeight` | number  | `2400`  | Maximum composite screenshot height in pixels. Those coordinate-safe transports cap the effective height at `896`; other models retain the configured limit.                                                                                                 |
@@ -547,26 +547,26 @@ Computer settings and the active model's coordinate-safe image limits are read f
 
 ```yaml
 bash:
-   enabled: true
-   allowCompoundCommands: false
-   autoBackground:
-      enabled: true
-      thresholdMs: 60000
+  enabled: true
+  allowCompoundCommands: false
+  autoBackground:
+    enabled: true
+    thresholdMs: 60000
 
 eval:
-   py: true
-   js: true
+  py: true
+  js: true
 
 python:
-   kernelMode: session # session, per-call
-   interpreter: ""
+  kernelMode: session # session, per-call
+  interpreter: ""
 
 lsp:
-   enabled: true
-   lazy: true
-   diagnosticsOnWrite: true
-   diagnosticsOnEdit: false
-   formatOnWrite: false
+  enabled: true
+  lazy: true
+  diagnosticsOnWrite: true
+  diagnosticsOnEdit: false
+  formatOnWrite: false
 ```
 
 | Key                               | Type    | Default   | Notes                                                                                                                                                       |
@@ -574,12 +574,12 @@ lsp:
 | `bash.enabled`                    | boolean | `true`    | Enable the bash tool.                                                                                                                                       |
 | `bash.allowCompoundCommands`      | boolean | `false`   | Evaluate flat, literal `&&` chains per segment; unmatched segments inherit normal bash approval policy and mode.                                            |
 | `launch.enabled`                  | boolean | `true`    | Enable the launch tool for shared long-running project processes.                                                                                           |
-| `bash.autoBackground.enabled`     | boolean | `true`    | Auto-background long-running commands.                                                                                                                      |
+| `bash.autoBackground.enabled`     | boolean | `true`   | Auto-background long-running commands.                                                                                                                      |
 | `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding.                                                                                                                        |
 | `eval.py`                         | boolean | `true`    | Python eval backend. `PI_PY=0` disables for the process.                                                                                                    |
 | `eval.js`                         | boolean | `true`    | JavaScript eval backend. `PI_JS=0` disables for the process.                                                                                                |
 | `eval.tools.enabled`              | boolean | `true`    | Expose kernel-defined `@tool` / `tool(fn)` functions to `task`, `agent()`, and `workpool()` subagents.                                                      |
-| `eval.workpool.freshAgents`       | boolean | `false`   | Spawn a new workpool agent for every item instead of reusing idle workers or batching queued items.                                                         |
+| `eval.workpool.freshAgents`       | boolean | `false`   | Spawn a new workpool agent for every item instead of reusing idle workers or batching queued items.                                                        |
 | `python.kernelMode`               | enum    | `session` | `session` (persistent kernel) or `per-call`.                                                                                                                |
 | `python.interpreter`              | string  | `""`      | Path to a Python interpreter; empty = auto-detect.                                                                                                          |
 | `lsp.enabled`                     | boolean | `true`    | Language-server integration. `--no-lsp` disables for the run.                                                                                               |
@@ -595,19 +595,19 @@ lsp:
 
 ```yaml
 edit:
-   mode: hashline # apply_patch, hashline, patch, replace
-   fuzzyMatch: true
-   fuzzyThreshold: 0.95
-   blockAutoGenerated: true
-   blackbox:
-      enabled: false
+  mode: hashline # apply_patch, hashline, patch, replace
+  fuzzyMatch: true
+  fuzzyThreshold: 0.95
+  blockAutoGenerated: true
+  blackbox:
+    enabled: false
 
 read:
-   defaultLimit: 300
-   toolResultPreview: false
-   summarize:
-      enabled: true
-      prose: false
+  defaultLimit: 300
+  toolResultPreview: false
+  summarize:
+    enabled: true
+    prose: false
 ```
 
 | Key                       | Type    | Default    | Notes                                             |
@@ -617,7 +617,7 @@ read:
 | `edit.fuzzyThreshold`     | number  | `0.95`     | Similarity threshold for fuzzy matching.          |
 | `edit.blockAutoGenerated` | boolean | `true`     | Refuse to edit generated/lockfile-like files.     |
 | `edit.streamingAbort`     | boolean | `false`    | Abort on streaming edit mismatch.                 |
-| `edit.blackbox.enabled`   | boolean | `false`    | Append full source for AST parse regressions.     |
+| `edit.blackbox.enabled`   | boolean | `false`    | Append full source for AST parse regressions.      |
 | `read.defaultLimit`       | number  | `300`      | Default line count for `read` without a selector. |
 | `read.summarize.enabled`  | boolean | `true`     | Structural summaries for code reads.              |
 | `read.summarize.prose`    | boolean | `false`    | Summarize prose files too.                        |
@@ -634,35 +634,35 @@ Compaction headroom is separate from this opt-in. With the default 15% reserve, 
 extendedContext: false
 
 contextPromotion:
-   enabled: false
+  enabled: false
 
 compaction:
-   enabled: true
-   methodOrder: [remote, snapcompact, handoff, shake, soft]
-   midTurnEnabled: true # check thresholds between tool-loop provider requests
-   thresholdPercent: -1 # -1 = default reserve-based behavior
-   thresholdTokens: -1 # fixed token limit when > 0
+  enabled: true
+  methodOrder: [remote, snapcompact, handoff, shake, soft]
+  midTurnEnabled: true # check thresholds between tool-loop provider requests
+  thresholdPercent: -1 # -1 = default reserve-based behavior
+  thresholdTokens: -1 # fixed token limit when > 0
 memory:
-   backend: off # off, local, hindsight, mnemopi
+  backend: off # off, local, hindsight, mnemopi
 ```
 
-| Key                           | Type    | Default                                     | Notes                                                                                                                                                                                                                                     |
-| ----------------------------- | ------- | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `extendedContext`             | boolean | `false`                                     | Opt in to larger model windows; `/extended-context on`, `off`, or `status`.                                                                                                                                                               |
-| `contextPromotion.enabled`    | boolean | `false`                                     | Promote to the active model's explicit `contextPromotionTarget` on context overflow.                                                                                                                                                      |
-| `compaction.enabled`          | boolean | `true`                                      | Automatic conversation compaction.                                                                                                                                                                                                        |
-| `compaction.asyncEnabled`     | boolean | `true`                                      | Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed.                                                                                       |
-| `compaction.midTurnEnabled`   | boolean | `true`                                      | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request.                                                                                                                                                  |
-| `compaction.methodOrder`      | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta); unavailable or failed methods advance.                                                                          |
-| `compaction.thresholdPercent` | number  | `-1`                                        | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                 |
-| `compaction.thresholdTokens`  | number  | `-1`                                        | Fixed token trigger when `> 0`.                                                                                                                                                                                                           |
-| `compaction.reserveTokens`    | number  | _(unset)_                                   | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
-| `compaction.keepRecentTokens` | number  | `20000`                                     | Recent tokens always preserved.                                                                                                                                                                                                           |
-| `compaction.autoContinue`     | boolean | `true`                                      | Continue automatically after compaction.                                                                                                                                                                                                  |
-| `memory.backend`              | enum    | `off`                                       | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys.                                                                                                                  |
-| `autolearn.enabled`           | boolean | `false`                                     | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
-| `autolearn.autoContinue`      | boolean | `false`                                     | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn.                                                                                                           |
-| `autolearn.minToolCalls`      | number  | `5`                                         | Only nudge after a turn that used at least this many tools.                                                                                                                                                                               |
+| Key                           | Type    | Default                                  | Notes                                                                                                                                                                                                                                     |
+| ----------------------------- | ------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `extendedContext` | boolean | `false` | Opt in to larger model windows; `/extended-context on`, `off`, or `status`. |
+| `contextPromotion.enabled`    | boolean | `false`                                  | Promote to the active model's explicit `contextPromotionTarget` on context overflow.                                                                                                                                                      |
+| `compaction.enabled`          | boolean | `true`                                   | Automatic conversation compaction.                                                                                                                                                                                                        |
+| `compaction.asyncEnabled`     | boolean | `true`                                   | Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed.                                                                                        |
+| `compaction.midTurnEnabled`   | boolean | `true`                                   | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request.                                                                                                                                                  |
+| `compaction.methodOrder`      | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta); unavailable or failed methods advance. |
+| `compaction.thresholdPercent` | number  | `-1`                                     | Percent-of-context trigger; `-1` = reserve-based default.                                                                                                                                                                                 |
+| `compaction.thresholdTokens`  | number  | `-1`                                     | Fixed token trigger when `> 0`.                                                                                                                                                                                                           |
+| `compaction.reserveTokens`    | number  | _(unset)_                                | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
+| `compaction.keepRecentTokens` | number  | `20000`                                  | Recent tokens always preserved.                                                                                                                                                                                                           |
+| `compaction.autoContinue`     | boolean | `true`                                   | Continue automatically after compaction.                                                                                                                                                                                                  |
+| `memory.backend`              | enum    | `off`                                    | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys.                                                                                                                  |
+| `autolearn.enabled`           | boolean | `false`       | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
+| `autolearn.autoContinue`      | boolean | `false`       | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn.                                                                                                           |
+| `autolearn.minToolCalls`      | number  | `5`           | Only nudge after a turn that used at least this many tools.                                                                                                                                                                               |
 
 `compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
 
@@ -670,44 +670,44 @@ memory:
 
 ```yaml
 theme:
-   dark: titanium
-   light: light
+  dark: titanium
+  light: light
 symbolPreset: unicode # unicode, nerd, ascii
 colorBlindMode: false
 
 statusLine:
-   preset: default # default, minimal, compact, full, nerd, ascii, custom
-   separator: powerline-thin
-   transparent: false
-   showHookStatus: true
+  preset: default # default, minimal, compact, full, nerd, ascii, custom
+  separator: powerline-thin
+  transparent: false
+  showHookStatus: true
 
 terminal:
-   showImages: true
+  showImages: true
 images:
-   autoResize: true
-   blockImages: false
+  autoResize: true
+  blockImages: false
 tui:
-   hyperlinks: auto # off, auto, always
+  hyperlinks: auto # off, auto, always
 ```
 
-| Key                         | Type    | Default          | Values                                                                                                                                                                                                                                                                  |
-| --------------------------- | ------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `theme.dark`                | string  | `titanium`       | Theme used on a dark terminal background.                                                                                                                                                                                                                               |
-| `theme.light`               | string  | `light`          | Theme used on a light terminal background.                                                                                                                                                                                                                              |
-| `symbolPreset`              | enum    | `unicode`        | `unicode`, `nerd`, `ascii`.                                                                                                                                                                                                                                             |
-| `colorBlindMode`            | boolean | `false`          | Use blue instead of green for diff additions.                                                                                                                                                                                                                           |
-| `showHardwareCursor`        | boolean | `true`           | Show the terminal hardware cursor.                                                                                                                                                                                                                                      |
-| `statusLine.preset`         | enum    | `default`        | `default`, `minimal`, `compact`, `full`, `nerd`, `ascii`, `custom`.                                                                                                                                                                                                     |
-| `statusLine.separator`      | enum    | `powerline-thin` | `powerline`, `powerline-thin`, `slash`, `pipe`, `block`, `none`, `ascii`.                                                                                                                                                                                               |
-| `statusLine.sessionAccent`  | boolean | `true`           | Tint the editor border with the session color.                                                                                                                                                                                                                          |
-| `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                                                                                                                                                                                                                        |
-| `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                                                                                                                                                                                                              |
-| `terminal.showImages`       | boolean | `true`           | Render images inline (when the terminal supports it).                                                                                                                                                                                                                   |
-| `images.autoResize`         | boolean | `true`           | Resize large images for model compatibility.                                                                                                                                                                                                                            |
-| `images.blockImages`        | boolean | `false`          | Never send images to providers.                                                                                                                                                                                                                                         |
-| `tui.hyperlinks`            | enum    | `auto`           | `off`, `auto`, `always`.                                                                                                                                                                                                                                                |
-| `tui.mouse`                 | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on.                                              |
-| `display.pinnedAgents`      | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all.                                                                                                                                          |
+| Key                         | Type    | Default          | Values                                                                    |
+| --------------------------- | ------- | ---------------- | ------------------------------------------------------------------------- |
+| `theme.dark`                | string  | `titanium`       | Theme used on a dark terminal background.                                 |
+| `theme.light`               | string  | `light`          | Theme used on a light terminal background.                                |
+| `symbolPreset`              | enum    | `unicode`        | `unicode`, `nerd`, `ascii`.                                               |
+| `colorBlindMode`            | boolean | `false`          | Use blue instead of green for diff additions.                             |
+| `showHardwareCursor`        | boolean | `true`           | Show the terminal hardware cursor.                                        |
+| `statusLine.preset`         | enum    | `default`        | `default`, `minimal`, `compact`, `full`, `nerd`, `ascii`, `custom`.       |
+| `statusLine.separator`      | enum    | `powerline-thin` | `powerline`, `powerline-thin`, `slash`, `pipe`, `block`, `none`, `ascii`. |
+| `statusLine.sessionAccent`  | boolean | `true`           | Tint the editor border with the session color.                            |
+| `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
+| `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |
+| `terminal.showImages`       | boolean | `true`           | Render images inline (when the terminal supports it).                     |
+| `images.autoResize`         | boolean | `true`           | Resize large images for model compatibility.                              |
+| `images.blockImages`        | boolean | `false`          | Never send images to providers.                                           |
+| `tui.hyperlinks`            | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
+| `tui.mouse`                 | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |
+| `display.pinnedAgents`      | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
 | `tui.resizeScrollback`      | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport. |
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
@@ -716,75 +716,76 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 
 ### Interaction
 
-| Key                            | Type    | Default         | Values                                                                                                                                                                               |
-| ------------------------------ | ------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `steeringMode`                 | enum    | `one-at-a-time` | `all`, `one-at-a-time`. How queued steering messages are delivered.                                                                                                                  |
-| `followUpMode`                 | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                                                                                              |
-| `interruptMode`                | enum    | `immediate`     | `immediate`, `wait`.                                                                                                                                                                 |
-| `doubleEscapeAction`           | enum    | `rewind`        | `rewind`, `none`.                                                                                                                                                                    |
-| `autoResume`                   | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                                                                                                      |
-| `history.scope`                | enum    | `global`        | `session`, `cwd`, `repo`, `global`. Which prompts the `Up` arrow recalls; all projects by default, `repo` spans linked worktrees.                                                    |
-| `history.searchScope`          | enum    | `global`        | Which scope `Ctrl+R` opens on; `Tab`/`Shift+Tab` change it inside the panel.                                                                                                         |
-| `composer.recallClearedDrafts` | boolean | `true`          | Keep prompts cleared with `Ctrl+C` in the editor's local Up/Down history until exit.                                                                                                 |
-| `plan.enabled`                 | boolean | `true`          | Enable plan mode.                                                                                                                                                                    |
-| `plan.defaultOnStartup`        | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
-| `ask.timeout`                  | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout.                                                                                                                          |
-| `ask.notify`                   | enum    | `on`            | `on`, `off`.                                                                                                                                                                         |
+| Key                    | Type    | Default         | Values                                                                                                  |
+| ---------------------- | ------- | --------------- | ------------------------------------------------------------------------------------------------------- |
+| `steeringMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`. How queued steering messages are delivered.                                     |
+| `followUpMode`         | enum    | `one-at-a-time` | `all`, `one-at-a-time`.                                                                                 |
+| `interruptMode`        | enum    | `immediate`     | `immediate`, `wait`.                                                                                    |
+| `doubleEscapeAction`   | enum    | `rewind`          | `rewind`, `none`.                                                                               |
+| `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
+| `history.scope`        | enum    | `global`        | `session`, `cwd`, `repo`, `global`. Which prompts the `Up` arrow recalls; all projects by default, `repo` spans linked worktrees. |
+| `history.searchScope`  | enum    | `global`        | Which scope `Ctrl+R` opens on; `Tab`/`Shift+Tab` change it inside the panel.                            |
+| `composer.recallClearedDrafts` | boolean | `true`          | Keep prompts cleared with `Ctrl+C` in the editor's local Up/Down history until exit.                    |
+| `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
+| `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
+| `ask.timeout`          | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. |
+| `ask.notify`           | enum    | `on`            | `on`, `off`.                                                                                            |
 
 ### Providers and services
 
 ```yaml
 providers:
-   webSearchOrder: [perplexity, exa, gemini]
-   imageOrder: [openai, xai]
-   fetch: auto
-   webSearchGeminiModel: gemini-2.5-flash
-   tinyModel: online
-   tinyModelDevice: default
-   tinyModelDtype: default
-   openaiWebsockets: auto
-   openrouterVariant: default
-   kimiApiFormat: auto
-   cacheRetention: auto
-   maxInFlightRequests:
-      anthropic: 2
+  webSearchOrder: [perplexity, exa, gemini]
+  imageOrder: [openai, xai]
+  fetch: auto
+  webSearchGeminiModel: gemini-2.5-flash
+  tinyModel: online
+  tinyModelDevice: default
+  tinyModelDtype: default
+  openaiWebsockets: auto
+  openrouterVariant: default
+  kimiApiFormat: auto
+  cacheRetention: auto
+  maxInFlightRequests:
+    anthropic: 2
 
 provider:
-   appendOnlyContext: auto # auto, on, off
+  appendOnlyContext: auto # auto, on, off
 
 exa:
-   enabled: true
-   searchDelayMs: 1000
+  enabled: true
+  searchDelayMs: 1000
 
 searxng:
-   endpoint: https://search.example.com
-   token: SEARXNG_TOKEN
+  endpoint: https://search.example.com
+  token: SEARXNG_TOKEN
 ```
 
-| Key                                 | Type    | Default   | Values / notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ----------------------------------- | ------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Key                                 | Type    | Default   | Values / notes                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| ----------------------------------- | ------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `providers.webSearchOrder`          | array   | `[]`      | Provider IDs in priority order for `web_search` (`perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `ollama`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public`). Duplicates and unknown IDs are ignored; unlisted providers retain their built-in relative order afterward. Empty = built-in order. Replaces the removed `providers.webSearch` enum (a legacy value migrates to the head of this list). |
-| `providers.webSearchExclude`        | array   | `[]`      | Search provider IDs that `web_search` must never use, even as fallbacks. Accepts the same provider IDs as `providers.webSearchOrder`.                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `providers.webSearchTimeoutSeconds` | number  | `60`      | Hard timeout in seconds supplied to each `web_search` provider transport before the automatic chain advances to the next fallback. Use a larger value for slower model-backed providers; values above `300` are capped at five minutes. This is not a whole-chain deadline, and provider-specific upstream or aggregate limits may still be shorter.                                                                                                                                                                                             |
-| `providers.webSearchGeminiModel`    | string  | _(unset)_ | Gemini model ID for Google Search grounding when `web_search` uses Gemini; defaults to `gemini-2.5-flash`, overridden by `GEMINI_SEARCH_MODEL`.                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `providers.imageOrder`              | array   | `[]`      | Image-generation provider IDs in priority order (`openai`, `openai-codex`, `antigravity`, `xai`, `gemini`, `openrouter`). Unlisted providers follow the active session provider and the built-in order. Replaces the removed `providers.image` enum (a legacy value migrates to the head of this list).                                                                                                                                                                                                                                          |
-| `providers.fetch`                   | enum    | `auto`    | `auto`, `native`, `trafilatura`, `lynx`, `parallel`, `firecrawl`, `jina`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `providers.tinyModel`               | enum    | `online`  | `online` or a local model (`lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| `providers.tinyModelDevice`         | enum    | `default` | ONNX execution provider, or `mlx` (Apple silicon, via mlx-lm), for local tiny models. Overridden by `PI_TINY_DEVICE`.                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `providers.maxInFlightRequests`     | record  | `{}`      | Positive per-provider concurrency limits for LLM HTTP requests, shared across local `omp` processes using the same config root. Omitted providers are unlimited. `omp config set` rejects non-positive or non-numeric values.                                                                                                                                                                                                                                                                                                                    |
-| `providers.tinyModelDtype`          | enum    | `default` | ONNX precision for local tiny models. Overridden by `PI_TINY_DTYPE`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `providers.openaiWebsockets`        | enum    | `auto`    | `auto`, `off`, `on`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `providers.openrouterVariant`       | enum    | `default` | `default`, `nitro`, `floor`, `online`, `exacto`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `providers.kimiApiFormat`           | enum    | `auto`    | `auto`, `openai`, `anthropic`. `auto` follows live model metadata.                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `providers.cacheRetention`          | enum    | `auto`    | `auto`, `short`, `long`, `none`. Prompt-cache retention forwarded to providers that support it. `auto` keeps provider defaults (Anthropic: 1h entries on OAuth subscriber sessions, 5m entries plus idle keep-alive refreshes on API keys) and honors `PI_CACHE_RETENTION`; `short` forces 5m; `long` uses 1h TTLs where supported and disables keep-alive refreshes; `none` disables prompt caching and cache-affinity routing.                                                                                                                 |
-| `provider.appendOnlyContext`        | enum    | `auto`    | `auto`, `on`, `off`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `exa.enabled`                       | boolean | `true`    | Enable the Exa web search provider.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `exa.searchDelayMs`                 | number  | `1000`    | Minimum delay between Exa web search requests in milliseconds; set `0` to disable pacing.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `searxng.endpoint`                  | string  | _(unset)_ | SearXNG instance URL.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `searxng.token`                     | string  | _(unset)_ | SearXNG token; also `searxng.basicUsername`/`searxng.basicPassword`/`searxng.categories`/`searxng.language`/`searxng.engines` (comma-separated engine names or bang shortcuts, e.g. `ddg, br, startpage`, sent as the API's `engines=` parameter)/`searxng.safesearch`.                                                                                                                                                                                                                                                                          |
-| `auth.broker.url`                   | string  | _(unset)_ | Auth-broker URL. Overridden by `OMP_AUTH_BROKER_URL`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `auth.broker.token`                 | string  | _(unset)_ | Auth-broker token. Overridden by `OMP_AUTH_BROKER_TOKEN`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `secrets.enabled`                   | boolean | `false`   | Enable configured secret obfuscation and built-in credential-shaped token redaction before provider requests. See [Secret obfuscation](./secrets.md).                                                                                                                                                                                                                                                                                                                                                                                            |
+| `providers.webSearchExclude`        | array   | `[]`      | Search provider IDs that `web_search` must never use, even as fallbacks. Accepts the same provider IDs as `providers.webSearchOrder`.                                                                                                                                                                                                                                                                                              |
+| `providers.webSearchTimeoutSeconds` | number  | `60`      | Hard timeout in seconds supplied to each `web_search` provider transport before the automatic chain advances to the next fallback. Use a larger value for slower model-backed providers; values above `300` are capped at five minutes. This is not a whole-chain deadline, and provider-specific upstream or aggregate limits may still be shorter.                                                                                   |
+| `providers.webSearchGeminiModel`    | string  | _(unset)_ | Gemini model ID for Google Search grounding when `web_search` uses Gemini; defaults to `gemini-2.5-flash`, overridden by `GEMINI_SEARCH_MODEL`.                                                                                                                                                                                                                                                                                        |
+| `providers.imageOrder`              | array   | `[]`      | Image-generation provider IDs in priority order (`openai`, `openai-codex`, `antigravity`, `xai`, `gemini`, `openrouter`). Unlisted providers follow the active session provider and the built-in order. Replaces the removed `providers.image` enum (a legacy value migrates to the head of this list).                                                                                                                                |
+| `providers.fetch`                   | enum    | `auto`    | `auto`, `native`, `trafilatura`, `lynx`, `parallel`, `firecrawl`, `jina`.                                                                                                                                                                                                                                                                                                                                                              |
+| `providers.judgmentProvider`        | enum    | `auto`    | Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging). `auto` uses TypeSafe when `TYPESAFE_API_KEY` or a `/login typesafe` credential exists; failed TypeSafe requests fall back through `tiny`, `smol`, `default`, then the active session model. `llm` skips TypeSafe; a feature-configured local model remains the direct backend when TypeSafe is not selected.                                                                                                                       |
+| `providers.tinyModel`               | enum    | `online`  | `online` or a local model (`lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`).                                                                                                                                                                                                                                                                                                                                                              |
+| `providers.tinyModelDevice`         | enum    | `default` | ONNX execution provider, or `mlx` (Apple silicon, via mlx-lm), for local tiny models. Overridden by `PI_TINY_DEVICE`.                                                                                                                                                                                                                                                                                                                                                         |
+| `providers.maxInFlightRequests`     | record  | `{}`      | Positive per-provider concurrency limits for LLM HTTP requests, shared across local `omp` processes using the same config root. Omitted providers are unlimited. `omp config set` rejects non-positive or non-numeric values.                                                                                                                                                                                                          |
+| `providers.tinyModelDtype`          | enum    | `default` | ONNX precision for local tiny models. Overridden by `PI_TINY_DTYPE`.                                                                                                                                                                                                                                                                                                                                                                   |
+| `providers.openaiWebsockets`        | enum    | `auto`    | `auto`, `off`, `on`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `providers.openrouterVariant`       | enum    | `default` | `default`, `nitro`, `floor`, `online`, `exacto`.                                                                                                                                                                                                                                                                                                                                                                                       |
+| `providers.kimiApiFormat`           | enum    | `auto`    | `auto`, `openai`, `anthropic`. `auto` follows live model metadata.                                                                                                                                                                                                                                                                                                                                                                     |
+| `providers.cacheRetention`          | enum    | `auto`    | `auto`, `short`, `long`, `none`. Prompt-cache retention forwarded to providers that support it. `auto` keeps provider defaults (Anthropic: 1h entries on OAuth subscriber sessions, 5m entries plus idle keep-alive refreshes on API keys) and honors `PI_CACHE_RETENTION`; `short` forces 5m; `long` uses 1h TTLs where supported and disables keep-alive refreshes; `none` disables prompt caching and cache-affinity routing.         |
+| `provider.appendOnlyContext`        | enum    | `auto`    | `auto`, `on`, `off`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `exa.enabled`                       | boolean | `true`    | Enable the Exa web search provider.                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `exa.searchDelayMs`                 | number  | `1000`    | Minimum delay between Exa web search requests in milliseconds; set `0` to disable pacing.                                                                                                                                                                                                                                                                                                                                               |
+| `searxng.endpoint`                  | string  | _(unset)_ | SearXNG instance URL.                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `searxng.token`                     | string  | _(unset)_ | SearXNG token; also `searxng.basicUsername`/`searxng.basicPassword`/`searxng.categories`/`searxng.language`/`searxng.engines` (comma-separated engine names or bang shortcuts, e.g. `ddg, br, startpage`, sent as the API's `engines=` parameter)/`searxng.safesearch`.                                                                                                                                                                                                                                                                                                 |
+| `auth.broker.url`                   | string  | _(unset)_ | Auth-broker URL. Overridden by `OMP_AUTH_BROKER_URL`.                                                                                                                                                                                                                                                                                                                                                                                  |
+| `auth.broker.token`                 | string  | _(unset)_ | Auth-broker token. Overridden by `OMP_AUTH_BROKER_TOKEN`.                                                                                                                                                                                                                                                                                                                                                                              |
+| `secrets.enabled`                   | boolean | `false`   | Enable configured secret obfuscation and built-in credential-shaped token redaction before provider requests. See [Secret obfuscation](./secrets.md).                                                                                                                                                                                                                                                                                  |
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
@@ -816,17 +817,17 @@ After either main YAML file exists, these legacy sources are no longer consulted
 
 Applied whenever raw settings are loaded (global, project, overlays, and runtime overrides):
 
-| Old                                                                   | New                                                                                                          |
-| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `inspect_image.enabled` / `inspect_image.mode`                        | removed                                                                                                      |
-| `inspect_image.timeoutMs`                                             | `images.questionTimeoutMs`                                                                                   |
-| `queueMode`                                                           | `steeringMode`                                                                                               |
-| flat `theme: "<name>"` string                                         | `theme.dark` / `theme.light` (slot chosen by luminance; built-in `light`/`dark` are dropped to use defaults) |
-| legacy `task.isolation.mode: none`                                    | `task.isolation.enabled: false`                                                                              |
-| legacy `task.isolation.mode: <backend>`                               | `task.isolation.enabled: true` + `isolation.backend: <backend>`                                              |
-| `task.simple`                                                         | removed                                                                                                      |
-| legacy isolation backends (`worktree`, `fuse-overlay`, `fuse-projfs`) | `rcopy`, `overlayfs`, `projfs`                                                                               |
-| `lastChangelogVersion`                                                | moved to a marker file and stripped from `config.yml`                                                        |
+| Old                                                                      | New                                                                                                          |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `inspect_image.enabled` / `inspect_image.mode`                           | removed                                                                                                      |
+| `inspect_image.timeoutMs`                                                | `images.questionTimeoutMs`                                                                                   |
+| `queueMode`                                                              | `steeringMode`                                                                                               |
+| flat `theme: "<name>"` string                                            | `theme.dark` / `theme.light` (slot chosen by luminance; built-in `light`/`dark` are dropped to use defaults) |
+| legacy `task.isolation.mode: none`                                       | `task.isolation.enabled: false`                                                                              |
+| legacy `task.isolation.mode: <backend>`                                  | `task.isolation.enabled: true` + `isolation.backend: <backend>`                                              |
+| `task.simple`                                                            | removed                                                                                                      |
+| legacy isolation backends (`worktree`, `fuse-overlay`, `fuse-projfs`)    | `rcopy`, `overlayfs`, `projfs`                                                                               |
+| `lastChangelogVersion`                                                   | moved to a marker file and stripped from `config.yml`                                                        |
 
 ## Troubleshooting
 

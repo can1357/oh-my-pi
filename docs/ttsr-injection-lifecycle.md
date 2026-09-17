@@ -24,11 +24,15 @@ At session creation, `createAgentSession()` loads discovered rules, constructs a
 const ttsrSettings = settings.getGroup("ttsr");
 const ttsrManager = new TtsrManager(ttsrSettings);
 const rulesResult = await loadCapability<Rule>(ruleCapability.id, { cwd });
-const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
-	builtinRules: ttsrSettings.builtinRules,
-	disabledRules: ttsrSettings.disabledRules,
-	agentName: resolvedAgentName,
-});
+const { rulebookRules, alwaysApplyRules } = bucketRules(
+  rulesResult.items,
+  ttsrManager,
+  {
+    builtinRules: ttsrSettings.builtinRules,
+    disabledRules: ttsrSettings.disabledRules,
+    agentName: resolvedAgentName,
+  },
+);
 ```
 
 `bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded builtin-defaults rules when `ttsr.builtinRules === false`, drops rules whose `agents` globs do not match this session's agent, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
@@ -150,12 +154,12 @@ Non-interrupting matches split by `matchContext.source`:
 
 - **`source === "tool"` (tool-source match).** The rule is bucketed into `TtsrCoordinator.#perToolInjections`, keyed by the matched tool call's `id`, and marked injected in memory immediately. There is **no** deferred follow-up turn and the stream is not aborted. When the tool actually produces a result, the `afterToolCall` hook prepends a rendered `ttsr-tool-reminder.md` block to `ctx.result.content` (a single `text` block inserted ahead of the tool's own content) and persists a `ttsr_injection` entry with the consumed rule names. The template payload is:
 
-   ```xml
-   <system-reminder reason="rule_violation" rule="{{name}}" path="{{path}}">
-   ...
-   {{content}}
-   </system-reminder>
-   ```
+  ```xml
+  <system-reminder reason="rule_violation" rule="{{name}}" path="{{path}}">
+  ...
+  {{content}}
+  </system-reminder>
+  ```
 
 - **`source === "text"` / `"thinking"` (prose-source match).** The rule is queued in the pending injections. After a successful non-error, non-aborted assistant message, `TtsrCoordinator` queues the hidden `ttsr-injection` custom message with `agent.followUp()` and schedules continuation after 1ms. These deferred non-interrupting prose matches do not emit `ttsr_triggered`; that event is emitted for actual interrupt paths and for non-interrupting per-tool reminders.
 

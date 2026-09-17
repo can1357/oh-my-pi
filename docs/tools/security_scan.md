@@ -23,30 +23,30 @@
 
 ## Inputs
 
-| Field                    | Type                                                                                                                               | Used by                                | Description                                                                                                                                |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `action`                 | `"preflight" \| "start" \| "status" \| "cancel" \| "validate" \| "cloud_scans" \| "cloud_start" \| "cloud_status" \| "cloud_pull"` | All                                    | Required dispatch selector.                                                                                                                |
-| `plan_id`                | `string`                                                                                                                           | `start`                                | Plan ID returned by `preflight`.                                                                                                           |
-| `operation_id`           | `string`                                                                                                                           | `status`, `cancel`                     | Operation ID returned by `start`.                                                                                                          |
-| `target_kind`            | `"repository" \| "scoped_path" \| "ref_diff" \| "working_tree"`                                                                    | `preflight`                            | Defaults to `repository`.                                                                                                                  |
-| `include_paths`          | `string[]`                                                                                                                         | `preflight`                            | Repository-relative paths included in the immutable scope. At least one nonblank value is required for `scoped_path`.                      |
-| `exclude_paths`          | `string[]`                                                                                                                         | `preflight`                            | Repository-relative paths removed from the scope. Exclusion wins over inclusion.                                                           |
-| `base_revision`          | `string`                                                                                                                           | `preflight` with `ref_diff`            | Required with `head_revision`; resolved to a commit during preflight.                                                                      |
-| `head_revision`          | `string`                                                                                                                           | `preflight` with `ref_diff`            | Required with `base_revision`; resolved to a commit during preflight.                                                                      |
-| `knowledge_base_paths`   | `string[]`                                                                                                                         | `preflight`                            | Files resolved relative to the repository root, canonicalized, and pinned by SHA-256 and size.                                             |
-| `output_root`            | `string`                                                                                                                           | `preflight`                            | Optional external result directory. It must be outside the repository, canonical, non-symlinked, and empty unless `archive_existing=true`. |
-| `archive_existing`       | `boolean`                                                                                                                          | `preflight`                            | Defaults to `false`. Allows a nonempty output directory to be renamed to `<output_root>.archive-<scan-id>` when execution begins.          |
-| `credential_id`          | positive integer                                                                                                                   | Native `preflight`; every cloud action | Pins one OAuth credential. Native scans select it for the active model provider; cloud actions select it for `openai-codex`.               |
-| `scan_id`                | `string`                                                                                                                           | `validate`                             | Stored scan containing the finding.                                                                                                        |
-| `finding_id`             | `string`                                                                                                                           | `validate`                             | Stored finding to update.                                                                                                                  |
-| `validation_status`      | `"unvalidated" \| "validated" \| "rejected" \| "partial" \| "error"`                                                               | `validate`                             | New validation state.                                                                                                                      |
-| `validation_summary`     | `string`                                                                                                                           | `validate`                             | Required, nonblank validation explanation.                                                                                                 |
-| `validation_evidence`    | `{label: string, explanation: string}[]`                                                                                           | `validate`                             | Optional evidence appended as validation evidence; labels must be nonempty.                                                                |
-| `cloud_configuration_id` | `string`                                                                                                                           | `cloud_status`, `cloud_pull`           | Codex Security cloud configuration ID.                                                                                                     |
-| `repository_id`          | `string`                                                                                                                           | `cloud_start`                          | Required cloud repository identifier.                                                                                                      |
-| `repository_url`         | `string`                                                                                                                           | `cloud_start`                          | Required cloud repository URL.                                                                                                             |
-| `environment_id`         | `string`                                                                                                                           | `cloud_start`                          | Required cloud environment identifier.                                                                                                     |
-| `lookback_days`          | positive integer or `"all"`                                                                                                        | `cloud_start`                          | Defaults to `30`; `"all"` sends an unlimited lookback.                                                                                     |
+| Field | Type | Used by | Description |
+| --- | --- | --- | --- |
+| `action` | `"preflight" \| "start" \| "status" \| "cancel" \| "validate" \| "cloud_scans" \| "cloud_start" \| "cloud_status" \| "cloud_pull"` | All | Required dispatch selector. |
+| `plan_id` | `string` | `start` | Plan ID returned by `preflight`. |
+| `operation_id` | `string` | `status`, `cancel` | Operation ID returned by `start`. |
+| `target_kind` | `"repository" \| "scoped_path" \| "ref_diff" \| "working_tree"` | `preflight` | Defaults to `repository`. |
+| `include_paths` | `string[]` | `preflight` | Repository-relative paths included in the immutable scope. At least one nonblank value is required for `scoped_path`. |
+| `exclude_paths` | `string[]` | `preflight` | Repository-relative paths removed from the scope. Exclusion wins over inclusion. |
+| `base_revision` | `string` | `preflight` with `ref_diff` | Required with `head_revision`; resolved to a commit during preflight. |
+| `head_revision` | `string` | `preflight` with `ref_diff` | Required with `base_revision`; resolved to a commit during preflight. |
+| `knowledge_base_paths` | `string[]` | `preflight` | Files resolved relative to the repository root, canonicalized, and pinned by SHA-256 and size. |
+| `output_root` | `string` | `preflight` | Optional external result directory. It must be outside the repository, canonical, non-symlinked, and empty unless `archive_existing=true`. |
+| `archive_existing` | `boolean` | `preflight` | Defaults to `false`. Allows a nonempty output directory to be renamed to `<output_root>.archive-<scan-id>` when execution begins. |
+| `credential_id` | positive integer | Native `preflight`; every cloud action | Pins one OAuth credential. Native scans select it for the active model provider; cloud actions select it for `openai-codex`. |
+| `scan_id` | `string` | `validate` | Stored scan containing the finding. |
+| `finding_id` | `string` | `validate` | Stored finding to update. |
+| `validation_status` | `"unvalidated" \| "validated" \| "rejected" \| "partial" \| "error"` | `validate` | New validation state. |
+| `validation_summary` | `string` | `validate` | Required, nonblank validation explanation. |
+| `validation_evidence` | `{label: string, explanation: string}[]` | `validate` | Optional evidence appended as validation evidence; labels must be nonempty. |
+| `cloud_configuration_id` | `string` | `cloud_status`, `cloud_pull` | Codex Security cloud configuration ID. |
+| `repository_id` | `string` | `cloud_start` | Required cloud repository identifier. |
+| `repository_url` | `string` | `cloud_start` | Required cloud repository URL. |
+| `environment_id` | `string` | `cloud_start` | Required cloud environment identifier. |
+| `lookback_days` | positive integer or `"all"` | `cloud_start` | Defaults to `30`; `"all"` sends an unlimited lookback. |
 
 Unused optional fields are ignored by actions that do not read them.
 
@@ -182,18 +182,18 @@ Directories are hardened to mode `0700` and files to `0600` on non-Windows platf
 
 The `security://` namespace is immutable and project-scoped:
 
-| URL                                                | Result                                                  |
-| -------------------------------------------------- | ------------------------------------------------------- |
-| `security://`                                      | Namespace index.                                        |
-| `security://scans`                                 | Stored scan list.                                       |
-| `security://scans/<scan-id>`                       | Scan summary and child-resource index.                  |
-| `security://scans/<scan-id>/manifest`              | Public manifest JSON, including the plan.               |
-| `security://scans/<scan-id>/findings`              | Finding list.                                           |
+| URL | Result |
+| --- | --- |
+| `security://` | Namespace index. |
+| `security://scans` | Stored scan list. |
+| `security://scans/<scan-id>` | Scan summary and child-resource index. |
+| `security://scans/<scan-id>/manifest` | Public manifest JSON, including the plan. |
+| `security://scans/<scan-id>/findings` | Finding list. |
 | `security://scans/<scan-id>/findings/<finding-id>` | Rendered finding, locations, evidence, and remediation. |
-| `security://scans/<scan-id>/coverage`              | Coverage JSON.                                          |
-| `security://scans/<scan-id>/report`                | Markdown report, when present.                          |
-| `security://scans/<scan-id>/sarif`                 | SARIF JSON, when present.                               |
-| `security://scans/<scan-id>/provenance`            | Redacted provenance JSON.                               |
+| `security://scans/<scan-id>/coverage` | Coverage JSON. |
+| `security://scans/<scan-id>/report` | Markdown report, when present. |
+| `security://scans/<scan-id>/sarif` | SARIF JSON, when present. |
+| `security://scans/<scan-id>/provenance` | Redacted provenance JSON. |
 
 Use `security_scan` actions or explicit security commands for mutations; URI reads never validate, import, cancel, or otherwise modify state.
 
@@ -202,22 +202,22 @@ Use `security_scan` actions or explicit security commands for mutations; URI rea
 Plan and launch a repository scan:
 
 ```json
-{ "action": "preflight", "target_kind": "repository", "exclude_paths": ["vendor", "dist"] }
+{"action":"preflight","target_kind":"repository","exclude_paths":["vendor","dist"]}
 ```
 
 ```json
-{ "action": "start", "plan_id": "secplan_<id>" }
+{"action":"start","plan_id":"secplan_<id>"}
 ```
 
 Plan an exact revision diff with an external output directory:
 
 ```json
 {
-	"action": "preflight",
-	"target_kind": "ref_diff",
-	"base_revision": "origin/main",
-	"head_revision": "HEAD",
-	"output_root": "/tmp/omp-security-review"
+  "action": "preflight",
+  "target_kind": "ref_diff",
+  "base_revision": "origin/main",
+  "head_revision": "HEAD",
+  "output_root": "/tmp/omp-security-review"
 }
 ```
 
@@ -225,12 +225,14 @@ Validate a finding:
 
 ```json
 {
-	"action": "validate",
-	"scan_id": "secscan_<id>",
-	"finding_id": "secfinding_<id>",
-	"validation_status": "validated",
-	"validation_summary": "Reproduced with an untrusted archive entry.",
-	"validation_evidence": [{ "label": "Reproduction", "explanation": "The entry writes outside the extraction root." }]
+  "action": "validate",
+  "scan_id": "secscan_<id>",
+  "finding_id": "secfinding_<id>",
+  "validation_status": "validated",
+  "validation_summary": "Reproduced with an untrusted archive entry.",
+  "validation_evidence": [
+    {"label":"Reproduction","explanation":"The entry writes outside the extraction root."}
+  ]
 }
 ```
 
@@ -238,17 +240,17 @@ Explicitly start and later import a cloud scan:
 
 ```json
 {
-	"action": "cloud_start",
-	"repository_id": "repo_<id>",
-	"repository_url": "https://github.com/owner/repo",
-	"environment_id": "env_<id>",
-	"lookback_days": 30,
-	"credential_id": 7
+  "action": "cloud_start",
+  "repository_id": "repo_<id>",
+  "repository_url": "https://github.com/owner/repo",
+  "environment_id": "env_<id>",
+  "lookback_days": 30,
+  "credential_id": 7
 }
 ```
 
 ```json
-{ "action": "cloud_pull", "cloud_configuration_id": "scan_<id>", "credential_id": 7 }
+{"action":"cloud_pull","cloud_configuration_id":"scan_<id>","credential_id":7}
 ```
 
 ## Errors and constraints

@@ -1,17 +1,17 @@
 {
+	"type": "module",
 	"name": "@oh-my-pi/browser-relay",
 	"version": "0.1.0",
 	"private": true,
 	"description": "Chrome extension that lets the omp browser tool drive your existing tabs (relay server lives in the omp CLI: `omp browser-relay`)",
 	"homepage": "https://omp.sh",
-	"license": "MIT",
 	"author": "Stencil Labs, Inc.",
+	"license": "MIT",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/can1357/oh-my-pi.git",
 		"directory": "packages/browser-relay"
 	},
-	"type": "module",
 	"scripts": {
 		"build": "bun scripts/build-extension.ts",
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",

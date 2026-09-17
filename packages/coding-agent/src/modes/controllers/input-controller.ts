@@ -25,6 +25,7 @@ import { chipLabel, compactImageMarkers, shiftImageMarkers } from "../../modes/c
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { materializeImageReferenceLinks, setCachedImageDimensions } from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
+import { createModelMentionSource } from "../model-mention-autocomplete";
 import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
 import type { InteractiveModeContext } from "../../modes/types";
@@ -1331,6 +1332,15 @@ export class InputController {
 			postmortem.exitProcess(130); // 128 + SIGINT
 		}
 
+		// A graceful close already failed at the memoized dispose stage (#12238),
+		// so re-running it can only re-fail. The user was told one more Ctrl+C
+		// exits; honour that with a single press — skip the double-tap gate below
+		// and let shutdown() take its force-quit escape hatch.
+		if (this.ctx.teardownFailed) {
+			void this.ctx.shutdown();
+			return;
+		}
+
 		const now = Date.now();
 		if (now - this.ctx.lastSigintTime < 500) {
 			void this.ctx.shutdown();
@@ -2251,6 +2261,11 @@ export class InputController {
 			commands,
 			basePath,
 			commandUsage: getSlashCommandUsage,
+			modelMentions: createModelMentionSource({
+				settings: this.ctx.settings,
+				registry: this.ctx.session.modelRegistry,
+				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
+			}),
 			// This TUI host uses the default registry; the receiving session can change with focus.
 			internalUrlCaller: () => {
 				const manager = this.ctx.viewSession.sessionManager;

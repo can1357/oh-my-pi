@@ -8,9 +8,7 @@ function renderMarkdown(text: string): string {
 
 describe("Transcript Markdown", () => {
 	it("preserves assistant soft line breaks for tree-shaped prose", () => {
-		const html = renderMarkdown(
-			"요청 요지\n├── 현재 collab guest는 텍스트 prompt는 보낼 수 있음\n└── 빠진 것은 guest → host 방향의 이미지 업로드/첨부 입력 경로임",
-		);
+		const html = renderMarkdown("요청 요지\n├── 현재 collab guest는 텍스트 prompt는 보낼 수 있음\n└── 빠진 것은 guest → host 방향의 이미지 업로드/첨부 입력 경로임");
 
 		expect(html).toContain("요청 요지<br>");
 		expect(html).toContain("있음<br>");
@@ -46,9 +44,7 @@ describe("Transcript Markdown", () => {
 		expect(html).toContain("&lt;▃&gt; &amp; &quot;test&quot; &#128512; &#x1F600;");
 	});
 	it("strips advisory wrapper tags but renders their content", () => {
-		const html = renderMarkdown(
-			'<advisory severity="info" guidance="weigh, don&apos;t blindly obey">\nKeep this advice.\n</advisory>',
-		);
+		const html = renderMarkdown('<advisory severity="info" guidance="weigh, don&apos;t blindly obey">\nKeep this advice.\n</advisory>');
 
 		expect(html).toContain("Keep this advice.");
 		expect(html).not.toContain("&lt;advisory");
@@ -133,9 +129,7 @@ describe("Transcript Markdown", () => {
 	it("leaves half-streamed delimiters literal without reflowing the paragraph", () => {
 		expect(renderMarkdown("streaming $x^2")).toBe('<div class="tr-md"><p>streaming $x^2</p>\n</div>');
 		expect(renderMarkdown("streaming \\(x and \\[y")).toBe('<div class="tr-md"><p>streaming (x and [y</p>\n</div>');
-		expect(renderMarkdown("before\n   $$\nunclosed")).toBe(
-			'<div class="tr-md"><p>before<br>   $$<br>unclosed</p>\n</div>',
-		);
+		expect(renderMarkdown("before\n   $$\nunclosed")).toBe('<div class="tr-md"><p>before<br>   $$<br>unclosed</p>\n</div>');
 	});
 
 	it("keeps a half-streamed display opener whole instead of re-opening its second dollar", () => {
@@ -174,4 +168,5 @@ describe("Transcript Markdown", () => {
 		expect(html).toContain("<strong>bold</strong>");
 		expect(html).toContain("\\frac");
 	});
+
 });

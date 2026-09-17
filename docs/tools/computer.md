@@ -26,12 +26,12 @@ User setup, permissions, safety guidance, examples, and platform limitations: [S
 
 ## Settings
 
-| Setting              | Type    | Default | Contract                                                  |
-| -------------------- | ------- | ------: | --------------------------------------------------------- |
-| `computer.enabled`   | boolean | `false` | Enable the Eval prelude.                                  |
-| `computer.display`   | string  |   `all` | Composite every display, or select one native display ID. |
-| `computer.maxWidth`  | number  |  `3840` | Maximum screenshot width.                                 |
-| `computer.maxHeight` | number  |  `2400` | Maximum screenshot height.                                |
+| Setting | Type | Default | Contract |
+|---|---|---:|---|
+| `computer.enabled` | boolean | `false` | Enable the Eval prelude. |
+| `computer.display` | string | `all` | Composite every display, or select one native display ID. |
+| `computer.maxWidth` | number | `3840` | Maximum screenshot width. |
+| `computer.maxHeight` | number | `2400` | Maximum screenshot height. |
 
 There is no `computer.backend` setting. The native addon selects the platform backend.
 

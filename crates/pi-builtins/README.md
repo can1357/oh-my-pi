@@ -49,11 +49,11 @@ Utilities that are genuinely async — `sleep`, `timeout`, `ps`, `top`, `pgrep`,
 
 Three entry points, so the embedding shell decides what to install:
 
-| Function                | Contents                                                               |
-| ----------------------- | ---------------------------------------------------------------------- |
-| `default_builtins(set)` | The POSIX/bash builtins, per `BuiltinSet`.                             |
-| `utility_builtins()`    | The coreutils-style commands, which shadow system binaries.            |
-| `process_builtins()`    | `ps`, `top`, `pgrep`, `pkill`, `pidwait`, `sleep`, `timeout`, `nohup`. |
+| Function | Contents |
+| --- | --- |
+| `default_builtins(set)` | The POSIX/bash builtins, per `BuiltinSet`. |
+| `utility_builtins()` | The coreutils-style commands, which shadow system binaries. |
+| `process_builtins()` | `ps`, `top`, `pgrep`, `pkill`, `pidwait`, `sleep`, `timeout`, `nohup`. |
 
 Every command is behind a cargo feature (`builtin.<name>`, `util.<name>`), so a
 single one can be built and tested in isolation:

@@ -21,18 +21,18 @@ saveTextLockfile = true
 # loop, exhausts file descriptors, and every test that pipes a child process's
 # stdio fails with empty output or EPIPE.
 pathIgnorePatterns = [
-	"**/node_modules/**",
-	"**/.git/**",
-	"**/target/**",
-	"**/dist/**",
-	"python/**",
-	"docs/**",
-	"runs/**",
-	"python/robomp/data/**",
-	".wt/**",
-	".worktrees/**",
-	"bazel-*/**",
-	"**/bazel-out/**",
+  "**/node_modules/**",
+  "**/.git/**",
+  "**/target/**",
+  "**/dist/**",
+  "python/**",
+  "docs/**",
+  "runs/**",
+  "python/robomp/data/**",
+  ".wt/**",
+  ".worktrees/**",
+  "bazel-*/**",
+  "**/bazel-out/**",
 ]
 
 [run]

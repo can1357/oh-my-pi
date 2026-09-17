@@ -2773,9 +2773,10 @@ export class TUI extends Container {
 		const pendingAltExit = this.#pendingAltExit;
 		let buffer = this.#paintBeginSequence + pendingAltExit;
 		if (destructiveReset && TERMINAL.imageProtocol === ImageProtocol.Kitty) {
-			// ED2/ED3 erase text cells but leave Kitty graphics visible. A reset is
-			// explicitly destructive, so remove every placement—not only the ones
-			// this TUI tracked—then resend images composed for the clean replay.
+			// A reset is explicitly destructive, so remove every placement—not only
+			// the ones this TUI tracked—then resend images composed for the clean
+			// replay. ED2 below reclaims the rest, but only on terminals that treat
+			// an erase as a graphics clear; the explicit delete covers the others.
 			buffer += encodeKittyDeleteAllImages();
 			// `d=A` spares virtual placements, and erasing the placeholder text it
 			// leaves behind does not remove the prototype either. The ids this
@@ -2789,7 +2790,6 @@ export class TUI extends Container {
 		} else {
 			this.#imageBudget.takePurgeIds();
 		}
-		for (const sequence of this.#imageBudget.takeTransmits()) buffer += sequence;
 		// ED2 MUST precede ED3: tmux implements ED2 by scrolling the live screen
 		// into pane history (so cleared content stays reachable), so erasing
 		// history first would let ED2 refill it with a copy of the old screen —
@@ -2797,7 +2797,16 @@ export class TUI extends Container {
 		// ED2-then-ED3 clears the screen, then wipes history including that
 		// push. On xterm-family terminals the two erases are independent and
 		// the order is irrelevant.
+		//
+		// Both erases MUST precede the image transmits. kitty and Ghostty treat
+		// ED2 as a graphics clear that also frees every image left without a
+		// placement — which is exactly what freshly transmitted data is until
+		// the row carrying its placement is written. Transmitting first let the
+		// erase reclaim the data, so the replay's placements then referenced an
+		// image the terminal no longer had and every inline image vanished
+		// after a settled width resize.
 		if (destructiveReset) buffer += "\x1b[H\x1b[2J\x1b[3J";
+		for (const sequence of this.#imageBudget.takeTransmits()) buffer += sequence;
 		const diffable =
 			geometryStable &&
 			historyRows.length === 0 &&

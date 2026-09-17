@@ -60,15 +60,15 @@ A custom provider's `apiKey` is resolved as **environment-variable-name-or-liter
 ```yaml
 # ~/.omp/agent/models.yml
 providers:
-   my-gateway:
-      baseUrl: https://gateway.example.com/v1
-      api: openai-completions
-      apiKey: MY_GATEWAY_API_KEY # reads this env var if set, else literal text
-      models:
-         - id: claude-sonnet
-           name: Claude Sonnet via Gateway
-           contextWindow: 200000
-           maxTokens: 8192
+  my-gateway:
+    baseUrl: https://gateway.example.com/v1
+    api: openai-completions
+    apiKey: MY_GATEWAY_API_KEY # reads this env var if set, else literal text
+    models:
+      - id: claude-sonnet
+        name: Claude Sonnet via Gateway
+        contextWindow: 200000
+        maxTokens: 8192
 ```
 
 If `authHeader: true` is set on a custom provider, the resolved key is injected as an `Authorization: Bearer <key>` header on every request to that provider.
@@ -98,62 +98,62 @@ Each provider has one or more environment variables that supply a key when no st
 
 ### Additional hosted providers
 
-| Provider ID                      | Environment variable(s)                                                             |
-| -------------------------------- | ----------------------------------------------------------------------------------- |
-| `aiand`                          | `AIAND_API_KEY`                                                                     |
-| `cerebras`                       | `CEREBRAS_API_KEY`                                                                  |
-| `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`                     |
-| `baseten`                        | `BASETEN_API_KEY`                                                                   |
-| `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK`                                                          |
-| `deepinfra`                      | `DEEPINFRA_API_KEY`                                                                 |
-| `deepseek`                       | `DEEPSEEK_API_KEY`                                                                  |
-| `siliconflow`                    | `SILICONFLOW_API_KEY`                                                               |
-| `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                            |
-| `fireworks`                      | `FIREWORKS_API_KEY`                                                                 |
-| `together`                       | `TOGETHER_API_KEY`                                                                  |
-| `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                           |
-| `nvidia`                         | `NVIDIA_API_KEY`                                                                    |
-| `devin`                          | `DEVIN_API_KEY`                                                                     |
-| `gmi-cloud`                      | `GMI_API_KEY`                                                                       |
-| `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                            |
-| `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                             |
-| `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                                |
-| `nanogpt`                        | `NANO_GPT_API_KEY`                                                                  |
-| `novita`                         | `NOVITA_API_KEY`                                                                    |
-| `venice`                         | `VENICE_API_KEY`                                                                    |
-| `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery)       |
+| Provider ID                      | Environment variable(s)                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------- |
+| `aiand`                          | `AIAND_API_KEY`                                                               |
+| `cerebras`                       | `CEREBRAS_API_KEY`                                                            |
+| `alibaba-token-plan`             | `ALIBABA_TOKEN_PLAN_API_KEY`, then `BAILIAN_TOKEN_PLAN_API_KEY`               |
+| `baseten`                        | `BASETEN_API_KEY`                                                             |
+| `bedrock-mantle`                 | `AWS_BEARER_TOKEN_BEDROCK`                                                    |
+| `deepinfra`                      | `DEEPINFRA_API_KEY`                                                           |
+| `deepseek`                       | `DEEPSEEK_API_KEY`                                                            |
+| `siliconflow`                    | `SILICONFLOW_API_KEY`                                                         |
+| `siliconflow-cn`                 | `SILICONFLOW_CN_API_KEY`                                                      |
+| `fireworks`                      | `FIREWORKS_API_KEY`                                                           |
+| `together`                       | `TOGETHER_API_KEY`                                                            |
+| `coreweave`                      | `COREWEAVE_API_KEY`, then `WANDB_API_KEY`                                     |
+| `nvidia`                         | `NVIDIA_API_KEY`                                                              |
+| `devin`                          | `DEVIN_API_KEY`                                                               |
+| `gmi-cloud`                      | `GMI_API_KEY`                                                                 |
+| `huggingface`                    | `HUGGINGFACE_HUB_TOKEN`, then `HF_TOKEN`                                      |
+| `moonshot`                       | `MOONSHOT_API_KEY`, then `KIMI_API_KEY`                                       |
+| `meta`                           | `MODEL_API_KEY`, then `META_API_KEY`                                          |
+| `nanogpt`                        | `NANO_GPT_API_KEY`                                                            |
+| `novita`                         | `NOVITA_API_KEY`                                                              |
+| `venice`                         | `VENICE_API_KEY`                                                              |
+| `vercel-ai-gateway`              | `AI_GATEWAY_API_KEY` (also `VERCEL_AI_GATEWAY_API_KEY` for catalog discovery) |
 | `cloudflare-ai-gateway`          | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
-| `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint               |
-| `kilo`                           | `KILO_API_KEY`                                                                      |
-| `zai`                            | `ZAI_API_KEY`                                                                       |
-| `zenmux`                         | `ZENMUX_API_KEY`                                                                    |
-| `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                                     |
-| `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                      |
-| `qianfan`                        | `QIANFAN_API_KEY`                                                                   |
-| `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                      |
-| `synthetic`                      | `SYNTHETIC_API_KEY`                                                                 |
-| `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                              |
-| `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                           |
-| `minimax`                        | `MINIMAX_API_KEY`                                                                   |
-| `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                       |
-| `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                               |
-| `aimlapi`                        | `AIMLAPI_API_KEY`                                                                   |
-| `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                      |
-| `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                                  |
-| `cline-pass`                     | `CLINE_API_KEY`                                                                     |
-| `firepass`                       | `FIREPASS_API_KEY`                                                                  |
-| `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                          |
-| `xiaomi`                         | `XIAOMI_API_KEY`                                                                    |
-| `xiaomi-token-plan-ams`          | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`                                                     |
-| `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                      |
-| `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                                     |
-| `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                              |
-| `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)                  |
-| `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                                  |
-| `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                            |
-| `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                       |
-| `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                                 |
-| `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                         |
+| `litellm`                        | `LITELLM_API_KEY`; optional `LITELLM_BASE_URL` for the proxy endpoint         |
+| `kilo`                           | `KILO_API_KEY`                                                                |
+| `zai`                            | `ZAI_API_KEY`                                                                 |
+| `zenmux`                         | `ZENMUX_API_KEY`                                                              |
+| `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                               |
+| `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                |
+| `qianfan`                        | `QIANFAN_API_KEY`                                                             |
+| `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                |
+| `synthetic`                      | `SYNTHETIC_API_KEY`                                                           |
+| `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                        |
+| `minimax-code-cn`                | `MINIMAX_CODE_CN_API_KEY`                                                     |
+| `minimax`                        | `MINIMAX_API_KEY`                                                             |
+| `alibaba-coding-plan`            | `ALIBABA_CODING_PLAN_API_KEY`                                                 |
+| `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                         |
+| `aimlapi`                        | `AIMLAPI_API_KEY`                                                             |
+| `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
+| `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
+| `cline-pass`                     | `CLINE_API_KEY`                                                               |
+| `firepass`                       | `FIREPASS_API_KEY`                                                            |
+| `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
+| `xiaomi`                         | `XIAOMI_API_KEY`                                                              |
+| `xiaomi-token-plan-ams`          | `XIAOMI_TOKEN_PLAN_AMS_API_KEY`                                               |
+| `xiaomi-token-plan-cn`           | `XIAOMI_TOKEN_PLAN_CN_API_KEY`                                                |
+| `xiaomi-token-plan-sgp`          | `XIAOMI_TOKEN_PLAN_SGP_API_KEY`                                               |
+| `ollama-cloud`                   | `OLLAMA_CLOUD_API_KEY`                                                        |
+| `ollama`                         | `OLLAMA_API_KEY` (optional; local discovery is keyless by default)            |
+| `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
+| `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
+| `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
+| `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
+| `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
 
@@ -213,10 +213,10 @@ Use the `disabledProviders` setting to remove a provider's models from selection
 ```yaml
 # ~/.omp/agent/config.yml or <project>/.omp/config.yml
 disabledProviders:
-   - anthropic
-   - openai
-   - google
-   - groq
+  - anthropic
+  - openai
+  - google
+  - groq
 ```
 
 Provider IDs are matched exactly. Disable `google` to hide the Google Gemini API provider; the OAuth-backed Google providers `google-gemini-cli` and `google-antigravity` are separate IDs and must be disabled individually. Disable `ollama`, `llama.cpp`, or `lm-studio` to stop local discovery for that engine.
@@ -238,8 +238,8 @@ Project settings live in `<project>/.omp/config.yml`. Use them when one reposito
 ```yaml
 # <project>/.omp/config.yml
 disabledProviders:
-   - openai
-   - openrouter
+  - openai
+  - openrouter
 ```
 
 Settings arrays are **replaced** wholesale by the higher-precedence layer, not merged or appended. If the global file disables three providers and the project file disables one, the project sees only the project list:
@@ -247,13 +247,13 @@ Settings arrays are **replaced** wholesale by the higher-precedence layer, not m
 ```yaml
 # ~/.omp/agent/config.yml
 disabledProviders:
-   - anthropic
-   - openai
-   - google
+  - anthropic
+  - openai
+  - google
 
 # <project>/.omp/config.yml
 disabledProviders:
-   - groq
+  - groq
 ```
 
 Effective result inside the project:
@@ -270,16 +270,16 @@ The project array re-enables `anthropic`, `openai`, and `google` for sessions la
 
 ```yaml
 disabledProviders:
-   - ollama
-   - path: ~/projects/sensitive
-     providers:
-        - anthropic
-        - openai
-   - paths:
-        - ~/work/client-a
-        - ~/work/client-b
-     values:
-        - openrouter
+  - ollama
+  - path: ~/projects/sensitive
+    providers:
+      - anthropic
+      - openai
+  - paths:
+      - ~/work/client-a
+      - ~/work/client-b
+    values:
+      - openrouter
 ```
 
 - Bare string entries always apply.
@@ -317,15 +317,15 @@ Minimal OpenAI-compatible provider:
 
 ```yaml
 providers:
-   my-openai-compatible:
-      baseUrl: https://api.example.com/v1
-      api: openai-completions
-      apiKey: MY_OPENAI_COMPATIBLE_KEY # env-var-name or literal
-      models:
-         - id: fast-chat
-           name: Fast Chat
-           contextWindow: 128000
-           maxTokens: 8192
+  my-openai-compatible:
+    baseUrl: https://api.example.com/v1
+    api: openai-completions
+    apiKey: MY_OPENAI_COMPATIBLE_KEY # env-var-name or literal
+    models:
+      - id: fast-chat
+        name: Fast Chat
+        contextWindow: 128000
+        maxTokens: 8192
 ```
 
 ### Zhipu BigModel account-balance keys
@@ -336,13 +336,13 @@ Use a custom provider for an API key issued from a standard BigModel account bal
 
 ```yaml
 providers:
-   bigmodel:
-      baseUrl: https://open.bigmodel.cn/api/paas/v4
-      api: openai-completions
-      apiKey: BIGMODEL_API_KEY
-      models:
-         - id: glm-4.6
-           name: GLM-4.6 (BigModel)
+  bigmodel:
+    baseUrl: https://open.bigmodel.cn/api/paas/v4
+    api: openai-completions
+    apiKey: BIGMODEL_API_KEY
+    models:
+      - id: glm-4.6
+        name: GLM-4.6 (BigModel)
 ```
 
 Set `BIGMODEL_API_KEY` to the `<id>.<secret>` key before starting `omp`, then select `bigmodel/glm-4.6`. The key does not use an `sk-` prefix.
@@ -351,28 +351,28 @@ Keyless local provider (no credentials required):
 
 ```yaml
 providers:
-   local-proxy:
-      baseUrl: http://127.0.0.1:4000/v1
-      api: openai-completions
-      auth: none
-      models:
-         - id: local-model
-           name: Local Model
-           contextWindow: 32768
-           maxTokens: 4096
+  local-proxy:
+    baseUrl: http://127.0.0.1:4000/v1
+    api: openai-completions
+    auth: none
+    models:
+      - id: local-model
+        name: Local Model
+        contextWindow: 32768
+        maxTokens: 4096
 ```
 
 Discovery-enabled provider (models fetched from the endpoint at runtime):
 
 ```yaml
 providers:
-   team-proxy:
-      baseUrl: https://models.example.com/v1
-      apiKey: TEAM_PROXY_API_KEY
-      authHeader: true # send Authorization: Bearer <resolved key>
-      disableStrictTools: true
-      discovery:
-         type: proxy
+  team-proxy:
+    baseUrl: https://models.example.com/v1
+    apiKey: TEAM_PROXY_API_KEY
+    authHeader: true # send Authorization: Bearer <resolved key>
+    disableStrictTools: true
+    discovery:
+      type: proxy
 ```
 
 For the full schema, all allowed `api` values, discovery `type`s, model overrides, and equivalence settings, see [Model and Provider Configuration](./models.md).
@@ -381,8 +381,8 @@ To disable a custom provider, list its ID exactly:
 
 ```yaml
 disabledProviders:
-   - my-openai-compatible
-   - team-proxy
+  - my-openai-compatible
+  - team-proxy
 ```
 
 ## Troubleshooting

@@ -11,13 +11,13 @@ The prelude is disabled by default. Configure it in `~/.omp/agent/config.yml`, p
 
 ```yaml
 computer:
-   enabled: true
-   display: all
-   maxWidth: 3840
-   maxHeight: 2400
+  enabled: true
+  display: all
+  maxWidth: 3840
+  maxHeight: 2400
 
 tools:
-   approvalMode: write
+  approvalMode: write
 ```
 
 | Key                  | Default | Meaning                                                                                                           |
@@ -121,7 +121,10 @@ AX element actions need no screenshot. AX bounds and `computer.elementAt` use gl
 const text = await computer.clipboard.read();
 await computer.clipboard.write("replacement text");
 await computer.run(async ({ desktop, wait }) => {
-	await wait(() => desktop.windows({ title: "Done" }).then(xs => xs.length > 0), { timeout: 10_000, interval: 100 });
+  await wait(
+    () => desktop.windows({ title: "Done" }).then((xs) => xs.length > 0),
+    { timeout: 10_000, interval: 100 },
+  );
 });
 ```
 
@@ -129,13 +132,13 @@ Inside `computer.run`, `wait(milliseconds)` sleeps and `wait(predicate, { timeou
 
 ## Platforms
 
-| Platform                | Current backend                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS x64/arm64         | ScreenCapture/Quartz plus native AX and input. Grant Screen Recording for capture and Accessibility for input/AX, then restart the launching host.                                                                                                                                                                                                                                                                                                                                                                                 |
-| Linux X11 x64/arm64     | X11 capture/input and AT-SPI accessibility. Requires a readable display plus RandR/XTEST.                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Platform                | Current backend                                                                                                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS x64/arm64         | ScreenCapture/Quartz plus native AX and input. Grant Screen Recording for capture and Accessibility for input/AX, then restart the launching host.                                                                          |
+| Linux X11 x64/arm64     | X11 capture/input and AT-SPI accessibility. Requires a readable display plus RandR/XTEST.                                                                                                                                   |
 | Linux Wayland x64/arm64 | RemoteDesktop portal or `LIBEI_SOCKET` input and AT-SPI accessibility. ScreenCast portal/PipeWire capture ships only in builds compiled with the `wayland-pipewire` Cargo feature; released binaries omit it, so `capabilities()` reports `capture: false` there. RemoteDesktop permission is requested lazily on first native input, is not persisted, and closes with the desktop session; read-only window/AX inspection does not request it. Compositor restrictions apply; background per-window native input is unavailable. |
-| Windows x64/arm64       | Native display/window capture, Win32 input, and UI Automation accessibility.                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| Other published targets | Unsupported unless the native addon reports capabilities.                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| Windows x64/arm64       | Native display/window capture, Win32 input, and UI Automation accessibility.                                                                                                                                                |
+| Other published targets | Unsupported unless the native addon reports capabilities.                                                                                                                                                                   |
 
 Inspect `computer.capabilities()` rather than assuming capture, input, AX, or permission state. On Wayland, input reports `prompt-or-granted` before first native input without opening a RemoteDesktop session. Released builds are compiled without the `wayland-pipewire` feature, so `capabilities()` reports `capture: false`; where the feature is present, a missing portal/PipeWire feature or denied RemoteDesktop portal is reported as a capture/input/permission failure rather than falling back to X11.
 

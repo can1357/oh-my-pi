@@ -3,7 +3,6 @@
 > Generate a speech audio file from text and write it to `output_path`.
 
 ## Source
-
 - Entry: `packages/coding-agent/src/tools/tts.ts`
 - Local voice catalog: `packages/coding-agent/src/tts/models.ts`
 - Local worker client: `packages/coding-agent/src/tts/tts-client.ts`
@@ -13,25 +12,23 @@ The SDK registers this write-approved custom tool only when `speechgen.enabled=t
 
 ## Inputs
 
-| Field         | Type             | Required | Description                                                                                                                                                              |
-| ------------- | ---------------- | -------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `text`        | `string`         |      Yes | Text to synthesize. Must be `1..15000` chars.                                                                                                                            |
-| `voice_id`    | `string`         |       No | Voice id. Defaults to `eve` on xAI; the local backend uses `tts.localVoice` instead; DeepInfra forwards it only when set (model-specific ids, server default otherwise). |
-| `language`    | `string`         |       No | Language hint for xAI. Defaults to `en`.                                                                                                                                 |
-| `output_path` | `string`         |      Yes | Destination path resolved relative to session cwd.                                                                                                                       |
-| `sample_rate` | `number.integer` |       No | xAI sample-rate override. Ignored by the local and DeepInfra backends.                                                                                                   |
-| `bit_rate`    | `number.integer` |       No | xAI MP3 bit-rate override. Ignored for WAV and by the local and DeepInfra backends.                                                                                      |
+| Field | Type | Required | Description |
+|---|---|---:|---|
+| `text` | `string` | Yes | Text to synthesize. Must be `1..15000` chars. |
+| `voice_id` | `string` | No | Voice id. Defaults to `eve` on xAI; the local backend uses `tts.localVoice` instead; DeepInfra forwards it only when set (model-specific ids, server default otherwise). |
+| `language` | `string` | No | Language hint for xAI. Defaults to `en`. |
+| `output_path` | `string` | Yes | Destination path resolved relative to session cwd. |
+| `sample_rate` | `number.integer` | No | xAI sample-rate override. Ignored by the local and DeepInfra backends. |
+| `bit_rate` | `number.integer` | No | xAI MP3 bit-rate override. Ignored for WAV and by the local and DeepInfra backends. |
 
 ## Outputs
-
 - Success:
-   - `content[0].type = "text"`
-   - `content[0].text = "Saved <bytes> bytes to <path> (voice=<voice>, codec=<codec>, backend=<backend>...)."`
-   - `details = { bytes, voiceId, codec, backend }`
+  - `content[0].type = "text"`
+  - `content[0].text = "Saved <bytes> bytes to <path> (voice=<voice>, codec=<codec>, backend=<backend>...)."`
+  - `details = { bytes, voiceId, codec, backend }`
 - Missing-credential (xAI or DeepInfra), cloud HTTP, and a `null` local-worker response return `isError: true` with one text block and no `details`. Other exceptions, cancellation, and timeout propagate.
 
 ## Flow
-
 1. The SDK injects `tts` only when `speechgen.enabled` is true.
 2. `output_path` is resolved relative to the session cwd. The requested codec is inferred from its case-insensitive suffix: `.wav` means WAV, anything else means MP3.
 3. `providers.tts` (default `auto`) selects routing (`local` / `xai` / `deepinfra` / `auto`):
@@ -44,14 +41,12 @@ The SDK registers this write-approved custom tool only when `speechgen.enabled=t
 6. DeepInfra synthesis resolves a DeepInfra API key, posts `{ model, input, response_format, voice? }` to `https://api.deepinfra.com/v1/openai/audio/speech` (model `hexgrad/Kokoro-82M`), and writes the provider bytes directly; `voice` is forwarded only when the caller set `voice_id`.
 
 ## Modes / Variants
-
 - Local backend: fully on-device Kokoro-82M, no network provider call after model weights are available; output is always WAV/PCM16.
 - xAI backend: Grok Voice cloud synthesis; output can be MP3 or WAV.
 - DeepInfra backend: OpenAI-compatible `/audio/speech` cloud synthesis (`hexgrad/Kokoro-82M`); output can be MP3 or WAV.
 - Auto backend: local unless an MP3 path plus xAI credentials requires cloud routing.
 
 ## Side Effects
-
 - Filesystem: writes `output_path`, or a sibling `.wav` path when local synthesis receives a non-WAV destination.
 - Network: xAI backend calls the configured xAI/Grok Voice HTTP endpoint; DeepInfra backend calls `api.deepinfra.com`; local backend may download/cache model weights through the tiny-model stack.
 - Session state: reads cwd, model registry, and settings `providers.tts`, `tts.localModel`, and `tts.localVoice`.
@@ -59,7 +54,6 @@ The SDK registers this write-approved custom tool only when `speechgen.enabled=t
 - Streaming / updates: synthesis is single-shot and does not emit `onUpdate` progress.
 
 ## Limits & Caps
-
 - Text schema limit: `1..15_000` JavaScript string characters.
 - xAI defaults: voice `eve`, language `en`, sample rate `24000`, bit rate `128000`; a non-`.wav` path requests MP3.
 - DeepInfra default model: `hexgrad/Kokoro-82M`; the server default voice applies unless `voice_id` is set.
@@ -76,6 +70,5 @@ The SDK registers this write-approved custom tool only when `speechgen.enabled=t
 - Caller cancellation, the 60-second cloud timeout, filesystem write errors, and thrown local worker failures propagate rather than being wrapped in an `isError` result.
 
 ## Notes
-
 - Local MP3 output is intentionally not bundled. A local request for `speech.mp3` writes `speech.wav` and says so in the tool result.
 - `voice_id` and `language` are xAI payload fields; local voice selection comes from settings so model calls do not have to enumerate local voice ids per invocation.

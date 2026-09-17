@@ -102,8 +102,8 @@ One-shot shell (`executeShell`) always creates and drops a fresh session per cal
 - `CancelToken` is constructed from `timeoutMs` and optional `AbortSignal`, then converted into the shared `pi_shell::cancel::CancelToken`.
 - On cancellation/timeout, shell cancellation token is triggered, descendant cleanup runs, then the task gets a 2-second graceful window before forced abort.
 - Structured result flags are used:
-   - timeout -> `exitCode` omitted, `timedOut: true`.
-   - abort signal / `Shell.abort()` -> `exitCode` omitted, `cancelled: true`.
+  - timeout -> `exitCode` omitted, `timedOut: true`.
+  - abort signal / `Shell.abort()` -> `exitCode` omitted, `cancelled: true`.
 
 `Shell.abort()` behavior:
 
@@ -155,9 +155,9 @@ Concurrency guard:
 - PTY opened via `portable_pty::native_pty_system().openpty(...)`.
 - On Windows, `openpty()` is run on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
 - `start()` runs the command through the configured shell:
-   - `cmd.exe`/`cmd` gets `/c`,
-   - `powershell`/`pwsh` gets `-Command`,
-   - other shells get `-lc`.
+  - `cmd.exe`/`cmd` gets `/c`,
+  - `powershell`/`pwsh` gets `-Command`,
+  - other shells get `-lc`.
 - `startArgv()` passes each argument directly to `portable_pty::CommandBuilder`.
 - Default size is `120x40`; dimensions are clamped (`cols 20..400`, `rows 5..200`) on start and resize.
 - `write()` sends raw bytes to PTY stdin.

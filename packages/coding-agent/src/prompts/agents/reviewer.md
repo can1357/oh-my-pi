@@ -5,53 +5,53 @@ tools: read, grep, glob, bash, lsp, web_search, ast_grep
 spawns: scout
 model: "@slow"
 output:
-   properties:
-      overall_correctness:
-         metadata:
-            description: Whether change correct (no bugs/blockers)
-         enum: [correct, incorrect]
-      explanation:
-         metadata:
-            description: Plain-text verdict summary, 1-3 sentences
-         type: string
-      confidence:
-         metadata:
-            description: Verdict confidence (0.0-1.0)
-         type: number
-   optionalProperties:
-      findings:
-         metadata:
-            description: 'Populate via incremental yield sections under type: ["findings"]; don''t repeat it in a final payload.'
-         elements:
-            properties:
-               title:
-                  metadata:
-                     description: Imperative, ≤80 chars
-                  type: string
-               body:
-                  metadata:
-                     description: "One paragraph: bug, trigger, impact"
-                  type: string
-               priority:
-                  metadata:
-                     description: "P0-P3: 0 blocks release, 1 fix next cycle, 2 fix eventually, 3 nice to have"
-                  type: number
-               confidence:
-                  metadata:
-                     description: Confidence it's real bug (0.0-1.0)
-                  type: number
-               file_path:
-                  metadata:
-                     description: Path to affected file
-                  type: string
-               line_start:
-                  metadata:
-                     description: First line (1-indexed)
-                  type: number
-               line_end:
-                  metadata:
-                     description: Last line (1-indexed, ≤10 lines)
-                  type: number
+  properties:
+    overall_correctness:
+      metadata:
+        description: Whether change correct (no bugs/blockers)
+      enum: [correct, incorrect]
+    explanation:
+      metadata:
+        description: Plain-text verdict summary, 1-3 sentences
+      type: string
+    confidence:
+      metadata:
+        description: Verdict confidence (0.0-1.0)
+      type: number
+  optionalProperties:
+    findings:
+      metadata:
+        description: "Populate via incremental yield sections under type: [\"findings\"]; don't repeat it in a final payload."
+      elements:
+        properties:
+          title:
+            metadata:
+              description: Imperative, ≤80 chars
+            type: string
+          body:
+            metadata:
+              description: "One paragraph: bug, trigger, impact"
+            type: string
+          priority:
+            metadata:
+              description: "P0-P3: 0 blocks release, 1 fix next cycle, 2 fix eventually, 3 nice to have"
+            type: number
+          confidence:
+            metadata:
+              description: Confidence it's real bug (0.0-1.0)
+            type: number
+          file_path:
+            metadata:
+              description: Path to affected file
+            type: string
+          line_start:
+            metadata:
+              description: First line (1-indexed)
+            type: number
+          line_end:
+            metadata:
+              description: Last line (1-indexed, ≤10 lines)
+            type: number
 ---
 
 Find bugs author wants fixed before merge.
@@ -118,7 +118,6 @@ Finding: incremental `yield`, `type: ["findings"]`; `data`:
 - `line_start`, `line_end`: ≤10-line range; MUST overlap diff.
 
 Verdict fields: incremental `yield`:
-
 - `type: ["overall_correctness"]`: `"correct"` (no bugs/blockers) | `"incorrect"`.
 - `type: ["explanation"]`: plain-text 1-3-sentence verdict summary.
 - `type: ["confidence"]`: 0.0-1.0 confidence.

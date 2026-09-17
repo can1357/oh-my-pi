@@ -1,11 +1,12 @@
 {
+	"type": "module",
+	"private": true,
 	"name": "@oh-my-pi/pi-metaharness",
 	"version": "0.0.1",
-	"private": true,
 	"description": "Unified benchmark runners plus Harbor run storage, REST/SSE APIs, and a live web dashboard",
 	"homepage": "https://omp.sh",
-	"license": "MIT",
 	"author": "Stencil Labs, Inc.",
+	"license": "MIT",
 	"repository": {
 		"type": "git",
 		"url": "git+https://github.com/can1357/oh-my-pi.git",
@@ -14,7 +15,6 @@
 	"bin": {
 		"metaharness": "src/server.ts"
 	},
-	"type": "module",
 	"scripts": {
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
 		"check:types": "tsgo -p tsconfig.json --noEmit && tsgo -p src/tb/tsconfig.json --noEmit && tsgo -p adapters/edit/tsconfig.json --noEmit && tsgo -p scripts/tsconfig.json --noEmit",
@@ -31,7 +31,6 @@
 		"@oh-my-pi/pi-ai": "catalog:",
 		"@oh-my-pi/pi-catalog": "catalog:",
 		"@oh-my-pi/pi-coding-agent": "catalog:",
-		"@oh-my-pi/pi-natives": "catalog:",
 		"@oh-my-pi/pi-utils": "catalog:",
 		"@oh-my-pi/typescript-edit-benchmark": "workspace:*",
 		"@stencil-hq/vibemon": "^0.3.2",
@@ -39,6 +38,7 @@
 		"d3-scale": "^4.0.2",
 		"d3-shape": "^3.2.0",
 		"diff": "catalog:",
+		"@oh-my-pi/pi-natives": "catalog:",
 		"motion": "^12.15.0",
 		"react": "^19.1.0",
 		"react-dom": "^19.1.0",

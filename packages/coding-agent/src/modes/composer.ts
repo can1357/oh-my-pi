@@ -399,13 +399,19 @@ export class Composer implements TerminalFrameProvider {
 		// and the editor drifts up above a band of blank rows (#11007).
 		this.#retirementBelowFloor =
 			this.#retirementBelowFloor === undefined ? after.length : Math.min(this.#retirementBelowFloor, after.length);
-		const history = this.#offerHistory(transcript, width, rows, preRoots.length + this.#retirementBelowFloor);
+		const belowFloor = this.#retirementBelowFloor;
+		const history = this.#offerHistory(transcript, width, rows, preRoots.length + belowFloor);
 		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
 		const headerRows = headerVisible ? this.#header.render(width) : [];
 		const before = [...headerRows, ...preRoots];
 		const now = performance.now();
 		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
-		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - after.length), frame);
+		// The live tail is laid out against the same baseline retirement is
+		// billed against, so its compaction allocator (one row per block, no
+		// inter-block blanks) engages only when a block genuinely cannot retire.
+		// Rows the transient chrome peak displaces are clipped from the top by
+		// the `drop` slice below, which is what scrollback would have done.
+		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - belowFloor), frame);
 		const activeSpans: ViewportClickSpan[] = [];
 		for (const span of transcript.getLastViewportSpans()) {
 			const ids = (span.component as Partial<{ getClickFocusAgentIds(): string[] }>).getClickFocusAgentIds?.();
@@ -498,6 +504,9 @@ export class Composer implements TerminalFrameProvider {
 		}
 		this.#offeredHistory = undefined;
 		if (this.#historyReplayRequested) this.#startHistoryReplay();
+		if (offered.kind === "replay") {
+			this.ui.requestRender();
+		}
 	}
 
 	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */

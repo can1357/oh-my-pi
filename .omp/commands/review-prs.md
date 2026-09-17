@@ -5,7 +5,6 @@ Parallel PR triage: decide merge-worthiness, prepare rebased worktrees, fix bloc
 ## Arguments
 
 `$ARGUMENTS` optional:
-
 - space/comma-separated PR numbers/URLs; or
 - GitHub-search qualifiers (`is:open`, `author:foo`, `label:bug`, `draft:false`, ...) and/or time window (`3d`, `2w`, `12h`).
 

@@ -14,14 +14,19 @@ import type { SessionTitleUpdate } from "./session-title-slot";
 export type SqlSessionStorageAdapter = "postgres" | "mysql" | "sqlite";
 
 /**
- * Minimal subset of the `Bun.SQL` instance surface used by
- * {@link SqlSessionStorage}. Bun's SQL client exposes a tagged-template API too,
+ * SQL executor shared by the pooled client and its transaction-scoped handle.
+ * Bun's SQL client exposes a tagged-template API too,
  * but this implementation intentionally uses `unsafe(query, values)` because
  * the table identifier is validated and then inlined while values remain bound
  * parameters.
  */
-export interface SqlSessionStorageClient {
+export interface SqlSessionStorageTransaction {
 	unsafe(query: string, values?: unknown[]): Promise<SqlSessionStorageResult>;
+}
+
+/** Bun.SQL-compatible client whose transactions make session renames atomic. */
+export interface SqlSessionStorageClient extends SqlSessionStorageTransaction {
+	transaction(callback: (transaction: SqlSessionStorageTransaction) => Promise<void>): Promise<void>;
 	/**
 	 * `Bun.SQL` exposes the parsed connection options here. We only consult
 	 * `adapter` to pick the dialect; the field is typed as
@@ -76,7 +81,7 @@ interface DialectQueries {
 	updateTitle: string;
 	/** Delete a single row by path. */
 	delete: string;
-	/** Move a row from one path to another (caller deletes any conflicting destination first). */
+	/** Move a row from one path to another. */
 	rename: string;
 	/** Warm the synchronous index without transferring full content. */
 	loadIndex: string;
@@ -149,14 +154,14 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			],
 			upsertReplace:
 				`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?) ` +
-				`ON DUPLICATE KEY UPDATE content = VALUES(content), mtime_ms = VALUES(mtime_ms), title = VALUES(title), title_source = VALUES(title_source), title_updated_at = VALUES(title_updated_at)`,
+				`ON DUPLICATE KEY UPDATE content = ?, mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ?`,
 			insertIfMissing: `INSERT IGNORE INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			replaceIfSize:
 				`UPDATE ${table} SET content = ?, mtime_ms = ?, title = ?, title_source = ?, title_updated_at = ? ` +
 				`WHERE path = ? AND length(content) = ?`,
 			upsertAppend:
 				`INSERT INTO ${table} (path, content, mtime_ms) VALUES (?, ?, ?) ` +
-				`ON DUPLICATE KEY UPDATE content = CONCAT(content, VALUES(content)), mtime_ms = VALUES(mtime_ms)`,
+				`ON DUPLICATE KEY UPDATE content = CONCAT(content, ?), mtime_ms = ?`,
 			updateTitle: `UPDATE ${table} SET title = ?, title_source = ?, title_updated_at = ?, mtime_ms = ? WHERE path = ?`,
 			delete: `DELETE FROM ${table} WHERE path = ?`,
 			rename: `UPDATE ${table} SET path = ?, mtime_ms = ? WHERE path = ?`,
@@ -216,7 +221,7 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`ON CONFLICT (path) DO UPDATE SET content = ${tableQualifier} || excluded.content, mtime_ms = excluded.mtime_ms`,
 		updateTitle: `UPDATE ${table} SET title = ${placeholder(1)}, title_source = ${placeholder(2)}, title_updated_at = ${placeholder(3)}, mtime_ms = ${placeholder(4)} WHERE path = ${placeholder(5)}`,
 		delete: `DELETE FROM ${table} WHERE path = ${placeholder(1)}`,
-		rename: `UPDATE ${table} SET path = ${placeholder(1)}, mtime_ms = ${placeholder(2)} WHERE path = ${placeholder(3)}`,
+		rename: `UPDATE ${table} SET path = ${placeholder(1)}, mtime_ms = ${placeholder(2)} WHERE path = ${placeholder(3)} RETURNING path`,
 		loadIndex: `SELECT path, mtime_ms, ${byteLengthExpr} AS byte_len, title, title_source, title_updated_at FROM ${table}`,
 		readFull: `SELECT content AS content FROM ${table} WHERE path = ${placeholder(1)}`,
 		readSlices,
@@ -363,7 +368,9 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	): Promise<void> {
 		const titleValues = [title?.title ?? null, title?.source ?? null, title?.updatedAt ?? null];
 		if (expectedSize === undefined) {
-			await this.#client.unsafe(this.#q.upsertReplace, [path, content, mtimeMs, ...titleValues]);
+			const values = [path, content, mtimeMs, ...titleValues];
+			if (this.#adapter === "mysql") values.push(content, mtimeMs, ...titleValues);
+			await this.#client.unsafe(this.#q.upsertReplace, values);
 			return;
 		}
 
@@ -398,7 +405,8 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	async append(path: string, line: string, mtimeMs: number): Promise<void> {
-		await this.#client.unsafe(this.#q.upsertAppend, [path, line, mtimeMs]);
+		const values = this.#adapter === "mysql" ? [path, line, mtimeMs, line, mtimeMs] : [path, line, mtimeMs];
+		await this.#client.unsafe(this.#q.upsertAppend, values);
 	}
 
 	async truncate(path: string, mtimeMs: number): Promise<void> {
@@ -412,7 +420,15 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 	}
 
 	async move(src: string, dst: string, mtimeMs: number): Promise<void> {
-		await this.#client.unsafe(this.#q.delete, [dst]);
-		await this.#client.unsafe(this.#q.rename, [dst, mtimeMs, src]);
+		if (src === dst) {
+			if ((await this.readFull(src)) === null) throw enoent(src);
+			return;
+		}
+		await this.#client.transaction(async transaction => {
+			await transaction.unsafe(this.#q.delete, [dst]);
+			const result = await transaction.unsafe(this.#q.rename, [dst, mtimeMs, src]);
+			const moved = this.#adapter === "mysql" ? result.affectedRows === 1 : result.length === 1;
+			if (!moved) throw enoent(src);
+		});
 	}
 }

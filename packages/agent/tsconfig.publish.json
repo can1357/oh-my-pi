@@ -11,6 +11,15 @@
 		"outDir": "dist/types",
 		"noCheck": true
 	},
-	"include": ["src"],
-	"exclude": ["dist", "node_modules", "test", "tests", "scripts", "bench"]
+	"include": [
+		"src"
+	],
+	"exclude": [
+		"dist",
+		"node_modules",
+		"test",
+		"tests",
+		"scripts",
+		"bench"
+	]
 }

@@ -42,13 +42,16 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent";
 const { session, modelFallbackMessage } = await createAgentSession();
 
 if (modelFallbackMessage) {
-	process.stderr.write(`${modelFallbackMessage}\n`);
+  process.stderr.write(`${modelFallbackMessage}\n`);
 }
 
-const unsubscribe = session.subscribe(event => {
-	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-		process.stdout.write(event.assistantMessageEvent.delta);
-	}
+const unsubscribe = session.subscribe((event) => {
+  if (
+    event.type === "message_update" &&
+    event.assistantMessageEvent.type === "text_delta"
+  ) {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
 });
 
 await session.prompt("Summarize this repository in 3 bullets.");
@@ -79,15 +82,17 @@ If omitted, it resolves:
 Typically you must provide only what you want to control:
 
 ```ts
-function createAgentSession(options?: CreateAgentSessionOptions): Promise<CreateAgentSessionResult>;
+function createAgentSession(
+  options?: CreateAgentSessionOptions,
+): Promise<CreateAgentSessionResult>;
 ```
 
 - **Must provide**: nothing for a minimal session
 - **Usually provide explicitly** in embedders:
-   - `sessionManager` (if you need in-memory or custom location)
-   - `authStorage` + `modelRegistry` (if you own credential/model lifecycle)
-   - `model` or `modelPattern` (if deterministic model selection matters)
-   - `settings` (if you need isolated/test config)
+  - `sessionManager` (if you need in-memory or custom location)
+  - `authStorage` + `modelRegistry` (if you own credential/model lifecycle)
+  - `model` or `modelPattern` (if deterministic model selection matters)
+  - `settings` (if you need isolated/test config)
 
 For multiple concurrent top-level sessions in one process, pass a private
 `AgentRegistry` to each session. The default process-global registry admits
@@ -103,7 +108,7 @@ only one `"Main"` identity per generation.
 import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 const { session } = await createAgentSession({
-	sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: SessionManager.create(process.cwd()),
 });
 
 console.log(session.sessionFile); // absolute .jsonl path
@@ -119,7 +124,7 @@ console.log(session.sessionFile); // absolute .jsonl path
 import { createAgentSession, SessionManager } from "@oh-my-pi/pi-coding-agent";
 
 const { session } = await createAgentSession({
-	sessionManager: SessionManager.inMemory(),
+  sessionManager: SessionManager.inMemory(),
 });
 
 console.log(session.sessionFile); // undefined
@@ -150,21 +155,27 @@ divergent stores.
 ### Explicit wiring
 
 ```ts
-import { createAgentSession, discoverAuthStorage, ModelRegistry, SessionManager } from "@oh-my-pi/pi-coding-agent";
+import {
+  createAgentSession,
+  discoverAuthStorage,
+  ModelRegistry,
+  SessionManager,
+} from "@oh-my-pi/pi-coding-agent";
 
 const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
 
 const available = modelRegistry.getAvailable();
-if (available.length === 0) throw new Error("No authenticated models available");
+if (available.length === 0)
+  throw new Error("No authenticated models available");
 
 const { session } = await createAgentSession({
-	authStorage,
-	modelRegistry,
-	model: available[0],
-	thinkingLevel: "medium",
-	sessionManager: SessionManager.inMemory(),
+  authStorage,
+  modelRegistry,
+  model: available[0],
+  thinkingLevel: "medium",
+  sessionManager: SessionManager.inMemory(),
 });
 ```
 
@@ -190,23 +201,25 @@ If restore fails, `modelFallbackMessage` explains fallback.
 6. other stored API-key credential in `agent.db` / broker-backed storage
 7. custom-provider resolver fallback
 
+Configured values are resolved asynchronously through the registry-installed resolver; catalog construction does not execute credential commands. `ModelRegistry.getProviderHeaders(provider)` and `resolveModelHeaders(model, signal?)` return promises. For direct provider requests, await the latter instead of reading config-backed values from `model.headers`. The AI client's `stream()` and `streamSimple()` materialize `model.resolveHeaders` automatically for each request attempt, including authentication retries.
+
 ## Event subscription model
 
 Subscribe with `session.subscribe(listener)`; it returns an unsubscribe function.
 
 ```ts
-const unsubscribe = session.subscribe(event => {
-	switch (event.type) {
-		case "agent_start":
-		case "turn_start":
-		case "tool_execution_start":
-			break;
-		case "message_update":
-			if (event.assistantMessageEvent.type === "text_delta") {
-				process.stdout.write(event.assistantMessageEvent.delta);
-			}
-			break;
-	}
+const unsubscribe = session.subscribe((event) => {
+  switch (event.type) {
+    case "agent_start":
+    case "turn_start":
+    case "tool_execution_start":
+      break;
+    case "message_update":
+      if (event.assistantMessageEvent.type === "text_delta") {
+        process.stdout.write(event.assistantMessageEvent.delta);
+      }
+      break;
+  }
 });
 ```
 
@@ -264,10 +277,13 @@ Call `await session.dispose()` when the embedder is completely done with a sessi
 ```ts
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
 
-async function closeEmbeddedSession(session: AgentSession, closeHostInputAndUi: () => Promise<void>): Promise<void> {
-	session.beginDispose(); // no new deferred work may enter after this point
-	await closeHostInputAndUi();
-	await session.dispose();
+async function closeEmbeddedSession(
+  session: AgentSession,
+  closeHostInputAndUi: () => Promise<void>,
+): Promise<void> {
+  session.beginDispose(); // no new deferred work may enter after this point
+  await closeHostInputAndUi();
+  await session.dispose();
 }
 ```
 
@@ -285,6 +301,9 @@ Only after work capable of appending session entries has settled does disposal c
 - Set `restrictToolNames: true` to limit the session to the names in
   `toolNames`. Restricted sessions disable ambient MCP, extensions, custom
   commands, and LSP by default.
+- Restricted children retain hooks/providers from the parent's
+  `preloadedPreparedExtensions`, rebound to their own session. Contributed tools
+  cannot extend or replace the restricted tool set, even when registered later.
 - In a restricted session, SDK-supplied `customTools` are excluded unless
   `allowRestrictedCustomTools: true` and their names also appear in
   `toolNames`.
@@ -292,9 +311,9 @@ Only after work capable of appending session entries has settled does disposal c
 
 ```ts
 const { session } = await createAgentSession({
-	toolNames: ["read", "grep", "glob", "write"],
-	restrictToolNames: true,
-	requireYieldTool: true,
+  toolNames: ["read", "grep", "glob", "write"],
+  restrictToolNames: true,
+  requireYieldTool: true,
 });
 ```
 
@@ -306,8 +325,13 @@ const { session } = await createAgentSession({
   inline factories still load
 - `preloadedExtensions`: reuse an extension set loaded early by the same
   session-owning process. Never pass loaded extension instances from a parent
-  to another session; use `preloadedExtensionPaths` so each session gets its
+  to another session; use `preloadedPreparedExtensions` so each session gets its
   own `ExtensionAPI` binding.
+- `preloadedPreparedExtensions`: already-imported factories to rebind, including
+  in restricted children; does not reevaluate the module graph.
+- `extensionRoots`: a live owner-root provider for child discovery and revival.
+  Its explicit roots, discovery mode, and configured roots take precedence over
+  the child's local extension-loading inputs.
 
 ### Runtime tool set changes
 
@@ -350,18 +374,18 @@ These are optional for normal single-agent embedding.
 
 ```ts
 type CreateAgentSessionResult = {
-	session: AgentSession;
-	extensionsResult: LoadExtensionsResult;
-	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
-	mcpManager?: MCPManager;
-	modelFallbackMessage?: string;
-	lspServers?: Array<{
-		name: string;
-		status: "connecting" | "ready" | "error" | "available";
-		fileTypes: string[];
-		error?: string;
-	}>;
-	eventBus: EventBus;
+  session: AgentSession;
+  extensionsResult: LoadExtensionsResult;
+  setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+  mcpManager?: MCPManager;
+  modelFallbackMessage?: string;
+  lspServers?: Array<{
+    name: string;
+    status: "connecting" | "ready" | "error" | "available";
+    fileTypes: string[];
+    error?: string;
+  }>;
+  eventBus: EventBus;
 };
 ```
 
@@ -373,21 +397,21 @@ Use `setToolUIContext(...)` only if your embedder provides UI capabilities that 
 
 - **Model-host preconnect.** As soon as the model is resolved, the SDK fires a best-effort `fetch.preconnect(model.baseUrl)` so DNS + TCP + TLS + HTTP/2 to the provider's host happens in parallel with extension/skill load, tool registry build, and system-prompt assembly. The first real `fetch(...)` then reuses the warm connection, saving 100–300 ms on transcontinental hops (e.g. residential IP → `api.anthropic.com`). Implementation lives in `preconnectModelHost()` in `packages/coding-agent/src/sdk.ts`. If `fetch.preconnect` is unavailable (non-Bun runtime) or the call throws, the optimization is silently skipped — never a hard dependency. Applies to every mode (interactive, print, RPC, ACP).
 - **Conditional LSP warmup.** Startup LSP servers (those returned by `discoverStartupLspServers(cwd)`) are only warmed when **all** of these hold:
-   - `enableLsp !== false` on the session options, **and**
-   - `options.hasUI === true` (interactive TUI), **and**
-   - the `lsp.lazy` setting is disabled (it defaults to `true`).
+  - `enableLsp !== false` on the session options, **and**
+  - `options.hasUI === true` (interactive TUI), **and**
+  - the `lsp.lazy` setting is disabled (it defaults to `true`).
 
-   With `lsp.lazy` enabled — the default — no language servers are launched at startup at all; each server cold-starts on first use, i.e. when the agent invokes the `lsp` tool or an edit/write touches a file whose extension matches the server's `fileTypes`. Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup regardless of the setting: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` field in `CreateAgentSessionResult` is still populated for UI sessions in lazy mode — recognized servers are discovered (no processes spawned) and reported with status `"available"` so the welcome screen and `/status` can list them; it is `undefined` only when `enableLsp === false` or `hasUI === false`.
+  With `lsp.lazy` enabled — the default — no language servers are launched at startup at all; each server cold-starts on first use, i.e. when the agent invokes the `lsp` tool or an edit/write touches a file whose extension matches the server's `fileTypes`. Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup regardless of the setting: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` field in `CreateAgentSessionResult` is still populated for UI sessions in lazy mode — recognized servers are discovered (no processes spawned) and reported with status `"available"` so the welcome screen and `/status` can list them; it is `undefined` only when `enableLsp === false` or `hasUI === false`.
 
 ## Minimal controlled embed example
 
 ```ts
 import {
-	createAgentSession,
-	discoverAuthStorage,
-	ModelRegistry,
-	SessionManager,
-	Settings,
+  createAgentSession,
+  discoverAuthStorage,
+  ModelRegistry,
+  SessionManager,
+  Settings,
 } from "@oh-my-pi/pi-coding-agent";
 
 const authStorage = await discoverAuthStorage();
@@ -395,24 +419,27 @@ const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
 
 const settings = Settings.isolated({
-	"compaction.enabled": true,
-	"retry.enabled": true,
+  "compaction.enabled": true,
+  "retry.enabled": true,
 });
 
 const { session } = await createAgentSession({
-	authStorage,
-	modelRegistry,
-	settings,
-	sessionManager: SessionManager.inMemory(),
-	toolNames: ["read", "grep", "glob", "edit", "write"],
-	enableMCP: false,
-	enableLsp: true,
+  authStorage,
+  modelRegistry,
+  settings,
+  sessionManager: SessionManager.inMemory(),
+  toolNames: ["read", "grep", "glob", "edit", "write"],
+  enableMCP: false,
+  enableLsp: true,
 });
 
-session.subscribe(event => {
-	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-		process.stdout.write(event.assistantMessageEvent.delta);
-	}
+session.subscribe((event) => {
+  if (
+    event.type === "message_update" &&
+    event.assistantMessageEvent.type === "text_delta"
+  ) {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
 });
 
 await session.prompt("Find all TODO comments in this repo and propose fixes.");

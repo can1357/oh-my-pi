@@ -1,12 +1,17 @@
 import { For, type JSX, Show } from "solid-js";
 
-import { CODE_STAGES, SIMPLE_CLASSIFICATIONS, SIMPLE_STAGES, stageOrdinal } from "../work-items";
+import {
+  CODE_STAGES,
+  SIMPLE_CLASSIFICATIONS,
+  SIMPLE_STAGES,
+  stageOrdinal,
+} from "../work-items";
 
 export interface LifecycleStepperProps {
-	state: string | null;
-	classification: string | null;
-	failed: boolean;
-	live: boolean;
+  state: string | null;
+  classification: string | null;
+  failed: boolean;
+  live: boolean;
 }
 
 type NodeState = "complete" | "current" | "failed" | "pending";
@@ -20,36 +25,38 @@ type NodeState = "complete" | "current" | "failed" | "pending";
 // connector for cell i is absolutely positioned from this dot's centre to the
 // next dot's centre (one cell width), and the dot paints over it.
 export function LifecycleStepper(props: LifecycleStepperProps): JSX.Element {
-	const stages = (): readonly string[] =>
-		props.classification != null && SIMPLE_CLASSIFICATIONS.has(props.classification) ? SIMPLE_STAGES : CODE_STAGES;
-	const ord = (): number => stageOrdinal(props.state);
+  const stages = (): readonly string[] =>
+    props.classification != null && SIMPLE_CLASSIFICATIONS.has(props.classification)
+      ? SIMPLE_STAGES
+      : CODE_STAGES;
+  const ord = (): number => stageOrdinal(props.state);
 
-	const nodeState = (i: number): NodeState => {
-		const o = ord();
-		if (i < o) return "complete";
-		if (i === o) return props.failed ? "failed" : "current";
-		return "pending";
-	};
+  const nodeState = (i: number): NodeState => {
+    const o = ord();
+    if (i < o) return "complete";
+    if (i === o) return props.failed ? "failed" : "current";
+    return "pending";
+  };
 
-	return (
-		<div class="rmp-step">
-			<For each={stages()}>
-				{(stage, i) => (
-					<div class="rmp-step-cell">
-						<Show when={i() < stages().length - 1}>
-							<div class="rmp-step-seg" data-state={i() < ord() ? "complete" : "pending"} />
-						</Show>
-						<div
-							class="rmp-step-node"
-							data-state={nodeState(i())}
-							data-live={nodeState(i()) === "current" && props.live}
-						/>
-						<span class="rmp-step-label" data-reached={i() <= ord()}>
-							{stage}
-						</span>
-					</div>
-				)}
-			</For>
-		</div>
-	);
+  return (
+    <div class="rmp-step">
+      <For each={stages()}>
+        {(stage, i) => (
+          <div class="rmp-step-cell">
+            <Show when={i() < stages().length - 1}>
+              <div class="rmp-step-seg" data-state={i() < ord() ? "complete" : "pending"} />
+            </Show>
+            <div
+              class="rmp-step-node"
+              data-state={nodeState(i())}
+              data-live={nodeState(i()) === "current" && props.live}
+            />
+            <span class="rmp-step-label" data-reached={i() <= ord()}>
+              {stage}
+            </span>
+          </div>
+        )}
+      </For>
+    </div>
+  );
 }

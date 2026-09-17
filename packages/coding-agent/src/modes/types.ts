@@ -30,6 +30,7 @@ import type { ShakeMode } from "../session/shake-types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { LspStartupServerInfo } from "../tools";
 import type { EventBus } from "../utils/event-bus";
+import type { TokenRateMeter } from "../utils/token-rate";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import type { CustomEditor } from "./components/custom-editor";
@@ -245,6 +246,8 @@ export interface InteractiveModeContext {
 	 * Replaced by `renderSessionContext` on every rebuild/session switch.
 	 */
 	servedModelTracker: ServedModelTracker;
+	/** Live gen tok/s for the working row; fed by streamed deltas, reset per run. */
+	tokenRate: TokenRateMeter;
 	loadingAnimation: Loader | undefined;
 	autoCompactionLoader: Loader | undefined;
 	retryLoader: Loader | undefined;
@@ -261,6 +264,10 @@ export interface InteractiveModeContext {
 	/** True once `shutdown()` has started. Read-only from the context;
 	 *  controllers use this to skip work that races with teardown. */
 	readonly isShuttingDown: boolean;
+	/** True once a graceful `shutdown()` teardown failed at the dispose stage,
+	 *  so the next single Ctrl+C must escape (force-quit) rather than re-run the
+	 *  doomed teardown or merely clear the editor (#12238). */
+	readonly teardownFailed: boolean;
 	hookSelector: HookSelectorComponent | undefined;
 	hookInput: HookInputComponent | undefined;
 	hookEditor: HookEditorComponent | undefined;

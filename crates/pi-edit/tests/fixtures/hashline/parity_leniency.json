@@ -345,7 +345,9 @@
 					"input": "2.=3:\n+X",
 					"expect": {
 						"editCount": 3,
-						"warnings": ["Recovered a bare `N.=M:` header as `PUT N.=M:`. Prefix replacement ranges with `PUT`."]
+						"warnings": [
+							"Recovered a bare `N.=M:` header as `PUT N.=M:`. Prefix replacement ranges with `PUT`."
+						]
 					}
 				}
 			],
@@ -468,7 +470,9 @@
 					"input": "PUT 2-2:\n  hello",
 					"expect": {
 						"editCount": 2,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],
@@ -490,14 +494,18 @@
 					"input": "PUT 2-2:\n2:hello",
 					"expect": {
 						"editCount": 2,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				},
 				{
 					"input": "PUT 2-2:\n2|hello",
 					"expect": {
 						"editCount": 2,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],
@@ -549,7 +557,9 @@
 					"input": "PUT 2-2:\n2:42:hello",
 					"expect": {
 						"editCount": 2,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],
@@ -571,7 +581,9 @@
 					"input": "PUT 2-3:\n2:foo\n3:bar",
 					"expect": {
 						"editCount": 4,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],
@@ -593,7 +605,9 @@
 					"input": "PUT 2-3:\n3:keep\nplain",
 					"expect": {
 						"editCount": 4,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],
@@ -615,7 +629,9 @@
 					"input": "PUT 2-3:\nfoo\n\nbar",
 					"expect": {
 						"editCount": 5,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],
@@ -637,7 +653,9 @@
 					"input": "PUT 2-2:\nfoo\n\nPUT 4-4:\nbaz",
 					"expect": {
 						"editCount": 4,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],
@@ -659,7 +677,9 @@
 					"input": "PUT 2-3:\n2:foo\n\n3:bar",
 					"expect": {
 						"editCount": 5,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],
@@ -681,7 +701,9 @@
 					"input": "PUT 2-3:\n1: \"one\",\n2: \"two\",",
 					"expect": {
 						"editCount": 4,
-						"warnings": ["Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."]
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
 					}
 				}
 			],

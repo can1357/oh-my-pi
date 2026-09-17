@@ -44,11 +44,11 @@ match_command = "^npx$"
 match_subcommand = "^(?:|[^bejnptv].*|b(?:|[^i].*|i(?:|[^o].*|o(?:|[^m].*|m(?:|[^e].*|e(?:.+)))))|e(?:|[^s].*|s(?:|[^l].*|l(?:|[^i].*|i(?:|[^n].*|n(?:|[^t].*|t(?:.+))))))|j(?:|[^e].*|e(?:|[^s].*|s(?:|[^t].*|t(?:.+))))|n(?:|[^ex].*|e(?:|[^x].*|x(?:|[^t].*|t(?:.+)))|x(?:.+))|p(?:|[^lr].*|l(?:|[^a].*|a(?:|[^y].*|y(?:|[^w].*|w(?:|[^r].*|r(?:|[^i].*|i(?:|[^g].*|g(?:|[^h].*|h(?:|[^t].*|t(?:.+)))))))))|r(?:|[^ei].*|e(?:|[^t].*|t(?:|[^t].*|t(?:|[^i].*|i(?:|[^e].*|e(?:|[^r].*|r(?:.+))))))|i(?:|[^s].*|s(?:|[^m].*|m(?:|[^a].*|a(?:.+))))))|t(?:|[^s].*|s(?:|[^c].*|c(?:.+)))|v(?:|[^i].*|i(?:|[^t].*|t(?:|[^e].*|e(?:|[^s].*|s(?:|[^t].*|t(?:.+)))))))$"
 strip_ansi = true
 strip_lines_matching = [
-	"^Need to install the following packages",
-	"^Ok to proceed\\? \\(y\\)",
-	"^npm warn",
-	"^npm notice",
-	"^\\s*$",
+  "^Need to install the following packages",
+  "^Ok to proceed\\? \\(y\\)",
+  "^npm warn",
+  "^npm notice",
+  "^\\s*$",
 ]
 truncate_lines_at = 120
 max_lines = 50

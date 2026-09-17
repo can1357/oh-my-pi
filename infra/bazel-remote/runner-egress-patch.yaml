@@ -12,13 +12,13 @@
 - op: add
   path: /spec/egress/-
   value:
-     # bazel-remote shared cache (gRPC) over the cluster network.
-     to:
-        - ipBlock:
-             cidr: 10.43.0.0/16
-        - namespaceSelector:
-             matchLabels:
-                kubernetes.io/metadata.name: bazel-cache
-     ports:
-        - port: 9092
-          protocol: TCP
+    # bazel-remote shared cache (gRPC) over the cluster network.
+    to:
+      - ipBlock:
+          cidr: 10.43.0.0/16
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: bazel-cache
+    ports:
+      - port: 9092
+        protocol: TCP

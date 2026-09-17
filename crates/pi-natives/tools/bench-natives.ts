@@ -40,8 +40,6 @@ for (const encoding of ENCODINGS) {
 		}
 		const seconds = (Bun.nanoseconds() - start) / 1e9;
 		const megabytesPerSecond = (new TextEncoder().encode(text).byteLength * runs) / seconds / 1e6;
-		console.log(
-			encoding.padEnd(20) + name.padStart(10) + megabytesPerSecond.toFixed(1).padStart(12) + `   ${tokens}`,
-		);
+		console.log(encoding.padEnd(20) + name.padStart(10) + megabytesPerSecond.toFixed(1).padStart(12) + `   ${tokens}`);
 	}
 }

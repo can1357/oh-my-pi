@@ -19,13 +19,13 @@ All providers emit the same shape (`AssistantMessageEvent` in `packages/ai/src/t
 
 - `start`
 - content block lifecycle triplets:
-   - text: `text_start` → `text_delta`\* → `text_end`
-   - thinking: `thinking_start` → `thinking_delta`\* → `thinking_end`
-   - tool call: `toolcall_start` → `toolcall_delta`\* → `toolcall_end`
+  - text: `text_start` → `text_delta`\* → `text_end`
+  - thinking: `thinking_start` → `thinking_delta`\* → `thinking_end`
+  - tool call: `toolcall_start` → `toolcall_delta`\* → `toolcall_end`
 - complete image blocks: `image_end`
 - terminal event:
-   - `done` with `reason: "stop" | "length" | "toolUse"`
-   - or `error` with `reason: "aborted" | "error"`
+  - `done` with `reason: "stop" | "length" | "toolUse"`
+  - or `error` with `reason: "aborted" | "error"`
 
 `AssistantMessageEventStream` guarantees:
 
@@ -51,10 +51,10 @@ Normalization points:
 - `message_start` initializes usage (input/output/cache tokens)
 - `content_block_start` maps to text/thinking/toolcall starts
 - `content_block_delta` maps:
-   - `text_delta` → `text_delta`
-   - `thinking_delta` → `thinking_delta`
-   - `input_json_delta` → `toolcall_delta`
-   - `signature_delta` updates `thinkingSignature` only (no event)
+  - `text_delta` → `text_delta`
+  - `thinking_delta` → `thinking_delta`
+  - `input_json_delta` → `toolcall_delta`
+  - `signature_delta` updates `thinkingSignature` only (no event)
 - `content_block_stop` emits corresponding `*_end`
 - `message_delta.stop_reason` maps via `mapStopReason()`
 

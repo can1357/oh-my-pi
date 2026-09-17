@@ -25,12 +25,12 @@ If your extension/tool can run in non-interactive mode, guard with `ctx.hasUI` /
 
 ```ts
 export interface Component {
-	render(width: number): readonly string[];
-	handleInput?(data: string): void;
-	wantsKeyRelease?: boolean;
-	invalidate?(): void;
-	setIgnoreTight?(ignore: boolean): any;
-	dispose?(): void;
+  render(width: number): readonly string[];
+  handleInput?(data: string): void;
+  wantsKeyRelease?: boolean;
+  invalidate?(): void;
+  setIgnoreTight?(ignore: boolean): any;
+  dispose?(): void;
 }
 ```
 
@@ -40,8 +40,8 @@ Render results are component-owned and immutable to callers. An unchanged compon
 
 ```ts
 export interface Focusable {
-	focused: boolean;
-	setUseTerminalCursor?(useTerminalCursor: boolean): void;
+  focused: boolean;
+  setUseTerminalCursor?(useTerminalCursor: boolean): void;
 }
 ```
 
@@ -78,8 +78,8 @@ Extension UI factories receive a `KeybindingsManager` (interactive mode; an in-m
 
 ```ts
 if (keybindings.matches(data, "app.interrupt")) {
-	done(undefined);
-	return;
+  done(undefined);
+  return;
 }
 ```
 
@@ -174,9 +174,14 @@ These renderers are mounted by `ToolExecutionComponent`.
 Example cancellation pattern:
 
 ```ts
-const loader = new CancellableLoader(tui, theme.fg("accent"), theme.fg("muted"), "Working...");
+const loader = new CancellableLoader(
+  tui,
+  theme.fg("accent"),
+  theme.fg("muted"),
+  "Working...",
+);
 loader.onAbort = () => done(undefined);
-void doWork(loader.signal).then(result => done(result));
+void doWork(loader.signal).then((result) => done(result));
 return loader;
 ```
 
@@ -184,61 +189,73 @@ return loader;
 
 ```ts
 import type { Component } from "@oh-my-pi/pi-tui";
-import { SelectList, matchesKey, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { getSelectListTheme, type ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import {
+  SelectList,
+  matchesKey,
+  replaceTabs,
+  truncateToWidth,
+} from "@oh-my-pi/pi-tui";
+import {
+  getSelectListTheme,
+  type ExtensionAPI,
+} from "@oh-my-pi/pi-coding-agent";
 
 class Picker implements Component {
-	list: SelectList;
-	keybindings: any;
-	done: (value: string | undefined) => void;
+  list: SelectList;
+  keybindings: any;
+  done: (value: string | undefined) => void;
 
-	constructor(
-		items: Array<{ value: string; label: string }>,
-		keybindings: any,
-		done: (value: string | undefined) => void,
-	) {
-		this.list = new SelectList(items, 8, getSelectListTheme());
-		this.keybindings = keybindings;
-		this.done = done;
-		this.list.onSelect = item => this.done(item.value);
-		this.list.onCancel = () => this.done(undefined);
-	}
+  constructor(
+    items: Array<{ value: string; label: string }>,
+    keybindings: any,
+    done: (value: string | undefined) => void,
+  ) {
+    this.list = new SelectList(items, 8, getSelectListTheme());
+    this.keybindings = keybindings;
+    this.done = done;
+    this.list.onSelect = (item) => this.done(item.value);
+    this.list.onCancel = () => this.done(undefined);
+  }
 
-	handleInput(data: string): void {
-		if (this.keybindings.matches(data, "app.interrupt")) {
-			this.done(undefined);
-			return;
-		}
-		this.list.handleInput(data);
-	}
+  handleInput(data: string): void {
+    if (this.keybindings.matches(data, "app.interrupt")) {
+      this.done(undefined);
+      return;
+    }
+    this.list.handleInput(data);
+  }
 
-	render(width: number): readonly string[] {
-		return this.list.render(width).map(line => truncateToWidth(replaceTabs(line), width));
-	}
+  render(width: number): readonly string[] {
+    return this.list
+      .render(width)
+      .map((line) => truncateToWidth(replaceTabs(line), width));
+  }
 
-	invalidate(): void {
-		this.list.invalidate();
-	}
+  invalidate(): void {
+    this.list.invalidate();
+  }
 }
 
 export default function extension(pi: ExtensionAPI): void {
-	pi.registerCommand("pick-model", {
-		description: "Pick a model profile",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) return;
+  pi.registerCommand("pick-model", {
+    description: "Pick a model profile",
+    handler: async (_args, ctx) => {
+      if (!ctx.hasUI) return;
 
-			const selected = await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
-				const items = [
-					{ value: "fast", label: theme.fg("accent", "Fast") },
-					{ value: "balanced", label: "Balanced" },
-					{ value: "quality", label: "Quality" },
-				];
-				return new Picker(items, keybindings, done);
-			});
+      const selected = await ctx.ui.custom<string | undefined>(
+        (tui, theme, keybindings, done) => {
+          const items = [
+            { value: "fast", label: theme.fg("accent", "Fast") },
+            { value: "balanced", label: "Balanced" },
+            { value: "quality", label: "Quality" },
+          ];
+          return new Picker(items, keybindings, done);
+        },
+      );
 
-			if (selected) ctx.ui.notify(`Selected profile: ${selected}`, "info");
-		},
-	});
+      if (selected) ctx.ui.notify(`Selected profile: ${selected}`, "info");
+    },
+  });
 }
 ```
 

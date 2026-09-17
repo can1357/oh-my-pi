@@ -100,11 +100,13 @@ Place a durable benchmark with the owning package (`packages/natives/bench`, `pa
 const ITERATIONS = 2_000;
 
 function bench(name: string, fn: () => void): number {
-	const start = Bun.nanoseconds();
-	for (let i = 0; i < ITERATIONS; i++) fn();
-	const elapsedMs = (Bun.nanoseconds() - start) / 1e6;
-	console.log(`${name}: ${elapsedMs.toFixed(2)}ms (${(elapsedMs / ITERATIONS).toFixed(6)}ms/op)`);
-	return elapsedMs;
+  const start = Bun.nanoseconds();
+  for (let i = 0; i < ITERATIONS; i++) fn();
+  const elapsedMs = (Bun.nanoseconds() - start) / 1e6;
+  console.log(
+    `${name}: ${elapsedMs.toFixed(2)}ms (${(elapsedMs / ITERATIONS).toFixed(6)}ms/op)`,
+  );
+  return elapsedMs;
 }
 
 bench("feature/js", () => jsImpl(sample));

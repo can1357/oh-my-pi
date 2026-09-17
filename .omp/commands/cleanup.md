@@ -23,26 +23,22 @@ First run `bun scripts/cleanup-scan.ts`; `--json`: machine output; `--pkg=<a,b>|
 Candidate classes:
 
 **Dead weight** — highest value/risk
-
 - `dead-exports`: exported symbols with zero repo non-test references. `barrel-public`: re-exported via explicit `exports`-map entry or public barrel; published surface, PROTECTED—tools cannot see external consumers. `wildcard-only`: importable only through `./*` subpath pattern; internal-by-default, deletable once proven.
 - Unpassed options/parameters; unreachable branches.
 - Compatibility shims, deprecated aliases, re-export indirection from past refactors.
 - Runtime checks duplicating type-system guarantees.
 
 **Duplication**
-
 - `clones` gives exact ranges. Literal-heavy schema tables/registry descriptors intentionally repeat; extract only if a helper genuinely simplifies every site.
 - Helper reimplemented in 2+ files; copies differing only by literal/flag.
 - Inline reimplementation of central path-shortening, truncation, spawning, stream-reading, or caching utility.
 - Parallel switch/if chains dispatching on one discriminant in multiple locations.
 
 **God objects**
-
 - File dwarfs siblings AND mixes responsibilities: state + IO + rendering + parsing; or class methods span domains.
 - Size alone no smell: retain large coherent files.
 
 **Hierarchy rot**
-
 - Domainless junk drawers: `utils`, `helpers`, `misc`, `common` with unrelated accretions.
 - `../../..` imports: wrong module home.
 - Directories grouped by kind (`types/`, `constants/`, `interfaces/`) rather than domain.
@@ -57,32 +53,27 @@ Worth-doing bar: name win in one sentence, e.g. entire duplicate implementation 
 ## 3. Execute
 
 **Dead weight / type checks**
-
 - Delete dead exports and tests only mirroring them. Export deletion requires BOTH: (1) `lsp references`: no callsites—missed callsites are bugs; (2) `wildcard-only`: no direct/transitive re-export through explicit `exports`-map entry or public barrel. Either fails → retain.
 - Narrow once at IO boundary; internal code receives narrowed type. Delete downstream `?.` on non-nullable values, `?? fallback` on non-optional values, `typeof`/`Array.isArray` re-narrowing, and `as` casts papering over flow.
 - Genuinely sometimes-absent value → fix TYPE upstream; NEVER add downstream guards.
 - Swallow-and-limp `try/catch` → delete or propagate error. Precise catches only, e.g. ENOENT.
 
 **Dedup**
-
 - 2+ copies → one function in nearest common domain module; cross-package → shared utils package. NEVER create a junk drawer.
 - Literal/flag variants → one function with options object; NEVER boolean positionals.
 - Keep hardened copy—timeouts, caps, sanitization—not fresh copies that lack hardening.
 
 **God objects**
-
 - Split on existing seams into domain-named, single-responsibility modules.
 - Extraction = MOVEMENT: code verbatim except imports/visibility; rewriting while moving hides regressions.
 - Update every importer; NEVER retain re-export shim. Split introducing interface, base class, event bus, or DI where direct call existed = failed split.
 
 **Hierarchy**
-
 - Use `lsp rename_file` to move files and rewrite imports everywhere.
 - Group by domain, not kind; collapse single-file directories; delete empty barrels.
 - Resulting tree MUST read as always designed.
 
 **Perf** — opportunistic; only code already touched
-
 - Hoist loop invariants; precompile regexes; use one pass rather than chained filter/map on hot paths; remove intermediate arrays/strings/copies.
 - NEVER trade cold-path clarity for micro-perf; NEVER add caching layers.
 

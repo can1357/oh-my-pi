@@ -117,9 +117,9 @@ Lint + format: TypeScript via Biome (config in `biome.json`), Python via Ruff (c
 
 - **Framework**: `pytest` with `asyncio_mode = "auto"` (`pyproject.toml`). HTTP mocking with `httpx.MockTransport`; `respx` is available but only `MockTransport` is used in-tree — match that style.
 - **Fixtures** (`tests/conftest.py`):
-   - `env` — `monkeypatch`-sets all required `ROBOMP_*` env vars and calls `reset_settings_cache()` before/after.
-   - `settings` — invokes `ensure_paths()` for sqlite/workspace dirs.
-   - `db` — isolated `tmp_path/test.sqlite` `Database`; tests must `database.close()` in teardown when bypassing this.
+  - `env` — `monkeypatch`-sets all required `ROBOMP_*` env vars and calls `reset_settings_cache()` before/after.
+  - `settings` — invokes `ensure_paths()` for sqlite/workspace dirs.
+  - `db` — isolated `tmp_path/test.sqlite` `Database`; tests must `database.close()` in teardown when bypassing this.
 - **Isolation rules**: any test mutating env via `monkeypatch.setenv` MUST also call `reset_settings_cache()` to invalidate the `@cache`d `get_settings()`.
 - **Async tests**: `test_github_client.py` and `test_host_tools.py` spin custom event loops in background threads to bridge sync-style tests with async client code. Prefer `pytest-asyncio` `auto` mode (`async def test_*`) for new tests; only fall back to the loop helpers if matching the surrounding file's style.
 - **Mocking**: never patch internals; inject test doubles via `httpx.MockTransport` for HTTP and via the `db` / `tmp_path` fixtures for storage. Sandbox tests use a real local bare repo as the upstream.

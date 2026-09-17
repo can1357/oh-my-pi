@@ -46,17 +46,13 @@ let seen = 0;
 for (const key in vocab) {
 	const rank = vocab[key];
 	seen++;
-	if (!Number.isInteger(rank) || rank < 0 || rank >= EXPECTED)
-		throw new Error(`rank ${rank} out of range for '${key}'`);
+	if (!Number.isInteger(rank) || rank < 0 || rank >= EXPECTED) throw new Error(`rank ${rank} out of range for '${key}'`);
 	if (byRank[rank] !== undefined) throw new Error(`duplicate rank ${rank}`);
 	const bytes = new Uint8Array(key.length);
 	let n = 0;
 	for (const ch of key) {
 		const b = inv.get(ch.codePointAt(0)!);
-		if (b === undefined)
-			throw new Error(
-				`rank ${rank}: char U+${ch.codePointAt(0)!.toString(16)} not in GPT-2 byte alphabet ('${key}')`,
-			);
+		if (b === undefined) throw new Error(`rank ${rank}: char U+${ch.codePointAt(0)!.toString(16)} not in GPT-2 byte alphabet ('${key}')`);
 		bytes[n++] = b;
 	}
 	byRank[rank] = bytes.subarray(0, n);

@@ -432,7 +432,10 @@
 								}
 							},
 							"additionalProperties": false,
-							"anyOf": [{ "required": ["status"] }, { "required": ["activity"] }]
+							"anyOf": [
+								{ "required": ["status"] },
+								{ "required": ["activity"] }
+							]
 						}
 					]
 				}

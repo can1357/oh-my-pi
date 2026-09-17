@@ -1,14 +1,12 @@
 <vibe-turn session="{{id}}" cli="{{cli}}" turn="{{turn}}" status="{{status}}" duration="{{duration}}"{{#if model}} model="{{model}}"{{/if}}>
 <activity tool-calls="{{toolCount}}" requests="{{requests}}">
 {{#each trace}}
-
 - {{this}}
-  {{/each}}
-  {{#if traceOverflow}}
+{{/each}}
+{{#if traceOverflow}}
 - … {{traceOverflow}} earlier tool call(s) not shown
 {{/if}}
- </activity>
-
+</activity>
 <response{{#if responseTruncated}} truncated="true" full-output="agent://{{id}}"{{/if}}>
 {{response}}
 </response>

@@ -11,17 +11,17 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
  * agent understands why execution was prevented.
  */
 export default function safetyHook(pi: ExtensionAPI) {
-	pi.on("tool_call", async event => {
-		if (event.toolName !== "bash") return;
+  pi.on("tool_call", async (event) => {
+    if (event.toolName !== "bash") return;
 
-		const command = String((event.input as { command?: unknown }).command ?? "");
+    const command = String((event.input as { command?: unknown }).command ?? "");
 
-		// Exact pattern match: "rm -rf /" (with any surrounding whitespace)
-		if (/\brm\s+-rf\s+\//.test(command)) {
-			return {
-				block: true,
-				reason: "safety-hook: refusing to delete root filesystem (rm -rf /)",
-			};
-		}
-	});
+    // Exact pattern match: "rm -rf /" (with any surrounding whitespace)
+    if (/\brm\s+-rf\s+\//.test(command)) {
+      return {
+        block: true,
+        reason: "safety-hook: refusing to delete root filesystem (rm -rf /)",
+      };
+    }
+  });
 }

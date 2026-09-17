@@ -21,6 +21,12 @@ output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | di
     Invoke any session tool; `args` = its parameter object.{{#if py}} Async: `await tool.read({...})`.{{/if}}
 completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → CompletionHandle
     Oneshot, stateless (no history/tools); returns immediately. `.wait()` → str (parsed object with `schema`). `model`: "smol" fast | "default" session | "slow" most capable.
+judge(state, questions) → JudgmentHandle
+    Typed judgment over one `state` (str | JSON object | JSON array); returns immediately, `.wait()` → `{id: answer}`. Every question sees the same state and is answered independently: batch independent questions into one call. Cheap and fast (TypeSafe when credentialed, else the tiny/smol chat model); prefer over `completion()` for classification, yes/no, ranking.
+    `questions`: `{id: q}` where q is one of
+      `{type: "choice", instructions, criteria: {label: rubric | None, …}}` → `{choice, probabilities: {label: p}, confidence}` (≥2 labels)
+      `{type: "bool", instructions, criteria?: {true?: str, false?: str}}` → `{bool: P(yes)}`
+      `{type: "score", instructions, criteria: [lowest, …, highest]}` → `{score, probabilities: {"0": p, …}, confidence}` (≥2 levels; score is the probability-weighted level index)
 {{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", label?=None, schema?=None, schema{{#if js}}Mode{{else}}_mode{{/if}}?="permissive", isolated?=None, apply?=None, merge?=None{{#if evalTools}}, tools?=None{{/if}}) → AgentHandle
     Spawns a background subagent and returns immediately. `agent` selects a discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}} Handle: `.id`, `.handle` ("agent://<id>"), `.status`, `.done()`, `.wait(timeout?)` → final text (parsed with `schema`), `.send(message)`, `.cancel()`, `.output()`. Unwaited results auto-deliver like async jobs. `schema` overrides agent/session schemas; `isolated` requests a worktree; `apply`/`merge` control its changes.{{#if evalTools}} `tools`: names of your @tool-defined tools the child may call.{{/if}}
 {{#if js}}    JS: ONE trailing object — agent(prompt, { agent, label, schema, schemaMode, isolated, apply, merge{{#if evalTools}}, tools{{/if}} }).{{/if}}
@@ -28,7 +34,7 @@ workpool(agent?=None, name?=None, context?=None{{#if evalTools}}, tools?=None{{/
     {{#if eagerDelegation}}Default for 2+ independent items.{{else}}Keep-alive worker pool for a batch of independent items.{{/if}} `.push(*items)`; `.status()`; `.peek()`; `.close()`. Pool name = async job id; results auto-deliver, or poll outside eval with `hub wait` and `ids:[pool.name]`. `eval.workpool.freshAgents=true` uses a new agent per item.
 {{/if}}
 wait(handles, timeout?=None, raise_errors?=True) → list
-    Barrier over agent/completion handles, results in input order. `raise_errors=False` keeps the error in its slot.{{#if js}} JS: wait(handles, { timeout, raiseErrors }).{{/if}}
+    Barrier over agent/completion/judgment handles, results in input order. `raise_errors=False` keeps the error in its slot.{{#if js}} JS: wait(handles, { timeout, raiseErrors }).{{/if}}
 {{#if evalTools}}{{#if py}}@tool / tool(fn, name=None, description=None){{/if}}{{#if js}}tool(fn, { name?, description?, parameters? }){{/if}}
     Define a tool that runs in this kernel{{#if py}} (schema inferred from type hints){{/if}}; reference by name in `task` items' `tools`{{#if spawns}}, `agent(tools=…)`, `workpool(tools=…)`{{/if}}. `tool.defined()`, `tool.undefine(name)`.
 {{/if}}
@@ -43,14 +49,12 @@ budget → {{#if py}}`budget.total` (ceiling or None), `budget.spent()`, `budget
 {{#if spawns}}
 <dag>
 Acyclic waves of handles:
-
 - **Name nodes.** `h = agent(…)` returns at once; `h.handle` is `agent://<id>`.
 - **Wire edges.** Put an upstream `.wait()` result or `.handle` in the downstream prompt. Bulk: `write("local://<name>.md", …)`.
 - **`wait(hs)`** = wave barrier. Open-ended item streams → `workpool()`.
 - **Isolate failure.** `wait(hs, raise_errors=False)` keeps a failure in its slot; only that subtree degrades.
 - **Acyclic only.** No node waits on its own descendant.
- </dag>
-
+</dag>
 {{/if}}
 
 <critical>

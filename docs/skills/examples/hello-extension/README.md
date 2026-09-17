@@ -19,7 +19,7 @@ With `omp --profile <name>`, use `~/.omp/profiles/<name>/agent/extensions/hello-
 ```yaml
 # ~/.omp/agent/config.yml
 extensions:
-   - /path/to/hello-extension
+  - /path/to/hello-extension
 ```
 
 **Option C — load once via CLI flag:**

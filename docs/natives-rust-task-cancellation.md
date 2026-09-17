@@ -114,14 +114,14 @@ Aborted
 ### Before-start vs mid-execution cancellation
 
 - **Before start / before first cancellation check**:
-   - `task::future` users that race on `ct.wait()` can resolve cancellation once they enter `select!`.
-   - `task::blocking` users only observe cancellation when closure code reaches `heartbeat()`.
+  - `task::future` users that race on `ct.wait()` can resolve cancellation once they enter `select!`.
+  - `task::blocking` users only observe cancellation when closure code reaches `heartbeat()`.
 
 - **Mid-execution**:
-   - `blocking`: next `heartbeat()` returns `Err("Aborted: ...")`.
-   - `future`: `ct.wait()` branch wins `select!`, then code cancels subordinate async machinery.
-   - shell: cancellation triggers a Tokio cancellation token, sends descendant termination waves, waits up to 2 seconds for the command task, then aborts the task if needed.
-   - PTY: heartbeat failure or `kill()` terminates PTY child/process targets and drains output briefly.
+  - `blocking`: next `heartbeat()` returns `Err("Aborted: ...")`.
+  - `future`: `ct.wait()` branch wins `select!`, then code cancels subordinate async machinery.
+  - shell: cancellation triggers a Tokio cancellation token, sends descendant termination waves, waits up to 2 seconds for the command task, then aborts the task if needed.
+  - PTY: heartbeat failure or `kill()` terminates PTY child/process targets and drains output briefly.
 
 ## Heartbeat expectations for long-running loops
 

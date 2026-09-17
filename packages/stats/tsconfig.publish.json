@@ -11,6 +11,15 @@
 		"outDir": "dist/types",
 		"noCheck": true
 	},
-	"include": ["src"],
-	"exclude": ["src/client", "dist", "node_modules", "test", "tests", "scripts"]
+	"include": [
+		"src"
+	],
+	"exclude": [
+		"src/client",
+		"dist",
+		"node_modules",
+		"test",
+		"tests",
+		"scripts"
+	]
 }

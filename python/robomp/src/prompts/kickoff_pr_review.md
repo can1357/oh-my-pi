@@ -28,10 +28,10 @@ Call `classify_pr` exactly once: applies `triaged` and labels below.
 
 Rank: value × scope discipline × maintainer confidence; heavily weight Convention adherence. Tighter scope/adherence rank up; sprawl/sloppiness down.
 
-- **P0** — lgtm / must-fix / truly incremental, scoped; correct, conventional, no blocker; merge-at-glance. _(e.g. small root-cause bug fix with regression test.)_
-- **P1** — mergeable after a touch: minor nits or architectural concern before merge. _(e.g. right fix with verbose hardcoded list or cleaner placement.)_
-- **P2** — explicit maintainer call: feature, or default-behavior change not fixing a break. "small" ≠ safe. _(e.g. default flip, setting addition, existing-contract change.)_
-- **P3** — deprioritize: unrelated-edit grab-bag, irrelevant changes, large implementation without confirmed intent, broken/off-spec, or resolved/superseded. _(e.g. 200-file PR builds mechanism repo already has.)_
+- **P0** — lgtm / must-fix / truly incremental, scoped; correct, conventional, no blocker; merge-at-glance. *(e.g. small root-cause bug fix with regression test.)*
+- **P1** — mergeable after a touch: minor nits or architectural concern before merge. *(e.g. right fix with verbose hardcoded list or cleaner placement.)*
+- **P2** — explicit maintainer call: feature, or default-behavior change not fixing a break. "small" ≠ safe. *(e.g. default flip, setting addition, existing-contract change.)*
+- **P3** — deprioritize: unrelated-edit grab-bag, irrelevant changes, large implementation without confirmed intent, broken/off-spec, or resolved/superseded. *(e.g. 200-file PR builds mechanism repo already has.)*
 
 ## Categories
 

@@ -108,10 +108,10 @@ function nextImageIdSeed(): number {
  * Bounds how many inline images render as live terminal graphics at once.
  *
  * Terminal graphics protocols — Kitty especially — keep every transmitted image
- * in a per-terminal store and re-draw placements as content scrolls; text-clear
- * escapes (`CSI 2 J` / `CSI 3 J`) do not remove them. Unbounded, a session that
- * shows many images piles up placements plus store memory and leaves ghosts in
- * scrollback.
+ * in a per-screen store and re-draw placements as content scrolls; placements
+ * that left the viewport survive text-clear escapes (`CSI 2 J`). Unbounded, a
+ * session that shows many images piles up placements plus store memory and
+ * leaves ghosts in scrollback.
  *
  * The budget keeps the most recent `cap` images live and demotes older ones to
  * their text fallback. Demotion needs a full redraw (so off-screen rows are
@@ -165,10 +165,16 @@ export class ImageBudget {
 	 * {@link forgetTransmitted}.
 	 */
 	#resetPurgeIds: number[] = [];
-	/** Image ids whose data is believed to be loaded in the terminal's store. */
-	#transmitted = new Set<number>();
-	/** Transmit sequences (full base64) to write once, before this frame's placements. */
-	#pendingTransmits = new Map<number, string>();
+	/**
+	 * Image ids whose data is believed to be loaded in each screen's store.
+	 * kitty and Ghostty keep the normal and alternate buffers' graphics apart
+	 * and wipe the alternate store on every `?1049h`, so data sent while one
+	 * buffer was active is unknown to the other: a placement there resolves
+	 * only after its own transmit.
+	 */
+	#transmitted: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
+	/** Transmit sequences (full base64) to write once per surface, before that frame's placements. */
+	#pendingTransmits: Record<Surface, Map<number, string>> = { screen: new Map(), alt: new Map() };
 	// True while the in-flight pass is a partial/throwaway pass (the
 	// non-multiplexer resize viewport fast path) that walks only the visible
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
@@ -258,6 +264,8 @@ export class ImageBudget {
 	beginAltScreenLifecycle(): void {
 		resetSurfaceSplit(this.#altSplit);
 		this.#liveIds.alt.clear();
+		// `?1049h` hands over an empty graphics store as well as a cleared grid.
+		this.#transmitted.alt.clear();
 	}
 
 	/**
@@ -354,9 +362,10 @@ export class ImageBudget {
 	 */
 	limitResidentImages(): void {
 		this.#liveIds[this.#surface] = new Set(this.#passIds.filter(id => this.#passShowsLive(id)));
-		if (this.#cap <= 0 || this.#transmitted.size <= this.#cap) return;
-		for (const id of this.#transmitted) {
-			if (this.#transmitted.size <= this.#cap) break;
+		const transmitted = this.#transmitted[this.#surface];
+		if (this.#cap <= 0 || transmitted.size <= this.#cap) return;
+		for (const id of transmitted) {
+			if (transmitted.size <= this.#cap) break;
 			this.#retire(id);
 		}
 	}
@@ -384,15 +393,17 @@ export class ImageBudget {
 	}
 
 	/**
-	 * Drop `imageId` from the terminal's image store: queue its `d=I` (or cancel
-	 * a transmit that never went out) and forget its placement ledger and key.
+	 * Drop `imageId` from the painted surface's image store: queue its `d=I` (or
+	 * cancel a transmit that never went out) and, once no surface holds its data,
+	 * forget its placement ledger and key.
 	 *
 	 * The single gate on every destruction path. `d=I` removes an image's
-	 * placements everywhere, scrollback included, and a frame diff only rewrites
-	 * rows whose text changed — so a graphic some standing frame still shows
-	 * cannot be repaired once deleted, and must never be a candidate. Refuses
-	 * when the in-flight pass renders the image live, or when the frame on any
-	 * surface this pass is not repainting does. Returns whether it was retired.
+	 * placements everywhere on its screen, scrollback included, and a frame diff
+	 * only rewrites rows whose text changed — so a graphic some standing frame
+	 * still shows cannot be repaired once deleted, and must never be a
+	 * candidate. Refuses when the in-flight pass renders the image live, or when
+	 * the frame on any surface this pass is not repainting does. Returns whether
+	 * it was retired.
 	 */
 	#retire(imageId: number): boolean {
 		if (this.#passShowsLive(imageId)) return false;
@@ -401,11 +412,17 @@ export class ImageBudget {
 		}
 		// A transmit queued by a discarded discovery pass never reached the
 		// terminal, so cancel it instead of transmitting then purging.
-		if (!this.#pendingTransmits.delete(imageId)) this.#purgeIds.push(imageId);
-		this.#transmitted.delete(imageId);
-		this.#deletePlacementState(imageId);
+		if (!this.#pendingTransmits[this.#surface].delete(imageId)) this.#purgeIds.push(imageId);
+		this.#transmitted[this.#surface].delete(imageId);
+		if (!this.#isTransmitted(imageId)) this.#deletePlacementState(imageId);
 		this.#forgetKeyForId(imageId);
 		return true;
+	}
+
+	/** Whether any screen's store is believed to hold `imageId`'s data. */
+	#isTransmitted(imageId: number): boolean {
+		for (const surface of SURFACES) if (this.#transmitted[surface].has(imageId)) return true;
+		return false;
 	}
 
 	/**
@@ -427,25 +444,28 @@ export class ImageBudget {
 		return ids;
 	}
 
-	/** All image ids believed to be loaded in the terminal store; clears tracking. */
+	/** All image ids believed to be loaded in any screen's store; clears tracking. */
 	takeAllTransmittedIds(): readonly number[] {
-		if (this.#transmitted.size === 0) return EMPTY_IDS;
-		const ids = [...this.#transmitted];
-		this.#transmitted.clear();
+		const ids = new Set<number>();
+		for (const surface of SURFACES) {
+			for (const id of this.#transmitted[surface]) ids.add(id);
+			this.#transmitted[surface].clear();
+			this.#pendingTransmits[surface].clear();
+		}
+		if (ids.size === 0) return EMPTY_IDS;
 		this.#purgeIds = [];
 		this.#resetPurgeIds = [];
-		this.#pendingTransmits.clear();
 		this.#keyToId.clear();
 		this.#idToKey.clear();
 		this.#placementState.clear();
 		this.#watchedPlacements.clear();
 		for (const surface of SURFACES) this.#liveIds[surface].clear();
-		return ids;
+		return [...ids];
 	}
 
-	/** Whether `imageId`'s data still needs to be transmitted to the terminal. */
+	/** Whether `imageId`'s data still needs to be transmitted to the surface the in-flight pass paints. */
 	shouldTransmit(imageId: number): boolean {
-		return !this.#transmitted.has(imageId);
+		return !this.#transmitted[this.#surface].has(imageId);
 	}
 
 	/**
@@ -566,18 +586,20 @@ export class ImageBudget {
 	}
 
 	/**
-	 * Queue a one-time transmit for `imageId`. No-op if already transmitted, so a
-	 * repeated call (e.g. a width-change re-render) never re-sends the data.
+	 * Queue a one-time transmit for `imageId` on the surface the in-flight pass
+	 * paints. No-op if that surface already holds the data, so a repeated call
+	 * (e.g. a width-change re-render) never re-sends it.
 	 */
 	enqueueTransmit(imageId: number, sequence: string): void {
-		if (this.#transmitted.has(imageId)) return;
-		this.#transmitted.add(imageId);
-		this.#pendingTransmits.set(imageId, sequence);
+		const transmitted = this.#transmitted[this.#surface];
+		if (transmitted.has(imageId)) return;
+		transmitted.add(imageId);
+		this.#pendingTransmits[this.#surface].set(imageId, sequence);
 	}
 
-	/** Whether a frame has image data queued but not yet written to the terminal. */
+	/** Whether the in-flight pass's surface has image data queued but not yet written. */
 	hasPendingTransmits(): boolean {
-		return this.#pendingTransmits.size > 0;
+		return this.#pendingTransmits[this.#surface].size > 0;
 	}
 
 	/**
@@ -587,33 +609,38 @@ export class ImageBudget {
 	 * observe pass only then — a partial tree walk would under-count display order.
 	 */
 	get quiescent(): boolean {
-		if (this.#pendingTransmits.size > 0 || this.#purgeIds.length > 0) return false;
+		if (this.#purgeIds.length > 0) return false;
+		for (const surface of SURFACES) if (this.#pendingTransmits[surface].size > 0) return false;
 		for (const split of [this.#screenSplit, this.#altSplit]) {
 			if (split.lastTotal !== 0 || split.planned !== split.onTerminal) return false;
 		}
 		return true;
 	}
 
-	/** Transmit sequences to write before this frame's placements; clears the queue. */
+	/** Transmit sequences to write before this frame's placements on its surface; clears that queue. */
 	takeTransmits(): readonly string[] {
-		if (this.#pendingTransmits.size === 0) return EMPTY_TRANSMITS;
-		const sequences = [...this.#pendingTransmits.values()];
-		this.#pendingTransmits.clear();
+		const pending = this.#pendingTransmits[this.#surface];
+		if (pending.size === 0) return EMPTY_TRANSMITS;
+		const sequences = [...pending.values()];
+		pending.clear();
 		return sequences;
 	}
 
 	/**
-	 * Drop transmit tracking so every still-live image re-enqueues its data
-	 * (`a=t`) on the next render. Recovers when the terminal dropped the original
-	 * transmit — e.g. Ghostty discarding graphics sent during its post-startup
-	 * window — where a placement-only replay can never bind a Unicode placeholder.
-	 * Pair with a component invalidate + forced repaint so the data and placement
-	 * re-emit together; keeps no base64 in budget state (the transmit-once design).
+	 * Drop the normal screen's transmit tracking so every still-live image
+	 * re-enqueues its data (`a=t`) on the next render. Recovers when the terminal
+	 * dropped the original transmit — e.g. Ghostty discarding graphics sent during
+	 * its post-startup window — where a placement-only replay can never bind a
+	 * Unicode placeholder. Pair with a component invalidate + forced repaint so
+	 * the data and placement re-emit together; keeps no base64 in budget state
+	 * (the transmit-once design).
 	 */
 	forgetTransmitted(): void {
-		if (this.#transmitted.size === 0 && this.#pendingTransmits.size === 0) return;
-		for (const id of this.#transmitted) {
-			if (!this.#pendingTransmits.has(id)) this.#resetPurgeIds.push(id);
+		const transmitted = this.#transmitted.screen;
+		const pending = this.#pendingTransmits.screen;
+		if (transmitted.size === 0 && pending.size === 0) return;
+		for (const id of transmitted) {
+			if (!pending.has(id)) this.#resetPurgeIds.push(id);
 		}
 		// The ids go to #resetPurgeIds, drained only by the destructive repaint
 		// itself — never to #purgeIds, which any frame drains. That is how a
@@ -624,8 +651,8 @@ export class ImageBudget {
 		// placements from it, and erasing placeholder text does not remove the
 		// prototype either. Forgetting drops the id from tracking, so without an
 		// explicit `d=I` no later sweep can ever find that placement again.
-		this.#transmitted.clear();
-		this.#pendingTransmits.clear();
+		transmitted.clear();
+		pending.clear();
 	}
 
 	/**
@@ -641,7 +668,7 @@ export class ImageBudget {
 	 * deleting every placement it ever made including scrollback copies.
 	 */
 	#forgetKeyForId(id: number): void {
-		if (this.#transmitted.has(id)) return;
+		if (this.#isTransmitted(id)) return;
 		const key = this.#idToKey.get(id);
 		if (key === undefined) return;
 		this.#idToKey.delete(id);

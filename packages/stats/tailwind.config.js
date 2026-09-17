@@ -19,7 +19,15 @@ export default {
 				violet: "var(--accent-violet)",
 			},
 			fontFamily: {
-				sans: ["-apple-system", "BlinkMacSystemFont", '"Segoe UI"', "Roboto", "Helvetica", "Arial", "sans-serif"],
+				sans: [
+					"-apple-system",
+					"BlinkMacSystemFont",
+					'"Segoe UI"',
+					"Roboto",
+					"Helvetica",
+					"Arial",
+					"sans-serif",
+				],
 			},
 			borderRadius: {
 				sm: "var(--radius-sm)",

@@ -61,32 +61,32 @@ Terminology follows `docs/natives-architecture.md`:
 ### Execution branches
 
 - **In-memory branch**
-   - `search` -> `search_sync` / search helpers over provided content bytes.
-   - `hasMatch` compiles/checks pattern against provided content and returns a boolean.
-   - No filesystem scan or walker cache.
+  - `search` -> `search_sync` / search helpers over provided content bytes.
+  - `hasMatch` compiles/checks pattern against provided content and returns a boolean.
+  - No filesystem scan or walker cache.
 - **Single-file branch**
-   - `grep` resolves path, checks metadata is file, and searches that file.
+  - `grep` resolves path, checks metadata is file, and searches that file.
 - **Directory branch**
-   - Rust builds a `pi_walker::WalkRequest` with `.cache(false)` hard-coded (`build_grep_walk_request`): directory searches stream while the tree is walked and never read or populate the shared scan cache.
-   - The walk yields file candidates directly to searchers (`glob`/type filters run walker-side; the type filter is applied per candidate).
-   - Files larger than the size cap are deferred to a trailing prefix pass that reads only the leading window into an owned buffer.
+  - Rust builds a `pi_walker::WalkRequest` with `.cache(false)` hard-coded (`build_grep_walk_request`): directory searches stream while the tree is walked and never read or populate the shared scan cache.
+  - The walk yields file candidates directly to searchers (`glob`/type filters run walker-side; the type filter is applied per candidate).
+  - Files larger than the size cap are deferred to a trailing prefix pass that reads only the leading window into an owned buffer.
 
 ### Search/collection semantics
 
 - Matcher selection: the Rust regex engine is tried first, then PCRE2 for features such as lookaround/backreferences. `OMP_PCRE2_JIT=0`/`false` disables PCRE2 JIT and `1` enables it; when unset, JIT is enabled except on macOS.
 - Context resolution:
-   - `contextBefore/contextAfter` override legacy `context`.
-   - Non-content modes do not collect context.
+  - `contextBefore/contextAfter` override legacy `context`.
+  - Non-content modes do not collect context.
 - Output modes:
-   - `content` -> one `GrepMatch` per hit.
-   - `count` and `filesWithMatches` map to count-style entries (`lineNumber=0`, `line=""`, `matchCount` set).
-   - `offset` and `maxCount` are applied during aggregation across sorted file results; `maxCountPerFile` can additionally prevent one hot file consuming the content-mode budget.
-   - Directory streaming model (`run_streaming_grep`):
-      - With a content-mode match budget (`maxCount`, no `offset`), the budget terminates the walk itself: small budgets (up to 64 matches) run a sequential early-exit walk, larger ones run a path-ordered walk that searches in windows and commits results after each window (`run_windowed_streaming_grep`), stopping once the budget is satisfied. Deterministic path-ordered first pages are preserved at every budget size.
-      - Without an early-stop budget, an unordered work-stealing parallel traversal feeds searchers directly (`run_parallel_streaming_grep`); per-file results are sorted by path afterwards.
-      - `maxCountPerFile` (content mode) caps matches collected per file so one hot file cannot exhaust the global `maxCount` budget before other files are reached.
-      - Oversized files (beyond the 4 MiB cap) are deferred behind normal-sized results and searched over their leading window only (bounded prefix read via `read_owned_prefix`; no full-file read and no mmap — the bounded owned read avoids mmap page faults).
-      - `offset` and `maxCount` are applied while aggregating per-file results; the `onMatch` callback fires after aggregation so callback and returned-result semantics match.
+  - `content` -> one `GrepMatch` per hit.
+  - `count` and `filesWithMatches` map to count-style entries (`lineNumber=0`, `line=""`, `matchCount` set).
+  - `offset` and `maxCount` are applied during aggregation across sorted file results; `maxCountPerFile` can additionally prevent one hot file consuming the content-mode budget.
+  - Directory streaming model (`run_streaming_grep`):
+    - With a content-mode match budget (`maxCount`, no `offset`), the budget terminates the walk itself: small budgets (up to 64 matches) run a sequential early-exit walk, larger ones run a path-ordered walk that searches in windows and commits results after each window (`run_windowed_streaming_grep`), stopping once the budget is satisfied. Deterministic path-ordered first pages are preserved at every budget size.
+    - Without an early-stop budget, an unordered work-stealing parallel traversal feeds searchers directly (`run_parallel_streaming_grep`); per-file results are sorted by path afterwards.
+    - `maxCountPerFile` (content mode) caps matches collected per file so one hot file cannot exhaust the global `maxCount` budget before other files are reached.
+    - Oversized files (beyond the 4 MiB cap) are deferred behind normal-sized results and searched over their leading window only (bounded prefix read via `read_owned_prefix`; no full-file read and no mmap — the bounded owned read avoids mmap page faults).
+    - `offset` and `maxCount` are applied while aggregating per-file results; the `onMatch` callback fires after aggregation so callback and returned-result semantics match.
 
 ### Result shaping back to JS
 
@@ -200,13 +200,13 @@ These are pure, in-memory utilities.
 ### Boundaries and responsibilities
 
 - `text.rs` owns terminal-cell semantics:
-   - ANSI sequence parsing,
-   - grapheme-aware width and slicing,
-   - wrap/truncate/slice behavior,
-   - explicit tab-width parameter on width-sensitive APIs.
+  - ANSI sequence parsing,
+  - grapheme-aware width and slicing,
+  - wrap/truncate/slice behavior,
+  - explicit tab-width parameter on width-sensitive APIs.
 - `grep.rs` line truncation (`maxColumns`) is separate:
-   - simple character-boundary truncation of matched lines with `...`,
-   - not ANSI-state-preserving and not terminal-cell width aware.
+  - simple character-boundary truncation of matched lines with `...`,
+  - not ANSI-state-preserving and not terminal-cell width aware.
 
 ### Key behaviors
 
@@ -249,17 +249,17 @@ Text functions generally return deterministic transformed output; errors are lim
 
 ## Pure utility vs filesystem-dependent flows
 
-| Flow                         | Filesystem access | Shared cache | Notes                                                         |
-| ---------------------------- | ----------------- | ------------ | ------------------------------------------------------------- |
-| `search` / `hasMatch`        | No                | No           | regex on provided bytes/string only                           |
-| `text` module functions      | No                | No           | ANSI/width utilities only                                     |
-| `highlight` module functions | No                | No           | syntax + ANSI coloring only                                   |
-| `countTokens`                | No                | No           | tokenization only                                             |
-| `astMatch`                   | No                | No           | in-memory syntax-aware match (no disk)                        |
+| Flow                         | Filesystem access | Shared cache | Notes                                                        |
+| ---------------------------- | ----------------- | ------------ | ------------------------------------------------------------ |
+| `search` / `hasMatch`        | No                | No           | regex on provided bytes/string only                          |
+| `text` module functions      | No                | No           | ANSI/width utilities only                                    |
+| `highlight` module functions | No                | No           | syntax + ANSI coloring only                                  |
+| `countTokens`                | No                | No           | tokenization only                                            |
+| `astMatch`                   | No                | No           | in-memory syntax-aware match (no disk)                       |
 | `astGrep` / `astEdit`        | Yes               | Always       | directory discovery is cached; a direct file path bypasses it |
-| `glob`                       | Yes               | Optional     | directory scans + glob filtering (`cache` opt-in)             |
-| `fuzzyFind`                  | Yes               | Optional     | directory scans + fuzzy scoring (`cache` opt-in)              |
-| `grep` (file/dir path)       | Yes               | Never        | streaming uncached walk feeding searchers                     |
+| `glob`                       | Yes               | Optional     | directory scans + glob filtering (`cache` opt-in)            |
+| `fuzzyFind`                  | Yes               | Optional     | directory scans + fuzzy scoring (`cache` opt-in)             |
+| `grep` (file/dir path)       | Yes               | Never        | streaming uncached walk feeding searchers                    |
 
 ## End-to-end lifecycle summary
 

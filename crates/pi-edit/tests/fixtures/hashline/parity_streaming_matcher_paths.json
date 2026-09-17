@@ -43,21 +43,9 @@
 		}
 	],
 	"skipped": [
-		{
-			"name": "ts-no-any triggers when filePaths come from the hashline header",
-			"reason": "TTSR rule-manager integration is TypeScript-owned; the Rust inspect contract is covered by the cases above."
-		},
-		{
-			"name": "ts-no-any does NOT trigger when filePaths are missing — the regression's pre-fix state",
-			"reason": "TTSR rule-manager integration is TypeScript-owned; empty Rust matcher inspection is covered above."
-		},
-		{
-			"name": "multi-file hashline isolates a .md hunk's `: any` from a sibling .ts entry",
-			"reason": "TTSR rule-manager integration is TypeScript-owned; per-file Rust matcher entries are covered above."
-		},
-		{
-			"name": "multi-file hashline fires only on the .ts entry when the .ts entry carries `: any`",
-			"reason": "TTSR rule-manager integration is TypeScript-owned; per-file Rust matcher entries are covered above."
-		}
+		{ "name": "ts-no-any triggers when filePaths come from the hashline header", "reason": "TTSR rule-manager integration is TypeScript-owned; the Rust inspect contract is covered by the cases above." },
+		{ "name": "ts-no-any does NOT trigger when filePaths are missing — the regression's pre-fix state", "reason": "TTSR rule-manager integration is TypeScript-owned; empty Rust matcher inspection is covered above." },
+		{ "name": "multi-file hashline isolates a .md hunk's `: any` from a sibling .ts entry", "reason": "TTSR rule-manager integration is TypeScript-owned; per-file Rust matcher entries are covered above." },
+		{ "name": "multi-file hashline fires only on the .ts entry when the .ts entry carries `: any`", "reason": "TTSR rule-manager integration is TypeScript-owned; per-file Rust matcher entries are covered above." }
 	]
 }

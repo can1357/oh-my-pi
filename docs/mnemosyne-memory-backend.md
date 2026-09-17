@@ -6,16 +6,16 @@ Set:
 
 ```yaml
 memory:
-   backend: mnemopi
+  backend: mnemopi
 ```
 
 Example:
 
 ```yaml
 memory:
-   backend: mnemopi
+  backend: mnemopi
 mnemopi:
-   scoping: per-project-tagged
+  scoping: per-project-tagged
 ```
 
 With this backend enabled, the coding agent:
@@ -94,9 +94,9 @@ FTS-only:
 
 ```yaml
 memory:
-   backend: mnemopi
+  backend: mnemopi
 mnemopi:
-   noEmbeddings: true
+  noEmbeddings: true
 ```
 
 Equivalent constructor shape:
@@ -109,18 +109,18 @@ Remote embeddings:
 
 ```yaml
 mnemopi:
-   embeddingModel: text-embedding-3-small
-   embeddingApiUrl: https://api.openai.com/v1
-   embeddingApiKey: ${OPENAI_API_KEY}
+  embeddingModel: text-embedding-3-small
+  embeddingApiUrl: https://api.openai.com/v1
+  embeddingApiKey: ${OPENAI_API_KEY}
 ```
 
 Equivalent constructor shape:
 
 ```ts
 new Mnemopi({
-	embeddingModel: "text-embedding-3-small",
-	embeddingApiUrl: "https://api.openai.com/v1",
-	embeddingApiKey,
+  embeddingModel: "text-embedding-3-small",
+  embeddingApiUrl: "https://api.openai.com/v1",
+  embeddingApiKey,
 });
 ```
 
@@ -128,10 +128,10 @@ Remote LLM:
 
 ```yaml
 mnemopi:
-   llmMode: remote
-   llmBaseUrl: https://api.openai.com/v1
-   llmApiKey: ${OPENAI_API_KEY}
-   llmModel: gpt-4.1-mini
+  llmMode: remote
+  llmBaseUrl: https://api.openai.com/v1
+  llmApiKey: ${OPENAI_API_KEY}
+  llmModel: gpt-4.1-mini
 ```
 
 Equivalent constructor shapes:
@@ -145,14 +145,14 @@ Dynamic function LLM for rotating OAuth tokens:
 
 ```ts
 new Mnemopi({
-	llm: async (prompt, opts) => {
-		const token = await getFreshOauthToken();
-		return await completeWithPiAi(prompt, {
-			token,
-			maxTokens: opts?.maxTokens,
-			temperature: opts?.temperature,
-		});
-	},
+  llm: async (prompt, opts) => {
+    const token = await getFreshOauthToken();
+    return await completeWithPiAi(prompt, {
+      token,
+      maxTokens: opts?.maxTokens,
+      temperature: opts?.temperature,
+    });
+  },
 });
 ```
 
@@ -160,14 +160,14 @@ pi-ai tiny/smol role LLM:
 
 ```yaml
 mnemopi:
-   llmMode: smol
+  llmMode: smol
 ```
 
 The coding agent resolves `tiny` first and then `smol`, and passes a dynamic completion function so every Mnemopi LLM call can fetch current provider credentials at call time:
 
 ```ts
 new Mnemopi({
-	llm: async (prompt, opts) => completeSmolWithCurrentAuth(prompt, opts),
+  llm: async (prompt, opts) => completeSmolWithCurrentAuth(prompt, opts),
 });
 ```
 

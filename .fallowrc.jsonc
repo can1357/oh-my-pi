@@ -10,11 +10,11 @@
 		"packages/*/test/**/*.{ts,tsx}",
 		"packages/*/test/**/*.test.{ts,tsx}",
 		"packages/*/bench/**/*.{ts,tsx}",
-		"packages/*/scripts/**/*.ts",
+		"packages/*/scripts/**/*.ts"
 	],
 	"ignoreDependencies": [
 		// Used via `node_modules/.bin/napi` from packages/natives/scripts/build-native.ts.
-		"@napi-rs/cli",
+		"@napi-rs/cli"
 	],
 	"duplicates": {
 		"ignore": [
@@ -23,9 +23,9 @@
 			// Embedded HTML asset shipped as a static template, not a code module.
 			"packages/coding-agent/src/export/html/template.js",
 			// Generated/owned upstream — see packages/ai/scripts/generate-models.ts.
-			"packages/ai/src/models.json",
+			"packages/ai/src/models.json"
 		],
-		"ignoreImports": true,
+		"ignoreImports": true
 	},
-	"rules": {},
+	"rules": {}
 }

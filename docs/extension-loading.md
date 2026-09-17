@@ -81,13 +81,13 @@ Examples:
 ```yaml
 # ~/.omp/agent/config.yml
 extensions:
-   - ~/my-exts/safety.ts
-   - ./local/ext-pack
+  - ~/my-exts/safety.ts
+  - ./local/ext-pack
 ```
 
 ```json
 {
-	"extensions": ["./.omp/extensions/my-extra"]
+  "extensions": ["./.omp/extensions/my-extra"]
 }
 ```
 
@@ -131,7 +131,7 @@ Example:
 
 ```yaml
 disabledExtensions:
-   - extension-module:foo
+  - extension-module:foo
 ```
 
 ### Disable specific items of other capabilities
@@ -145,7 +145,7 @@ or `project`:
 
 ```yaml
 disabledExtensions:
-   - context-file:user:CLAUDE.md
+  - context-file:user:CLAUDE.md
 ```
 
 The id carries no directory and no depth, so a `project` entry disables files of
@@ -230,6 +230,8 @@ Each candidate path is loaded via `loadLegacyPiModule()` (`src/extensibility/plu
 - the entry's realpath is resolved, then dynamically imported with an `?mtime` cache-buster so edited source reloads. Since 16.3.7 the same mtime tag propagates to every module in the extension-owned dependency graph — relative `./`/`../` imports, package `imports` aliases (`#alias/*`), and extension-local bare dependencies — via the graph-wide `onLoad` rewrite, so same-process re-imports pick up edits across the whole graph, not just the entry file. Host-resolved rewrites (legacy pi-package specifiers, the TypeBox shim) stay untagged `file://` URLs because they point at in-process host code that never changes between reloads
 - a scoped Bun `onLoad` hook rewrites legacy pi-package specifiers (`@mariozechner/*`, `@earendil-works/*`) and bare `@sinclair/typebox` onto the host-bundled copies before evaluation. Legacy Pi package-root imports resolve through compat shims: catalog symbols that moved to `@oh-my-pi/pi-catalog/models` (`calculateCost`, `modelsAreEqual`, `getBundledProviders`, plus `getModel`/`getModels` aliases) are re-exported by the legacy pi-ai shim (`src/extensibility/legacy-pi-ai-shim.ts`), and legacy `@oh-my-pi/pi-coding-agent` imports — including `DefaultResourceLoader` — resolve to the compat loader in `src/extensibility/legacy-pi-coding-agent-shim.ts`
 - graph-owned CommonJS modules use synchronous Bun `onLoad` object modules exposing runtime own-string export keys, including computed and non-enumerable names; `default` remains the complete `module.exports` value. The shared evaluator preserves cycles and `require`/import identity, while required host ESM shims are prepared before synchronous evaluation. No generated facade files or AST named-export reconstruction are needed
+- bundled host modules use Bun's native object loader. Modules exporting `theme` add a thin ESM binding bridge so the existing `theme` import follows host assignments synchronously without replacing the UI's change listener
+- package `imports` and `exports` patterns prefer the longest prefix before `*`, then the longest complete pattern; exact matches take precedence and excluded targets never fall back to broader patterns
 - factory is selected by `getExtensionFactory(module)`: the module itself if it is a function, otherwise `module.default`
 - factory must be a function (`ExtensionFactory`) and may return `void` or a promise; loading awaits it before continuing to the next path
 
@@ -248,6 +250,23 @@ Common cases:
 - import failure / missing file
 - invalid factory export (non-function)
 - exception thrown while executing factory
+
+### Restricted children and revival
+
+Restricted task/eval children rebind the parent's already-imported extension
+factories to their own session. Hooks and providers remain available without
+ambient extension discovery. Extension tools cannot widen the restricted tool
+set or replace built-ins, including through late registration. New extension
+paths, loaded parent-bound instances, and additional inline factories remain
+excluded.
+
+Revived children inherit the current owning session's extension roots and
+prepared factories, not extension authority from a saved transcript. Cold
+discovery without prepared factories respects the owner's explicit-only or
+merged roots.
+
+Extension factories still execute host code when rebound; tool restrictions are
+not an extension sandbox. Existing per-module load-failure handling is unchanged.
 
 ### Runtime isolation model
 
@@ -290,9 +309,9 @@ When events run through `ExtensionRunner`, handler exceptions are caught and emi
 
 ```json
 {
-	"omp": {
-		"extensions": ["./src/check-a.ts", "./src/check-b.js"]
-	}
+  "omp": {
+    "extensions": ["./src/check-a.ts", "./src/check-b.js"]
+  }
 }
 ```
 
@@ -300,8 +319,8 @@ Legacy manifest key still accepted:
 
 ```json
 {
-	"pi": {
-		"extensions": ["./index.ts"]
-	}
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
 }
 ```

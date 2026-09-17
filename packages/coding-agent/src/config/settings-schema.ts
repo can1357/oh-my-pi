@@ -10,6 +10,7 @@ import {
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { type HistoryScopeKind, HISTORY_SCOPE_KINDS, HISTORY_SCOPE_LABELS } from "../session/history-storage";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import type { SymbolKey } from "../modes/theme/symbols";
 import {
 	COMPACTION_METHOD_CHOICES,
 	type CompactionMethod,
@@ -168,7 +169,7 @@ export type SettingTab =
 	| "providers";
 
 /** Tab display metadata - icon is resolved via theme.symbol() */
-export type TabMetadata = { label: string; icon: `tab.${string}` };
+export type TabMetadata = { label: string; icon: Extract<SymbolKey, `tab.${string}`> };
 
 /** Ordered list of tabs for UI rendering */
 export const SETTING_TABS: SettingTab[] = [
@@ -185,7 +186,7 @@ export const SETTING_TABS: SettingTab[] = [
 ];
 
 /** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
-export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${string}` }> = {
+export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
 	appearance: { label: "Appearance", icon: "tab.appearance" },
 	model: { label: "Model", icon: "tab.model" },
 	interaction: { label: "Interaction", icon: "tab.interaction" },
@@ -788,6 +789,17 @@ export const SETTINGS_SCHEMA = {
 			options: "runtime",
 		},
 	},
+	"composer.tokenRate": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Composer",
+			label: "Generation Rate",
+			description:
+				"Show a live generation tok/s readout on the working row, docked right next to the session title. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
+		},
+	},
 
 	// Status line
 	"statusLine.preset": {
@@ -1283,21 +1295,22 @@ export const SETTINGS_SCHEMA = {
 			group: "Display",
 			label: "Terminal Title Run State",
 			description:
-				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' on Windows), '>' when it's your turn, '!' when the agent is waiting on you",
+				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' under WSL), '>' when it's your turn, '!' when the agent is waiting on you",
 		},
 	},
 	"tui.titleSpinner": {
 		type: "enum",
-		values: ["braille", "dots", "line"] as const,
+		values: ["braille", "pulse", "dots", "line"] as const,
 		default: "braille",
 		ui: {
 			tab: "appearance",
 			group: "Display",
 			label: "Terminal Title Spinner",
 			description:
-				"Glyph set for the working-state spinner in the terminal title — braille sweep, single-dot cycle, or ASCII-safe line",
+				"Glyph set for the working-state spinner in the terminal title — braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
 			options: [
 				{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep (default)" },
+				{ value: "pulse", label: "Pulse", description: "Moon filling ○◑● then emptying" },
 				{ value: "dots", label: "Dots", description: "Single braille dots cycling" },
 				{ value: "line", label: "Line", description: "ASCII - \\ | / for fonts without braille coverage" },
 			],
@@ -5815,6 +5828,31 @@ export const SETTINGS_SCHEMA = {
 			label: "Speech Vocalization Voice",
 			description: "Kokoro voice used when speaking the assistant's output aloud",
 			options: TTS_LOCAL_VOICE_OPTIONS,
+		},
+	},
+	"providers.judgmentProvider": {
+		type: "enum",
+		values: ["auto", "typesafe", "llm"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Tiny Model",
+			label: "Judgment Provider",
+			description:
+				"Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging, eval judge()). Auto uses TypeSafe when authenticated; failed TypeSafe requests fall back through tiny, smol, default, then the active session model.",
+			options: [
+				{ value: "auto", label: "Auto", description: "TypeSafe when authenticated, else the LLM bridge (default)" },
+				{
+					value: "typesafe",
+					label: "TypeSafe",
+					description: "Prefer TypeSafe; fall back through the online model roles on failure",
+				},
+				{
+					value: "llm",
+					label: "LLM",
+					description: "Never TypeSafe; keyword prompts to the tiny/smol or local model",
+				},
+			],
 		},
 	},
 	"providers.tinyModel": {

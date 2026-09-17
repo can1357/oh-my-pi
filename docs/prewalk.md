@@ -16,16 +16,16 @@ The equivalent YAML in `~/.omp/agent/config.yml` or a project `.omp/config.yml` 
 
 ```yaml
 prewalk:
-   enabled: true
+  enabled: true
 ```
 
 Session flags override the configured value:
 
-| Flag                             | Effect                                                                         |
-| -------------------------------- | ------------------------------------------------------------------------------ |
-| `--prewalk`                      | Arm prewalk for the new session.                                               |
-| `--no-prewalk`                   | Leave prewalk disabled for the session, even when `prewalk.enabled` is `true`. |
-| `--prewalk-into <model-or-role>` | Arm prewalk and use the supplied model pattern or role instead of `@smol`.     |
+| Flag | Effect |
+| --- | --- |
+| `--prewalk` | Arm prewalk for the new session. |
+| `--no-prewalk` | Leave prewalk disabled for the session, even when `prewalk.enabled` is `true`. |
+| `--prewalk-into <model-or-role>` | Arm prewalk and use the supplied model pattern or role instead of `@smol`. |
 
 For example:
 

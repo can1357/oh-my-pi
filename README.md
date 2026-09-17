@@ -357,15 +357,15 @@ Define custom providers in `~/.omp/agent/models.yml`:
 
 ```yaml
 providers:
-   spark:
-      baseUrl: http://192.168.10.223:8000/v1
-      api: openai-completions
-      apiKey: dummy
-      models:
-         - id: minimax-m3
-           name: MiniMax M3
-           contextWindow: 100000
-           maxTokens: 32000
+  spark:
+    baseUrl: http://192.168.10.223:8000/v1
+    api: openai-completions
+    apiKey: dummy
+    models:
+      - id: minimax-m3
+        name: MiniMax M3
+        contextWindow: 100000
+        maxTokens: 32000
 ```
 
 Run `omp models spark` to verify discovery. Then run `omp setup` and choose the model in the default-model step, or open `/model` in a session and assign it to the `default` role.
@@ -374,7 +374,7 @@ To preconfigure the default without the picker, add the selector to `~/.omp/agen
 
 ```yaml
 modelRoles:
-   default: spark/minimax-m3
+  default: spark/minimax-m3
 ```
 
 ### Four knobs that make routing useful
@@ -454,14 +454,14 @@ Six crates, one platform-tagged N-API addon. Search, shell, AST, highlight, PTY,
 
 Per crate, code lines only:
 
-| Crate      | What it does                                                                           |   ~LoC |
-| ---------- | -------------------------------------------------------------------------------------- | -----: |
-| pi-shell   | Embedded bash engine · persistent sessions · in-process coreutils dispatch · minimizer | 38,000 |
-| pi-natives | The N-API surface — every module in the table below                                    | 25,000 |
-| pi-walker  | Parallel ignore-aware walker + scan cache shared by grep · glob · workspace · shell    |  5,200 |
-| pi-iso     | Workspace isolation · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |  3,300 |
-| pi-ast     | tree-sitter + ast-grep matching, block resolution, structural summaries                |  2,900 |
-| pi-voice   | Audio capture/playback · Opus · live WebRTC                                            |  1,000 |
+| Crate         | What it does                                                                           |   ~LoC |
+| ------------- | -------------------------------------------------------------------------------------- | -----: |
+| pi-shell      | Embedded bash engine · persistent sessions · in-process coreutils dispatch · minimizer | 38,000 |
+| pi-natives    | The N-API surface — every module in the table below                                    | 25,000 |
+| pi-walker     | Parallel ignore-aware walker + scan cache shared by grep · glob · workspace · shell    |  5,200 |
+| pi-iso        | Workspace isolation · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |  3,300 |
+| pi-ast        | tree-sitter + ast-grep matching, block resolution, structural summaries                |  2,900 |
+| pi-voice      | Audio capture/playback · Opus · live WebRTC                                            |  1,000 |
 
 Inside `pi-natives`, the per-module breakdown (glue and tests omitted):
 
@@ -510,16 +510,21 @@ The same prompt cards surface over ACP, so editors get the picker without writin
 Node and TypeScript hosts pull the engine in directly. The package exposes `ModelRegistry`, `SessionManager`, `createAgentSession`, and `discoverAuthStorage`; the session emits typed events you subscribe to.
 
 ```ts
-import { ModelRegistry, SessionManager, createAgentSession, discoverAuthStorage } from "@oh-my-pi/pi-coding-agent";
+import {
+  ModelRegistry,
+  SessionManager,
+  createAgentSession,
+  discoverAuthStorage,
+} from "@oh-my-pi/pi-coding-agent";
 
 const auth = await discoverAuthStorage();
 const models = new ModelRegistry(auth);
 await models.refresh();
 
 const { session } = await createAgentSession({
-	sessionManager: SessionManager.inMemory(),
-	authStorage: auth,
-	modelRegistry: models,
+  sessionManager: SessionManager.inMemory(),
+  authStorage: auth,
+  modelRegistry: models,
 });
 await session.prompt("list .ts files");
 ```
@@ -649,17 +654,17 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 
 ### Rust Crates
 
-| Crate                                      | Description                                                                                              |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| **[pi-natives](crates/pi-natives)**        | Core Rust native addon (N-API `cdylib`) used by `@oh-my-pi/pi-natives`; aggregates the crates below      |
-| **[pi-shell](crates/pi-shell)**            | Embedded shell / PTY / process management split out of `pi-natives` (wraps `brush-*`)                    |
-| **[pi-ast](crates/pi-ast)**                | tree-sitter-based code summarizer and AST utilities (50+ language grammars)                              |
-| **[pi-iso](crates/pi-iso)**                | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy               |
-| **[pi-voice](crates/pi-voice)**            | Audio capture/playback, Opus codecs, and live WebRTC streaming primitives                                |
-| **[pi-walker](crates/pi-walker)**          | Parallel ignore-aware filesystem walker with the scan cache shared by grep, glob, and workspace          |
-| **[pi-edit](crates/pi-edit)**              | Edit engine behind the `edit` tool: line-anchored patch/hashline modes, streaming previews, atomic apply |
-| **[brush-core](crates/vendor/brush-core)** | Vendored fork of [brush-shell](https://github.com/reubeno/brush) for embedded bash execution             |
-| **[pi-builtins](crates/pi-builtins)**      | Bash builtins (cd, echo, test, printf, read, export, …) plus 67 in-process command-line utilities        |
+| Crate                                              | Description                                                                                         |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| **[pi-natives](crates/pi-natives)**                | Core Rust native addon (N-API `cdylib`) used by `@oh-my-pi/pi-natives`; aggregates the crates below |
+| **[pi-shell](crates/pi-shell)**                    | Embedded shell / PTY / process management split out of `pi-natives` (wraps `brush-*`)               |
+| **[pi-ast](crates/pi-ast)**                        | tree-sitter-based code summarizer and AST utilities (50+ language grammars)                         |
+| **[pi-iso](crates/pi-iso)**                        | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy          |
+| **[pi-voice](crates/pi-voice)**                    | Audio capture/playback, Opus codecs, and live WebRTC streaming primitives                           |
+| **[pi-walker](crates/pi-walker)**                  | Parallel ignore-aware filesystem walker with the scan cache shared by grep, glob, and workspace     |
+| **[pi-edit](crates/pi-edit)**                      | Edit engine behind the `edit` tool: line-anchored patch/hashline modes, streaming previews, atomic apply |
+| **[brush-core](crates/vendor/brush-core)**         | Vendored fork of [brush-shell](https://github.com/reubeno/brush) for embedded bash execution        |
+| **[pi-builtins](crates/pi-builtins)**              | Bash builtins (cd, echo, test, printf, read, export, …) plus 67 in-process command-line utilities |
 
 ## Contributing
 

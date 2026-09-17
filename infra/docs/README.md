@@ -65,13 +65,13 @@ Key properties baked into this design:
 
 ## Component map (bill of materials)
 
-| Component               | What it is                                                                                                                                                                                                                                                 | Version                     | Documented in                                    |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- | ------------------------------------------------ |
-| Host + k3s cluster      | Bare-metal CentOS Stream 10 node running single-node k3s (own containerd v2, Flannel CNI; Traefik + servicelb disabled so host nginx keeps :80/:443); firewalld provides NAT egress                                                                        | k3s `v1.35.5+k3s1`          | [01-host-and-cluster.md](01-host-and-cluster.md) |
-| Kata Containers runtime | QEMU/KVM microVM runtime: containerd drop-in registering `kata-qemu` + the `kata-qemu` RuntimeClass                                                                                                                                                        | Kata `3.31.0`               | [02-kata-runtime.md](02-kata-runtime.md)         |
-| Preloaded runner image  | Custom `actions/runner` image (build toolchain, Bun, Rust nightly + cross targets, native-build deps) built on the host and imported into k3s containerd — no registry                                                                                     | local dated tag             | [03-runner-image.md](03-runner-image.md)         |
-| ARC (runner scale set)  | actions-runner-controller, `gha-runner-scale-set` flavor: controller in `arc-systems`, one scale set + listener, GitHub App auth                                                                                                                           | ARC `0.14.2`                | [04-arc-and-caching.md](04-arc-and-caching.md)   |
-| Shared caches           | bazel-remote `v2.6.2` (`svc bazel-remote:9092` grpcs, cluster-internal only, 100Gi PVC) is the Bazel action/CAS cache; `arc-runners/runner-cache` (100Gi PVC) holds Bun/Cargo downloads; the `bazel-remote-ci` secret and egress NetworkPolicy wire access | in-cluster services/storage | [04-arc-and-caching.md](04-arc-and-caching.md)   |
+| Component | What it is | Version | Documented in |
+| --- | --- | --- | --- |
+| Host + k3s cluster | Bare-metal CentOS Stream 10 node running single-node k3s (own containerd v2, Flannel CNI; Traefik + servicelb disabled so host nginx keeps :80/:443); firewalld provides NAT egress | k3s `v1.35.5+k3s1` | [01-host-and-cluster.md](01-host-and-cluster.md) |
+| Kata Containers runtime | QEMU/KVM microVM runtime: containerd drop-in registering `kata-qemu` + the `kata-qemu` RuntimeClass | Kata `3.31.0` | [02-kata-runtime.md](02-kata-runtime.md) |
+| Preloaded runner image | Custom `actions/runner` image (build toolchain, Bun, Rust nightly + cross targets, native-build deps) built on the host and imported into k3s containerd — no registry | local dated tag | [03-runner-image.md](03-runner-image.md) |
+| ARC (runner scale set) | actions-runner-controller, `gha-runner-scale-set` flavor: controller in `arc-systems`, one scale set + listener, GitHub App auth | ARC `0.14.2` | [04-arc-and-caching.md](04-arc-and-caching.md) |
+| Shared caches | bazel-remote `v2.6.2` (`svc bazel-remote:9092` grpcs, cluster-internal only, 100Gi PVC) is the Bazel action/CAS cache; `arc-runners/runner-cache` (100Gi PVC) holds Bun/Cargo downloads; the `bazel-remote-ci` secret and egress NetworkPolicy wire access | in-cluster services/storage | [04-arc-and-caching.md](04-arc-and-caching.md) |
 
 ## Prerequisites
 
@@ -87,17 +87,17 @@ Before starting, you need:
 
 The configs in this doc set are copied verbatim from the live host and then redacted. Wherever you see one of these tokens, substitute your own value:
 
-| Placeholder                           | Substitute with                                                                            |
-| ------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `<CI_HOST>`                           | Your CI host's hostname / SSH target                                                       |
-| `<PUBLIC_IP>`                         | The host's public IPv4 address                                                             |
-| `<TAILNET_IP>`                        | Your Tailscale/tailnet admin IP(s) (the generic CGNAT range `100.64.0.0/10` is kept as-is) |
-| `<OWNER>/<REPO>`                      | Your GitHub repository owner and name                                                      |
-| `<GITHUB_APP_ID>`                     | Your GitHub App ID                                                                         |
-| `<GITHUB_APP_INSTALLATION_ID>`        | Your GitHub App installation ID                                                            |
-| `<GITHUB_APP_PRIVATE_KEY>`            | Your GitHub App private key (PEM)                                                          |
-| `<S3_ACCESS_KEY>` / `<S3_SECRET_KEY>` | Legacy RustFS/S3 credentials (only while the legacy sccache stack survives)                |
-| `<PLACEHOLDER>`                       | Any other password/key/token (named in context where it appears)                           |
+| Placeholder | Substitute with |
+| --- | --- |
+| `<CI_HOST>` | Your CI host's hostname / SSH target |
+| `<PUBLIC_IP>` | The host's public IPv4 address |
+| `<TAILNET_IP>` | Your Tailscale/tailnet admin IP(s) (the generic CGNAT range `100.64.0.0/10` is kept as-is) |
+| `<OWNER>/<REPO>` | Your GitHub repository owner and name |
+| `<GITHUB_APP_ID>` | Your GitHub App ID |
+| `<GITHUB_APP_INSTALLATION_ID>` | Your GitHub App installation ID |
+| `<GITHUB_APP_PRIVATE_KEY>` | Your GitHub App private key (PEM) |
+| `<S3_ACCESS_KEY>` / `<S3_SECRET_KEY>` | Legacy RustFS/S3 credentials (only while the legacy sccache stack survives) |
+| `<PLACEHOLDER>` | Any other password/key/token (named in context where it appears) |
 
 Secret **values** never appear in these docs — only key names and placeholders. The following are intentionally **kept as-is** because they are not sensitive and are needed to follow along: the pod CIDR `10.42.0.0/16`, the service CIDR `10.43.0.0/16`, the CoreDNS service IP `10.43.0.10`, in-cluster service DNS names and ports (including `bazel-remote.bazel-cache.svc.cluster.local:9092` and NodePort `30992`), and all version numbers.
 

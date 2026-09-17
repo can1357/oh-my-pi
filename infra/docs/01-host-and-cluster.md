@@ -14,7 +14,7 @@ The reference host is a bare-metal **CentOS Stream 10** box, 32 vCPU / 125 GiB R
 
 ### 1.1 Hardware virtualization / KVM
 
-Every CI job boots its own QEMU/KVM microVM, so the host **must** expose working KVM. On bare metal this means VT-x (Intel) or AMD-V (AMD) enabled in firmware; on a VM you need working _nested_ virtualization.
+Every CI job boots its own QEMU/KVM microVM, so the host **must** expose working KVM. On bare metal this means VT-x (Intel) or AMD-V (AMD) enabled in firmware; on a VM you need working *nested* virtualization.
 
 Check the CPU virtualization flag (`vmx` = Intel, `svm` = AMD) and that the KVM device and modules are present:
 
@@ -108,7 +108,7 @@ dnf -y update
 dnf -y install curl tar iptables
 ```
 
-> Do **not** pre-install a separate containerd/Docker for k3s to use — k3s ships and manages its own containerd v2. (A separate Docker install can coexist for _building_ the runner image; that is covered in [03-runner-image.md](03-runner-image.md).)
+> Do **not** pre-install a separate containerd/Docker for k3s to use — k3s ships and manages its own containerd v2. (A separate Docker install can coexist for *building* the runner image; that is covered in [03-runner-image.md](03-runner-image.md).)
 
 ### 1.5 Time synchronization
 
@@ -152,22 +152,22 @@ curl -sfL https://get.k3s.io | \
 
 What each piece does:
 
-| Token                              | Meaning                                                                                                                                                                                              |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `INSTALL_K3S_VERSION=v1.35.5+k3s1` | Pin the exact k3s release (reproducible installs; omit to track the stable channel).                                                                                                                 |
-| `server`                           | Run this node as a **control-plane + worker** (single-node cluster — it both schedules and runs pods).                                                                                               |
-| `--disable=traefik`                | Do **not** deploy the bundled Traefik ingress controller, so nothing tries to bind host :80/:443 (owned by nginx — see [1.6](#16-the-nginx-port-constraint-why-traefik-and-servicelb-are-disabled)). |
-| `--disable=servicelb`              | Do **not** deploy Klipper servicelb, so `LoadBalancer` services do not bind host ports. Runners need no inbound `LoadBalancer`; the ARC listener reaches GitHub via **outbound** long-poll.          |
+| Token | Meaning |
+| --- | --- |
+| `INSTALL_K3S_VERSION=v1.35.5+k3s1` | Pin the exact k3s release (reproducible installs; omit to track the stable channel). |
+| `server` | Run this node as a **control-plane + worker** (single-node cluster — it both schedules and runs pods). |
+| `--disable=traefik` | Do **not** deploy the bundled Traefik ingress controller, so nothing tries to bind host :80/:443 (owned by nginx — see [1.6](#16-the-nginx-port-constraint-why-traefik-and-servicelb-are-disabled)). |
+| `--disable=servicelb` | Do **not** deploy Klipper servicelb, so `LoadBalancer` services do not bind host ports. Runners need no inbound `LoadBalancer`; the ARC listener reaches GitHub via **outbound** long-poll. |
 
-Everything else is left at k3s defaults _on purpose_ — those defaults are what the rest of this doc set relies on:
+Everything else is left at k3s defaults *on purpose* — those defaults are what the rest of this doc set relies on:
 
-| Default (not overridden)           | Value                      | Why we keep it                                                                            |
-| ---------------------------------- | -------------------------- | ----------------------------------------------------------------------------------------- |
-| CNI                                | **Flannel**, VXLAN backend | Simple single-node overlay; see [section 5](#5-cluster-networking-cni-cidrs--nat-egress). |
-| `--cluster-cidr` (pod network)     | `10.42.0.0/16`             | Pod IP range.                                                                             |
-| `--service-cidr` (service network) | `10.43.0.0/16`             | ClusterIP range.                                                                          |
-| `--cluster-dns` (CoreDNS)          | `10.43.0.10`               | In-cluster DNS resolver.                                                                  |
-| Container runtime                  | bundled **containerd v2**  | Kata is wired into _this_ containerd in [02-kata-runtime.md](02-kata-runtime.md).         |
+| Default (not overridden) | Value | Why we keep it |
+| --- | --- | --- |
+| CNI | **Flannel**, VXLAN backend | Simple single-node overlay; see [section 5](#5-cluster-networking-cni-cidrs--nat-egress). |
+| `--cluster-cidr` (pod network) | `10.42.0.0/16` | Pod IP range. |
+| `--service-cidr` (service network) | `10.43.0.0/16` | ClusterIP range. |
+| `--cluster-dns` (CoreDNS) | `10.43.0.10` | In-cluster DNS resolver. |
+| Container runtime | bundled **containerd v2** | Kata is wired into *this* containerd in [02-kata-runtime.md](02-kata-runtime.md). |
 
 Because we do not pass `--node-ip` / `--flannel-iface`, k3s auto-detects the host's primary interface and uses its address as the node IP (the public IPv4 on the reference host). If your host has multiple NICs, set `--node-ip` / `--flannel-iface` explicitly.
 
@@ -182,7 +182,7 @@ ExecStart=/usr/local/bin/k3s \
 	'--disable=servicelb' \
 ```
 
-There is **no** `/etc/rancher/k3s/config.yaml` on the host — the two `--disable` flags above are the _only_ customization; everything else is the default set listed above.
+There is **no** `/etc/rancher/k3s/config.yaml` on the host — the two `--disable` flags above are the *only* customization; everything else is the default set listed above.
 
 Enable and check the service:
 
@@ -217,22 +217,22 @@ The file targets the local API server over loopback (TLS material redacted):
 ```yaml
 apiVersion: v1
 clusters:
-   - cluster:
-        certificate-authority-data: <REDACTED>
-        server: https://127.0.0.1:6443
-     name: default
+- cluster:
+    certificate-authority-data: <REDACTED>
+    server: https://127.0.0.1:6443
+  name: default
 contexts:
-   - context:
-        cluster: default
-        user: default
-     name: default
+- context:
+    cluster: default
+    user: default
+  name: default
 current-context: default
 kind: Config
 users:
-   - name: default
-     user:
-        client-certificate-data: <REDACTED>
-        client-key-data: <REDACTED>
+- name: default
+  user:
+    client-certificate-data: <REDACTED>
+    client-key-data: <REDACTED>
 ```
 
 > This kubeconfig embeds cluster-admin credentials. Treat the file as a secret (`chmod 600`, root-only). To administer the cluster from another machine, copy the file and replace `127.0.0.1` with the host's reachable address — on the reference host that is done over **Tailscale** (`tailscale0`), so the API server is never exposed on the public interface. Do not commit this file.
@@ -288,30 +288,30 @@ k3s installs Flannel and writes its CNI config to `/var/lib/rancher/k3s/agent/et
 
 ```json
 {
-	"name": "cbr0",
-	"cniVersion": "1.0.0",
-	"plugins": [
-		{
-			"type": "flannel",
-			"delegate": {
-				"hairpinMode": true,
-				"forceAddress": true,
-				"isDefaultGateway": true
-			}
-		},
-		{
-			"type": "portmap",
-			"capabilities": {
-				"portMappings": true
-			}
-		},
-		{
-			"type": "bandwidth",
-			"capabilities": {
-				"bandwidth": true
-			}
-		}
-	]
+  "name":"cbr0",
+  "cniVersion":"1.0.0",
+  "plugins":[
+    {
+      "type":"flannel",
+      "delegate":{
+        "hairpinMode":true,
+        "forceAddress":true,
+        "isDefaultGateway":true
+      }
+    },
+    {
+      "type":"portmap",
+      "capabilities":{
+        "portMappings":true
+      }
+    },
+    {
+      "type":"bandwidth",
+      "capabilities":{
+        "bandwidth":true
+      }
+    }
+  ]
 }
 ```
 
@@ -323,11 +323,11 @@ k3s installs Flannel and writes its CNI config to `/var/lib/rancher/k3s/agent/et
 
 The cluster uses the k3s defaults — keep these as-is (they are referenced throughout the doc set):
 
-| Range                          | CIDR           | Notes                                                                                                             |
-| ------------------------------ | -------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Pod network (cluster-cidr)     | `10.42.0.0/16` | Single node carves a `/24` from this: `kubectl get node -o jsonpath='{.items[0].spec.podCIDR}'` → `10.42.0.0/24`. |
-| Service network (service-cidr) | `10.43.0.0/16` | ClusterIP services.                                                                                               |
-| CoreDNS service IP             | `10.43.0.10`   | Cluster DNS resolver (`kube-dns` Service).                                                                        |
+| Range | CIDR | Notes |
+| --- | --- | --- |
+| Pod network (cluster-cidr) | `10.42.0.0/16` | Single node carves a `/24` from this: `kubectl get node -o jsonpath='{.items[0].spec.podCIDR}'` → `10.42.0.0/24`. |
+| Service network (service-cidr) | `10.43.0.0/16` | ClusterIP services. |
+| CoreDNS service IP | `10.43.0.10` | Cluster DNS resolver (`kube-dns` Service). |
 
 Confirm CoreDNS:
 
@@ -416,7 +416,7 @@ $ firewall-cmd --query-forward
 yes
 ```
 
-> This is host-level NAT only. A second, finer-grained layer — the `runner-egress-lockdown` Kubernetes **NetworkPolicy** — restricts _which_ destinations runner pods may reach (it blocks `<PUBLIC_IP>`, the tailnet `100.64.0.0/10`, RFC-1918 ranges, etc., while allowing the public internet and cluster DNS). That policy is part of the runner setup and is documented in [04-arc-and-caching.md](04-arc-and-caching.md).
+> This is host-level NAT only. A second, finer-grained layer — the `runner-egress-lockdown` Kubernetes **NetworkPolicy** — restricts *which* destinations runner pods may reach (it blocks `<PUBLIC_IP>`, the tailnet `100.64.0.0/10`, RFC-1918 ranges, etc., while allowing the public internet and cluster DNS). That policy is part of the runner setup and is documented in [04-arc-and-caching.md](04-arc-and-caching.md).
 
 ---
 

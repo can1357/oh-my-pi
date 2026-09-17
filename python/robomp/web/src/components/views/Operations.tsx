@@ -11,11 +11,11 @@ import { Trigger } from "../Trigger";
 // three states from one status poll. Read-only collapses the trigger to a
 // chip; the cards lose their retry/cancel actions.
 export function Operations(): JSX.Element {
-	return (
-		<>
-			<Trigger variant="bar" />
-			<Pipeline />
-			<Releases />
-		</>
-	);
+  return (
+    <>
+      <Trigger variant="bar" />
+      <Pipeline />
+      <Releases />
+    </>
+  );
 }

@@ -1,6 +1,6 @@
 # OpenAI Harmony response format
 
-Harmony is the response format OpenAI trained its open-weight `gpt-oss` models on (`gpt-oss-20b`, `gpt-oss-120b`, released August 2025). It defines the conversation envelope, the multi-channel reasoning/answer separation, and the function-calling wire syntax. The models will not work correctly if prompted without it. The format deliberately mirrors the OpenAI _Responses_ API (roles, channels, recipients) rather than the older Chat Completions shape.
+Harmony is the response format OpenAI trained its open-weight `gpt-oss` models on (`gpt-oss-20b`, `gpt-oss-120b`, released August 2025). It defines the conversation envelope, the multi-channel reasoning/answer separation, and the function-calling wire syntax. The models will not work correctly if prompted without it. The format deliberately mirrors the OpenAI *Responses* API (roles, channels, recipients) rather than the older Chat Completions shape.
 
 Tokens are produced with the `o200k_harmony` encoding (the `o200k_base` BPE vocab plus a block of Harmony special tokens; see the table below). The reference renderer/parser is the Rust crate `openai-harmony` (Python bindings: `pip install openai-harmony`; encoding name `HarmonyEncodingName.HARMONY_GPT_OSS`).
 
@@ -16,15 +16,15 @@ The chat template shipped with the gpt-oss weights renders these same token sequ
 
 All Harmony control tokens have the literal form `<|type|>` (ASCII pipes `|`, U+007C — no unicode variants). They are real single tokens in `o200k_harmony`, not text that is BPE-split. The structurally meaningful ones:
 
-| Token (verbatim)  | Token ID | Purpose                                                                                                  |
-| :---------------- | :------- | :------------------------------------------------------------------------------------------------------- |
-| `<\|start\|>`     | `200006` | Begins a message; immediately followed by the header (role, optional recipient/channel/content-type).    |
-| `<\|end\|>`       | `200007` | Ends a fully-formed message.                                                                             |
-| `<\|message\|>`   | `200008` | Header → content transition. Everything after it (until a stop/end token) is the message body.           |
-| `<\|channel\|>`   | `200005` | Introduces the channel field of the header (`analysis` / `commentary` / `final`).                        |
+| Token (verbatim) | Token ID | Purpose |
+| :--------------- | :------- | :------ |
+| `<\|start\|>`     | `200006` | Begins a message; immediately followed by the header (role, optional recipient/channel/content-type). |
+| `<\|end\|>`       | `200007` | Ends a fully-formed message. |
+| `<\|message\|>`   | `200008` | Header → content transition. Everything after it (until a stop/end token) is the message body. |
+| `<\|channel\|>`   | `200005` | Introduces the channel field of the header (`analysis` / `commentary` / `final`). |
 | `<\|constrain\|>` | `200003` | Marks the content-type / constrained-decoding format in a tool-call header (e.g. `<\|constrain\|>json`). |
-| `<\|return\|>`    | `200002` | Stop token: the model finished its final answer. Decode-time only (see normalization note).              |
-| `<\|call\|>`      | `200012` | Stop token: the model is emitting a tool call and wants it executed.                                     |
+| `<\|return\|>`    | `200002` | Stop token: the model finished its final answer. Decode-time only (see normalization note). |
+| `<\|call\|>`      | `200012` | Stop token: the model is emitting a tool call and wants it executed. |
 
 `<|return|>` and `<|call|>` are the two valid generation stop tokens — halt inference on either.
 
@@ -42,25 +42,25 @@ The encoding also defines (same `o200k_harmony` block, IDs `199998`–`200013`) 
 
 **Roles** (five). The instruction hierarchy used to resolve conflicts is `system` > `developer` > `user` > `assistant` > `tool`.
 
-| Role        | Purpose                                                                                                                                             |
-| :---------- | :-------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `system`    | Identity, knowledge cutoff / current date, reasoning effort, valid-channels declaration, built-in tools. NOT the user-facing "system prompt".       |
-| `developer` | The conventional "system prompt": instructions + the `# Tools` function declarations + (optional) structured-output schema.                         |
-| `user`      | End-user input.                                                                                                                                     |
-| `assistant` | Model output. Carries a channel and, for tool calls, a recipient.                                                                                   |
-| `tool`      | Output of an executed tool. The message's _author/role is the tool's own name_ (e.g. `functions.get_current_weather`), not the literal word `tool`. |
+| Role | Purpose |
+| :--- | :------ |
+| `system` | Identity, knowledge cutoff / current date, reasoning effort, valid-channels declaration, built-in tools. NOT the user-facing "system prompt". |
+| `developer` | The conventional "system prompt": instructions + the `# Tools` function declarations + (optional) structured-output schema. |
+| `user` | End-user input. |
+| `assistant` | Model output. Carries a channel and, for tool calls, a recipient. |
+| `tool` | Output of an executed tool. The message's *author/role is the tool's own name* (e.g. `functions.get_current_weather`), not the literal word `tool`. |
 
 **Channels** (assistant output only; the channel is mandatory on every assistant message):
 
-| Channel      | Purpose                                                                                                                                                    |
-| :----------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `analysis`   | Raw chain-of-thought (reasoning). Not held to the same safety bar as `final`; do not show to end users. Built-in `python`/`browser` calls usually go here. |
-| `commentary` | Function tool calls, and user-visible "preambles" (action plans) before calling multiple tools.                                                            |
-| `final`      | The user-facing answer.                                                                                                                                    |
+| Channel | Purpose |
+| :------ | :------ |
+| `analysis` | Raw chain-of-thought (reasoning). Not held to the same safety bar as `final`; do not show to end users. Built-in `python`/`browser` calls usually go here. |
+| `commentary` | Function tool calls, and user-visible "preambles" (action plans) before calling multiple tools. |
+| `final` | The user-facing answer. |
 
 **Reasoning effort** is set in the system message as `Reasoning: high` (or `medium` / `low`; default is medium). The model emits CoT into `analysis` and the answer into `final`.
 
-**CoT carry-over rule.** On the next turn, drop prior `analysis` messages _if_ the last assistant turn ended in a `final` message. The exception is an in-progress tool-calling turn: the `analysis` that preceded a tool call MUST be fed back in alongside the tool result so the model can continue its reasoning (the `openai-harmony` renderer does this via `RenderConversationConfig { auto_drop_analysis: true }`).
+**CoT carry-over rule.** On the next turn, drop prior `analysis` messages *if* the last assistant turn ended in a `final` message. The exception is an in-progress tool-calling turn: the `analysis` that preceded a tool call MUST be fed back in alongside the tool result so the model can continue its reasoning (the `openai-harmony` renderer does this via `RenderConversationConfig { auto_drop_analysis: true }`).
 
 ## Tool definitions
 
@@ -69,7 +69,7 @@ Function tools are advertised in the **developer** message under a `# Tools` sec
 - No-arg function → `type name = () => any;`
 - With args → the single parameter is named `_` and its object type is inlined: `type name = (_: { ... }) => any;`
 - Return type is always `any`.
-- A property `description` becomes a `//` comment on the line _above_ the field; a JSON Schema `title` renders as `// TITLE` followed by a `//` blank-comment line; `examples` render as `// Examples:` then `// - "value"` lines.
+- A property `description` becomes a `//` comment on the line *above* the field; a JSON Schema `title` renders as `// TITLE` followed by a `//` blank-comment line; `examples` render as `// Examples:` then `// - "value"` lines.
 - Optional (non-`required`) fields get a trailing `?`. A `default` renders as a trailing `// default: <value>` comment; an `enum` becomes a `"a" | "b"` union; `oneOf` becomes a multi-line `|` union; JSON `integer` maps to TS `number`.
 - One blank line separates function definitions; the block closes with `} // namespace functions`.
 
@@ -112,7 +112,7 @@ format?: "celsius" | "fahrenheit", // default: celsius
 
 A function call is an **assistant** message on the **commentary** channel, addressed to the tool via recipient `to=functions.<name>`, with the JSON arguments as the body, terminated by the `<|call|>` stop token.
 
-The recipient may appear in the _role section_ or the _channel section_ of the header — both are valid Harmony and the parser accepts either. The model commonly emits it in the channel section. The pi renderer omits the optional content-type marker:
+The recipient may appear in the *role section* or the *channel section* of the header — both are valid Harmony and the parser accepts either. The model commonly emits it in the channel section. The pi renderer omits the optional content-type marker:
 
 ```text
 <|start|>assistant<|channel|>commentary to=functions.get_current_weather<|message|>{"location":"San Francisco, CA"}<|call|>
@@ -136,7 +136,7 @@ An important owned-scanner edge case differs from canonical Harmony. After a rec
 
 ## Multiple / parallel tool calls
 
-Harmony has no special "parallel" wrapper. Multiple calls are just multiple consecutive messages. The model may first emit an optional **preamble** — a _user-visible_ assistant message on the `commentary` channel (unlike `analysis`, this is meant to be shown) — then one tool-call message per function. Each individual call still ends with its own `<|call|>` stop token, so a host that stops on `<|call|>` collects calls one at a time, executes, feeds the result back, and resumes:
+Harmony has no special "parallel" wrapper. Multiple calls are just multiple consecutive messages. The model may first emit an optional **preamble** — a *user-visible* assistant message on the `commentary` channel (unlike `analysis`, this is meant to be shown) — then one tool-call message per function. Each individual call still ends with its own `<|call|>` stop token, so a host that stops on `<|call|>` collects calls one at a time, executes, feeds the result back, and resumes:
 
 ```text
 <|channel|>analysis<|message|>{reasoning}<|end|><|start|>assistant<|channel|>commentary<|message|>**Action plan**:
@@ -195,7 +195,7 @@ Turn boundaries:
 
 - The host stops generation at `<|call|>`, parses the `commentary` call, runs `get_current_weather`, and appends the `functions.get_current_weather to=assistant` result message.
 - It then appends `<|start|>assistant` and resumes. The preceding `analysis` message is kept (the turn ended in a tool call, not a `final`), so the model can continue its reasoning.
-- Generation stops at `<|return|>`. When this turn is persisted into history for a _later_ turn, normalize the trailing `<|return|>` to `<|end|>` (see next note).
+- Generation stops at `<|return|>`. When this turn is persisted into history for a *later* turn, normalize the trailing `<|return|>` to `<|end|>` (see next note).
 
 **`<|return|>` normalization.** `<|return|>` is a decode-time stop token only. When you store the assistant's reply into history for the next turn, replace the trailing `<|return|>` with `<|end|>` so every stored message is a well-formed `<|start|>{header}<|message|>{content}<|end|>`. (For supervised training targets, ending the example with `<|return|>` is correct.)
 
@@ -217,7 +217,7 @@ When a server (vLLM/SGLang/Ollama) bridges Harmony to Chat Completions JSON:
 - **Two stop tokens.** Always stop on both `<|return|>` and `<|call|>`. Stopping only on `<|return|>` will run past tool calls; stopping only on `<|end|>` is wrong for assistant generation.
 - **Recipient position varies.** `to=functions.<name>` may be in the role section (`<|start|>assistant to=...<|channel|>commentary`) or the channel section (`<|channel|>commentary to=...`). A parser must accept both.
 - **Channel is mandatory** on assistant messages; the system message even reminds the model ("Channel must be included for every message."). Missing-channel output is malformed.
-- **Tool author, not `tool`.** The tool-result message's role is the tool's _name_ (`functions.get_current_weather`), not the literal string `tool`. Splitting `functions.x` into namespace + function is the parser's job.
+- **Tool author, not `tool`.** The tool-result message's role is the tool's *name* (`functions.get_current_weather`), not the literal string `tool`. Splitting `functions.x` into namespace + function is the parser's job.
 - **CoT dropping is conditional.** Drop `analysis` only when the previous assistant turn ended on `final`. Dropping the `analysis` that immediately precedes a `<|call|>` breaks multi-step tool reasoning.
 - **`arguments` is a string.** Do not double-encode. The body after `<|message|>` is already serialized JSON; pass it through as the `arguments` string.
 - **Content-type variants.** `<|constrain|>json` is optional. If present, it is metadata, not a guarantee of valid JSON. Enforce JSON validity with constrained decoding / your own grammar — the prompt format alone does not guarantee schema adherence (same caveat applies to structured-output `# Response Formats`).

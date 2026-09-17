@@ -3,53 +3,50 @@
 > Grep file contents with a regex across files, directories, globs, and internal URLs.
 
 ## Source
-
 - Entry: `packages/coding-agent/src/tools/grep.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/grep.md`
 - Key collaborators:
-   - `packages/coding-agent/src/tools/match-line-format.ts` — model-facing anchor formatting.
-   - `packages/coding-agent/src/tools/path-utils.ts` — path normalization, glob splitting, internal URL resolution.
-   - `packages/coding-agent/src/tools/file-recorder.ts` — file ordering for grouped output.
-   - `packages/coding-agent/src/tools/grouped-file-output.ts` — grouped per-file text layout.
-   - `packages/coding-agent/src/session/streaming-output.ts` — line truncation and final byte truncation.
-   - `packages/coding-agent/src/config/settings-schema.ts` — default context lines.
-   - `packages/natives/native/index.d.ts` — native `grep()` types exposed to TS.
-   - `crates/pi-natives/src/grep.rs` — native regex/file search implementation.
-   - `docs/natives-text-search-pipeline.md` — native search pipeline overview.
+  - `packages/coding-agent/src/tools/match-line-format.ts` — model-facing anchor formatting.
+  - `packages/coding-agent/src/tools/path-utils.ts` — path normalization, glob splitting, internal URL resolution.
+  - `packages/coding-agent/src/tools/file-recorder.ts` — file ordering for grouped output.
+  - `packages/coding-agent/src/tools/grouped-file-output.ts` — grouped per-file text layout.
+  - `packages/coding-agent/src/session/streaming-output.ts` — line truncation and final byte truncation.
+  - `packages/coding-agent/src/config/settings-schema.ts` — default context lines.
+  - `packages/natives/native/index.d.ts` — native `grep()` types exposed to TS.
+  - `crates/pi-natives/src/grep.rs` — native regex/file search implementation.
+  - `docs/natives-text-search-pipeline.md` — native search pipeline overview.
 
 ## Inputs
 
-| Field       | Type      | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
-| ----------- | --------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pattern`   | `string`  | Yes      | Regex pattern. `grep.ts` rejects whitespace-only input but preserves it verbatim. The native matcher tries Rust regex first, then PCRE2 for features such as lookaround/backreferences, then targeted literal recovery for malformed braces/parentheses. Multiline is enabled only when the pattern contains a literal newline or the two-character sequence `\\n`.                                                                                                                                                                               |
-| `path`      | `string`  | No       | One file path, directory path, glob-like path, archive member, readable external URL, internal URL, or one-file line selector such as `src/foo.ts:50-100` — or several of those as a semicolon-delimited list (`"src; tests"`). Omitted or empty defaults to `.`. Empty entries are rejected. Semicolon-delimited lists split unconditionally; entries accidentally joined with comma or whitespace are expanded only after existence validation; existing paths containing delimiters stay intact. Internal URLs cannot contain glob characters. |
-| `case`      | `boolean` | No       | Case-sensitive search. Defaults to `true`. Passed to native `ignoreCase` or JS `RegExp` flags for virtual resources.                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `gitignore` | `boolean` | No       | Respect `.gitignore` during directory scans. Defaults to `true`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `skip`      | `number`  | No       | File-page offset for multi-file results. Defaults to `0`; `grep.ts` floors finite numbers and rejects negative or non-finite values. Single-file searches ignore it because they do not paginate by file.                                                                                                                                                                                                                                                                                                                                         |
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `pattern` | `string` | Yes | Regex pattern. `grep.ts` rejects whitespace-only input but preserves it verbatim. The native matcher tries Rust regex first, then PCRE2 for features such as lookaround/backreferences, then targeted literal recovery for malformed braces/parentheses. Multiline is enabled only when the pattern contains a literal newline or the two-character sequence `\\n`. |
+| `path` | `string` | No | One file path, directory path, glob-like path, archive member, readable external URL, internal URL, or one-file line selector such as `src/foo.ts:50-100` — or several of those as a semicolon-delimited list (`"src; tests"`). Omitted or empty defaults to `.`. Empty entries are rejected. Semicolon-delimited lists split unconditionally; entries accidentally joined with comma or whitespace are expanded only after existence validation; existing paths containing delimiters stay intact. Internal URLs cannot contain glob characters. |
+| `case` | `boolean` | No | Case-sensitive search. Defaults to `true`. Passed to native `ignoreCase` or JS `RegExp` flags for virtual resources. |
+| `gitignore` | `boolean` | No | Respect `.gitignore` during directory scans. Defaults to `true`. |
+| `skip` | `number` | No | File-page offset for multi-file results. Defaults to `0`; `grep.ts` floors finite numbers and rejects negative or non-finite values. Single-file searches ignore it because they do not paginate by file. |
 
 `grep` is enabled by default (`grep.enabled = true`) and is discoverable rather than essential. Context defaults are configurable with `grep.contextBefore` and `grep.contextAfter`.
 
 ## Outputs
-
 The tool returns a single text block in `content[0].text` plus structured `details`.
 
 - Match lines are formatted by `formatMatchLine()` as `*LINE:content` for matches and ` LINE:content` for context under a `[PATH#TAG]` header in hashline mode.
-   - Hashline mode: `[src/login.ts#1F2A]`, `*5:content`, ` 9:content`.
-   - Plain mode: `*5|content`, ` 9|content`.
+  - Hashline mode: `[src/login.ts#1F2A]`, `*5:content`, ` 9:content`.
+  - Plain mode: `*5|content`, ` 9|content`.
 - Directory and multi-file results are grouped through `formatGroupedFiles()` as a multi-level, prefix-folded directory tree: one `#` per nesting level, directory headers end with `/`, and file headers carry a `#TAG` suffix when editable hashline anchors are available.
 - `details` may include:
-   - `scopePath` — formatted search scope.
-   - `matchCount`, `fileCount`, `files`, `fileMatches` — counts for the returned page.
-   - `fileLimitReached` — more matching files remain beyond the current 20-file page.
-   - `perFileLimitReached` — a hot file was trimmed to the per-file match cap.
-   - `linesTruncated` — one or more matched lines were shortened to `512` chars plus `…`.
-   - `truncated` and `meta.truncation` — final text output was head-truncated by `truncateHead()`.
-   - `displayContent` — TUI-only rendering text with `│` gutters instead of model anchors.
-   - `missingPaths` — multi-path entries skipped because their base path did not exist.
+  - `scopePath` — formatted search scope.
+  - `matchCount`, `fileCount`, `files`, `fileMatches` — counts for the returned page.
+  - `fileLimitReached` — more matching files remain beyond the current 20-file page.
+  - `perFileLimitReached` — a hot file was trimmed to the per-file match cap.
+  - `linesTruncated` — one or more matched lines were shortened to `512` chars plus `…`.
+  - `truncated` and `meta.truncation` — final text output was head-truncated by `truncateHead()`.
+  - `displayContent` — TUI-only rendering text with `│` gutters instead of model anchors.
+  - `missingPaths` — multi-path entries skipped because their base path did not exist.
 - No-match result text is `No matches found` (or `No more results (...)` when `skip` points past the last file page), optionally followed by skipped missing-path, unreadable-archive, or oversized-file notes.
 
 ## Flow
-
 1. `GrepTool.execute()` validates and normalizes input in `packages/coding-agent/src/tools/grep.ts`:
    - rejects whitespace-only patterns while preserving the pattern verbatim;
    - defaults omitted or empty `path` to `["."]` (the workspace root);
@@ -83,31 +80,24 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - `maxCountPerFile`: the per-file match cap plus one;
    - `mode: content`;
    - the combined abort `signal` and `timeoutMs: SEARCH_GREP_TIMEOUT_MS` (`30_000`).
-10.   Native execution happens in `crates/pi-natives/src/grep.rs`:
-
-- `build_matcher()` sanitizes non-quantifier braces and first tries the Rust regex engine;
-- patterns unsupported by Rust regex (including lookaround/backreferences) retry with PCRE2;
-- group-balance errors retry with literal parentheses; if both engines still reject the pattern, the original pattern is searched literally.
-
+10. Native execution happens in `crates/pi-natives/src/grep.rs`:
+   - `build_matcher()` sanitizes non-quantifier braces and first tries the Rust regex engine;
+   - patterns unsupported by Rust regex (including lookaround/backreferences) retry with PCRE2;
+   - group-balance errors retry with literal parentheses; if both engines still reject the pattern, the original pattern is searched literally.
 11. Grep dispatch differs by resolved path set:
-
-- exact explicit files or fanned-out multi-targets: JS loops over targets, merges `grep()` results itself, and deduplicates overlapping targets by absolute path + line number;
-- single file/directory base: one `grep()` call handles native scanning.
-
+   - exact explicit files or fanned-out multi-targets: JS loops over targets, merges `grep()` results itself, and deduplicates overlapping targets by absolute path + line number;
+   - single file/directory base: one `grep()` call handles native scanning.
 12. Virtual internal resources are searched in JS with `RegExp`; archive scratch paths and virtual paths are remapped back to user-facing selectors before rendering.
 13. JS output shaping then:
-
-- caps multi-file output to 20 files per page (`DEFAULT_FILE_LIMIT`), using `skip` as the next file offset;
-- caps matches per file to 20 for multi-file scopes and 200 for single-file scopes;
-- round-robins selected per-file matches so one file does not monopolize the page;
-- formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` for TUI;
-- in hashline mode, records a whole-file snapshot per rendered file with `recordFileSnapshot()` to mint the `#TAG` anchor (archive, virtual, and immutable paths are skipped).
-
+   - caps multi-file output to 20 files per page (`DEFAULT_FILE_LIMIT`), using `skip` as the next file offset;
+   - caps matches per file to 20 for multi-file scopes and 200 for single-file scopes;
+   - round-robins selected per-file matches so one file does not monopolize the page;
+   - formats lines through `formatMatchLine()` for the model and `formatCodeFrameLine()` for TUI;
+   - in hashline mode, records a whole-file snapshot per rendered file with `recordFileSnapshot()` to mint the `#TAG` anchor (archive, virtual, and immutable paths are skipped).
 14. Final text is passed through `truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER })`, so the effective cap is the default byte cap from `streaming-output.ts`, not the default line cap.
 15. `toolResult()` attaches text plus limit/truncation metadata.
 
 ## Modes / Variants
-
 1. **Single file path**
    - `grep()` searches one file.
    - Output is a flat list of match/context lines.
@@ -130,21 +120,19 @@ The tool returns a single text block in `content[0].text` plus structured `detai
    - Immutable and virtual sources suppress editable hashline anchors.
 
 ## Side Effects
-
 - Filesystem
-   - Stats resolved search roots and input paths.
-   - Reads matched files through native `grep()`.
-   - Records whole-file snapshots into the session file-snapshot store via `recordFileSnapshot()` for hashline anchors.
+  - Stats resolved search roots and input paths.
+  - Reads matched files through native `grep()`.
+  - Records whole-file snapshots into the session file-snapshot store via `recordFileSnapshot()` for hashline anchors.
 - Session state (transcript, memory, jobs, checkpoints, registries)
-   - Reads session settings for context defaults.
-   - Uses `session.internalRouter` to resolve internal URLs.
-   - Populates tool `details.meta` with truncation/limit metadata.
+  - Reads session settings for context defaults.
+  - Uses `session.internalRouter` to resolve internal URLs.
+  - Populates tool `details.meta` with truncation/limit metadata.
 - Background work / cancellation
-   - Wrapped in `untilAborted(signal, ...)` at the JS level.
-   - `grep.ts` passes the abort `signal` and `timeoutMs: SEARCH_GREP_TIMEOUT_MS` (`30_000`) into native `grep()`, so native scans are cancellable and time-bounded.
+  - Wrapped in `untilAborted(signal, ...)` at the JS level.
+  - `grep.ts` passes the abort `signal` and `timeoutMs: SEARCH_GREP_TIMEOUT_MS` (`30_000`) into native `grep()`, so native scans are cancellable and time-bounded.
 
 ## Limits & Caps
-
 - File page limit: `20` files (`DEFAULT_FILE_LIMIT` in `packages/coding-agent/src/tools/grep.ts`).
 - Per-file match caps: `20` for multi-file scopes (`MULTI_FILE_PER_FILE_MATCHES`), `200` for single-file scopes (`SINGLE_FILE_MATCHES`).
 - Native/JS preselection cap: `2000` matches (`INTERNAL_TOTAL_CAP`).
@@ -157,7 +145,6 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - Native per-file size cap: `4 * 1024 * 1024` bytes (`MAX_FILE_BYTES` in `crates/pi-natives/src/grep.rs`, mirrored as `NATIVE_GREP_MAX_FILE_BYTES` in `grep.ts`). Oversized filesystem files are skipped and surfaced as partial coverage (names for explicit files, a count for directory scans). Oversized virtual resources are searched in line-boundary chunks for line mode; multiline virtual searches fall back to JavaScript regex.
 
 ## Errors
-
 - `Pattern must not be empty` when trimmed `pattern` is empty.
 - `Skip must be a non-negative number` for negative or non-finite `skip`.
 - `Search scope entries must be non-empty paths or globs` when any normalized `path` entry is empty.
@@ -172,7 +159,6 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - ``Grep timed out after 30s; narrow paths or pattern, or scope with `glob` first`` when native grep hits `SEARCH_GREP_TIMEOUT_MS`.
 
 ## Notes
-
 - Filesystem-backed searches use Rust regex first and PCRE2 when the pattern needs features such as lookaround or backreferences. Virtual in-memory resources use JavaScript `RegExp`.
 - Native `build_matcher()` auto-escapes braces that cannot be valid quantifiers. Valid quantifiers such as `a{2,4}` remain regex syntax.
 - If Rust regex and PCRE2 both reject group syntax, native compilation retries after escaping unescaped parentheses, then finally treats the original pattern literally.

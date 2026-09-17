@@ -154,7 +154,7 @@ The CLI flags and files do **not** set this property: they set `customSystemProm
 | Replace the default instruction template but keep generated context, skills, and rules | `SYSTEM.md` or `--system-prompt`                                         |
 | Replace every provider-facing system block                                             | SDK `CreateAgentSessionOptions.systemPrompt`                             |
 | Customize automatic session titles                                                     | `TITLE_SYSTEM.md`                                                        |
-| Replace the personality block while keeping the rest of the default prompt             | `PERSONALITY.md`                                                         |
+| Replace the personality block while keeping the rest of the default prompt            | `PERSONALITY.md`                                                         |
 | Use `{{cwd}}` or other internal variables in a user file                               | Not supported; user content is inserted verbatim                         |
 | Inherit selected default-template sections                                             | Not supported; append to the default or copy the required text           |
 | Per-directory override                                                                 | A supported config base directly under the cwd used to launch OMP        |

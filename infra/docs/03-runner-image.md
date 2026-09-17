@@ -173,26 +173,25 @@ during `apt-get install`.
 
 **The apt `RUN` block.** This is the set that must mirror `setup-system-deps`.
 In order:
-
 - The first three lines add the **GitHub CLI apt repository** (keyring + signed
-  source list) _before_ `apt-get update`, so `gh` resolves and installs in the
+  source list) *before* `apt-get update`, so `gh` resolves and installs in the
   same apt transaction as everything else. `gh` is present on GitHub-hosted
   runners and is expected by the release workflows and the coding-agent `github`
   tool.
 - `apt-get install` pulls three groups:
-   - **build toolchain / utilities:** `build-essential pkg-config curl
-ca-certificates git unzip xz-utils gh clang lld llvm`.
-     `build-essential` + `pkg-config` are needed by the native and canvas builds;
-     `gh` is used by release workflows and the coding-agent GitHub tool; `clang
-lld llvm` are the MSVC-cross prerequisites that used to be apt-installed per
-     job.
-   - **canvas / cairo native stack:** `libcairo2-dev libpango1.0-dev libjpeg-dev
-libgif-dev librsvg2-dev` - the `-dev` headers the canvas/rsvg native modules
-     compile against.
-   - **CLI tools:** `fd-find ripgrep imagemagick`, used by the agent and tests.
+  - **build toolchain / utilities:** `build-essential pkg-config curl
+    ca-certificates git unzip xz-utils gh clang lld llvm`.
+    `build-essential` + `pkg-config` are needed by the native and canvas builds;
+    `gh` is used by release workflows and the coding-agent GitHub tool; `clang
+    lld llvm` are the MSVC-cross prerequisites that used to be apt-installed per
+    job.
+  - **canvas / cairo native stack:** `libcairo2-dev libpango1.0-dev libjpeg-dev
+    libgif-dev librsvg2-dev` - the `-dev` headers the canvas/rsvg native modules
+    compile against.
+  - **CLI tools:** `fd-find ripgrep imagemagick`, used by the agent and tests.
 - **The two shims** normalize Debian's binary names to what callers expect:
   Debian ships `fd` as `fdfind`, so `ln -sf "$(command -v fdfind)"
-/usr/local/bin/fd` exposes it as `fd`; ImageMagick installs `convert`, so
+  /usr/local/bin/fd` exposes it as `fd`; ImageMagick installs `convert`, so
   `ln -sf /usr/bin/convert /usr/local/bin/magick` exposes the v7-style `magick`
   name. These two shims are exactly what `setup-system-deps` recreates on a stock
   runner.
@@ -224,7 +223,7 @@ Linux arm64 cross path. The target set must stay a superset of the toml's, or
 rustup fetches the difference per job. The same layer also `cargo install`s the Rust-native helper CLIs
 `cargo-nextest`, `cargo-zigbuild`, and `cargo-xwin`, so the self-hosted native
 build path no longer fetches those tools job-by-job. Because the default toolchain
-already _is_ the pinned nightly with these components/targets, the corresponding
+already *is* the pinned nightly with these components/targets, the corresponding
 Rust setup steps in CI become no-ops - the warm-start payoff.
 
 ---
@@ -373,10 +372,10 @@ next job's microVM starts cold but with warm dependencies from the local store.
 
 ## 5. Tag conventions
 
-| Tag                                 | Mutability | Imported into containerd? | Referenced by ARC? | Purpose                                         |
-| ----------------------------------- | ---------- | ------------------------- | ------------------ | ----------------------------------------------- |
-| `omp-kata-runner:YYYY-MM-DD-HHMMSS` | immutable  | yes                       | yes                | the build of record; what runners actually boot |
-| `omp-kata-runner:preloaded`         | moving     | no                        | no                 | docker-local alias to the most recent build     |
+| Tag | Mutability | Imported into containerd? | Referenced by ARC? | Purpose |
+| --- | --- | --- | --- | --- |
+| `omp-kata-runner:YYYY-MM-DD-HHMMSS` | immutable | yes | yes | the build of record; what runners actually boot |
+| `omp-kata-runner:preloaded` | moving | no | no | docker-local alias to the most recent build |
 
 - The default `reload.sh` tag is timestamped (`date +%Y-%m-%d-%H%M%S`). You can
   also pass a date-only tag (`./reload.sh 2026-06-20`) or an explicit `repo:tag`.

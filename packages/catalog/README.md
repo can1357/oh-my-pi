@@ -4,18 +4,18 @@ Model catalog for [oh-my-pi](https://github.com/can1357/oh-my-pi): bundled model
 
 ## What's inside
 
-| Module                          | Purpose                                                                                                                                                                                                                                      |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `models.json` + `models`        | Bundled model database (pricing, context windows, modalities, thinking support)                                                                                                                                                              |
-| `provider-models`               | Provider catalog descriptors (`CATALOG_PROVIDERS`), per-provider model resolution rules                                                                                                                                                      |
-| `discovery`                     | Runtime model discovery for OpenAI-compatible endpoints, Gemini, Codex, Cursor, Antigravity, Ollama                                                                                                                                          |
-| `compat/rules`                  | Checked-in KDL policy tree: taxonomy (classes/families/revisions), class/provider cascade rules, runtime behavior vocabulary; compiled by `bun run gen:compat` into the committed `rules.json`                                               |
+| Module                          | Purpose                                                                                                     |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `models.json` + `models`        | Bundled model database (pricing, context windows, modalities, thinking support)                             |
+| `provider-models`               | Provider catalog descriptors (`CATALOG_PROVIDERS`), per-provider model resolution rules                     |
+| `discovery`                     | Runtime model discovery for OpenAI-compatible endpoints, Gemini, Codex, Cursor, Antigravity, Ollama         |
+| `compat/rules`                  | Checked-in KDL policy tree: taxonomy (classes/families/revisions), class/provider cascade rules, runtime behavior vocabulary; compiled by `bun run gen:compat` into the committed `rules.json` |
 | `compat`                        | The rule engine: `classifyModel` (taxonomy), `resolveModelPolicy` (cascade), behavior accessors (`api-routes`, `model-limits`, `exclude-models`, `pricing-peer`), collapse, and OpenAI/Anthropic wire builders that consume resolved records |
-| `identity`                      | Mechanical id utilities: reference resolution against the bundled index, dialects, selection priority, tokenizer families                                                                                                                    |
-| `model-thinking`                | Runtime thinking helpers (`getSupportedEfforts`, effort clamping/mapping, wire-id routing) over resolved model records                                                                                                                       |
-| `model-manager` / `model-cache` | Runtime model registry with discovery refresh and on-disk caching                                                                                                                                                                            |
-| `wire`                          | Wire-level helpers: Codex, Gemini headers, GitHub Copilot                                                                                                                                                                                    |
-| `effort`                        | Reasoning-effort level definitions                                                                                                                                                                                                           |
+| `identity`                      | Mechanical id utilities: reference resolution against the bundled index, dialects, selection priority, tokenizer families                                |
+| `model-thinking`                | Runtime thinking helpers (`getSupportedEfforts`, effort clamping/mapping, wire-id routing) over resolved model records                                   |
+| `model-manager` / `model-cache` | Runtime model registry with discovery refresh and on-disk caching                                           |
+| `wire`                          | Wire-level helpers: Codex, Gemini headers, GitHub Copilot                                                   |
+| `effort`                        | Reasoning-effort level definitions                                                                          |
 
 Import from subpaths (`@oh-my-pi/pi-catalog/<module>`) or the root barrel.
 
@@ -42,13 +42,13 @@ Ships TypeScript source directly (no build step); requires Bun ≥ 1.3.14.
 
 The `models` subpath (also exported from the root) provides timestamp-aware pricing helpers:
 
-| API                                                               | Result                                                                                                    |
-| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `calculateCost(model, usage, timestamp?)`                         | Updates and returns `usage.cost` using `model.cost`.                                                      |
-| `calculateUsageCost(cost, usage, timestamp?)`                     | Updates and returns `usage.cost` using a `ModelCost`.                                                     |
-| `calculateUncachedInputCost(cost, promptInputTokens, timestamp?)` | Returns the cost of a fully uncached prompt.                                                              |
-| `getTimeBasedPricingPeriod(cost, timestamp?)`                     | Returns `"peak"`, `"off-peak"`, or `undefined` without a schedule.                                        |
-| `getNextTimeBasedPricingTransition(cost, timestamp?)`             | Returns the next actual peak/off-peak change strictly after the timestamp, or `undefined` if none exists. |
+| API | Result |
+| --- | --- |
+| `calculateCost(model, usage, timestamp?)` | Updates and returns `usage.cost` using `model.cost`. |
+| `calculateUsageCost(cost, usage, timestamp?)` | Updates and returns `usage.cost` using a `ModelCost`. |
+| `calculateUncachedInputCost(cost, promptInputTokens, timestamp?)` | Returns the cost of a fully uncached prompt. |
+| `getTimeBasedPricingPeriod(cost, timestamp?)` | Returns `"peak"`, `"off-peak"`, or `undefined` without a schedule. |
+| `getNextTimeBasedPricingTransition(cost, timestamp?)` | Returns the next actual peak/off-peak change strictly after the timestamp, or `undefined` if none exists. |
 
 Timestamps are Unix milliseconds; omitted timestamps use the current time for scheduled pricing. Flat token prices are unaffected. Pricing selects the latest applicable effective rate card, then its long-context tier, then the peak/off-peak multiplier. A transition query concerns the recurring tariff, not dated rate-card changes.
 

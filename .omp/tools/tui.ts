@@ -50,7 +50,10 @@ interface ToolUpdate {
 	details?: Record<string, unknown>;
 }
 interface ToolResult {
-	content: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[];
+	content: (
+		| { type: "text"; text: string }
+		| { type: "image"; data: string; mimeType: string }
+	)[];
 	details?: Record<string, unknown>;
 }
 
@@ -98,9 +101,11 @@ let vtApi: Promise<typeof KittyVt> | null = null;
 
 function loadVt() {
 	// Lazy import: a missing optional install must degrade `start`, not fail tool load.
-	vtApi ??= import("kitty-vt-wasm").catch(error => {
+	vtApi ??= import("kitty-vt-wasm").catch((error) => {
 		vtApi = null;
-		throw new Error(`screen emulation needs kitty-vt-wasm — run \`bun install\` in .omp/tools (${error})`);
+		throw new Error(
+			`screen emulation needs kitty-vt-wasm — run \`bun install\` in .omp/tools (${error})`,
+		);
 	});
 	return vtApi;
 }
@@ -185,12 +190,15 @@ async function loadCanvas() {
 		// Lazy import: a missing optional install must degrade `shot`, not fail tool load.
 		mod = await import("@napi-rs/canvas");
 	} catch (error) {
-		throw new Error(`shot needs @napi-rs/canvas — run \`bun install\` in .omp/tools (${error})`);
+		throw new Error(
+			`shot needs @napi-rs/canvas — run \`bun install\` in .omp/tools (${error})`,
+		);
 	}
-	const families = mod.GlobalFonts.families.map(entry => entry.family);
+	const families = mod.GlobalFonts.families.map((entry) => entry.family);
 	const stack = ["Menlo"];
 	const nerd =
-		families.find(family => /nerd font mono/i.test(family)) ?? families.find(family => /nerd font/i.test(family));
+		families.find((family) => /nerd font mono/i.test(family)) ??
+		families.find((family) => /nerd font/i.test(family));
 	if (nerd) stack.push(nerd);
 	for (const wanted of [
 		"Apple Braille",
@@ -205,7 +213,7 @@ async function loadCanvas() {
 	canvasApi = {
 		create: mod.createCanvas,
 		load: mod.loadImage,
-		stack: stack.map(family => `"${family}"`).join(", "),
+		stack: stack.map((family) => `"${family}"`).join(", "),
 	};
 	return canvasApi;
 }
@@ -264,10 +272,10 @@ export class Screen {
 			scrollback: 2000,
 		});
 		const screen = new Screen(term);
-		term.onOutput = bytes => screen.onReply?.(bytes);
+		term.onOutput = (bytes) => screen.onReply?.(bytes);
 		// Image transmissions are kept for `shot`; the handler also keeps
 		// core logs and other host events off the host's stderr.
-		term.onEvent = event => {
+		term.onEvent = (event) => {
 			if (event.type === "graphics_command") screen.#graphics(event);
 		};
 		return screen;
@@ -294,7 +302,10 @@ export class Screen {
 		if (cmd.payload) pending.chunks.push(Buffer.from(cmd.payload, "base64"));
 		if (cmd.more) return;
 		this.#pending = null;
-		let bytes: Buffer = pending.chunks.length === 1 ? pending.chunks[0] : Buffer.concat(pending.chunks);
+		let bytes: Buffer =
+			pending.chunks.length === 1
+				? pending.chunks[0]
+				: Buffer.concat(pending.chunks);
 		if (pending.compressed) {
 			try {
 				bytes = inflateSync(bytes);
@@ -350,7 +361,8 @@ export class Screen {
 		}
 		const channels = image.format === 24 ? 3 : 4;
 		const { width, height } = image;
-		if (!width || !height || image.bytes.length < width * height * channels) return null;
+		if (!width || !height || image.bytes.length < width * height * channels)
+			return null;
 		const off = create(width, height);
 		const ctx = off.getContext("2d");
 		const data = ctx.createImageData(width, height);
@@ -377,10 +389,13 @@ export class Screen {
 		if (history > 0) {
 			const total = term.scrollbackLength;
 			for (let i = Math.max(0, total - history); i < total; i++) {
-				out.push(`┆${(term.scrollbackLine(i) ?? "").replace(PLACEHOLDER_RE, "▒")}`);
+				out.push(
+					`┆${(term.scrollbackLine(i) ?? "").replace(PLACEHOLDER_RE, "▒")}`,
+				);
 			}
 		}
-		for (let y = 0; y < term.rows; y++) out.push(`│${term.line(y).replace(PLACEHOLDER_RE, "▒")}`);
+		for (let y = 0; y < term.rows; y++)
+			out.push(`│${term.line(y).replace(PLACEHOLDER_RE, "▒")}`);
 		return out.join("\n");
 	}
 
@@ -445,7 +460,11 @@ export class Screen {
 					// Image placeholder: fg encodes the image id, combining
 					// diacritics the tile row/col; omitted diacritics continue
 					// the previous cell's run (kitty spec).
-					const id = cell.fg ? ("rgb" in cell.fg ? cell.fg.rgb : cell.fg.index) : 0;
+					const id = cell.fg
+						? "rgb" in cell.fg
+							? cell.fg.rgb
+							: cell.fg.index
+						: 0;
 					const row = rowcolIndex.get(cell.combining[0]?.codePointAt(0) ?? -1);
 					const col = rowcolIndex.get(cell.combining[1]?.codePointAt(0) ?? -1);
 					const prev = holders.at(-1);
@@ -475,8 +494,11 @@ export class Screen {
 		}
 		// Decode every image referenced by a placement or placeholder cell.
 		const placements = term.graphicsPlacements();
-		const drawable = new Map<number, CanvasModule.Image | CanvasModule.Canvas>();
-		const wanted = new Set(holders.map(holder => holder.id));
+		const drawable = new Map<
+			number,
+			CanvasModule.Image | CanvasModule.Canvas
+		>();
+		const wanted = new Set(holders.map((holder) => holder.id));
 		for (const placement of placements) {
 			if (!placement.unicodePlacement) wanted.add(placement.imageId);
 		}
@@ -486,7 +508,9 @@ export class Screen {
 			const image = await this.#decodeImage(create, load, stored);
 			if (image) drawable.set(id, image);
 		}
-		const direct = placements.filter(placement => !placement.unicodePlacement).sort((a, b) => a.zIndex - b.zIndex);
+		const direct = placements
+			.filter((placement) => !placement.unicodePlacement)
+			.sort((a, b) => a.zIndex - b.zIndex);
 		const drawDirect = (placement: (typeof direct)[number]) => {
 			const image = drawable.get(placement.imageId);
 			if (!image) return;
@@ -494,11 +518,29 @@ export class Screen {
 			// assumes 10x20px cells when sizing them.
 			const spanCols = placement.numCols || Math.ceil(image.width / 10);
 			const spanRows = placement.numRows || Math.ceil(image.height / 20);
-			ctx.drawImage(image, placement.col * CW, placement.row * CH, spanCols * CW, spanRows * CH);
+			ctx.drawImage(
+				image,
+				placement.col * CW,
+				placement.row * CH,
+				spanCols * CW,
+				spanRows * CH,
+			);
 		};
 		// kitty z-order: negative z-index draws under text, the rest above.
-		for (const placement of direct) if (placement.zIndex < 0) drawDirect(placement);
-		for (const { px, py, ch, fg, deco, bold, italic, underline, strike, span } of cells) {
+		for (const placement of direct)
+			if (placement.zIndex < 0) drawDirect(placement);
+		for (const {
+			px,
+			py,
+			ch,
+			fg,
+			deco,
+			bold,
+			italic,
+			underline,
+			strike,
+			span,
+		} of cells) {
 			if (underline) {
 				// Coarse style fidelity: double gets two bars; straight,
 				// curly, dotted, and dashed all render as one.
@@ -537,15 +579,22 @@ export class Screen {
 				}
 				continue;
 			}
-			ctx.font = `${italic ? "italic " : ""}${bold ? "bold " : ""}` + `${FONT_PX}px ${stack}`;
+			ctx.font =
+				`${italic ? "italic " : ""}${bold ? "bold " : ""}` +
+				`${FONT_PX}px ${stack}`;
 			ctx.fillText(ch, px, py + BASELINE);
 		}
-		for (const placement of direct) if (placement.zIndex >= 0) drawDirect(placement);
+		for (const placement of direct)
+			if (placement.zIndex >= 0) drawDirect(placement);
 		// Placeholder tiles: scale each image to its virtual grid (or the max
 		// extent seen) and draw the cell's slice.
 		const grids = new Map<number, { cols: number; rows: number }>();
 		for (const placement of placements) {
-			if (placement.unicodePlacement && placement.numCols && placement.numRows) {
+			if (
+				placement.unicodePlacement &&
+				placement.numCols &&
+				placement.numRows
+			) {
 				grids.set(placement.imageId, {
 					cols: placement.numCols,
 					rows: placement.numRows,
@@ -564,7 +613,17 @@ export class Screen {
 			if (!image || !grid) continue;
 			const sw = image.width / grid.cols;
 			const sh = image.height / grid.rows;
-			ctx.drawImage(image, holder.col * sw, holder.row * sh, sw, sh, holder.px, holder.py, CW, CH);
+			ctx.drawImage(
+				image,
+				holder.col * sw,
+				holder.row * sh,
+				sw,
+				sh,
+				holder.px,
+				holder.py,
+				CW,
+				CH,
+			);
 		}
 		const cursor = term.cursor;
 		if (cursor.visible) {
@@ -631,7 +690,11 @@ function capture(session: Session, chunk: Uint8Array) {
 	}
 }
 
-function connectSocket(session: Session, path: string, timeoutMs: number): Promise<boolean> {
+function connectSocket(
+	session: Session,
+	path: string,
+	timeoutMs: number,
+): Promise<boolean> {
 	const deadline = Date.now() + timeoutMs;
 	const { promise, resolve } = Promise.withResolvers<boolean>();
 	const attempt = () => {
@@ -687,9 +750,10 @@ function request(
 			),
 		);
 	}
-	const { promise, resolve, reject } = Promise.withResolvers<Record<string, unknown>>();
+	const { promise, resolve, reject } =
+		Promise.withResolvers<Record<string, unknown>>();
 	const timer = setTimeout(() => {
-		const index = session.waiters.findIndex(waiter => waiter.timer === timer);
+		const index = session.waiters.findIndex((waiter) => waiter.timer === timer);
 		if (index >= 0) session.waiters.splice(index, 1);
 		reject(new Error(`debug request timed out: ${JSON.stringify(body)}`));
 	}, timeoutMs);
@@ -763,14 +827,18 @@ function screenshotText(response: Record<string, unknown>): string {
 		`── viewport (window_top=${response.window_top}` +
 		`${response.alt_screen ? ", alt screen" : ""}` +
 		`${response.cursor ? `, cursor=${JSON.stringify(response.cursor)}` : ""}) ──`;
-	return `${header}\n${lines.map(line => `│${line}`).join("\n")}`;
+	return `${header}\n${lines.map((line) => `│${line}`).join("\n")}`;
 }
 
 /**
  * After-input screenshot: the renderer's viewport when a debug socket exists
  * (and answers), else the emulator's screen.
  */
-async function settled(session: Session, note: string, waitMs = 180): Promise<string> {
+async function settled(
+	session: Session,
+	note: string,
+	waitMs = 180,
+): Promise<string> {
 	await sleep(waitMs);
 	if (session.sock) {
 		try {
@@ -798,7 +866,9 @@ function renderTree(node: unknown, depth: number, out: string[]) {
 	out.push(
 		"  ".repeat(depth) +
 			`${field(node, "kind")}${typeof id === "string" ? `#${id}` : ""}` +
-			(Array.isArray(rect) ? ` [${rect[0]},${rect[1]} ${rect[2]}x${rect[3]}]` : "") +
+			(Array.isArray(rect)
+				? ` [${rect[0]},${rect[1]} ${rect[2]}x${rect[3]}]`
+				: "") +
 			(flags ? `  ${flags}` : ""),
 	);
 	const children = field(node, "children");
@@ -838,7 +908,8 @@ function visible(bytes: Buffer): string {
 		if (byte === 0x1b) out += "\\e";
 		else if (byte === 0x0a) out += "\n";
 		else if (byte === 0x0d) out += "\\r";
-		else if (byte < 0x20 || byte === 0x7f) out += `\\x${byte.toString(16).padStart(2, "0")}`;
+		else if (byte < 0x20 || byte === 0x7f)
+			out += `\\x${byte.toString(16).padStart(2, "0")}`;
 		else out += String.fromCharCode(byte);
 	}
 	return out;
@@ -937,7 +1008,7 @@ const factory = (omp: ToolHost) => {
 		}
 		// Route the core's query replies (DA, DECRQSS, OSC color queries) back
 		// to the child: capability probes resolve as on a real terminal.
-		screen.onReply = bytes => proc.terminal.write(bytes);
+		screen.onReply = (bytes) => proc.terminal.write(bytes);
 		session = {
 			name,
 			target,
@@ -953,18 +1024,23 @@ const factory = (omp: ToolHost) => {
 			rawBytes: 0,
 			exit: null,
 		};
-		proc.exited.then(code => {
+		proc.exited.then((code) => {
 			session.exit = code;
 		});
 		sessions.set(name, session);
 
 		const deadline = Date.now() + (params.timeout ?? 15) * 1000;
-		const connected = await connectSocket(session, sockPath, (params.timeout ?? 15) * 1000);
+		const connected = await connectSocket(
+			session,
+			sockPath,
+			(params.timeout ?? 15) * 1000,
+		);
 		if (session.exit !== null) {
 			const tail = visible(Buffer.concat(session.raw)).slice(-3000);
 			await stopSession(session).catch(() => {});
 			throw new Error(
-				`"${target}" exited immediately (code ${session.exit}).\n` + `terminal tail: ${tail || "(empty)"}`,
+				`"${target}" exited immediately (code ${session.exit}).\n` +
+					`terminal tail: ${tail || "(empty)"}`,
 			);
 		}
 		let text = `session "${name}": ${target} pid=${proc.pid} pty=${cols}x${rows}`;
@@ -999,7 +1075,7 @@ const factory = (omp: ToolHost) => {
 			"Run and debug omp/pi-tui apps headlessly on a real PTY plus the " +
 			"OMP_TUI_DEBUG socket. Start defaults to omp itself " +
 			"(packages/coding-agent/src/cli.ts); override with file (a TS/JS entry, e.g. " +
-			'file: "packages/tui/examples/debug-demo.ts") or bin (an executable name/path), plus optional rows/cols and args. Any omp/pi-tui app serves ' +
+			"file: \"packages/tui/examples/debug-demo.ts\") or bin (an executable name/path), plus optional rows/cols and args. Any omp/pi-tui app serves " +
 			"OMP_TUI_DEBUG. Ops: text (viewport screenshot as plain text), screen " +
 			"(plain-text screen from kitty's real terminal core — works for any app, no " +
 			"debug socket needed; peek=N prepends N scrollback lines), frame (full " +
@@ -1022,29 +1098,62 @@ const factory = (omp: ToolHost) => {
 				.describe(
 					"operation: start | stop | list | text | screen | shot | frame | tree | values | info | keys | type | paste | mouse | send | resize | raw",
 				),
-			name: omp.zod.string().optional().describe("session name (default: main)"),
+			name: omp.zod
+				.string()
+				.optional()
+				.describe("session name (default: main)"),
 			file: omp.zod
 				.string()
 				.optional()
-				.describe(
-					"start: TS/JS entry path relative to cwd (default: packages/coding-agent/src/cli.ts — omp itself)",
-				),
-			bin: omp.zod.string().optional().describe("start: executable name or path"),
-			args: omp.zod.array(omp.zod.string()).optional().describe("start: program argv"),
-			rows: omp.zod.number().optional().describe("start/resize: pty rows (default 30)"),
-			cols: omp.zod.number().optional().describe("start/resize: pty cols (default 100)"),
-			keys: omp.zod.string().optional().describe("keys: spec, e.g. \"tab tab enter C-c pgdn 'hello'\""),
-			text: omp.zod.string().optional().describe("type/paste/send: payload text"),
+				.describe("start: TS/JS entry path relative to cwd (default: packages/coding-agent/src/cli.ts — omp itself)"),
+			bin: omp.zod
+				.string()
+				.optional()
+				.describe("start: executable name or path"),
+			args: omp.zod
+				.array(omp.zod.string())
+				.optional()
+				.describe("start: program argv"),
+			rows: omp.zod
+				.number()
+				.optional()
+				.describe("start/resize: pty rows (default 30)"),
+			cols: omp.zod
+				.number()
+				.optional()
+				.describe("start/resize: pty cols (default 100)"),
+			keys: omp.zod
+				.string()
+				.optional()
+				.describe("keys: spec, e.g. \"tab tab enter C-c pgdn 'hello'\""),
+			text: omp.zod
+				.string()
+				.optional()
+				.describe("type/paste/send: payload text"),
 			x: omp.zod.number().optional().describe("mouse: zero-based column"),
 			y: omp.zod.number().optional().describe("mouse: zero-based viewport row"),
-			action: omp.zod.string().optional().describe("mouse: gesture (default click)"),
+			action: omp.zod
+				.string()
+				.optional()
+				.describe("mouse: gesture (default click)"),
 			peek: omp.zod
 				.number()
 				.optional()
-				.describe("screen: scrollback lines to include; raw: tail bytes (default 2000)"),
-			clear: omp.zod.boolean().optional().describe("raw: reset capture after reading"),
-			quiet: omp.zod.boolean().optional().describe("input ops: skip the after-screenshot"),
-			timeout: omp.zod.number().optional().describe("start: socket wait seconds (default 15)"),
+				.describe(
+					"screen: scrollback lines to include; raw: tail bytes (default 2000)",
+				),
+			clear: omp.zod
+				.boolean()
+				.optional()
+				.describe("raw: reset capture after reading"),
+			quiet: omp.zod
+				.boolean()
+				.optional()
+				.describe("input ops: skip the after-screenshot"),
+			timeout: omp.zod
+				.number()
+				.optional()
+				.describe("start: socket wait seconds (default 15)"),
 		}),
 
 		async execute(
@@ -1052,7 +1161,10 @@ const factory = (omp: ToolHost) => {
 			params: TuiParams,
 			_onUpdate?: (update: ToolUpdate) => void,
 		): Promise<ToolResult> {
-			const reply = (text: string, details?: Record<string, unknown>): ToolResult => ({
+			const reply = (
+				text: string,
+				details?: Record<string, unknown>,
+			): ToolResult => ({
 				content: [{ type: "text", text }],
 				details,
 			});
@@ -1062,7 +1174,7 @@ const factory = (omp: ToolHost) => {
 					return reply(await startSession(params));
 				case "list": {
 					const rows = [...sessions.values()].map(
-						session =>
+						(session) =>
 							`${session.name}: ${session.target} pid=${session.proc.pid} ` +
 							`${session.cols}x${session.rows} ` +
 							`${session.exit === null ? "running" : `exited(${session.exit})`}` +
@@ -1077,7 +1189,8 @@ const factory = (omp: ToolHost) => {
 				}
 				case "text": {
 					const session = need(params.name);
-					if (!session.sock) return reply(session.screen.snapshot(params.peek ?? 0));
+					if (!session.sock)
+						return reply(session.screen.snapshot(params.peek ?? 0));
 					const response = await request(session, { op: "text" });
 					return reply(screenshotText(response), response);
 				}
@@ -1086,7 +1199,10 @@ const factory = (omp: ToolHost) => {
 				}
 				case "shot": {
 					const session = need(params.name);
-					const png = join(tmpdir(), `omp-tui-${session.name}-${Date.now()}.png`);
+					const png = join(
+						tmpdir(),
+						`omp-tui-${session.name}-${Date.now()}.png`,
+					);
 					const bytes = await session.screen.png();
 					writeFileSync(png, bytes);
 					return {
@@ -1103,7 +1219,7 @@ const factory = (omp: ToolHost) => {
 				case "frame": {
 					const response = await request(need(params.name), { op: "frame" });
 					const lines = stringLines(response.lines);
-					return reply(lines.map(line => `│${line}`).join("\n"), response);
+					return reply(lines.map((line) => `│${line}`).join("\n"), response);
 				}
 				case "tree": {
 					const response = await request(need(params.name), { op: "tree" });
@@ -1136,10 +1252,14 @@ const factory = (omp: ToolHost) => {
 					});
 					if (!response.ok) throw new Error(String(response.error));
 					const note = `injected ${response.injected} events`;
-					return reply(params.quiet ? note : await settled(session, note), response);
+					return reply(
+						params.quiet ? note : await settled(session, note),
+						response,
+					);
 				}
 				case "type": {
-					if (params.text === undefined) throw new Error("type op needs `text`");
+					if (params.text === undefined)
+						throw new Error("type op needs `text`");
 					const session = need(params.name);
 					const response = await request(session, {
 						op: "bytes",
@@ -1147,17 +1267,24 @@ const factory = (omp: ToolHost) => {
 					});
 					if (!response.ok) throw new Error(String(response.error));
 					const note = `typed ${params.text.length} chars`;
-					return reply(params.quiet ? note : await settled(session, note), response);
+					return reply(
+						params.quiet ? note : await settled(session, note),
+						response,
+					);
 				}
 				case "paste": {
-					if (params.text === undefined) throw new Error("paste op needs `text`");
+					if (params.text === undefined)
+						throw new Error("paste op needs `text`");
 					const session = need(params.name);
 					const response = await request(session, {
 						op: "paste",
 						text: params.text,
 					});
 					if (!response.ok) throw new Error(String(response.error));
-					return reply(params.quiet ? "pasted" : await settled(session, "pasted"), response);
+					return reply(
+						params.quiet ? "pasted" : await settled(session, "pasted"),
+						response,
+					);
 				}
 				case "mouse": {
 					if (params.x === undefined || params.y === undefined) {
@@ -1172,10 +1299,14 @@ const factory = (omp: ToolHost) => {
 					});
 					if (!response.ok) throw new Error(String(response.error));
 					const note = `mouse ${params.action ?? "click"} at ${params.x},${params.y}`;
-					return reply(params.quiet ? note : await settled(session, note), response);
+					return reply(
+						params.quiet ? note : await settled(session, note),
+						response,
+					);
 				}
 				case "send": {
-					if (params.text === undefined) throw new Error("send op needs `text`");
+					if (params.text === undefined)
+						throw new Error("send op needs `text`");
 					const session = need(params.name);
 					const bytes = unescapeBytes(params.text);
 					session.proc.terminal.write(bytes);
@@ -1207,7 +1338,10 @@ const factory = (omp: ToolHost) => {
 					}
 					const peek = params.peek ?? 2000;
 					const tail = peek > 0 ? visible(blob.subarray(-peek)) : "";
-					return reply(`${JSON.stringify(stats)}${tail ? `\n── tail ──\n${tail}` : ""}`, { stats });
+					return reply(
+						`${JSON.stringify(stats)}${tail ? `\n── tail ──\n${tail}` : ""}`,
+						{ stats },
+					);
 				}
 				default:
 					throw new Error(`unknown op ${JSON.stringify(params.op)}`);

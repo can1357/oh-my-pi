@@ -107,10 +107,10 @@ There is no current `packages/natives` TS wrapper that emits OSC52, handles Term
 - **Collection boundary**: profiling samples are produced by `profile_region(tag)` guards in `task::blocking` and `task::future`.
 - **Storage format**: fixed-size circular buffer (`MAX_SAMPLES = 10_000`) storing stack path, duration, and timestamp.
 - **Output boundary**: `getWorkProfile(lastSeconds)` returns:
-   - `folded`: folded-stack text (flamegraph input)
-   - `summary`: markdown table summary
-   - `svg`: optional flamegraph SVG
-   - `totalMs`, `sampleCount`
+  - `folded`: folded-stack text (flamegraph input)
+  - `summary`: markdown table summary
+  - `svg`: optional flamegraph SVG
+  - `totalMs`, `sampleCount`
 
 ## Lifecycle and state transitions
 

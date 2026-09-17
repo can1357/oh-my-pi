@@ -6,7 +6,6 @@ robomp **never merges, closes, approves, or pushes** — the rank label is the v
 maintainer acts on it.
 
 Confirmed decisions:
-
 - **COMMENT-only.** `submit_pr_review` always uses `event="COMMENT"`. Never `APPROVE` /
   `REQUEST_CHANGES` (those gate merge — the maintainer's call).
 - **SQLite staging.** Inline comments are staged in a sqlite table, flushed in one review.
@@ -45,16 +44,15 @@ GitHub webhook
 
 Existing task kinds and their analogues for us:
 
-| Task                     | Trigger (`route`)                                              | Workspace                                | Terminal action                                          | Notes                                                                                          |
-| ------------------------ | -------------------------------------------------------------- | ---------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `triage_issue`           | `issues.opened`                                                | fresh `farm/<hex>/<slug>` worktree       | `gh_open_pr` / `mark_unable_to_reproduce` / `abort_task` | **The fresh-entry template** for `review_pr`.                                                  |
-| `handle_comment`         | `issue_comment.created` on an issue                            | resume existing                          | one `gh_post_comment`                                    |                                                                                                |
-| `handle_pr_conversation` | `issue_comment.created` on a PR                                | resume bot-PR branch                     | `gh_post_comment` / push                                 | bot-owned PRs only.                                                                            |
-| `handle_review`          | `pull_request_review_comment.created` on a **bot-authored** PR | resume via `existing_branch=pr.head_ref` | reply / push                                             | **The PR-context template** — shows `ensure_workspace(existing_branch=…)` and `inbound_is_pr`. |
-| `cleanup_workspace`      | `issues.closed` / bot `pull_request.merged`                    | removes worktree                         | —                                                        |                                                                                                |
+| Task | Trigger (`route`) | Workspace | Terminal action | Notes |
+|---|---|---|---|---|
+| `triage_issue` | `issues.opened` | fresh `farm/<hex>/<slug>` worktree | `gh_open_pr` / `mark_unable_to_reproduce` / `abort_task` | **The fresh-entry template** for `review_pr`. |
+| `handle_comment` | `issue_comment.created` on an issue | resume existing | one `gh_post_comment` | |
+| `handle_pr_conversation` | `issue_comment.created` on a PR | resume bot-PR branch | `gh_post_comment` / push | bot-owned PRs only. |
+| `handle_review` | `pull_request_review_comment.created` on a **bot-authored** PR | resume via `existing_branch=pr.head_ref` | reply / push | **The PR-context template** — shows `ensure_workspace(existing_branch=…)` and `inbound_is_pr`. |
+| `cleanup_workspace` | `issues.closed` / bot `pull_request.merged` | removes worktree | — | |
 
 Two facts that shape the wiring:
-
 - `route()` and `WorkerPool._dispatch()` **both** branch on `(event_type, action)`. `route`
   decides queue/skip + carries `submitter`/`directive`; `_dispatch` re-derives the handler.
   **A new task kind must be added in both.**
@@ -100,7 +98,7 @@ Today `issue_comment.created` on **any** PR queues `handle_pr_conversation`. For
 `issue_comment` handler to:
 
 - PR author **is** the bot → `handle_pr_conversation` (unchanged).
-- PR author is **not** the bot → **skip**, _unless_ `_directive_kwargs(...)` is non-empty
+- PR author is **not** the bot → **skip**, *unless* `_directive_kwargs(...)` is non-empty
   (a maintainer `@bot` mention or a configured reviewer bot). A directive routes to the
   existing directive path; only an explicit "re-review" directive re-runs the review.
 
@@ -186,15 +184,14 @@ comment tools at the PR thread (existing behavior). Add `review_pr` to `tasks.__
   full kickoff now, not just a rubric).
 - Add the loader, mirroring `kickoff`:
 
-   ```python
-   def kickoff_pr_review(*, repo: RepoInfo, pr: PullRequestInfo, workspace: Workspace) -> str:
-       return render(_load("kickoff_pr_review.md"), {"repo": repo, "pr": pr, "workspace": workspace})
-   ```
+  ```python
+  def kickoff_pr_review(*, repo: RepoInfo, pr: PullRequestInfo, workspace: Workspace) -> str:
+      return render(_load("kickoff_pr_review.md"), {"repo": repo, "pr": pr, "workspace": workspace})
+  ```
 
-   The template references `{{repo.*}}`, `{{pr.number|author|head_ref|base_ref|head_repo|html_url}}`,
-   `{{workspace.branch}}`. Title/body/diff come from the `fetch_pr` tool, not template vars
-   (`PullRequestInfo` has no title/body). `_lookup` returns `""` for any missing field — safe.
-
+  The template references `{{repo.*}}`, `{{pr.number|author|head_ref|base_ref|head_repo|html_url}}`,
+  `{{workspace.branch}}`. Title/body/diff come from the `fetch_pr` tool, not template vars
+  (`PullRequestInfo` has no title/body). `_lookup` returns `""` for any missing field — safe.
 - `_build_prompt` (`worker.py`): add a `task_kind == "review_pr"` branch calling
   `persona.kickoff_pr_review(repo=inputs.repo, pr=<pr>, workspace=inputs.workspace)`. The `pr`
   object must reach `_build_prompt` — simplest is to add an optional `pr: PullRequestInfo | None`
@@ -213,23 +210,23 @@ This is the load-bearing isolation change. Reuse the entire worktree machinery; 
 `refs/pull/<n>/head` on the base repo's remote (not a branch on origin).
 
 - **`GitTransport` protocol** — add:
-   ```python
-   def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None: ...
-   ```
-   `LocalGitTransport`: `git fetch origin pull/<n>/head` (PAT injected per-call, as
-   `fetch_base_ref` does). `ProxyGitTransport`: add the matching gh-proxy git op (mirror its
-   `fetch_base_ref` path over the HMAC channel + a proxy-server handler).
+  ```python
+  def fetch_pr_head(self, *, repo: str, pool_dir: Path, pr_number: int) -> None: ...
+  ```
+  `LocalGitTransport`: `git fetch origin pull/<n>/head` (PAT injected per-call, as
+  `fetch_base_ref` does). `ProxyGitTransport`: add the matching gh-proxy git op (mirror its
+  `fetch_base_ref` path over the HMAC channel + a proxy-server handler).
 - **`ensure_workspace`** — add `pr_head: int | None = None`. When set, in the `not repo_exists`
   branch:
-   ```python
-   self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
-   _run(["git", "worktree", "add", "--detach", str(repo_dir), "FETCH_HEAD"], cwd=pool)
-   ```
-   Detached HEAD (never a pushable branch — review is read-only). Set
-   `workspace.branch = f"review/pr-{pr_head}"` for bookkeeping/logging only. Everything after
-   (slot chown, `_share_git_metadata_with_slots`, `_provision_runtime_dirs`, natives-cache
-   hardlink, identity config) runs unchanged, so the review worktree gets the **same isolation
-   and the warm native cache** as a fix worktree (`bun check`/lsp stay fast).
+  ```python
+  self.transport.fetch_pr_head(repo=repo, pool_dir=pool, pr_number=pr_head)
+  _run(["git", "worktree", "add", "--detach", str(repo_dir), "FETCH_HEAD"], cwd=pool)
+  ```
+  Detached HEAD (never a pushable branch — review is read-only). Set
+  `workspace.branch = f"review/pr-{pr_head}"` for bookkeeping/logging only. Everything after
+  (slot chown, `_share_git_metadata_with_slots`, `_provision_runtime_dirs`, natives-cache
+  hardlink, identity config) runs unchanged, so the review worktree gets the **same isolation
+  and the warm native cache** as a fix worktree (`bun check`/lsp stay fast).
 
 Result: the agent's cwd is the PR head, fully isolated, read-only. No credentialed push remote
 is configured for review worktrees.
@@ -248,15 +245,14 @@ Add a `review_mode: bool = False` field to `ToolBindings`; set it from `run_task
 
 Four new tools, registered unconditionally in `build()`:
 
-| Tool                | Params                                                                                                       | Behavior                                                                                                                                                                                                         | Audit |
-| ------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
-| `fetch_pr`          | — (defaults to inbound PR)                                                                                   | `get_pull_request` + `list_pr_files`; returns title, body, `Fixes #N` links, changed-file list (path/status/+−). The premise read.                                                                               | yes   |
-| `classify_pr`       | `rank`(req `review:p0..p3`), `type`(one of `_PR_TYPES`), `area[]`(⊆ `_FUNCTIONAL`), `provider?`, `rationale` | Validate (drop unknowns silently, like `classify_issue`); `github.add_issue_labels(repo, pr.number, ["triaged", rank, type, *area, provider?])` (issues-labels API works on PRs); persist rank in the issue row. | yes   |
-| `pr_review_comment` | `path`(req), `line`(req int), `body`(req), `side`="RIGHT", `start_line?`, `start_side?`                      | **Stage only** — append to sqlite (§9). Validate path/line/body. Return staged count. No GitHub call.                                                                                                            | yes   |
-| `submit_pr_review`  | `body`(req), `event`="COMMENT" (forced)                                                                      | Read staged rows → `github.submit_pr_review(repo, pr.number, body, "COMMENT", comments)` → `clear_staged_review_comments` on success.                                                                            | yes   |
+| Tool | Params | Behavior | Audit |
+|---|---|---|---|
+| `fetch_pr` | — (defaults to inbound PR) | `get_pull_request` + `list_pr_files`; returns title, body, `Fixes #N` links, changed-file list (path/status/+−). The premise read. | yes |
+| `classify_pr` | `rank`(req `review:p0..p3`), `type`(one of `_PR_TYPES`), `area[]`(⊆ `_FUNCTIONAL`), `provider?`, `rationale` | Validate (drop unknowns silently, like `classify_issue`); `github.add_issue_labels(repo, pr.number, ["triaged", rank, type, *area, provider?])` (issues-labels API works on PRs); persist rank in the issue row. | yes |
+| `pr_review_comment` | `path`(req), `line`(req int), `body`(req), `side`="RIGHT", `start_line?`, `start_side?` | **Stage only** — append to sqlite (§9). Validate path/line/body. Return staged count. No GitHub call. | yes |
+| `submit_pr_review` | `body`(req), `event`="COMMENT" (forced) | Read staged rows → `github.submit_pr_review(repo, pr.number, body, "COMMENT", comments)` → `clear_staged_review_comments` on success. | yes |
 
 New allowlists next to the existing ones:
-
 ```python
 _PR_RANKS = ("review:p0", "review:p1", "review:p2", "review:p3")
 _PR_TYPES = ("feat", "fix", "docs", "refactor", "perf", "test", "chore", "ci", "build")
@@ -273,10 +269,10 @@ _PR_TYPES = ("feat", "fix", "docs", "refactor", "perf", "test", "chore", "ci", "
 - `PullRequestInfo`: add `title: str = ""`, `body: str = ""`. Populate in `_pr_from_payload`
   (REST `/pulls/{n}` carries both) and proxy `_pr_from`.
 - `GitHubBackend` protocol + both impls:
-   - `list_pr_files(repo, pr_number) -> list[PullRequestFileInfo]` → `GET /pulls/{n}/files`
-     (new small frozen dataclass: `path`, `status`, `additions`, `deletions`).
-   - `submit_pr_review(*, repo, pr_number, body, event, comments) -> PullRequestReviewInfo`
-     → `POST /pulls/{n}/reviews` with `comments=[{path, line, side, body, start_line?, start_side?}]`.
+  - `list_pr_files(repo, pr_number) -> list[PullRequestFileInfo]` → `GET /pulls/{n}/files`
+    (new small frozen dataclass: `path`, `status`, `additions`, `deletions`).
+  - `submit_pr_review(*, repo, pr_number, body, event, comments) -> PullRequestReviewInfo`
+    → `POST /pulls/{n}/reviews` with `comments=[{path, line, side, body, start_line?, start_side?}]`.
 - gh-proxy mode (`proxy_client.py` + `src/proxy/server.py`): add `/gh/v1/pr_files` (GET) and
   `/gh/v1/submit_pr_review` (POST) endpoints + client wrappers. HMAC signing is generic — no
   protocol change. Validate inputs server-side with the existing `_require_*` helpers.
@@ -330,16 +326,16 @@ killed without a redeploy; check it in `route()`'s new branch. Reuse the existin
 
 ## 12. Routing truth table
 
-| Event                                                   | Condition                                     | Result                               |
-| ------------------------------------------------------- | --------------------------------------------- | ------------------------------------ |
-| `pull_request.opened` / `reopened` / `ready_for_review` | non-draft, author ≠ bot, allowlisted, enabled | **`review_pr`**                      |
-| `pull_request.opened`                                   | draft / bot-authored                          | skip                                 |
-| `pull_request.synchronize` (new commits)                | —                                             | **skip** (no re-review)              |
-| `pull_request.edited` / others                          | —                                             | skip                                 |
-| `issue_comment.created` on incoming PR                  | not a directive                               | **skip**                             |
-| `issue_comment.created` on incoming PR                  | maintainer `@bot` / reviewer bot              | directive path (may re-review)       |
-| `issue_comment.created` on bot PR                       | —                                             | `handle_pr_conversation` (unchanged) |
-| `pull_request.closed`                                   | has review workspace                          | `cleanup_workspace`                  |
+| Event | Condition | Result |
+|---|---|---|
+| `pull_request.opened` / `reopened` / `ready_for_review` | non-draft, author ≠ bot, allowlisted, enabled | **`review_pr`** |
+| `pull_request.opened` | draft / bot-authored | skip |
+| `pull_request.synchronize` (new commits) | — | **skip** (no re-review) |
+| `pull_request.edited` / others | — | skip |
+| `issue_comment.created` on incoming PR | not a directive | **skip** |
+| `issue_comment.created` on incoming PR | maintainer `@bot` / reviewer bot | directive path (may re-review) |
+| `issue_comment.created` on bot PR | — | `handle_pr_conversation` (unchanged) |
+| `pull_request.closed` | has review workspace | `cleanup_workspace` |
 
 ---
 

@@ -26,8 +26,8 @@ Top-level fields:
 - `vars` (optional; reusable color variables)
 - `export` (optional; HTML export colors)
 - `symbols` (optional)
-   - `preset` (optional: `unicode | nerd | ascii`)
-   - `overrides` (optional: key/value overrides for `SymbolKey`)
+  - `preset` (optional: `unicode | nerd | ascii`)
+  - `overrides` (optional: key/value overrides for `SymbolKey`)
 
 Color values accept:
 
@@ -158,6 +158,14 @@ Conversion behavior:
 
 ## Runtime switching behavior
 
+The `theme` export is a live binding, including in bundled extensions. Read it inside rendering callbacks rather than retaining a theme instance across switches. Extension renderer callbacks may also use their supplied theme argument.
+
+```ts
+import { theme } from "@oh-my-pi/pi-coding-agent";
+
+const renderStatus = () => theme.fg("accent", "Ready");
+```
+
 ### Initial theme (`initTheme`)
 
 `main.ts` initializes theme with settings:
@@ -184,7 +192,7 @@ Current defaults from settings schema:
 ### Explicit switching (`setTheme`)
 
 - loads selected theme
-- updates global `theme` singleton
+- updates the live `theme` export
 - optionally starts watcher
 - triggers `onThemeChange` callback
 
@@ -195,7 +203,7 @@ On failure:
 
 ### Preview switching (`previewTheme`)
 
-- applies temporary preview theme to global `theme`
+- applies the preview to the live `theme` export
 - does **not** change persisted settings by itself
 - returns success/error without fallback replacement
 
@@ -249,87 +257,87 @@ Minimal skeleton:
 
 ```json
 {
-	"name": "my-theme",
-	"vars": {
-		"accent": "#7aa2f7",
-		"muted": 244
-	},
-	"colors": {
-		"accent": "accent",
-		"border": "#4c566a",
-		"borderAccent": "accent",
-		"borderMuted": "muted",
-		"success": "#9ece6a",
-		"error": "#f7768e",
-		"warning": "#e0af68",
-		"muted": "muted",
-		"dim": 240,
-		"text": "",
-		"thinkingText": "muted",
+  "name": "my-theme",
+  "vars": {
+    "accent": "#7aa2f7",
+    "muted": 244
+  },
+  "colors": {
+    "accent": "accent",
+    "border": "#4c566a",
+    "borderAccent": "accent",
+    "borderMuted": "muted",
+    "success": "#9ece6a",
+    "error": "#f7768e",
+    "warning": "#e0af68",
+    "muted": "muted",
+    "dim": 240,
+    "text": "",
+    "thinkingText": "muted",
 
-		"selectedBg": "#2a2f45",
-		"userMessageBg": "#1f2335",
-		"userMessageText": "",
-		"customMessageBg": "#24283b",
-		"customMessageText": "",
-		"customMessageLabel": "accent",
-		"toolPendingBg": "#1f2335",
-		"toolSuccessBg": "#1f2d2a",
-		"toolErrorBg": "#2d1f2a",
-		"toolTitle": "",
-		"toolOutput": "muted",
+    "selectedBg": "#2a2f45",
+    "userMessageBg": "#1f2335",
+    "userMessageText": "",
+    "customMessageBg": "#24283b",
+    "customMessageText": "",
+    "customMessageLabel": "accent",
+    "toolPendingBg": "#1f2335",
+    "toolSuccessBg": "#1f2d2a",
+    "toolErrorBg": "#2d1f2a",
+    "toolTitle": "",
+    "toolOutput": "muted",
 
-		"mdHeading": "accent",
-		"mdLink": "accent",
-		"mdLinkUrl": "muted",
-		"mdCode": "#c0caf5",
-		"mdCodeBlock": "#c0caf5",
-		"mdCodeBlockBorder": "muted",
-		"mdQuote": "muted",
-		"mdQuoteBorder": "muted",
-		"mdHr": "muted",
-		"mdListBullet": "accent",
+    "mdHeading": "accent",
+    "mdLink": "accent",
+    "mdLinkUrl": "muted",
+    "mdCode": "#c0caf5",
+    "mdCodeBlock": "#c0caf5",
+    "mdCodeBlockBorder": "muted",
+    "mdQuote": "muted",
+    "mdQuoteBorder": "muted",
+    "mdHr": "muted",
+    "mdListBullet": "accent",
 
-		"toolDiffAdded": "#9ece6a",
-		"toolDiffRemoved": "#f7768e",
-		"toolDiffContext": "muted",
+    "toolDiffAdded": "#9ece6a",
+    "toolDiffRemoved": "#f7768e",
+    "toolDiffContext": "muted",
 
-		"syntaxComment": "#565f89",
-		"syntaxKeyword": "#bb9af7",
-		"syntaxFunction": "#7aa2f7",
-		"syntaxVariable": "#c0caf5",
-		"syntaxString": "#9ece6a",
-		"syntaxNumber": "#ff9e64",
-		"syntaxType": "#2ac3de",
-		"syntaxOperator": "#89ddff",
-		"syntaxPunctuation": "#9aa5ce",
+    "syntaxComment": "#565f89",
+    "syntaxKeyword": "#bb9af7",
+    "syntaxFunction": "#7aa2f7",
+    "syntaxVariable": "#c0caf5",
+    "syntaxString": "#9ece6a",
+    "syntaxNumber": "#ff9e64",
+    "syntaxType": "#2ac3de",
+    "syntaxOperator": "#89ddff",
+    "syntaxPunctuation": "#9aa5ce",
 
-		"thinkingOff": 240,
-		"thinkingMinimal": 244,
-		"thinkingLow": "#7aa2f7",
-		"thinkingMedium": "#2ac3de",
-		"thinkingHigh": "#bb9af7",
-		"thinkingXhigh": "#f7768e",
-		"thinkingMax": "#ff007c",
+    "thinkingOff": 240,
+    "thinkingMinimal": 244,
+    "thinkingLow": "#7aa2f7",
+    "thinkingMedium": "#2ac3de",
+    "thinkingHigh": "#bb9af7",
+    "thinkingXhigh": "#f7768e",
+    "thinkingMax": "#ff007c",
 
-		"bashMode": "#2ac3de",
-		"pythonMode": "#bb9af7",
+    "bashMode": "#2ac3de",
+    "pythonMode": "#bb9af7",
 
-		"statusLineBg": "#16161e",
-		"statusLineSep": 240,
-		"statusLineModel": "#bb9af7",
-		"statusLinePath": "#7aa2f7",
-		"statusLineGitClean": "#9ece6a",
-		"statusLineGitDirty": "#e0af68",
-		"statusLineContext": "#2ac3de",
-		"statusLineSpend": "#7dcfff",
-		"statusLineStaged": "#9ece6a",
-		"statusLineDirty": "#e0af68",
-		"statusLineUntracked": "#f7768e",
-		"statusLineOutput": "#c0caf5",
-		"statusLineCost": "#ff9e64",
-		"statusLineSubagents": "#bb9af7"
-	}
+    "statusLineBg": "#16161e",
+    "statusLineSep": 240,
+    "statusLineModel": "#bb9af7",
+    "statusLinePath": "#7aa2f7",
+    "statusLineGitClean": "#9ece6a",
+    "statusLineGitDirty": "#e0af68",
+    "statusLineContext": "#2ac3de",
+    "statusLineSpend": "#7dcfff",
+    "statusLineStaged": "#9ece6a",
+    "statusLineDirty": "#e0af68",
+    "statusLineUntracked": "#f7768e",
+    "statusLineOutput": "#c0caf5",
+    "statusLineCost": "#ff9e64",
+    "statusLineSubagents": "#bb9af7"
+  }
 }
 ```
 

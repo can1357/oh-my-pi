@@ -63,9 +63,9 @@ Current runtime behavior:
 
 - `name` defaults to the skill directory name
 - `description` is required for:
-   - native `.omp` provider skill discovery (`requireDescription: true`)
-   - `omp-plugins` extension-package skills and the `github` provider (`.github/skills/`), which also pass `requireDescription: true`
-   - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (non-recursive)
+  - native `.omp` provider skill discovery (`requireDescription: true`)
+  - `omp-plugins` extension-package skills and the `github` provider (`.github/skills/`), which also pass `requireDescription: true`
+  - `skills.customDirectories` scans via `scanSkillsFromDir` in `src/discovery/helpers.ts` (non-recursive)
 - the claude/codex/agents/opencode/claude-plugins providers can load skills without description
 
 ## Discovery pipeline
@@ -119,9 +119,9 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 
 - Capability dedup already keeps first skill per name (highest-precedence provider)
 - `extensibility/skills.ts` additionally:
-   - de-duplicates identical files by `realpath` (symlink-safe)
-   - emits collision warnings when a later skill name conflicts
-   - keeps the convenience `loadSkillsFromDir({ dir, source })` API as a thin adapter over `scanSkillsFromDir`
+  - de-duplicates identical files by `realpath` (symlink-safe)
+  - emits collision warnings when a later skill name conflicts
+  - keeps the convenience `loadSkillsFromDir({ dir, source })` API as a thin adapter over `scanSkillsFromDir`
 - Custom-directory skills are merged after provider skills and override same-named default-path provider skills. Among custom directories, the first same-named skill wins.
 
 ## Runtime usage behavior
@@ -131,9 +131,9 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 System prompt construction (`src/system-prompt.ts`) uses discovered skills as follows:
 
 - if `read` tool is available:
-   - include discovered skills list in prompt, excluding skills with `hide: true`
+  - include discovered skills list in prompt, excluding skills with `hide: true`
 - otherwise:
-   - omit discovered list
+  - omit discovered list
 
 `hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
 
@@ -152,8 +152,8 @@ If `skills.enableSkillCommands` is true, interactive mode registers one slash co
 - strips frontmatter
 - wraps the body with skill name, base directory, and optional user arguments, then injects it as a custom message
 - delivery mode follows the **submission keybinding**:
-   - **Enter** → invokes the skill on the `steer` queue while streaming (matches free-text Enter, which also steers), or as a normal idle prompt when the agent is not streaming
-   - **Ctrl+Enter** (`app.message.followUp`) → invokes the skill on the `followUp` queue while streaming, or as a normal idle prompt when the agent is not streaming
+  - **Enter** → invokes the skill on the `steer` queue while streaming (matches free-text Enter, which also steers), or as a normal idle prompt when the agent is not streaming
+  - **Ctrl+Enter** (`app.message.followUp`) → invokes the skill on the `followUp` queue while streaming, or as a normal idle prompt when the agent is not streaming
 
 There is no flag, mode-selector, or frontmatter knob to override delivery mode — the keybinding _is_ the choice, identical to free-text routing during streaming. Both submission paths dispatch through `#invokeSkillCommand` in `input-controller.ts`, which delegates to `invokeSkillCommandFromText` in `src/modes/skill-command.ts`.
 
