@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- TypeSafe judgments now report their published input-token price in usage instead of zero cost, so session cost totals include them.
+- TypeSafe judgments now report their published input-token price in usage instead of zero cost, so session cost totals include them ([#12336](https://github.com/can1357/oh-my-pi/pull/12336) by [@eggpeat](https://github.com/eggpeat)).
 
 ## [18.2.4] - 2026-09-17
 
