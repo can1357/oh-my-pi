@@ -499,8 +499,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const sessionAbortController = new AbortController();
 		const emitToolUpdate = onUpdate
 			? (text: string, details: EvalToolDetails): void => {
-				onUpdate({ content: [{ type: "text", text }], details });
-			}
+					onUpdate({ content: [{ type: "text", text }], details });
+				}
 			: undefined;
 		const run = async (
 			runSignal: AbortSignal | undefined,
@@ -1032,7 +1032,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			if (!outputDumped) {
 				try {
 					await finalizeOutput();
-				} catch { }
+				} catch {}
 			}
 		}
 	}
