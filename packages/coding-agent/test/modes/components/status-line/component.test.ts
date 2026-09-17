@@ -181,7 +181,10 @@ describe("StatusLineComponent", () => {
 	});
 
 	it("preserves the compact context prefix in startup placeholders", () => {
-		const statusLine = new StatusLineComponent(makeSessionWithLastMessage(null) as unknown as AgentSession);
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null) as unknown as AgentSession,
+			statusLineHost,
+		);
 		statusLine.updateSettings({
 			preset: "custom",
 			leftSegments: ["context_pct"],

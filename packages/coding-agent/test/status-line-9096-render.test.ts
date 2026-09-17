@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { __resetDirsFromEnvForTests, setProfile } from "@oh-my-pi/pi-utils";
 import {
 	beginSettingsTest,
@@ -33,39 +34,42 @@ afterEach(() => {
 
 test("renders profile plus compact metric status line", () => {
 	setProfile("work");
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "GPT-5.6-Sol", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "GPT-5.6-Sol", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 25000,
-				output: 5,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 25005,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "GPT-5.6-Sol", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "GPT-5.6-Sol", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 25000,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 25005,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -89,39 +93,42 @@ test("renders profile plus compact metric status line", () => {
 });
 
 test("reserves token breakdown widths in startup placeholders", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 25000,
-				output: 5,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 25005,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 25000,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 25005,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -139,39 +146,42 @@ test("reserves token breakdown widths in startup placeholders", () => {
 });
 
 test("compact context percentage preserves an explicitly configured context total", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -190,39 +200,42 @@ test("compact context percentage preserves an explicitly configured context tota
 
 test("breakdown keeps orchestration usage out of in/out labels", () => {
 	setProfile("work");
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "GPT-5.6-Sol", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "GPT-5.6-Sol", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 25000,
-				output: 5,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 37005,
-				orchestrationInput: 7000,
-				orchestrationOutput: 5000,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "GPT-5.6-Sol", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "GPT-5.6-Sol", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 25000,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 37005,
+					orchestrationInput: 7000,
+					orchestrationOutput: 5000,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -245,39 +258,42 @@ test("breakdown keeps orchestration usage out of in/out labels", () => {
 });
 
 test("keeps compact embedded context visible in a seven-cell gauge gap", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 25000,
-				output: 5,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 25005,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 25000,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 25005,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -297,39 +313,42 @@ test("keeps compact embedded context visible in a seven-cell gauge gap", () => {
 });
 
 test("renders compact embedded context in an exact-width six-cell gauge gap", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 25000,
-				output: 5,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 25005,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 25000,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 25005,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -351,39 +370,42 @@ test("renders compact embedded context in an exact-width six-cell gauge gap", ()
 });
 
 test("keeps compact context when it only fits after dropping the last status segment", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -400,39 +422,42 @@ test("keeps compact context when it only fits after dropping the last status seg
 });
 
 test("falls back to compact context when an explicit total cannot fit", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -449,39 +474,42 @@ test("falls back to compact context when an explicit total cannot fit", () => {
 });
 
 test("reserves the compact total width in startup placeholders", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -506,51 +534,54 @@ test("reserves the compact total width in startup placeholders", () => {
 });
 
 test("masks boundary ticks across the reserved compact placeholder width", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: {
-			get: () => false,
-			getGroup: (group: string) =>
-				group === "compaction"
-					? {
-							enabled: true,
-							strategy: "summarize",
-							asyncEnabled: true,
-							thresholdPercent: 50,
-							methodOrder: ["soft"],
-						}
-					: {},
-		},
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: {
+				get: () => false,
+				getGroup: (group: string) =>
+					group === "compaction"
+						? {
+								enabled: true,
+								strategy: "summarize",
+								asyncEnabled: true,
+								thresholdPercent: 50,
+								methodOrder: ["soft"],
+							}
+						: {},
+			},
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 	component.setAutoCompactEnabled(true);
 	component.updateSettings({
 		preset: "custom",
@@ -574,39 +605,42 @@ test("masks boundary ticks across the reserved compact placeholder width", () =>
 });
 
 test("startup gauge omits the window label when live labels cannot fit the gap", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "MMM", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "MMM", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "MMM", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "MMM", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -633,39 +667,42 @@ test("startup gauge omits the window label when live labels cannot fit the gap",
 });
 
 test("preserves the last ordinary segment when compact context labels cannot fit", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -684,39 +721,42 @@ test("preserves the last ordinary segment when compact context labels cannot fit
 });
 
 test("drops the last ordinary segment when the explicit compact total then fits", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -739,39 +779,42 @@ test("drops the last ordinary segment when the explicit compact total then fits"
 });
 
 test("reserves the live compact percentage width during startup", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -794,39 +837,42 @@ test("reserves the live compact percentage width during startup", () => {
 });
 
 test("keeps the percent suffix fixed in startup placeholders", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 120000, contextWindow: 100000, percent: 120 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 120000, contextWindow: 100000, percent: 120 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -847,39 +893,42 @@ test("keeps the percent suffix fixed in startup placeholders", () => {
 });
 
 test("reserves standalone compact context width during startup", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 9100, contextWindow: 100000, percent: 9.1 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -904,39 +953,42 @@ test("reserves standalone compact context width during startup", () => {
 });
 
 test("preserves the last ordinary segment when compact context cannot fit by itself", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -960,39 +1012,42 @@ test("preserves the last ordinary segment when compact context cannot fit by its
 });
 
 test("preserves the last ordinary segment when non-compact context labels cannot fit", () => {
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 100000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: { get: () => false },
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "status demo",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 100000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: { get: () => false },
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "status demo",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 
 	component.updateSettings({
 		preset: "custom",
@@ -1017,51 +1072,54 @@ test("keeps the embedded context percentage visible when every slot collides wit
 	// markers. Regression: the context percent is the primary readout, so it
 	// must still render rather than being dropped when the placement search
 	// finds no gap that clears both markers.
-	const component = new StatusLineComponent({
-		state: { messages: [], model: { name: "M", contextWindow: 50000 } },
-		messages: [],
-		model: { name: "M", contextWindow: 50000 },
-		systemPrompt: [],
-		agent: { state: { tools: [] } },
-		skills: [],
-		isStreaming: false,
-		isAutoThinking: false,
-		autoResolvedThinkingLevel: () => undefined,
-		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
-		getAsyncJobSnapshot: () => ({ running: [] }),
-		settings: {
-			get: () => false,
-			getGroup: (group: string) =>
-				group === "compaction"
-					? {
-							enabled: true,
-							strategy: "summarize",
-							asyncEnabled: true,
-							thresholdPercent: 30,
-							methodOrder: ["soft"],
-						}
-					: {},
-		},
-		modelRegistry: { isUsingOAuth: () => false },
-		sessionManager: {
-			getSessionName: () => "s",
-			getUsageStatistics: () => ({
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-			}),
-		},
-		getContextUsage: () => ({ tokens: 12500, contextWindow: 50000, percent: 25 }),
-	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+	const component = new StatusLineComponent(
+		{
+			state: { messages: [], model: { name: "M", contextWindow: 50000 } },
+			messages: [],
+			model: { name: "M", contextWindow: 50000 },
+			systemPrompt: [],
+			agent: { state: { tools: [] } },
+			skills: [],
+			isStreaming: false,
+			isAutoThinking: false,
+			autoResolvedThinkingLevel: () => undefined,
+			isFastModeActive: () => false,
+			isAdvisorActive: () => false,
+			getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			settings: {
+				get: () => false,
+				getGroup: (group: string) =>
+					group === "compaction"
+						? {
+								enabled: true,
+								strategy: "summarize",
+								asyncEnabled: true,
+								thresholdPercent: 30,
+								methodOrder: ["soft"],
+							}
+						: {},
+			},
+			modelRegistry: { isUsingOAuth: () => false },
+			sessionManager: {
+				getSessionName: () => "s",
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			getContextUsage: () => ({ tokens: 12500, contextWindow: 50000, percent: 25 }),
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
+		statusLineHost,
+	);
 	component.setAutoCompactEnabled(true);
 	component.updateSettings({
 		preset: "custom",

@@ -221,7 +221,7 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		const onBranchChange = vi.fn(() => {
 			throw new Error("disposed PR lookup invoked its stale callback");
 		});
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings({
 			...gitSegmentSettings,
 			leftSegments: ["git", "pr"],
