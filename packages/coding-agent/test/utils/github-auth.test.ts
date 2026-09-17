@@ -69,6 +69,14 @@ interface GhFixture {
  * Put a `gh` on PATH that appends one record per invocation before running
  * `script`. Appending is what lets a case prove a child never ran: an
  * overwritten file would keep only the last record.
+ *
+ * The whole record is assembled first and appended with a single `printf`,
+ * because a case can run several `gh` children at once. A `{ ...; ... } >> log`
+ * group performs one write per `printf` and the shell flushes each to the
+ * shared descriptor separately, so two concurrent children interleave
+ * mid-record and produce lines like `ARGVARGV\tpr\tpr\tview\tview` that belong
+ * to neither invocation. One `write(2)` per record cannot interleave on an
+ * `O_APPEND` descriptor, so records stay whole and in call order.
  */
 async function fakeGh(script: string): Promise<GhFixture> {
 	const dir = await mkdtemp(path.join(os.tmpdir(), "github-auth-test-"));
@@ -77,7 +85,7 @@ async function fakeGh(script: string): Promise<GhFixture> {
 		path.join(dir, "gh"),
 		`#!/bin/sh
 dir=$(dirname "$0")
-{
+record=$(
 	printf 'ARGV'
 	for arg in "$@"; do printf '\\t%s' "$arg"; done
 	printf '\\n'
@@ -85,8 +93,9 @@ dir=$(dirname "$0")
 		eval "value=\\$$name"
 		[ -n "$value" ] && printf 'ENV\\t%s\\t%s\\n' "$name" "$value"
 	done
-	printf 'END\\n'
-} >> "$dir/invocations"
+	printf 'END'
+)
+printf '%s\\n' "$record" >> "$dir/invocations"
 ${script}
 `,
 	);
@@ -100,14 +109,19 @@ ${script}
 		if (!(await file.exists())) return [];
 		const records: GhInvocation[] = [];
 		let current: GhInvocation | undefined;
-		for (const line of (await file.text()).split("\n")) {
+		// Every complete line is newline-terminated, so the last element is
+		// either empty or a tail whose write has not landed yet. Everything
+		// before it has to be a line this parser recognizes: skipping one
+		// silently is how a lost record reads as "the child never ran".
+		const lines = (await file.text()).split("\n");
+		for (const line of lines.slice(0, -1)) {
 			const [kind, ...rest] = line.split("\t");
-			if (kind === "ARGV") current = { argv: rest, env: {} };
+			if (kind === "ARGV" && !current) current = { argv: rest, env: {} };
 			else if (kind === "ENV" && current) current.env[rest[0]] = rest[1];
 			else if (kind === "END" && current) {
 				records.push(current);
 				current = undefined;
-			}
+			} else throw new Error(`unreadable gh invocation record in ${log}: ${JSON.stringify(line)}`);
 		}
 		return records;
 	}
