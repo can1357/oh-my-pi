@@ -14,12 +14,8 @@ import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { collectIrcPeerRoster } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
-import {
-	DEFAULT_HUB_LIST_LIMIT,
-	executeList,
-	executeSend,
-	MAX_HUB_LIST_LIMIT,
-} from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
+import { executeList, executeSend } from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
+import { DEFAULT_HUB_LIST_LIMIT, MAX_HUB_LIST_LIMIT } from "@oh-my-pi/pi-tui/tools/hub";
 import { prompt, TempDir } from "@oh-my-pi/pi-utils";
 
 function sessionHeader(id: string): string {

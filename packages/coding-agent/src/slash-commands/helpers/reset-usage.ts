@@ -7,19 +7,7 @@ import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome, ResetCreditTar
 
 export const CODEX_PROVIDER_ID = "openai-codex";
 
-/** One Codex account row for the reset-usage selector. */
-export interface ResetUsageAccount {
-	/** Display label (email, else account id). */
-	label: string;
-	/** Saved resets redeemable for this account right now. */
-	availableCount: number;
-	/** Identifies the account when redeeming. */
-	target: ResetCreditTarget;
-	/** Whether this is the session's active Codex account. */
-	active: boolean;
-	/** Set when this account could not be reached (token/list failure). */
-	error?: string;
-}
+import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
 
 /**
  * Map live per-account reset status to selector rows. Sorted with the active

@@ -1,11 +1,6 @@
 import type { AgentStorage } from "../../../session/agent-storage";
-import {
-	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	SEARCH_PROVIDER_LABELS,
-	SearchProviderError,
-	type SearchProviderId,
-	type SearchSource,
-} from "../../../web/search/types";
+import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
+import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
 import { dateToAgeSeconds } from "../utils";
 
 /**

@@ -888,10 +888,17 @@ describe("terminal title runtime", () => {
 	let ttyDescriptor: PropertyDescriptor | undefined;
 	let windowsTitleMock: WindowsConsoleTitleMock | undefined;
 
-	// Titles emitted (newest last) since the last reset of `writes`; used across
-	// every assertion, so the OSC extraction lives here rather than at each site.
+	// Titles emitted (newest last) since the last reset of `writes` and the native
+	// mock; this win32 host drives the native `SetConsoleTitleW` sink, so OSC-only
+	// extraction would observe nothing — include both sinks.
 	function emittedTitles(): string[] {
-		return writes.map(payload => OSC_TITLE_RE.exec(payload)?.[1]).filter((t): t is string => t !== undefined);
+		const osc = writes.map(payload => OSC_TITLE_RE.exec(payload)?.[1]);
+		return [...osc, ...(windowsTitleMock?.titles ?? [])].filter((t): t is string => t !== undefined);
+	}
+
+	function resetEmitted(): void {
+		writes.length = 0;
+		if (windowsTitleMock) windowsTitleMock.titles.length = 0;
 	}
 
 	beforeEach(() => {
@@ -905,6 +912,7 @@ describe("terminal title runtime", () => {
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 
 		windowsTitleMock = mockWindowsConsoleTitle();
+		windowsTitleMock.succeeds = true;
 		writes = [];
 		stdoutSpy = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
 			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
@@ -921,6 +929,7 @@ describe("terminal title runtime", () => {
 
 		// Discard the reset's own emissions; each test asserts only its own writes.
 		writes.length = 0;
+		windowsTitleMock.titles.length = 0;
 	});
 
 	afterEach(() => {
@@ -942,8 +951,8 @@ describe("terminal title runtime", () => {
 		// spinner prefix. The override wins verbatim.
 		setExtensionTerminalTitle("Deploying prod");
 		expect(emittedTitles().at(-1)).toBe("Deploying prod");
-
-		writes.length = 0;
+		// The `beforeEach` reset already cleared the sync-setup emissions observed
+		// above; no re-reset — the state flips below must not move off the override.
 		setTerminalTitleState("working");
 		setTerminalTitleState("attention");
 		setTerminalTitleState("idle");
@@ -961,7 +970,7 @@ describe("terminal title runtime", () => {
 		// the override. This exercises the timer-driven emission path, not just
 		// the synchronous state setter.
 		setExtensionTerminalTitle("Long extension task");
-		writes.length = 0;
+		resetEmitted();
 
 		// Enter `working` to start the spinner interval, then advance the fake
 		// clock across several tick intervals (interval is 80ms).
@@ -978,7 +987,7 @@ describe("terminal title runtime", () => {
 		// CONTRACT: `setSessionTerminalTitle` supersedes any extension override —
 		// the emitted title tracks the real session, not the stale override.
 		setExtensionTerminalTitle("Stale extension title");
-		writes.length = 0;
+		resetEmitted();
 
 		setSessionTerminalTitle("my-session");
 
@@ -993,7 +1002,16 @@ describe("terminal title runtime", () => {
 		setTerminalTitle("direct title");
 
 		expect(emittedTitles()).toEqual(["direct title"]);
-		expect(writes).toHaveLength(1);
+		// Sink-specific: the native mock only fires on win32
+		// (`getWindowsConsoleTitleApi` returns null elsewhere), so OSC is the
+		// sink on Linux/macOS. Exactly one sink fires once either way.
+		if (process.platform === "win32") {
+			expect(writes).toHaveLength(0);
+			expect(windowsTitleMock?.titles).toEqual(["direct title"]);
+		} else {
+			expect(writes).toHaveLength(1);
+			expect(windowsTitleMock?.titles ?? []).toEqual([]);
+		}
 	});
 
 	it("animates the working title on Windows", () => {
@@ -1003,12 +1021,12 @@ describe("terminal title runtime", () => {
 			setTerminalTitleSpinnerStyle("line");
 			setTerminalTitleSpinnerStyle("braille");
 			setSessionTerminalTitle("windows-project");
-			writes.length = 0;
+			resetEmitted();
 
 			setTerminalTitleState("working");
 			expect(emittedTitles()).toEqual(["π ⠋ windows-project"]);
 
-			writes.length = 0;
+			resetEmitted();
 			vi.advanceTimersByTime(160);
 			const titles = emittedTitles();
 			expect(titles.length).toBeGreaterThan(0);
@@ -1026,14 +1044,14 @@ describe("terminal title runtime", () => {
 			Object.defineProperty(process, "platform", { value: "linux", configurable: true });
 			process.env.WSL_DISTRO_NAME = "Ubuntu";
 			setSessionTerminalTitle("wsl-project");
-			writes.length = 0;
+			resetEmitted();
 
 			setTerminalTitleState("working");
 			expect(emittedTitles()).toEqual(["π : wsl-project"]);
 
-			writes.length = 0;
+			resetEmitted();
 			vi.advanceTimersByTime(400);
-			expect(writes).toEqual([]);
+			expect(emittedTitles()).toEqual([]);
 		} finally {
 			if (originalWslDistro === undefined) delete process.env.WSL_DISTRO_NAME;
 			else process.env.WSL_DISTRO_NAME = originalWslDistro;
@@ -1058,6 +1076,58 @@ describe("terminal title runtime", () => {
 		}
 	});
 
+	it("falls back to OSC verbatim when a direct title fails the native path on Windows", () => {
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			native.succeeds = false;
+			resetEmitted();
+
+			setTerminalTitle("custom direct");
+
+			// The caller's own title is the OSC fallback — not the composed session
+			// state — and the interval is pinned off for later working frames.
+			expect(emittedTitles()).toEqual(["custom direct"]);
+			expect(windowsTitleMock?.titles).toEqual([]);
+			setTerminalTitleState("working");
+			resetEmitted();
+			vi.advanceTimersByTime(400);
+			expect(emittedTitles()).toEqual([]);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
+	it("pins the working title static when the native path fails mid-spinner on Windows", () => {
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			native.succeeds = true;
+			resetEmitted();
+			setSessionTerminalTitle("windows-project");
+			setTerminalTitleState("working");
+			resetEmitted();
+			// Fail the NEXT native write mid-spinner: the failing animated frame
+			// must collapse to the static `:` separator over OSC, not emit OSC
+			// animation, and the interval must stop so no later frame ticks.
+			native.succeeds = false;
+			setSessionTerminalTitle("windows-project-2");
+
+			expect(emittedTitles().at(-1)).toBe("π : windows-project-2");
+			expect(vi.getTimerCount()).toBe(0);
+			resetEmitted();
+			vi.advanceTimersByTime(400);
+			expect(emittedTitles()).toEqual([]);
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
 	it("releases the override when an extension sets an empty title", () => {
 		// CONTRACT: `setTitle("")` is the obvious way an extension author clears a
 		// title, so an empty override must RELEASE ownership back to the run-state
@@ -1065,7 +1135,7 @@ describe("terminal title runtime", () => {
 		// title is stranded at the bare brand and the run state can never show again.
 		setSessionTerminalTitle("my-session");
 		setExtensionTerminalTitle("Deploying prod");
-		writes.length = 0;
+		resetEmitted();
 
 		setExtensionTerminalTitle("");
 
@@ -1083,7 +1153,7 @@ describe("terminal title runtime", () => {
 		// `setSessionTerminalTitle` again.
 		setSessionTerminalTitle("my-session");
 		setExtensionTerminalTitle("");
-		writes.length = 0;
+		resetEmitted();
 
 		setTerminalTitleState("working");
 
@@ -1101,7 +1171,7 @@ describe("terminal title runtime", () => {
 		// the run state exactly as `""` did.
 		setSessionTerminalTitle("my-session");
 		setExtensionTerminalTitle("   ");
-		writes.length = 0;
+		resetEmitted();
 
 		setTerminalTitleState("working");
 

@@ -4,10 +4,9 @@ import * as path from "node:path";
 import { logger, postmortem, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { JsRuntime, type RuntimeHooks } from "../../../eval/js/shared/runtime";
 import { callSessionTool } from "../../../eval/js/tool-bridge";
-import { resizeImage } from "../../../utils/image-resize";
+import { formatScreenshot, resizeImage } from "../../../utils/image-resize";
 import type { ToolSession } from "../../index";
 import { resolveToCwd } from "../../path-utils";
-import { formatScreenshot } from "../../render-utils";
 import {
 	bindRunFacade,
 	isBrowserRunOwnedRejection,
@@ -18,7 +17,8 @@ import {
 	waitForRun,
 	withBrowserPromiseCombinatorTracking,
 } from "../../run-scope";
-import { ToolAbortError, ToolError, throwIfAborted } from "../../tool-errors";
+import { ToolAbortError, throwIfAborted } from "../../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type AriaSnapshotOptions, assertSelectorString, buildAriaSnapshotScript } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
 import { extractReadableFromHtml, type ReadableFormat } from "../readable";

@@ -24,7 +24,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { collapseSharedUsageReports } from "../utils/usage-display";
+import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
 
 const BAR_WIDTH = 28;
 

@@ -6,7 +6,8 @@ import {
 	workerEnvFromParent,
 } from "../../subprocess/worker-client";
 import type { ToolSession } from "../../tools";
-import { ToolAbortError, ToolError } from "../../tools/tool-errors";
+import { ToolAbortError } from "../../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";

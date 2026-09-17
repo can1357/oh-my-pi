@@ -262,7 +262,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.parentTaskPrefix).toBe("ChildAgent");
 	});
 
-	it("removes all MCP and discovered capability sources for a restricted child", async () => {
+	it("removes MCP and fresh discovery sources for a restricted child", async () => {
 		const session = yieldEmittingSession();
 		const persistedInits: Array<{ restrictToolNames?: boolean; tools: string[] }> = [];
 		vi.spyOn(session.sessionManager, "appendSessionInit").mockImplementation(init => {
@@ -304,7 +304,6 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.mcpManager).toBeUndefined();
 		expect(forwarded?.customTools).toBeUndefined();
 		expect(forwarded?.preloadedExtensionPaths).toEqual([]);
-		expect(forwarded?.preloadedPreparedExtensions).toEqual([]);
 		expect(forwarded?.preloadedCustomToolPaths).toEqual([]);
 		expect(getTools).not.toHaveBeenCalled();
 		expect(forwarded?.outputSchemaMode).toBe("strict");

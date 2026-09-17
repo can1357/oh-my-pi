@@ -5,6 +5,7 @@
 //! Port of `packages/coding-agent/src/edit/sloppy.ts` lines 1651–4258.
 
 use std::{
+	borrow::Cow,
 	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	path::Path,
 };
@@ -12,7 +13,7 @@ use std::{
 use super::{
 	parse::{has_marker_lines, missing_unmarked_lines, operation_payload, parse_operations},
 	types::{
-		ATOMICITY_NOTICE, Candidate, CandidateResult, LiteralFallback, MAX_CANDIDATES,
+		ATOMICITY_NOTICE, Candidate, CandidateResult, EdgeGaps, LiteralFallback, MAX_CANDIDATES,
 		MAX_COMBINATIONS, NormalizedText, Occurrence, Operation, OperationRewrite, ParsedPattern,
 		PatternToken, PlannedEdit, SelectionPair,
 		markers::{GAP, SELECT_CLOSE, SELECT_DIVIDER, SELECT_OPEN},
@@ -97,6 +98,7 @@ pub(crate) fn parse_pattern(
 				text: pattern.to_owned(),
 				normalized,
 			}],
+			edge_gaps:                EdgeGaps::default(),
 			selection_start:          0,
 			selection_end:            1,
 			insertion:                false,
@@ -178,8 +180,31 @@ pub(crate) fn parse_pattern(
 		tokens.remove(0);
 		stripped_leading += 1;
 	}
+	let mut stripped_trailing = 0;
 	while matches!(tokens.last(), Some(PatternToken::Gap { .. })) {
 		tokens.pop();
+		stripped_trailing += 1;
+	}
+	let edge_gaps = EdgeGaps { leading: stripped_leading > 0, trailing: stripped_trailing > 0 };
+	// An edge gap spans nothing inside the match: the newline joining a
+	// whole-line `…` to its neighbour belongs to the gap, not the anchor, and
+	// the surviving captures renumber from zero.
+	if edge_gaps.leading
+		&& let Some(PatternToken::Literal { text, .. }) = tokens.first_mut()
+		&& let Some(rest) = text.strip_prefix('\n')
+	{
+		*text = rest.strip_prefix('\r').unwrap_or(rest).to_owned();
+	}
+	if edge_gaps.trailing
+		&& let Some(PatternToken::Literal { text, .. }) = tokens.last_mut()
+		&& let Some(rest) = text.strip_suffix('\n')
+	{
+		*text = rest.strip_suffix('\r').unwrap_or(rest).to_owned();
+	}
+	for token in &mut tokens {
+		if let PatternToken::Gap { capture_index, .. } = token {
+			*capture_index -= stripped_leading;
+		}
 	}
 	for boundary in &mut selection_boundaries {
 		*boundary = boundary.saturating_sub(stripped_leading).min(tokens.len());
@@ -294,6 +319,7 @@ pub(crate) fn parse_pattern(
 	};
 	Ok(ParsedPattern {
 		tokens,
+		edge_gaps,
 		selection_start,
 		selection_end,
 		insertion,
@@ -704,6 +730,7 @@ fn collect_candidates(
 						.iter()
 						.map(|index| self.chosen[index].start)
 						.collect(),
+					literal_gaps: false,
 				};
 				if let Some(existing) = self.candidates.iter_mut().find(|existing| {
 					existing.start == candidate.start
@@ -1049,6 +1076,7 @@ pub(crate) fn locate(
 							.then_some(vec![(start, end)])
 							.unwrap_or_default(),
 						tuple: vec![occurrence.start],
+						literal_gaps: true,
 					}
 				})
 				.collect::<Vec<_>>();
@@ -1333,10 +1361,79 @@ fn decode_literal_markers(text: String) -> String {
 		.replace("\0V8LITDIV\0", SELECT_DIVIDER)
 }
 
+/// Drop the `<SM:PUT>` ellipses that re-emit `<SM:FIND>`'s open edges. An
+/// edge gap captured nothing, so re-emitting it writes nothing; a whole-line
+/// edge `…` takes the newline joining it to the rest of the rewrite with it.
+/// The leading edge is positional; the trailing one is only claimed by an
+/// ellipsis left over after the inner captures, since `…` re-emits captures
+/// in order.
+fn strip_edge_gaps(rewrite: &str, edges: EdgeGaps, inner: usize) -> Cow<'_, str> {
+	// A rewrite that is nothing but edge ellipses is context elision, not a
+	// deletion; leave it for `render_rewrite` to reject.
+	let keep = |stripped: String, current: &str| {
+		if stripped.trim().is_empty() {
+			current.to_owned()
+		} else {
+			stripped
+		}
+	};
+	let mut text = Cow::Borrowed(rewrite);
+	if edges.leading {
+		let at = text.len() - text.trim_start().len();
+		if text[at..].starts_with(GAP) {
+			let after = at + GAP.len();
+			let line_end = text[after..]
+				.find('\n')
+				.map_or(text.len(), |offset| after + offset);
+			let stripped = if text[after..line_end].trim().is_empty() {
+				let line_start = text[..at].rfind('\n').map_or(0, |offset| offset + 1);
+				format!("{}{}", &text[..line_start], &text[(line_end + 1).min(text.len())..])
+			} else {
+				format!("{}{}", &text[..at], &text[after..])
+			};
+			text = Cow::Owned(keep(stripped, &text));
+		}
+	}
+	if edges.trailing && text.matches(GAP).count() > inner {
+		let end = text.trim_end().len();
+		if text[..end].ends_with(GAP) {
+			let at = end - GAP.len();
+			let line_start = text[..at].rfind('\n').map_or(0, |offset| offset + 1);
+			let cut = if text[line_start..at].trim().is_empty() {
+				text[..line_start]
+					.strip_suffix('\n')
+					.map_or(line_start, |rest| rest.strip_suffix('\r').map_or(rest.len(), str::len))
+			} else {
+				at
+			};
+			let stripped = text[..cut].to_owned();
+			text = Cow::Owned(keep(stripped, &text));
+		}
+	}
+	text
+}
+
+/// Edges of `<SM:FIND>` that an inline selection borders; its replacement may
+/// re-emit them.
+fn selection_edges(
+	pattern: &ParsedPattern,
+	candidate: &Candidate,
+	pair: &SelectionPair,
+) -> EdgeGaps {
+	if candidate.literal_gaps {
+		return EdgeGaps::default();
+	}
+	EdgeGaps {
+		leading:  pattern.edge_gaps.leading && pair.start == 0,
+		trailing: pattern.edge_gaps.trailing && pair.end == pattern.tokens.len(),
+	}
+}
+
 fn render_rewrite(
 	rewrite: &str,
 	indices: &[usize],
 	captures: &[String],
+	edges: EdgeGaps,
 	operation_number: usize,
 ) -> Result<String, EditError> {
 	if rewrite.contains(SELECT_OPEN) || rewrite.contains(SELECT_CLOSE) {
@@ -1345,6 +1442,8 @@ fn render_rewrite(
 			 text, <SM:PUT> is final text."
 		)));
 	}
+	let stripped = strip_edge_gaps(rewrite, edges, indices.len());
+	let rewrite = stripped.as_ref();
 	let mut rendered = String::new();
 	let mut marker = 0;
 	let mut index = 0;
@@ -1634,6 +1733,7 @@ fn prepare_inline(
 	span: (usize, usize),
 	selection: &SelectionPair,
 	rewrite: &str,
+	edges: EdgeGaps,
 	operation_number: usize,
 	lenient: bool,
 ) -> Result<(Candidate, String, Option<String>), EditError> {
@@ -1674,8 +1774,13 @@ fn prepare_inline(
 	} else {
 		desired.to_owned()
 	};
-	let replacement =
-		render_rewrite(&framed, &selection.capture_indices, &candidate.captures, operation_number)?;
+	let replacement = render_rewrite(
+		&framed,
+		&selection.capture_indices,
+		&candidate.captures,
+		edges,
+		operation_number,
+	)?;
 	if replacement.is_empty() && start != end {
 		let deleted = content[start..end].to_owned();
 		candidate = expand_full_line_deletion(content, &candidate);
@@ -2236,12 +2341,14 @@ fn apply_operations(
 						.collect::<Vec<_>>();
 					selections.sort_by_key(|(_, (start, _))| std::cmp::Reverse(*start));
 					for (selection_index, span) in selections {
+						let pair = &pattern.selection_pairs[selection_index];
 						let (prepared, replacement, deleted) = prepare_inline(
 							content,
 							candidate,
 							span,
-							&pattern.selection_pairs[selection_index],
+							pair,
 							&replacements[selection_index],
+							selection_edges(&pattern, candidate, pair),
 							number,
 							operation.whitespace_matched,
 						)?;
@@ -2393,6 +2500,11 @@ fn apply_operations(
 							&pattern.selected_capture_indices
 						},
 						&candidate.captures,
+						if candidate.literal_gaps {
+							EdgeGaps::default()
+						} else {
+							pattern.edge_gaps
+						},
 						number,
 					)?;
 					let replacement = align_boundary_echoes(content, &candidate, &rendered);

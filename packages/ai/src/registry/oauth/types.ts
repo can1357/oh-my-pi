@@ -37,6 +37,8 @@ export type OAuthPrompt = {
 	message: string;
 	placeholder?: string;
 	allowEmpty?: boolean;
+	/** Request masked entry from interactive hosts. Hosts that cannot hide input must reject the prompt. */
+	secret?: boolean;
 };
 
 export type OAuthAuthInfo = {

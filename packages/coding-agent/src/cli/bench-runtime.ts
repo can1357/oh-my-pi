@@ -24,7 +24,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import { concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
+import { concreteThinkingLevel, resolveThinkingLevelForModel } from "@oh-my-pi/pi-tui/thinking";
 
 /** Injection point for the provider call; tests pass a synthetic event stream. */
 export type StreamSimpleFn = (

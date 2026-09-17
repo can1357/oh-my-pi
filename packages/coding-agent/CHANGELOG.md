@@ -6,12 +6,71 @@
 
 - Exposed model-selection provenance for callers without changing model or thinking-level precedence ([#12346](https://github.com/can1357/oh-my-pi/pull/12346) by [@Xytronix](https://github.com/Xytronix)).
 - Added a per-call `model` selector to task items, eval `agent()`, and `workpool()`: a `provider/model[:level]` pattern or role alias, or an ordered array of them, that takes precedence over `task.agentModelOverrides` and the agent definition. Selection is an ordered preference — requested candidates are tried before configured fallbacks — and the spawn fails at preflight instead of silently routing elsewhere when the selector is the ambiguous literal `default`/`inherit` (use `@default`), is blank or comma-only, carries an invalid thinking suffix, matches no available model, or sits on the batch container instead of a `tasks[]` item. A pool applies its selector to each worker's first turn and reuses that worker's session afterwards ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+### Breaking Changes
+
+- Moved every terminal-UI module (theme, tool renderers, chat/overlay/status-line/composer components, setup wizard, git/ps/debug apps) to `@oh-my-pi/pi-tui`; `@oh-my-pi/pi-coding-agent/modes/theme/*`, `/modes/components/*`, `/tui/*`, `/tools/render-utils` and related subpaths no longer exist. Names re-exported from the package root (`Theme`, `theme`, hook/editor components, tool Details types) are unchanged.
+
+### Changed
+
+- Keyless Parallel web search now leads the default provider chain ahead of Perplexity.
 
 ### Fixed
 
+- Fixed the `edit` tool splicing a literal `…` into the file when a `<SM:FIND>` opened or closed with an ellipsis (a line-end `…` spanning the rest of a line, or a whole-line `…` at either edge) and `<SM:PUT>` re-emitted it. An edge gap captures nothing, so the matching `<SM:PUT>` ellipsis now re-emits nothing and the anchor keeps its own newline; an identical `<SM:FIND>`/`<SM:PUT>` pair reports no change instead of writing the marker. A leading gap combined with an inner gap no longer panics.
+- Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+
+## [18.2.4] - 2026-09-17
+
+### Added
+
+- Added an optional live generation speed readout via `composer.tokenRate`, showing smoothed tokens-per-second output in the working row and keeping the rate visible between turns.
+- Added TypeSafe provider support through `/login typesafe` or `TYPESAFE_API_KEY`. TypeSafe can power thinking-level detection, unexpected-stop detection, and AI-assisted git staging with calibrated judgment probabilities; configure `providers.judgmentProvider` as `auto`, `typesafe`, or `llm` to select the judgment backend.
+- Added the `judge(state, questions)` evaluation helper for Python and JavaScript cell code, supporting typed choice, boolean, and score judgments. It returns a handle whose `.wait()` method provides answers and probabilities, using TypeSafe when configured and available or a fallback chat model otherwise.
+
+### Changed
+
+- Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
+
+## [18.2.3] - 2026-09-17
+
+### Breaking Changes
+
+- Config-backed headers now resolve asynchronously through `ModelRegistry.getProviderHeaders()` or `resolveModelHeaders()`; removed the synchronous `config/model-config-values` module.
+- Removed the unused `ConfigFile.getMtimeMsAsync()`, `tryLoadAsync()`, `loadAsync()`, and `loadOrDefaultAsync()` methods.
+- Custom SQL session clients must support transactions for atomic renames.
+
+### Added
+
+- Type `^` to tag a model for delegation, with atomic display-name chips and session-persisted `m1`, `m2`, … agents available to task and eval.
+- Provider login and setup support masked secret prompts; RPC rejects secret prompts rather than requesting ordinary input.
+
+### Changed
+
+- Shell-backed API keys and headers resolve asynchronously without freezing terminal input or running during catalog construction.
+
+### Fixed
+
+- macOS process discovery now retains the complete PID list when locating executables and descendants. ([#12290](https://github.com/can1357/oh-my-pi/pull/12290) by [@iliaal](https://github.com/iliaal))
+- Reduced snapshot-recording stalls when a session retains large file histories. ([#12279](https://github.com/can1357/oh-my-pi/pull/12279) by [@iliaal](https://github.com/iliaal))
+- Cancelled background jobs remain tracked until execution finishes, so cleanup cannot report completion prematurely after retention expires. ([#12278](https://github.com/can1357/oh-my-pi/pull/12278) by [@iliaal](https://github.com/iliaal))
+- Fixed localized edits rewriting unrelated bytes in files with invalid UTF-8; these edits now fail without modifying the file. ([#12277](https://github.com/can1357/oh-my-pi/pull/12277) by [@iliaal](https://github.com/iliaal))
 - Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
 - Subagent model resolution now tries every requested candidate, including role-expanded alternatives, for working credentials before falling back to the parent's model — also when no parent model is supplied — and accepts keyless parent providers.
 - Task preflight failures are reported as tool errors and render with an error status.
+- Fixed retry timing reliability in agent sessions by ensuring sleep durations are monotonic
+- Fixed data stability issues when processing streamed lines
+- Resolved same-path move failures in indexed session storage
+- Restricted and revived subagents retain parent-loaded extension hooks without enabling extension-contributed tools.
+- Revived subagents honor the owning session's extension-discovery restrictions.
+- Secret login answers stay hidden in later prompts and cannot be recovered through undo or yank.
+- SQL session renames preserve data on same-path moves, missing sources, and failed overwrites.
+- MySQL session writes no longer use deprecated upsert value references.
+- MCP SSE requests honor one response deadline and report timeouts correctly without replaying accepted tool calls.
+- Legacy extension package-import patterns follow native prefix precedence.
+- Bundled extensions observe theme initialization and changes through the existing live `theme` export.
+- Configured discovery models retain request-time credentials after offline cache reloads and failed refreshes.
+- Runtime API-key overrides retain precedence over configured credentials.
+- Element handles returned by `tab.waitForSelector`, `tab.$`, and related selector helpers can now be passed as arguments to `tab.evaluate` inside `tab.run` instead of failing with "JSHandles can be evaluated only in the context they were created".
 
 ## [18.2.2] - 2026-09-16
 
