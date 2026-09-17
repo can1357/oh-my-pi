@@ -15,6 +15,7 @@
 - Fixed the `edit` tool splicing a literal `…` into the file when a `<SM:FIND>` opened or closed with an ellipsis (a line-end `…` spanning the rest of a line, or a whole-line `…` at either edge) and `<SM:PUT>` re-emitted it. An edge gap captures nothing, so the matching `<SM:PUT>` ellipsis now re-emits nothing and the anchor keeps its own newline; an identical `<SM:FIND>`/`<SM:PUT>` pair reports no change instead of writing the marker. A leading gap combined with an inner gap no longer panics.
 - Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
 
+- Fixed `retry.usageReservePolicy: confirm` acting as `auto` wherever no one could confirm: a subagent (or `-p` run) whose coding-plan model entered the reserve margin was switched, without any signal, to the first entry of its inherited `default` chain — a reviewer pinned to a frontier model quietly ran on a flash model. Sessions with no confirmer now keep the primary until it is depleted; `auto` still switches on reserve.
 ## [18.2.4] - 2026-09-17
 
 ### Added

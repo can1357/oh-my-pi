@@ -1808,7 +1808,8 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "confirm",
 					label: "Confirm interactively",
-					description: "Keep interactive sessions on the primary until confirmed; background agents auto-fallback",
+					description:
+						"Ask before switching while reserve remains; sessions with no one to ask (subagents, -p runs) keep the primary until it is depleted",
 				},
 				{
 					value: "auto",

@@ -186,7 +186,7 @@ Defined in settings schema under retry group:
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
 - `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
-- `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)
+- `retry.usageReservePolicy` (default `"confirm"`: a human approves crossing into a fallback while reserve remains, and a session with no one to ask — a subagent or `-p` run — keeps the primary until it is depleted; `"auto"` and `"fail-closed"` are also supported)
 
 Programmatic toggles in session:
 

@@ -650,8 +650,9 @@ export interface CreateAgentSessionOptions {
 	 */
 	interactivePrompts?: boolean;
 	/**
-	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
-	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
+	 * @deprecated No-op. A `confirm` reserve decision is always deferred to
+	 * prompt time, where the session's usage-fallback confirmer (if any) is
+	 * consulted; startup never crosses into a fallback on its own under `confirm`.
 	 */
 	deferUsageReserveConfirmation?: boolean;
 
@@ -2584,10 +2585,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								`Usage reserve reached for ${primary.model.provider}/${primary.model.id}; reserve policy is fail-closed.`,
 							);
 						}
-						if (
-							modelFallbackEnabled &&
-							(usageReservePolicy === "auto" || (!options.hasUI && !options.deferUsageReserveConfirmation))
-						) {
+						// Under `confirm` the switch waits for a human at prompt time; a
+						// session that never gets one keeps the primary until it is depleted.
+						if (modelFallbackEnabled && usageReservePolicy === "auto") {
 							usageFallbackTriggered = true;
 							continue;
 						}

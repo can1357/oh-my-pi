@@ -1729,6 +1729,16 @@ export class TurnRecovery {
 			return false;
 		}
 		if (!this.#host.settings.get("retry.modelFallback")) return false;
+		// `confirm` crosses into a fallback while quota remains only when a human
+		// approves it. A session with no one to ask (a subagent, a `-p` run) keeps
+		// the primary instead of quietly acting as `auto`; a depleted plan still
+		// switches below, since there is nothing left to confirm.
+		if (reservePolicy === "confirm" && health.state === "reserve" && !confirmer) {
+			logger.debug("Usage reserve reached with no confirmer; keeping the primary", {
+				selector: currentSelector,
+			});
+			return false;
+		}
 
 		let fallback: { role: string; selector: RetryFallbackSelector; apiKey: string } | undefined;
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -1791,7 +1801,7 @@ export class TurnRecovery {
 		}
 		if (!fallback) return false;
 
-		let shouldFallback = health.state === "depleted" || reservePolicy === "auto" || !confirmer;
+		let shouldFallback = health.state === "depleted" || reservePolicy === "auto";
 		if (!shouldFallback && health.state === "reserve" && confirmer) {
 			const remainingFraction =
 				selectedAccount?.remainingFraction ??
