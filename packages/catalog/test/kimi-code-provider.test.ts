@@ -66,7 +66,7 @@ describe("Kimi Code provider catalog", () => {
 		expect(legacy?.compat).toMatchObject({ thinkingFormat: "zai" });
 		// Unreported protocol resolves the provider-root KDL default (kimi-api-format "anthropic").
 		expect(legacy?.compat.kimiApiFormat).toBe("anthropic");
-		expect(legacy?.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
+		expect(legacy?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 
 	it("derives per-family output caps instead of a blanket constant (#6711)", async () => {

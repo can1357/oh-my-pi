@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `kimi-code/kimi-for-coding` (K2.8 Preview) advertising only `minimal`/`low`/`medium`/`high` thinking efforts: the `kimi-for*` residue glob stamped the legacy four-rung ladder, but the model's dynamic catalog and Kimi Code CLI declare `support_efforts` `[low, high, max]` (defaultLevel `max`) — the catalog now exposes the declared ladder via an exact selector that outranks the glob.
+
 
 ## [18.2.3] - 2026-09-17
 

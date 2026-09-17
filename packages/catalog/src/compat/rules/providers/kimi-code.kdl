@@ -39,6 +39,14 @@ provider "kimi-code" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-format "zai"
 	}
+	// K2.8 Preview's dynamic catalog and Kimi Code CLI declare
+	// support_efforts [low, high, max] (defaultLevel max); the `kimi-for*`
+	// residue glob above stamps the legacy four-rung ladder. The exact
+	// selector outranks the glob and pins the declared set.
+	models "kimi-for-coding" {
+		thinking-efforts "low" "high" "max"
+	}
+
 
 	// /coding/v1/models carries no pricing. `cost-fallback` seeds the public
 	// Moonshot list price only when discovery reports $0, so a future priced
