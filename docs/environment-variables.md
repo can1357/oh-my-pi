@@ -407,6 +407,16 @@ Use `ANTHROPIC_SEARCH_BASE_URL` (optionally with `ANTHROPIC_SEARCH_API_KEY`) to 
 | ------------------- | ------------------------------------------------------------------------------- |
 | `PI_AUTH_NO_BORROW` | If set, disables macOS native-app token borrowing path in Perplexity login flow |
 
+### TypeSafe judgments
+
+Small typed decisions the agent makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging) go through one judgment interface. With a TypeSafe credential they run on TypeSafe's System One model (`POST /v1/systemone`); a failed request falls back through the `tiny`, `smol`, `default`, and active-session models. Without TypeSafe, features use that chat chain or their configured local on-device model. `providers.judgmentProvider` (`auto` / `typesafe` / `llm`) pins the preferred backend.
+
+| Variable                 | Default / behavior                                                          |
+| ------------------------ | --------------------------------------------------------------------------- |
+| `TYPESAFE_API_KEY`       | TypeSafe API key; alternatively use `/login typesafe`                       |
+| `TYPESAFE_BASE_URL`      | API root override (default `https://api.typesafe.ai`); also used by `/login` validation |
+| `TYPESAFE_DEFAULT_MODEL` | System One model name (default `jev-latest`)                                |
+
 ---
 
 ## 4) Python tooling and kernel runtime

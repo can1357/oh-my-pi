@@ -1,9 +1,50 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed Anthropic prompt-cache breakpoints stalling on sessions with mid-conversation tool changes: the rolling tail no longer parks on tool-control messages that cannot carry `cache_control`, so the growing message tail keeps its breakpoint instead of being re-billed as uncached input ([#12318](https://github.com/can1357/oh-my-pi/issues/12318)).
+
+## [18.2.4] - 2026-09-17
 
 ### Added
 
+- Added the `judgment` module for typed questions over JSON state, including choice, yes/no, and score judgments through the `Judge` interface.
+- Added `TypeSafeJudge` support with TypeSafe System One authentication, credential rotation on unauthorized responses, and retry-aware backoff.
+- Added `TextJudge` and `chatTextBackend` for model-based judgments, with structured state rendering and safeguards that prevent embedded requests from being executed.
+- Added automatic format-correction retries to `TextJudge` when models return malformed output.
+- Added the `guardState` option to `TextBackend` to control whether safety guidance is included in prompts.
+
+## [18.2.3] - 2026-09-17
+
+### Added
+
+- `stream()` and `streamSimple()` support asynchronous model header resolution for each request attempt, including authentication retries and cancellation.
+- Provider login prompts can request masked entry with `secret: true`.
+
+## [18.2.2] - 2026-09-16
+
+### Added
+
+- Added configurable `baseUrl` support for `bedrock-converse-stream` requests, enabling Amazon Bedrock providers and compatible custom providers to use VPC or PrivateLink endpoints, FIPS hosts, and internal gateways, including endpoints mounted under a path or authenticated with query parameters.
+
+### Fixed
+
+- Corrupt credential databases are now backed up privately and recreated instead of preventing startup; signing in again restores credentials.
+- Fixed malformed Anthropic thinking signatures that could freeze sessions at 100% CPU.
+- Fixed Anthropic-compatible gateway tool-call handling so client-declared tools are reported with `stop_reason: "tool_use"` and already-executed native provider tools are not exposed for clients to run again.
+- Fixed gateway session isolation when clients omit a session key, preventing one conversation's retained provider state from affecting another.
+- Fixed retained provider state across credential switches so account-specific capabilities are re-evaluated while reusable endpoint capabilities remain available.
+- Fixed session retention limits closing provider state while a request is still streaming.
+- ChatGPT accounts that have exhausted a plan's usage window but still have available Codex credit can now continue to be selected for Codex requests.
+- Cursor requests now honor explicit max-mode markers on wire-backed models instead of inferring the mode from the model suffix.
+- OpenAI-compatible chat responses containing only structured tool calls now report time to first token correctly.
+
+## [18.2.1] - 2026-09-15
+
+### Added
+
+- Added support for Cerebras Qwen 3.8-27b with improved reasoning effort control
 - Added optional host browser-session callbacks for Perplexity SSO login, keeping browser automation out of pi-ai and preserving email and authenticator-code login.
 
 ### Fixed

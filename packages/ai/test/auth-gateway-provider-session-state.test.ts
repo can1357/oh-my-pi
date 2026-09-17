@@ -14,11 +14,16 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { AuthGatewaySessionStateStore, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
-import type { AuthGatewayServerHandle } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	AUTH_GATEWAY_MAX_SESSION_STATES,
+	AuthGatewaySessionStateStore,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai/auth-gateway";
+import type { AuthGatewayServerHandle, AuthGatewaySessionStateRequest } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
+import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import type { Api, Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Api, Context, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { withOfficialAnthropicEndpoint } from "./helpers";
 
@@ -124,14 +129,27 @@ function startUpstream(): Upstream {
 
 interface GatewayFixture {
 	handle: AuthGatewayServerHandle;
+	/** The gateway's credential source, so a test can switch the account under it. */
+	storage: AuthStorage;
 	stop(): Promise<void>;
 	cleanup(): Promise<void>;
 }
 
-async function startGateway(model: Model<Api>, provider: string): Promise<GatewayFixture> {
+async function startGateway(
+	model: Model<Api>,
+	provider: string,
+	options?: { apiKeys?: string[] },
+): Promise<GatewayFixture> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-session-state-"));
 	const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-	storage.setRuntimeApiKey(provider, "sk-ant-api-test");
+	if (options?.apiKeys) {
+		await storage.set(
+			provider,
+			options.apiKeys.map(key => ({ type: "api_key", key })),
+		);
+	} else {
+		storage.setRuntimeApiKey(provider, "sk-ant-api-test");
+	}
 	const handle = startAuthGateway({
 		bind: "127.0.0.1:0",
 		bearerTokens: ["test-token"],
@@ -147,6 +165,7 @@ async function startGateway(model: Model<Api>, provider: string): Promise<Gatewa
 	};
 	return {
 		handle,
+		storage,
 		stop,
 		cleanup: async () => {
 			await stop();
@@ -154,6 +173,11 @@ async function startGateway(model: Model<Api>, provider: string): Promise<Gatewa
 			await fs.rm(dir, { recursive: true, force: true });
 		},
 	};
+}
+
+/** One store request for a client-keyed session, as a gateway handler builds it. */
+function stateRequest(clientKey: string, account = "key:test-account"): AuthGatewaySessionStateRequest {
+	return { clientKey, model: ANTHROPIC_MODEL, context: CONTEXT, account };
 }
 
 /**
@@ -180,29 +204,35 @@ async function priorityTurn(
 }
 
 /**
- * One priority-tier turn through a foreign-wire route. No session key is sent,
- * so the gateway derives one from model + system + tools + first message —
- * identical bodies land on the same logical session.
+ * One priority-tier turn through a foreign-wire route, carrying the history the
+ * caller supplies. No session key is sent, so the gateway has to work out which
+ * conversation this is from the history itself.
  */
-async function priorityChatTurn(
+async function priorityChatHistory(
 	handle: AuthGatewayServerHandle,
 	modelId: string,
-	prompt: string,
+	messages: ReadonlyArray<{ role: "user" | "assistant"; content: string }>,
 ): Promise<{ status: number; body: unknown }> {
 	const response = await fetch(`${handle.url}/v1/chat/completions`, {
 		method: "POST",
 		headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
 		body: JSON.stringify({
 			model: modelId,
-			messages: [
-				{ role: "system", content: "Stay concise." },
-				{ role: "user", content: prompt },
-			],
+			messages: [{ role: "system", content: "Stay concise." }, ...messages],
 			service_tier: "priority",
 			stream: false,
 		}),
 	});
 	return { status: response.status, body: await response.json() };
+}
+
+/** A single-message turn: identical bodies land on the same logical session. */
+async function priorityChatTurn(
+	handle: AuthGatewayServerHandle,
+	modelId: string,
+	prompt: string,
+): Promise<{ status: number; body: unknown }> {
+	return priorityChatHistory(handle, modelId, [{ role: "user", content: prompt }]);
 }
 
 withOfficialAnthropicEndpoint();
@@ -268,23 +298,219 @@ describe("auth-gateway provider session state", () => {
 		}
 	});
 
+	it("gives two keyless conversations that share an opening their own retained state", async () => {
+		const upstream = startUpstream();
+		const model = makeAnthropicModel(upstream.url);
+		const gateway = await startGateway(model, "anthropic");
+		try {
+			// Conversation A opens and learns the fallback.
+			expect(await priorityChatHistory(gateway.handle, model.id, [{ role: "user", content: "Hi" }])).toMatchObject({
+				status: 200,
+			});
+			// A's second turn extends A's history, so it keeps A's lesson.
+			expect(
+				await priorityChatHistory(gateway.handle, model.id, [
+					{ role: "user", content: "Hi" },
+					{ role: "assistant", content: "ok" },
+					{ role: "user", content: "and now about A" },
+				]),
+			).toMatchObject({ status: 200 });
+			// Conversation B opened the same way but is a different chat. Sharing a
+			// derived key with A would silence B's priority request off A's
+			// rejection — and hand B whatever transport session A is on.
+			expect(
+				await priorityChatHistory(gateway.handle, model.id, [
+					{ role: "user", content: "Hi" },
+					{ role: "assistant", content: "ok" },
+					{ role: "user", content: "and now about B" },
+				]),
+			).toMatchObject({ status: 200 });
+
+			expect(upstream.payloads.map(payload => payload.speed)).toEqual([
+				"fast",
+				undefined,
+				undefined,
+				"fast",
+				undefined,
+			]);
+		} finally {
+			await gateway.cleanup();
+			upstream.stop();
+		}
+	});
+
+	it("re-probes the account-scoped lesson after the session switches credentials", async () => {
+		const upstream = startUpstream();
+		const model = makeAnthropicModel(upstream.url);
+		const gateway = await startGateway(model, "anthropic");
+		try {
+			expect(await priorityTurn(gateway.handle, "session-a", model.id)).toMatchObject({ status: 200 });
+			expect(await priorityTurn(gateway.handle, "session-a", model.id)).toMatchObject({ status: 200 });
+
+			// What markUsageLimitReached does to a session: same conversation, next
+			// credential. Fast mode is an entitlement of the account that was
+			// rejected, not of the endpoint, so the new one has to be asked.
+			gateway.storage.setRuntimeApiKey("anthropic", "sk-ant-api-sibling");
+			expect(await priorityTurn(gateway.handle, "session-a", model.id)).toMatchObject({ status: 200 });
+			// Still the sibling: a switch re-probes once, it does not re-probe every
+			// turn afterwards.
+			expect(await priorityTurn(gateway.handle, "session-a", model.id)).toMatchObject({ status: 200 });
+
+			expect(upstream.payloads.map(payload => payload.speed)).toEqual([
+				"fast",
+				undefined,
+				undefined,
+				"fast",
+				undefined,
+				undefined,
+			]);
+		} finally {
+			await gateway.cleanup();
+			upstream.stop();
+		}
+	});
+
+	it("re-probes account-scoped state before retrying with a sibling credential", async () => {
+		registerMockApi();
+		const observed: Array<{ fastModeDisabled: boolean; strictToolsDisabled: boolean }> = [];
+		let attempt = 0;
+		const mock = createMockModel({
+			provider: "mock",
+			id: "gw-session-account-retry",
+			handler: (_context, options) => {
+				const states = options?.providerSessionState;
+				if (!states) throw new Error("expected retained provider state");
+				if (attempt++ === 0) {
+					states.set("anthropic-messages", {
+						fastModeDisabled: true,
+						strictToolsDisabled: true,
+						close: () => {},
+					} as ProviderSessionState & { fastModeDisabled: boolean; strictToolsDisabled: boolean });
+					throw new ProviderHttpError("expired credential", 401);
+				}
+				const state = states.get("anthropic-messages") as
+					| (ProviderSessionState & { fastModeDisabled: boolean; strictToolsDisabled: boolean })
+					| undefined;
+				if (!state) throw new Error("expected Anthropic provider state");
+				observed.push({
+					fastModeDisabled: state.fastModeDisabled,
+					strictToolsDisabled: state.strictToolsDisabled,
+				});
+				return { content: ["ok"] };
+			},
+		});
+		const gateway = await startGateway(mock, "mock", { apiKeys: ["key-one", "key-two"] });
+		try {
+			expect(await priorityTurn(gateway.handle, "session-a", mock.id)).toMatchObject({ status: 200 });
+			expect(mock.calls.map(call => call.options?.apiKey)).toHaveLength(2);
+			expect(new Set(mock.calls.map(call => call.options?.apiKey)).size).toBe(2);
+			expect(observed).toEqual([{ fastModeDisabled: false, strictToolsDisabled: true }]);
+		} finally {
+			await gateway.cleanup();
+			clearCustomApis();
+		}
+	});
+
 	it("closes the provider state it evicts at the session ceiling", () => {
 		const store = new AuthGatewaySessionStateStore(1);
 		const closed: string[] = [];
-		const first = store.acquire("session-a", ANTHROPIC_MODEL);
-		first.set("probe", { close: () => closed.push("session-a") });
+		const first = store.acquire(stateRequest("session-a"));
+		first.states.set("probe", { close: () => closed.push("session-a") });
+		first.release();
 
-		expect(store.acquire("session-a", ANTHROPIC_MODEL)).toBe(first);
+		const again = store.acquire(stateRequest("session-a"));
+		expect(again.states).toBe(first.states);
 		expect(closed).toEqual([]);
+		again.release();
 
-		store.acquire("session-b", ANTHROPIC_MODEL);
+		store.acquire(stateRequest("session-b")).release();
 
 		// Dropping an entry without closing it leaks the sockets and timers the
 		// ceiling exists to cap, and handing the dropped map back would resurrect
 		// state whose `close()` already ran.
 		expect(closed).toEqual(["session-a"]);
 		expect(store.size).toBe(1);
-		expect(store.acquire("session-a", ANTHROPIC_MODEL)).not.toBe(first);
+		expect(store.acquire(stateRequest("session-a")).states).not.toBe(first.states);
+	});
+
+	it("leaves an entry a request is still holding alone, and closes it on release", () => {
+		const store = new AuthGatewaySessionStateStore(1);
+		const closed: string[] = [];
+		const live = store.acquire(stateRequest("session-live"));
+		live.states.set("probe", { close: () => closed.push("live") });
+
+		// A second conversation arrives while the first one's stream is still
+		// running. Making room by closing that entry would tear down the flags and
+		// sockets the stream is mid-turn on, so the ceiling gives instead.
+		const next = store.acquire(stateRequest("session-next"));
+		next.states.set("probe", { close: () => closed.push("next") });
+		expect(closed).toEqual([]);
+		expect(store.size).toBe(2);
+
+		// The stream ends. Its entry is the least recently acquired, so the
+		// deferred eviction takes it and the ceiling is back in force.
+		live.release();
+		expect(closed).toEqual(["live"]);
+		expect(store.size).toBe(1);
+
+		next.release();
+		expect(closed).toEqual(["live"]);
+		expect(store.size).toBe(1);
+	});
+
+	it("hands the retained state back when a request throws, so the ceiling still applies", async () => {
+		registerMockApi();
+		const mock = createMockModel({
+			provider: "openrouter",
+			id: "gw-session-throw",
+			handler: () => ({ content: ["ok"] }),
+		});
+		const gateway = await startGateway(mock, "openrouter");
+		try {
+			mock.push(() => {
+				throw new Error("upstream transport exploded");
+			});
+			const failed = await fetch(`${gateway.handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: mock.id,
+					context: CONTEXT,
+					options: { sessionId: "throwing-session" },
+					stream: false,
+				}),
+			});
+			expect(failed.status).toBeGreaterThanOrEqual(400);
+			await failed.json();
+
+			// The map the failed request was handed IS its retained entry.
+			const states = mock.calls[0]?.options?.providerSessionState;
+			expect(states).toBeDefined();
+			const closed: string[] = [];
+			states?.set("probe", { close: () => closed.push("probe") });
+
+			// Fill the retained-session ceiling. A claim leaked on the error path
+			// pins the throwing entry and evicts a newer idle entry instead.
+			for (let index = 0; index < AUTH_GATEWAY_MAX_SESSION_STATES; index++) {
+				const next = await fetch(`${gateway.handle.url}/v1/pi/stream`, {
+					method: "POST",
+					headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+					body: JSON.stringify({
+						modelId: mock.id,
+						context: CONTEXT,
+						options: { sessionId: `next-session-${index}` },
+						stream: false,
+					}),
+				});
+				if (!next.ok) throw new Error(`next session ${index} failed with ${next.status}`);
+				await next.json();
+			}
+
+			expect(closed).toEqual(["probe"]);
+		} finally {
+			await gateway.cleanup();
+			clearCustomApis();
+		}
 	});
 
 	it("closes every retained provider state when the gateway shuts down", async () => {

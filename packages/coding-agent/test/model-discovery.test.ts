@@ -15,6 +15,7 @@ import {
 	discoverOllamaModels,
 	discoveryProbeTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
+import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -2825,6 +2826,7 @@ providers:
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refreshProvider("litellm", "online");
 		expect(getModelsForProvider(registry, "litellm").map(model => model.id)).toEqual(["keep-chat-a", "keep-chat-b"]);
+		expect(registry.getProviderDiscoveryState("litellm")?.status).toBe("ok");
 
 		modelGroups = [
 			{ model_group: "keep-chat-a", mode: "chat", providers: ["openai"], supports_vision: false },
@@ -2836,6 +2838,39 @@ providers:
 		modelGroups = [{ model_group: "keep-chat-a", mode: "embedding" }];
 		await registry.refreshProvider("litellm", "online");
 		expect(getModelsForProvider(registry, "litellm")).toEqual([]);
+	});
+
+	test("built-in litellm discovery timeout settles pending state", async () => {
+		vi.useFakeTimers();
+		try {
+			writeRawModelsJson({
+				litellm: {
+					baseUrl: "https://litellm-timeout.example.net/v1",
+					apiKey: "sk-litellm-test",
+					api: "openai-completions",
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => Promise.withResolvers<Response>().promise,
+			});
+			expect(registry.find("litellm", "not-yet-discovered")).toBeUndefined();
+			expect(registry.isProviderDiscoveryPending("litellm")).toBe(true);
+
+			const refresh = registry.refreshProvider("litellm", "online");
+			for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+			vi.advanceTimersByTime(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS);
+			await refresh;
+
+			expect(registry.getProviderDiscoveryState("litellm")).toMatchObject({
+				status: "unavailable",
+				stale: true,
+				models: [],
+				error: `model discovery timed out after ${RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS}ms`,
+			});
+			expect(registry.isProviderDiscoveryPending("litellm")).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("litellm discovery enriches configured proxy models with bundled references", async () => {

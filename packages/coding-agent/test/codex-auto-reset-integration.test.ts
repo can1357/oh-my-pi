@@ -24,7 +24,6 @@
  * process-wide default is never touched.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -39,6 +38,7 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const ACCOUNT_ID = "acct-1";
 const EMAIL = "user@example.com";
@@ -209,7 +209,7 @@ describe("codex saved-reset trigger integration", () => {
 			liveCredits: [liveCreditStatus(1)],
 			streamErrorFirst: true,
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
 		await session.waitForIdle();
@@ -240,7 +240,7 @@ describe("codex saved-reset trigger integration", () => {
 			liveCredits: [liveCreditStatus(1)],
 			streamErrorFirst: true,
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
 		await session.waitForIdle();

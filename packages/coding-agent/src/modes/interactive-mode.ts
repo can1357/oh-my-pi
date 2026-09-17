@@ -117,6 +117,8 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { modelMentionDisplayName } from "../session/model-mention-syntax";
+import { modelMentionChipLabel } from "./composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
@@ -169,12 +171,14 @@ import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { resumeCommand } from "../utils/resume-command";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
+import { TokenRateMeter } from "../utils/token-rate";
 import {
 	disposeTerminalTitleState,
 	initTerminalTitleState,
 	popTerminalTitle,
 	pushTerminalTitle,
 	setSessionTerminalTitle,
+	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
@@ -804,6 +808,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	streamingMessage: AssistantMessage | undefined = undefined;
 	lastAssistantUsage: Usage | undefined = undefined;
 	servedModelTracker = new ServedModelTracker();
+	tokenRate = new TokenRateMeter(text => this.session.agent.tokenizer.countTokens(text));
 	loadingAnimation: Loader | undefined = undefined;
 	autoCompactionLoader: Loader | undefined = undefined;
 	retryLoader: Loader | undefined = undefined;
@@ -820,10 +825,26 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!name) return undefined;
 		return `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
 	}
-	/** Idle stand-in for the working row in band mode: the docked title stays
-	 * readable between turns, in the same spot the loader's trailer uses. */
+	/** Generation tok/s: live while streaming, the last reading between
+	 * turns, blank until a run has produced enough tokens to measure. */
+	#tokenRateLabel(): string | undefined {
+		if (!settings.get("composer.tokenRate")) return undefined;
+		const rate = this.tokenRate.rate();
+		if (rate === null) return undefined;
+		return theme.fg("dim", `${theme.icon.throughput} ${rate.toFixed(1)} tok/s`);
+	}
+	/** Right-docked suffix of the working row: the tok/s readout, then the band-mode title. */
+	#workingRowTrailer(): string | undefined {
+		const rate = this.#tokenRateLabel();
+		const title = this.#workingTitleTrailer();
+		if (rate && title) return `${rate}  ${title}`;
+		return rate ?? title;
+	}
+	/** Idle stand-in for the working row: the last tok/s reading and the
+	 * band-mode title stay readable between turns, docked where the loader's
+	 * trailer was. */
 	renderIdleStatusHud(width: number): readonly string[] | undefined {
-		const trailer = this.#workingTitleTrailer();
+		const trailer = this.#workingRowTrailer();
 		if (!trailer) return undefined;
 		return ["", " ".repeat(Math.max(0, width - visibleWidth(trailer))) + trailer];
 	}
@@ -846,6 +867,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastLeftTapTime = 0;
 	shutdownRequested = false;
 	#isShuttingDown = false;
+	/**
+	 * Set once a graceful {@link shutdown} teardown threw. The teardown is
+	 * promise-memoized (and the session manager latches its disk error), so
+	 * re-running it repeats the identical failure — without this flag the user is
+	 * trapped in a process that can never close (#12238: a corrupted session file
+	 * makes the close-time rewrite refuse to clobber it). The next shutdown is the
+	 * escape hatch: exit without writing the session log.
+	 */
+	#teardownFailed = false;
+	/** True once a graceful `shutdown()` teardown failed at the memoized
+	 *  dispose stage. Surfaced to the input controller so the next single
+	 *  Ctrl+C skips the double-tap gate and runs `shutdown()` — which
+	 *  force-quits — instead of merely clearing the editor (#12238). */
+	get teardownFailed(): boolean {
+		return this.#teardownFailed;
+	}
 	/** True once `shutdown()` has begun teardown. Surfaced to the input
 	 *  controller so a Ctrl+C arriving while teardown is in flight can hard-
 	 *  abort the remaining work instead of stacking another no-op call. */
@@ -1033,6 +1070,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.streamingMessage = undefined;
 		this.lastAssistantUsage = undefined;
 		this.servedModelTracker = new ServedModelTracker();
+		this.tokenRate.reset();
 		this.pendingTools.clear();
 	}
 	readonly #uiHelpers: UiHelpers;
@@ -1111,6 +1149,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
+		this.editor.modelMentionLabel = selector => {
+			const model = this.session.findMentionableModel(selector);
+			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
+		};
+		this.editor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		this.editor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		this.#ownsStartedUi = wasStarted;
 		this.keybindings = KeybindingsManager.inMemory();
@@ -1500,6 +1543,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// after shutdown can never write into the parent shell's tab.
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
+		setTerminalTitleSpinnerStyle(this.settings.get("tui.titleSpinner"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
@@ -5427,12 +5471,27 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async shutdown(): Promise<void> {
 		if (this.#isShuttingDown) return;
+		// The previous graceful teardown failed AT the memoized session.dispose()
+		// (the session is already disposing), so it re-rejects identically forever
+		// and the process can never close (#12238: a corrupted session file makes
+		// the close-time rewrite refuse to clobber it). This second attempt is the
+		// escape hatch: quit without writing the session log. 130 = 128 + SIGINT,
+		// matching the Ctrl+C hard-abort exit code in input-controller.
+		if (this.#teardownFailed) {
+			try {
+				await postmortem.quit(130);
+			} catch {
+				// Extension/hook loading temporarily guards process.exit. Cleanup
+				// has already run; bypass that guard for this host-owned escape.
+				postmortem.exitProcess(130);
+			}
+			return;
+		}
 		this.#isShuttingDown = true;
 		try {
 			await this.#teardown();
 		} catch (error) {
-			this.#isShuttingDown = false;
-			this.showError(`Could not close session: ${error instanceof Error ? error.message : String(error)}`);
+			this.#handleTeardownError("close", error);
 			return;
 		}
 
@@ -5445,6 +5504,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		await postmortem.quit(0);
+	}
+
+	#handleTeardownError(action: "close" | "restart", error: unknown): void {
+		this.#isShuttingDown = false;
+		const detail = error instanceof Error ? error.message : String(error);
+		// Arm the escape hatch only once dispose() has begun: its promise is
+		// memoized, so a retry can only re-fail. A failure BEFORE dispose (a
+		// transient BTW/live-command flush) leaves the session undisposed and
+		// the teardown genuinely retryable, so it must not force-quit.
+		this.#teardownFailed = this.session.isDisposed;
+		this.showError(
+			this.#teardownFailed
+				? `Could not ${action} session: ${detail}\nPress Ctrl+C again to exit without saving the session log.`
+				: `Could not ${action} session: ${detail}`,
+		);
 	}
 
 	/**
@@ -5464,8 +5538,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			await this.#teardown();
 		} catch (error) {
-			this.#isShuttingDown = false;
-			this.showError(`Could not restart session: ${error instanceof Error ? error.message : String(error)}`);
+			this.#handleTeardownError("restart", error);
 			return;
 		}
 
@@ -5625,6 +5698,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
+		nextEditor.modelMentionLabel = selector => {
+			const model = this.session.findMentionableModel(selector);
+			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
+		};
+		nextEditor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		nextEditor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		nextEditor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
@@ -5944,7 +6022,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// status rows so the interrupt glyph reads as indented.
 				[` ${theme.icon.esc}`],
 			);
-			this.loadingAnimation.setTrailer(() => this.#workingTitleTrailer());
+			this.loadingAnimation.setTrailer(() => this.#workingRowTrailer());
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
 			this.statusContainer.disposeChildren();
@@ -6189,10 +6267,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleResetContextCommand();
 	}
 
-	async handleDropCommand(): Promise<void> {
+	async handleDeleteCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		await this.prepareSessionSwitch();
-		await this.#commandController.handleDropCommand();
+		await this.#commandController.handleDeleteCommand();
 	}
 
 	async handleForkCommand(): Promise<void> {

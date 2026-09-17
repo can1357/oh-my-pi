@@ -153,7 +153,7 @@ It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 
 ### Command-resolved secrets
 
-Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. The command is run with a 10 s timeout, stdout is trimmed, and empty/failing commands are omitted:
+Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously with a 10 s timeout; stdout is trimmed, and empty/failing commands are omitted. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
 
 ```yaml
 providers:
@@ -163,7 +163,7 @@ providers:
       X-Team-Key: "!bw get password omp-team-key"
 ```
 
-Successful command outputs are cached for the process lifetime so the command is not re-run for every model.
+Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. Failures back off for 30 seconds. An explicit model refresh or 401 credential refresh invalidates the relevant cached API keys and headers. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
 
 ## Merge and override order
 
@@ -629,6 +629,33 @@ Anthropic-side knobs are supplied by built-in catalog metadata and are not confi
 The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `explicit`),
 `supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`, and
 `promptCacheMaximumCheckpoints` for Bedrock models.
+
+By default `bedrock-converse-stream` requests go to `bedrock-runtime.{region}.amazonaws.com`, where
+`{region}` comes from an explicit per-request region, the model id (ARN or cross-region
+inference-profile prefix), or `AWS_REGION`/`AWS_DEFAULT_REGION`/the AWS profile — falling back to
+`us-east-1`. Set `baseUrl` on `providers.amazon-bedrock` (or on a custom provider using
+`api: bedrock-converse-stream`) to send requests somewhere else instead — a VPC/PrivateLink
+endpoint, a FIPS host, or a gateway. Any path or query string on the `baseUrl` is kept — the path
+as a prefix, the query appended to the final URL (and included in SigV4's canonical request when
+signing) — so `{baseUrl}/model/{id}/converse-stream[?query]` is the final URL. That covers gateways
+that authenticate via a query parameter instead of a header:
+
+```yaml
+providers:
+  amazon-bedrock:
+    baseUrl: https://vpce-0123456789abcdef0.bedrock-runtime.us-east-1.vpce.amazonaws.com
+```
+
+One host shape is not taken literally: a `baseUrl` of exactly
+`bedrock-runtime.{region}.amazonaws.com` is AWS's own endpoint, and its region segment is replaced
+with the resolved region — signing has to match the region it sends to, and every bundled Bedrock
+model already carries such a `baseUrl`. Use a distinct host (VPC endpoint, `-fips`, gateway) to
+pin an origin exactly.
+
+Region resolution itself is unaffected by `baseUrl`, because SigV4 still signs with a real AWS
+region — set `AWS_REGION` or use a region-scoped model id/ARN if the endpoint expects a specific
+one. A gateway that accepts a bearer token instead of SigV4 needs no region at all: set the
+provider's `apiKey` (or `AWS_BEARER_TOKEN_BEDROCK`) and signing is skipped.
 
 ### Strict tool schemas (`disableStrictTools`)
 

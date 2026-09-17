@@ -11,9 +11,11 @@ import type {
 	ElementHandle,
 	ElementScreenshotOptions,
 	HTTPResponse,
+	JSHandle,
 	KeyboardTypeOptions,
 	KeyInput,
 	Page,
+	Realm,
 	SerializedAXNode,
 	Target,
 } from "puppeteer-core";
@@ -47,6 +49,7 @@ import {
 	applyViewport,
 	BROWSER_PROTOCOL_TIMEOUT_MS,
 	DEFAULT_VIEWPORT,
+	isPuppeteerHandle,
 	loadPuppeteerInWorker,
 } from "./launch";
 import { extractReadableFromHtml, type ReadableFormat } from "./readable";
@@ -69,6 +72,14 @@ declare module "puppeteer-core" {
 	interface Frame {
 		/** Puppeteer's main JavaScript realm, retained by our pinned runtime patch. */
 		mainRealm(): Realm;
+	}
+	interface Realm {
+		/** Re-home a DOM handle into this realm (`@internal` upstream, stripped from published types). */
+		adoptHandle<T extends JSHandle>(handle: T): Promise<T>;
+	}
+	interface JSHandle {
+		/** Realm that created this handle (`@internal` upstream, stripped from published types). */
+		readonly realm: Realm;
 	}
 }
 
@@ -399,6 +410,54 @@ async function runGuardedHandleAction<T>(
 		).catch(() => undefined);
 		throw error;
 	}
+}
+
+/**
+ * Re-home element handles in `args` into `realm` so they can be passed to an
+ * evaluation there. The stealth patch resolves selectors (`tab.waitForSelector`,
+ * `tab.$`, …) in Puppeteer's isolated world while `tab.evaluate` runs in the main
+ * world; CDP rejects a handle used outside the context that created it. Puppeteer's
+ * supported realm adoption is DOM-only, so non-element JSHandles pass through and
+ * retain Puppeteer's native same-realm requirement. Nested handles likewise remain
+ * unsupported by Puppeteer's positional argument serializer.
+ *
+ * Adopted copies are disposed on partial adoption failure and after evaluation.
+ * Caller-owned handles — including handles already in `realm` — are never disposed.
+ */
+async function adoptElementArgs(
+	realm: Realm,
+	args: unknown[],
+): Promise<{ args: unknown[]; dispose: () => Promise<void> }> {
+	let adopted: JSHandle[] | undefined;
+	let out: unknown[] | undefined;
+	let copies: Map<JSHandle, JSHandle> | undefined;
+	const dispose = async (): Promise<void> => {
+		if (adopted) await Promise.all(adopted.map(handle => handle.dispose().catch(() => undefined)));
+	};
+
+	try {
+		for (let i = 0; i < args.length; i++) {
+			const handle = args[i];
+			if (!isPuppeteerHandle(handle)) continue;
+			const element = handle.asElement();
+			if (!element || handle.realm === realm) continue;
+
+			copies ??= new Map();
+			let copy = copies.get(handle);
+			if (!copy) {
+				copy = await realm.adoptHandle(element);
+				copies.set(handle, copy);
+				(adopted ??= []).push(copy);
+			}
+			out ??= args.slice();
+			out[i] = copy;
+		}
+	} catch (error) {
+		await dispose();
+		throw error;
+	}
+
+	return { args: out ?? args, dispose };
 }
 
 /**
@@ -1778,14 +1837,19 @@ export class WorkerCore {
 			},
 			evaluate: (fn, ...args) =>
 				op("tab.evaluate()", INF, sig =>
-					untilAborted(sig, () =>
-						typeof fn === "string"
-							? page.mainFrame().mainRealm().evaluate(fn)
-							: page
-									.mainFrame()
-									.mainRealm()
-									.evaluate(fn as (...a: unknown[]) => unknown, ...args),
-					),
+					untilAborted(sig, async () => {
+						const realm = page.mainFrame().mainRealm();
+						// Puppeteer evaluates strings as expressions and ignores extra args; preserve
+						// that behavior without inspecting or adopting otherwise-unused handles.
+						if (typeof fn === "string") return realm.evaluate(fn);
+						const { args: adopted, dispose } = await adoptElementArgs(realm, args);
+						try {
+							throwIfAborted(sig);
+							return await realm.evaluate(fn as (...a: unknown[]) => unknown, ...adopted);
+						} finally {
+							await dispose();
+						}
+					}),
 				) as never,
 			scrollIntoView: selector =>
 				op(

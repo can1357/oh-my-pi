@@ -45,13 +45,16 @@ impl Default for OutputDecoder {
 
 impl OutputDecoder {
 	/// Decode with the host ANSI code page as the Windows fallback.
+	/// Not `const`: `GetACP` is an FFI call.
+	#[cfg(windows)]
+	pub fn new() -> Self {
+		Self::with_fallback_codepage(acp())
+	}
+
+	/// Decode as UTF-8 only; no ANSI fallback exists off Windows.
+	#[cfg(not(windows))]
 	pub const fn new() -> Self {
-		Self {
-			pending: Vec::new(),
-			mode: Mode::Utf8,
-			#[cfg(windows)]
-			fallback_codepage: acp(),
-		}
+		Self { pending: Vec::new(), mode: Mode::Utf8 }
 	}
 
 	/// Decode with an explicit ANSI fallback. Used by tests so GBK fixtures

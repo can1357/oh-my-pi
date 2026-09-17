@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
@@ -236,6 +237,75 @@ async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> 
 }
 
 /**
+ * Resolve a distro wrapper script to its exec target (e.g.
+ * /opt/google/chrome/google-chrome is bash ending in
+ * `exec -a "$0" "$HERE/chrome" "$@"` with $HERE = dirname of the wrapper).
+ * Scans line-by-line for the final `exec ... $HERE/...` command so helper
+ * invocations are never mistaken for the application. Returns null for
+ * binaries and wrappers without an exec command. Size-guarded so real
+ * binaries are never read into memory.
+ */
+async function resolveWrapperTarget(wrapperPath: string): Promise<string | null> {
+	if (process.platform !== "linux") return null;
+	const stat = await fs.stat(wrapperPath).catch(() => null);
+	if (!stat || !stat.isFile() || stat.size > 65_536) return null;
+	const content = await Bun.file(wrapperPath)
+		.text()
+		.catch(() => null);
+	if (!content || content.charCodeAt(0) === 0x7f) return null;
+	let target: string | null = null;
+	const execRegex = /^\s*exec\s+(?:-a\s+(?:"[^"]*"|'[^']*'|\S+)\s+)?["']?\$(?:HERE|\{HERE\})\/([^\s"'`;}]+)/;
+	for (const line of content.split("\n")) {
+		const match = execRegex.exec(line);
+		if (match?.[1]) target = match[1];
+	}
+	if (!target) return null;
+	const joined = path.join(path.dirname(wrapperPath), target);
+	return fs.realpath(joined).catch(() => joined);
+}
+
+/**
+ * Normalize candidate argv for kernels that serve /proc/<pid>/cmdline
+ * space-joined instead of NUL-separated. A glued first word (the whole
+ * command line in argv[0]) would otherwise hide --user-data-dir and
+ * --remote-debugging-port from the matchers below.
+ */
+function normalizeCandidateArgs(args: string[]): string[] {
+	if (args.length !== 1 || !args[0]!.includes(" --")) return args;
+	const word = args[0]!;
+	const split = word.trim().split(/\s+/);
+	if (split.length <= 1) return args;
+
+	// Invariant: ungluing is only safe when splitting preserves exact argument
+	// boundaries without corrupting switch values (e.g. splitting a profile path
+	// containing spaces into multiple argv elements, which risks cross-profile reuse).
+	// Every --user-data-dir flag must re-parse to the identical value.
+	const flagRegex = /(?:^|\s)--user-data-dir(?:=(.*?)|(?:\s+(.*?))?)(?=\s--|$)/g;
+	const rawMatches = [...word.trim().replace(/\s+/g, " ").matchAll(flagRegex)];
+	if (rawMatches.length > 0) {
+		let matchIndex = 0;
+		for (let i = 0; i < split.length; i++) {
+			const arg = split[i]!;
+			if (arg.startsWith("--user-data-dir=")) {
+				const expected = rawMatches[matchIndex]?.[1] ?? rawMatches[matchIndex]?.[2] ?? "";
+				const actual = findUserDataDirInArgs(split.slice(i, i + 1));
+				if (actual !== expected) return args;
+				matchIndex++;
+			} else if (arg === "--user-data-dir") {
+				const expected = rawMatches[matchIndex]?.[1] ?? rawMatches[matchIndex]?.[2] ?? "";
+				const actual = findUserDataDirInArgs(split.slice(i, i + 2));
+				if (actual !== expected) return args;
+				matchIndex++;
+				i++;
+			}
+		}
+		if (matchIndex !== rawMatches.length) return args;
+	}
+
+	return split;
+}
+
+/**
  * Return a reusable CDP endpoint for `exe`, or null when no instance is
  * running. Refuse to replace an occupied instance unless the caller can
  * launch an isolated profile.
@@ -249,13 +319,22 @@ export async function findReusableCdp(
 		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
 			? normalizeUserDataDir(requestedUserDataDir)
 			: null;
-	const candidates = Process.fromPath(exe).filter(process => process.status() === ProcessStatus.Running);
+	// Process paths use the executable real path, not its launcher symlink. A distro
+	// wrapper script defeats realpath, so resolve through the wrapper exec target
+	// for Chromium-family browsers on Linux.
+	const executablePath = await fs.realpath(exe).catch(() => exe);
+	const base = path.basename(exe).replace(/\.exe$/i, "");
+	const isChromium = CHROMIUM_BROWSER_BASENAME.test(base) || Object.hasOwn(CHROMIUM_FLATPAK_IDS, base);
+	const wrapperTarget = process.platform === "linux" && isChromium ? await resolveWrapperTarget(executablePath) : null;
+	const candidates = Process.fromPath(wrapperTarget ?? executablePath).filter(
+		candidate => candidate.status() === ProcessStatus.Running,
+	);
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
 	for (const process of candidates) {
 		let args: string[];
 		try {
-			args = process.args();
+			args = normalizeCandidateArgs(process.args());
 		} catch {
 			hasUnreadableCandidate = true;
 			continue;

@@ -953,6 +953,7 @@ export class TurnRecovery {
 					settings: this.#host.settings,
 					registry: this.#host.modelRegistry,
 					sessionId: this.#host.sessionId(),
+					model: this.#host.model() ?? undefined,
 					metadataResolver: (provider: string) => this.#host.agent.metadataForProvider(provider),
 					signal: controller.signal,
 				});

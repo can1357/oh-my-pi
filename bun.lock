@@ -22,7 +22,7 @@
     },
     "packages/agent": {
       "name": "@oh-my-pi/pi-agent-core",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "dependencies": {
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
@@ -41,7 +41,7 @@
     },
     "packages/ai": {
       "name": "@oh-my-pi/pi-ai",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "dependencies": {
         "@oh-my-pi/omptype": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
@@ -63,7 +63,7 @@
     },
     "packages/catalog": {
       "name": "@oh-my-pi/pi-catalog",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "dependencies": {
         "@oh-my-pi/omptype": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
@@ -76,7 +76,7 @@
     },
     "packages/coding-agent": {
       "name": "@oh-my-pi/pi-coding-agent",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "bin": {
         "omp": "src/cli.ts",
       },
@@ -166,7 +166,7 @@
     },
     "packages/mnemopi": {
       "name": "@oh-my-pi/pi-mnemopi",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "bin": {
         "mnemopi": "src/cli.ts",
       },
@@ -192,7 +192,7 @@
     },
     "packages/natives": {
       "name": "@oh-my-pi/pi-natives",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
         "@types/bun": "catalog:",
@@ -207,7 +207,7 @@
     },
     "packages/omptype": {
       "name": "@oh-my-pi/omptype",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "devDependencies": {
         "@ark/attest": "0.56.3",
         "@ark/schema": "0.56.2",
@@ -220,7 +220,7 @@
     },
     "packages/snapcompact": {
       "name": "@oh-my-pi/snapcompact",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "dependencies": {
         "@oh-my-pi/pi-ai": "catalog:",
         "@oh-my-pi/pi-catalog": "catalog:",
@@ -234,7 +234,7 @@
     },
     "packages/stats": {
       "name": "@oh-my-pi/omp-stats",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "bin": {
         "omp-stats": "./src/index.ts",
       },
@@ -259,7 +259,7 @@
     },
     "packages/tui": {
       "name": "@oh-my-pi/pi-tui",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "dependencies": {
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
@@ -294,7 +294,7 @@
     },
     "packages/utils": {
       "name": "@oh-my-pi/pi-utils",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "dependencies": {
         "@oh-my-pi/pi-natives": "catalog:",
       },
@@ -304,7 +304,7 @@
     },
     "packages/wire": {
       "name": "@oh-my-pi/pi-wire",
-      "version": "18.2.0",
+      "version": "18.2.4",
       "devDependencies": {
         "@types/bun": "catalog:",
       },
@@ -339,18 +339,18 @@
     "@babel/types": "^7.29.7",
     "@huggingface/transformers": "^4.2.0",
     "@napi-rs/cli": "3.7.2",
-    "@oh-my-pi/omp-stats": "18.2.0",
-    "@oh-my-pi/omptype": "18.2.0",
-    "@oh-my-pi/pi-agent-core": "18.2.0",
-    "@oh-my-pi/pi-ai": "18.2.0",
-    "@oh-my-pi/pi-catalog": "18.2.0",
-    "@oh-my-pi/pi-coding-agent": "18.2.0",
-    "@oh-my-pi/pi-mnemopi": "18.2.0",
-    "@oh-my-pi/pi-natives": "18.2.0",
-    "@oh-my-pi/pi-tui": "18.2.0",
-    "@oh-my-pi/pi-utils": "18.2.0",
-    "@oh-my-pi/pi-wire": "18.2.0",
-    "@oh-my-pi/snapcompact": "18.2.0",
+    "@oh-my-pi/omp-stats": "18.2.4",
+    "@oh-my-pi/omptype": "18.2.4",
+    "@oh-my-pi/pi-agent-core": "18.2.4",
+    "@oh-my-pi/pi-ai": "18.2.4",
+    "@oh-my-pi/pi-catalog": "18.2.4",
+    "@oh-my-pi/pi-coding-agent": "18.2.4",
+    "@oh-my-pi/pi-mnemopi": "18.2.4",
+    "@oh-my-pi/pi-natives": "18.2.4",
+    "@oh-my-pi/pi-tui": "18.2.4",
+    "@oh-my-pi/pi-utils": "18.2.4",
+    "@oh-my-pi/pi-wire": "18.2.4",
+    "@oh-my-pi/snapcompact": "18.2.4",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/api-logs": "^0.220.0",
     "@opentelemetry/context-async-hooks": "^2.9.0",
@@ -931,7 +931,7 @@
 
     "@ts-morph/common": ["@ts-morph/common@0.29.0", "", { "dependencies": { "minimatch": "^10.0.1", "path-browserify": "^1.0.1", "tinyglobby": "^0.2.14" } }, "sha512-35oUmphHbJvQ/+UTwFNme/t2p3FoKiGJ5auTjjpNTop2dyREspirjMy82PLSC1pnDJ8ah1GU98hwpVt64YXQsg=="],
 
-    "@tybys/wasm-util": ["@tybys/wasm-util@0.10.3", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg=="],
+    "@tybys/wasm-util": ["@tybys/wasm-util@0.10.4", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A=="],
 
     "@types/babel__core": ["@types/babel__core@7.20.5", "", { "dependencies": { "@babel/parser": "^7.20.7", "@babel/types": "^7.20.7", "@types/babel__generator": "*", "@types/babel__template": "*", "@types/babel__traverse": "*" } }, "sha512-qoQprZvz5wQFJwMDqeseRXWv3rqMvhgpbXFfVyWhbx9X47POIA6i/+dXefEmZKoAgOaTdaIgNSMqMIU61yRyzA=="],
 
@@ -1035,7 +1035,7 @@
 
     "balanced-match": ["balanced-match@4.0.4", "", {}, "sha512-BLrgEcRTwX2o6gGxGOCNyMvGSp35YofuYzw9h1IMTRmKqttAZZVU67bdb9Pr2vUHA8+j3i2tJfjO6C6+4myGTA=="],
 
-    "baseline-browser-mapping": ["baseline-browser-mapping@2.11.22", "", { "bin": { "baseline-browser-mapping": "dist/cli.cjs" } }, "sha512-pWc4w51fBFd7mav43/zKRC+RI6f4yfzQoVlfvE8dECePyfkn1bzLp01Fj0QACcyCZyFhiEMyD2qScfKRWgWibA=="],
+    "baseline-browser-mapping": ["baseline-browser-mapping@2.11.23", "", { "bin": { "baseline-browser-mapping": "dist/cli.cjs" } }, "sha512-le521dGVfxM7yRX0EikCoSz+rOK+hHzdDt/E7mG1jOJB/6WAAUuwVroLwaB7ApaUsz5Q0kFlDXLSA9MheUIfRQ=="],
 
     "before-after-hook": ["before-after-hook@4.0.0", "", {}, "sha512-q6tR3RPqIB1pMiTRMFcZwuG5T8vwp+vUvEG0vuI6B+Rikh5BfPp2fQ82c925FOs+b0lcFQ8CFrL+KbilfZFhOQ=="],
 
@@ -1125,7 +1125,7 @@
 
     "emoji-regex": ["emoji-regex@8.0.0", "", {}, "sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A=="],
 
-    "enhanced-resolve": ["enhanced-resolve@5.24.5", "", { "dependencies": { "graceful-fs": "^4.2.4", "tapable": "^2.3.3" } }, "sha512-L1l8TNvomm6UVW5B253AGxQagSQr+vGwhMlrrfRS2qmhx46AMpMVJKQYLvWYbysTMY8VoicOvzHzoHMbyzB+4A=="],
+    "enhanced-resolve": ["enhanced-resolve@5.25.1", "", { "dependencies": { "graceful-fs": "^4.2.4", "tapable": "^2.3.3" } }, "sha512-nGXts5znJzmWPu+mIE9izCOzdg63oJca2mDzGWWTth7sr4aCToKcoyFVBQwN75Ij5Pf6p510EwkTqViTRzDV+w=="],
 
     "entities": ["entities@6.0.1", "", {}, "sha512-aN97NXWF6AWBTahfVOIrB/NShkzi5H7F9r1s9mD3cDj4Ko5f2qhhVoYMibXF7GlLveb/D2ioWay8lxI97Ven3g=="],
 
@@ -1401,7 +1401,7 @@
 
     "supports-color": ["supports-color@7.2.0", "", { "dependencies": { "has-flag": "^4.0.0" } }, "sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw=="],
 
-    "tailwind-merge": ["tailwind-merge@3.6.0", "", {}, "sha512-uxL7qAVQriqRQPAyK3pj66VqskWqoZ37PW94jwOTwNfq/z9oyu1V+eqrZqtR2+fCiXdYOZe/Modt8GtvqNzu+w=="],
+    "tailwind-merge": ["tailwind-merge@3.7.0", "", {}, "sha512-XPPUyAc+cvspz3lHTcR/QgPfW2A0lv/xQNIjX3HGhLR+Nq2lHaLq5MtTesHn8GUr3W3DguT2KT5x3NVgRtYwmA=="],
 
     "tailwindcss": ["tailwindcss@4.3.3", "", {}, "sha512-gOhV3P7ufE62QDGg1zVaTgCR+EtPv92k2nIhVcVKcLmxT1sUBsQGhnZj175j+MqRt4zLF7ic+sCYjfhxMxj7YQ=="],
 
@@ -1529,7 +1529,7 @@
 
     "@tailwindcss/oxide-wasm32-wasi/@napi-rs/wasm-runtime": ["@napi-rs/wasm-runtime@1.2.4", "", { "dependencies": { "@tybys/wasm-util": "^0.10.3" }, "peerDependencies": { "@emnapi/core": "^1.7.1 || ^2.0.0-alpha.4", "@emnapi/runtime": "^1.7.1 || ^2.0.0-alpha.4" }, "bundled": true }, "sha512-AJxoUD2/15ESHbvpcyjU274nsAPLuOtPHCk0vKJM5pj//Fg/B1FXNWjPnXTT9PymCYYiHo4zPj0ZomXBKhoy7g=="],
 
-    "@tailwindcss/oxide-wasm32-wasi/@tybys/wasm-util": ["@tybys/wasm-util@0.10.3", "", { "dependencies": { "tslib": "^2.4.0" }, "bundled": true }, "sha512-F3fo1MYrRJYL3zER0OUOmkutjr1Vp23m7OsSgp7nq4SP6OqX6C/56XFIPAl5bt3zaBRjmW7SGz3u/6LwFpYcOg=="],
+    "@tailwindcss/oxide-wasm32-wasi/@tybys/wasm-util": ["@tybys/wasm-util@0.10.4", "", { "dependencies": { "tslib": "^2.4.0" }, "bundled": true }, "sha512-W3c4gRigFS0T/Ma4qIYF3GDAc5AQdHb1yL5znJT1Zv1YaD9Kitx656wBjvr19qbiosmZT8lWDM5BEMynUqX65A=="],
 
     "@tailwindcss/oxide-wasm32-wasi/tslib": ["tslib@2.8.1", "", { "bundled": true }, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
 

@@ -81,8 +81,29 @@ function getDefaultTheme(): string {
 // Global Theme Instance
 // ============================================================================
 
+/** Active theme; imports remain live across initialization, previews, and theme switches. */
 export var theme: Theme;
 var currentThemeName: string | undefined;
+
+type ThemeBinding = (value: Theme) => void;
+var themeBindings: Set<ThemeBinding> | undefined;
+
+/** @internal Mirror assignments into bundled module bindings without replacing the UI change listener. */
+export function bindTheme(binding: ThemeBinding): () => void {
+	const bindings = (themeBindings ??= new Set<ThemeBinding>());
+	bindings.add(binding);
+	binding(theme);
+	return () => {
+		bindings.delete(binding);
+	};
+}
+
+function assignTheme(value: Theme): void {
+	theme = value;
+	if (themeBindings) {
+		for (const binding of themeBindings) binding(value);
+	}
+}
 
 /** Get the name of the currently active theme. */
 export function getCurrentThemeName(): string | undefined {
@@ -145,11 +166,11 @@ export function initThemeSync(
 		colorBlindMode: currentColorBlindMode,
 	};
 	try {
-		theme = loadThemeSync(name, options);
+		assignTheme(loadThemeSync(name, options));
 	} catch (error) {
 		logger.debug("Theme loading failed, falling back to dark theme", { error: String(error) });
 		currentThemeName = "dark";
-		theme = loadThemeSync("dark", options);
+		assignTheme(loadThemeSync("dark", options));
 	}
 }
 
@@ -173,7 +194,7 @@ export async function initTheme(
 ): Promise<void> {
 	const name = configureTheme(symbolPreset, colorBlindMode, darkTheme, lightTheme);
 	try {
-		theme = await loadTheme(name, getCurrentThemeOptions());
+		assignTheme(await loadTheme(name, getCurrentThemeOptions()));
 		if (enableWatcher) {
 			await startThemeWatcher();
 			startSigwinchListener();
@@ -181,7 +202,7 @@ export async function initTheme(
 	} catch (err) {
 		logger.debug("Theme loading failed, falling back to dark theme", { error: String(err) });
 		currentThemeName = "dark";
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
 		// Don't start watcher for fallback theme
 	}
 }
@@ -198,7 +219,7 @@ export async function setTheme(
 		if (requestId !== themeLoadRequestId) {
 			return { success: false, error: "Theme change superseded by a newer request" };
 		}
-		theme = loadedTheme;
+		assignTheme(loadedTheme);
 		if (enableWatcher) {
 			await startThemeWatcher();
 		}
@@ -210,7 +231,7 @@ export async function setTheme(
 		}
 		// Theme is invalid - fall back to dark theme
 		currentThemeName = "dark";
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
 		// The active theme just changed to the fallback — bump the epoch so memoized
 		// renderers (e.g. ToolExecutionComponent) re-shape with the fallback colors
 		// instead of holding the failed theme's stale styling.
@@ -233,7 +254,7 @@ export async function previewTheme(
 		if (requestId !== themeLoadRequestId) {
 			return { success: false, error: "Theme preview superseded by a newer request" };
 		}
-		theme = loadedTheme;
+		assignTheme(loadedTheme);
 		notifyThemeChange(event);
 		return { success: true };
 	} catch (error) {
@@ -281,7 +302,7 @@ export function onTerminalAppearanceChange(
 
 export function setThemeInstance(themeInstance: Theme): void {
 	autoDetectedTheme = false;
-	theme = themeInstance;
+	assignTheme(themeInstance);
 	currentThemeName = "<in-memory>";
 	stopThemeWatcher();
 	notifyThemeChange({ ephemeral: true });
@@ -298,11 +319,11 @@ export async function setSymbolPreset(preset: SymbolPreset): Promise<void> {
 	try {
 		const loadedTheme = await loadTheme(currentThemeName, getCurrentThemeOptions());
 		if (requestId !== themeLoadRequestId) return;
-		theme = loadedTheme;
+		assignTheme(loadedTheme);
 	} catch {
 		if (requestId !== themeLoadRequestId) return;
 		// Fall back to dark theme with new preset
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
 		if (requestId !== themeLoadRequestId) return;
 	}
 	notifyThemeChange({ ephemeral: true });
@@ -327,11 +348,11 @@ export async function setColorBlindMode(enabled: boolean): Promise<void> {
 	try {
 		const loadedTheme = await loadTheme(currentThemeName, getCurrentThemeOptions());
 		if (requestId !== themeLoadRequestId) return;
-		theme = loadedTheme;
+		assignTheme(loadedTheme);
 	} catch {
 		if (requestId !== themeLoadRequestId) return;
 		// Fall back to dark theme
-		theme = await loadTheme("dark", getCurrentThemeOptions());
+		assignTheme(await loadTheme("dark", getCurrentThemeOptions()));
 		if (requestId !== themeLoadRequestId) return;
 	}
 	notifyThemeChange({ ephemeral: true });
@@ -407,7 +428,7 @@ async function startThemeWatcher(): Promise<void> {
 
 			loadTheme(watchedThemeName, getCurrentThemeOptions())
 				.then(loadedTheme => {
-					theme = loadedTheme;
+					assignTheme(loadedTheme);
 					notifyThemeChange({ ephemeral: true });
 				})
 				.catch(() => {
@@ -446,7 +467,7 @@ function applyResolvedAutoTheme(resolved: string, debugLabel: string, event: The
 	loadTheme(resolved, getCurrentThemeOptions())
 		.then(loadedTheme => {
 			if (requestId !== themeLoadRequestId) return;
-			theme = loadedTheme;
+			assignTheme(loadedTheme);
 			notifyThemeChange(event);
 		})
 		.catch(err => {

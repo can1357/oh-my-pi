@@ -179,6 +179,7 @@ import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { 
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with { type: "text" };
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
+import sessionStopBlockedPrompt from "../prompts/system/session-stop-blocked.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import skillfulNoticePrompt from "../prompts/system/skillful-notice.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
@@ -227,6 +228,9 @@ import { supportsExternalThinking } from "../tools/think";
 import type { TodoPhase } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
+import type { AgentDefinition } from "../task/types";
+import type { ModelMention } from "./model-mention-syntax";
+import { ModelMentionRegistry } from "./model-mentions";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -673,6 +677,7 @@ export class AgentSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
+	readonly #modelMentions: ModelMentionRegistry;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
 	/** Item set matching the last successfully rebuilt provider prompt. The base
 	 *  prompt starts consistent with the empty set; every later value is a
@@ -822,6 +827,8 @@ export class AgentSession {
 	// Cursor exec, TUI listeners) is held back. Without this, a client that resumes
 	// on `agent_end` can fire its next `prompt` before #promptWithMessage's finally
 	#promptGeneration = 0;
+	// abort() can finish in a message_end listener before queued settle work runs.
+	#activeAgentPromptGeneration = this.#promptGeneration;
 	/** Bumped by newSession()/switchSession() at the same point they clear the pending IRC/aside
 	 *  queue (restored on a rolled-back switchSession()). A message-queueing call that spans an
 	 *  await (image normalization, vision description) captures this before the await and checks
@@ -1384,6 +1391,11 @@ export class AgentSession {
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
 		};
 		this.#todo = new TodoTracker(todoHost);
+		this.#modelMentions = new ModelMentionRegistry({
+			sessionManager: this.sessionManager,
+			modelRegistry: this.#modelRegistry,
+			scopedModels: () => this.scopedModels.map(s => s.model),
+		});
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
 		this.#asyncJobManager = config.asyncJobManager ?? config.ownedAsyncJobManager;
 		const modelControlsHost: ModelControlsHost = {
@@ -1767,6 +1779,7 @@ export class AgentSession {
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
+		this.#modelMentions.syncFromBranch();
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
 			setState: state => {
@@ -1945,7 +1958,10 @@ export class AgentSession {
 			resetPlanReference: () => {
 				this.#planReferenceSent = false;
 			},
-			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
+			syncTodoPhasesFromBranch: () => {
+				this.#todo.syncFromBranch();
+				this.#modelMentions.syncFromBranch();
+			},
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
@@ -3045,6 +3061,7 @@ export class AgentSession {
 		// A fresh run supersedes the previously settled (and pruned) refusal
 		// turn: state-based lookups take over again.
 		if (event.type === "agent_start") {
+			this.#activeAgentPromptGeneration = eventPromptGeneration;
 			this.#prunedTerminalRefusal = undefined;
 			this.#advisors.onPrimaryAgentStart();
 			this.#emitRunState("running");
@@ -4216,11 +4233,11 @@ export class AgentSession {
 				? result.additionalContext
 				: undefined;
 		const reason = typeof result.reason === "string" && result.reason.length > 0 ? result.reason : undefined;
+		if (result.decision === "block") {
+			return reason ?? additionalContext ?? prompt.render(sessionStopBlockedPrompt);
+		}
 		if (result.continue === true) {
 			return additionalContext ?? reason;
-		}
-		if (result.decision === "block") {
-			return reason ?? additionalContext;
 		}
 		return undefined;
 	}
@@ -4238,7 +4255,7 @@ export class AgentSession {
 		messages: AgentMessage[],
 		lastAssistantMessage = this.getLastAssistantMessage(),
 	): Promise<boolean> {
-		if (this.#abortInProgress || this.#isDisposed) {
+		if (this.#abortInProgress || this.#isDisposed || this.#activeAgentPromptGeneration !== this.#promptGeneration) {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}
@@ -4264,7 +4281,7 @@ export class AgentSession {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}
-		if (this.#sessionStopContinuationCount >= SESSION_STOP_CONTINUATION_CAP) {
+		if (result?.decision !== "block" && this.#sessionStopContinuationCount >= SESSION_STOP_CONTINUATION_CAP) {
 			logger.warn("session_stop continuation cap reached", {
 				sessionId: this.sessionId,
 				cap: SESSION_STOP_CONTINUATION_CAP,
@@ -4272,7 +4289,7 @@ export class AgentSession {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}
-		this.#sessionStopContinuationCount++;
+		if (result?.decision !== "block") this.#sessionStopContinuationCount++;
 		this.#sessionStopHookActive = true;
 		this.#queueHiddenNextTurnMessage(
 			{
@@ -6356,7 +6373,8 @@ export class AgentSession {
 		}
 
 		// Expand file-based prompt templates if requested
-		const expandedText = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+		const templated = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+		const expandedText = options?.synthetic ? templated : this.#modelMentions.expandMentions(templated);
 
 		// Magic keywords ("ultrathink", "orchestrate"): append hidden system notices after the
 		// user's message that steer this turn. User-authored prompts only — synthetic /
@@ -7908,6 +7926,21 @@ export class AgentSession {
 		return this.#tools.skillWarnings;
 	}
 
+	/** Session-local general-purpose agents pinned to user-tagged models. */
+	getSessionAgents(): AgentDefinition[] {
+		return this.#modelMentions.sessionAgents();
+	}
+
+	/** Registered model pseudonyms on the active branch. */
+	get modelMentions(): readonly ModelMention[] {
+		return this.#modelMentions.mentions;
+	}
+
+	/** Resolve a model selector within the session picker's scope. */
+	findMentionableModel(selector: string): Model | undefined {
+		return this.#modelMentions.findMentionable(selector);
+	}
+
 	getTodoPhases(): TodoPhase[] {
 		return this.#todo.phases;
 	}
@@ -8306,7 +8339,7 @@ export class AgentSession {
 					try {
 						await this.sessionManager.dropSession(previousSessionFile);
 					} catch (err) {
-						logger.error("Failed to delete session during /drop", { err });
+						logger.error("Failed to delete session during /delete", { err });
 					}
 				} else {
 					await this.sessionManager.flush();
@@ -8834,6 +8867,7 @@ export class AgentSession {
 		this.agent.replaceMessages(activeMessages ?? sessionContext.messages);
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
+		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
@@ -9589,6 +9623,7 @@ export class AgentSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisors.resetSessionState({ preserveCost: true });
 			this.#todo.syncFromBranch();
+			this.#modelMentions.syncFromBranch();
 			if (switchingToDifferentSession) {
 				this.#closeAllProviderSessions("session switch");
 			} else if (didReloadConversationChange) {
@@ -9766,6 +9801,7 @@ export class AgentSession {
 				this.#emit({ type: "model_changed" });
 			}
 			this.#todo.syncFromBranch();
+			this.#modelMentions.syncFromBranch();
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
@@ -9880,6 +9916,7 @@ export class AgentSession {
 			this.#clearSessionScopedToolState();
 			this.#rehydrateCheckpointRewindState();
 			this.#todo.syncFromBranch();
+			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
@@ -10018,6 +10055,7 @@ export class AgentSession {
 			});
 			this.sessionManager.appendMessage(sanitizeAssistantForReparentedHistory(assistantMessage));
 			this.#todo.syncFromBranch();
+			this.#modelMentions.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
 			this.#memory.rekeyForCurrentSessionId();
@@ -10361,6 +10399,7 @@ export class AgentSession {
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();
+		this.#modelMentions.syncFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
 		this.#branchSummaryAbortController = undefined;

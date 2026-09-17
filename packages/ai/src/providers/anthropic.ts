@@ -3978,11 +3978,26 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
 	const decimationIndices = userIndices.filter((_, ordinal) => (ordinal + 1) % ANTHROPIC_DECIMATION_INTERVAL === 0);
 
-	// Collect up to 2 trailing candidates from the reusable prefix.
+	// Collect up to 2 trailing candidates from the reusable prefix, skipping
+	// mid-conversation tool-control messages. They contain only tool_addition /
+	// tool_removal blocks, so cache_control is always rejected there; parking
+	// the rolling window on one spends the tail breakpoint on a decoration
+	// that always fails, and with decimation checkpoints present the remaining
+	// breakpoints land on already-cached history while the growing tail is
+	// re-billed as uncached input every turn.
 	const trailingCandidates: number[] = [];
 	for (let index = stableMessageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
 		const message = params.messages[index];
 		if (!message) continue;
+		if (
+			message.role === "system" &&
+			typeof message.content !== "string" &&
+			Array.isArray(message.content) &&
+			message.content.length > 0 &&
+			message.content.every(block => block.type === "tool_addition" || block.type === "tool_removal")
+		) {
+			continue;
+		}
 		trailingCandidates.push(index);
 	}
 

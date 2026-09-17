@@ -235,12 +235,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
-		name: "drop",
+		name: "delete",
 		icon: "trash",
 		description: "Delete the current session and start a new one",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleDropCommand();
+			await runtime.ctx.handleDeleteCommand();
 		},
 	},
 	{
@@ -341,7 +341,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "handoff",
 		icon: "handoff",
-		description: "Hand off session context to a new session",
+		description: "Summarize the session into a handoff document and compact in place",
 		acpDescription: "Summarize the session into a handoff document and compact in place",
 		inlineHint: "[focus instructions]",
 		allowArgs: true,
