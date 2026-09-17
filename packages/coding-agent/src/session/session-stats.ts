@@ -8,12 +8,13 @@ import {
 import type { AssistantMessage, Model, ProviderResponseMetadata, Usage } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
+import type { Settings } from "../config/settings";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import {
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	type NonMessageTokenSource,
-} from "../modes/utils/context-usage";
+} from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
 import { getLatestCompactionEntry } from "./session-context";
 import type { ModelUsageEntry, SessionEntry } from "./session-entries";
@@ -33,7 +34,7 @@ interface PendingContextSnapshot {
 
 /** Capabilities the stats tracker borrows from its owning session. */
 export interface SessionStatsTrackerHost {
-	session: NonMessageTokenSource;
+	session: NonMessageTokenSource & { readonly settings?: Pick<Settings, "revision" | "get"> };
 	agent: Agent;
 	sessionManager: SessionManager;
 	modelRegistry: ModelRegistry;
@@ -205,9 +206,15 @@ export class SessionStatsTracker {
 		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(
 			this.#host.session,
 			this.#tokenizer,
+			this.#host.session.settings?.revision,
+			this.#host.session.settings?.get("skillful"),
 		);
 		const categoryNonMessageTokens = skillsTokens + toolsTokens + systemContextTokens + systemPromptTokens;
-		const currentNonMessageTokens = computeNonMessageTokens(this.#host.session, this.#tokenizer);
+		const currentNonMessageTokens = computeNonMessageTokens(
+			this.#host.session,
+			this.#tokenizer,
+			this.#host.session.settings?.revision,
+		);
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
@@ -247,7 +254,7 @@ export class SessionStatsTracker {
 		if (useAnchor && anchorAssistant) {
 			const nonMessageTokens =
 				anchorAssistant.contextSnapshot?.nonMessageTokens ??
-				computeNonMessageTokens(this.#host.session, this.#tokenizer);
+				computeNonMessageTokens(this.#host.session, this.#tokenizer, this.#host.session.settings?.revision);
 			anchored = true;
 			usedTokens = this.#anchoredUsedTokens(
 				correctedPromptTokens(anchorAssistant),
@@ -274,7 +281,7 @@ export class SessionStatsTracker {
 			if (liveAnchor) {
 				const nonMessageTokens =
 					liveAnchor.message.contextSnapshot?.nonMessageTokens ??
-					computeNonMessageTokens(this.#host.session, this.#tokenizer);
+					computeNonMessageTokens(this.#host.session, this.#tokenizer, this.#host.session.settings?.revision);
 				usedTokens = this.#anchoredUsedTokens(
 					correctedPromptTokens(liveAnchor.message),
 					nonMessageTokens,
@@ -354,7 +361,11 @@ export class SessionStatsTracker {
 			if (!assistant.contextSnapshot) {
 				assistant.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistant.usage),
-					nonMessageTokens: computeNonMessageTokens(this.#host.session, this.#tokenizer),
+					nonMessageTokens: computeNonMessageTokens(
+						this.#host.session,
+						this.#tokenizer,
+						this.#host.session.settings?.revision,
+					),
 					compactionEpoch: this.#compactionEpoch,
 				};
 			}
@@ -375,7 +386,11 @@ export class SessionStatsTracker {
 	rebaseAfterCompaction(): void {
 		this.#compactionEpoch++;
 		if (!this.#pendingContextSnapshot) return;
-		const nonMessageTokens = computeNonMessageTokens(this.#host.session, this.#tokenizer);
+		const nonMessageTokens = computeNonMessageTokens(
+			this.#host.session,
+			this.#tokenizer,
+			this.#host.session.settings?.revision,
+		);
 		const messages = this.#host.agent.state.messages;
 		this.setPendingSnapshot({
 			promptTokens: nonMessageTokens + this.#tokenizer.countMessages(messages),

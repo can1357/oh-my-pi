@@ -23,11 +23,8 @@ import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchBrave } from "@oh-my-pi/pi-coding-agent/web/search/providers/brave";
 import { withHardTimeout } from "@oh-my-pi/pi-coding-agent/web/search/providers/utils";
-import {
-	SearchProviderError,
-	type SearchProviderId,
-	type SearchResponse,
-} from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { type SearchProviderId, type SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
 
 const FAKE_SESSION = {} as ToolSession;
 const fakeStorage = {

@@ -1,17 +1,22 @@
 // Provider-wire compat for "yolo-auto"; wire constraints apply to every discovered model.
 
 provider "yolo-auto" {
-	default-model "deepseek-flash-v4"
+	default-model "qwen3.8-flash"
 	env "YOLO_AUTO_API_KEY"
 	dynamic-models-authoritative #true
 	discovery label="Yolo-Auto"
 
-	// Documented Yolo-Auto catalog (yolo-auto.com/docs, 2026-08) bundled so the
-	// provider is usable when generation and first boot have no live key. The
-	// flat-rate `/v1/models` response is authoritative once discovery runs.
-	// The compat block mirrors the provider's documented wire surface: the API
-	// speaks the generic chat template with `reasoning_effort` support and rejects
-	// the `developer` role and `store` param.
+	// Documented Yolo-Auto catalog (yolo-auto.com/models, yolo-auto.com/docs):
+	// `qwen3.8-flash` is the default model on Free and paid plans at a 256K
+	// (262144) context window, and the paid `yolo` route is initially backed by
+	// the same Flash deployment. The flat-rate `/v1/models` response carries
+	// bare ids with no limit fields and is authoritative once discovery runs.
+	// Without provider-local seeds the bare `qwen3.8-flash` slug resolves
+	// through the global reference index, which prefers the largest bundled
+	// window (1M) and misreports the deployment cap. The compat block mirrors
+	// the provider's documented wire surface: the API speaks the Qwen
+	// chat-template dialect with `reasoning_effort` support and rejects the
+	// `developer` role and `store` param.
 	seed api="openai-completions" base-url="https://yolo-auto.com/v1" bundle="fallback" {
 		model "deepseek-flash-v4" name="DeepSeek Flash V4" {
 			reasoning #true
@@ -25,6 +30,32 @@ provider "yolo-auto" {
 			supports-store #false
 			supports-reasoning-effort #true
 			thinking-format "chat-template"
+		}
+		model "qwen3.8-flash" name="Qwen3.8 Flash" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high"
+			supports-developer-role #false
+			supports-store #false
+			supports-reasoning-effort #true
+			thinking-format "qwen-chat-template"
+			template-reasoning-effort #true
+		}
+		model "yolo" name="Yolo" {
+			reasoning #true
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=262144 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high"
+			supports-developer-role #false
+			supports-store #false
+			supports-reasoning-effort #true
+			thinking-format "qwen-chat-template"
+			template-reasoning-effort #true
 		}
 	}
 

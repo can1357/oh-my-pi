@@ -11,7 +11,7 @@ import {
 import { MODEL_ROLE_IDS } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
-import { concreteThinkingLevel } from "../thinking";
+import { concreteThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 export interface ResolvedCommitModel {
 	model: Model<Api>;
