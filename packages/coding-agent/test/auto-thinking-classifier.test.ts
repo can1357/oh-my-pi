@@ -386,7 +386,7 @@ describe("auto thinking classifier helpers", () => {
 		// TypeSafe answers the full ladder (not the coarse local buckets), and the
 		// default ceiling keeps `max` off the offered options.
 		expect(Object.keys(requested?.questions.level.criteria ?? {})).toEqual(["low", "medium", "high", "xhigh"]);
-		expect(requested?.state).toBe("add validation around the retry path");
+		expect(requested?.state).toEqual({ request: "add validation around the retry path" });
 		expect(onUsage).toHaveBeenCalledWith(
 			expect.objectContaining({ role: "typesafe", provider: "typesafe", model: "jev-latest", stopReason: "stop" }),
 		);
