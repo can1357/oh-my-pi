@@ -26,6 +26,20 @@ function stringAt(body: unknown, path: string | undefined): string | undefined {
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+/**
+ * Some providers (notably OpenCode Console) return the device
+ * `verification_uri` pair as origin-relative paths. Resolve those against
+ * the device authorization endpoint so the URL handed to `onAuth` is always
+ * absolute and clickable.
+ */
+function resolveVerificationUrl(url: string, deviceUrl: string): string {
+	try {
+		return new URL(url, deviceUrl).href;
+	} catch {
+		return url;
+	}
+}
+
 function numberAt(body: unknown, path: string | undefined): number | undefined {
 	if (!path) return undefined;
 	const value = jsonPath(body, path);
@@ -68,7 +82,10 @@ export function createDeviceCodeLogin(
 			});
 		}
 		ctrl.onAuth?.({
-			url: verificationUriComplete ?? verificationUri,
+			url: resolveVerificationUrl(
+				verificationUriComplete ?? verificationUri,
+				template(await resolveValue(rule.device.url, signal), vars),
+			),
 			instructions: template(rule.instructions, { user_code: userCode }),
 		});
 		ctrl.onProgress?.("Waiting for device authorization...");

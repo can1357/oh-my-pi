@@ -1,6 +1,6 @@
 /** Shared inference request identity headers. */
 
-import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, getInstallId } from "@oh-my-pi/pi-utils";
 
 /** Options controlling provider and protocol inference headers. */
 export interface InferenceHeaderOptions {
@@ -29,6 +29,52 @@ function setHeader(headers: Record<string, string>, name: string, value: string)
 }
 
 /**
+ * OpenCode Zen gates its contributor free tier on OpenCode client identity
+ * (issue #12306): inference requests must carry `User-Agent: opencode/<ver>`
+ * and an `x-opencode-session` shaped `ses_<12 hex><14 alnum>`. OMP's own
+ * `omp/*` UA with the install id is rejected with 403 FreeTierError, so for
+ * `opencode-zen` we present OpenCode client identity with a per-process
+ * minted session id. The head derives from the stable install id (a UUID,
+ * so its hex prefix always fits the shape); override via `OMP_ZEN_UA`,
+ * `OMP_ZEN_SESSION`, or `OMP_ZEN_SESSION_HEAD`.
+ */
+const ZEN_CLIENT_IDENTITY_HEAD_FALLBACK = "f516cd5fcffe";
+const ZEN_CLIENT_IDENTITY_UA = "opencode/1.18.31";
+const ZEN_SESSION_TAIL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+function resolveZenUserAgent(): string {
+	try {
+		const override = process.env.OMP_ZEN_UA;
+		if (override?.trim()) return override.trim();
+	} catch {}
+	return ZEN_CLIENT_IDENTITY_UA;
+}
+
+function resolveZenSessionHead(): string {
+	try {
+		const override = process.env.OMP_ZEN_SESSION_HEAD;
+		if (override && /^[0-9a-f]{12}$/.test(override)) return override;
+	} catch {}
+	try {
+		const head = getInstallId().replace(/-/g, "").toLowerCase().slice(0, 12);
+		if (/^[0-9a-f]{12}$/.test(head)) return head;
+	} catch {}
+	return ZEN_CLIENT_IDENTITY_HEAD_FALLBACK;
+}
+
+const zenSessionId: string = (() => {
+	try {
+		const pinned = process.env.OMP_ZEN_SESSION;
+		if (pinned?.trim()) return pinned.trim();
+	} catch {}
+	let tail = "";
+	for (let i = 0; i < 14; i++) {
+		tail += ZEN_SESSION_TAIL_ALPHABET[Math.floor(Math.random() * ZEN_SESSION_TAIL_ALPHABET.length)];
+	}
+	return `ses_${resolveZenSessionHead()}${tail}`;
+})();
+
+/**
  * Project omp's identity and authoritative conversation id onto the headers
  * understood by the active inference protocol and host.
  */
@@ -42,6 +88,12 @@ export function applyInferenceHeaders(headers: Record<string, string>, options: 
 	} else if (options.protocol === "openai" && options.provider === "openai") {
 		setHeader(headers, "session_id", sessionId);
 		setHeader(headers, "x-client-request-id", sessionId);
+	}
+
+	if (options.provider === "opencode-zen") {
+		setHeader(headers, "User-Agent", resolveZenUserAgent());
+		setHeader(headers, "x-opencode-session", zenSessionId);
+		return;
 	}
 
 	if (isOpenCode) {

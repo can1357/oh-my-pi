@@ -1,0 +1,40 @@
+auth "opencode-zen-device" {
+	name "OpenCode Zen (Console sign-in)"
+	// OAuth device flow against the OpenCode Console, using the same public
+	// client the OpenCode binary itself signs in with (`opencode-cli`). This is
+	// an alternative to pasting an `sk-...` Zen key through the `opencode-zen`
+	// entry; credentials land under `opencode-zen` either way.
+	login "device-code" {
+		client-id "opencode-cli"
+		device url="https://opencode.ai/console/auth/device/code" body="json" {
+			headers {
+				Accept "application/json"
+			}
+		}
+		token url="https://opencode.ai/console/auth/device/token" body="json" {
+			headers {
+				Accept "application/json"
+			}
+		}
+		response user-code="user_code" device-code="device_code" verification-uri="verification_uri" verification-uri-complete="verification_uri_complete" interval="interval" expires-in="expires_in"
+		instructions "Enter code: {user_code}"
+		credential {
+			account-id "id"
+			email "email"
+		}
+		userinfo url="https://opencode.ai/console/api/user" email="email" account-id="id"
+		// A Console session token is not a Zen key. The hook resolves the billing
+		// workspace and the Console inference lane, then re-encodes `access` as
+		// the structured envelope `opencodeZenTransport` unpacks per request.
+		after-exchange hook="opencode-zen-org"
+	}
+	refresh {
+		token url="https://opencode.ai/console/auth/device/token" body="json" {
+			headers {
+				Accept "application/json"
+			}
+		}
+		after-refresh hook="opencode-zen-org"
+	}
+	store-as "opencode-zen"
+}
