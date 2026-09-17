@@ -131,6 +131,11 @@ export type { AgentToolResult, AgentToolUpdateCallback };
 export interface ExtensionUISelectOption {
 	label: string;
 	description?: string;
+	/** TUI-only display hint: an exact substring of `label` rendered in the
+	 *  theme's success color (e.g. the tool name in the session-approval menu).
+	 *  Never part of the selection contract — non-TUI surfaces and the returned
+	 *  choice use `label` alone. */
+	labelHighlight?: string;
 }
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;

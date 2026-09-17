@@ -525,4 +525,54 @@ describe("HookSelectorComponent", () => {
 		expect(appleRow).not.toContain(openBg);
 		expect(cherryRow).not.toContain(openBg);
 	});
+
+	it("paints labelHighlight in the success color, keeps every option single-row, and returns the raw label", () => {
+		const selected: string[] = [];
+		const component = new HookSelectorComponent(
+			"Allow tool: bash",
+			[
+				"Approve",
+				{ label: "Approve bash Commands for Session", labelHighlight: "bash" },
+				{ label: "Approve Similar bash Commands for Session", labelHighlight: "bash" },
+				"Deny",
+			],
+			option => selected.push(option),
+			() => {},
+			{ initialIndex: 1 },
+		);
+
+		const rendered = component.render(80);
+		const plainLines = rendered.map(line => Bun.stripANSI(line));
+		for (const label of ["Approve bash Commands for Session", "Approve Similar bash Commands for Session"]) {
+			// Single-row height: the label appears on exactly one line and no
+			// description row follows it.
+			expect(plainLines.filter(line => line.includes(label))).toHaveLength(1);
+		}
+		const sessionRow = rendered.find(line => Bun.stripANSI(line).includes("Approve bash Commands for Session"));
+		const similarRow = rendered.find(line => Bun.stripANSI(line).includes("Approve Similar bash Commands"));
+		expect(sessionRow).toBeDefined();
+		expect(similarRow).toBeDefined();
+		// The tool name is green on both rows — including the selected one,
+		// whose focus band is applied after the inner styling.
+		expect(sessionRow).toContain(theme.fg("success", "bash"));
+		expect(similarRow).toContain(theme.fg("success", "bash"));
+
+		component.handleInput("\r");
+		expect(selected).toEqual(["Approve bash Commands for Session"]);
+	});
+
+	it("drops a labelHighlight that is not an exact substring of the label", () => {
+		const component = new HookSelectorComponent(
+			"Pick",
+			[{ label: "Approve bash Commands for Session", labelHighlight: "no-such-tool" }],
+			() => {},
+			() => {},
+			{},
+		);
+
+		const row = component.render(80).find(line => Bun.stripANSI(line).includes("Approve bash"));
+		expect(row).toBeDefined();
+		expect(row).toContain(theme.fg("accent", "Approve bash Commands for Session"));
+		expect(row).not.toContain(theme.fg("success", "no-such-tool"));
+	});
 });

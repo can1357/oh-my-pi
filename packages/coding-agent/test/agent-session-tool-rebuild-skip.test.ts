@@ -240,6 +240,40 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(1);
 	});
 
+	it("keeps refreshed MCP fallback contexts attributed to the current provider session", async () => {
+		const { session } = newSession(async toolNames => `tools:${toolNames.join(",")}`);
+		session.agent.setMetadataResolver(provider =>
+			provider === "anthropic" ? { user_id: session.agent.sessionId } : undefined,
+		);
+		const metadataTool: CustomTool = {
+			...createMcpCustomTool("mcp__nucleus_attribution", "nucleus", "attribution", "Report request attribution"),
+			async execute(_id, _args, _update, context) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: JSON.stringify({
+								anthropic: context.metadataForProvider?.("anthropic")?.user_id,
+								openai: context.metadataForProvider?.("openai")?.user_id,
+							}),
+						},
+					],
+				};
+			},
+		};
+		await session.refreshMCPTools([metadataTool]);
+		const wrapped = session.getToolByName(metadataTool.name)!;
+		const firstSessionId = session.agent.sessionId;
+		const first = await wrapped.execute("attribution-before", { q: "" });
+		expect(first.content).toEqual([{ type: "text", text: JSON.stringify({ anthropic: firstSessionId }) }]);
+
+		session.agent.sessionId = "rotated-provider-session";
+		const second = await wrapped.execute("attribution-after", { q: "" });
+		expect(second.content).toEqual([
+			{ type: "text", text: JSON.stringify({ anthropic: "rotated-provider-session" }) },
+		]);
+	});
+
 	it("warns and keeps the stable winner when distinct MCP tools mint the same name", async () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const { session, toolRegistry } = newSession(async toolNames => `tools:${toolNames.join(",")}`);
