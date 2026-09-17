@@ -41,11 +41,15 @@ export interface MCPToolFilterResult {
  * and no leading dot). Picomatch's glob semantics are the contract: an escape
  * means what it means in a glob (`\d` is a digit, `\n` a newline), a bare `|`
  * alternates, and a bare `"` is quoted before compiling so it stays ordinary.
- * A literal entry — no glob metacharacter — is exact equality on the
- * sanitized spellings, so a tool name containing glob metacharacters still
- * matches the pattern written for its look. A pattern the compiler rejects
- * degrades to a never-matching entry instead of disabling the server, and
- * entries are never environment-expanded.
+ * A literal entry — holding none of `*?[]{}()|\\` (the `compilePattern`
+ * metacharacter gate), so also none of the `{a,b}`/extglob/`(a|b)` spellings
+ * picomatch would read as syntax — is exact equality on the sanitized
+ * spellings, so a tool name containing glob metacharacters still matches
+ * the pattern written for its look. A pattern the compiler rejects degrades
+ * to a never-matching entry instead of disabling the server, and entries
+ * are never environment-expanded. An entry carrying four or more consecutive
+ * backslashes is refused before compiling (picomatch hangs on such runs)
+ * and likewise never matches, surfacing as an unmatched entry.
  */
 
 /**
@@ -165,10 +169,10 @@ function compilePattern(pattern: string): ToolMatcher {
 /**
  * Apply a per-server tool filter.
  *
- * Literal entries match exactly; entries containing glob metacharacters
- * (`*`, `?`, `[...]`, `{a,b}`) are matched with picomatch's glob semantics
- * over the sanitized name. Denylist entries subtract from the allowlist when
- * both are set.
+ * Literal entries match exactly; entries holding any of `*?[]{}()|\\`
+ * (the `compilePattern` metacharacter gate) are matched with picomatch's
+ * glob semantics over the sanitized name. Denylist entries subtract from
+ * the allowlist when both are set.
  */
 export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 	const { toolNames, enabledTools, disabledTools } = input;
@@ -243,7 +247,11 @@ export function applyMCPToolFilter(
 	if (filterEmpty) {
 		logger.warn(
 			`MCP server "${serverName}": tool filter(enabledTools = ${JSON.stringify(config.enabledTools)}, disabledTools = ${JSON.stringify(config.disabledTools)}) excluded all ${tools.length} advertised tools; 0 tools will be contributed to the session.`,
-			{ path: `mcp:${serverName}` },
+			{
+				path: `mcp:${serverName}`,
+				advertised:
+					toolNames.length <= 20 ? toolNames : [...toolNames.slice(0, 20), `… (+${toolNames.length - 20} more)`],
+			},
 		);
 		return [];
 	}
