@@ -352,6 +352,7 @@ export class DeltaSync {
 			filteredKeys = 0,
 			maxRowid = lastRowid;
 		const qname = QUALIFIED_TABLE_NAMES[table];
+		const appliedRowids = new Map<string, number>();
 		for (const row of delta) {
 			const remoteRowid = row.rowid;
 			const hasRemoteRowid = typeof remoteRowid === "number" && Number.isSafeInteger(remoteRowid) && remoteRowid > 0;
@@ -361,6 +362,10 @@ export class DeltaSync {
 			}
 			const id = row.id;
 			if (typeof id !== "string" || id.length === 0) {
+				skipped++;
+				continue;
+			}
+			if (hasRemoteRowid && remoteRowid <= (appliedRowids.get(id) ?? 0)) {
 				skipped++;
 				continue;
 			}
@@ -403,8 +408,9 @@ export class DeltaSync {
 				this.db.run(`INSERT INTO ${qname} (${columns.join(", ")}) VALUES (${placeholders})`, params);
 				inserted++;
 			}
-			if (hasRemoteRowid && remoteRowid > maxRowid) {
-				maxRowid = remoteRowid;
+			if (hasRemoteRowid) {
+				appliedRowids.set(id, remoteRowid);
+				maxRowid = Math.max(maxRowid, remoteRowid);
 			}
 		}
 		this.saveCheckpoint(

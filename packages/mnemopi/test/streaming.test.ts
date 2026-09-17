@@ -164,6 +164,52 @@ describe("DeltaSync", () => {
 		}
 	});
 
+	it("keeps the newest applied version of each ID within an unsorted batch", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			const stats = sync.applyDelta("peer", [
+				{ id: "descending", content: "Newest", rowid: 100 },
+				{ id: "descending", content: "Older", rowid: 50 },
+				{ id: "ascending", content: "Initial", rowid: 20 },
+				{ id: "ascending", content: "Updated", rowid: 80 },
+				{ id: "ascending", content: "Duplicate", rowid: 80 },
+			]);
+			expect(db.query("SELECT id, content FROM working_memory ORDER BY id").all()).toEqual([
+				{ id: "ascending", content: "Updated" },
+				{ id: "descending", content: "Newest" },
+			]);
+			expect(stats).toMatchObject({ inserted: 2, updated: 1, skipped: 2 });
+			expect(new DeltaSync({ db }, root).getCheckpoint("peer")?.lastRowid).toBe(100);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("allows a lower version of an ID when its higher version could not be applied", () => {
+		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
+		const db = new Database(":memory:");
+		try {
+			initBeam(db);
+			const sync = new DeltaSync({ db }, root);
+			const stats = sync.applyDelta("peer", [
+				{ id: "x", rowid: 100 },
+				{ id: "x", content: "Inserted", rowid: 50 },
+				{ id: "x", rowid: 200 },
+				{ id: "x", content: "Updated", rowid: 150 },
+			]);
+			expect(db.query("SELECT content FROM working_memory WHERE id = ?").get("x")).toEqual({ content: "Updated" });
+			expect(stats).toMatchObject({ inserted: 1, updated: 1, skipped: 2 });
+			expect(sync.getCheckpoint("peer")?.lastRowid).toBe(150);
+		} finally {
+			db.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("does not advance checkpoints for skipped rows", () => {
 		const root = mkdtempSync(join(tmpdir(), "mnemopi-stream-"));
 		const db = new Database(":memory:");
