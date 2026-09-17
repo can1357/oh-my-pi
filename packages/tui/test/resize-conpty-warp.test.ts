@@ -28,7 +28,23 @@ const ED3 = "\x1b[3J";
 const DSR = "\x1b[6n";
 const COMMITTED = ["committed-0", "committed-1", "committed-2"];
 
-const TERMINAL_ENV = ["TERM", "TERM_PROGRAM", "PI_TUI_RESIZE_IN_PLACE", "TMUX", "STY", "ZELLIJ", "HERDR_ENV"] as const;
+const TERMINAL_ENV = [
+	"TERM",
+	"TERM_PROGRAM",
+	"PI_TUI_RESIZE_IN_PLACE",
+	"TMUX",
+	"STY",
+	"ZELLIJ",
+	"HERDR_ENV",
+	"HERDR_PANE_ID",
+	"HERDR_TAB_ID",
+	"HERDR_WORKSPACE_ID",
+	"CMUX_WORKSPACE_ID",
+	"CMUX_SURFACE_ID",
+	"CMUX_REMOTE_TRANSPORT",
+	"WMUX",
+	"WMUX_SURFACE_ID",
+] as const;
 
 /**
  * Windows ConPTY host: answers DSR from its own re-homed cursor (column 1

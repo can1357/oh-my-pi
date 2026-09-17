@@ -1786,6 +1786,7 @@ mod tests {
 		git(temp.path(), &["init", "-q", "-b", "main"]);
 		git(temp.path(), &["config", "user.name", "Test"]);
 		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		git(temp.path(), &["config", "core.hooksPath", ".git/hooks"]);
 		fs::write(temp.path().join("a"), "one\n").unwrap();
 		fs::write(temp.path().join("b"), "two\n").unwrap();
 		git(temp.path(), &["add", "."]);

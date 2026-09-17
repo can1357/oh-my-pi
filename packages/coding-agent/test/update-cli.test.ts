@@ -430,8 +430,11 @@ describe("update-cli install target detection", () => {
 		"refuses a foreign native target that does not report an OMP version",
 		async () => {
 			const dir = await makeTempDir();
+			const foreignPath = path.join(dir, "foreign");
 			const aliasPath = path.join(dir, "omp");
-			await fs.symlink(process.execPath, aliasPath);
+			await fs.copyFile(process.execPath, foreignPath);
+			await fs.chmod(foreignPath, 0o755);
+			await fs.symlink(foreignPath, aliasPath);
 			const fetchImpl = vi.fn(async () => new Response());
 			const target = resolveUpdateTargetFromPath(aliasPath, undefined, {
 				allowPackageManagers: true,

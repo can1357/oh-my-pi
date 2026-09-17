@@ -1486,7 +1486,7 @@ mod tests {
 	fn children_run_in_host_cwd() {
 		let dir = tempfile::TempDir::new().expect("tempdir");
 		let (code, capture) = crate::host::run_util::<Xargs>(
-			&["sh", "-c", "touch \"$1\"", "_"],
+			&["sh", "-c", "printf x > \"$1\"", "_"],
 			"made.txt\n",
 			dir.path(),
 		);
