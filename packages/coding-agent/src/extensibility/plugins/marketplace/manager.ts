@@ -593,6 +593,69 @@ export class MarketplaceManager {
 	}
 
 	/**
+	 * Reads the cached marketplace catalog (a local file — refreshing it is
+	 * `updateMarketplace`'s job) and resolves the target version the same way
+	 * `installPlugin` would. url/github/git-subdir sources need a read-only temp
+	 * clone for version resolution (removed right after); nothing in the plugin
+	 * cache or registry is touched.
+	 */
+	async #previewUpgrade(
+		parsed: { name: string; marketplace: string },
+		scope: "user" | "project",
+	): Promise<InstalledPluginEntry> {
+		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
+		const mktEntry = getMarketplaceEntry(mktReg, parsed.marketplace);
+		if (!mktEntry) {
+			throw new Error(`Marketplace "${parsed.marketplace}" not found`);
+		}
+
+		const catalog = await this.#readCatalog(mktEntry);
+		const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
+		if (!pluginEntry) {
+			throw new Error(`Plugin "${parsed.name}" not found in marketplace "${parsed.marketplace}"`);
+		}
+		if (
+			typeof pluginEntry.version === "string" &&
+			pluginEntry.version.length > 0 &&
+			!isValidVersionForCache(pluginEntry.version)
+		) {
+			throw new Error(`Invalid version for cache: "${pluginEntry.version}"`);
+		}
+
+		// Same source resolution the real install uses. Relative sources resolve
+		// against the marketplace clone; url/github/git-subdir sources temp-clone
+		// and the clone is removed in the finally below.
+		const { dir: sourcePath, tempCloneRoot } = await resolvePluginSource(pluginEntry, {
+			marketplaceClonePath: this.#resolveMarketplaceRoot(mktEntry),
+			catalogMetadata: catalog.metadata,
+			tmpDir: os.tmpdir(),
+		});
+
+		let version: string;
+		try {
+			version = (await this.#resolveCatalogVersion(pluginEntry, sourcePath)) ?? "0.0.0";
+		} finally {
+			if (tempCloneRoot) {
+				await fs.rm(tempCloneRoot, { recursive: true, force: true }).catch(() => {});
+			}
+		}
+		const { userEntries, projectEntries } = await this.#findInBothRegistries(
+			buildPluginId(parsed.name, parsed.marketplace),
+		);
+		const targetEntries = (scope === "project" ? projectEntries : userEntries) ?? [];
+		const existing = targetEntries[0];
+		const wasDisabled = targetEntries.some(e => e.enabled === false);
+		return {
+			scope,
+			installPath: getCachedPluginPath(this.#opts.pluginsCacheDir, parsed.marketplace, parsed.name, version),
+			version,
+			installedAt: existing?.installedAt ?? new Date().toISOString(),
+			lastUpdated: new Date().toISOString(),
+			...(wasDisabled ? { enabled: false } : {}),
+		};
+	}
+
+	/**
 	 * Resolve the version a catalog entry publishes, so install and {@link checkForUpdates}
 	 * agree. Relative sources (files in the marketplace clone) use Claude Code's precedence:
 	 * 1. Plugin manifest (`.claude-plugin/plugin.json`, then Agent Plugins root `plugin.json`)
@@ -882,18 +945,34 @@ export class MarketplaceManager {
 	}
 
 	// Re-install a specific plugin at the latest catalog version (force-overwrites).
-	async upgradePlugin(pluginId: string, scope?: "user" | "project"): Promise<InstalledPluginEntry> {
+	// With `dryRun`, only validates and resolves the would-be version — the caller
+	// prints the preview; nothing is written to the cache, registry, or runtime link.
+	async upgradePlugin(
+		pluginId: string,
+		scope?: "user" | "project",
+		options?: { dryRun?: boolean },
+	): Promise<InstalledPluginEntry> {
 		const { name, marketplace, scopes } = await this.#resolveUpgradeScopes(pluginId, scope, { across: false });
+		if (options?.dryRun) {
+			return this.#previewUpgrade({ name, marketplace }, scopes[0]);
+		}
 		return this.installPlugin(name, marketplace, { force: true, scope: scopes[0] });
 	}
 
 	// Upgrade a plugin across all scopes where it is installed.
 	// Returns one entry per scope upgraded (0–2 entries).
-	async upgradePluginAcrossScopes(pluginId: string): Promise<InstalledPluginEntry[]> {
+	async upgradePluginAcrossScopes(
+		pluginId: string,
+		options?: { dryRun?: boolean },
+	): Promise<InstalledPluginEntry[]> {
 		const { name, marketplace, scopes } = await this.#resolveUpgradeScopes(pluginId, undefined, { across: true });
 		const results: InstalledPluginEntry[] = [];
 		for (const target of scopes) {
-			results.push(await this.installPlugin(name, marketplace, { force: true, scope: target }));
+			results.push(
+				options?.dryRun
+					? await this.#previewUpgrade({ name, marketplace }, target)
+					: await this.installPlugin(name, marketplace, { force: true, scope: target }),
+			);
 		}
 		return results;
 	}
@@ -972,15 +1051,20 @@ export class MarketplaceManager {
 	// Upgrade every (pluginId, scope) pair that checkForUpdates reports as outdated.
 	// Only stale scopes are touched; a current user install is not re-installed when only
 	// the project scope is stale. Per-entry failures are skipped — partial success is returned.
-	async upgradeAllPlugins(): Promise<
-		Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>
-	> {
+	async upgradeAllPlugins(options?: {
+		dryRun?: boolean;
+	}): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const updates = await this.checkForUpdates();
 		const results: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
 		for (const update of updates) {
 			try {
-				const entry = await this.upgradePlugin(update.pluginId, update.scope);
-				results.push({ pluginId: update.pluginId, scope: update.scope, from: update.from, to: entry.version });
+				const entry = await this.upgradePlugin(update.pluginId, update.scope, { dryRun: options?.dryRun });
+				results.push({
+					pluginId: update.pluginId,
+					scope: update.scope,
+					from: update.from,
+					to: entry.version,
+				});
 			} catch {
 				// Skip this entry; partial upgrades are better than none.
 			}
