@@ -270,8 +270,9 @@ describe("anthropic server-side fallback opt-in", () => {
 describe("anthropic fallback content-block replay policy", () => {
 	// A prior assistant turn that took a fallback carries a persisted `fallback`
 	// content block. On the next request the outgoing wire body must strip it
-	// UNLESS the current request also opts into the beta chain AND the target
-	// is official Anthropic.
+	// UNLESS the current request also opts into the beta chain — the endpoint
+	// that accepts `fallbacks` accepts the marker, whether it is
+	// api.anthropic.com or a transparent gateway in front of it.
 
 	function priorFallbackAssistant(): AssistantMessage {
 		return {
@@ -319,14 +320,20 @@ describe("anthropic fallback content-block replay policy", () => {
 		expect(params[0]?.content).toEqual([{ type: "text", text: "continued" }]);
 	});
 
-	it("drops the fallback block on non-official Anthropic targets even when opted in", () => {
+	it("keeps the fallback block on a non-official Anthropic target when the request opts in", () => {
+		// A gateway relaying to Anthropic returned this marker; stripping it on
+		// replay while keeping the thinking around it rewrites the latest turn
+		// and Anthropic rejects the request.
 		const params = convertAnthropicMessages(
 			[priorFallbackAssistant(), { role: "user", content: "next", timestamp: 0 }],
 			umansModel,
 			false,
 			{ serverSideFallbackEnabled: true },
 		);
-		expect(params[0]?.content).toEqual([{ type: "text", text: "continued" }]);
+		expect(params[0]?.content).toEqual([
+			{ type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-4-8" } },
+			{ type: "text", text: "continued" },
+		]);
 	});
 });
 
