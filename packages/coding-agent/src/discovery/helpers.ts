@@ -186,8 +186,11 @@ export function parseRequestIdFormat(value: unknown): MCPRequestIdFormat | undef
  * the configured value is not a valid filter: non-array values (a typo like
  * `"tool_a, tool_b"` or an object) would otherwise be silently dropped and
  * the server would contribute ALL tools — the opposite of the allowlist
- * intent, with no diagnostic. An empty array (`[]`) is valid but filters
- * nothing, matching the "no filter" semantics of an absent field.
+ * intent, with no diagnostic. An empty array (`[]`) is valid and filters
+ * nothing (fail-open): it degrades to `undefined`, the same as an absent
+ * field, so the server contributes every tool. To exclude every tool,
+ * use `"*"` in `disabledTools` (or a never-matching entry such as
+ * `"__none__"` in `enabledTools`).
  *
  * Invalid values degrade to `undefined` (filter off) so a typo never breaks
  * an otherwise usable server; the warning is the diagnostic.

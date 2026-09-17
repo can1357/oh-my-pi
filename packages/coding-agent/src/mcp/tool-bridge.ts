@@ -404,6 +404,9 @@ async function reconnectWithAbort(
  * "puppeteer_screenshot"), strips the redundant prefix to produce
  * "mcp__puppeteer_screenshot" instead of "mcp__puppeteer_puppeteer_screenshot".
  */
+// Mint-domain only; the filter domain lives in ./name-sanitize (keepHyphen).
+// Do not reunify: both third params are boolean but mean different things
+// (keepDigits vs keepHyphen) and swapping them silently changes mint semantics.
 function sanitizeMCPToolNamePart(value: string, fallback: string, keepDigits: boolean): string {
 	const sanitized = value
 		.toLowerCase()
