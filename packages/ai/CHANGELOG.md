@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/login anysearch` and `ANYSEARCH_API_KEY` credential discovery ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
+### Fixed
+
+- Prevented provider-generated API keys from replacing credentials added concurrently or outranking a later environment key ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
 ## [18.2.3] - 2026-09-17
 
 ### Added
@@ -343,11 +351,6 @@
 ### Fixed
 
 - Fixed auth-broker background activity keeping processes alive unnecessarily, so unused broker-backed auth storage now parks automatically and no longer prevents CLI exit.
-- Added `/login anysearch` and `ANYSEARCH_API_KEY` credential discovery ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
-
-### Fixed
-
-- Prevented provider-generated API keys from replacing credentials added concurrently or outranking a later environment key ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
 
 ## [18.0.5] - 2026-08-25
 
@@ -369,13 +372,6 @@
 - Fixed Codex WebSocket cleanup failures caused by already-closed sockets.
 - Added safe retries for transient mid-stream socket closures across OpenAI Responses, Chat Completions, Azure OpenAI Responses, and Codex SSE when no replay-unsafe output has been emitted.
 - Fixed usage and cost reporting for OpenAI-compatible gateways backed by Vertex AI or Gemini by recognizing cached prompt tokens reported through `cachedContentTokenCount`.
-### Added
-
-- Added `/login anysearch` and `ANYSEARCH_API_KEY` credential discovery.
-
-### Fixed
-
-- Prevented provider-generated API keys from replacing credentials added concurrently or outranking a later environment key.
 
 ## [18.0.4] - 2026-08-24
 

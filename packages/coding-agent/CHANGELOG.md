@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AnySearch as the first concrete web-search provider after Auto, with API-key login and safe explicit anonymous auto-registration ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes
@@ -453,15 +457,6 @@
 - `@upstream` routing selectors accept tiered OpenRouter slugs (`openrouter/google/gemini-3.8-flash@google-ai-studio/priority`), and `omp bench` labels each routed model with its upstream.
 - `/skill:<name>` in the composer becomes an atomic skill chip (icon + name, linked to its SKILL.md) once you finish typing it or accept it from autocomplete — it deletes as one unit and survives draft restores, like image chips.
 - The transcript now flags a gateway serving a different Claude model than requested: a `⚠ served claude-haiku-4-5-20251001 · requested claude-opus-5 · via openrouter/Amazon Bedrock` divider under the first affected turn, shown once per substitution per session.
-- Added an explicit append-only transcript declaration and width-independent stable-row API for components that can guarantee an immutable history prefix across later updates.
-- Added `:img` read selector to rasterize local SVG/SVGZ files for vision input.
-- Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
-- Added the `omp if-bench` command: a zero-tool instruction-following and working-memory benchmark that drives one cached conversation per model, adding one more glyph array action every turn while a `nya{1,N}` directive moves through the prompt, with a live turn-ladder board and a ranked scoreboard
-- Added `q` shortcut to exit the git TUI
-- Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
-- Added AnySearch as the first concrete web-search provider after Auto, with API-key login and safe explicit anonymous auto-registration.
-- Compressed single-child directory chains in the sidebar tree view
-- Split pure additions (new/untracked files) into their own list below tracked changes in each git TUI file section, separated by a rule; addition rows drop the redundant status letter and deleted files render struck through
 
 ### Changed
 
@@ -1322,14 +1317,6 @@
 
 ### Added
 
-### Added
-
-- Added AnySearch as the first concrete web-search provider after Auto, with API-key login and safe explicit anonymous auto-registration ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
-
-## [18.0.5] - 2026-08-25
-
-### Added
-
 - Added append-only transcript declarations and stable-row APIs for components with immutable history prefixes.
 - Added the `:img` read selector to rasterize local SVG and SVGZ files for vision input.
 - Added side-by-side image and SVG previews to `omp git`, including Git LFS object resolution and clear placeholders for unavailable or unsupported binary content.
@@ -1391,7 +1378,6 @@
 - Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
 - Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
 - Fixed large MCP tool payloads being stored redundantly on disk.
-- Added AnySearch as the first concrete web-search provider after Auto, with API-key login and safe explicit anonymous auto-registration.
 
 ## [18.0.4] - 2026-08-24
 
