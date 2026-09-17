@@ -102,11 +102,12 @@ describe("xai-api-oauth routing contract", () => {
 		expect(auth.login.scopes).not.toContain("grok-cli:access");
 	});
 
-	it("bundles grok-4.6 without any Grok Build model", () => {
+	it("bundles grok-4.6 without Grok Build or SuperGrok Composer models", () => {
 		expect(providerEntry(providerId)?.defaultModel).toBe("grok-4.6");
 		expect(DEFAULT_MODEL_PER_PROVIDER[providerId]).toBe("grok-4.6");
 		expect(seed.some(model => model.id === "grok-4.6")).toBe(true);
 		expect(seed.some(model => model.id.startsWith("grok-build"))).toBe(false);
+		expect(seed.some(model => model.id === "grok-composer-2.5-fast")).toBe(false);
 		expect(Object.keys(bundled).sort()).toEqual(seed.map(model => model.id).sort());
 	});
 
@@ -115,7 +116,7 @@ describe("xai-api-oauth routing contract", () => {
 		expect(bundled["grok-4.20-multi-agent-0309"]?.cost.input).toBeGreaterThan(0);
 	});
 
-	it("filters Grok Build and media models from live discovery", async () => {
+	it("filters non-API models and preserves per-model prices during live discovery", async () => {
 		const options = xaiOAuthModelManagerOptions({
 			providerId,
 			apiKey: "oauth-token",
@@ -123,6 +124,7 @@ describe("xai-api-oauth routing contract", () => {
 				Response.json({
 					data: [
 						{ id: "grok-build", object: "model", created: 0, owned_by: "xai" },
+						{ id: "grok-composer-2.5-fast", object: "model", created: 0, owned_by: "xai" },
 						{ id: "grok-imagine-1.0", object: "model", created: 0, owned_by: "xai" },
 						{ id: "grok-4.6", object: "model", created: 0, owned_by: "xai" },
 					],
@@ -131,7 +133,9 @@ describe("xai-api-oauth routing contract", () => {
 
 		const discovered = await options.fetchDynamicModels?.();
 		expect(discovered?.map(model => model.id)).not.toContain("grok-build");
+		expect(discovered?.map(model => model.id)).not.toContain("grok-composer-2.5-fast");
 		expect(discovered?.map(model => model.id)).not.toContain("grok-imagine-1.0");
 		expect(discovered?.map(model => model.id)).toContain("grok-4.6");
+		expect(discovered?.find(model => model.id === "grok-4.3")?.cost).toEqual(bundled["grok-4.3"]?.cost);
 	});
 });

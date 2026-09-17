@@ -1539,9 +1539,16 @@ function applyXAIOAuthCuration(
 
 	const template = filtered[0];
 	if (template) {
+		const bundledById = new Map(getBundledModels(providerId).map(model => [model.id, model]));
 		for (const curated of curatedModels) {
 			if (!byId.has(curated.id)) {
-				const base: ModelSpec<"openai-responses"> = { ...template, id: curated.id, name: curated.id };
+				const referenceCost = bundledById.get(curated.id)?.cost ?? curated.cost;
+				const base: ModelSpec<"openai-responses"> = {
+					...template,
+					id: curated.id,
+					name: curated.id,
+					cost: { ...referenceCost },
+				};
 				byId.set(curated.id, mergeCuratedIntoModel(base, curated, providerId));
 			}
 		}
