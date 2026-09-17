@@ -517,14 +517,19 @@ pub async fn clone(
 ) -> Result<()> {
 	let absolute = std::path::absolute(target_dir)?;
 	let destination = absolute.clone();
-	tokio::task::spawn_blocking(move || check_clone_destination(&destination))
-		.await
-		.map_err(|err| Error::backend("git clone", err.to_string()))??;
+	let destination_exists =
+		tokio::task::spawn_blocking(move || check_clone_destination(&destination, None))
+			.await
+			.map_err(|err| Error::backend("git clone", err.to_string()))??;
 	let parent = absolute
 		.parent()
 		.map_or_else(|| absolute.clone(), Path::to_owned);
 	tokio::fs::create_dir_all(&parent).await?;
-	let staging_parent = parent.clone();
+	let staging_parent = if destination_exists {
+		absolute.clone()
+	} else {
+		parent.clone()
+	};
 	let staging = tokio::task::spawn_blocking(move || {
 		tempfile::Builder::new()
 			.prefix(".pi-clone-")
@@ -592,27 +597,34 @@ pub async fn clone(
 	Ok(())
 }
 
-fn check_clone_destination(destination: &Path) -> std::io::Result<()> {
+fn check_clone_destination(destination: &Path, staging: Option<&Path>) -> std::io::Result<bool> {
 	match std::fs::read_dir(destination) {
-		Ok(mut entries) => match entries.next().transpose()? {
-			None => Ok(()),
-			Some(_) => Err(std::io::Error::new(
-				std::io::ErrorKind::AlreadyExists,
-				format!("destination is not empty: {}", destination.display()),
-			)),
+		Ok(entries) => {
+			for entry in entries {
+				if Some(entry?.path().as_path()) != staging {
+					return Err(std::io::Error::new(
+						std::io::ErrorKind::AlreadyExists,
+						format!("destination is not empty: {}", destination.display()),
+					));
+				}
+			}
+			Ok(true)
 		},
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
 		Err(err) => Err(err),
 	}
 }
 
 fn publish_clone(checkout: &Path, destination: &Path) -> std::io::Result<()> {
-	match rename_clone_entry(checkout, destination) {
-		Ok(()) => return Ok(()),
-		Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {},
-		Err(err) => return Err(err),
+	let staging = checkout.parent();
+	if staging.and_then(Path::parent) != Some(destination) {
+		match rename_clone_entry(checkout, destination) {
+			Ok(()) => return Ok(()),
+			Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {},
+			Err(err) => return Err(err),
+		}
 	}
-	check_clone_destination(destination)?;
+	check_clone_destination(destination, staging)?;
 	let entries = std::fs::read_dir(checkout)?
 		.map(|entry| entry.map(|entry| entry.file_name()))
 		.collect::<std::io::Result<Vec<_>>>()?;
@@ -771,21 +783,119 @@ mod tests {
 		assert!(!target.join(".git").exists());
 	}
 
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn clone_supports_existing_destination_on_another_filesystem() {
+		use std::os::unix::fs::{MetadataExt, symlink};
+
+		let root = tempfile::tempdir_in("/tmp").unwrap();
+		let source = clone_source(root.path());
+		let mounted = match tempfile::tempdir_in("/dev/shm") {
+			Ok(directory) => directory,
+			Err(error)
+				if matches!(
+					error.kind(),
+					std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+				) =>
+			{
+				eprintln!("cross-filesystem clone test requires writable /dev/shm: {error}");
+				return;
+			},
+			Err(error) => panic!("create second-filesystem fixture: {error}"),
+		};
+		if std::fs::metadata(root.path()).unwrap().dev()
+			== std::fs::metadata(mounted.path()).unwrap().dev()
+		{
+			eprintln!("cross-filesystem clone test requires /tmp and /dev/shm on different devices");
+			return;
+		}
+		let target = root.path().join("target");
+		symlink(mounted.path(), &target).unwrap();
+		clone(source.to_str().unwrap(), &target, &CloneOptions::default(), None)
+			.await
+			.unwrap();
+		assert!(std::fs::symlink_metadata(&target).unwrap().is_symlink());
+		assert_eq!(std::fs::read(mounted.path().join("tracked.txt")).unwrap(), b"clone content");
+		assert_eq!(std::fs::read_dir(mounted.path()).unwrap().count(), 2);
+	}
+
+	#[cfg(target_os = "linux")]
+	#[tokio::test]
+	async fn clone_inherits_existing_destination_group_and_default_acl() {
+		use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+		let root = tempfile::tempdir().unwrap();
+		let source = clone_source(root.path());
+		let target = root.path().join("target");
+		let expected = root.path().join("expected");
+		// Linux POSIX ACL v2: owner rwx, group rwx, other none.
+		let mut acl = 2_u32.to_le_bytes().to_vec();
+		for (tag, permissions) in [(1_u16, 7_u16), (4, 7), (32, 0)] {
+			acl.extend_from_slice(&tag.to_le_bytes());
+			acl.extend_from_slice(&permissions.to_le_bytes());
+			acl.extend_from_slice(&u32::MAX.to_le_bytes());
+		}
+		for directory in [&target, &expected] {
+			std::fs::create_dir(directory).unwrap();
+			std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o2770)).unwrap();
+			match rustix::fs::setxattr(
+				directory,
+				"system.posix_acl_default",
+				&acl,
+				rustix::fs::XattrFlags::empty(),
+			) {
+				Ok(()) => {},
+				Err(rustix::io::Errno::OPNOTSUPP) => {
+					eprintln!("clone inheritance test requires POSIX ACL support");
+					return;
+				},
+				Err(error) => panic!("set fixture default ACL: {error}"),
+			}
+		}
+		assert!(
+			std::process::Command::new("git")
+				.args(["clone", "-q"])
+				.arg(&source)
+				.arg(&expected)
+				.status()
+				.unwrap()
+				.success()
+		);
+		clone(source.to_str().unwrap(), &target, &CloneOptions::default(), None)
+			.await
+			.unwrap();
+		for relative in [".git", ".git/objects", "tracked.txt"] {
+			let actual = std::fs::metadata(target.join(relative)).unwrap();
+			let expected = std::fs::metadata(expected.join(relative)).unwrap();
+			assert_eq!(actual.mode() & 0o7777, expected.mode() & 0o7777, "{relative}");
+			assert_eq!(actual.gid(), expected.gid(), "{relative}");
+		}
+		assert_eq!(std::fs::read(target.join("tracked.txt")).unwrap(), b"clone content");
+	}
+
 	#[test]
 	fn clone_publication_rechecks_destination_after_transfer() {
-		let root = tempfile::tempdir().unwrap();
-		let checkout = root.path().join("checkout");
-		let target = root.path().join("target");
-		std::fs::create_dir(&checkout).unwrap();
-		std::fs::write(checkout.join("tracked.txt"), b"staged content").unwrap();
-		check_clone_destination(&target).unwrap();
-		std::fs::create_dir(&target).unwrap();
-		std::fs::write(target.join("sentinel"), b"caller content").unwrap();
-		let error = publish_clone(&checkout, &target).unwrap_err();
-		assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
-		assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"caller content");
-		assert_eq!(std::fs::read(checkout.join("tracked.txt")).unwrap(), b"staged content");
-		assert!(!target.join("tracked.txt").exists());
+		for existing in [false, true] {
+			let root = tempfile::tempdir().unwrap();
+			let target = root.path().join("target");
+			if existing {
+				std::fs::create_dir(&target).unwrap();
+			}
+			check_clone_destination(&target, None).unwrap();
+			let staging = tempfile::tempdir_in(if existing { &target } else { root.path() }).unwrap();
+			let checkout = staging.path().join("repo");
+			std::fs::create_dir(&checkout).unwrap();
+			std::fs::write(checkout.join("tracked.txt"), b"staged content").unwrap();
+			if !existing {
+				std::fs::create_dir(&target).unwrap();
+			}
+			std::fs::write(target.join("sentinel"), b"caller content").unwrap();
+			let error = publish_clone(&checkout, &target).unwrap_err();
+			assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+			assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"caller content");
+			assert_eq!(std::fs::read(checkout.join("tracked.txt")).unwrap(), b"staged content");
+			assert!(!target.join("tracked.txt").exists());
+		}
 	}
 
 	#[tokio::test]
