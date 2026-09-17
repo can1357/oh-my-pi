@@ -362,10 +362,10 @@ export class GrokLiveTransport implements ILiveTransport {
 
 	#dispatchFunctionCalls(): void {
 		if (this.#queuedFunctionCalls.length === 0) return;
-		if (this.#pendingFunctionOutputIds.size > 0) {
-			this.#reportFailure("Grok issued new function calls before the previous function-call batch completed.");
-			return;
-		}
+		// Live instructions tell Grok to create a new delegation while work is
+		// still running. The session controller only tracks one active
+		// delegation id, so extra batches wait instead of aborting the call.
+		if (this.#pendingFunctionOutputIds.size > 0) return;
 
 		const calls = this.#queuedFunctionCalls.splice(0);
 		if (calls.some(call => !call.request)) {
@@ -400,7 +400,12 @@ export class GrokLiveTransport implements ILiveTransport {
 				output,
 			},
 		});
-		if (this.#pendingFunctionOutputIds.size === 0) this.#sendRaw({ type: "response.create" });
+		if (this.#pendingFunctionOutputIds.size > 0) return;
+		if (this.#queuedFunctionCalls.length > 0) {
+			this.#dispatchFunctionCalls();
+			return;
+		}
+		this.#sendRaw({ type: "response.create" });
 	}
 
 	#handleAudioOutput(base64Pcm: string): void {
