@@ -396,6 +396,9 @@ function isMultiplexerSession(): boolean {
 	// override and can be set outside a CMUX terminal.
 	if (Bun.env.TMUX || Bun.env.STY || Bun.env.ZELLIJ) return true;
 	if (Bun.env.CMUX_WORKSPACE_ID || Bun.env.CMUX_SURFACE_ID) return true;
+	// pk-herdr sets HERDR_PANE_ID on every pane process (pane.rs) and
+	// HERDR_SOCKET_PATH for its control socket; either marks a herdr pane.
+	if (Bun.env.HERDR_PANE_ID || Bun.env.HERDR_SOCKET_PATH) return true;
 	const term = Bun.env.TERM?.toLowerCase() ?? "";
 	return term.startsWith("tmux") || term.startsWith("screen");
 }

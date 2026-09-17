@@ -106,6 +106,8 @@ const MULTIPLEXER_ENV_KEYS = [
 	"CMUX_PANEL_ID",
 	"CMUX_TAB_ID",
 	"CMUX_SOCKET_PATH",
+	"HERDR_PANE_ID",
+	"HERDR_SOCKET_PATH",
 ];
 const NO_MULTIPLEXER_ENV: Record<string, string | undefined> = Object.fromEntries(
 	MULTIPLEXER_ENV_KEYS.map(key => [key, undefined]),
@@ -114,6 +116,10 @@ const TMUX_ENV: Record<string, string | undefined> = { ...NO_MULTIPLEXER_ENV, TM
 const CMUX_ENV_CASES: Array<[string, Record<string, string | undefined>]> = [
 	["CMUX_WORKSPACE_ID", { ...NO_MULTIPLEXER_ENV, TERM: "dumb", CMUX_WORKSPACE_ID: "workspace:cmux-2088" }],
 	["CMUX_SURFACE_ID", { ...NO_MULTIPLEXER_ENV, TERM: "dumb", CMUX_SURFACE_ID: "surface:cmux-2088" }],
+];
+const HERDR_ENV_CASES: Array<[string, Record<string, string | undefined>]> = [
+	["HERDR_PANE_ID", { ...NO_MULTIPLEXER_ENV, TERM: "dumb", HERDR_PANE_ID: "w1:p1" }],
+	["HERDR_SOCKET_PATH", { ...NO_MULTIPLEXER_ENV, TERM: "dumb", HERDR_SOCKET_PATH: "\\\\.\\pipe\\herdr-test" }],
 ];
 const CMUX_SOCKET_ONLY_ENV: Record<string, string | undefined> = {
 	...NO_MULTIPLEXER_ENV,
@@ -428,6 +434,39 @@ describe("multiplexer detection gates ED3 on resize", () => {
 
 	for (const [label, env] of CMUX_ENV_CASES) {
 		it(`debounces resize and emits no ED3 when ${label} marks CMUX with TERM=dumb`, async () => {
+			await withEnvPatch(env, async () => {
+				const term = new VirtualTerminal(40, 10, 1000);
+				const tui = new TUI(term);
+				tui.addChild(new MutableLinesComponent(Array.from({ length: 20 }, (_v, i) => `line-${i}`)));
+
+				try {
+					tui.start();
+					await settle(term);
+
+					const baselineRedraws = tui.fullRedraws;
+					const writes = captureWrites(term);
+
+					term.resize(80, 10);
+					await Bun.sleep(10);
+					expect(writes.length).toBe(0);
+					expect(tui.fullRedraws).toBe(baselineRedraws);
+
+					await Bun.sleep(DEBOUNCE_SETTLE_WAIT_MS);
+					await settle(term);
+					const out = writes.join("");
+					expect(out.length).toBeGreaterThan(0);
+					expect(out).not.toContain(ED3);
+					expect(tui.fullRedraws - baselineRedraws).toBe(1);
+					expect(visible(term)).toEqual(Array.from({ length: 10 }, (_v, i) => `line-${i + 10}`));
+				} finally {
+					tui.stop();
+				}
+			});
+		});
+	}
+
+	for (const [label, env] of HERDR_ENV_CASES) {
+		it(`debounces resize and emits no ED3 when ${label} marks pk-herdr with TERM=dumb`, async () => {
 			await withEnvPatch(env, async () => {
 				const term = new VirtualTerminal(40, 10, 1000);
 				const tui = new TUI(term);
