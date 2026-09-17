@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Already-aborted hub job waits return promptly even when peer messaging is unavailable. ([#12320](https://github.com/can1357/oh-my-pi/pull/12320) by [@luken](https://github.com/luken))
 - The Todo tracker now reflects nested `eval` Todo updates, including when a cell fails after committing ([#12921](https://github.com/can1357/oh-my-pi/pull/12921) by [@tommymorgan](https://github.com/tommymorgan)).
 - Output schemas written as JSON Schema without a root `type` keep their `items` and `required` keywords, so structured-output tools no longer fail strict-mode validation ([#12893](https://github.com/can1357/oh-my-pi/issues/12893))
 - TTSR whole-buffer lookahead conditions now avoid repeated starting-position scans during streamed writes ([#12261](https://github.com/can1357/oh-my-pi/issues/12261), [#12887](https://github.com/can1357/oh-my-pi/pull/12887) by [@Dante-dan](https://github.com/Dante-dan)).

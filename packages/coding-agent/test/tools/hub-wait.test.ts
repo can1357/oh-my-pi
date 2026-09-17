@@ -49,6 +49,32 @@ describe("hub unified wait", () => {
 		IrcBus.resetGlobalForTests();
 	});
 
+	test("an already-aborted job wait returns promptly without cancelling the worker", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const job = registerHangingJob(manager, "still running");
+		const session = makeSession(manager);
+		session.agentRegistry = undefined; // Exercise the job-only path, without a bus abort wakeup.
+		const tool = new HubTool(session);
+		const abort = new AbortController();
+		abort.abort();
+		let settled = false;
+		const pending = tool.execute("already-aborted", { op: "wait" }, abort.signal).then(result => {
+			settled = true;
+			return result;
+		});
+		try {
+			for (let turn = 0; turn < 20; turn++) await Promise.resolve();
+			expect(settled).toBe(true);
+			expect((await pending).details).toMatchObject({ jobs: [{ id: job.id, status: "running" }] });
+			expect(manager.getJob(job.id)?.abortController.signal.aborted).toBe(false);
+		} finally {
+			manager.cancel(job.id);
+			vi.advanceTimersByTime(60_000);
+			await pending;
+		}
+	});
+
 	test("back-to-back job waits climb the adaptive window without cancelling unfinished work", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
