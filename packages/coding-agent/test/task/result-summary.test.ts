@@ -60,4 +60,34 @@ describe("formatTaskResultSummary", () => {
 		expect(summary).toContain("<output>\ndone\n</output>");
 		expect(summary).not.toContain("<preview");
 	});
+
+	it("names the fallback that served the run, and stays silent when the configured model did", () => {
+		// A subagent pinned to one model can be served by another (retry chain,
+		// usage-reserve switch). The parent reads only this envelope, so without
+		// the attribute it weighs a flash model's verdict as the frontier model's.
+		const served = formatTaskResultSummary(
+			{
+				...settledResult("looks correct"),
+				resolvedModel: "google-antigravity/gemini-3.8-flash:high",
+				resolvedModelIsFallback: true,
+			},
+			{ totalDurationMs: 5 },
+		);
+		expect(served).toMatch(
+			/^<task-result id="Scout" agent="scout" status="completed" duration="[^"]+" fallback-model="google-antigravity\/gemini-3.8-flash:high">\n/,
+		);
+
+		const primary = formatTaskResultSummary(
+			{
+				...settledResult("looks correct"),
+				resolvedModel: "openai-codex/gpt-6-astra:xhigh",
+				resolvedModelIsFallback: false,
+			},
+			{ totalDurationMs: 5 },
+		);
+		expect(primary).not.toContain("fallback-model");
+		expect(formatTaskResultSummary(settledResult("looks correct"), { totalDurationMs: 5 })).not.toContain(
+			"fallback-model",
+		);
+	});
 });

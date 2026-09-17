@@ -59,11 +59,16 @@ export function formatTaskResultSummary(
 	// "parked" status must not read as resumable.
 	const refStatus = AgentRegistry.global().get(result.id)?.status;
 	const resumable = result.aborted && !result.isolated && (refStatus === "idle" || refStatus === "parked");
+	// The parent asked for one model and may have been served by another: a
+	// retry chain or a usage-reserve switch. It cannot judge the output without
+	// knowing, so name the fallback that actually served the run.
+	const fallbackModel = result.resolvedModelIsFallback ? result.resolvedModel : undefined;
 	return prompt.render(taskSummaryTemplate, {
 		agentName: result.agent,
 		id: result.id,
 		status,
 		duration: formatDuration(options.totalDurationMs),
+		fallbackModel,
 		abortReason: result.aborted ? result.abortReason : undefined,
 		resumable,
 		preview,
