@@ -396,6 +396,10 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 			: candidate.useless
 				? USELESS_NOTICE
 				: createPrunedNotice(candidate.tokens);
+		const details = (message.details ?? {}) as Record<string, unknown>;
+		if (details.originalContent === undefined && message.content.length > 0) {
+			message.details = { ...details, originalContent: message.content };
+		}
 		message.content = [{ type: "text", text: notice }];
 		message.prunedAt = prunedAt;
 		prunedCount++;
@@ -507,6 +511,10 @@ export function maskConsumedObservations(
 	const prunedAt = Date.now();
 	let tokensSaved = 0;
 	for (const candidate of toPrune) {
+		const candidateDetails = (candidate.message.details ?? {}) as Record<string, unknown>;
+		if (candidateDetails.originalContent === undefined && candidate.message.content.length > 0) {
+			candidate.message.details = { ...candidateDetails, originalContent: candidate.message.content };
+		}
 		candidate.message.content = [{ type: "text", text: candidate.notice }];
 		candidate.message.prunedAt = prunedAt;
 		candidate.message.consumed = true;

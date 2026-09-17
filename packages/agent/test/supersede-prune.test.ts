@@ -770,4 +770,20 @@ describe("maskConsumedObservations", () => {
 		expect(resultText(entries[entries.length - 2])).toBe("[bash result consumed]");
 		expect(resultMessage(before[1]).prunedAt).toBeUndefined();
 	});
+
+	test("preserves original content in message.details.originalContent", () => {
+		const entries: SessionEntry[] = [
+			messageEntry(userMessage("do something", T0), T0),
+			messageEntry(toolCallMessage("bash", "bash-1", { command: "echo test" }, T0 + 1), T0 + 1),
+			messageEntry(toolResultMessage("bash", "bash-1", BIG_TEXT, T0 + 2), T0 + 2),
+			textEntry("Next step.", T0 + 3),
+		];
+
+		const result = maskConsumedObservations(entries, []);
+		expect(result.prunedCount).toBe(1);
+
+		const msg = resultMessage(entries[2]);
+		expect(msg.content).toEqual([{ type: "text", text: "[bash result consumed]" }]);
+		expect((msg.details as any)?.originalContent).toEqual([{ type: "text", text: BIG_TEXT }]);
+	});
 });

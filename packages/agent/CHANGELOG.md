@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved unpruned tool output in `message.details.originalContent` during `pruneToolOutputs()` and `maskConsumedObservations()` so observation history remains recoverable for dataset export and offline replay while maintaining runtime prompt-cache savings.
+
 ## [16.4.18] - 2026-09-09
 
 ### Fixed
