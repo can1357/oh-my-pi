@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
 import { AmbiguousOverlapError, globMatch, resolveCascade, resolveCascadeRules } from "../src/compat/cascade";
-import type { ResolveTarget } from "../src/compat/types";
+import type { CompiledCascade, ResolveTarget } from "../src/compat/types";
 
 function compile(text: string) {
 	return compileCascade([{ file: "classes/test.kdl", text }]);
@@ -125,6 +125,99 @@ describe("cascade rank precedence", () => {
 		expect(upgraded.thinking.efforts).toEqual(["low", "high"]);
 		expect(upgraded.thinking.mode).toBe("effort");
 	});
+
+	test("compound wildcard and token selectors preserve conjunction semantics", () => {
+		const cascade: CompiledCascade = {
+			rules: [
+				{
+					source: "global",
+					wire: { supportsStore: false },
+				},
+				{
+					source: "compound",
+					class: "cls",
+					providers: ["prov"],
+					apis: ["api"],
+					family: "fam",
+					revision: [
+						{ op: ">=", revision: "2.0.0" },
+						{ op: "<", revision: "3.0.0" },
+					],
+					models: [
+						{ kind: "glob", value: "model-*-pro" },
+						{ kind: "token", value: "preview" },
+					],
+					wire: { supportsStore: true, maxTokensField: "max_completion_tokens" },
+				},
+			],
+		};
+
+		for (const model of ["MODEL-X-PRO", "acme-preview-v2"]) {
+			expect(resolveCascadeRules(cascade, target({ family: "fam", revision: "2.4", model })).wire).toEqual({
+				supportsStore: true,
+				maxTokensField: "max_completion_tokens",
+			});
+		}
+		expect(
+			resolveCascadeRules(cascade, target({ family: "other", revision: "2.4", model: "MODEL-X-PRO" })).wire,
+		).toEqual({
+			supportsStore: false,
+		});
+		expect(resolveCascadeRules(cascade, target({ family: "fam", revision: "3", model: "MODEL-X-PRO" })).wire).toEqual(
+			{
+				supportsStore: false,
+			},
+		);
+	});
+
+	test("candidate buckets retain declaration order for ambiguity diagnostics", () => {
+		const cascade: CompiledCascade = {
+			rules: [
+				{ source: "provider-first", providers: ["prov"], wire: { supportsStore: true } },
+				{ source: "irrelevant", providers: ["other"], wire: { supportsStore: true } },
+				{ source: "class-second", class: "cls", wire: { supportsStore: false } },
+			],
+		};
+
+		let caught: unknown;
+		try {
+			resolveCascadeRules(cascade, target({}));
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(AmbiguousOverlapError);
+		expect(caught).toMatchObject({
+			axis: "supportsStore",
+			first: "provider-first",
+			second: "class-second",
+		});
+	});
+
+	test("custom cascades are isolated from result mutation and one another", () => {
+		const first: CompiledCascade = {
+			rules: [
+				{
+					source: "first",
+					class: "cls",
+					wire: { reasoningEffortMap: { low: "minimal" } },
+				},
+			],
+		};
+		const second: CompiledCascade = {
+			rules: [
+				{
+					source: "second",
+					class: "cls",
+					wire: { reasoningEffortMap: { low: "low" } },
+				},
+			],
+		};
+
+		const mutated = resolveCascadeRules(first, target({}));
+		(mutated.wire.reasoningEffortMap as Record<string, string>).low = "poisoned";
+		expect(resolveCascadeRules(first, target({})).wire.reasoningEffortMap).toEqual({ low: "minimal" });
+		expect(resolveCascadeRules(second, target({})).wire.reasoningEffortMap).toEqual({ low: "low" });
+	});
 });
 
 describe("resolveCascade over committed rules", () => {
@@ -152,6 +245,27 @@ describe("resolveCascade over committed rules", () => {
 			reasoning: true,
 		});
 		expect(resolved.thinking.efforts).toEqual(["minimal", "low", "medium", "high", "max"]);
+	});
+
+	test("memoized bundled results cannot be contaminated by consumers", () => {
+		const lookup: ResolveTarget = {
+			provider: "alibaba-coding-plan",
+			api: "openai-completions",
+			class: "glm",
+			model: "glm-5.2",
+			revision: "5.2",
+			reasoning: true,
+		};
+		const first = resolveCascade({ ...lookup });
+		(first.thinking.efforts as string[])[0] = "poisoned";
+		first.thinking.mode = "poisoned";
+
+		const repeated = resolveCascade({ ...lookup });
+		expect(repeated.thinking.efforts).toEqual(["minimal", "low", "medium", "high", "max"]);
+		expect(repeated.thinking.mode).not.toBe("poisoned");
+		expect(repeated).not.toBe(first);
+		expect(repeated.thinking.efforts).not.toBe(first.thinking.efforts);
+		expect(resolveCascade({ ...lookup, reasoning: false }).thinking).toEqual({});
 	});
 
 	test("glob matching is anchored and case-insensitive", () => {

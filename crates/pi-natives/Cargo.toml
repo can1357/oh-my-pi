@@ -112,8 +112,10 @@ winreg.workspace = true
 
 [dev-dependencies]
 fancy-regex.workspace = true # utok scanner differential oracle
+shlex.workspace = true
 tiktoken-rs.workspace = true # utok openai differential oracle
 xkeysym = "=0.2.1"
 
 [build-dependencies]
 napi-build.workspace = true
+shlex.workspace = true

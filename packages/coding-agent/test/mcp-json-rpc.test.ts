@@ -1,5 +1,6 @@
 import type { BodyInit } from "bun";
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { fetchExaTools } from "@oh-my-pi/pi-coding-agent/exa/mcp-client";
 import { callMCP, redactUrlForLog } from "@oh-my-pi/pi-coding-agent/mcp/json-rpc";
 import { isRecord } from "@oh-my-pi/pi-utils";
@@ -151,6 +152,68 @@ describe("callMCP", () => {
 			id: expect.any(String),
 			result: { mode: "json" },
 		});
+	});
+
+	it("uses injected fetch, merges custom headers, and forwards the caller signal", async () => {
+		const signal = AbortSignal.timeout(1_000);
+		let capturedUrl: string | undefined;
+		let capturedRequest: RequestInit | undefined;
+		const fetchMock: FetchImpl = async (url, init) => {
+			capturedUrl = url.toString();
+			capturedRequest = init;
+			return new Response(
+				JSON.stringify({ jsonrpc: "2.0", id: parsePostedJsonRpcRequest(init?.body).id, result: { ok: true } }),
+			);
+		};
+
+		const response = await callMCP(
+			"http://127.0.0.1:1/mcp",
+			"tools/call",
+			{ name: "web_search" },
+			{ fetch: fetchMock, headers: { "User-Agent": "omp/test" }, signal },
+		);
+
+		expect(capturedUrl).toBe("http://127.0.0.1:1/mcp");
+		expect(capturedRequest?.headers).toEqual({
+			"Content-Type": "application/json",
+			Accept: "application/json, text/event-stream",
+			"User-Agent": "omp/test",
+		});
+		expect(capturedRequest?.signal).toBe(signal);
+		expect(response.result).toEqual({ ok: true });
+	});
+
+	it("lets callers classify HTTP errors using the response body", async () => {
+		const fetchMock: FetchImpl = async () => new Response("rate limited", { status: 429 });
+
+		await expect(
+			callMCP(
+				"http://127.0.0.1:1/mcp",
+				"tools/call",
+				{},
+				{
+					fetch: fetchMock,
+					onHttpError: (response, body) => new Error(`classified ${response.status}: ${body}`),
+				},
+			),
+		).rejects.toThrow("classified 429: rate limited");
+	});
+
+	it("lets callers classify malformed MCP responses", async () => {
+		const fetchMock: FetchImpl = async () => new Response("not a JSON-RPC response");
+
+		await expect(
+			callMCP(
+				"http://127.0.0.1:1/mcp",
+				"tools/call",
+				{},
+				{
+					fetch: fetchMock,
+					onParseError: error =>
+						new Error(`invalid MCP payload: ${error instanceof Error ? error.name : "unknown"}`),
+				},
+			),
+		).rejects.toThrow("invalid MCP payload: SyntaxError");
 	});
 
 	it("lets fetchExaTools discover tools without descriptions after a notification", async () => {

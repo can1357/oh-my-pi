@@ -5,6 +5,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildBrowserItems,
+	buildSearchAffinity,
+	rankModelItems,
 	ModelBrowser,
 	type RoleAssignments,
 	resolveRoleAssignments,
@@ -64,9 +66,45 @@ describe("resolveRoleAssignments", () => {
 		expect(roles.tiny?.model).toBe(smol);
 		expect(roles.tiny?.autoSelected).toBe(true);
 	});
+
+	test("shows configured slow for an unconfigured advisor role", () => {
+		const slow = makeModel("demo", "custom-slow");
+		const priorityHead = makeModel("demo", "gpt-5.6-sol");
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "demo/default",
+				slow: "demo/custom-slow",
+			},
+		});
+
+		const roles = resolveRoleAssignments(settings, [slow, priorityHead], [slow, priorityHead]);
+
+		expect(roles.slow?.model).toBe(slow);
+		expect(roles.advisor?.model).toBe(slow);
+		expect(roles.advisor?.autoSelected).toBe(true);
+	});
 });
 
 describe("ModelBrowser search ranking", () => {
+	test("headless candidates preserve picker relevance and affinity ordering", () => {
+		const models = [makeModel("a", "example-2"), makeModel("b", "example-2"), makeModel("a", "other")];
+		const roles: RoleAssignments = {};
+		const mruOrder = ["b/example-2", "a/example-2"];
+		const providerOrder = ["a"];
+		const browser = makeBrowser(models, mruOrder, { roles, providerOrder });
+		const query = "example";
+		browser.setQuery(query);
+		const items = buildBrowserItems(models);
+		const ranked = rankModelItems(query, items, {
+			roles,
+			mruOrder,
+			affinity: buildSearchAffinity(providerOrder, roles, mruOrder),
+		});
+		expect(ranked.map(item => item.selector)).toEqual(["b/example-2", "a/example-2"]);
+		expect(browser.getSelected()?.selector).toBe(ranked[0].selector);
+		expect(ranked.length).toBe(browser.visibleCount);
+	});
+
 	test("an exact query match outranks the MRU model", () => {
 		// Regression: with gpt-5.6-sol as the active (MRU) model, typing
 		// "gpt-5.5" must select gpt-5.5, not keep the MRU pinned on top.
@@ -296,7 +334,7 @@ describe("ModelBrowser native model metadata", () => {
 
 	test("detail line badges upstream flags and appends the provider blurb", () => {
 		const detail = renderDetail(
-			makeModel("devin", "swe-2", {
+			makeModel("fixture", "swe-2", {
 				description: "Fast\tagentic\ncoder",
 				isNew: true,
 				isBeta: true,
@@ -311,5 +349,66 @@ describe("ModelBrowser native model metadata", () => {
 
 	test("models without upstream metadata render the plain detail line", () => {
 		expect(renderDetail(makeModel("openai", "gpt-5"))).toContain("gpt-5 · 128k ctx · 1k out · free per M");
+	});
+
+	test("price rows preserve free labels and identify invalid rates", () => {
+		const zero = makeModel("fixture", "zero");
+		const missing = makeModel("fixture", "missing");
+		Object.assign(missing, { cost: undefined });
+		const partial = makeModel("fixture", "partial");
+		partial.cost.input = Number.NaN;
+		partial.cost.output = 2;
+		const negativeZero = makeModel("fixture", "negative-zero");
+		negativeZero.cost.input = -1;
+		negativeZero.cost.output = 0;
+		const invalid = makeModel("fixture", "invalid");
+		invalid.cost.input = -1;
+		invalid.cost.output = Number.POSITIVE_INFINITY;
+		const browser = makeBrowser([zero, missing, partial, negativeZero, invalid], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(rows.find(line => line.includes("fixture/zero"))).toContain("free");
+		expect(rows.find(line => line.includes("fixture/missing"))).toContain("free");
+		expect(rows.find(line => line.includes("fixture/partial"))).toContain("$?/2");
+		expect(rows.find(line => line.includes("fixture/negative-zero"))).toContain("$?/0");
+		expect(rows.find(line => line.includes("fixture/invalid"))).toContain("$?/?");
+
+		browser.setQuery("free");
+		const freeRows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(freeRows.some(line => line.includes("fixture/zero"))).toBe(true);
+		expect(freeRows.some(line => line.includes("fixture/negative-zero"))).toBe(false);
+	});
+
+	test.each([
+		[-1, 0, "$?/0"],
+		[0, -1, "$0/?"],
+		[-1, -2, "$?/?"],
+	] as const)("renders invalid rates %s/%s with per-leg markers", (input, output, expected) => {
+		const model = makeModel("demo", "invalid-rate");
+		model.cost.input = input;
+		model.cost.output = output;
+		const browser = makeBrowser([model], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		expect(rows.find(line => line.includes("demo/invalid-rate"))).toContain(expected);
+		expect(renderDetail(model)).toContain(`${expected} per M`);
+		browser.setQuery("free");
+		expect(browser.visibleCount).toBe(0);
+	});
+
+	test("price formatting preserves integer zeros and positive sub-cent rates", () => {
+		const priced = makeModel("fixture", "priced");
+		priced.cost.input = 100;
+		priced.cost.output = 0.001;
+		const tiny = makeModel("fixture", "tiny");
+		tiny.cost.input = 0.0000001;
+		tiny.cost.output = 0.001;
+		const browser = makeBrowser([priced, tiny], []);
+		const rows = browser.render(100).map(line => Bun.stripANSI(line));
+		const listRow = rows.find(line => line.includes("fixture/priced"));
+		const detailRow = rows.find(line => line.includes("$100/0.001 per M"));
+		const tinyRow = rows.find(line => line.includes("fixture/tiny"));
+		expect(listRow).toContain("$100/0.001");
+		expect(detailRow).toContain("$100/0.001 per M");
+		expect(tinyRow).toContain("$0.0000001/0.001");
+		expect(rows.every(line => Bun.stringWidth(line) <= 100)).toBe(true);
 	});
 });

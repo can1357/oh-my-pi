@@ -104,6 +104,48 @@ describe("StatusLineComponent effective settings cache", () => {
 		}
 	});
 
+	it("skips the entire segment pipeline until a visible input invalidates it", () => {
+		const session = makeSession();
+		let snapshotCalls = 0;
+		const getSnapshot = session.getAsyncJobSnapshot.bind(session);
+		session.getAsyncJobSnapshot = () => {
+			snapshotCalls++;
+			return getSnapshot();
+		};
+		const component = statusLines.track(new StatusLineComponent(session));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["model", "mode"],
+			rightSegments: ["session_name"],
+			sessionAccent: false,
+		});
+
+		const first = component.getTopBorder(120);
+		const second = component.getTopBorder(120);
+		expect(second).toEqual(first);
+		expect(snapshotCalls).toBe(1);
+
+		component.invalidate();
+		component.getTopBorder(120);
+		expect(snapshotCalls).toBe(2);
+
+		component.setPlanModeStatus({ enabled: true, paused: false });
+		const withPlan = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(withPlan).toContain("Plan");
+		expect(snapshotCalls).toBe(3);
+
+		const mutableModel = session.state.model as { name: string };
+		mutableModel.name = "Renamed Model";
+		const withModel = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(withModel).toContain("Renamed Model");
+		expect(snapshotCalls).toBe(4);
+
+		const mutableMessages = session.messages as unknown[];
+		mutableMessages.push({ role: "user", content: "new tail" });
+		component.getTopBorder(120);
+		expect(snapshotCalls).toBe(5);
+	});
+
 	it("invalidates on updateSettings and reflects hook visibility changes", () => {
 		const component = makeComponent({
 			preset: "custom",
@@ -162,6 +204,24 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(customComponent.getEffectiveSettingsForTest().leftSegments).toEqual([]);
 		expect(customComponent.getEffectiveSettingsForTest().rightSegments).toEqual([]);
 		expect(customComponent.getTopBorder(120)).toEqual({ content: "", width: 0, revision: 0 });
+	});
+
+	it("renders custom preset defaults when segment arrays are unconfigured", () => {
+		Settings.instance.override("statusLine.preset", "custom");
+		const component = makeComponent({
+			preset: Settings.instance.get("statusLine.preset"),
+			leftSegments: Settings.instance.get("statusLine.leftSegments"),
+			rightSegments: Settings.instance.get("statusLine.rightSegments"),
+			sessionAccent: false,
+		});
+
+		const effective = component.getEffectiveSettingsForTest();
+		expect(effective.leftSegments).toEqual(STATUS_LINE_PRESETS.custom.leftSegments);
+		expect(effective.rightSegments).toEqual(STATUS_LINE_PRESETS.custom.rightSegments);
+
+		const content = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(content).toContain("Test Model");
+		expect(content).toContain("Cache Session");
 	});
 
 	it("surfaces active subagents even when custom segments omit subagents", () => {

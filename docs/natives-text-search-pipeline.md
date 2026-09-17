@@ -175,6 +175,7 @@ Configuration is read from environment once:
 - `FS_SCAN_CACHE_TTL_MS`: cache TTL, default `1000`.
 - `FS_SCAN_EMPTY_RECHECK_MS`: cached-empty recheck age, default `200`.
 - `FS_SCAN_CACHE_MAX_ENTRIES`: maximum entries in the cache map, default `16`.
+- `FS_SCAN_CACHE_MAX_BYTES`: maximum retained vector and path-string allocation bytes, default `67108864` (64 MiB).
 - `PI_WALK_WORKERS`: walker Rayon pool size, default `4`.
 
 ### Cache state transitions

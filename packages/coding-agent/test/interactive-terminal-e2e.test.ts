@@ -288,8 +288,8 @@ describe("libkitty end-to-end", () => {
 		void mode.getUserInput();
 		await term.waitForRender();
 
+		// Tool visibility is a global input-controller action; it reads the live keybindings.
 		mode.keybindings.setUserBindings({ "app.tools.toggleVisibility": "alt+o" });
-		mode.editor.setActionKeys("app.tools.toggleVisibility", mode.keybindings.getKeys("app.tools.toggleVisibility"));
 		mode.renderSessionContext({
 			messages: [
 				toolCall,

@@ -23,12 +23,19 @@ import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { EvalShadowCellSession } from "../eval/speculation/cell-session";
 import { runWithEvalShadowCell } from "../eval/speculation/runtime-context";
-import type { EvalCellResult, EvalDisplayOutput, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
-import { DEFAULT_MAX_BYTES, OutputSink, type OutputSummary, TailBuffer } from "../session/streaming-output";
+import {
+	DEFAULT_MAX_BYTES,
+	OutputSink,
+	type OutputSummary,
+	TailBuffer,
+	truncateHeadBytes,
+} from "../session/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isIsolationAvailable, resolveSpawnPolicy } from "../task/spawn-policy";
+import { canSpawnAtDepth } from "../task/types";
 import { webpExclusionForModel } from "../utils/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
@@ -36,7 +43,7 @@ import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
 import { generateCodeModeDeclarations } from "./eval-format/code-mode-declarations";
 import { upsertStatusEvent } from "./eval-render";
-import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
+import { formatOutputNotice, resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -130,36 +137,56 @@ export type EvalToolResult = {
 
 export type EvalProxyExecutor = (params: EvalToolParams, signal?: AbortSignal) => Promise<EvalToolResult>;
 
-/** Cap per `display()` value sent back to the model. */
+/** Shared cap for each structured `display()` preview returned by eval. */
 const MAX_DISPLAY_TEXT_BYTES = 8000;
+const DISPLAY_ELISION_RESERVE_BYTES = 64;
 
-function formatDisplayJsonForText(value: unknown): string {
-	let text: string;
-	try {
-		text = JSON.stringify(value, null, 2) ?? String(value);
-	} catch {
-		text = String(value);
-	}
-	if (text.length > MAX_DISPLAY_TEXT_BYTES) {
-		text = `${text.slice(0, MAX_DISPLAY_TEXT_BYTES)}\n[…${text.length - MAX_DISPLAY_TEXT_BYTES}ch elided…]`;
-	}
-	return text;
+interface FormattedDisplayJson {
+	fullText: string;
+	previewText: string;
+	detailsValue: unknown;
+	/** Full value must be mirrored to the output artifact; `detailsValue` holds only a preview. */
+	spillFullValue: boolean;
 }
 
 /**
- * Format display() JSON values into text the model can see. Images are surfaced
- * separately as ImageContent so the model can actually inspect them; this helper
- * intentionally does not touch images.
+ * Format one structured `display()` value for the model text and the tool
+ * `details`. The model-visible preview is always capped at
+ * {@link MAX_DISPLAY_TEXT_BYTES}. When the value exceeds that cap, the full
+ * value is retained in `details` only if `canSpill` is false (no persistence,
+ * so nothing to bloat); otherwise `details` keeps a bounded metadata object and
+ * the caller mirrors the full value to the session output artifact.
  */
-function formatDisplayOutputsForText(outputs: EvalDisplayOutput[]): string {
-	const chunks: string[] = [];
-	let displayIndex = 0;
-	for (const output of outputs) {
-		if (output.type !== "json") continue;
-		displayIndex++;
-		chunks.push(`display[${displayIndex}]:\n${formatDisplayJsonForText(output.data)}`);
+function formatDisplayJson(value: unknown, canSpill: boolean): FormattedDisplayJson {
+	let fullText: string;
+	try {
+		fullText = JSON.stringify(value, null, 2) ?? String(value);
+	} catch {
+		fullText = String(value);
 	}
-	return chunks.join("\n\n");
+	const totalBytes = Buffer.byteLength(fullText, "utf-8");
+	if (totalBytes <= MAX_DISPLAY_TEXT_BYTES) {
+		return { fullText, previewText: fullText, detailsValue: value, spillFullValue: false };
+	}
+
+	const head = truncateHeadBytes(fullText, MAX_DISPLAY_TEXT_BYTES - DISPLAY_ELISION_RESERVE_BYTES);
+	const previewText = `${head.text}\n[…${fullText.length - head.text.length}ch elided…]`;
+	// Without an artifact to mirror into, keep the full value in details: there
+	// is no session JSONL to bloat, and discarding it would strand large
+	// displays from SDK consumers that read `details.jsonOutputs`.
+	if (!canSpill) {
+		return { fullText, previewText, detailsValue: value, spillFullValue: false };
+	}
+	return {
+		fullText,
+		previewText,
+		detailsValue: {
+			preview: previewText,
+			truncated: true,
+			totalBytes,
+		},
+		spillFullValue: true,
+	};
 }
 
 export interface EvalToolDescriptionOptions {
@@ -291,6 +318,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		} else {
 			const backends = resolveEvalBackends(this.session);
 			const sessionSpawns = this.session.getSessionSpawns?.() ?? "*";
+			const depthAllowsSpawning = canSpawnAtDepth(
+				this.session.settings.get("task.maxRecursionDepth") ?? 2,
+				this.session.taskDepth ?? 0,
+			);
 			const preludeDocumentation = getEnabledEvalPreludes(this.session.getEvalPreludes?.() ?? [])
 				.map(definition => definition.documentation.trim())
 				.filter(Boolean)
@@ -298,7 +329,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			base = getEvalToolDescription({
 				py: backends.python,
 				js: backends.js,
-				spawns: sessionSpawns,
+				spawns: depthAllowsSpawning ? sessionSpawns : false,
 				isolationEnabled: isIsolationAvailable(this.session, this.session.getPlanModeState?.()?.enabled === true),
 				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
 				evalTools: this.session.settings.get("eval.tools.enabled"),
@@ -468,8 +499,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const sessionAbortController = new AbortController();
 		const emitToolUpdate = onUpdate
 			? (text: string, details: EvalToolDetails): void => {
-					onUpdate({ content: [{ type: "text", text }], details });
-				}
+				onUpdate({ content: [{ type: "text", text }], details });
+			}
 			: undefined;
 		const run = async (
 			runSignal: AbortSignal | undefined,
@@ -549,7 +580,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						void reportProgress(text, { async: { state: "running", jobId, type: "eval" } });
 						if (forwardUpdates) emitToolUpdate?.(text, details);
 					});
-					const finalText = result.content.find(block => block.type === "text")?.text ?? "";
+					const finalText =
+						(result.content.find(block => block.type === "text")?.text ?? "") +
+						formatOutputNotice(result.details?.meta);
 					latestText = finalText;
 					latestDetails = result.details;
 					// Hand the full result (images included) to the foreground waiter
@@ -691,6 +724,25 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			const jsonOutputs: unknown[] = [];
 			const images: ImageContent[] = [];
 			const statusEvents: EvalStatusEvent[] = [];
+			// Oversized displays land in `jsonOutputs` as bounded previews and stream
+			// their full value to the output artifact. Until the artifact write is
+			// confirmed (see `commitDisplaySpills`), the full value is kept here so a
+			// silently failed spill can restore it instead of stranding it.
+			const spilledDisplays: Array<{ index: number; fullValue: unknown }> = [];
+			const commitDisplaySpills = (summary: OutputSummary | undefined): void => {
+				if (spilledDisplays.length === 0) return;
+				// Artifact persistence confirmed: keep the bounded preview. Otherwise
+				// restore the full value so `details` never points at an artifact that
+				// was never (fully) written.
+				if (summary?.artifactId !== undefined) {
+					spilledDisplays.length = 0;
+					return;
+				}
+				for (const spill of spilledDisplays) {
+					jsonOutputs[spill.index] = spill.fullValue;
+				}
+				spilledDisplays.length = 0;
+			};
 
 			const cellResults: EvalCellResult[] = cells.map(cell => ({
 				index: cell.index,
@@ -830,13 +882,22 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const durationMs = Date.now() - startTime;
 
 				const cellStatusEvents: EvalStatusEvent[] = [];
-				const cellDisplayOutputs: EvalDisplayOutput[] = [];
+				const cellDisplayTexts: string[] = [];
 				const cellImageNotes: string[] = [];
 				let cellHasMarkdown = false;
 				for (const output of result.displayOutputs) {
 					if (output.type === "json") {
-						jsonOutputs.push(output.data);
-						cellDisplayOutputs.push(output);
+						const formatted = formatDisplayJson(output.data, artifactPath !== undefined);
+						const label = `display[${cellDisplayTexts.length + 1}]:\n`;
+						jsonOutputs.push(formatted.detailsValue);
+						cellDisplayTexts.push(`${label}${formatted.previewText}`);
+						if (formatted.spillFullValue) {
+							spilledDisplays.push({ index: jsonOutputs.length - 1, fullValue: output.data });
+							outputSink.push(`${label}${formatted.fullText}\n`, {
+								inline: `${label}${formatted.previewText}\n`,
+								emitInline: false,
+							});
+						}
 					}
 					if (output.type === "image") {
 						const resized = await resizeImage(
@@ -853,11 +914,6 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							mimeType: resized.mimeType,
 						};
 						images.push(image);
-						cellDisplayOutputs.push({
-							type: "image",
-							data: image.data,
-							mimeType: image.mimeType,
-						});
 						const dimensionNote = formatDimensionNote(resized);
 						if (dimensionNote) {
 							cellImageNotes.push(`display image ${cellImageNotes.length + 1}: ${dimensionNote}`);
@@ -874,7 +930,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 
 				const stdoutTrimmed = result.output.trim();
 				const imageText = cellImageNotes.join("\n");
-				const displayText = formatDisplayOutputsForText(cellDisplayOutputs);
+				const displayText = cellDisplayTexts.join("\n\n");
 				const visibleDisplayText =
 					displayText && imageText ? `${displayText}\n\n${imageText}` : displayText || imageText;
 				const cellOutput =
@@ -900,6 +956,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					const outputText = combinedOutput || errorMsg;
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+					commitDisplaySpills(summaryForMeta);
 					const details: EvalToolDetails = {
 						language: languages[0],
 						languages,
@@ -926,6 +983,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						: `Command exited with code ${result.exitCode}`;
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+					commitDisplaySpills(summaryForMeta);
 					const details: EvalToolDetails = {
 						language: languages[0],
 						languages,
@@ -955,6 +1013,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					? `(displayed ${images.length} image${images.length === 1 ? "" : "s"}; no text output)`
 					: "(no output)");
 			const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
+			commitDisplaySpills(summaryForMeta);
 
 			const details: EvalToolDetails = {
 				language: languages[0],
@@ -973,7 +1032,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			if (!outputDumped) {
 				try {
 					await finalizeOutput();
-				} catch {}
+				} catch { }
 			}
 		}
 	}
@@ -1003,6 +1062,7 @@ async function summarizeFinal(
 		outputLines,
 		outputBytes,
 		artifactId: rawSummary.artifactId,
+		artifactError: rawSummary.artifactError,
 		columnDroppedBytes: rawSummary.columnDroppedBytes,
 		columnTruncatedLines: rawSummary.columnTruncatedLines,
 		columnMax: rawSummary.columnMax,

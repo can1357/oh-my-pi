@@ -948,7 +948,7 @@ export class VibeSessionRegistry {
 		if (record.turn) {
 			const live = registered?.session;
 			if (live?.isStreaming) {
-				await live.steer(message);
+				await live.steer(message, undefined, { attribution: "agent" });
 				record.lastActivityAt = Date.now();
 				return { id: record.id, mode: "steered" };
 			}

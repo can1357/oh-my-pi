@@ -16,6 +16,7 @@ import {
 	shouldRenderAbortReason,
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
+import { formatArtifactErrorNotice, type OutputMeta } from "../../tools/output-meta";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { ToolActivityContainer } from "../components/tool-activity";
@@ -37,7 +38,8 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 			type?: AsyncJobType;
 			label?: string;
 			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: AsyncJobType; label?: string; durationMs?: number }>;
+			jobs?: Array<{ jobId?: string; type?: AsyncJobType; label?: string; durationMs?: number; meta?: OutputMeta }>;
+			meta?: OutputMeta;
 		}>
 	).details;
 	const jobs =
@@ -65,6 +67,12 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 			.filter(Boolean)
 			.join(" ");
 		block.addChild(new Text(line, 1, 0));
+		if (job.meta?.artifactError) {
+			block.addChild(new Text(theme.fg("warning", formatArtifactErrorNotice(job.meta.artifactError)), 1, 0));
+		}
+	}
+	if (details?.meta?.artifactError) {
+		block.addChild(new Text(theme.fg("warning", formatArtifactErrorNotice(details.meta.artifactError)), 1, 0));
 	}
 	return new ToolActivityContainer(block);
 }

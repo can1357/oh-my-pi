@@ -391,6 +391,7 @@ export class SessionStatsTracker {
 		this.#host.modelRegistry.authStorage.ingestUsageHeaders(provider, response.headers, {
 			sessionId: this.#host.agent.sessionId,
 			baseUrl: this.#host.modelRegistry.getProviderBaseUrl?.(provider),
+			responseStatus: response.status,
 		});
 	}
 }

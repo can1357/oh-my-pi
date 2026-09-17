@@ -93,6 +93,110 @@ async function createClaudeFixture(): Promise<{ info: ForeignSessionInfo; store:
 }
 
 describe("ClaudeSessionStore", () => {
+	it("lists an unindexed session at the cwd its transcript recorded", async () => {
+		const root = path.join(tempRoot, ".claude");
+		const cwd = path.join(tempRoot, "my-project.dir");
+		const id = "33333333-3333-4333-8333-333333333333";
+		// No history entry, and a directory name whose "-" separators are ambiguous.
+		await writeJsonl(path.join(root, "projects", cwd.replace(/[/\\._]/g, "-"), `${id}.jsonl`), [
+			{ type: "file-history-snapshot", timestamp: "2026-01-01T00:00:00.000Z" },
+			{
+				type: "user",
+				uuid: "u",
+				parentUuid: null,
+				timestamp: "2026-01-01T00:00:01.000Z",
+				cwd,
+				message: { content: "." },
+			},
+		]);
+
+		const info = (await new ClaudeSessionStore(root).list()).find(item => item.id === id);
+		expect(info?.cwd).toBe(cwd);
+	});
+
+	it("bounds cwd discovery to the transcript prefix before using the encoded fallback", async () => {
+		const root = path.join(tempRoot, ".claude");
+		const cwd = path.join(tempRoot, "late-project.dir");
+		const encoded = cwd.replace(/[/\\._]/g, "-");
+		const id = "55555555-5555-4555-8555-555555555555";
+		await writeJsonl(path.join(root, "projects", encoded, `${id}.jsonl`), [
+			{ type: "file-history-snapshot", snapshot: "x".repeat(128 * 1024) },
+			{ type: "user", cwd, message: { content: "." } },
+		]);
+
+		const info = (await new ClaudeSessionStore(root).list()).find(item => item.id === id);
+		expect(info?.cwd).toBe(encoded.replaceAll("-", path.sep));
+	});
+
+	it("prefers the history index cwd over the transcript's", async () => {
+		const root = path.join(tempRoot, ".claude");
+		const indexedCwd = path.join(tempRoot, "indexed-project");
+		const id = "44444444-4444-4444-8444-444444444444";
+		await writeJsonl(path.join(root, "history.jsonl"), [
+			{ sessionId: id, timestamp: 1_767_225_600_000, display: ".", project: indexedCwd },
+		]);
+		await writeJsonl(path.join(root, "projects", indexedCwd.replaceAll(path.sep, "-"), `${id}.jsonl`), [
+			{
+				type: "user",
+				uuid: "u",
+				parentUuid: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: path.join(tempRoot, "somewhere-else"),
+				message: { content: "." },
+			},
+		]);
+
+		const info = (await new ClaudeSessionStore(root).list()).find(item => item.id === id);
+		expect(info?.cwd).toBe(indexedCwd);
+	});
+
+	it("imports an API error as a failed turn", async () => {
+		const root = path.join(tempRoot, ".claude");
+		const cwd = path.join(tempRoot, "overloaded");
+		const id = "22222222-2222-4222-8222-222222222222";
+		await writeJsonl(path.join(root, "history.jsonl"), [
+			{ sessionId: id, timestamp: 1_767_225_600_000, display: ".", project: cwd },
+		]);
+		await writeJsonl(path.join(root, "projects", cwd.replaceAll(path.sep, "-"), `${id}.jsonl`), [
+			{
+				type: "user",
+				uuid: "u",
+				parentUuid: null,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd,
+				message: { content: "." },
+			},
+			{
+				type: "assistant",
+				uuid: "a",
+				parentUuid: "u",
+				timestamp: "2026-01-01T00:00:01.000Z",
+				isApiErrorMessage: true,
+				apiErrorStatus: 529,
+				error: "server_error",
+				// Claude Code stamps a completed stop_reason on the record even
+				// though nothing was answered.
+				message: {
+					id: "msg_err",
+					model: "claude-sonnet-4-5",
+					stop_reason: "stop_sequence",
+					content: [{ type: "text", text: "API Error: 529 Overloaded." }],
+				},
+			},
+		]);
+		const store = new ClaudeSessionStore(root);
+		const info = (await store.list())[0];
+		if (!info) throw new Error("Overloaded fixture was not listed");
+		const manager = await store.load(info);
+
+		const assistant = manager.getEntries().find(e => e.type === "message" && e.message.role === "assistant");
+		if (assistant?.type !== "message" || assistant.message.role !== "assistant") {
+			throw new Error("Missing imported assistant");
+		}
+		expect(assistant.message.stopReason).toBe("error");
+		expect(assistant.message.errorStatus).toBe(529);
+	});
+
 	it("uses current history metadata and converts linked messages in memory", async () => {
 		const { info, store } = await createClaudeFixture();
 

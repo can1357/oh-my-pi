@@ -6,18 +6,12 @@ import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 import { once } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../eval/js/tool-bridge";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
-import computerDescription from "../prompts/tools/computer.md" with { type: "text" };
 import { enforceInlineByteCap } from "../session/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
 import type { ComputerScreenshot, ComputerSessionSnapshot } from "./computer/protocol";
-// @ts-expect-error Bun imports this declaration source as text instead of a TypeScript module.
-import computerCodeModeDeclarations from "./computer/declarations.d.ts" with { type: "text" };
-// @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
-import computerJavascript from "./computer/prelude.js" with { type: "text" };
-import computerPython from "./computer/prelude.py" with { type: "text" };
 import { type ComputerController, ComputerSupervisor, registerComputerController } from "./computer/supervisor";
 import type { ToolSession } from "./index";
-import { renderFunctionRun } from "./run-code";
+import { renderCallChain, renderFunctionRun } from "./run-code";
 import { ToolError, throwIfAborted } from "./tool-errors";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -121,6 +115,9 @@ export function createComputerPrelude(
 ): EvalPreludeDefinition {
 	const controller = createController(session);
 	const unregisterOwner = registerComputerController(session.getEvalKernelOwnerId?.() ?? undefined, controller);
+	// Eval-first-use boundary: source/declaration assets stay unloaded until a
+	// JavaScript or Python kernel actually asks for its enabled preludes.
+	const { computerPreludeAssets } = require("./computer/prelude-definition");
 	let closed = false;
 	const lifetime: ComputerLifetime = {
 		isClosed: () => closed,
@@ -134,11 +131,11 @@ export function createComputerPrelude(
 
 	return {
 		name: "computer",
-		documentation: computerDescription,
-		javascript: computerJavascript,
-		python: computerPython,
+		documentation: computerPreludeAssets.documentation,
+		javascript: computerPreludeAssets.javascript,
+		python: computerPreludeAssets.python,
 		exports: ["computer"],
-		codeModeDeclarations: computerCodeModeDeclarations,
+		codeModeDeclarations: computerPreludeAssets.codeModeDeclarations,
 		approval: computerApproval,
 		enabled: () => session.settings.get("computer.enabled") === true,
 		invoke: async (parameters, context) => {
@@ -148,7 +145,23 @@ export function createComputerPrelude(
 			}
 			return await invokeComputer(session, controller, parsed, context, lifetime);
 		},
+		status: describeComputerCall,
 	};
+}
+
+/** Status-tree line for a completed computer call: `desktop.window(3).focus()`, `run(fn)`, `close`. */
+function describeComputerCall(parameters: unknown): string | undefined {
+	const parsed = getComputerParamsSchema()(parameters);
+	if (parsed instanceof type.errors) return undefined;
+	switch (parsed.action) {
+		case "call":
+			return `desktop.${renderCallChain(parsed.chain)}`;
+		case "run":
+			return `run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
+		case "capabilities":
+		case "close":
+			return parsed.action;
+	}
 }
 
 interface ComputerLifetime {
@@ -171,7 +184,9 @@ async function invokeComputer(
 			if (lifetime.isClosed()) throw new ToolError("Computer session is closed");
 			return await runComputer(session, controller, params, context.signal);
 		case "capabilities": {
-			const capabilities = lifetime.isClosed() ? undefined : await controller.capabilities();
+			const capabilities = lifetime.isClosed()
+				? undefined
+				: await controller.capabilities(buildComputerSnapshot(session, true), context.signal);
 			throwIfAborted(context.signal);
 			return {
 				content: [
@@ -208,20 +223,12 @@ function resolveComputerRunCode(params: ComputerRunParams | ComputerCallParams):
 	throw new ToolError("Action 'run' requires exactly one of 'code' or 'fn'.");
 }
 
-async function runComputer(
-	session: ToolSession,
-	controller: ComputerController,
-	params: ComputerRunParams | ComputerCallParams,
-	signal?: AbortSignal,
-): Promise<AgentToolResult<unknown>> {
-	const code = resolveComputerRunCode(params);
-	// Direct inspection calls run read-only so the desktop guard backs the read approval tier.
-	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
-	const timeoutSeconds = clampTimeout("computer", params.timeout, session.settings.get("tools.maxTimeout"));
+/** Freezes the current session settings into the snapshot every worker command carries. */
+function buildComputerSnapshot(session: ToolSession, readOnly: boolean): ComputerSessionSnapshot {
 	const coordinateSafe = usesCoordinateSafeImageSizing(session.getActiveModel?.());
 	const configuredMaxWidth = session.settings.get("computer.maxWidth");
 	const configuredMaxHeight = session.settings.get("computer.maxHeight");
-	const snapshot: ComputerSessionSnapshot = {
+	return {
 		cwd: session.cwd,
 		sessionId: session.getEvalSessionId?.() ?? session.getSessionId?.() ?? "computer",
 		captureMaxWidth: coordinateSafe
@@ -233,6 +240,19 @@ async function runComputer(
 		display: session.settings.get("computer.display") ?? "all",
 		readOnly,
 	};
+}
+
+async function runComputer(
+	session: ToolSession,
+	controller: ComputerController,
+	params: ComputerRunParams | ComputerCallParams,
+	signal?: AbortSignal,
+): Promise<AgentToolResult<unknown>> {
+	const code = resolveComputerRunCode(params);
+	// Direct inspection calls run read-only so the desktop guard backs the read approval tier.
+	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
+	const timeoutSeconds = clampTimeout("computer", params.timeout, session.settings.get("tools.maxTimeout"));
+	const snapshot = buildComputerSnapshot(session, readOnly);
 	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal);
 	throwIfAborted(signal);
 

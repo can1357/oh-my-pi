@@ -6,6 +6,12 @@ import { parseStreamingJson } from "./json-parse";
 const LF = 0x0a;
 const CR = 0x0d;
 
+/**
+ * Split a byte stream on LF boundaries.
+ *
+ * Every yielded line owns its bytes and remains unchanged after the generator
+ * advances or drains. Line terminators are excluded.
+ */
 export async function* readLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<Uint8Array> {
 	const buffer = new ConcatSink();
 	const source = abortableSource(stream, signal);
@@ -57,11 +63,16 @@ export async function* readJsonl<T>(stream: ReadableStream<Uint8Array>, signal?:
 	}
 }
 
-// =============================================================================
-// SSE (Server-Sent Events)
-// =============================================================================
-
-class ConcatSink {
+/**
+ * Amortized byte accumulator for chunked stream readers.
+ *
+ * Holds the unconsumed tail of a stream in a single growing `Buffer` so that
+ * appending N chunks costs O(total bytes) instead of re-copying the whole
+ * prefix per chunk. Backs {@link readLines}, {@link readJsonl} and
+ * {@link readSseEvents}; also usable directly when a reader needs its own
+ * framing loop (see `consume` and `flush`).
+ */
+export class ConcatSink {
 	#space?: Buffer;
 	#length = 0;
 	#skipLeadingLf = false;
@@ -102,16 +113,37 @@ class ConcatSink {
 		return this.#length === 0;
 	}
 
+	/**
+	 * The buffered bytes as a live view — invalidated by the next `append`,
+	 * `reset` or `consume`.
+	 */
 	flush(): Uint8Array | undefined {
 		if (!this.#length) return undefined;
 		return this.#space!.subarray(0, this.#length);
+	}
+
+	/** Drop the first `count` buffered bytes, keeping the remainder. */
+	consume(count: number) {
+		if (count <= 0) return;
+		if (count >= this.#length) {
+			this.#length = 0;
+			return;
+		}
+		this.#space!.copyWithin(0, count, this.#length);
+		this.#length -= count;
 	}
 
 	clear() {
 		this.#length = 0;
 	}
 
-	*appendAndFlushLines(chunk: Uint8Array) {
+	/**
+	 * Append a chunk and yield each complete LF-delimited line.
+	 *
+	 * Yielded lines are owned snapshots. Unlike {@link flush}, they remain
+	 * valid after this sink or the input chunk is mutated.
+	 */
+	*appendAndFlushLines(chunk: Uint8Array): Generator<Uint8Array> {
 		let pos = 0;
 		while (pos < chunk.length) {
 			const nl = chunk.indexOf(LF, pos);
@@ -122,12 +154,12 @@ class ConcatSink {
 			const suffix = chunk.subarray(pos, nl);
 			pos = nl + 1;
 			if (this.isEmpty) {
-				yield suffix;
+				yield new Uint8Array(suffix);
 			} else {
 				this.append(suffix);
 				const payload = this.flush();
 				if (payload) {
-					yield payload;
+					yield new Uint8Array(payload);
 					this.clear();
 				}
 			}
@@ -207,6 +239,10 @@ class ConcatSink {
 	}
 }
 
+// =============================================================================
+// SSE (Server-Sent Events)
+// =============================================================================
+
 /**
  * Stream parsed JSON objects from SSE `data:` lines.
  *
@@ -246,11 +282,24 @@ function isRecoverableTrailingJson(data: string): boolean {
 	return typeof recovered === "object" && recovered !== null;
 }
 
-export async function* readSseJson<T>(
+/**
+ * One dispatched `data:` frame from {@link readSseFrames}: either the parsed JSON
+ * value, or the text of a frame `JSON.parse` rejected together with the
+ * `SyntaxError` it raised (so the strict reader can rethrow it unchanged).
+ */
+type SseFrame<T> = { ok: true; value: T } | { ok: false; raw: string; error: SyntaxError };
+
+/**
+ * Shared `data:`-line framing for {@link readSseJson} and
+ * {@link readSseJsonOrText}: skips empty events, stops at the OpenAI `[DONE]`
+ * sentinel, notifies the diagnostic observer, and treats a container-shaped
+ * stream tail as a clean end of iteration.
+ */
+async function* readSseFrames<T>(
 	stream: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
 	onEvent?: SseEventObserver,
-): AsyncGenerator<T> {
+): AsyncGenerator<SseFrame<T>> {
 	for await (const sse of readSseEvents(stream, signal)) {
 		const isTrailing = trailingEvents.has(sse);
 		notifySseEventObserver(onEvent, sse);
@@ -260,13 +309,57 @@ export async function* readSseJson<T>(
 			continue;
 		}
 		try {
-			yield JSON.parse(data) as T;
+			yield { ok: true, value: JSON.parse(data) as T };
 		} catch (err) {
 			if (err instanceof SyntaxError && isTrailing && isRecoverableTrailingJson(data)) {
 				return;
 			}
+			if (err instanceof SyntaxError) {
+				yield { ok: false, raw: data, error: err };
+				continue;
+			}
 			throw err;
 		}
+	}
+}
+
+export async function* readSseJson<T>(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	onEvent?: SseEventObserver,
+): AsyncGenerator<T> {
+	for await (const frame of readSseFrames<T>(stream, signal, onEvent)) {
+		if (!frame.ok) throw frame.error;
+		yield frame.value;
+	}
+}
+
+/**
+ * Like {@link readSseJson}, but a `data:` frame that is not valid JSON is yielded
+ * as its raw text instead of raising a `SyntaxError`. Cut-off container-shaped
+ * stream tails stay recoverable, exactly as they are in {@link readSseJson}.
+ *
+ * Consumers that only understand objects must treat a `string` yield as a
+ * transport-level failure (for example a `429 Too Many Requests` or an HTML
+ * throttle page from a reverse proxy that already committed to the stream). This
+ * exists because `readSseJson`'s baseline consumers span unrelated transports
+ * whose error handling a text yield would subtly change; new call sites opt in.
+ *
+ * Note that the text lane is only the frames `JSON.parse` *rejected*: a frame
+ * carrying a JSON-encoded string (`data: "429 Too Many Requests"`) parses, so it
+ * is yielded as that string and is indistinguishable from a rejected frame by
+ * type alone. Consumers branching on `typeof === "string"` therefore see both,
+ * which is the safe direction — each is classified as text rather than trusted as
+ * an event object.
+ */
+export async function* readSseJsonOrText<T>(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	onEvent?: SseEventObserver,
+): AsyncGenerator<T | string> {
+	for await (const frame of readSseFrames<T>(stream, signal, onEvent)) {
+		if (!frame.ok) yield frame.raw;
+		else yield frame.value;
 	}
 }
 
