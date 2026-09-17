@@ -7953,10 +7953,13 @@ export class AgentSession {
 		const armed = shouldRunSkillSuggestion(this.settings, this.modelRegistry);
 		const n = this.skills.filter(skill => !skill.hide).length;
 		const last = this.#lastSkillSuggestion;
+		const rerank = this.settings.get("skills.suggestion.rerank");
 		const lastBit = last
-			? ` last=${last.suggestion.name} gate=${last.suggestion.gate.toFixed(2)} ${last.elapsedMs}ms`
+			? ` last=${last.suggestion.name} gate=${last.suggestion.gate.toFixed(2)}${
+					last.suggestion.fits !== undefined ? ` fits=${last.suggestion.fits.toFixed(2)}` : ""
+				}${last.suggestion.reranked ? " rerank" : ""} ${last.elapsedMs}ms`
 			: "";
-		return `Skill suggestion: ${mode}${armed ? " (TypeSafe)" : " (idle)"}; ${n} visible skills.${lastBit}`;
+		return `Skill suggestion: ${mode}, rerank=${rerank}${armed ? " (TypeSafe)" : " (idle)"}; ${n} visible skills.${lastBit}`;
 	}
 
 	async #applySkillSuggestionForTurn(promptText: string, generation: number): Promise<void> {

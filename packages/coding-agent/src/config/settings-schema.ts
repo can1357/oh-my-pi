@@ -5336,6 +5336,36 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"skills.suggestion.rerank": {
+		type: "enum",
+		values: ["auto", "always", "off"] as const,
+		default: "auto",
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skill Suggestion Rerank",
+			description:
+				"Cookbook call 2: rerank the top three skills with SKILL.md excerpts and per-candidate fits nouls. Auto runs on large rosters or lookalike collisions; off keeps call 1 only.",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Rerank when the roster is large or the top two choices are close (default)",
+				},
+				{
+					value: "always",
+					label: "Always",
+					description: "Always run call 2 after call 1 passes the gate",
+				},
+				{
+					value: "off",
+					label: "Off",
+					description: "Call 1 only",
+				},
+			],
+		},
+	},
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -6366,6 +6396,7 @@ export interface SkillsSettings {
 	includeSkills?: string[];
 	disabledExtensions?: string[];
 	suggestion?: "auto" | "typesafe" | "off";
+	suggestionRerank?: "auto" | "always" | "off";
 }
 
 /** Conventional commit generation and changelog limits. */

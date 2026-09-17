@@ -2,19 +2,31 @@ import { describe, expect, it } from "bun:test";
 import type { Judge, JudgmentRequest, JudgmentResult, Questions } from "@oh-my-pi/pi-ai/judgment";
 import { shouldRunSkillSuggestion } from "../src/skills/policy";
 import {
+	FITS_THRESHOLD,
 	GATE_THRESHOLD,
 	gateMean,
+	shouldRerank,
 	skillRelevanceBlock,
 	suggestSkill,
 	systemPromptAlreadyHasSkillRelevance,
 	visibleSkillsForSuggestion,
 } from "../src/skills/suggest";
 
-function fakeJudge(answers: Record<string, unknown>, opts: { throw?: Error; model?: string } = {}): Judge {
+function fakeJudge(
+	answersByStage: Record<string, Record<string, unknown>> | Record<string, unknown>,
+	opts: { throw?: Error; model?: string } = {},
+): Judge {
+	let calls = 0;
 	return {
 		label: "fake/jev-test",
 		async judge<Q extends Questions>(_request: JudgmentRequest<Q>): Promise<JudgmentResult<Q>> {
 			if (opts.throw) throw opts.throw;
+			calls += 1;
+			const answers =
+				"which" in answersByStage
+					? (answersByStage as Record<string, unknown>)
+					: ((answersByStage as Record<string, Record<string, unknown>>)[calls === 1 ? "wide" : "rerank"] ??
+						{});
 			return {
 				api: "typesafe",
 				provider: "typesafe",
@@ -40,11 +52,17 @@ const roster = [
 ];
 
 function gatedAnswers(choice: string, gates: { act: number; proc: number; prose: number }) {
+	const probabilities: Record<string, number> = {
+		"systematic-debugging": 0.1,
+		"agent-reach": 0.1,
+		"typesafe-jev": 0.1,
+	};
+	probabilities[choice] = 0.8;
 	return {
 		which: {
 			type: "choice",
 			choice,
-			probabilities: { [choice]: 0.8, "systematic-debugging": 0.1, "agent-reach": 0.1 },
+			probabilities,
 			confidence: 0.7,
 		},
 		"gate::acts_on_user_system": { type: "noul", noul: gates.act },
@@ -125,6 +143,92 @@ describe("suggestSkill", () => {
 				judge: fakeJudge({}, { throw: new Error("boom") }),
 			}),
 		).rejects.toThrow("boom");
+	});
+
+	it("reranks lookalikes in auto mode and returns the stage-2 winner", async () => {
+		const suggestion = await suggestSkill({
+			prompt: "build a pitch deck as a pptx",
+			skills: roster,
+			rerank: "auto",
+			judge: fakeJudge({
+				wide: {
+					which: {
+						type: "choice",
+						choice: "systematic-debugging",
+						probabilities: {
+							"systematic-debugging": 0.42,
+							"typesafe-jev": 0.38,
+							"agent-reach": 0.2,
+						},
+						confidence: 0.4,
+					},
+					"gate::acts_on_user_system": { type: "noul", noul: 0.9 },
+					"gate::would_follow_documented_procedure": { type: "noul", noul: 0.8 },
+					"gate::prose_suffices": { type: "noul", noul: 0.1 },
+				},
+				rerank: {
+					which: {
+						type: "choice",
+						choice: "typesafe-jev",
+						probabilities: { "typesafe-jev": 0.7, "systematic-debugging": 0.2, "agent-reach": 0.1 },
+						confidence: 0.6,
+					},
+					"fits::typesafe-jev": { type: "noul", noul: 0.55 },
+					"fits::systematic-debugging": { type: "noul", noul: 0.45 },
+					"fits::agent-reach": { type: "noul", noul: 0.05 },
+				},
+			}),
+		});
+		expect(suggestion?.name).toBe("typesafe-jev");
+		expect(suggestion?.reranked).toBe(true);
+		expect(suggestion?.fits).toBeGreaterThanOrEqual(FITS_THRESHOLD);
+	});
+
+	it("stays quiet when rerank fits fall below the threshold", async () => {
+		const suggestion = await suggestSkill({
+			prompt: "build a pitch deck as a pptx",
+			skills: roster,
+			rerank: "always",
+			judge: fakeJudge({
+				wide: gatedAnswers("agent-reach", { act: 0.9, proc: 0.8, prose: 0.1 }),
+				rerank: {
+					which: {
+						type: "choice",
+						choice: "agent-reach",
+						probabilities: { "agent-reach": 0.7 },
+						confidence: 0.6,
+					},
+					"fits::agent-reach": { type: "noul", noul: 0.1 },
+				},
+			}),
+		});
+		expect(suggestion).toBeNull();
+	});
+});
+
+describe("shouldRerank", () => {
+	it("auto skips rerank when call 1 is already high confidence", () => {
+		expect(
+			shouldRerank({
+				mode: "auto",
+				rosterSize: 40,
+				gate: 0.8,
+				topProbability: 0.85,
+				probabilities: { a: 0.85, b: 0.1 },
+			}),
+		).toBe(false);
+	});
+
+	it("auto reranks when the top two probabilities are close", () => {
+		expect(
+			shouldRerank({
+				mode: "auto",
+				rosterSize: 40,
+				gate: 0.5,
+				topProbability: 0.42,
+				probabilities: { a: 0.42, b: 0.38, c: 0.2 },
+			}),
+		).toBe(true);
 	});
 });
 
