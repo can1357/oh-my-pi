@@ -545,6 +545,14 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return;
 		}
+		// Relay-private busy signal: the omp tab worker toggles this while it
+		// actively drives the tab, so the extension can flag the tab's group.
+		// Never forwarded — real Chrome rejects the unknown method.
+		if (msg.method === "OMP.setBusy") {
+			void this.#rpc({ op: "setBusy", tabId, busy: msg.params?.busy === true }).catch(() => {});
+			this.#reply(conn, msg, {});
+			return;
+		}
 		try {
 			const result = await this.#rpc({
 				op: "send",

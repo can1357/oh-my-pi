@@ -50,6 +50,8 @@ function snapshot(tab: ChromeTab): TabSnapshot | null {
 
 /** Title of the omp tab group; mirrored to session storage so a restarted service worker can still dissolve it. */
 let ompGroupTitle: string | null = null;
+/** Tabs currently marked busy per group id, so the "⏳" suffix survives multiple concurrently-driven tabs. */
+const busyTabsByGroup = new Map<number, Set<number>>();
 
 /**
  * Serialize group mutations. Chrome's query→group→set-title sequence is not
@@ -109,12 +111,48 @@ async function restoreGroups(): Promise<void> {
 		const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
 		ompGroupTitle = typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle ? stored.ompGroupTitle : null;
 	}
+	busyTabsByGroup.clear();
 	if (!ompGroupTitle) return;
-	const groups = await chrome.tabGroups.query({ title: ompGroupTitle }).catch(() => []);
+	// Query every group and match by title: a currently-busy group carries the
+	// "<title> ⏳" suffix, which an exact-title query would miss.
+	const allGroups = await chrome.tabGroups.query({}).catch(() => []);
+	const groups = allGroups.filter(group => group.title === ompGroupTitle || group.title === `${ompGroupTitle} ⏳`);
 	for (const group of groups) {
 		const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
 		const ids = tabs.map(tab => tab.id).filter(id => id !== undefined);
 		if (ids.length > 0) await chrome.tabs.ungroup(ids).catch(() => {});
+	}
+}
+
+/** Toggle the "⏳" busy suffix on the title of whichever group `tabId` currently belongs to. */
+async function setGroupBusy(tabId: number, busy: boolean): Promise<void> {
+	const tab = await chrome.tabs.get(tabId).catch(() => null);
+	if (!tab || tab.groupId === undefined || tab.groupId < 0) return;
+	const groupId = tab.groupId;
+	let busyTabIds = busyTabsByGroup.get(groupId);
+	if (busy) {
+		if (!busyTabIds) {
+			busyTabIds = new Set();
+			busyTabsByGroup.set(groupId, busyTabIds);
+		}
+		if (busyTabIds.size === 0) await updateGroupBusyTitle(groupId, true);
+		busyTabIds.add(tabId);
+	} else {
+		if (!busyTabIds) return;
+		busyTabIds.delete(tabId);
+		if (busyTabIds.size === 0) {
+			busyTabsByGroup.delete(groupId);
+			await updateGroupBusyTitle(groupId, false);
+		}
+	}
+}
+
+async function updateGroupBusyTitle(groupId: number, busy: boolean): Promise<void> {
+	if (!ompGroupTitle) return;
+	try {
+		await chrome.tabGroups.update(groupId, { title: busy ? `${ompGroupTitle} ⏳` : ompGroupTitle });
+	} catch {
+		// Group may have been dissolved concurrently; ignore.
 	}
 }
 
@@ -191,6 +229,9 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 			return await enqueueGroupOp(() => groupTabs(msg.tabIds, msg.title, msg.color));
 		case "ungroup":
 			await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
+			return {};
+		case "setBusy":
+			await enqueueGroupOp(() => setGroupBusy(msg.tabId, msg.busy));
 			return {};
 	}
 }

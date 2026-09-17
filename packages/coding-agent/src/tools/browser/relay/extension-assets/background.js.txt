@@ -29,6 +29,7 @@ function snapshot(tab) {
   };
 }
 var ompGroupTitle = null;
+var busyTabsByGroup = new Map;
 var groupOps = Promise.resolve();
 function enqueueGroupOp(fn) {
   const result = groupOps.then(fn, fn);
@@ -76,15 +77,48 @@ async function restoreGroups() {
     const stored = await chrome.storage.session.get({ ompGroupTitle: "" }).catch(() => ({ ompGroupTitle: "" }));
     ompGroupTitle = typeof stored.ompGroupTitle === "string" && stored.ompGroupTitle ? stored.ompGroupTitle : null;
   }
+  busyTabsByGroup.clear();
   if (!ompGroupTitle)
     return;
-  const groups = await chrome.tabGroups.query({ title: ompGroupTitle }).catch(() => []);
+  const allGroups = await chrome.tabGroups.query({}).catch(() => []);
+  const groups = allGroups.filter((group) => group.title === ompGroupTitle || group.title === `${ompGroupTitle} ⏳`);
   for (const group of groups) {
     const tabs = await chrome.tabs.query({ groupId: group.id }).catch(() => []);
     const ids = tabs.map((tab) => tab.id).filter((id) => id !== undefined);
     if (ids.length > 0)
       await chrome.tabs.ungroup(ids).catch(() => {});
   }
+}
+async function setGroupBusy(tabId, busy) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || tab.groupId === undefined || tab.groupId < 0)
+    return;
+  const groupId = tab.groupId;
+  let busyTabIds = busyTabsByGroup.get(groupId);
+  if (busy) {
+    if (!busyTabIds) {
+      busyTabIds = new Set;
+      busyTabsByGroup.set(groupId, busyTabIds);
+    }
+    if (busyTabIds.size === 0)
+      await updateGroupBusyTitle(groupId, true);
+    busyTabIds.add(tabId);
+  } else {
+    if (!busyTabIds)
+      return;
+    busyTabIds.delete(tabId);
+    if (busyTabIds.size === 0) {
+      busyTabsByGroup.delete(groupId);
+      await updateGroupBusyTitle(groupId, false);
+    }
+  }
+}
+async function updateGroupBusyTitle(groupId, busy) {
+  if (!ompGroupTitle)
+    return;
+  try {
+    await chrome.tabGroups.update(groupId, { title: busy ? `${ompGroupTitle} ⏳` : ompGroupTitle });
+  } catch {}
 }
 function post(msg) {
   if (ws?.readyState === WebSocket.OPEN)
@@ -154,6 +188,9 @@ async function runRpc(msg) {
       return await enqueueGroupOp(() => groupTabs(msg.tabIds, msg.title, msg.color));
     case "ungroup":
       await enqueueGroupOp(() => chrome.tabs.ungroup(msg.tabIds).catch(() => {}));
+      return {};
+    case "setBusy":
+      await enqueueGroupOp(() => setGroupBusy(msg.tabId, msg.busy));
       return {};
   }
 }
