@@ -47,6 +47,7 @@ export function createGallerySegmentContext(sessionOptions?: GallerySessionOptio
 		goalMode: null,
 		vibeMode: null,
 		vim: null,
+		skillMode: null,
 		collab: { role: "host", participantCount: 3 },
 		usageStats: {
 			input: 12_400,
@@ -111,6 +112,7 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "warning / paused", context: { planMode: { enabled: true, paused: true } } },
 				{ label: "prewalk active", context: { planMode: null, prewalk: { enabled: true } } },
 				{ label: "vibe active", context: { planMode: null, vibeMode: { enabled: true } } },
+				{ label: "skill mode pinned", context: { planMode: null, skillMode: ["poteto-mode"] } },
 				{
 					label: "loop active",
 					context: {

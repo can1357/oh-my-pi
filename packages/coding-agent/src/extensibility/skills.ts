@@ -36,6 +36,10 @@ export interface Skill {
 	 * every `skill://` resource access must realpath-resolve within it.
 	 */
 	containRoot?: string;
+	/** `true` when the skill declares `mode: true` in frontmatter (pinnable mode) */
+	mode?: boolean;
+	/** Reminder text injected into the system prompt while the mode is pinned */
+	reminder?: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
 }
@@ -114,6 +118,8 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			...(capSkill.mode !== undefined && { mode: capSkill.mode }),
+			...(capSkill.reminder !== undefined && { reminder: capSkill.reminder }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		})),
@@ -258,6 +264,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+				...(capSkill.mode !== undefined && { mode: capSkill.mode }),
+				...(capSkill.reminder !== undefined && { reminder: capSkill.reminder }),
 				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 				_source: capSkill._source,
 			});
@@ -296,6 +304,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+					...(capSkill.mode !== undefined && { mode: capSkill.mode }),
+					...(capSkill.reminder !== undefined && { reminder: capSkill.reminder }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
@@ -397,6 +407,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
+			...(capSkill.mode !== undefined && { mode: capSkill.mode }),
+			...(capSkill.reminder !== undefined && { reminder: capSkill.reminder }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
 			_source: capSkill._source,
 		});

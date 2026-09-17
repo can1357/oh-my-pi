@@ -438,6 +438,36 @@ describe("agent-plugins discovery", () => {
 		expect(warned(`unexpected frontmatter field "enabled"`)).toBe(true);
 	});
 
+	test("loads a mode skill with a reminder and exposes both on the Skill", async () => {
+		await writeManifest();
+		await writeSkill(
+			"poteto",
+			["name: poteto", "description: Persona mode", "mode: true", "reminder: Stay terse."].join("\n"),
+		);
+		await writeRegistry(pluginPath);
+
+		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+		const fromPlugin = skills.all.filter(skill => skill._source.provider === "agent-plugins");
+		expect(fromPlugin.map(skill => skill.name)).toEqual(["poteto"]);
+		expect(fromPlugin[0].mode).toBe(true);
+		expect(fromPlugin[0].reminder).toBe("Stay terse.");
+	});
+
+	test("rejects a non-boolean mode and a non-string reminder per skill", async () => {
+		await writeManifest();
+		// `mode: 1` and `reminder: 42` parse as numbers: neither is the
+		// declared type, so each skill is skipped independently.
+		await writeSkill("bad-mode", "name: bad-mode\ndescription: ok\nmode: 1");
+		await writeSkill("bad-reminder", "name: bad-reminder\ndescription: ok\nreminder: 42");
+		await writeRegistry(pluginPath);
+
+		const skills = await loadCapability<Skill>("skills", { cwd: tempDir });
+		expect(skills.all.filter(skill => skill._source.provider === "agent-plugins")).toEqual([]);
+		const warned = (needle: string) => skills.warnings.some(warning => warning.includes(needle));
+		expect(warned(`"mode" must be a boolean`)).toBe(true);
+		expect(warned(`"reminder" must be a string`)).toBe(true);
+	});
+
 	test("rejects an escaping plugin.json symlink without consuming outside content", async () => {
 		// A fully valid Agent Plugins manifest OUTSIDE the package: if the client
 		// read it through the symlink, classification would succeed and the
@@ -583,13 +613,13 @@ describe("agent-plugins discovery", () => {
 		expect(skills.warnings.some(warning => warning.includes(`"commented": missing required "name"`))).toBe(true);
 	});
 
-	test("closes skill frontmatter to the six standard fields", async () => {
+	test("closes skill frontmatter to the eight standard fields", async () => {
 		await writeManifest();
 		// Standard key with a non-string value → non-conforming, skipped.
 		await writeSkill("bad-tools", "name: bad-tools\ndescription: ok\nallowed-tools: 5");
 		// Nonstandard camelCase alias is an unexpected field → skipped (skills-ref).
 		await writeSkill("camel-alias", "name: camel-alias\ndescription: ok\nallowedTools: Read");
-		// All six standard fields together → conforming.
+		// All eight standard fields together → conforming.
 		await writeSkill(
 			"full",
 			[
@@ -597,6 +627,8 @@ describe("agent-plugins discovery", () => {
 				"description: ok",
 				"license: MIT",
 				"compatibility: Requires git",
+				"mode: true",
+				"reminder: Keep it short.",
 				"metadata:",
 				"  author: example",
 				"allowed-tools: Read Bash(git:*)",

@@ -108,6 +108,8 @@ export interface SegmentContext {
 		/** `tui.vimModeDisplay`: how the mode renders in the status line. */
 		display: "text" | "icon" | "none";
 	} | null;
+	/** Names of pinned mode skills (frontmatter `mode: true`); null when none pinned. */
+	skillMode: string[] | null;
 	collab: CollabStatus | null;
 	// Cached values for performance (computed once per render)
 	usageStats: {

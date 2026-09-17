@@ -23,7 +23,7 @@ import {
 	type RuleFrontmatter,
 	SUB_AGENT_RULE_NAME,
 } from "../capability/rule";
-import type { Skill, SkillFrontmatter } from "../capability/skill";
+import { type Skill, type SkillFrontmatter, validateSkillReminder } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
@@ -472,11 +472,18 @@ export async function scanSkillsFromDir(
 			const skillDirName = path.basename(path.dirname(skillPath));
 			const rawName = frontmatter.name;
 			const name = typeof rawName === "string" ? rawName.trim() || skillDirName : skillDirName;
+			const rawReminder = frontmatter.reminder;
+			const reminderError = validateSkillReminder(rawReminder);
+			if (reminderError !== null) {
+				warnings.push(`Dropping "reminder" for skill "${name}": ${reminderError}`);
+			}
 			items.push({
 				name,
 				path: skillPath,
 				content: body,
 				frontmatter: frontmatter as SkillFrontmatter,
+				mode: parseBoolean(frontmatter.mode),
+				reminder: reminderError === null && typeof rawReminder === "string" ? rawReminder : undefined,
 				level,
 				_source: createSourceMeta(providerId, skillPath, level, options.origin),
 			});
