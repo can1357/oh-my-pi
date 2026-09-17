@@ -150,7 +150,7 @@ describe.serial("createAgentSession resolveServiceTierByFamily", () => {
 				authStorage,
 				Settings.isolated({
 					"providers.openaiWebsockets": "on",
-					"enabledModels": ["openai-codex/deferred-model"],
+					enabledModels: ["openai-codex/deferred-model"],
 					"tier.openai": "none",
 					"tier.anthropic": "none",
 					"tier.google": "none",
@@ -183,7 +183,7 @@ describe.serial("createAgentSession resolveServiceTierByFamily", () => {
 					openAuthStorage(),
 					Settings.isolated({
 						"providers.openaiWebsockets": "on",
-						"enabledModels": ["openai-codex/deferred-model"],
+						enabledModels: ["openai-codex/deferred-model"],
 						"tier.openai": "none",
 						"tier.anthropic": "none",
 						"tier.google": "none",
