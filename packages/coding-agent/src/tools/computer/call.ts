@@ -1,4 +1,4 @@
-import { renderRunArg } from "../run-code";
+import { renderCallChain } from "../run-code";
 import { ToolError } from "../tool-errors";
 
 /** One allowlisted method invocation in a computer call chain. */
@@ -75,10 +75,6 @@ function describe(methods: MethodPolicies): string {
 	return Object.keys(methods).join(", ");
 }
 
-function renderStep(step: ComputerCallStep): string {
-	return `${step.method}(${step.args.map(renderRunArg).join(", ")})`;
-}
-
 function validateChain(chain: readonly ComputerCallStep[]): void {
 	if (chain.length === 0) {
 		throw new ToolError("Action 'call' requires a non-empty 'chain'.");
@@ -119,6 +115,6 @@ export function isReadOnlyComputerCall(chain: readonly ComputerCallStep[]): bool
 export function renderComputerCall(chain: readonly ComputerCallStep[]): string {
 	validateChain(chain);
 	const root = chain[0]!;
-	if (chain.length === 1) return `return await desktop.${renderStep(root)};`;
-	return `return await (await desktop.${renderStep(root)}).${renderStep(chain[1]!)};`;
+	if (chain.length === 1) return `return await desktop.${renderCallChain([root])};`;
+	return `return await (await desktop.${renderCallChain([root])}).${renderCallChain([chain[1]!])};`;
 }

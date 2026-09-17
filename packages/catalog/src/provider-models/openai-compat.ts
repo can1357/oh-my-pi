@@ -4,13 +4,15 @@ import { toClinePassPublicModelId } from "../cline-pass-model-id";
 import {
 	apiRouteExactModelIds,
 	apiRouteFor,
+	isBareIdReferenceProvider,
+	isExcludedDiscoveryMode,
 	isExcludedModel,
 	isLikelyOpenAIResponsesId,
 	modelLimitsFor,
 	pricingPeerFor,
 } from "../compat/behavior";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
-import { resolveModelPolicy } from "../compat/resolve";
+import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
@@ -237,6 +239,192 @@ async function fetchCatalogPayload(
 	session.etag = response.headers.get("etag");
 	session.hasPayload = true;
 	return payload;
+}
+
+/**
+ * The wire effort tiers the catalog publishes for a model, in canonical order.
+ * Undefined when the row has no effort-addressed thinking, or names no tier
+ * omp knows.
+ */
+function publishedEffortLadder(model: ModelsDevModel): Effort[] | undefined {
+	const values = model.reasoning_options?.find(option => option?.type === "effort")?.values;
+	if (!Array.isArray(values)) return undefined;
+	const ladder = THINKING_EFFORTS.filter(effort => values.includes(effort));
+	return ladder.length > 0 ? ladder : undefined;
+}
+
+/**
+ * Published ladders, addressable both by the host that published them and by
+ * bare id.
+ *
+ * `byHost` (keyed `provider\0id`) is authoritative: a ladder is only valid for
+ * the deployment that published it, so the endpoint's own catalog identity is
+ * consulted first. `byId` answers when the host is unknown — a gateway id with
+ * no catalog provider of its own — and only while every host publishing that
+ * id agrees that it takes an effort dial and on which tiers; an id whose hosts
+ * disagree, or that any host publishes with no dial at all, is dropped from
+ * it, so the ladder stays unknown instead of borrowing an arbitrary host's.
+ *
+ * `withoutLadder` carries the same `provider\0id` key for a row the catalog
+ * does publish but with no effort dial on it. The host serving an id outranks
+ * every other host on the question of what that deployment accepts, so its
+ * silence blocks the bare-id fallback for that id rather than letting a
+ * foreign ladder answer in its place. When the serving host is unknown that
+ * per-host veto cannot fire, which is why a dialless row also disqualifies the
+ * bare id outright.
+ */
+interface PublishedEffortLadders {
+	byHost: ReadonlyMap<string, readonly Effort[]>;
+	byId: ReadonlyMap<string, readonly Effort[]>;
+	withoutLadder: ReadonlySet<string>;
+}
+
+const EMPTY_PUBLISHED_EFFORT_LADDERS: PublishedEffortLadders = {
+	byHost: new Map(),
+	byId: new Map(),
+	withoutLadder: new Set(),
+};
+
+function indexPublishedEffortLadders(payload: unknown): PublishedEffortLadders {
+	const byHost = new Map<string, readonly Effort[]>();
+	const byId = new Map<string, readonly Effort[]>();
+	const withoutLadder = new Set<string>();
+	const index: PublishedEffortLadders = { byHost, byId, withoutLadder };
+	const unshareable = new Set<string>();
+	if (!isRecord(payload)) return index;
+	for (const [providerKey, provider] of Object.entries(payload)) {
+		if (!isRecord(provider) || !isRecord(provider.models)) continue;
+		for (const [modelId, rawModel] of Object.entries(provider.models)) {
+			if (!isRecord(rawModel)) continue;
+			const key = `${providerKey}\u0000${modelId}`;
+			const ladder = publishedEffortLadder(rawModel as ModelsDevModel);
+			if (!ladder) {
+				withoutLadder.add(key);
+				// Some deployment of this id rejects an effort dial; without
+				// knowing which host serves a bare id, none may claim one.
+				byId.delete(modelId);
+				unshareable.add(modelId);
+				continue;
+			}
+			byHost.set(key, ladder);
+			if (unshareable.has(modelId)) continue;
+			const shared = byId.get(modelId);
+			if (shared === undefined) {
+				byId.set(modelId, ladder);
+			} else if (shared.length !== ladder.length || shared.some((effort, index) => effort !== ladder[index])) {
+				byId.delete(modelId);
+				unshareable.add(modelId);
+			}
+		}
+	}
+	return index;
+}
+
+/**
+ * The index is tagged onto the catalog payload it was built from, so each
+ * catalog version is indexed once. {@link fetchWellKnownModels} already scopes
+ * payloads by fetch context, coalesces concurrent requests, answers a `304`
+ * with the same object, and hands back the last good payload when a refresh
+ * fails, so the tag inherits all of that lifetime behaviour for free.
+ */
+const kPublishedEffortLadders = Symbol("catalog.publishedEffortLadders");
+
+interface IndexedCatalogPayload {
+	[kPublishedEffortLadders]?: PublishedEffortLadders;
+}
+
+async function loadPublishedEffortLadders(fetchImpl?: FetchImpl): Promise<PublishedEffortLadders> {
+	const payload = await fetchWellKnownModels(fetchImpl);
+	if (!isRecord(payload)) return EMPTY_PUBLISHED_EFFORT_LADDERS;
+	const tagged = payload as IndexedCatalogPayload;
+	return (tagged[kPublishedEffortLadders] ??= indexPublishedEffortLadders(payload));
+}
+
+/**
+ * The catalog provider keys this endpoint publishes under. A provider whose
+ * catalog identity differs from its omp id (`moonshot` → `moonshotai`) is
+ * resolved through its descriptors; the omp id stays as a candidate for
+ * providers the descriptors do not cover.
+ */
+function catalogProviderKeys(providerId: string): readonly string[] {
+	const keys = new Set<string>();
+	for (const descriptor of MODELS_DEV_DESCRIPTORS_BY_PROVIDER[providerId] ?? []) keys.add(descriptor.modelsDevKey);
+	keys.add(providerId);
+	return [...keys];
+}
+
+/**
+ * The ladder published for a discovered id, preferring the host that serves it.
+ *
+ * Gateway prefixes are peeled (`deepseek/deepseek-v4` → `deepseek-v4`), and
+ * each peeled segment joins the host candidates ahead of the endpoint's own
+ * keys: on an aggregator the prefix names the real upstream. All host-scoped
+ * candidates are checked before accepting any shared-id fallback.
+ * A bare id is only accepted from {@link PublishedEffortLadders.byId}, which
+ * holds it only while every publishing host agrees that it takes an effort
+ * dial and on which tiers. A host serving the id that published it without a
+ * dial is this deployment's own answer and outranks any other host's ladder,
+ * so it vetoes the candidate here; a dialless host omp cannot recognize as the
+ * server already kept the id out of `byId` when the index was built.
+ */
+function lookupPublishedEffortLadder(
+	ladders: PublishedEffortLadders,
+	providerKeys: readonly string[],
+	modelId: string,
+): readonly Effort[] | undefined {
+	const hosts = [...providerKeys];
+	let shared: readonly Effort[] | undefined;
+	for (let candidate = modelId; ;) {
+		let dialless = false;
+		for (const host of hosts) {
+			const key = `${host}\u0000${candidate}`;
+			const scoped = ladders.byHost.get(key);
+			if (scoped) return scoped;
+			dialless ||= ladders.withoutLadder.has(key);
+		}
+		if (dialless) return undefined;
+		shared ??= ladders.byId.get(candidate);
+		const slash = candidate.indexOf("/");
+		if (slash < 0) return shared;
+		hosts.unshift(candidate.slice(0, slash));
+		candidate = candidate.slice(slash + 1);
+	}
+}
+
+/**
+ * Fill the effort ladder of discovered reasoning models whose tiers omp would
+ * otherwise guess from the neutral wire or provider-wide unknown-class default.
+ *
+ * Source precedence is unchanged: a provider that reports its own thinking
+ * surface, and any model whose ladder reviewed rules declare, are left exactly
+ * as they are. Only the guess is corrected, and only for ids the catalog
+ * actually publishes for this endpoint (or publishes unambiguously), so no
+ * request is made when every discovered model is already covered.
+ */
+async function applyPublishedEffortLadders<TApi extends Api>(
+	models: readonly ModelSpec<TApi>[] | null,
+	providerId: string,
+	fetchImpl?: FetchImpl,
+): Promise<readonly ModelSpec<TApi>[] | null> {
+	if (models === null) return null;
+	const guessed = new Set(
+		models
+			.filter(
+				model => model.reasoning === true && model.thinking === undefined && !hasModelScopedEffortLadder(model),
+			)
+			.map(model => model.id),
+	);
+	if (guessed.size === 0) return models;
+	// An unreachable catalog with no prior payload is not a discovery failure:
+	// the endpoint's own listing stands and the guess stays in place.
+	const ladders = await loadPublishedEffortLadders(fetchImpl).catch(() => EMPTY_PUBLISHED_EFFORT_LADDERS);
+	if (ladders.byHost.size === 0) return models;
+	const providerKeys = catalogProviderKeys(providerId);
+	return models.map(model => {
+		if (!guessed.has(model.id)) return model;
+		const efforts = lookupPublishedEffortLadder(ladders, providerKeys, model.id);
+		return efforts ? { ...model, thinking: { mode: "effort" as const, efforts } } : model;
+	});
 }
 
 function mapAnthropicModelsDev(payload: unknown, baseUrl: string): ModelSpec<"anthropic-messages">[] {
@@ -579,6 +767,7 @@ type OpenAICompatibleModelManagerBuilderOptions<TApi extends Api> = {
 	dynamicModelsAuthoritative?: true;
 	requireApiKey?: true;
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
+	cacheProviderId?: string;
 	filterModel?: (
 		entry: OpenAICompatibleModelRecord,
 		model: ModelSpec<TApi>,
@@ -600,24 +789,29 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 	const filterModel = options.filterModel;
 	return {
 		providerId: options.providerId,
+		...(options.cacheProviderId && { cacheProviderId: options.cacheProviderId }),
 		...(options.dynamicModelsAuthoritative && { dynamicModelsAuthoritative: true }),
 		...(options.dropCachedModelIdsOnStaticMismatch && {
 			dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch,
 		}),
 		...((!options.requireApiKey || apiKey) && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels({
-					api: options.api,
-					provider: options.providerId,
-					baseUrl,
-					apiKey,
-					...(options.headers && { headers: resolveSimpleProviderHeaders(options.headers) }),
-					...(filterModel && {
-						filterModel: (entry, model) => filterModel(entry, model, references),
+			fetchDynamicModels: async () =>
+				applyPublishedEffortLadders(
+					await fetchOpenAICompatibleModels({
+						api: options.api,
+						provider: options.providerId,
+						baseUrl,
+						apiKey,
+						...(options.headers && { headers: resolveSimpleProviderHeaders(options.headers) }),
+						...(filterModel && {
+							filterModel: (entry, model) => filterModel(entry, model, references),
+						}),
+						mapModel: (entry, defaults) => options.mapModel(entry, defaults, references.get(defaults.id)),
+						fetch: options.config?.fetch,
 					}),
-					mapModel: (entry, defaults) => options.mapModel(entry, defaults, references.get(defaults.id)),
-					fetch: options.config?.fetch,
-				}),
+					options.providerId,
+					options.config?.fetch,
+				),
 		}),
 	};
 }
@@ -982,6 +1176,7 @@ export function gmiCloudModelManagerOptions(
 		api: "openai-completions",
 		providerId: "gmi-cloud",
 		defaultBaseUrl: GMI_CLOUD_BASE_URL,
+		cacheProviderId: resolveModelCacheProviderId("gmi-cloud"),
 		config,
 		requireApiKey: true,
 		mapModel: mapGmiCloudModel,
@@ -1201,6 +1396,13 @@ function mapDeepinfraModel(
 		return null;
 	}
 	const pricing = isRecord(metadata.pricing) ? metadata.pricing : {};
+	// `metadata.discount` is a promotional fraction in [0, 1): DeepInfra bills
+	// `pricing * (1 - discount)` (verified against the site — GLM-5.2 lists
+	// input 0.75 with discount 0.35 and charges 0.4875), while `pricing.*`
+	// stays at list price. Fold it into the rate card so cost reporting matches
+	// what the user is actually billed. Values outside (0, 1) are ignored.
+	const discount = toNumber(metadata.discount);
+	const discountMultiplier = discount !== undefined && discount > 0 && discount < 1 ? 1 - discount : 1;
 	// `reasoning_effort` marks models whose effort dial is advertised. The
 	// parameter itself is validated and accepted platform-wide on DeepInfra
 	// (verified: 200 on effort-tagged, reasoning-only, and plain-chat models;
@@ -1243,9 +1445,9 @@ function mapDeepinfraModel(
 		...(thinking ? { thinking } : {}),
 		input: tags.includes("vision") || tags.includes("vlm") ? ["text", "image"] : ["text"],
 		cost: {
-			input: toPositiveNumber(pricing.input_tokens, 0),
-			output: toPositiveNumber(pricing.output_tokens, 0),
-			cacheRead: toPositiveNumber(pricing.cache_read_tokens, 0),
+			input: toPositiveNumber(pricing.input_tokens, 0) * discountMultiplier,
+			output: toPositiveNumber(pricing.output_tokens, 0) * discountMultiplier,
+			cacheRead: toPositiveNumber(pricing.cache_read_tokens, 0) * discountMultiplier,
 			cacheWrite: 0,
 		},
 		contextWindow,
@@ -1711,6 +1913,7 @@ function createSiliconFlowModelManagerOptions(
 	const baseUrl = config?.baseUrl ?? defaultBaseUrl;
 	return {
 		providerId,
+		cacheProviderId: resolveModelCacheProviderId(providerId),
 		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: async () => {
@@ -2134,6 +2337,9 @@ function createModelsDevReferenceMap<TApi extends Api>(
 	const references = new Map<string, ModelSpec<TApi>>();
 	for (const model of models) {
 		const candidate = model as ModelSpec<TApi>;
+		if (!isBareIdReferenceProvider(candidate.provider)) {
+			continue;
+		}
 		const existing = references.get(candidate.id);
 		if (!existing) {
 			references.set(candidate.id, candidate);
@@ -3866,10 +4072,17 @@ export interface BasetenModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-// A previous version of OMP shipped this model without reasoning levels. We've
-// since fixed that. This const lets us bust the cache so that users on that
-// version of OMP pick up the reasoning levels immediately.
-const BASETEN_CACHE_MIGRATION_MODEL_IDS = ["zai-org/GLM-5.3", "zai-org/GLM-5.3-Flash"] as const;
+// A previous version of OMP shipped these models without reasoning levels.
+// We've since fixed that (V4-generation whitelist). This const lets us bust
+// the cache so that users on that version of OMP pick up the reasoning levels
+// immediately.
+const BASETEN_CACHE_MIGRATION_MODEL_IDS = [
+	"zai-org/GLM-5.3",
+	"zai-org/GLM-5.3-Flash",
+	"deepseek-ai/DeepSeek-V4-Flash-0731",
+	"deepseek-ai/DeepSeek-V4.1-Flash",
+	"deepseek-ai/DeepSeek-V4-Pro-0813",
+] as const;
 
 export function basetenModelManagerOptions(
 	config?: BasetenModelManagerConfig,
@@ -3900,7 +4113,7 @@ export function basetenModelManagerOptions(
 				(identity.class === "kimi" && identity.family === "k3") ||
 				isGlmReasoningIdentity("baseten", defaults.id, "5.2") ||
 				defaults.id === "openai/gpt-oss-120b" ||
-				defaults.id === "deepseek-ai/DeepSeek-V4-Pro";
+				isDeepseekV4Generation("baseten", defaults.id);
 			const reasoning =
 				isSupportedBasetenReasoningModel &&
 				(features.includes("reasoning") || features.includes("reasoning_effort"));
@@ -4678,7 +4891,11 @@ type LiteLLMRichEndpointFailure = {
 	error?: unknown;
 };
 type LiteLLMRichEndpointResult<TApi extends Api> =
-	| { models: LiteLLMRichEndpointModel<TApi>[]; incompleteVisionMetadata: boolean }
+	| {
+			models: LiteLLMRichEndpointModel<TApi>[];
+			excludedModelIds: ReadonlySet<string>;
+			incompleteVisionMetadata: boolean;
+	  }
 	| { failure: LiteLLMRichEndpointFailure };
 
 const LITELLM_RICH_ENDPOINTS = ["/model_group/info", "/v2/model/info", "/model/info", "/v1/model/info"] as const;
@@ -4705,6 +4922,11 @@ function warnLiteLLMMetadataFallback(managementBaseUrl: string, failure: LiteLLM
 			: {}),
 		...(failure.error !== undefined ? { error: failure.error } : {}),
 	});
+}
+
+/** Exclude only known non-conversational modes; unknown and non-string modes remain selectable for aliases. */
+export function isSelectableLiteLLMModelMode(mode: unknown): boolean {
+	return typeof mode !== "string" || !isExcludedDiscoveryMode("litellm", mode);
 }
 
 export function normalizeLiteLLMManagementBaseUrl(baseUrl: string): string {
@@ -4747,7 +4969,10 @@ function mapLiteLLMOpenAICompatibleModel(
 	entry: OpenAICompatibleModelRecord,
 	defaults: ModelSpec<Api>,
 	reference: ModelSpec<Api> | undefined,
-): ModelSpec<Api> {
+): ModelSpec<Api> | null {
+	if (!isSelectableLiteLLMModelMode(entry.mode)) {
+		return null;
+	}
 	const model = mapWithBundledReference(entry, defaults, reference);
 	return {
 		...model,
@@ -4943,7 +5168,10 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	options: FetchLiteLLMRichModelsOptions<TApi>,
 	runtimeBaseUrl: string,
 ): ModelSpec<TApi> | null {
-	if (isLiteLLMUnusableSentinelPlaceholder(entry)) {
+	if (
+		!isSelectableLiteLLMModelMode(getLiteLLMMetadataValue(entry, "mode")) ||
+		isLiteLLMUnusableSentinelPlaceholder(entry)
+	) {
 		return null;
 	}
 	const id = getLiteLLMRichModelId(entry);
@@ -5151,7 +5379,22 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 		return null;
 	}
 	const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
+	const excludedModelIds = new Set<string>();
 	for (const entry of entries) {
+		if (isLiteLLMUnusableSentinelPlaceholder(entry)) {
+			continue;
+		}
+		const modelId = getLiteLLMRichModelId(entry);
+		if (!isSelectableLiteLLMModelMode(getLiteLLMMetadataValue(entry, "mode"))) {
+			if (modelId) {
+				excludedModelIds.add(modelId);
+				deduped.delete(modelId);
+			}
+			continue;
+		}
+		if (modelId && excludedModelIds.has(modelId)) {
+			continue;
+		}
 		const model = mapLiteLLMRichEntry(entry, options, runtimeBaseUrl);
 		if (model) {
 			const supportsVision = getLiteLLMMetadataValue(entry, "supports_vision");
@@ -5177,12 +5420,13 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 			deduped.set(model.id, existing ? mergeLiteLLMRichEndpointModels(existing, next) : next);
 		}
 	}
-	if (deduped.size === 0) {
+	if (deduped.size === 0 && excludedModelIds.size === 0) {
 		return null;
 	}
 	const models = Array.from(deduped.values()).sort((left, right) => left.model.id.localeCompare(right.model.id));
 	return {
 		models,
+		excludedModelIds,
 		incompleteVisionMetadata: models.some(entry => entry.supportsVision !== true && entry.supportsVision !== false),
 	};
 }
@@ -5197,6 +5441,7 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 	}
 	const fetchModels = async (signal?: AbortSignal): Promise<ModelSpec<TApi>[] | null> => {
 		const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
+		const excludedModelIds = new Set<string>();
 		let metadataFailure: LiteLLMRichEndpointFailure | undefined;
 		for (const endpoint of LITELLM_RICH_ENDPOINTS) {
 			const result = await fetchLiteLLMRichEndpoint(endpoint, options, managementBaseUrl, runtimeBaseUrl, signal);
@@ -5218,8 +5463,15 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 				}
 				continue;
 			}
+			for (const modelId of result.excludedModelIds) {
+				excludedModelIds.add(modelId);
+				deduped.delete(modelId);
+			}
 			const hadPriorModels = deduped.size > 0;
 			for (const next of result.models) {
+				if (excludedModelIds.has(next.model.id)) {
+					continue;
+				}
 				const existing = deduped.get(next.model.id);
 				if (!existing) {
 					if (!hadPriorModels) {
@@ -5228,6 +5480,9 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 					continue;
 				}
 				deduped.set(next.model.id, mergeLiteLLMRichEndpointModels(existing, next));
+			}
+			if (deduped.size === 0) {
+				continue;
 			}
 			let needsMoreMetadata = false;
 			for (const entry of deduped.values()) {
@@ -5249,6 +5504,9 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 			}
 		}
 		if (deduped.size === 0) {
+			if (excludedModelIds.size > 0) {
+				return [];
+			}
 			if (metadataFailure) {
 				warnLiteLLMMetadataFallback(managementBaseUrl, metadataFailure);
 			}
@@ -5275,17 +5533,18 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v9 keys the deployment's `supports_vision` declaration into the
-		// cached compat and unions compat across management endpoints instead of
-		// letting a later one retract what an earlier one reported (issue
-		// #11982). rich-v8 invalidated rows whose `compatConfig` retained a
-		// colliding bundled model's provider-specific transport (e.g. Fireworks
-		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
-		// bundled reference fallback, moved OpenAI models to Responses, continued
-		// past incomplete vision/API metadata and endpoints omitting cache
-		// pricing, stripped reseller usage suffixes, filtered placeholder rows,
-		// and mapped rich pricing. Bump the version whenever these mappers change,
-		// or warm authoritative caches keep serving pre-change rows for the full TTL.
+		// rich-v11 invalidates rows that inherited ClinePass gateway metadata
+		// through generic models.dev bare-id enrichment (issue #10932). rich-v10
+		// filtered known non-conversational LiteLLM modes, keyed the deployment's
+		// `supports_vision` declaration into cached compat, and unioned compat
+		// across management endpoints instead of letting a later endpoint retract
+		// what an earlier one reported (issue #11982). Earlier versions fixed
+		// provider-specific transport leakage, added bundled reference fallback,
+		// moved OpenAI models to Responses, continued past incomplete vision/API
+		// metadata and endpoints omitting cache pricing, stripped reseller usage
+		// suffixes, filtered placeholder rows, and mapped rich pricing. Bump the
+		// version whenever these mappers change, or warm authoritative caches keep
+		// serving pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer
@@ -5304,7 +5563,7 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 				resolveApi: resolveLiteLLMApi,
 				timeoutMs: 10_000,
 			});
-			if (richModels && richModels.length > 0) {
+			if (richModels !== null) {
 				return richModels;
 			}
 			return fetchOpenAICompatibleModels<Api>({
@@ -6308,6 +6567,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 			return {
 				...model,
 				id,
+				name: id,
 				thinking: model.reasoning ? buildClinePassThinking(raw, model) : undefined,
 			};
 		},

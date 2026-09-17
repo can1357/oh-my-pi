@@ -13,6 +13,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const recordToolSchema = type({ value: type("string") });
 
@@ -294,7 +295,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("caps provider-empty recovery without consuming generic retries and accepts the next prompt", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[emptyProviderResponse(), emptyProviderResponse(), emptyProviderResponse(), emptyProviderResponse()],
 			{
@@ -411,6 +412,39 @@ describe("AgentSession empty stop guard", () => {
 			summary: "",
 			details: { kind: "discarded-entry-branch" },
 		});
+	});
+
+	it("does not revive capped empty responses through pending todo reminders", async () => {
+		const { session, mock } = await createHarness(
+			[
+				emptyStop(),
+				emptyStop(),
+				emptyStop(),
+				emptyStop(),
+				{ content: ["Which task should I resume?"], stopReason: "stop" },
+			],
+			{ "todo.enabled": true, "todo.reminders": true, "todo.remindersMax": 3 },
+		);
+		session.setTodoPhases([
+			{ name: "Work", tasks: [{ content: "Finish the pending change", status: "in_progress" }] },
+		]);
+		const retryEnds: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+		const todoReminders: Array<Extract<AgentSessionEvent, { type: "todo_reminder" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEnds.push(event);
+			if (event.type === "todo_reminder") todoReminders.push(event);
+		});
+
+		await expectPromptCompletes(session.prompt("continue the pending task"));
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(4);
+		expect(retryEnds).toEqual([expect.objectContaining({ success: false, attempt: 3 })]);
+		expect(todoReminders).toEqual([]);
+
+		await session.prompt("I am ready to resume");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(5);
 	});
 
 	it("waits for capped empty-stop persistence before removing the active branch entry", async () => {
@@ -574,7 +608,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("ends auto-retry state when empty stop retries hit the cap", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[{ throw: "503 service unavailable: overloaded_error" }, emptyStop(), emptyStop(), emptyStop(), emptyStop()],
 			{
@@ -643,7 +677,7 @@ describe("AgentSession empty stop guard", () => {
 	});
 
 	it("preserves auto-retry budget across empty stop continuations", async () => {
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const { session, mock } = await createHarness(
 			[
 				{ throw: "503 service unavailable: overloaded_error" },

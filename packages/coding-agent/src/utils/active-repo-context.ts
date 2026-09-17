@@ -81,19 +81,27 @@ function resolveDirectChildDirectorySync(cwd: string, entry: fs.Dirent): string 
 	}
 }
 
-async function hasGitMarker(childPath: string): Promise<boolean> {
+async function hasGitRepository(childPath: string): Promise<boolean> {
 	try {
+		// Skip markerless siblings before native discovery can walk their ancestors.
 		const stat = await fsPromises.stat(path.join(childPath, ".git"));
-		return stat.isDirectory() || stat.isFile();
+		if (!stat.isDirectory() && !stat.isFile()) return false;
+		const info = vcs.gitInfo(childPath);
+		// Resolve gitfiles through the shared parser, but never adopt an ancestor.
+		if (!info || path.resolve(info.repoRoot) !== childPath) return false;
+		return (await fsPromises.stat(info.headPath)).isFile();
 	} catch {
 		return false;
 	}
 }
 
-function hasGitMarkerSync(childPath: string): boolean {
+function hasGitRepositorySync(childPath: string): boolean {
 	try {
 		const stat = fs.statSync(path.join(childPath, ".git"));
-		return stat.isDirectory() || stat.isFile();
+		if (!stat.isDirectory() && !stat.isFile()) return false;
+		const info = vcs.gitInfo(childPath);
+		if (!info || path.resolve(info.repoRoot) !== childPath) return false;
+		return fs.statSync(info.headPath).isFile();
 	} catch {
 		return false;
 	}
@@ -104,7 +112,7 @@ async function findSingleDirectChildRepo(cwd: string): Promise<ActiveRepoContext
 	for (const entry of await readDirectChildren(cwd)) {
 		const childPath = await resolveDirectChildDirectory(cwd, entry);
 		if (!childPath) continue;
-		if (!(await hasGitMarker(childPath))) continue;
+		if (!(await hasGitRepository(childPath))) continue;
 		if (context) return null;
 		context = buildContext(cwd, childPath);
 	}
@@ -116,7 +124,7 @@ function findSingleDirectChildRepoSync(cwd: string): ActiveRepoContext | null {
 	for (const entry of readDirectChildrenSync(cwd)) {
 		const childPath = resolveDirectChildDirectorySync(cwd, entry);
 		if (!childPath) continue;
-		if (!hasGitMarkerSync(childPath)) continue;
+		if (!hasGitRepositorySync(childPath)) continue;
 		if (context) return null;
 		context = buildContext(cwd, childPath);
 	}

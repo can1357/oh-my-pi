@@ -8,7 +8,7 @@ import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -731,6 +731,28 @@ describe("openai-completions wire-quirk compat detection", () => {
 				completionsSpec({ provider: "moonshot", id: "kimi-k2", baseUrl: "https://api.moonshot.ai/v1" }),
 			).compat.streamMarkupHealingPattern,
 		).toBe("kimi");
+		// Transparent gateways / user-configured hosts forward the upstream chat
+		// template unchanged: a deepseek-classed model behind a LiteLLM proxy or
+		// the NousResearch inference API still emits DSML envelopes and needs the
+		// DSML grammar, not the generic thinking healer.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "litellm",
+					id: "deepseek/deepseek-chat",
+					baseUrl: "http://127.0.0.1:4000/v1",
+				}),
+			).compat.streamMarkupHealingPattern,
+		).toBe("dsml");
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "nous",
+					id: "deepseek/deepseek-v4-flash-0731",
+					baseUrl: "https://inference-api.nousresearch.com/v1",
+				}),
+			).compat.streamMarkupHealingPattern,
+		).toBe("dsml");
 	});
 
 	it("derives Responses obfuscation opt-out and wire mode per surface", () => {
@@ -852,6 +874,36 @@ describe("OpenAI explicit prompt-cache breakpoint compat", () => {
 	});
 });
 
+describe("Responses configuration_update compat", () => {
+	/** The gpt-6-astra id served by a custom Responses-compatible proxy. */
+	function astraProxySpec(overrides: Partial<ModelSpec<"openai-responses">> = {}): ModelSpec<"openai-responses"> {
+		return responsesSpec({
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			provider: "astra-proxy",
+			baseUrl: "https://proxy.example.com/v1",
+			reasoning: true,
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			...overrides,
+		});
+	}
+
+	it("turns supportsConfigurationUpdate on for gpt-6-astra on any host and leaves sibling ids off", () => {
+		// The class rule is keyed on the exact id, not on the host: a custom proxy
+		// serving gpt-6-astra gets the item, its gpt-6 neighbour never does.
+		expect(buildModel(astraProxySpec()).compat.supportsConfigurationUpdate).toBe(true);
+		expect(buildModel(astraProxySpec({ id: "gpt-6", name: "GPT-6" })).compat.supportsConfigurationUpdate).toBe(false);
+	});
+
+	it("lets a spec-level compat override switch configuration_update off for a custom endpoint", () => {
+		// Spec-authored overrides are the last compat layer, so a models.yml
+		// `compat.supportsConfigurationUpdate: false` beats the class rule.
+		const model = buildModel(astraProxySpec({ compat: { supportsConfigurationUpdate: false } }));
+		expect(model.compat.supportsConfigurationUpdate).toBe(false);
+	});
+});
+
 describe("OpenRouter model discovery", () => {
 	it("keeps refreshed OpenRouter models on the OpenRouter pseudo API", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-openrouter-refresh-"));
@@ -967,8 +1019,32 @@ describe("OpenRouter model discovery", () => {
 	});
 });
 
-describe("model cache spec round trip", () => {
-	it("persists sparse specs and rebuilds resolved models on cache reads", async () => {
+describe("model cache materialized round trip", () => {
+	it("fingerprints current static content without mutating caller arrays", () => {
+		const staticModels = [completionsSpec({ id: "fingerprint-model" })];
+		const initial = fingerprintStaticModels(staticModels);
+		staticModels[0]!.name = "Changed in place";
+		expect(fingerprintStaticModels(staticModels)).not.toBe(initial);
+
+		const frozen = Object.freeze([completionsSpec({ id: "frozen-fingerprint-model" })]);
+		expect(() => fingerprintStaticModels(frozen)).not.toThrow();
+	});
+
+	it("uses generator-materialized bundled rows without rebuilding them", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-bundled-models-"));
+		const bundled = getBundledModel("anthropic", "claude-fable-5-1");
+		try {
+			const offline = await resolveProviderModels(
+				{ providerId: "anthropic", cacheDbPath: path.join(tempDir, "models.db") },
+				"offline",
+			);
+			expect(offline.models.find(model => model.id === bundled.id)).toBe(bundled);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("persists and directly restores fully resolved models", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-model-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
 		const sparse = { supportsDeveloperRole: true } as const;
@@ -985,19 +1061,26 @@ describe("model cache spec round trip", () => {
 			);
 			expect(online.models[0]?.compat.supportsDeveloperRole).toBe(true);
 
-			// The persisted row carries the sparse spec, never the resolved record.
-			const db = new Database(dbPath, { readonly: true });
+			// The persisted row is the resolved model, while retaining the sparse
+			// authoring provenance needed by later explicit override rebuilds.
+			const db = new Database(dbPath);
 			const row = db
 				.query<{ models: string }, [string]>("SELECT models FROM model_cache WHERE provider_id = ?")
 				.get("spec-cache-test");
-			db.close();
 			expect(row).toBeDefined();
-			const persisted = JSON.parse(row?.models ?? "[]") as ModelSpec<"openai-completions">[];
-			expect(persisted[0]?.compat).toEqual(sparse);
-			expect(persisted[0]).not.toHaveProperty("compatConfig");
-			expect(persisted[0]?.compat).not.toHaveProperty("isOpenRouterHost");
-
-			// Offline reads rebuild the row into a fully-resolved model.
+			const persisted = JSON.parse(row?.models ?? "[]") as Model<"openai-completions">[];
+			expect(persisted[0]?.compat.supportsDeveloperRole).toBe(true);
+			expect(persisted[0]?.compat.isOpenRouterHost).toBe(false);
+			expect(persisted[0]?.compatConfig).toEqual(sparse);
+			expect(persisted[0]?.identity).toEqual(online.models[0]?.identity);
+			// A compatible materialized row is trusted rather than sent back
+			// through buildModel. Policy changes invalidate the whole row instead.
+			persisted[0]!.compat.supportsDeveloperRole = false;
+			db.run("UPDATE model_cache SET models = ? WHERE provider_id = ?", [
+				JSON.stringify(persisted),
+				"spec-cache-test",
+			]);
+			db.close();
 			const offline = await resolveProviderModels<"openai-completions">(
 				{
 					providerId: "spec-cache-test",
@@ -1007,7 +1090,7 @@ describe("model cache spec round trip", () => {
 				"offline",
 			);
 			const model = offline.models.find(candidate => candidate.id === spec.id);
-			expect(model?.compat.supportsDeveloperRole).toBe(true);
+			expect(model?.compat.supportsDeveloperRole).toBe(false);
 			expect(model?.compat.isOpenRouterHost).toBe(false);
 			expect(model?.compatConfig).toEqual(sparse);
 		} finally {
@@ -1056,6 +1139,29 @@ describe("model cache spec round trip", () => {
 
 			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
 			expect(offline.models[0]?.cost.longContext).toEqual(staticModel.cost.longContext);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("invalidates rows materialized under a stale build or rules policy", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-stale-policy-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const model = buildModel(completionsSpec({ provider: "stale-policy-cache-test" }));
+		try {
+			writeModelCache("stale-policy-cache-test", Date.now(), [model], true, "", dbPath);
+			const db = new Database(dbPath);
+			db.run("UPDATE model_cache SET materialization_policy = ? WHERE provider_id = ?", [
+				"stale-builder:stale-rules",
+				"stale-policy-cache-test",
+			]);
+			db.close();
+
+			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
+			const verified = new Database(dbPath, { readonly: true });
+			const row = verified.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache").get();
+			verified.close();
+			expect(row?.count).toBe(0);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -1139,10 +1245,10 @@ describe("model cache spec round trip", () => {
 				.get("computer-use-cache-test");
 			db.close();
 			const persisted = JSON.parse(row?.models ?? "[]") as Array<Record<string, unknown>>;
-			expect(persisted.find(model => model.id === direct.id)).not.toHaveProperty("supportsComputerUse");
-			expect(persisted.find(model => model.id === proxy.id)).not.toHaveProperty("supportsComputerUse");
-			expect(persisted.find(model => model.id === explicitTrue.id)?.supportsComputerUse).toBe(true);
-			expect(persisted.find(model => model.id === explicitFalse.id)?.supportsComputerUse).toBe(false);
+			expect(persisted.find(model => model.id === direct.id)?.supportsComputerUseConfig).toBeNull();
+			expect(persisted.find(model => model.id === proxy.id)?.supportsComputerUseConfig).toBeNull();
+			expect(persisted.find(model => model.id === explicitTrue.id)?.supportsComputerUseConfig).toBe(true);
+			expect(persisted.find(model => model.id === explicitFalse.id)?.supportsComputerUseConfig).toBe(false);
 
 			const offline = await resolveProviderModels<"openai-responses">(
 				{ providerId: "computer-use-cache-test", staticModels: [], cacheDbPath: dbPath },

@@ -54,7 +54,7 @@ export class Input implements Component, Focusable {
 	/** Return bounded input content and cursor state for debug inspection. */
 	debugState(): Record<string, unknown> {
 		return {
-			textPreview: this.#value.slice(0, 120),
+			textPreview: this.mask ? "********" : this.#value.slice(0, 120),
 			textLength: this.#value.length,
 			previewTruncated: this.#value.length > 120,
 			cursor: this.#cursor,

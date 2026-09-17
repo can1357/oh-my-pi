@@ -1,6 +1,6 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
-import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import type { OAuthPrompt, OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import {
 	type Component,
 	type Focusable,
@@ -10,6 +10,7 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { captureBrowserSession } from "../../../utils/browser-session";
 import { copyToClipboard } from "../../../utils/clipboard";
 import { OAuthSelectorComponent } from "../../components/oauth-selector";
 import { theme } from "../../theme/theme";
@@ -201,6 +202,7 @@ export class SignInTab implements SetupTab {
 		try {
 			await this.#authStorage.login(providerId as OAuthProvider, {
 				signal: this.#loginAbort.signal,
+				onBrowserSession: captureBrowserSession,
 				onAuth: info => {
 					// Store the full authorization URL as the primary copy/display
 					// target: it works from any machine, including SSH boxes where
@@ -281,12 +283,13 @@ export class SignInTab implements SetupTab {
 		this.host.requestRender();
 	}
 
-	#showPrompt(prompt: { message: string; placeholder?: string }, signal?: AbortSignal): Promise<string> {
+	#showPrompt(prompt: OAuthPrompt, signal?: AbortSignal): Promise<string> {
 		this.#resolvePrompt("");
 		if (signal?.aborted) {
 			return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("Login input cancelled"));
 		}
 		const input = new Input();
+		input.mask = prompt.secret === true;
 		const focusInput = new CopyablePromptInput(input, () => {
 			void this.#copyAuthUrl();
 		});

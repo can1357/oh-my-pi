@@ -76,4 +76,29 @@ describe("Editor atom table", () => {
 		editor.handleInput("\x7f");
 		expect(editor.getText()).toBe("");
 	});
+
+	it("advances the text revision for programmatic edits, deletion, undo, and history restore", () => {
+		const editor = new Editor(defaultEditorTheme);
+		const initial = editor.textRevision;
+		editor.setText("one");
+		expect(editor.textRevision).toBeGreaterThan(initial);
+		const afterSet = editor.textRevision;
+		editor.insertText(" two");
+		expect(editor.textRevision).toBeGreaterThan(afterSet);
+		const afterInsert = editor.textRevision;
+		editor.pasteText(" pasted");
+		expect(editor.textRevision).toBeGreaterThan(afterInsert);
+		const afterPaste = editor.textRevision;
+		editor.handleInput("\x7f");
+		expect(editor.textRevision).toBeGreaterThan(afterPaste);
+		const afterDelete = editor.textRevision;
+		editor.handleInput("\x1f");
+		expect(editor.textRevision).toBeGreaterThan(afterDelete);
+		editor.addToHistory("history");
+		editor.setText("");
+		const beforeHistoryRestore = editor.textRevision;
+		editor.handleInput("\x1b[A");
+		expect(editor.textRevision).toBeGreaterThan(beforeHistoryRestore);
+		expect(editor.getText()).toBe("history");
+	});
 });

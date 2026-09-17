@@ -17,6 +17,12 @@ provider "openrouter" {
 		// isOpenRouterAnthropicModel checks in the OpenAI request builders.
 		retry-without-strict-on-grammar-error #true
 	}
+	class "meta" {
+		family "muse-spark" {
+			filter-reasoning-history #true
+			allows-synthetic-reasoning-content-for-tool-calls #false
+		}
+	}
 	class "minimax" {
 		family "m3" {
 			thinking-efforts "minimal" "low" "medium" "high"

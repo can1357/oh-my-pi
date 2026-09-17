@@ -55,9 +55,8 @@ describe("readToolRenderer hyperlinks", () => {
 		const rendered = component.render(200).join("\n");
 		expect(rendered).toContain("local://handoff.md");
 		expect(rendered).toContain(":2");
-		const handoffUri = new URL(url.pathToFileURL(path.resolve(handoffPath)).href);
-		handoffUri.searchParams.set("line", "2");
-		expect(extractLinkUris(rendered)).toContain(handoffUri.href);
+		const handoffUri = url.pathToFileURL(path.resolve(handoffPath)).href;
+		expect(extractLinkUris(rendered)).toContain(handoffUri);
 		expect(extractLinkTexts(rendered)).toContain("local://handoff.md");
 		expect(extractLinkTexts(rendered)).not.toContain("local://handoff.md:2");
 	});
@@ -76,9 +75,8 @@ describe("readToolRenderer hyperlinks", () => {
 
 		const rendered = component.render(200).join("\n");
 		expect(Bun.stripANSI(rendered)).toContain(`${examplePath}:10-12`);
-		const exampleUri = new URL(url.pathToFileURL(path.resolve(examplePath)).href);
-		exampleUri.searchParams.set("line", "10");
-		expect(extractLinkUris(rendered)).toContain(exampleUri.href);
+		const exampleUri = url.pathToFileURL(path.resolve(examplePath)).href;
+		expect(extractLinkUris(rendered)).toContain(exampleUri);
 		expect(extractLinkTexts(rendered)).toContain(examplePath);
 		expect(extractLinkTexts(rendered)).not.toContain(`${examplePath}:10-12`);
 	});

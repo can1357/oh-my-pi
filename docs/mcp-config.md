@@ -106,6 +106,8 @@ Shared fields for every transport:
 
 `OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
 
+Remote HTTP and SSE transports do not impose an additional socket-idle timeout. Without an applicable MCP deadline, a silent connection can wait indefinitely; cancel the call or close the transport to stop it. A quiet stream alone does not prove that its peer is still reachable.
+
 ### `stdio` transport
 
 `stdio` is the default when `type` is omitted.

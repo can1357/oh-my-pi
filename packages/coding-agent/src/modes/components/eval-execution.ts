@@ -6,6 +6,7 @@
 import { Container, type Loader, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { highlightCode, theme } from "../../modes/theme/theme";
+import type { OutputArtifactError } from "../../session/streaming-output";
 import type { TruncationMeta } from "../../tools/output-meta";
 import {
 	buildExecutionFrame,
@@ -27,6 +28,7 @@ export class EvalExecutionComponent extends Container {
 	#exitCode: number | undefined = undefined;
 	#loader: Loader;
 	#truncation?: TruncationMeta;
+	#artifactError?: OutputArtifactError;
 	#expanded = false;
 	// Post-finalize mutation counter (FinalizableBlock.getTranscriptBlockVersion):
 	// a completed cell's block still mutates on expansion toggles, and the
@@ -108,11 +110,12 @@ export class EvalExecutionComponent extends Container {
 	setComplete(
 		exitCode: number | undefined,
 		cancelled: boolean,
-		options?: { output?: string; truncation?: TruncationMeta },
+		options?: { output?: string; truncation?: TruncationMeta; artifactError?: OutputArtifactError },
 	): void {
 		this.#exitCode = exitCode;
 		this.#status = resolveExecutionStatus(exitCode, cancelled);
 		this.#truncation = options?.truncation;
+		this.#artifactError = options?.artifactError;
 		if (options?.output !== undefined) {
 			this.#setOutput(options.output);
 		}
@@ -150,6 +153,7 @@ export class EvalExecutionComponent extends Container {
 				status: this.#status,
 				exitCode: this.#exitCode,
 				truncation: this.#truncation,
+				artifactError: this.#artifactError,
 				hiddenLineCount,
 			});
 			if (footer) this.#contentContainer.addChild(footer);

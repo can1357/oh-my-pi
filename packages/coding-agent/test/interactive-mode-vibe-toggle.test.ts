@@ -755,7 +755,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		const warning = vi.spyOn(mode, "showWarning");
 
 		await expect(mode.handleClearCommand()).resolves.toBeUndefined();
-		await expect(mode.handleDropCommand()).resolves.toBeUndefined();
+		await expect(mode.handleDeleteCommand()).resolves.toBeUndefined();
 		await expect(mode.handleForkCommand()).resolves.toBeUndefined();
 		await expect(mode.handleMoveCommand(path.join(tempDir.path(), "other-project"))).resolves.toBeUndefined();
 

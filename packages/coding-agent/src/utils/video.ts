@@ -9,7 +9,9 @@
  */
 import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { $which, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
+import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { $which } from "@oh-my-pi/pi-utils/which";
 
 /** Container extensions treated as video. Mirrors the video subset of the local-protocol binary list. */
 const VIDEO_EXTENSION_LOOKUP: Record<string, true> = {
