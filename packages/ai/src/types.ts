@@ -926,10 +926,11 @@ export interface AnthropicCompactionPayload {
 	/** Opaque provider state the API attached to the block; replayed verbatim when present. */
 	encryptedContent?: string;
 	/**
-	 * Harness-appended file metadata (`<files>` section) kept out of the
-	 * byte-identical block. Replayed as a user message after the native block:
-	 * the converter replaces the summary message with the block and skips its
-	 * text, so without this the metadata would be invisible to this provider.
+	 * Harness-appended text (the `<files>` section, and any note the harness
+	 * placed ahead of it) kept out of the byte-identical block. Replayed as a
+	 * user message after the native block: the converter replaces the summary
+	 * message with the block and skips its text, so without this the text
+	 * would be invisible to this provider.
 	 */
 	filesText?: string;
 }

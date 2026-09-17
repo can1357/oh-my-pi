@@ -1,8 +1,21 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { appendCoverageNote, extractUserRequests } from "@oh-my-pi/pi-coding-agent/session/compaction-coverage";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	appendCoverageNote,
+	extractUserRequests,
+	insertCoverageNote,
+} from "@oh-my-pi/pi-coding-agent/session/compaction-coverage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { asGlobalFetch } from "./helpers/fetch-mock";
+import { assistantMsg, userMsg } from "./utilities";
 
 const LONG_REQUEST = "Please migrate the scheduler to the new retry policy without touching the public API.";
 const OTHER_REQUEST = "Keep every commit message in conventional-commits form; the release tooling depends on it.";
@@ -186,6 +199,110 @@ describe("compaction coverage", () => {
 				}),
 			).toBe("## Goal\nShip it.");
 			expect(fetchMock).toHaveBeenCalled();
+		});
+	});
+
+	describe("insertCoverageNote", () => {
+		const NOTE = "## Uncovered User Requests\n\n- do the thing";
+		const FILES = "<files>\nsrc/a.ts (RW)\n</files>";
+
+		it("goes ahead of a trailing files block, at the end otherwise, and stands alone in empty text", () => {
+			expect(insertCoverageNote(`## Goal\nShip it.\n\n${FILES}\n`, NOTE)).toBe(
+				`## Goal\nShip it.\n\n${NOTE}\n\n${FILES}\n`,
+			);
+			expect(insertCoverageNote("## Goal\nShip it.\n", NOTE)).toBe(`## Goal\nShip it.\n\n${NOTE}\n`);
+			// The preserved Anthropic slot holds only the files block, or nothing.
+			expect(insertCoverageNote(FILES, NOTE)).toBe(`${NOTE}\n\n${FILES}`);
+			expect(insertCoverageNote("", NOTE)).toBe(`${NOTE}\n`);
+		});
+	});
+
+	describe("Anthropic native compaction", () => {
+		let tempDir: TempDir;
+		let authStorage: AuthStorage | undefined;
+		let session: AgentSession | undefined;
+
+		beforeEach(() => {
+			tempDir = TempDir.createSync("@pi-coverage-native-");
+		});
+
+		afterEach(async () => {
+			await session?.dispose();
+			authStorage?.close();
+			tempDir.removeSync();
+		});
+
+		it("also carries the note in the preserved slot the provider replays after the native block", async () => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled test model to exist");
+			const settings = Settings.isolated({
+				"compaction.coverageCheck": true,
+				"compaction.keepRecentTokens": 1,
+				"compaction.methodOrder": ["soft"],
+			});
+			authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+			authStorage.setRuntimeApiKey(model.provider, "anthropic-token");
+			authStorage.setRuntimeApiKey("typesafe", "ts-key");
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+			const agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			session.subscribe(() => {});
+			for (const [userText, assistantText] of [
+				[LONG_REQUEST, "first answer"],
+				[OTHER_REQUEST, "second answer"],
+			] as const) {
+				const userMessage = userMsg(userText);
+				const assistantMessage = assistantMsg(assistantText);
+				session.agent.appendMessage(userMessage);
+				session.sessionManager.appendMessage(userMessage);
+				session.agent.appendMessage(assistantMessage);
+				session.sessionManager.appendMessage(assistantMessage);
+			}
+
+			// What compact() produces for a native summary: the API text is the
+			// entry text and the byte-identical block content; the harness file
+			// lists travel beside it because the replayed block drops the text.
+			const filesText = "<files>\n# /repo/src/\nscheduler.ts (RW)\n</files>";
+			const native = {
+				provider: model.provider,
+				content: "native summary",
+				encryptedContent: "enc_state_1",
+				filesText,
+				model: model.id,
+				usedTokens: 60_000,
+			};
+			vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: `native summary\n\n${filesText}\n`,
+				shortSummary: "native",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 1,
+				preserveData: { anthropicCompaction: native },
+			}));
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch(async (_url, init) => {
+					const { questions } = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
+					return Response.json({
+						model: "jev-latest",
+						answers: Object.fromEntries(Object.keys(questions).map(key => [key, { type: "noul", noul: 0.1 }])),
+						usage: { input_tokens: 100, output_tokens: 1 },
+					});
+				}),
+			);
+
+			await session.compact();
+
+			const entry = session.sessionManager.getEntries().find(candidate => candidate.type === "compaction");
+			if (entry?.type !== "compaction") throw new Error("Expected a compaction entry");
+			const head = "native summary\n\n";
+			const tail = `\n\n${filesText}\n`;
+			expect(entry.summary.startsWith(head)).toBe(true);
+			expect(entry.summary.endsWith(tail)).toBe(true);
+			const note = entry.summary.slice(head.length, entry.summary.length - tail.length);
+			expect(note.startsWith("## Uncovered User Requests")).toBe(true);
+			expect(note).toContain(`- ${LONG_REQUEST}`);
+			// The block content stays byte-identical to its opaque state; the note
+			// rides ahead of the file lists in the slot replayed after the block.
+			expect(entry.preserveData?.anthropicCompaction).toEqual({ ...native, filesText: `${note}\n\n${filesText}` });
 		});
 	});
 });

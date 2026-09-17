@@ -27,6 +27,7 @@ import {
 	DEFAULT_SHAKE_CONFIG,
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
+	getPreservedAnthropicCompactionData,
 	hasOpenAiRemoteCompactionPayload,
 	invalidateMessageCache,
 	isTranscriptUsageAnchor,
@@ -42,6 +43,7 @@ import {
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
 	upsertFileOperations,
+	withAnthropicCompactionPreserveData,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -79,7 +81,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
-import { appendCoverageNote } from "./compaction-coverage";
+import { coverageNote, insertCoverageNote } from "./compaction-coverage";
 import {
 	type CompactionMethod,
 	canUseRemoteCompaction,
@@ -1351,7 +1353,7 @@ export class SessionMaintenance {
 				// block because every catch path throws — the post-try reads
 				// of the result-derived locals are reachable only on success.
 				try {
-					const result = await this.#compactWithFallbackModel(
+					const generated = await this.#compactWithFallbackModel(
 						preparation,
 						options?.internalGuidance ?? customInstructions,
 						compactionAbortController.signal,
@@ -1367,7 +1369,8 @@ export class SessionMaintenance {
 						},
 						compactionCandidates,
 					);
-					summary = await this.#withCoverageNote(result, preparation, compactionAbortController.signal);
+					const result = await this.#withCoverageNote(generated, preparation, compactionAbortController.signal);
+					summary = result.summary;
 					shortSummary = result.shortSummary;
 					firstKeptEntryId = result.firstKeptEntryId;
 					tokensBefore = result.tokensBefore;
@@ -3229,19 +3232,23 @@ export class SessionMaintenance {
 	 * `compaction-coverage.ts`. Fail-open, so a judge outage never fails the
 	 * compaction that reached this point. An OpenAI remote compaction keeps its
 	 * history in the provider replay and stores only a placeholder as summary
-	 * text, so there is nothing to check.
+	 * text, so there is nothing to check. An Anthropic native summary replays
+	 * as a block that must stay byte-identical to its opaque state, and the
+	 * converter drops the entry text with it, so the note also travels in the
+	 * preserved slot beside the harness file lists (`filesText`), the lane that
+	 * already exists for text the block cannot carry.
 	 */
 	async #withCoverageNote(
 		result: CompactionResult,
 		preparation: CompactionPreparation,
 		signal: AbortSignal,
-	): Promise<string> {
-		if (hasOpenAiRemoteCompactionPayload(result.preserveData)) return result.summary;
+	): Promise<CompactionResult> {
+		if (hasOpenAiRemoteCompactionPayload(result.preserveData)) return result;
 		const usageOwner = {
 			sessionId: this.#host.sessionManager.getSessionId(),
 			parentId: this.#host.sessionManager.getLeafId(),
 		};
-		return appendCoverageNote(result.summary, {
+		const note = await coverageNote(result.summary, {
 			settings: this.#host.settings,
 			registry: this.#host.modelRegistry,
 			messages: preparation.messagesToSummarize.concat(preparation.turnPrefixMessages),
@@ -3257,6 +3264,18 @@ export class SessionMaintenance {
 				if (entryId) usageOwner.parentId = entryId;
 			},
 		});
+		if (note === undefined) return result;
+		const summary = insertCoverageNote(result.summary, note);
+		const native = getPreservedAnthropicCompactionData(result.preserveData);
+		if (!native) return { ...result, summary };
+		return {
+			...result,
+			summary,
+			preserveData: withAnthropicCompactionPreserveData(result.preserveData, {
+				...native,
+				filesText: insertCoverageNote(native.filesText ?? "", note),
+			}),
+		};
 	}
 
 	async #compactWithFallbackModel(
@@ -4805,7 +4824,8 @@ export class SessionMaintenance {
 					throw new Error("Compaction failed: no available model");
 				}
 
-				summary = await this.#withCoverageNote(compactResult, preparation, autoCompactionSignal);
+				compactResult = await this.#withCoverageNote(compactResult, preparation, autoCompactionSignal);
+				summary = compactResult.summary;
 				shortSummary = compactResult.shortSummary;
 				firstKeptEntryId = compactResult.firstKeptEntryId;
 				tokensBefore = compactResult.tokensBefore;

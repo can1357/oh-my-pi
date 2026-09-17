@@ -10,6 +10,11 @@
  *
  * Opt-in via `compaction.coverageCheck`. Best-effort and fail-open: a judge
  * failure, timeout, or abort returns the summary unchanged.
+ *
+ * {@link coverageNote} and {@link insertCoverageNote} are split out for the
+ * caller whose summary text is not what the model replays: an Anthropic native
+ * summary is replaced by its block on replay, so the note must also travel in
+ * the preserved slot beside the harness file lists (see `session-maintenance`).
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model, NoulQuestion } from "@oh-my-pi/pi-ai";
@@ -78,10 +83,20 @@ export function extractUserRequests(messages: readonly AgentMessage[]): string[]
  * block so the file-operation tail stays last.
  */
 export async function appendCoverageNote(summary: string, deps: CoverageCheckDeps): Promise<string> {
-	if (!deps.settings.get("compaction.coverageCheck")) return summary;
-	if (summary.trim().length === 0 || summary.length > MAX_SUMMARY_CHARS) return summary;
+	const note = await coverageNote(summary, deps);
+	return note === undefined ? summary : insertCoverageNote(summary, note);
+}
+
+/**
+ * The note listing the user requests `summary` does not preserve, or undefined
+ * when the check is disabled, nothing qualifies, everything is covered, or the
+ * judge fails.
+ */
+export async function coverageNote(summary: string, deps: CoverageCheckDeps): Promise<string | undefined> {
+	if (!deps.settings.get("compaction.coverageCheck")) return undefined;
+	if (summary.trim().length === 0 || summary.length > MAX_SUMMARY_CHARS) return undefined;
 	const requests = extractUserRequests(deps.messages);
-	if (requests.length === 0) return summary;
+	if (requests.length === 0) return undefined;
 
 	const questions: Record<string, NoulQuestion> = {};
 	for (let index = 0; index < requests.length; index++) {
@@ -106,26 +121,31 @@ export async function appendCoverageNote(summary: string, deps: CoverageCheckDep
 		// A missing answer counts as covered: the note only ever adds what the
 		// judge affirmatively reported missing.
 		const uncovered = requests.filter((_, index) => (answers[`request${index}`]?.noul ?? 1) < COVERED_THRESHOLD);
-		if (uncovered.length === 0) return summary;
+		if (uncovered.length === 0) return undefined;
 		logger.debug("Compaction summary missed user requests; appending coverage note", {
 			checked: requests.length,
 			uncovered: uncovered.length,
 		});
-		return insertCoverageNote(summary, uncovered);
+		// One bullet per request: collapse internal line breaks so the list survives.
+		return prompt
+			.render(coverageNoteTemplate, { requests: uncovered.map(request => request.replace(/\s+/g, " ").trim()) })
+			.trim();
 	} catch (error) {
 		logger.debug("Compaction coverage check failed; keeping the summary as generated", {
 			error: error instanceof Error ? error.message : String(error),
 		});
-		return summary;
+		return undefined;
 	}
 }
 
-function insertCoverageNote(summary: string, uncovered: readonly string[]): string {
-	// One bullet per request: collapse internal line breaks so the list survives.
-	const note = prompt
-		.render(coverageNoteTemplate, { requests: uncovered.map(request => request.replace(/\s+/g, " ").trim()) })
-		.trim();
-	const filesTag = summary.lastIndexOf("<files>");
-	if (filesTag < 0) return `${summary.trimEnd()}\n\n${note}\n`;
-	return `${summary.slice(0, filesTag).trimEnd()}\n\n${note}\n\n${summary.slice(filesTag)}`;
+/**
+ * `text` with `note` inserted ahead of its trailing `<files>` block, or
+ * appended when there is none. `text` may be empty or the bare file block.
+ */
+export function insertCoverageNote(text: string, note: string): string {
+	const filesTag = text.lastIndexOf("<files>");
+	const head = (filesTag < 0 ? text : text.slice(0, filesTag)).trimEnd();
+	const lead = head.length > 0 ? `${head}\n\n` : "";
+	if (filesTag < 0) return `${lead}${note}\n`;
+	return `${lead}${note}\n\n${text.slice(filesTag)}`;
 }
