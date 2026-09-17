@@ -14,6 +14,8 @@ import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
+import { hasEligibleRetryFallbackHop } from "./retry-fallback-chains";
+import { capDurationToSessionDeadline, remainingSessionDeadlineMs } from "./session-deadline";
 
 function timeoutSecondsToMs(value: number): number | undefined {
 	if (!Number.isFinite(value) || value < 0) return undefined;
@@ -25,9 +27,18 @@ function timeoutSecondsToMs(value: number): number | undefined {
  * Build a {@link StreamFn} that reads provider routing/guard settings from
  * `settings` per call and forwards to `base` (defaults to `streamSimple`).
  *
- * Caller-supplied `streamOptions` always win — the helper only fills holes.
+ * Caller-supplied `streamOptions` fill holes for routing and guard fields.
+ * An absolute session deadline (`getDeadline`) re-caps stream watchdogs and
+ * `maxRetryDelayMs`, including an explicit caller timeout or `0` (disabled),
+ * so `--max-time` can still abort a hung primary in time for a configured
+ * fallback hop. Without a deadline the caller-supplied timeouts win.
  */
-export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn = streamSimple): StreamFn {
+export function createSettingsAwareStreamFn(
+	settings: Settings,
+	base?: StreamFn,
+	options?: { getDeadline?: () => number | undefined },
+): StreamFn {
+	const stream = base ?? streamSimple;
 	return (model, context, streamOptions) => {
 		const openrouterRoutingPreset = settings.get("providers.openrouterVariant");
 		const openrouterVariant =
@@ -47,8 +58,18 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		// implicitly disables the short-entry keep-alive refresh loop).
 		const cacheRetentionSetting = settings.get("providers.cacheRetention");
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
-		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
-		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
+		const remainingMs = remainingSessionDeadlineMs(options?.getDeadline?.());
+		const reserveFallbackHop = hasEligibleRetryFallbackHop(settings, model);
+		const streamFirstEventTimeoutMs = capDurationToSessionDeadline(
+			timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds")),
+			remainingMs,
+			reserveFallbackHop,
+		);
+		const streamIdleTimeoutMs = capDurationToSessionDeadline(
+			timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds")),
+			remainingMs,
+			reserveFallbackHop,
+		);
 		// Server-side fallback (opt-in): when the user enables it AND the
 		// resolved model is a Claude Fable/Mythos on Anthropic's messages
 		// API, inject the `fallbacks: [{ model: "claude-opus-4-8" }]` chain.
@@ -72,9 +93,21 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
-			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
-			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
-			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),
+			streamFirstEventTimeoutMs: capDurationToSessionDeadline(
+				streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
+				remainingMs,
+				reserveFallbackHop,
+			),
+			streamIdleTimeoutMs: capDurationToSessionDeadline(
+				streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
+				remainingMs,
+				reserveFallbackHop,
+			),
+			maxRetryDelayMs: capDurationToSessionDeadline(
+				streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),
+				remainingMs,
+				reserveFallbackHop,
+			),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				streamOptions?.maxInFlightRequests ?? settings.get("providers.maxInFlightRequests"),
 			),
@@ -86,6 +119,6 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? settings.get("omitThinking"),
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 		};
-		return base(model, context, merged);
+		return stream(model, context, merged);
 	};
 }

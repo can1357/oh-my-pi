@@ -88,6 +88,10 @@
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
 
+### Fixed
+
+- `--max-time` now reserves fallback-hop budget only when a configured `retry.fallbackChains` candidate exists, and caps the final retry wait so a hung primary can still fail over before the deadline.
+
 ## [18.2.1] - 2026-09-15
 
 ### Breaking Changes
