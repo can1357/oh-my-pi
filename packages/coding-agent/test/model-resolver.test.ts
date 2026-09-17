@@ -4,9 +4,11 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import {
+	type AgentModelPatternResolutionOptions,
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
+	type ModelSelectionTier,
 	parseModelPattern,
 	parseModelString,
 	pickDefaultAvailableModel,
@@ -16,6 +18,7 @@ import {
 	resolveAgentPrewalkPattern,
 	resolveAllowedModels,
 	resolveCliModel,
+	resolveEffectiveAgentModelSelection,
 	resolveExplicitModelRole,
 	resolveModelFromString,
 	resolveModelOverride,
@@ -1052,6 +1055,83 @@ describe("resolveAgentAdvisorSelection", () => {
 	});
 });
 describe("resolveAgentModelPatterns", () => {
+	test("provenance follows the winning selector tier without changing model or effort precedence", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "openai/gpt-4o:low",
+				override: "anthropic/claude-sonnet-4-5:high",
+				definition: "openai/gpt-4o:medium",
+			},
+		});
+		const cases: Array<[AgentModelPatternResolutionOptions, ModelSelectionTier, Model<Api>, Effort]> = [
+			[
+				{ requestModel: "@definition", settingsOverride: "@override", agentModel: "@override" },
+				"request-explicit",
+				mockModels[1]!,
+				Effort.Medium,
+			],
+			[
+				{ requestModel: ",,", settingsOverride: "@override", agentModel: "@definition" },
+				"agent-override",
+				mockModels[0]!,
+				Effort.High,
+			],
+			[
+				{
+					settingsOverride: ",,",
+					agentModel: "@definition",
+					activeModelPattern: "anthropic/claude-sonnet-4-5:high",
+				},
+				"agent-frontmatter",
+				mockModels[1]!,
+				Effort.Medium,
+			],
+			[
+				{ agentModel: "@default:high", activeModelPattern: "anthropic/claude-sonnet-4-5:low" },
+				"inherit-parent",
+				mockModels[0]!,
+				Effort.High,
+			],
+			[
+				{ agentModel: "@default", activeModelPattern: " ", fallbackModelPattern: " " },
+				"role-default",
+				mockModels[1]!,
+				Effort.Low,
+			],
+		];
+		for (const [options, tier, model, thinkingLevel] of cases) {
+			const selection = resolveEffectiveAgentModelSelection({ ...options, settings });
+			const result = resolveModelOverride(selection.patterns, { getAvailable: () => mockModels }, settings);
+			expect(selection.tier).toBe(tier);
+			expect(result.model).toBe(model);
+			expect(result.thinkingLevel).toBe(thinkingLevel);
+		}
+	});
+
+	test("request provenance distinguishes inheritance-first from an earlier explicit role", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "openai/gpt-4o:low" } });
+		for (const inheritFirst of [true, false]) {
+			const selection = resolveEffectiveAgentModelSelection({
+				requestModel: inheritFirst ? ["@default:high", "@smol"] : ["@smol", "@default:high"],
+				settingsOverride: "openai/gpt-4o:medium",
+				settings,
+				activeModelPattern: "anthropic/claude-sonnet-4-5:low",
+			});
+			expect(selection.tier).toBe(inheritFirst ? "request-default-inherit" : "request-explicit");
+			expect(resolveExplicitModelRole(selection.source, settings)).toBe(inheritFirst ? undefined : "smol");
+			const result = resolveModelOverride(selection.patterns, { getAvailable: () => mockModels }, settings);
+			expect(result.model).toBe(mockModels[inheritFirst ? 0 : 1]);
+			expect(result.thinkingLevel).toBe(inheritFirst ? Effort.High : Effort.Low);
+			const fallback = resolveModelOverride(
+				selection.patterns,
+				{ getAvailable: () => [mockModels[inheritFirst ? 1 : 0]!] },
+				settings,
+			);
+			expect(fallback.model).toBe(mockModels[inheritFirst ? 1 : 0]);
+			expect(fallback.thinkingLevel).toBe(inheritFirst ? Effort.Low : Effort.High);
+		}
+	});
+
 	test("pairs the first non-empty source's role with its patterns, skipping aliases with no patterns", () => {
 		const settings = Settings.isolated({
 			modelRoles: {

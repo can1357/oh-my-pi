@@ -1346,7 +1346,17 @@ export interface AgentModelPatternResolutionOptions {
 	fallbackModelPattern?: string;
 }
 
-interface EffectiveAgentModelSelection {
+/** The selector source, before model availability or authentication fallback. */
+export type ModelSelectionTier =
+	| "request-explicit"
+	| "request-default-inherit"
+	| "agent-override"
+	| "agent-frontmatter"
+	| "inherit-parent"
+	| "role-default";
+
+export interface EffectiveAgentModelSelection {
+	tier: ModelSelectionTier;
 	source?: string | string[];
 	patterns: string[];
 }
@@ -1356,7 +1366,7 @@ function applyRequestedThinkingLevel(pattern: string, level: ConfiguredThinkingL
 	return `${pattern}:${level}`;
 }
 
-function resolveEffectiveAgentModelSelection(
+export function resolveEffectiveAgentModelSelection(
 	options: AgentModelPatternResolutionOptions,
 ): EffectiveAgentModelSelection {
 	const { requestModel, settingsOverride, agentModel, settings, activeModelPattern, fallbackModelPattern } = options;
@@ -1365,7 +1375,10 @@ function resolveEffectiveAgentModelSelection(
 			activeModelPattern?.trim() || fallbackModelPattern?.trim() || settings?.getModelRole("default")?.trim() || "";
 		const patterns = resolveConfiguredModelPatterns(fallback, settings);
 		const level = requested?.level;
-		return { patterns: level ? patterns.map(pattern => applyRequestedThinkingLevel(pattern, level)) : patterns };
+		return {
+			tier: activeModelPattern?.trim() || fallbackModelPattern?.trim() ? "inherit-parent" : "role-default",
+			patterns: level ? patterns.map(pattern => applyRequestedThinkingLevel(pattern, level)) : patterns,
+		};
 	};
 
 	let requestSource = requestModel;
@@ -1378,12 +1391,16 @@ function resolveEffectiveAgentModelSelection(
 		return inheritSessionModel(inheritance).patterns;
 	});
 	if (requestPatterns.length > 0 || requestedInheritance) {
-		return { source: requestSource, patterns: requestPatterns };
+		return {
+			tier: requestedInheritance && requestSource === undefined ? "request-default-inherit" : "request-explicit",
+			source: requestSource,
+			patterns: requestPatterns,
+		};
 	}
 
 	const overridePatterns = resolveConfiguredModelPatterns(settingsOverride, settings);
 	if (overridePatterns.length > 0) {
-		return { source: settingsOverride, patterns: overridePatterns };
+		return { tier: "agent-override", source: settingsOverride, patterns: overridePatterns };
 	}
 
 	const normalizedAgentPatterns = normalizeModelPatternList(agentModel);
@@ -1394,7 +1411,7 @@ function resolveEffectiveAgentModelSelection(
 		: undefined;
 	if (configuredAgentPatterns.length > 0) {
 		if (!agentInheritance || resolveExplicitModelRole(singleAgentPattern, settings) === "task") {
-			return { source: agentModel, patterns: configuredAgentPatterns };
+			return { tier: "agent-frontmatter", source: agentModel, patterns: configuredAgentPatterns };
 		}
 	}
 
