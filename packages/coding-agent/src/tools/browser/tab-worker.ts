@@ -51,6 +51,7 @@ import {
 	DEFAULT_VIEWPORT,
 	isPuppeteerHandle,
 	loadPuppeteerInWorker,
+	OFFSCREEN_WINDOW_ORIGIN,
 } from "./launch";
 import { extractReadableFromHtml, type ReadableFormat } from "./readable";
 
@@ -780,6 +781,35 @@ async function createTrackedHeadlessPage(browser: Browser, reportTarget: (target
 	return page;
 }
 
+/**
+ * Windows-only backstop for the blank headless window: `--headless=new` still
+ * creates a native window, and Chrome 150 + Windows 11 composites its surface
+ * onto the desktop even though the window never gets `WS_VISIBLE`. New
+ * browsers are launched with `--window-position=-32000,-32000`, but a shared
+ * daemon spawned by an older omp build (or one already running when this
+ * process attaches) has the window at its default position, so move it
+ * offscreen from the client side too. `Browser.*` is a browser-scoped domain,
+ * so this runs on the browser target's session like `Target.createTarget`
+ * above. Returns the failure reason instead of throwing: a browser that
+ * refuses the command must not fail the tab open.
+ */
+async function parkHeadlessWindowOffscreen(browser: Browser, targetId: string): Promise<string | undefined> {
+	if (process.platform !== "win32") return undefined;
+	const session = await browser.target().createCDPSession();
+	try {
+		const { windowId } = await session.send("Browser.getWindowForTarget", { targetId });
+		await session.send("Browser.setWindowBounds", {
+			windowId,
+			bounds: { left: OFFSCREEN_WINDOW_ORIGIN, top: OFFSCREEN_WINDOW_ORIGIN },
+		});
+		return undefined;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	} finally {
+		await session.detach().catch(() => undefined);
+	}
+}
+
 async function collectObservationEntries(
 	core: WorkerCore,
 	node: SerializedAXNode,
@@ -1145,9 +1175,15 @@ export class WorkerCore {
 				// Create the target directly so its id is reportable before
 				// Puppeteer waits for target/page initialization. If that wait
 				// wedges, the supervisor can still close the created target.
+				let createdTargetId: string | undefined;
 				this.#page = await createTrackedHeadlessPage(this.#browser, targetId => {
+					createdTargetId = targetId;
 					this.#transport.send({ type: "page-created", targetId });
 				});
+				if (payload.headless === true && createdTargetId) {
+					const failure = await parkHeadlessWindowOffscreen(this.#browser, createdTargetId);
+					if (failure) this.#log("debug", "Could not park headless window offscreen", { error: failure });
+				}
 				this.#observeDialogs();
 				await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
 				if (payload.emulateViewport !== false) await applyViewport(this.#page, payload.viewport);

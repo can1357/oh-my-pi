@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the headless browser leaving a blank window on the Windows desktop. ([#12299](https://github.com/can1357/oh-my-pi/pull/12299) by [@oldschoola](https://github.com/oldschoola))
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes
