@@ -21,7 +21,9 @@ for (const [arm, armRows] of [...byArm.entries()].sort()) {
 	const latencies = armRows.map(r => Number(r.latencyMs ?? 0));
 	const meanMs = latencies.length ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0;
 	const backends = [...new Set(armRows.map(r => String(r.backend ?? "-")))].join(",");
-	console.log(`${arm.padEnd(14)} ${(oks + "/" + armRows.length).padStart(7)} ${meanMs.toFixed(0).padStart(8)} ${backends}`);
+	console.log(
+		`${arm.padEnd(14)} ${(oks + "/" + armRows.length).padStart(7)} ${meanMs.toFixed(0).padStart(8)} ${backends}`,
+	);
 }
 
 const errors = rows.filter(r => r.error);

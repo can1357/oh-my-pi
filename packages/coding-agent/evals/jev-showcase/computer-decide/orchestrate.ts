@@ -16,10 +16,7 @@ import {
 	decideComputerStep,
 } from "../../../src/computer/decide";
 import { appendJsonl, loadCompletedKeys } from "../../../src/jev-showcase/jsonl";
-import {
-	gradeComputerDecideTask,
-	type ComputerDecideTask,
-} from "../../../src/jev-showcase/grade-computer-decide";
+import { gradeComputerDecideTask, type ComputerDecideTask } from "../../../src/jev-showcase/grade-computer-decide";
 import { runEvalComputerDecide } from "../../../src/computer/decide-bridge";
 import { Settings } from "../../../src/config/settings";
 import type { ToolSession } from "../../../src/tools";
@@ -67,9 +64,7 @@ async function runE2e(task: ComputerDecideTask) {
 		await harness.waitForGtkWindow();
 		harness.assertIsolationHeld();
 		const buttons = await harness.queryButtons();
-		const candidates = candidatesFromElements(
-			buttons.map(b => ({ ref: b.ref, role: b.role, title: b.title })),
-		);
+		const candidates = candidatesFromElements(buttons.map(b => ({ ref: b.ref, role: b.role, title: b.title })));
 		const jev = process.env.TYPESAFE_API_KEY ? "auto" : "off";
 		const result = await runEvalComputerDecide(
 			{ state: { goal: task.goal, candidates }, minConfidence: task.expected.minConfidence },

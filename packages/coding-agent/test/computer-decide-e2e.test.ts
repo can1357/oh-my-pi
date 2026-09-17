@@ -37,9 +37,7 @@ describe.skipIf(!SHOULD_RUN_COMPUTER_E2E)("computer.decide() gui e2e", () => {
 		}
 	});
 
-	it(
-		"maps GTK buttons on an isolated display and reranks Save",
-		async () => {
+	it("maps GTK buttons on an isolated display and reranks Save", async () => {
 		const harness = new GuiE2eHarness();
 		harnesses.push(harness);
 		harness.start();
@@ -52,9 +50,7 @@ describe.skipIf(!SHOULD_RUN_COMPUTER_E2E)("computer.decide() gui e2e", () => {
 		const buttons = await harness.queryButtons();
 		expect(buttons.map(b => b.title)).toEqual(["Save", "Cancel"]);
 
-		const candidates = candidatesFromElements(
-			buttons.map(b => ({ ref: b.ref, role: b.role, title: b.title })),
-		);
+		const candidates = candidatesFromElements(buttons.map(b => ({ ref: b.ref, role: b.role, title: b.title })));
 		const result = await runEvalComputerDecide(
 			{ state: { goal: "click Save", candidates } },
 			{ session: toolSession() },
@@ -62,15 +58,11 @@ describe.skipIf(!SHOULD_RUN_COMPUTER_E2E)("computer.decide() gui e2e", () => {
 
 		expect(result.data?.action).toBe("click");
 		expect(result.data?.target).toBe(buttons.find(b => b.title === "Save")?.ref);
-		expect(["rules", "rerank"]).toContain(result.data?.backend);
+		expect(result.data?.backend === "rules" || result.data?.backend === "rerank").toBe(true);
 		expect(result.details.jev).toBe(false);
-		},
-		30_000,
-	);
+	}, 30_000);
 
-	it(
-		"fail-opens when AX candidates do not match the goal (jev off)",
-		async () => {
+	it("fail-opens when AX candidates do not match the goal (jev off)", async () => {
 		const harness = new GuiE2eHarness();
 		harnesses.push(harness);
 		harness.start();
@@ -78,9 +70,7 @@ describe.skipIf(!SHOULD_RUN_COMPUTER_E2E)("computer.decide() gui e2e", () => {
 		await harness.waitForGtkWindow();
 
 		const buttons = await harness.queryButtons();
-		const candidates = candidatesFromElements(
-			buttons.map(b => ({ ref: b.ref, role: b.role, title: b.title })),
-		);
+		const candidates = candidatesFromElements(buttons.map(b => ({ ref: b.ref, role: b.role, title: b.title })));
 		const result = await runEvalComputerDecide(
 			{ state: { goal: "click Delete permanently", candidates } },
 			{ session: toolSession() },
@@ -88,13 +78,9 @@ describe.skipIf(!SHOULD_RUN_COMPUTER_E2E)("computer.decide() gui e2e", () => {
 
 		expect(result.data).toBeNull();
 		harness.assertIsolationHeld();
-		},
-		30_000,
-	);
+	}, 30_000);
 
-	it(
-		"returns null for ambiguous labels below confidence when jev is off",
-		async () => {
+	it("returns null for ambiguous labels below confidence when jev is off", async () => {
 		const harness = new GuiE2eHarness();
 		harnesses.push(harness);
 		harness.start();
@@ -103,9 +89,7 @@ describe.skipIf(!SHOULD_RUN_COMPUTER_E2E)("computer.decide() gui e2e", () => {
 
 		const buttons = await harness.queryButtons();
 		expect(buttons).toHaveLength(3);
-		const candidates = candidatesFromElements(
-			buttons.map(b => ({ ref: b.ref, role: b.role, title: b.title })),
-		);
+		const candidates = candidatesFromElements(buttons.map(b => ({ ref: b.ref, role: b.role, title: b.title })));
 		const result = await runEvalComputerDecide(
 			{ state: { goal: "click Submit", candidates }, minConfidence: 0.95 },
 			{ session: toolSession() },
@@ -114,9 +98,7 @@ describe.skipIf(!SHOULD_RUN_COMPUTER_E2E)("computer.decide() gui e2e", () => {
 		expect(result.data).toBeNull();
 		expect((result.details as { backend?: string }).backend).toBe("none");
 		harness.assertIsolationHeld();
-		},
-		30_000,
-	);
+	}, 30_000);
 });
 
 describe.skipIf(!SHOULD_RUN_HYPRLAND_GRIM_E2E)("computer.decide() hyprland grim e2e", () => {

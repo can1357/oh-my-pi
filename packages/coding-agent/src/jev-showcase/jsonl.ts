@@ -2,10 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 /** Load completed cell keys from a resume-safe results.jsonl file. */
-export function loadCompletedKeys(
-	resultsPath: string,
-	keyFn: (row: Record<string, unknown>) => string,
-): Set<string> {
+export function loadCompletedKeys(resultsPath: string, keyFn: (row: Record<string, unknown>) => string): Set<string> {
 	const done = new Set<string>();
 	if (!fs.existsSync(resultsPath)) return done;
 	for (const line of fs.readFileSync(resultsPath, "utf8").split("\n")) {

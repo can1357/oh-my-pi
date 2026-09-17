@@ -12,7 +12,11 @@ import {
 import { gradeComputerDecideTask, type ComputerDecideTask } from "../src/jev-showcase/grade-computer-decide";
 import computerTasks from "../evals/jev-showcase/computer-decide/tasks.json";
 
-function answer(choice: string, confidence: number, probabilities?: Record<string, number>): {
+function answer(
+	choice: string,
+	confidence: number,
+	probabilities?: Record<string, number>,
+): {
 	choice: string;
 	confidence: number;
 	probabilities: Record<string, number>;
@@ -129,7 +133,11 @@ describe("jev showcase computer decide task battery", () => {
 							provider: "typesafe",
 							model: "jev-test",
 							answers: {
-								action: { type: "choice", choice: task.expected.action ?? "click", probabilities: { click: 0.9 } },
+								action: {
+									type: "choice",
+									choice: task.expected.action ?? "click",
+									probabilities: { click: 0.9 },
+								},
 								target: {
 									type: "choice",
 									choice: task.expected.target ?? task.candidates[0]?.id ?? "none",
@@ -149,7 +157,7 @@ describe("jev showcase computer decide task battery", () => {
 							},
 						};
 					},
-				};
+				} as unknown as import("@oh-my-pi/pi-ai").Judge;
 				decision = await decideComputerStep({
 					state: { goal: task.goal, candidates: task.candidates },
 					judge,

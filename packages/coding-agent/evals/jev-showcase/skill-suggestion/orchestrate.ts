@@ -57,7 +57,8 @@ function loadRoster(): { roster: SuggestableSkill[]; details: Map<string, SkillD
 	const roster: SuggestableSkill[] = [];
 	for (const entry of raw) {
 		const full = "description_full" in entry ? entry.description_full : entry.description;
-		const indexDesc = "description" in entry && entry.description.length <= 64 ? entry.description : full.slice(0, 60);
+		const indexDesc =
+			"description" in entry && entry.description.length <= 64 ? entry.description : full.slice(0, 60);
 		roster.push({ name: entry.name, description: indexDesc });
 		if ("body" in entry && entry.body) {
 			details.set(entry.name, {
@@ -74,7 +75,7 @@ async function mapPool<T, R>(
 	concurrency: number,
 	fn: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
-	const out: R[] = new Array(items.length);
+	const out = Array.from({ length: items.length }) as R[];
 	let next = 0;
 	async function worker(): Promise<void> {
 		while (true) {
@@ -95,7 +96,10 @@ async function main(): Promise<void> {
 	}
 	const judge = new TypeSafeJudge({ apiKey });
 	const done = loadCompletedKeys(resultsPath, r => `${r.task}:${r.arm}`);
-	const arms = (process.env.JEV_ARMS ?? "typesafe").split(",").map(s => s.trim()).filter(Boolean);
+	const arms = (process.env.JEV_ARMS ?? "typesafe")
+		.split(",")
+		.map(s => s.trim())
+		.filter(Boolean);
 	const offset = Number.parseInt(process.env.JEV_OFFSET ?? "0", 10) || 0;
 	const limit = Number.parseInt(process.env.JEV_LIMIT ?? "0", 10) || 0;
 	const concurrency = Math.max(1, Number.parseInt(process.env.JEV_CONCURRENCY ?? "1", 10) || 1);
@@ -104,9 +108,7 @@ async function main(): Promise<void> {
 	const tasks = limit > 0 ? allTasks.slice(offset, offset + limit) : allTasks.slice(offset);
 	const { roster, details } = loadRoster();
 	const loadDetail =
-		details.size > 0
-			? async (name: string): Promise<SkillDetail | null> => details.get(name) ?? null
-			: undefined;
+		details.size > 0 ? async (name: string): Promise<SkillDetail | null> => details.get(name) ?? null : undefined;
 
 	console.log(
 		`skill-suggestion battery: ${tasks.length}/${allTasks.length} tasks, ${roster.length} skills, concurrency=${concurrency}`,

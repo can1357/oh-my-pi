@@ -3,7 +3,7 @@ import type { ComputerDecision, ComputerDecisionBackend } from "../computer/deci
 export interface ComputerDecideTask {
 	id: string;
 	goal: string;
-	candidates: Array<{ id: string; label: string; role?: string; source?: string }>;
+	candidates: Array<{ id: string; label: string; role?: string; source?: "ax" | "ocr" | "ax+ocr" }>;
 	expected: {
 		action?: string;
 		target?: string;
