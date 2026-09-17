@@ -392,6 +392,76 @@ describe("auto thinking classifier helpers", () => {
 		);
 	});
 
+	function mockTypeSafeLevel(answer: { choice: string; probabilities: Record<string, number>; confidence: number }) {
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async () =>
+				Response.json({
+					model: "jev-latest",
+					answers: { level: { type: "choice", ...answer } },
+					usage: { input_tokens: 42, output_tokens: 3 },
+				}),
+			),
+		);
+		return {
+			authStorage: { hasAuth: (provider: string) => provider === "typesafe", resolver: () => "ts-key" },
+			getAvailable: () => [],
+		} as never;
+	}
+
+	it("resolves a torn TypeSafe classification to the lower of its two most probable levels", async () => {
+		// The question tells the judge "if torn between levels, choose the lower
+		// one", but Jev answers with the argmax; below TypeSafe's documented 0.5
+		// confidence floor the tie-break is applied here instead.
+		const registry = mockTypeSafeLevel({
+			choice: "xhigh",
+			probabilities: { low: 0.04, medium: 0.1, high: 0.42, xhigh: 0.44 },
+			confidence: 0.3,
+		});
+
+		const effort = await classifyDifficulty("add validation around the retry path", {
+			settings: Settings.isolated({ "providers.autoThinkingModel": "online" }),
+			registry,
+			model: buildLadderModel("mock-max", MAX_LADDER),
+		});
+
+		expect(effort).toBe(Effort.High);
+	});
+
+	it("resolves a torn xhigh/max classification to xhigh even when max is offered", async () => {
+		const registry = mockTypeSafeLevel({
+			choice: "max",
+			probabilities: { low: 0.02, medium: 0.05, high: 0.1, xhigh: 0.4, max: 0.43 },
+			confidence: 0.35,
+		});
+
+		const effort = await classifyDifficulty("migrate the live payment cutover with no rollback", {
+			settings: Settings.isolated({
+				"providers.autoThinkingModel": "online",
+				"providers.autoThinkingMaxEffort": "max",
+			}),
+			registry,
+			model: buildLadderModel("mock-max", MAX_LADDER),
+		});
+
+		expect(effort).toBe(Effort.XHigh);
+	});
+
+	it("keeps a confident TypeSafe classification even when the runner-up is lower", async () => {
+		const registry = mockTypeSafeLevel({
+			choice: "xhigh",
+			probabilities: { low: 0.02, medium: 0.08, high: 0.2, xhigh: 0.7 },
+			confidence: 0.72,
+		});
+
+		const effort = await classifyDifficulty("untangle the scheduler deadlock", {
+			settings: Settings.isolated({ "providers.autoThinkingModel": "online" }),
+			registry,
+			model: buildLadderModel("mock-max", MAX_LADDER),
+		});
+
+		expect(effort).toBe(Effort.XHigh);
+	});
+
 	it("falls back to the chat chain when TypeSafe fails, and to the session model when no role resolves", async () => {
 		const target = buildLadderModel("mock-max", MAX_LADDER);
 		const settings = {

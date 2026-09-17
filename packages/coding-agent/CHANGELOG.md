@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+- Auto thinking now applies its "if torn between levels, choose the lower one" rule in code when TypeSafe reports an uncertain classification, instead of relying on the judge to honor it ([#12338](https://github.com/can1357/oh-my-pi/pull/12338) by [@eggpeat](https://github.com/eggpeat)).
 ## [18.2.4] - 2026-09-17
 
 ### Added
