@@ -545,45 +545,80 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "compass",
 		description: "TypeSafe Jev skill suggestion status (native System One)",
 		acpDescription: "TypeSafe skill suggestion status",
-		acpInputHint: "[status|auto|typesafe|off]",
+		acpInputHint: "[status|auto|typesafe|off|rerank ...]",
 		subcommands: [
 			{ name: "status", description: "Show whether TypeSafe skill suggestion will run" },
 			{ name: "auto", description: "Suggest skills when TypeSafe is authenticated (default)" },
 			{ name: "typesafe", description: "Always use TypeSafe when a key exists" },
 			{ name: "on", description: "Alias for typesafe" },
 			{ name: "off", description: "Disable TypeSafe skill suggestion" },
+			{ name: "rerank", description: "Cookbook call 2 rerank mode (auto|always|off)" },
 		],
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => runtime.ctx.session.skillSuggestionStatus(),
 		handle: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "status") {
+			const raw = command.args.trim();
+			const parts = raw.split(/\s+/).filter(Boolean);
+			const head = (parts[0] ?? "").toLowerCase();
+			if (head === "rerank") {
+				const mode = (parts[1] ?? "status").toLowerCase();
+				if (!parts[1] || mode === "status") {
+					await runtime.output(`Skill rerank: ${runtime.session.skillSuggestionRerankMode()}`);
+					return commandConsumed();
+				}
+				if (mode === "auto" || mode === "always" || mode === "off") {
+					runtime.session.setSkillSuggestionRerankMode(mode);
+					await runtime.output(runtime.session.skillSuggestionStatus());
+					return commandConsumed();
+				}
+				return usage("Usage: /jev rerank [status|auto|always|off]", runtime);
+			}
+			if (!head || head === "status") {
 				await runtime.output(runtime.session.skillSuggestionStatus());
 				return commandConsumed();
 			}
-			if (arg === "on" || arg === "typesafe" || arg === "auto" || arg === "off") {
-				const mode = arg === "on" ? "typesafe" : arg;
+			if (head === "on" || head === "typesafe" || head === "auto" || head === "off") {
+				const mode = head === "on" ? "typesafe" : head;
 				runtime.session.setSkillSuggestionMode(mode);
 				await runtime.output(runtime.session.skillSuggestionStatus());
 				return commandConsumed();
 			}
-			return usage("Usage: /jev [status|auto|typesafe|off]", runtime);
+			return usage("Usage: /jev [status|auto|typesafe|off|rerank ...]", runtime);
 		},
 		handleTui: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "status") {
+			const raw = command.args.trim();
+			const parts = raw.split(/\s+/).filter(Boolean);
+			const head = (parts[0] ?? "").toLowerCase();
+			if (head === "rerank") {
+				const mode = (parts[1] ?? "status").toLowerCase();
+				if (!parts[1] || mode === "status") {
+					runtime.ctx.showStatus(`Skill rerank: ${runtime.ctx.session.skillSuggestionRerankMode()}`);
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				if (mode === "auto" || mode === "always" || mode === "off") {
+					runtime.ctx.session.setSkillSuggestionRerankMode(mode);
+					runtime.ctx.showStatus(runtime.ctx.session.skillSuggestionStatus());
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				runtime.ctx.showStatus("Usage: /jev rerank [status|auto|always|off]");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (!head || head === "status") {
 				runtime.ctx.showStatus(runtime.ctx.session.skillSuggestionStatus());
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			if (arg === "on" || arg === "typesafe" || arg === "auto" || arg === "off") {
-				const mode = arg === "on" ? "typesafe" : arg;
+			if (head === "on" || head === "typesafe" || head === "auto" || head === "off") {
+				const mode = head === "on" ? "typesafe" : head;
 				runtime.ctx.session.setSkillSuggestionMode(mode);
 				runtime.ctx.showStatus(runtime.ctx.session.skillSuggestionStatus());
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /jev [status|auto|typesafe|off]");
+			runtime.ctx.showStatus("Usage: /jev [status|auto|typesafe|off|rerank ...]");
 			runtime.ctx.editor.setText("");
 		},
 	},
