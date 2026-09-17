@@ -117,6 +117,22 @@ describe("NineRouterController", () => {
 		expect(settings.getModelRole("budget")).toBe("9router/clinepass-deepseek-v4-flash");
 	});
 
+	test("routes the optional 9rdeepseek combo", async () => {
+		const settings = makeSettings();
+		const controller = new NineRouterController({
+			settings,
+			baseUrl: "http://127.0.0.1:20128/v1",
+			fetch: makeFetch(["9rdeepseek"]),
+		});
+
+		await controller.apply({ roles: ["default", "balanced", "task", "budget"] });
+
+		expect(settings.getModelRole("default")).toBe("9router/9rdeepseek");
+		expect(settings.getModelRole("balanced")).toBe("9router/9rdeepseek");
+		expect(settings.getModelRole("task")).toBe("9router/9rdeepseek");
+		expect(settings.getModelRole("budget")).toBe("9router/9rdeepseek");
+	});
+
 	test("probe mode skips candidates that fail the chat probe", async () => {
 		const settings = makeSettings();
 		const fetchImpl: FetchImpl = async (input, init) => {
@@ -218,5 +234,25 @@ describe("NineRouterController", () => {
 		expect(result.errors.length).toBeGreaterThan(0);
 		expect(result.errors[0]).toContain("connection refused");
 		expect(settings.getModelRole("default")).toBeUndefined();
+	});
+
+	test("attaches Authorization header when apiKey is supplied", async () => {
+		const settings = makeSettings();
+		const capturedHeaders: Array<Record<string, string>> = [];
+		const controller = new NineRouterController({
+			settings,
+			baseUrl: "http://127.0.0.1:20128/v1",
+			apiKey: "sk-test-nine-key",
+			fetch: async (_input, init) => {
+				if (init?.headers) capturedHeaders.push(init.headers as Record<string, string>);
+				return Response.json({ data: [{ id: "ompk" }] });
+			},
+		});
+
+		await controller.apply({ roles: ["default"] });
+
+		expect(capturedHeaders.length).toBeGreaterThan(0);
+		const authHeader = capturedHeaders[0]?.Authorization;
+		expect(authHeader).toBe("Bearer sk-test-nine-key");
 	});
 });

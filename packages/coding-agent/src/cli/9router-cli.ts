@@ -94,8 +94,9 @@ export async function runNineRouterCommand(command: NineRouterCommandArgs): Prom
 			.filter(Boolean)
 			.map(r => r as ModelRole)
 			.filter(Boolean);
+		const apiKey = command.flags["api-key"] ?? (await authStorage.getApiKey("9router"));
 		const result = await applyNineRouterRouting(settings, {
-			apiKey: command.flags["api-key"],
+			apiKey,
 			mode: command.flags.mode,
 			probeTimeoutMs: command.flags["probe-timeout"],
 			probeMaxTokens: command.flags["probe-tokens"],

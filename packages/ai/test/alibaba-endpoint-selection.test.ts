@@ -206,8 +206,11 @@ describe("alibaba-coding-plan endpoint selection", () => {
 		};
 
 		const error = await loginAlibabaCodingPlan(options).catch((e: unknown) => e as Error);
-		expect(error.message).toMatch(/sk-sp-/);
-		expect(error.message).toMatch(/alibaba-token-plan/);
+		expect(error).toBeInstanceOf(Error);
+		if (error instanceof Error) {
+			expect(error.message).toMatch(/sk-sp-/);
+			expect(error.message).toMatch(/alibaba-token-plan/);
+		}
 	});
 });
 

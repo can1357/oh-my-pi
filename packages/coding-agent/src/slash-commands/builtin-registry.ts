@@ -1538,22 +1538,34 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			const { verb } = parseSubcommand(command.args);
+			const authStorage = runtime.session.modelRegistry.authStorage;
 			if (verb === "route" || !verb) {
-				await runNineRouterSlashCommand(runtime.settings, "list", runtime.output);
+				await runNineRouterSlashCommand(runtime.settings, "list", runtime.output, authStorage);
 				return commandConsumed();
 			}
 			if (verb === "probe") {
-				await runNineRouterSlashCommand(runtime.settings, "probe", runtime.output);
+				await runNineRouterSlashCommand(runtime.settings, "probe", runtime.output, authStorage);
 				return commandConsumed();
 			}
 			return usage("Usage: /9router [route|probe]", runtime);
 		},
 		handleTui: async (command, runtime) => {
 			const { verb } = parseSubcommand(command.args);
+			const authStorage = runtime.ctx.session.modelRegistry.authStorage;
 			if (verb === "route" || !verb) {
-				await runNineRouterSlashCommand(runtime.ctx.settings, "list", text => runtime.ctx.showStatus(text));
+				await runNineRouterSlashCommand(
+					runtime.ctx.settings,
+					"list",
+					text => runtime.ctx.showStatus(text),
+					authStorage,
+				);
 			} else if (verb === "probe") {
-				await runNineRouterSlashCommand(runtime.ctx.settings, "probe", text => runtime.ctx.showStatus(text));
+				await runNineRouterSlashCommand(
+					runtime.ctx.settings,
+					"probe",
+					text => runtime.ctx.showStatus(text),
+					authStorage,
+				);
 			} else {
 				runtime.ctx.showStatus("Usage: /9router [route|probe]");
 			}
@@ -3225,8 +3237,10 @@ async function runNineRouterSlashCommand(
 	settings: Settings,
 	mode: "list" | "probe",
 	output: (text: string) => void | Promise<void>,
+	authStorage?: { getApiKey: (provider: string) => Promise<string | undefined> },
 ): Promise<void> {
-	const result = await applyNineRouterRouting(settings, { mode });
+	const apiKey = await authStorage?.getApiKey("9router");
+	const result = await applyNineRouterRouting(settings, { mode, apiKey });
 	await output(renderNineRouterRoutes(result));
 }
 

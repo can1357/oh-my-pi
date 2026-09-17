@@ -1,4 +1,5 @@
 import type { KnownProvider } from "@pk-nerdsaver-ai/pi-catalog";
+import { nineRouterProvider } from "./9router";
 import { aimlApiProvider } from "./aimlapi";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
 import { alibabaTokenPlanProvider } from "./alibaba-token-plan";
@@ -139,6 +140,7 @@ const ALL = [
 	ollamaProvider,
 	ollamaCloudProvider,
 	lmStudioProvider,
+	nineRouterProvider,
 	vllmProvider,
 	llamaCppProvider,
 	openaiProvider,
