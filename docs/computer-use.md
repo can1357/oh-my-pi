@@ -26,6 +26,7 @@ tools:
 | `computer.display`   |   `all` | Composite every display, or select one native display ID. On Wayland the portal display ID is `wayland-portal-0`. |
 | `computer.maxWidth`  |  `3840` | Maximum screenshot width. Some model transports impose an effective coordinate-safe cap of 1280.                  |
 | `computer.maxHeight` |  `2400` | Maximum screenshot height. Some model transports impose an effective coordinate-safe cap of 896.                  |
+| `computer.jev`       |  `auto` | Optional Jev backend for `computer.decide()` (auto when TypeSafe is authenticated; off = rules/rerank only). |
 
 There is no `computer.backend` setting: the native addon selects the platform backend. The `/computer`, `/computer on`, `/computer off`, and `/computer status` commands toggle or inspect the current session without writing config. Start a new session after changing settings files.
 

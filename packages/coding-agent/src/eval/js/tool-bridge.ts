@@ -11,6 +11,7 @@ import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { withBridgeTimeoutPause } from "../bridge-timeout";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
+import { EVAL_COMPUTER_DECIDE_BRIDGE_NAME, runEvalComputerDecide } from "../../computer/decide-bridge";
 import { EVAL_JUDGMENT_BRIDGE_NAME, runEvalJudgment } from "../judgment-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
@@ -236,6 +237,9 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	}
 	if (name === EVAL_JUDGMENT_BRIDGE_NAME) {
 		return runEvalJudgment(args, options);
+	}
+	if (name === EVAL_COMPUTER_DECIDE_BRIDGE_NAME) {
+		return await runEvalComputerDecide(args, options);
 	}
 	if (name === EVAL_AGENT_BRIDGE_NAME) {
 		return await runEvalAgent(args, options);
