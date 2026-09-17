@@ -6,6 +6,10 @@
 
 - Moved every terminal-UI module (theme, tool renderers, chat/overlay/status-line/composer components, setup wizard, git/ps/debug apps) to `@oh-my-pi/pi-tui`; `@oh-my-pi/pi-coding-agent/modes/theme/*`, `/modes/components/*`, `/tui/*`, `/tools/render-utils` and related subpaths no longer exist. Names re-exported from the package root (`Theme`, `theme`, hook/editor components, tool Details types) are unchanged.
 
+### Added
+
+- Documented every custom status-line segment id, hide rule, and `segmentOptions` key in the settings reference ([#11578](https://github.com/can1357/oh-my-pi/issues/11578)).
+
 ### Changed
 
 - Keyless Parallel web search now leads the default provider chain ahead of Perplexity.

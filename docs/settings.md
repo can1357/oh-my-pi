@@ -697,11 +697,16 @@ tui:
 | `symbolPreset`              | enum    | `unicode`        | `unicode`, `nerd`, `ascii`.                                               |
 | `colorBlindMode`            | boolean | `false`          | Use blue instead of green for diff additions.                             |
 | `showHardwareCursor`        | boolean | `true`           | Show the terminal hardware cursor.                                        |
-| `statusLine.preset`         | enum    | `default`        | `default`, `minimal`, `compact`, `full`, `nerd`, `ascii`, `custom`.       |
-| `statusLine.separator`      | enum    | `powerline-thin` | `powerline`, `powerline-thin`, `slash`, `pipe`, `block`, `none`, `ascii`. |
-| `statusLine.sessionAccent`  | boolean | `true`           | Tint the editor border with the session color.                            |
-| `statusLine.transparent`    | boolean | `false`          | Use the terminal background for the status line.                          |
-| `statusLine.showHookStatus` | boolean | `true`           | Show hook status messages.                                                |
+| `statusLine.preset`                | enum    | `default`                                      | `default`, `minimal`, `compact`, `full`, `nerd`, `ascii`, `custom`.                                                                                                                                 |
+| `statusLine.separator`             | enum    | `powerline-thin`                               | `powerline`, `powerline-thin`, `slash`, `pipe`, `block`, `none`, `ascii`.                                                                                                                            |
+| `statusLine.sessionAccent`         | boolean | `true`                                         | Tint the editor border with the session color.                                                                                                                                                      |
+| `statusLine.transparent`           | boolean | `false`                                        | Use the terminal background for the status line.                                                                                                                                                    |
+| `statusLine.showHookStatus`        | boolean | `true`                                         | Show hook status messages in the footer.                                                                                                                                                            |
+| `statusLine.leftSegments`          | array   | `vim, model, mode, path, git, pr`              | Ordered segment ids for the left group. Applied only when `preset` is `custom`. See [Custom status line segments](#custom-status-line-segments).                                                    |
+| `statusLine.rightSegments`         | array   | `session_name, token_total, cost, context_pct` | Ordered segment ids for the right group. Applied only when `preset` is `custom`.                                                                                                                    |
+| `statusLine.segmentOptions`        | record  | `{}`                                           | Per-segment options. Merged over the active preset's options. Only `model`, `path`, `git`, and `time` read this map.                                                                                |
+| `statusLine.compactThinkingLevel`  | boolean | `true`                                         | Show thinking as a compact icon on the model name instead of a ` · <level>` suffix.                                                                                                                 |
+| `statusLine.contextLine`           | enum    | `embedded`                                     | How the gap between left and right groups reflects context usage on box/band composers: `off`, `percentage`, `annotated`, `embedded`.                                                               |
 | `terminal.showImages`       | boolean | `true`           | Render images inline (when the terminal supports it).                     |
 | `images.autoResize`         | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`        | boolean | `false`          | Never send images to providers.                                           |
@@ -710,7 +715,81 @@ tui:
 | `display.pinnedAgents`      | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
 | `tui.resizeScrollback`      | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport. |
 
-For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
+#### Custom status line segments
+
+With `statusLine.preset: custom`, `leftSegments` and `rightSegments` are ordered lists of segment ids. Those arrays are ignored on every other preset — the preset's own lists win. `segmentOptions` still merge over the active preset's options on any preset.
+
+Omitting the arrays keeps the custom defaults (`vim, model, mode, path, git, pr` on the left; `session_name, token_total, cost, context_pct` on the right). Explicit empty arrays render an empty bar.
+
+```yaml
+statusLine:
+  preset: custom
+  separator: powerline-thin
+  leftSegments: [pi, vim, model, mode, path, git, pr]
+  rightSegments: [session_name, usage, token_total, cost, context_pct]
+  segmentOptions:
+    model:
+      showThinkingLevel: true
+    path:
+      abbreviate: true
+      maxLength: 40
+      stripWorkPrefix: true
+    git:
+      showBranch: true
+      showStaged: true
+      showUnstaged: true
+      showUntracked: true
+    time:
+      format: 24h
+      showSeconds: false
+```
+
+`omp config set` rejects unknown ids and prints the valid list. A typo in YAML is kept, logged once (`Settings: unknown status line segment "…"`), and skipped at render — an empty slot with no TUI error.
+
+| Segment         | Renders                                                                                          | Hides when                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `pi`            | Brand glyph at idle; spinner + turn timer during a turn; focused agent id                        | Never                                                                                               |
+| `status`        | Extension statuses from `ctx.ui.setStatus()`, ordered by key and joined inline                   | None set. Not in any built-in preset — add it to a custom list. Footer copy is `showHookStatus`.    |
+| `model`         | Model name, thinking level, advisor eye, fast-mode icon. Falls back to `no-model`                | Never                                                                                               |
+| `mode`          | Active Plan / Prewalk / Goal / Vibe / Loop badge                                                 | No special mode is active                                                                           |
+| `path`          | cwd (worktree/scratch-aware, abbreviated, hyperlinked)                                           | Never                                                                                               |
+| `git`           | Branch + `*n` unstaged, `+n` staged, `?n` untracked                                              | No branch and no status (not a repo, or `git.enabled` is false)                                     |
+| `pr`            | Linked PR `#n` (hyperlinked)                                                                     | No PR for the branch, or `git.enabled` is false                                                     |
+| `subagents`     | Running subagent count                                                                           | Count is 0                                                                                          |
+| `token_in`      | Input token count                                                                                | Count is 0                                                                                          |
+| `token_out`     | Output token count                                                                               | Count is 0                                                                                          |
+| `token_total`   | Total tokens (excludes `cacheRead` and orchestration cache reads)                                | Total is 0                                                                                          |
+| `token_rate`    | Throughput in tok/s                                                                              | Rate is 0                                                                                           |
+| `cost`          | Spend, premium requests, advisor cost, subscription badge, peak/off-peak arrow                   | No spend, no premium requests, no advisor cost, no subscription badge, and no peak/off-peak tariff  |
+| `context_pct`   | Context `%/<window>` (or `tokens/?` when the window is unknown) and auto-compact icon            | Never                                                                                               |
+| `context_total` | Context window size                                                                              | No context window                                                                                   |
+| `time_spent`    | Cumulative active time (excludes idle)                                                           | Under 1s of activity                                                                                |
+| `time`          | Wall clock                                                                                       | Never                                                                                               |
+| `session`       | Session id prefix                                                                                | Never (`new` fallback)                                                                              |
+| `hostname`      | Hostname (session-accent tinted when the session is named)                                       | Never                                                                                               |
+| `cache_read`    | Cache-read token count                                                                           | Count is 0                                                                                          |
+| `cache_write`   | Cache-write token count                                                                          | Count is 0                                                                                          |
+| `cache_hit`     | Cache hit-rate %                                                                                 | No cache reads                                                                                      |
+| `session_name`  | Session title (accent colored)                                                                   | Unnamed session. Also skipped on the `band` composer (the default `composer.shape`) — see below.    |
+| `usage`         | Provider quota windows `5h` / `1d` / `7d` / `mo` plus reset timers                               | No usage data. Not in any built-in preset — add it to a custom list.                                |
+| `collab`        | Collab host/guest role + participant count                                                       | Not in a collab session                                                                             |
+| `vim`           | Mode (`NORMAL` / `INSERT` / `VISUAL` / `V-LINE`), pending command, Visual selection height       | `tui.vimMode` is off, or `tui.vimModeDisplay` is `none`                                             |
+
+`statusLine.segmentOptions` is a per-segment map. Options for any other id are ignored:
+
+- `model.showThinkingLevel` (boolean, default true) — show the thinking level after the model name. Global `statusLine.compactThinkingLevel` (default true) replaces the model icon with the thinking glyph and drops the ` · <level>` suffix; `showThinkingLevel: false` hides the level entirely.
+- `path.abbreviate` (boolean, default true) — replace the home directory with `~`.
+- `path.maxLength` (number, default 40) — left-truncate the path label.
+- `path.stripWorkPrefix` (boolean, default true) — collapse linked worktrees to the project name, scratch dirs to a relative path, and strip `~/Projects` / `/work` prefixes.
+- `git.showBranch`, `git.showStaged`, `git.showUnstaged`, `git.showUntracked` (all boolean, default true).
+- `time.format` (`12h` or `24h`; omitted is 24-hour with no suffix) and `time.showSeconds` (boolean, default false).
+
+Gotchas:
+
+- `session_name` is omitted from the status band when `composer.shape` is `band` (the default). The title is shown on the working row instead. Box and Claude-style composers still render it inline from the left or right list.
+- With `statusLine.contextLine: embedded` (the default) on box/band composers, visible `context_pct` / `context_total` chips are absorbed into the gap gauge rather than sitting as standalone segments.
+- `usage` and `status` are implemented but absent from every built-in preset. They only appear if you add them under `preset: custom`.
+- Theme tokens for these segments are listed in [Theming](./theme.md).
 
 The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
 
