@@ -325,12 +325,20 @@ async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]):
 	try {
 		if (pluginId) {
 			if (flags.scope) {
-				const result = await manager.upgradePlugin(pluginId, flags.scope);
-				console.log(chalk.green(`Upgraded ${pluginId} (${flags.scope}) to ${result.version}`));
+				const result = await manager.upgradePlugin(pluginId, flags.scope, { dryRun: flags.dryRun });
+				if (flags.dryRun) {
+					console.log(chalk.dim(`[dry-run] Would upgrade ${pluginId} (${flags.scope}) to ${result.version}`));
+				} else {
+					console.log(chalk.green(`Upgraded ${pluginId} (${flags.scope}) to ${result.version}`));
+				}
 			} else {
-				const entries = await manager.upgradePluginAcrossScopes(pluginId);
+				const entries = await manager.upgradePluginAcrossScopes(pluginId, { dryRun: flags.dryRun });
 				for (const entry of entries) {
-					console.log(chalk.green(`Upgraded ${pluginId} (${entry.scope}) to ${entry.version}`));
+					if (flags.dryRun) {
+						console.log(chalk.dim(`[dry-run] Would upgrade ${pluginId} (${entry.scope}) to ${entry.version}`));
+					} else {
+						console.log(chalk.green(`Upgraded ${pluginId} (${entry.scope}) to ${entry.version}`));
+					}
 				}
 			}
 		} else {
@@ -341,12 +349,16 @@ async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]):
 					),
 				);
 			}
-			const results = await manager.upgradeAllPlugins();
+			const results = await manager.upgradeAllPlugins({ dryRun: flags.dryRun });
 			if (results.length === 0) {
 				console.log("All marketplace plugins are up to date.");
 			} else {
 				for (const r of results) {
-					console.log(chalk.green(`  ${r.pluginId} (${r.scope}): ${r.from} -> ${r.to}`));
+					if (flags.dryRun) {
+						console.log(chalk.dim(`[dry-run] Would upgrade ${r.pluginId} (${r.scope}): ${r.from} -> ${r.to}`));
+					} else {
+						console.log(chalk.green(`  ${r.pluginId} (${r.scope}): ${r.from} -> ${r.to}`));
+					}
 				}
 			}
 		}
@@ -1093,7 +1105,7 @@ ${chalk.bold("Options:")}
   --fix            Attempt automatic fixes (doctor)
   --force          Overwrite without prompting (install)
   --scope <scope>  Install scope: user (default) or project (install name@marketplace)
-  --dry-run        Preview changes without applying (install)
+  --dry-run        Preview changes without applying (install, uninstall, upgrade)
   -l, --local      Use project-local overrides
 
 ${chalk.bold("Examples:")}
