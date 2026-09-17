@@ -253,6 +253,9 @@
 - Fixed Cursor models behind an authentication gateway incorrectly retrying valid client-declared tool calls.
 - Fixed reasoning from models that prefill `<think>` (including DeepSeek-R1 and hosted Qwen3-Thinking) being shown in the response instead of as a separate thinking block.
 
+### Added
+
+- Added Ollama Cloud quota and trailing spend reporting to `omp usage` through the new ollama.com usage API (requires an API-key credential; accounts without one keep the previous no-quota stub report). Migrated plans surface the monthly allowance; unmigrated accounts keep their legacy 5-hour and 7-day session quotas.
 ## [18.1.3] - 2026-09-02
 
 ### Fixed
