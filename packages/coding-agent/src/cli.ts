@@ -322,6 +322,12 @@ async function runIpcSubprocessWorker<In, Out>(
 		 * Channel-gone failures still shut down.
 		 */
 		rethrowConnectedSendErrors?: boolean;
+		/**
+		 * Idle inactivity timeout (ms) after which the worker process exits if no
+		 * messages are received from the parent. Defaults to OMP_WORKER_IDLE_TTL_MS
+		 * or 15 minutes (900,000 ms). Pass 0 to disable.
+		 */
+		idleTimeoutMs?: number;
 	},
 ): Promise<void> {
 	const { promise: shuttingDown, resolve: shutdown } = Promise.withResolvers<void>();
@@ -363,11 +369,28 @@ async function runIpcSubprocessWorker<In, Out>(
 		}
 		return promise;
 	};
+	const envIdleTtl = process.env.OMP_WORKER_IDLE_TTL_MS
+		? Number.parseInt(process.env.OMP_WORKER_IDLE_TTL_MS, 10)
+		: undefined;
+	const configuredIdleTtl = options?.idleTimeoutMs ?? (Number.isFinite(envIdleTtl) ? envIdleTtl : 900_000);
+	let idleTimer: NodeJS.Timeout | undefined;
+	const resetIdleTimer = (): void => {
+		if (!configuredIdleTtl || configuredIdleTtl <= 0) return;
+		if (idleTimer) clearTimeout(idleTimer);
+		idleTimer = setTimeout(() => {
+			shutdown();
+		}, configuredIdleTtl);
+		idleTimer.unref();
+	};
+	resetIdleTimer();
 	start({
 		send,
 		sendAndFlush,
 		onMessage(handler) {
-			const wrap = (data: unknown): void => handler(data as In);
+			const wrap = (data: unknown): void => {
+				resetIdleTimer();
+				handler(data as In);
+			};
 			process.on("message", wrap);
 			return () => {
 				process.off("message", wrap);
@@ -443,7 +466,8 @@ async function runIpcSubprocessWorker<In, Out>(
 		await shuttingDown;
 	} finally {
 		clearInterval(keepalive);
-		if (parentWatchdog) clearInterval(parentWatchdog);
+		clearInterval(parentWatchdog);
+		clearTimeout(idleTimer);
 	}
 	process.kill(process.pid, "SIGKILL");
 }
