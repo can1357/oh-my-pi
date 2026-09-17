@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- TypeSafe judgments now report their published input-token price in usage instead of zero cost, so session cost totals include them.
+
 ## [18.2.4] - 2026-09-17
 
 ### Added
