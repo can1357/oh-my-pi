@@ -96,6 +96,24 @@ export class InternalUrlRouter {
 		return this.#isMcpResourceScheme(scheme);
 	}
 
+	/**
+	 * Whether this URL is served by the MCP resource handler — either the
+	 * explicit `mcp://<uri>` wrapper or a server-advertised native scheme no
+	 * other handler claims (e.g. `ags://capabilities/current-host`).
+	 *
+	 * Exposed so a caller that must apply a per-session MCP scope to `read` can
+	 * ask the same question the router asks when dispatching, instead of
+	 * re-deriving it (`scheme === "mcp"` misses the native form entirely).
+	 */
+	routesToMcpResources(input: string): boolean {
+		const scheme = extractUriScheme(input);
+		if (!scheme) return false;
+		// The explicit wrapper is itself a registered handler.
+		if (scheme === "mcp") return this.canHandle(input);
+		if (this.#handlers.has(scheme)) return false;
+		return this.#isMcpResourceScheme(scheme);
+	}
+
 	/** Schemes whose handler supports host/path autocomplete. */
 	completionSchemes(): string[] {
 		const schemes: string[] = [];

@@ -6,6 +6,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { MCPManager } from "../mcp/manager";
+import { resolveMCPToolAlias } from "../mcp/tool-bridge";
 import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -13,6 +14,7 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
+import { withSiblingTools } from "../tools/builtin-names";
 import type { EventBus } from "../utils/event-bus";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
 import type { AgentDefinition } from "./types";
@@ -180,7 +182,13 @@ export function createPersistedSubagentReviverFactory(
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
-				toolNames: revivedToolNames,
+				// Scope from the declarative allowlist when present: the enabled
+				// snapshot predates late registrations (extensions, MCP reconnects)
+				// and would permanently scope them out after a restart. Files from
+				// before `declaredTools` existed fall back to the snapshot.
+				toolNames: init.declaredTools ?? revivedToolNames,
+				enforceToolAllowlist: init.enforceToolAllowlist || undefined,
+				disallowedTools: init.disallowedTools,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
@@ -207,10 +215,36 @@ export function createPersistedSubagentReviverFactory(
 							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 						}),
 			});
-			// Clamp the active set to the persisted list: createAgentSession's
+			// Clamp the active set to the persisted scope: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
+			// Enforced revivals clamp to the declarative allowlist — the enabled
+			// snapshot predates tools that registered late originally and would
+			// drop one that is available again at revival time with no later
+			// registration event to re-activate it.
+			//
+			// The list is re-declared through the sibling pairing: the original
+			// run's active set carried the sister pair `declaredTools` alone
+			// cannot reproduce (`tools: [checkpoint]` was widened to include
+			// `rewind` during construction), so clamping to the raw declaration
+			// would strand the revived agent mid-investigation.
+			//
+			// MCP entries are canonicalized against the live registry first. The
+			// declaration may name a tool the Claude Code way
+			// (`mcp__srv-x__tool`), while `declaredTools` persists that original
+			// spelling: session creation resolves it to the minted key, and
+			// clamping to the raw persisted name would then drop the very tool the
+			// agent declared. An unresolvable spelling is left untouched.
+			const declaredScope = (init.declaredTools ?? revivedToolNames).map(name => {
+				if (name.endsWith("*")) return name;
+				return (
+					resolveMCPToolAlias(name, candidate =>
+						session.getToolByName(candidate) ? { name: candidate } : undefined,
+					)?.name ?? name
+				);
+			});
+			const revivedScope = withSiblingTools(declaredScope);
+			await session.setActiveToolsByName([...revivedScope, ...session.getMountedXdevToolNames()]);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
 			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
