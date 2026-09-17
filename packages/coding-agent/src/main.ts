@@ -1251,6 +1251,10 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
  * before extensions establish whether a built-in-named flag belongs to them.
  * `onSessionContinuation` hears when `--resume`, `--continue` or auto-resume
  * opens a newer copy of the chosen session's conversation instead of its file.
+ *
+ * `interactive` reports whether this run owns a terminal. Pass `false` for a
+ * run whose prompt arrived on piped stdin; `--print` and explicit modes are
+ * detected from `parsed` and never auto-resume regardless.
  */
 export async function createSessionManager(
 	parsed: Args,
@@ -1260,6 +1264,7 @@ export async function createSessionManager(
 	options: {
 		nativeFlagOwnership?: "preliminary" | "resolved";
 		onSessionContinuation?: (continuation: SessionContinuation) => void;
+		interactive?: boolean;
 	} = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
@@ -1367,8 +1372,17 @@ export async function createSessionManager(
 	// session exists. When a prior session is resumed, mark parsed.continue so
 	// buildSessionOptions restores the session's model/thinking instead of
 	// overriding them with CLI defaults.
+	//
+	// This is an interactive startup convenience, so it is limited to runs that
+	// own a terminal. A headless run is normally issued while the conversation
+	// it would otherwise adopt is still live in another process — a nested
+	// `omp -p` probe, a cron job, an editor integration — and adopting it makes
+	// two writers share one transcript, replaying the pending tool calls a
+	// resume carries in. `--continue`/`--resume` still resume deliberately from
+	// any mode.
+	const interactive = options.interactive ?? (!parsed.print && parsed.mode === undefined);
 	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
-	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
+	if (parsed.goal === undefined && interactive && cfgAutoResume.get(activeSettings)) {
 		const manager = await forkIfMovedAway(
 			await SessionManager.continueRecent(cwd, parsed.sessionDir, undefined, {
 				onSessionContinuation: options.onSessionContinuation,
@@ -2186,6 +2200,7 @@ export async function runRootCommand(
 					{
 						nativeFlagOwnership: "preliminary",
 						onSessionContinuation: continuation => resumedContinuations.push(continuation),
+						interactive: isInteractive,
 					},
 				);
 			}
