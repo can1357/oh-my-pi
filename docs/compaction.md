@@ -358,6 +358,12 @@ file-operations.md (Write)
 
 Legacy `<read-files>`/`<modified-files>` tags from summaries written by earlier versions are stripped (alongside `<files>`) before re-appending, so old summaries self-heal on the next compaction.
 
+### Coverage check (opt-in)
+
+With `compaction.coverageCheck` enabled, every LLM-generated summary (manual `/compact`, auto-compaction, and handoff documents) is checked against the user messages it replaces before it is committed. `appendCoverageNote()` in `session/compaction-coverage.ts` extracts user-authored requests from `messagesToSummarize` + `turnPrefixMessages` (agent-attributed and synthetic messages are skipped, messages under 40 characters are treated as acknowledgements, each request is cleaned through the tiny-model input policy, and at most 24 are checked — the first and last twelve), then asks the judgment provider (`providers.judgmentProvider`: TypeSafe when authenticated, else the tiny/smol chain) one yes/no question per request: does the summary preserve it? Requests judged not preserved are appended verbatim under an `## Uncovered User Requests` heading, ahead of the `<files>` block.
+
+The check is fail-open and bounded (30s on top of the compaction signal): a judge failure, timeout, or abort commits the summary as generated. Snapcompact and extension-provided summaries are not checked, and an OpenAI remote compaction is skipped because its summary text is only a placeholder. An Anthropic native summary is checked, but the provider replays it as a byte-identical `compaction` block and drops the entry text, so the note is also inserted into the preserved `filesText` slot (ahead of the `<files>` block) that the converter emits after the native block. Judgment usage is recorded on the session ledger with purpose `compaction-coverage`.
+
 ### Persist and reload
 
 After summary generation (or hook-provided summary), agent session:
@@ -495,6 +501,7 @@ From `settings-schema.ts`:
 - `compaction.autoContinue` = `true`
 - `compaction.midTurnEnabled` = `true`
 - `compaction.handoffSaveToDisk` = `false`
+- `compaction.coverageCheck` = `false`
 - The `handoff` method generates a handoff document through the live-cache side-request pipeline and commits it as a compaction entry on the current session (no new session is created); `/handoff` does the same manually.
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.remoteStreamingV2Enabled` = `true`

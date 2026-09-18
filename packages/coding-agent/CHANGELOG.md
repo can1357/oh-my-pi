@@ -24,6 +24,10 @@
 - Improved subagent task labels and plan filenames to use concise, action-oriented descriptions.
 - Updated CLI byte sizes to use decimal KB units and made duration displays coarser and easier to read.
 
+### Added
+
+- Added the opt-in `compaction.coverageCheck` setting: after a compaction summary or handoff document is generated, the judgment provider is asked which of the compacted user requests it fails to preserve, and those are appended to the summary verbatim so they survive the cut ([#12340](https://github.com/can1357/oh-my-pi/pull/12340) by [@eggpeat](https://github.com/eggpeat)).
+
 ### Fixed
 
 - Fixed `edit` auto-repair waiting up to 60 seconds when the `smol` model does not respond; it now times out after 20 seconds and reports repair start and timeout details.

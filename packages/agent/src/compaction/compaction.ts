@@ -1281,6 +1281,19 @@ export function canReplayRemoteCompaction(
 }
 
 /**
+ * Whether `preserveData` carries an OpenAI remote-compaction payload. Such an
+ * entry keeps its durable history in the provider replay and stores only the
+ * {@link formatRemoteCompactionSummary} placeholder as summary text, so callers
+ * that inspect or annotate summary text have nothing to work with.
+ */
+export function hasOpenAiRemoteCompactionPayload(preserveData: Record<string, unknown> | undefined): boolean {
+	return (
+		getCompactionV2PreserveData(preserveData) !== undefined ||
+		getPreservedOpenAiRemoteCompactionData(preserveData) !== undefined
+	);
+}
+
+/**
  * Whether compaction preparation may reuse a native boundary instead of
  * re-expanding its original messages. This is deliberately stricter than normal
  * replay: the active model must both read the payload and remain eligible for

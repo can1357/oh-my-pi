@@ -2650,6 +2650,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.coverageCheck": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Coverage Check",
+			description:
+				"After a compaction summary or handoff document is generated, ask the judgment provider which of the compacted user requests it fails to preserve and append them verbatim. Uses TypeSafe when authenticated, otherwise the tiny/smol chain.",
+		},
+	},
+
 	"compaction.remoteStreamingV2Enabled": {
 		type: "boolean",
 		default: true,

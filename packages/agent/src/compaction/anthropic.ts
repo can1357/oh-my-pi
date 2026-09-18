@@ -48,7 +48,10 @@ export interface AnthropicCompactionPreserveData {
 	content: string;
 	/** Opaque provider state the API attached to the block; replayed verbatim. */
 	encryptedContent?: string;
-	/** Harness file metadata (`<files>` section) replayed after the native block. */
+	/**
+	 * Harness text appended to the summary (the `<files>` section, and any
+	 * coverage note ahead of it) replayed after the native block.
+	 */
 	filesText?: string;
 	/** Model that wrote the summary. */
 	model?: string;
