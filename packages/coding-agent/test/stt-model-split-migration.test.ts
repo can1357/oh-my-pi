@@ -59,6 +59,14 @@ describe("stt.modelName → stt.localModel / stt.cloudModel migration", () => {
 		expect(settings.get("stt.localModel")).toBe("balanced");
 	});
 
+	it("promotes a quoted-dotted target that coexists with the legacy key", async () => {
+		// The flat spelling is authoritative over the legacy value, but normal
+		// lookup only traverses the nested `stt` object: it has to be promoted,
+		// not merely respected.
+		const settings = await loadWith({ stt: { modelName: "fast" }, "stt.localModel": "balanced" });
+		expect(settings.get("stt.localModel")).toBe("balanced");
+	});
+
 	it("migrates the flat quoted-dotted spelling too", async () => {
 		const settings = await loadWith({ "stt.modelName": "gpt-transcribe" });
 		expect(settings.get("stt.cloudModel")).toBe("gpt-transcribe");

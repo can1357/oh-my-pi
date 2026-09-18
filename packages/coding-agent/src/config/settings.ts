@@ -2397,7 +2397,14 @@ export class Settings {
 			if (legacyModel !== undefined) {
 				const target = isCloudSttModel(legacyModel) ? "cloudModel" : "localModel";
 				const sttRoot = sttObj ?? {};
-				if (typeof sttRoot[target] !== "string" && typeof raw[`stt.${target}`] !== "string") {
+				// A quoted-dotted `"stt.cloudModel"` / `"stt.localModel"` key wins over
+				// the legacy value, but lookup only traverses the nested `stt` object:
+				// promote it instead of leaving it stranded next to a deleted legacy key.
+				const flatTarget = raw[`stt.${target}`];
+				if (typeof flatTarget === "string") {
+					if (typeof sttRoot[target] !== "string") sttRoot[target] = flatTarget;
+					delete raw[`stt.${target}`];
+				} else if (typeof sttRoot[target] !== "string") {
 					sttRoot[target] = legacyModel;
 				}
 				delete sttRoot.modelName;
