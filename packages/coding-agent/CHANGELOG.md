@@ -6,6 +6,10 @@
 - Fixed memory recall blocks carrying a minute-resolution `Current time` stamp that dirtied the cached system prompt on every refresh; recall rows already carry dates, so the stamp is removed.
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
 
+### Fixed
+
+- Fixed subagents losing their configured retry fallback chain when their primary model is also the default model ([#12377](https://github.com/can1357/oh-my-pi/pull/12377) by [@Dante-dan](https://github.com/Dante-dan)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Breaking Changes
