@@ -4,7 +4,7 @@
 ### Fixed
 
 - Fixed auth-broker client config resolution failing silently on Windows when reading the token file or `config.yml`; reads now use `node:fs` instead of `Bun.file`.
-- Fixed Antigravity turns dying on `429 RESOURCE_EXHAUSTED` while the account still had quota: Cloud Code Assist refuses some `requestType: "agent"` payloads with a generic exhausted error that names no metric and carries no retry hint, and serves the byte-identical payload tagged `"chat"`. Such a refusal now retries once as a chat request; 429s that name a spent quota metric still fail fast.
+- Fixed Antigravity turns dying on `429 RESOURCE_EXHAUSTED` while the account still had quota: Cloud Code Assist refuses some `requestType: "agent"` payloads with a generic exhausted error that names no metric and carries no retry hint, and serves the byte-identical payload tagged `"chat"`. Such a refusal now retries once as a chat request; 429s that name a spent quota metric still fail fast ([#12437](https://github.com/can1357/oh-my-pi/pull/12437) by [@johnway114](https://github.com/johnway114)).
 
 ## [18.2.5] - 2026-09-17
 
