@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed sluggish streaming and status updates when unchanged inline SIXEL images remain in the transcript.
+- Fixed sluggish streaming and status updates when unchanged inline SIXEL images remain in the transcript ([#12461](https://github.com/can1357/oh-my-pi/pull/12461) by [@joshrzemien](https://github.com/joshrzemien)).
 
 ## [18.2.5] - 2026-09-17
 
