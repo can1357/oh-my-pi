@@ -225,6 +225,10 @@ describe("TypeSafeJudge", () => {
 		expect(result.model).toBe("jev-latest");
 		expect(result.usage.input).toBe(5);
 		expect(result.usage.totalTokens).toBe(6);
+		// Priced at the published $0.042/Mtok input rate; output tokens are free.
+		expect(result.usage.cost.input).toBeCloseTo((0.042 / 1_000_000) * 5, 12);
+		expect(result.usage.cost.output).toBe(0);
+		expect(result.usage.cost.total).toBe(result.usage.cost.input);
 	});
 
 	it("rotates the credential on 401 through the resolver and retries transient statuses", async () => {

@@ -10,7 +10,8 @@
  * the auth registry (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL`
  * overrides the API root, `TYPESAFE_DEFAULT_MODEL` the model.
  */
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { calculateUsageCost } from "@oh-my-pi/pi-catalog/models";
+import type { FetchImpl, ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { $env } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
@@ -28,6 +29,13 @@ import {
 export const TYPESAFE_PROVIDER = "typesafe";
 export const TYPESAFE_DEFAULT_BASE_URL = "https://api.typesafe.ai";
 export const TYPESAFE_DEFAULT_MODEL = "jev-latest";
+
+/**
+ * Published System One pricing (per million tokens): input is billed, output
+ * is free. Every current model and alias resolves to jev-1.13.0 at this rate.
+ * @see https://docs.typesafe.ai/models
+ */
+export const TYPESAFE_MODEL_COST: ModelCost = { input: 0.042, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 /** `TYPESAFE_BASE_URL` when set, else the public API root; trailing slashes stripped. */
 export function typesafeBaseUrl(): string {
@@ -109,12 +117,14 @@ export class TypeSafeJudge implements Judge {
 				);
 			}
 		}
+		const usage = tokenUsage(response.usage.input_tokens, response.usage.output_tokens);
+		calculateUsageCost(TYPESAFE_MODEL_COST, usage);
 		return {
 			api: TYPESAFE_PROVIDER,
 			provider: TYPESAFE_PROVIDER,
 			model: response.model,
 			answers: response.answers as JudgmentResult<Q>["answers"],
-			usage: tokenUsage(response.usage.input_tokens, response.usage.output_tokens),
+			usage,
 		};
 	}
 
