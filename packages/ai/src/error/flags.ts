@@ -163,7 +163,7 @@ export const PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN =
 	/peer closed connection without sending complete message body \(incomplete chunked read\)/;
 /** reqwest body-frame failures forwarded by the Codex HTTP proxy. */
 export const CODEX_HTTP_BODY_READ_ERROR_PATTERN = /\btransport error reading codex response body\b/i;
-const DNS_RESOLUTION_ERROR_PATTERN = /\bgetaddrinfo\s+(?:ENOTFOUND|EAI_AGAIN)\b/;
+const DNS_RESOLUTION_ERROR_PATTERN = /\bgetaddrinfo\s+(?:ENOTFOUND|EAI_AGAIN)\b/i;
 
 export function isDnsResolutionErrorText(text: string): boolean {
 	return DNS_RESOLUTION_ERROR_PATTERN.test(text);

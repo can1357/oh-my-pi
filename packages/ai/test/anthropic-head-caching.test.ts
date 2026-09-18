@@ -635,10 +635,6 @@ describe("anthropic head caching (general API-key path)", () => {
 		};
 		const messages: Message[] = [{ role: "user", content: "hello", timestamp: 1 }];
 		const before = await captureRecall("<memories>\nrecall v1\n</memories>", messages);
-		const systemBlocksBefore = textSystemBlocks(before);
-		const breakpointBefore = systemBlocksBefore.findIndex(
-			block => "cache_control" in block && block.cache_control != null,
-		);
 		const after = await captureRecall("<memories>\nrecall v2\n</memories>", [
 			...messages,
 			assistantMessage("hi there", 2),
@@ -655,7 +651,7 @@ describe("anthropic head caching (general API-key path)", () => {
 			.filter(index => index >= 0);
 		expect(cachedSystem).toContain(systemAfter.length - 2);
 		expect(cachedSystem).not.toContain(systemAfter.length - 1);
-		expect(systemBlocksBefore.length).toBe(systemAfter.length);
+		expect(textSystemBlocks(before).length).toBe(systemAfter.length);
 		// Stable prefix bytes survive the recall refresh: strip the volatile
 		// suffix and the per-turn cache_control, then compare.
 		const stableText = (body: MessageCreateParams): string[] =>
