@@ -544,6 +544,10 @@
 - Fixed Anthropic-compatible streams dropping thinking content, which broke replay of prior reasoning.
 - Updated the Alibaba Coding Plan China login flow to point to the current Bailian API-key management console.
 
+### Added
+
+- Added Kimi Code usage reports for API-key credentials, including status-line, `/usage`, and usage-aware routing support ([#8504](https://github.com/can1357/oh-my-pi/issues/8504)).
+
 ## [17.3.4] - 2026-08-14
 
 ### Fixed

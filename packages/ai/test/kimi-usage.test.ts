@@ -21,6 +21,60 @@ function makeCtx(payload: unknown): UsageFetchContext {
 }
 
 describe("kimi usage provider", () => {
+	it("fetches usage with an API key as a bearer token", async () => {
+		const requests: Array<{ url: string; authorization: string | null }> = [];
+		const credential: UsageFetchParams["credential"] = {
+			type: "api_key",
+			apiKey: "sk-kimi-test",
+		};
+		const params: UsageFetchParams = {
+			provider: "kimi-code",
+			credential,
+			baseUrl: "https://api.kimi.com/coding/v1/",
+			signal: undefined,
+		};
+		const fetch: FetchImpl = async (input, init) => {
+			requests.push({
+				url: String(input),
+				authorization: new Headers(init?.headers).get("Authorization"),
+			});
+			return new Response(
+				JSON.stringify({
+					usage: { limit: "100", used: "2", remaining: "98", resetTime: "2026-08-20T07:05:56Z" },
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		};
+
+		expect(kimiUsageProvider.supports!(params)).toBe(true);
+		const report = await kimiUsageProvider.fetchUsage!(params, { fetch });
+
+		expect(requests).toEqual([
+			{
+				url: "https://api.kimi.com/coding/v1/usages",
+				authorization: "Bearer sk-kimi-test",
+			},
+		]);
+		expect(report?.limits[0]?.amount.remainingFraction).toBe(0.98);
+	});
+
+	it("supports populated API-key and OAuth credentials only", () => {
+		expect(
+			kimiUsageProvider.supports!({
+				provider: "kimi-code",
+				credential: { type: "api_key", apiKey: "sk-kimi-test" },
+			}),
+		).toBe(true);
+		expect(
+			kimiUsageProvider.supports!({
+				provider: "kimi-code",
+				credential: { type: "oauth", accessToken: "kimi-oauth-token" },
+			}),
+		).toBe(true);
+		expect(kimiUsageProvider.supports!({ provider: "kimi-code", credential: { type: "api_key" } })).toBe(false);
+		expect(kimiUsageProvider.supports!({ provider: "kimi-code", credential: { type: "oauth" } })).toBe(false);
+	});
+
 	it("surfaces the 5h limit reset time from the limit detail onto the window", async () => {
 		// Live payload shape: `resetTime` lives on `detail`, while `window`
 		// carries only duration/timeUnit. The 5h row must still render

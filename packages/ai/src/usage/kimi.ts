@@ -242,22 +242,25 @@ function parseUsagePayload(payload: unknown, nowMs: number): { rows: KimiUsageRo
 export const kimiUsageProvider: UsageProvider = {
 	id: "kimi-code",
 	supports(params: UsageFetchParams): boolean {
-		return params.provider === "kimi-code" && params.credential.type === "oauth";
+		return (
+			params.provider === "kimi-code" &&
+			(params.credential.type === "oauth"
+				? Boolean(params.credential.accessToken)
+				: Boolean(params.credential.apiKey))
+		);
 	},
 	async fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 		if (params.provider !== "kimi-code") return null;
 		const { credential } = params;
-		if (credential.type !== "oauth") return null;
-
-		const accessToken = credential.accessToken;
-		if (!accessToken) return null;
+		const token = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
+		if (!token) return null;
 
 		const nowMs = Date.now();
 		// AuthStorage refreshes OAuth credentials pre-emptively (60s skew). If the
 		// usage probe lands with an expired token, short-circuit rather than POST
 		// the broker sentinel back to Kimi — the next cycle will carry a freshly
-		// refreshed credential.
-		if (credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
+		// refreshed credential. API keys do not expire through this flow.
+		if (credential.type === "oauth" && credential.expiresAt !== undefined && credential.expiresAt <= nowMs) {
 			ctx.logger?.debug("Kimi usage token expired; skipping probe", { provider: params.provider });
 			return null;
 		}
@@ -269,7 +272,7 @@ export const kimiUsageProvider: UsageProvider = {
 			const response = await ctx.fetch(url, {
 				headers: {
 					...getKimiCommonHeaders(),
-					Authorization: `Bearer ${accessToken}`,
+					Authorization: `Bearer ${token}`,
 				},
 				signal: params.signal,
 			});
