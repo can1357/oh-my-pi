@@ -89,3 +89,16 @@ describe("runEvalWorkpool", () => {
 		);
 	});
 });
+
+describe("workpool model validation", () => {
+	for (const model of [" , ", [], ["p/valid", ""], [42], "default"]) {
+		it(`rejects invalid selection ${JSON.stringify(model)} before registering a pool`, async () => {
+			vi.spyOn(discovery, "discoverAgents").mockResolvedValue({ agents: [SCOUT], projectAgentsDir: null });
+			const session = makeSession();
+			await expect(
+				runEvalWorkpool({ op: "create", name: "invalid", agent: "scout", model }, { session }),
+			).rejects.toThrow(/model/);
+			expect(WorkPoolRegistry.global().get("Main", "invalid")).toBeUndefined();
+		});
+	}
+});

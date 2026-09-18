@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a per-call `model` selector to task items, eval `agent()`, and `workpool()`: a `provider/model[:level]` pattern or role alias, or an ordered array of them, that takes precedence over `task.agentModelOverrides` and the agent definition. Selection is an ordered preference — requested candidates are tried before configured fallbacks — and the spawn fails at preflight instead of silently routing elsewhere when the selector is the ambiguous literal `default`/`inherit` (use `@default`), is blank or comma-only, carries an invalid thinking suffix, matches no available model, or sits on the batch container instead of a `tasks[]` item. A pool applies its selector to each worker's first turn and reuses that worker's session afterwards ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+- Exposed model-selection provenance for callers without changing model or thinking-level precedence ([#12346](https://github.com/can1357/oh-my-pi/pull/12346) by [@Xytronix](https://github.com/Xytronix)).
+
+### Fixed
+
+- Preserve the parent’s upstream route and live reasoning effort for inherited task/eval/workpool selectors and restored workers; explicit child effort overrides remain authoritative ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

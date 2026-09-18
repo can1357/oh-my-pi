@@ -145,3 +145,21 @@ describe("eval js read() URI delegation", () => {
 		]);
 	});
 });
+
+describe("eval js workpool model selection", () => {
+	it("sends ordered selectors through the shipped workpool helper", async () => {
+		const calls: Array<{ name: string; args: unknown }> = [];
+		const sandbox = loadPrelude(async (name, args) => {
+			calls.push({ name, args });
+			return { name: "chosen", agent: "scout", limit: 2 };
+		});
+		const create = sandbox.workpool as (agent: string, options: Record<string, unknown>) => Promise<unknown>;
+		await create("scout", { name: "chosen", model: ["@smol", "p/backup"] });
+		expect(calls).toEqual([
+			{
+				name: "__workpool__",
+				args: { op: "create", agent: "scout", name: "chosen", model: ["@smol", "p/backup"] },
+			},
+		]);
+	});
+});
