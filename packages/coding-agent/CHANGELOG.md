@@ -1,9 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added Keenable as a first-class web search provider and fetch reader (`KEENABLE_API_KEY` or `/login keenable`; explicit selection can use the public keyless API) ([#9939](https://github.com/can1357/oh-my-pi/pull/9939) by [@audreyt](https://github.com/audreyt)).
+
 ### Fixed
 
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
+- Keenable searches now preserve paths and excluded sites in `site:` constraints instead of broadening them to the entire host.
+- Keenable recency retries now share the original search timeout and retain rotated credentials instead of retrying a rejected key.
 
 ## [18.2.5] - 2026-09-17
 
