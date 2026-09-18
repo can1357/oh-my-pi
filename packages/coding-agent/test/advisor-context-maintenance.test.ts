@@ -1,11 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import {
-	Agent,
-	type AgentMessage,
-	type AgentTool,
-} from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { calculateContextTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction/openai";
@@ -376,9 +372,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const recoveryRequest = JSON.stringify(advisorMock.calls.at(-1)!.context.messages);
 		expect(recoveryRequest).not.toContain("503 Service Unavailable");
 		expect(
-			advisor.state.messages.filter(
-				message => message.role === "assistant" && message.stopReason === "error",
-			),
+			advisor.state.messages.filter(message => message.role === "assistant" && message.stopReason === "error"),
 		).toHaveLength(0);
 	});
 	it.each([
@@ -444,10 +438,7 @@ describe("AgentSession advisor context maintenance", () => {
 			expect(session.setAdvisorEnabled(true)).toBe(true);
 
 			await session.prompt(`first ${branch} update`);
-			await waitForCondition(
-				() => requested.length >= (expectsFallback ? 2 : 1),
-				`${branch} terminal disposition`,
-			);
+			await waitForCondition(() => requested.length >= (expectsFallback ? 2 : 1), `${branch} terminal disposition`);
 			if (expectsFallback) {
 				expect(requested).toEqual([primarySelector, fallbackSelector]);
 				expect(session.getAdvisorAgent()?.state.model.id).toBe(advisorFallback.id);
@@ -466,7 +457,6 @@ describe("AgentSession advisor context maintenance", () => {
 			}
 		},
 	);
-
 
 	it("ignores late context-promotion credentials after a session transition", async () => {
 		const promotion = createMockModel({
@@ -566,10 +556,7 @@ describe("AgentSession advisor context maintenance", () => {
 		seedCompactionJournalOnFirstAdmission(
 			advisor,
 			[{ role: "user", content: "summarized advisor history", timestamp: Date.now() - 2_000 }],
-			[
-				{ role: "user", content: "retained advisor boundary", timestamp: Date.now() - 1_500 },
-				retained,
-			],
+			[{ role: "user", content: "retained advisor boundary", timestamp: Date.now() - 1_500 }, retained],
 			{ summary: "bounded advisor summary", method: "soft" },
 		);
 
@@ -591,10 +578,7 @@ describe("AgentSession advisor context maintenance", () => {
 		seedCompactionJournalOnFirstAdmission(
 			advisor,
 			[{ role: "user", content: "summarized advisor history", timestamp: compactedAt - 1 }],
-			[
-				{ role: "user", content: "retained advisor boundary", timestamp: compactedAt },
-				retained,
-			],
+			[{ role: "user", content: "retained advisor boundary", timestamp: compactedAt }, retained],
 			{ summary: "bounded advisor summary", method: "soft", after: [fresh] },
 		);
 
@@ -681,7 +665,7 @@ describe("AgentSession advisor context maintenance", () => {
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([advisorMock, fallbackMock]);
 		// Unlike the recovery-branch harness, the advisor holds usable credentials
 		// so maintenance runs the LLM summarization compaction path.
-		const getApiKey = vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
 
 		// Two accumulated turns so compaction has older history to summarize while
 		// retaining the most recent one (a single message would be fully retained,
@@ -740,8 +724,7 @@ describe("AgentSession advisor context maintenance", () => {
 	it.each([true, false])(
 		"replays consecutive native compactions when the reader's native endpoint is enabled=%s",
 		async readerNativeEnabled => {
-			const { advisor, advisorMock, primaryMock, nativeModel, sameProviderModel } =
-				createAdvisorFallbackHarness();
+			const { advisor, advisorMock, primaryMock, nativeModel, sameProviderModel } = createAdvisorFallbackHarness();
 			const writer = {
 				...sameProviderModel,
 				remoteCompaction: { ...sameProviderModel.remoteCompaction, v2StreamingEnabled: false },
@@ -865,7 +848,9 @@ describe("AgentSession advisor context maintenance", () => {
 			await session.prompt("review after foreign-target maintenance");
 			await waitForSuccessfulAdvisorCompletion(session, "foreign-target maintenance review");
 
-			const wire = JSON.stringify(convertAnthropicMessages(advisorMock.calls.at(-1)!.context.messages, active, false));
+			const wire = JSON.stringify(
+				convertAnthropicMessages(advisorMock.calls.at(-1)!.context.messages, active, false),
+			);
 			expect(wire).toContain("portable archived decision");
 			expect(wire.match(/retained-readable-tail/g)).toHaveLength(1);
 			expect(JSON.stringify(summarizer.calls[0].context.messages)).toContain("archived readable decision");
@@ -910,7 +895,9 @@ describe("AgentSession advisor context maintenance", () => {
 		await waitForSuccessfulAdvisorCompletion(session, "promoted maintenance review");
 
 		expect(advisor.state.model.id).toBe(promoted.id);
-		const wire = JSON.stringify(convertAnthropicMessages(advisorMock.calls.at(-1)!.context.messages, promoted, false));
+		const wire = JSON.stringify(
+			convertAnthropicMessages(advisorMock.calls.at(-1)!.context.messages, promoted, false),
+		);
 		expect(wire).toContain("portable promoted-model summary");
 		expect(wire.match(/post-promotion-retained-tail/g)).toHaveLength(1);
 	});
@@ -967,8 +954,7 @@ describe("AgentSession advisor context maintenance", () => {
 	);
 
 	it("recovers native history through the working journal for an authenticated portable summarizer", async () => {
-		const { advisor, advisorMock, nativeModel, crossProviderModel, apiKeySpy } =
-			createAdvisorFallbackHarness();
+		const { advisor, advisorMock, nativeModel, crossProviderModel, apiKeySpy } = createAdvisorFallbackHarness();
 		seedNativeReplayOnFirstAdmission(advisor, advisorMock, nativeModel.provider);
 		session.settings.setModelRole("smol", `${crossProviderModel.provider}/${crossProviderModel.id}`);
 		apiKeySpy.mockImplementation(async model => (model.provider === "openai" ? undefined : "test-key"));
@@ -1045,13 +1031,17 @@ describe("AgentSession advisor context maintenance", () => {
 		const summary = advisor.state.messages.find(message => message.role === "compactionSummary");
 		if (summary?.role !== "compactionSummary") throw new Error("Expected installed advisor summary");
 		expect(summary).not.toHaveProperty("preserveData");
-		const firstWire = JSON.stringify(buildOpenAiNativeHistory(advisorMock.calls.at(-1)!.context.messages, nativeModel));
+		const firstWire = JSON.stringify(
+			buildOpenAiNativeHistory(advisorMock.calls.at(-1)!.context.messages, nativeModel),
+		);
 		expect(firstWire.match(/advisor-native-state/g)).toHaveLength(1);
 
 		advisorMock.push({ content: ["second advisor review"] });
 		await session.prompt("replay the journal-backed native replacement");
 		await waitForSuccessfulAdvisorCompletion(session, "native replacement replay");
-		const secondWire = JSON.stringify(buildOpenAiNativeHistory(advisorMock.calls.at(-1)!.context.messages, nativeModel));
+		const secondWire = JSON.stringify(
+			buildOpenAiNativeHistory(advisorMock.calls.at(-1)!.context.messages, nativeModel),
+		);
 		expect(secondWire.match(/advisor-native-state/g)).toHaveLength(1);
 	});
 
@@ -1121,8 +1111,7 @@ describe("AgentSession advisor context maintenance", () => {
 	});
 
 	it("skips unauthenticated advisor candidates before enforcing the native boundary", async () => {
-		const { advisor, apiKeySpy, crossProviderModel, nativeModel, sameProviderModel } =
-			createAdvisorFallbackHarness();
+		const { advisor, apiKeySpy, crossProviderModel, nativeModel, sameProviderModel } = createAdvisorFallbackHarness();
 		session.settings.setModelRole("smol", `${crossProviderModel.provider}/${crossProviderModel.id}`);
 		session.settings.setModelRole("slow", `${sameProviderModel.provider}/${sameProviderModel.id}`);
 		apiKeySpy.mockImplementation(async model =>
@@ -1365,7 +1354,7 @@ describe("AgentSession advisor context maintenance", () => {
 				}));
 			} else {
 				vi.spyOn(snapcompactModule, "compact").mockImplementation(
-					async <TMessage,>(preparation: snapcompactModule.CompactionPreparation<TMessage>) => ({
+					async <TMessage>(preparation: snapcompactModule.CompactionPreparation<TMessage>) => ({
 						summary: marker,
 						shortSummary: marker,
 						firstKeptEntryId: preparation.firstKeptEntryId,
@@ -1435,11 +1424,7 @@ describe("AgentSession advisor context maintenance", () => {
 	});
 
 	it("installs a generated handoff through the advisor adapter before its core request", async () => {
-		const { advisor, advisorMock, modelRegistry } = createHarness(
-			undefined,
-			false,
-			"HANDOFF-ADVISOR-CONTINUATION",
-		);
+		const { advisor, advisorMock, modelRegistry } = createHarness(undefined, false, "HANDOFF-ADVISOR-CONTINUATION");
 		session.settings.override("compaction.asyncEnabled", false);
 		session.settings.set("compaction.keepRecentTokens", 1);
 		session.settings.override("compaction.methodOrder", ["handoff"]);
@@ -1609,7 +1594,9 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(firstRequest.match(/one primary update requiring a tool-assisted review/g)).toHaveLength(1);
 		expect(nextRequest).toContain("MIDRUN-REWRITE");
 		expect(nextRequest).toContain("TOOL-CROSSING");
-		expect((nextRequest.match(/one primary update requiring a tool-assisted review/g) ?? []).length).toBeLessThanOrEqual(1);
+		expect(
+			(nextRequest.match(/one primary update requiring a tool-assisted review/g) ?? []).length,
+		).toBeLessThanOrEqual(1);
 		expect(JSON.stringify(advisor.state.messages)).toContain("MIDRUN-REWRITE");
 	});
 });

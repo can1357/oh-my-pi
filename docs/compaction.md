@@ -19,10 +19,20 @@ Both are persisted as session entries and converted back into user-context messa
 - `packages/agent/src/compaction/openai.ts`
 - `packages/coding-agent/src/session/session-manager.ts`
 - `packages/coding-agent/src/session/agent-session.ts`
-- `packages/coding-agent/src/session/session-maintenance.ts` (automatic maintenance orchestration)
+- `packages/coding-agent/src/session/context-maintenance.ts` (shared automatic maintenance controller)
+- `packages/coding-agent/src/session/session-maintenance.ts` (main/task session facade)
+- `packages/coding-agent/src/advisor/context-maintenance.ts` (advisor working-history owner)
 - `packages/coding-agent/src/session/messages.ts`
 - `packages/coding-agent/src/extensibility/hooks/types.ts`
 - `packages/coding-agent/src/config/settings-schema.ts`
+
+## Shared maintenance owners
+
+Main sessions, task sessions, and advisors use the same automatic context-maintenance controller. Each owner supplies its own history, model and context window, system prompt, tools, provider identity, and artifact access. A percentage threshold uses that owner's window; advisor maintenance never uses the primary model's larger window.
+
+The controller checks the actual pending prompt batch before submission, completed model/tool pairs before the next request, and settled or failed turns. A long advisor tool chain therefore does not need another primary update to trigger maintenance. Existing speculative preparation, configured method order, capability gates, model promotion, candidate fallback, and progress checks apply to every owner. No separate advisor timer or method policy is added.
+
+Advisors keep an authoritative in-memory working journal, separate from their append-only diagnostic transcript. Rewrites rebuild provider context from this journal; they do not reset the primary-history cursor or clear another owner's state. See [advisor context and diagnostics](./advisor-watchdog.md#cost-and-context-behavior).
 
 ## Session entry model
 
@@ -63,7 +73,7 @@ Disabling future native compaction does not disable normal replay of an existing
 
 ### Triggers
 
-Compaction/context maintenance can run in six ways:
+Compaction/context maintenance can run in seven ways:
 
 1. **Manual context compaction**: `/compact [instructions]` calls `AgentSession.compact(...)`.
 2. **Automatic overflow recovery**: after a same-model assistant error that matches context overflow.
@@ -71,6 +81,7 @@ Compaction/context maintenance can run in six ways:
 4. **Automatic threshold maintenance**: after a successful turn when context exceeds the resolved threshold.
 5. **Mid-turn threshold maintenance**: before the next provider request when a tool-loop turn crosses the threshold and `compaction.midTurnEnabled !== false`.
 6. **Idle maintenance**: `runIdleCompaction()` can invoke the same auto-maintenance path with reason `"idle"`.
+7. Pre-prompt threshold maintenance: before submitting the actual pending message batch, including owner system-prompt and tool-schema overhead.
 
 ### Compaction shape (visual)
 
@@ -320,7 +331,7 @@ When native compaction starts from an ordinary local summary, that summary is in
 
 For speculative native compaction, `providerReplayThroughEntryId` records the snapshot's last entry, not the later commit position. Context rebuilding and the next compaction preparation both include messages appended between those positions, followed by post-commit messages. The native payload and uncovered interval are replayed once each; `/clear` discards both when it supersedes that compaction.
 
-Advisor runtimes retain native `preserveData` for subsequent maintenance and attach its provider payload to the in-memory compaction summary for the next model request. Native replay already contains the retained tail, so advisors do not also append that tail as raw messages. Local summaries still keep recent messages separately. Advisor requests use the shared message converter so both textual compaction summaries and native payloads reach the provider.
+Advisor working journals retain native `preserveData` and replay boundary IDs in ordinary compaction entries. The shared context builder reconstructs provider payloads for the next request and later maintenance. Native history and its already-covered raw tail are not replayed twice; uncovered messages and local-summary tails remain available. Advisor tools share the primary artifact allocator, so primary references and advisor shake/archive artifacts remain readable without identifier collisions.
 
 ### Handoff generation
 
@@ -480,6 +491,8 @@ Post-navigation event exposing new/old leaf and optional summary entry.
    - overflow path emits `Context overflow recovery failed: ...`
    - incomplete-output path emits `Incomplete response recovery failed: ...`
    - threshold/idle paths emit `Auto-compaction failed: ...`
+- Exhausted mid-turn maintenance does not reset history or stop the active tool loop. Shared no-progress guards suppress repeated ineffective attempts until a new usable cut point appears; configured continuation rules still govern scheduled follow-up requests. This is not a hard context-growth or cost limit.
+- Cancelled or obsolete advisor operations cannot install history, change models, or continue a review. A committed rewrite and later completed tools survive ordinary retry without redelivering the original primary update.
 - Branch summarization can be cancelled via abort signal (e.g., Escape), returning canceled/aborted navigation result.
 
 ## Settings and defaults

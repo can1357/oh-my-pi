@@ -1066,10 +1066,7 @@ export class TurnRecovery {
 	 * (and the user-visible transcript line) in place.
 	 */
 	async #dropPersistedAssistantTurn(assistantMessage: AssistantMessage): Promise<string | undefined> {
-		return dropFailedAssistantTurn(
-			this.#contextRecoveryHost(this.#host.promptGeneration()),
-			assistantMessage,
-		);
+		return dropFailedAssistantTurn(this.#contextRecoveryHost(this.#host.promptGeneration()), assistantMessage);
 	}
 
 	/**
@@ -1971,9 +1968,7 @@ export class TurnRecovery {
 		const generation = this.#host.promptGeneration();
 		const currentModel = this.#host.model();
 		const ownsGeneration = () =>
-			this.#host.promptGeneration() === generation &&
-			!this.#host.isDisposed() &&
-			!this.#host.abortInProgress();
+			this.#host.promptGeneration() === generation && !this.#host.isDisposed() && !this.#host.abortInProgress();
 		const isCurrent = () => ownsGeneration() && this.#host.model() === currentModel;
 		const candidate = await findSafeRetryFallbackCandidate(
 			this.#retryFallbackSafetyHost(isCurrent),

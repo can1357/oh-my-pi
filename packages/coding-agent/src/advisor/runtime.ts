@@ -1,9 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type {
-	AdvisorContinuationMode,
-	AdvisorHistoryCheckpoint,
-	AdvisorTurnDisposition,
-} from "./maintenance-types";
+import type { AdvisorContinuationMode, AdvisorHistoryCheckpoint, AdvisorTurnDisposition } from "./maintenance-types";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
@@ -140,7 +136,6 @@ class AdvisorOrdinaryTurnError extends Error {
 		super(turnError instanceof Error ? turnError.message : String(turnError));
 	}
 }
-
 
 interface AdvisorOutputHazard {
 	label: string;
@@ -1007,9 +1002,7 @@ export class AdvisorRuntime {
 			const splitMessages = this.#formatRawDeltaMessageChunks(preparedMessages, wip);
 			const promptInput =
 				splitMessages ??
-				(batch
-					? ([{ role: "user", content: batch, timestamp: Date.now() }] as AgentMessage[])
-					: []);
+				(batch ? ([{ role: "user", content: batch, timestamp: Date.now() }] as AgentMessage[]) : []);
 
 			if (this.host.maintainContext && promptInput.length > 0) {
 				try {
@@ -1143,9 +1136,7 @@ export class AdvisorRuntime {
 			let disposition: AdvisorTurnDisposition = { kind: "not-applicable" };
 			if (this.host.onTurnSettled) {
 				try {
-					disposition = await Promise.resolve(
-						this.host.onTurnSettled(currentCheckpoint, signal, turnError),
-					);
+					disposition = await Promise.resolve(this.host.onTurnSettled(currentCheckpoint, signal, turnError));
 				} catch (settledError) {
 					throw new AdvisorSharedTerminalError(settledError);
 				}
@@ -1415,10 +1406,7 @@ export class AdvisorRuntime {
 							if (turnError !== undefined) await this.#discardFailedAttempt(checkpoint);
 							if (this.#epoch !== epoch) break;
 							const nextCheckpoint = this.#captureCheckpoint();
-							if (
-								iterationAbort.signal.aborted ||
-								(disposition.mode === "auto" && this.#pending.length > 0)
-							) {
+							if (iterationAbort.signal.aborted || (disposition.mode === "auto" && this.#pending.length > 0)) {
 								this.#queueOwnedContinuation({
 									mode: disposition.mode,
 									checkpoint: nextCheckpoint,
@@ -1496,8 +1484,7 @@ export class AdvisorRuntime {
 						(terminalFailure !== undefined && isClassifierRefusal(terminalFailure)) ||
 						(!AIError.is(rawErrorId, AIError.Flag.AccountPolicy) &&
 							AIError.is(rawErrorId, AIError.Flag.ContentBlocked));
-					const terminalFailureRetriable =
-						terminalFailureId === undefined || AIError.retriable(terminalFailureId);
+					const terminalFailureRetriable = terminalFailureId === undefined || AIError.retriable(terminalFailureId);
 					const ownsContinuation = reviewHasCommittedRewrite || continuationMode !== undefined;
 					if (ownsContinuation) {
 						await this.#discardFailedAttempt(checkpoint);
@@ -1607,9 +1594,8 @@ export class AdvisorRuntime {
 					let recovered = false;
 					try {
 						recovered =
-							(await Promise.resolve(
-								this.host.onTurnError?.(err, failedMessages, iterationAbort.signal),
-							)) === true;
+							(await Promise.resolve(this.host.onTurnError?.(err, failedMessages, iterationAbort.signal))) ===
+							true;
 					} catch (hookErr) {
 						logger.debug("advisor onTurnError hook failed", { err: String(hookErr) });
 					}

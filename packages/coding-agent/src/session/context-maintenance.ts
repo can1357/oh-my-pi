@@ -63,6 +63,15 @@ import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isRecord, logger, Snowflake, stringifyJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import {
+	ADVISOR_CONTEXT_MAINTENANCE_VERSION,
+	type AdvisorMaintenanceEvent,
+	type AdvisorMaintenanceEventSink,
+	advisorMaintenanceReason,
+	advisorMaintenanceSafeError,
+	createAdvisorMaintenanceAttemptId,
+	createAdvisorMaintenanceRunId,
+} from "../advisor/maintenance-types";
 import { writeArtifact } from "./artifacts";
 import type { ModelRegistry } from "../config/model-registry";
 import { CHAT_MODEL_ROLE_IDS } from "../config/model-roles";
@@ -114,6 +123,29 @@ export type CompactionCheckResult = Readonly<{
 	historyRewritten?: boolean;
 	contextRecovery?: boolean;
 }>;
+
+export interface ContextMaintenanceDiagnosticTarget {
+	readonly sink: AdvisorMaintenanceEventSink;
+	readonly advisorId: string;
+	readonly advisorGeneration: number;
+}
+
+interface MaintenanceDiagnosticRun {
+	readonly target: ContextMaintenanceDiagnosticTarget;
+	readonly runId: string;
+	readonly phase: AdvisorMaintenanceEvent["phase"];
+	readonly trigger: AdvisorMaintenanceEvent["trigger"];
+	readonly ownerModel: AdvisorMaintenanceEvent["ownerModel"];
+	readonly ownerContextWindow: number;
+	readonly ownerThreshold: number;
+	readonly before: AdvisorMaintenanceEvent["before"];
+	attemptId: string | null;
+	candidateModel: Model | null;
+	after: AdvisorMaintenanceEvent["after"];
+	historyChanged: boolean;
+	method: CompactionMethod | null;
+	completed: boolean;
+}
 
 /** Shared no-op result for dispatcher paths that perform no maintenance. */
 export const COMPACTION_CHECK_NONE: CompactionCheckResult = {
@@ -173,7 +205,8 @@ function isCompactionMethodUsable(
 	excludeMedia = false,
 ): boolean {
 	return candidate === "remote"
-		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate)) || model?.compactionModel !== undefined
+		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate)) ||
+				model?.compactionModel !== undefined
 		: candidate === "snapcompact"
 			? !excludeMedia && model?.input.includes("image") === true
 			: candidate === "handoff"
@@ -313,7 +346,6 @@ const COMPACTION_RECOVERY_BAND = 0.8;
  *  occupancy stays under this ceiling (≥10% headroom) and reported usage stays within the window (#9235). */
 const PAYLOAD_REJECTION_OCCUPANCY_CEILING = 0.9;
 
-/** A speculation-produced compaction result, ready to commit at threshold. */
 interface ArmedSpeculation {
 	result: CompactionResult;
 	action: "context-full" | "handoff" | "remote";
@@ -323,6 +355,7 @@ interface ArmedSpeculation {
 	snapshotLeafId: string;
 	/** Context size when speculation started; drives refresh-on-growth. */
 	contextTokensAtStart: number;
+	diagnosticRun?: MaintenanceDiagnosticRun;
 }
 
 type CompactionProjectionArgs = {
@@ -336,12 +369,12 @@ type CompactionProjectionArgs = {
 	providerReplayThroughEntryId?: string;
 };
 
-/** One background speculative-compaction run and (once resolved) its armed result. */
 interface SpeculationRun {
 	controller: AbortController;
 	promise: Promise<void>;
 	contextTokensAtStart: number;
 	armed?: ArmedSpeculation;
+	diagnosticRun?: MaintenanceDiagnosticRun;
 }
 
 function mergeLlmCompactionPreserveData(
@@ -405,6 +438,7 @@ export interface ContextMaintenanceHost {
 	queueExperimentalContextNotesReminder(prompt: string): void;
 	memoryBackendSession(): MemoryBackendOperationContext["session"];
 	emitSessionEvent(event: AgentSessionEvent, options?: { detachExtensions?: boolean }): Promise<void>;
+	captureMaintenanceDiagnosticTarget?(): ContextMaintenanceDiagnosticTarget | undefined;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(
 		task: (signal: AbortSignal) => Promise<void>,
@@ -506,6 +540,7 @@ export class ContextMaintenance {
 	#midTurnDeadEndPendingPrePrompt = false;
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
+	#pendingSpeculations = new Set<Promise<void>>();
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
 	/**
 	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
@@ -516,6 +551,7 @@ export class ContextMaintenance {
 	#incompleteRecoveryAttempts = 0;
 	/** Latest rollover boundary that already received its pre-threshold notebook reminder. */
 	#experimentalNotesReminderBoundaryId: string | undefined;
+	#pendingPromotionDiagnostic: MaintenanceDiagnosticRun | undefined;
 	readonly #host: ContextMaintenanceHost;
 
 	get #model(): Model | undefined {
@@ -532,6 +568,150 @@ export class ContextMaintenance {
 
 	constructor(host: ContextMaintenanceHost) {
 		this.#host = host;
+	}
+
+	#diagnosticMeasurement(opaqueNative = false): AdvisorMaintenanceEvent["before"] {
+		if (opaqueNative) return { value: null, source: "unknown" };
+		const contextWindow = this.#model?.contextWindow ?? 0;
+		const breakdown = this.#host.getContextBreakdown({ contextWindow });
+		if (!breakdown || !Number.isFinite(breakdown.usedTokens)) return { value: null, source: "unknown" };
+		const branch = this.#host.sessionManager.getBranch();
+		const boundary = branch.findLastIndex(entry => entry.type === "compaction");
+		const providerAnchor = branch
+			.slice(boundary + 1)
+			.some(entry => entry.type === "message" && isTranscriptUsageAnchor(entry.message));
+		const compaction = branch[boundary];
+		if (
+			!providerAnchor &&
+			compaction?.type === "compaction" &&
+			isRecord(compaction.preserveData?.openaiRemoteCompaction)
+		)
+			return { value: null, source: "unknown" };
+		return {
+			value: Math.max(0, Math.floor(breakdown.usedTokens)),
+			source: breakdown.anchored && providerAnchor ? "provider" : "estimated",
+		};
+	}
+
+	#startDiagnosticRun(
+		trigger: MaintenanceDiagnosticRun["trigger"],
+		phase: MaintenanceDiagnosticRun["phase"],
+		method: CompactionMethod | null,
+		before?: AdvisorMaintenanceEvent["before"],
+	): MaintenanceDiagnosticRun | undefined {
+		const target = this.#host.captureMaintenanceDiagnosticTarget?.();
+		const model = this.#model;
+		if (!target || !model) return undefined;
+		const contextWindow = model.contextWindow ?? 0;
+		const run: MaintenanceDiagnosticRun = {
+			target,
+			runId: createAdvisorMaintenanceRunId(),
+			phase,
+			trigger,
+			ownerModel: { provider: model.provider, id: model.id },
+			ownerContextWindow: contextWindow,
+			ownerThreshold:
+				contextWindow > 0 ? resolveThresholdTokens(contextWindow, this.#host.settings.getGroup("compaction")) : 0,
+			before: before ?? this.#diagnosticMeasurement(),
+			attemptId: null,
+			candidateModel: null,
+			after: { value: null, source: "unknown" },
+			historyChanged: false,
+			method,
+			completed: false,
+		};
+		this.#emitDiagnostic(run, { kind: "start", status: "started" });
+		return run;
+	}
+
+	#emitDiagnostic(
+		run: MaintenanceDiagnosticRun | undefined,
+		options: {
+			kind: AdvisorMaintenanceEvent["kind"];
+			status: AdvisorMaintenanceEvent["status"];
+			attemptId?: string | null;
+			method?: CompactionMethod | null;
+			candidateModel?: Model | null;
+			after?: AdvisorMaintenanceEvent["after"];
+			historyChanged?: boolean;
+			continuation?: AdvisorMaintenanceEvent["continuation"];
+			workingJournalBoundaryEntryId?: string | null;
+			workingJournalCheckpointId?: string | null;
+			reason?: string | null;
+			error?: unknown;
+		},
+	): void {
+		if (!run || (run.completed && options.kind !== "completion")) return;
+		if (options.candidateModel !== undefined) run.candidateModel = options.candidateModel;
+		if (options.after) run.after = options.after;
+		if (options.historyChanged) run.historyChanged = true;
+		const event: AdvisorMaintenanceEvent = {
+			version: ADVISOR_CONTEXT_MAINTENANCE_VERSION,
+			kind: options.kind,
+			status: options.status,
+			runId: run.runId,
+			attemptId: options.attemptId === undefined ? run.attemptId : options.attemptId,
+			advisorId: run.target.advisorId,
+			advisorGeneration: run.target.advisorGeneration,
+			phase: run.phase,
+			trigger: run.trigger,
+			method: options.method === undefined ? run.method : options.method,
+			candidateModel: run.candidateModel
+				? { provider: run.candidateModel.provider, id: run.candidateModel.id }
+				: null,
+			ownerModel: run.ownerModel,
+			ownerContextWindow: run.ownerContextWindow,
+			ownerThreshold: run.ownerThreshold,
+			before: run.before,
+			after: options.after ?? run.after,
+			historyChanged: options.historyChanged === true,
+			continuation: options.continuation ?? { decision: "none", mode: null },
+			workingJournalBoundaryEntryId: options.workingJournalBoundaryEntryId ?? null,
+			workingJournalCheckpointId: options.workingJournalCheckpointId ?? null,
+			reason: options.reason ? advisorMaintenanceReason(options.reason) : null,
+			error: options.error === undefined ? null : advisorMaintenanceSafeError(options.error),
+		};
+		try {
+			run.target.sink(event);
+		} catch (error) {
+			logger.warn("context maintenance diagnostic sink failed", {
+				error: advisorMaintenanceSafeError(error).message,
+			});
+		}
+	}
+
+	#completeDiagnosticRun(
+		run: MaintenanceDiagnosticRun | undefined,
+		status: AdvisorMaintenanceEvent["status"],
+		options: {
+			continuation?: AdvisorMaintenanceEvent["continuation"];
+			historyChanged?: boolean;
+			reason?: string;
+			error?: unknown;
+		} = {},
+	): void {
+		if (!run || run.completed) return;
+		run.completed = true;
+		this.#emitDiagnostic(run, {
+			kind: "completion",
+			status,
+			continuation: options.continuation,
+			historyChanged: options.historyChanged ?? run.historyChanged,
+			reason: options.reason,
+			error: options.error,
+		});
+	}
+
+	#completePendingPromotionDiagnostic(mode: "retry" | "auto" | null, cancelled = false): void {
+		const run = this.#pendingPromotionDiagnostic;
+		this.#pendingPromotionDiagnostic = undefined;
+		if (cancelled) {
+			this.#completeDiagnosticRun(run, "cancelled", { reason: "maintenance-owner-invalidated" });
+			return;
+		}
+		this.#completeDiagnosticRun(run, "applied", {
+			continuation: mode ? { decision: "scheduled", mode } : { decision: "none", mode: null },
+		});
 	}
 
 	/** Experimental rollover is safe only when the current effective tool surface can recover its state. */
@@ -586,12 +766,24 @@ export class ContextMaintenance {
 		return this.#speculation?.promise;
 	}
 
+	/** Drain even superseded speculative requests whose backend ignores abort. */
+	get speculationDrainCompletion(): Promise<void> | undefined {
+		if (this.#pendingSpeculations.size === 0) return undefined;
+		return Promise.allSettled(this.#pendingSpeculations).then(() => {});
+	}
+
 	/** Abort and discard any in-flight or armed speculative compaction. */
 	cancelSpeculation(): void {
 		const run = this.#speculation;
 		if (!run) return;
 		this.#speculation = undefined;
 		run.controller.abort();
+		this.#emitDiagnostic(run.diagnosticRun, {
+			kind: "discard",
+			status: run.armed ? "discarded" : "cancelled",
+			reason: run.armed ? "speculation-cancelled-after-prepare" : "speculation-cancelled",
+		});
+		this.#completeDiagnosticRun(run.diagnosticRun, run.armed ? "discarded" : "cancelled");
 	}
 
 	/** Assistant timestamp whose post-turn maintenance must be skipped once. */
@@ -644,7 +836,6 @@ export class ContextMaintenance {
 		}
 	}
 
-
 	async #rollbackEntrySnapshots(
 		snapshots: ReadonlyMap<SessionEntry, SessionEntry>,
 		restoreLiveContext = true,
@@ -671,7 +862,8 @@ export class ContextMaintenance {
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const entrySnapshots = this.#snapshotEntries(
 			branchEntries.filter(
-				entry => entry.type === "custom_message" || (entry.type === "message" && entry.message.role === "toolResult"),
+				entry =>
+					entry.type === "custom_message" || (entry.type === "message" && entry.message.role === "toolResult"),
 			),
 		);
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -736,7 +928,8 @@ export class ContextMaintenance {
 		const generation = this.#host.promptGeneration();
 		const entrySnapshots = this.#snapshotEntries(
 			branchEntries.filter(
-				entry => entry.type === "custom_message" || (entry.type === "message" && entry.message.role === "toolResult"),
+				entry =>
+					entry.type === "custom_message" || (entry.type === "message" && entry.message.role === "toolResult"),
 			),
 		);
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -2159,15 +2352,27 @@ export class ContextMaintenance {
 	/** Install and launch one background speculation run for `method`. */
 	#startSpeculationRun(contextTokens: number, method: "remote" | "handoff" | "soft"): void {
 		const controller = new AbortController();
-		const run: SpeculationRun = { controller, promise: Promise.resolve(), contextTokensAtStart: contextTokens };
+		const diagnosticRun = this.#startDiagnosticRun("speculation", "standalone_turn", method);
+		if (diagnosticRun) diagnosticRun.attemptId = createAdvisorMaintenanceAttemptId();
+		const run: SpeculationRun = {
+			controller,
+			promise: Promise.resolve(),
+			contextTokensAtStart: contextTokens,
+			diagnosticRun,
+		};
 		this.#speculation = run;
-		run.promise = this.#runSpeculation(run, method, contextTokens).catch(error => {
-			logger.debug("Speculative compaction failed", {
-				method,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			if (this.#speculation === run) this.#speculation = undefined;
-		});
+		run.promise = this.#runSpeculation(run, method, contextTokens)
+			.catch(error => {
+				logger.debug("Speculative compaction failed", {
+					method,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				this.#emitDiagnostic(diagnosticRun, { kind: "attempt", status: "failed", error });
+				this.#completeDiagnosticRun(diagnosticRun, "failed", { error });
+				if (this.#speculation === run) this.#speculation = undefined;
+			})
+			.finally(() => this.#pendingSpeculations.delete(run.promise));
+		this.#pendingSpeculations.add(run.promise);
 	}
 
 	/**
@@ -2226,26 +2431,34 @@ export class ContextMaintenance {
 		method: "remote" | "handoff" | "soft",
 		contextTokens: number,
 	): Promise<void> {
-		const clear = () => {
+		const clear = (reason: string) => {
 			if (this.#speculation === run) this.#speculation = undefined;
+			const cancelled = run.controller.signal.aborted;
+			this.#emitDiagnostic(run.diagnosticRun, {
+				kind: "attempt",
+				status: cancelled ? "cancelled" : "skipped",
+				reason,
+			});
+			this.#completeDiagnosticRun(run.diagnosticRun, cancelled ? "cancelled" : "skipped", { reason });
 		};
 		const model = this.#model;
-		if (!model) return clear();
+		if (!model) return clear("no-owner-model");
 		const settings = this.#host.settings.getGroup("compaction");
 		const effectiveSettings = resolveMethodSettings(settings, method);
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
-		if (!snapshotLeafId) return clear();
+		if (!snapshotLeafId) return clear("empty-working-journal");
 		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
-		if (!preparation) return clear();
+		if (!preparation) return clear("no-compaction-boundary");
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
 		if (method === "handoff") {
+			if (run.diagnosticRun) run.diagnosticRun.candidateModel = this.#model ?? null;
 			const generated = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
 				autoTriggered: true,
 				signal,
 			});
-			if (!generated) return clear();
+			if (!generated) return clear("handoff-produced-no-document");
 			const { summary, details } = handoffSummaryFromDocument(generated.document, preparation);
 			armed = {
 				result: {
@@ -2259,12 +2472,13 @@ export class ContextMaintenance {
 				method,
 				snapshotLeafId,
 				contextTokensAtStart: contextTokens,
+				diagnosticRun: run.diagnosticRun,
 			};
 		} else {
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, undefined);
 			// No hookCompaction is passed above, so "fromHook" is unreachable;
 			// the guard just narrows the union.
-			if (compactionPrep.kind === "fromHook") return clear();
+			if (compactionPrep.kind === "fromHook") return clear("compaction-hook-replaced-speculation");
 			const candidates = this.#getCompactionModelCandidates(
 				this.#host.modelRegistry.getAvailable(),
 				method === "remote" && !effectiveSettings.remoteEndpoint
@@ -2273,7 +2487,7 @@ export class ContextMaintenance {
 							shouldUseProviderNativeCompaction(candidate, effectiveSettings)
 					: undefined,
 			);
-			if (candidates.length === 0) return clear();
+			if (candidates.length === 0) return clear("no-eligible-compaction-model");
 			const codexCompaction = createCodexCompactionContext({
 				trigger: "auto",
 				reason: "context_limit",
@@ -2295,6 +2509,7 @@ export class ContextMaintenance {
 					preferWebsockets: false,
 				},
 				candidates,
+				run.diagnosticRun,
 			);
 			armed = {
 				result: {
@@ -2306,10 +2521,19 @@ export class ContextMaintenance {
 				codexCompaction,
 				snapshotLeafId,
 				contextTokensAtStart: contextTokens,
+				diagnosticRun: run.diagnosticRun,
 			};
 		}
 		if (signal.aborted || this.#speculation !== run) return;
 		run.armed = armed;
+		if (method === "handoff") {
+			this.#emitDiagnostic(run.diagnosticRun, {
+				kind: "attempt",
+				status: "prepared-only",
+				reason: "speculation-armed",
+				after: { value: null, source: "unknown" },
+			});
+		}
 		logger.debug("Speculative compaction armed", {
 			method,
 			snapshotLeafId,
@@ -2399,17 +2623,30 @@ export class ContextMaintenance {
 		this.#speculation = undefined;
 		if (!run.armed) {
 			run.controller.abort();
+			this.#emitDiagnostic(run.diagnosticRun, {
+				kind: "discard",
+				status: "cancelled",
+				reason: "superseded-by-blocking-maintenance",
+			});
+			this.#completeDiagnosticRun(run.diagnosticRun, "cancelled");
 			return undefined;
 		}
+		const discard = (reason: string): undefined => {
+			this.#emitDiagnostic(run.diagnosticRun, { kind: "discard", status: "discarded", reason });
+			this.#completeDiagnosticRun(run.diagnosticRun, "discarded", { reason });
+			return undefined;
+		};
 		const settings = this.#host.settings.getGroup("compaction");
-		if (settings.asyncEnabled === false) return undefined;
-		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return undefined;
+		if (settings.asyncEnabled === false) return discard("async-maintenance-disabled");
+		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
+			return discard("compaction-extension-active");
+		}
 		if (!this.#armedSpeculationValid(run.armed, triggerContextTokens, pendingContextTokens)) {
 			logger.debug("Armed speculative compaction invalidated by branch growth or headroom check", {
 				method: run.armed.method,
 				snapshotLeafId: run.armed.snapshotLeafId,
 			});
-			return undefined;
+			return discard("stale-speculation");
 		}
 		return run.armed;
 	}
@@ -2418,9 +2655,7 @@ export class ContextMaintenance {
 	#assertCompactionReplayCompatible(preserveData: Record<string, unknown> | undefined): void {
 		const model = this.#model;
 		if (!model || canReplayRemoteCompaction(preserveData, model)) return;
-		throw new Error(
-			`Compaction result cannot be replayed by the active model ${model.provider}/${model.id}.`,
-		);
+		throw new Error(`Compaction result cannot be replayed by the active model ${model.provider}/${model.id}.`);
 	}
 
 	/**
@@ -2442,6 +2677,7 @@ export class ContextMaintenance {
 		providerReplayThroughEntryId?: string;
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
+		diagnosticRun?: MaintenanceDiagnosticRun;
 	}): Promise<CompactionEntry | undefined> {
 		this.#assertCompactionReplayCompatible(args.preserveData);
 		const entryId = this.#host.sessionManager.appendCompaction(
@@ -2464,6 +2700,18 @@ export class ContextMaintenance {
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		if (args.diagnosticRun) {
+			this.#emitDiagnostic(args.diagnosticRun, {
+				kind: "commit",
+				status: "applied",
+				method: args.method ?? null,
+				after: isRecord(args.preserveData?.openaiRemoteCompaction)
+					? { value: null, source: "unknown" }
+					: { value: this.#estimateStoredContextTokens(), source: "estimated" },
+				historyChanged: true,
+				workingJournalBoundaryEntryId: entryId,
+			});
+		}
 		this.#host.rebaseAfterCompaction();
 		// Compaction discarded the conversation history that carried the approved
 		// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
@@ -2606,7 +2854,7 @@ export class ContextMaintenance {
 		// the history at all. The post-turn threshold path already promotes before
 		// compacting; without this, the pre-prompt path would pre-empt promotion and
 		// compact (snapcompact/summary) a session that should have just been promoted.
-		if (await this.#promoteContextModel(signal)) {
+		if (await this.#promoteContextModel(signal, { trigger: "threshold", phase: "pre_turn" })) {
 			const promotedWindow = this.#model?.contextWindow ?? 0;
 			if (promotedWindow > 0 && !shouldCompact(contextTokens, promotedWindow, compactionSettings)) {
 				logger.debug("Pre-prompt context promotion avoided compaction", {
@@ -2658,9 +2906,7 @@ export class ContextMaintenance {
 
 		const generation = this.#host.promptGeneration();
 		const isCurrent = () =>
-			!signal?.aborted &&
-			!this.#host.isDisposed() &&
-			this.#host.promptGeneration() === generation;
+			!signal?.aborted && !this.#host.isDisposed() && this.#host.promptGeneration() === generation;
 		const model = this.#model;
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
@@ -2768,7 +3014,7 @@ export class ContextMaintenance {
 		// crosses the threshold compacts the history (and can hit the no-progress
 		// dead-end on a single oversized turn) on a model that should have just
 		// been promoted to a larger window instead.
-		if (await this.#promoteContextModel(signal)) {
+		if (await this.#promoteContextModel(signal, { trigger: "threshold", phase: "mid_turn" })) {
 			const promotedWindow = this.#model?.contextWindow ?? 0;
 			if (promotedWindow > 0 && !shouldCompact(contextTokens, promotedWindow, compactionSettings)) {
 				logger.debug("Mid-run context promotion avoided compaction", {
@@ -2847,8 +3093,7 @@ export class ContextMaintenance {
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		const generation = this.#host.promptGeneration();
-		const isCurrent = () =>
-			!this.#host.isDisposed() && this.#host.promptGeneration() === generation;
+		const isCurrent = () => !this.#host.isDisposed() && this.#host.promptGeneration() === generation;
 		// A turn that produced actionable output means the incomplete-recovery loop
 		// broke through: clear the counter so a later isolated `length` stop starts
 		// fresh rather than inheriting a stale count from an earlier loop.
@@ -2969,16 +3214,23 @@ export class ContextMaintenance {
 
 			// Try context promotion first - switch to a larger model and retry without compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
-			if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
+			if (!isCurrent()) {
+				this.#completePendingPromotionDiagnostic(null, true);
+				return contextRecoveryResult(COMPACTION_CHECK_NONE);
+			}
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
-				if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
+				if (!isCurrent()) {
+					this.#completePendingPromotionDiagnostic(null, true);
+					return contextRecoveryResult(COMPACTION_CHECK_NONE);
+				}
 				// Retry on the promoted (larger) model without compacting
 				this.#host.scheduleAgentContinue({
 					source: "context-promotion-overflow",
 					delayMs: 100,
 					generation,
 				});
+				this.#completePendingPromotionDiagnostic("retry");
 				return contextRecoveryResult(COMPACTION_CHECK_CONTINUATION);
 			}
 
@@ -3130,10 +3382,16 @@ export class ContextMaintenance {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 
 			const promoted = await this.#tryContextPromotion(assistantMessage);
-			if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
+			if (!isCurrent()) {
+				this.#completePendingPromotionDiagnostic(null, true);
+				return contextRecoveryResult(COMPACTION_CHECK_NONE);
+			}
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
-				if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
+				if (!isCurrent()) {
+					this.#completePendingPromotionDiagnostic(null, true);
+					return contextRecoveryResult(COMPACTION_CHECK_NONE);
+				}
 				this.#incompleteRecoveryAttempts = 0;
 				logger.debug("Context promotion triggered by response.incomplete (length stop)", {
 					from: `${assistantMessage.provider}/${assistantMessage.model}`,
@@ -3143,6 +3401,7 @@ export class ContextMaintenance {
 					delayMs: 100,
 					generation,
 				});
+				this.#completePendingPromotionDiagnostic("retry");
 				return contextRecoveryResult(COMPACTION_CHECK_CONTINUATION);
 			}
 
@@ -3326,7 +3585,20 @@ export class ContextMaintenance {
 		// switched away from; only promote when the failing turn was this model.
 		if (assistantMessage.provider !== currentModel.provider || assistantMessage.model !== currentModel.id)
 			return false;
-		return this.#promoteContextModel();
+		return this.#promoteContextModel(undefined, {
+			trigger:
+				assistantMessage.stopReason === "length"
+					? "incomplete"
+					: assistantMessage.stopReason === "error"
+						? "overflow"
+						: "threshold",
+			phase:
+				assistantMessage.stopReason === "error" || assistantMessage.stopReason === "length"
+					? "recovery"
+					: "pre_turn",
+			continuationMode:
+				assistantMessage.stopReason === "error" || assistantMessage.stopReason === "length" ? "retry" : undefined,
+		});
 	}
 
 	/**
@@ -3337,7 +3609,14 @@ export class ContextMaintenance {
 	 * ({@link #tryContextPromotion}) and the pre-prompt threshold path
 	 * ({@link runPrePromptCompactionIfNeeded}).
 	 */
-	async #promoteContextModel(signal?: AbortSignal): Promise<boolean> {
+	async #promoteContextModel(
+		signal?: AbortSignal,
+		diagnostic: {
+			trigger: AdvisorMaintenanceEvent["trigger"];
+			phase: AdvisorMaintenanceEvent["phase"];
+			continuationMode?: "retry" | "auto";
+		} = { trigger: "fallback", phase: "recovery" },
+	): Promise<boolean> {
 		const promotionSettings = this.#host.settings.getGroup("contextPromotion");
 		if (!promotionSettings.enabled) return false;
 		const generation = this.#host.promptGeneration();
@@ -3345,7 +3624,18 @@ export class ContextMaintenance {
 		if (!currentModel) return false;
 		const contextWindow = currentModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
-		const targetModel = await this.resolveContextPromotionTarget(currentModel, contextWindow, signal);
+		const run = this.#startDiagnosticRun(diagnostic.trigger, diagnostic.phase, null);
+		if (run) run.attemptId = createAdvisorMaintenanceAttemptId();
+		let targetModel: Model | undefined;
+		try {
+			targetModel = await this.resolveContextPromotionTarget(currentModel, contextWindow, signal);
+		} catch (error) {
+			const cancelled =
+				signal?.aborted === true || this.#host.isDisposed() || this.#host.promptGeneration() !== generation;
+			this.#emitDiagnostic(run, { kind: "promotion", status: cancelled ? "cancelled" : "failed", error });
+			this.#completeDiagnosticRun(run, cancelled ? "cancelled" : "failed", { error });
+			throw error;
+		}
 		if (
 			!targetModel ||
 			signal?.aborted ||
@@ -3353,25 +3643,47 @@ export class ContextMaintenance {
 			this.#host.promptGeneration() !== generation ||
 			!modelsAreEqual(this.#model, currentModel)
 		) {
+			const cancelled =
+				signal?.aborted === true ||
+				this.#host.isDisposed() ||
+				this.#host.promptGeneration() !== generation ||
+				!modelsAreEqual(this.#model, currentModel);
+			this.#emitDiagnostic(run, {
+				kind: "promotion",
+				status: cancelled ? "cancelled" : "skipped",
+				candidateModel: targetModel ?? null,
+				reason: cancelled ? "maintenance-owner-invalidated" : "no-promotion-target",
+			});
+			this.#completeDiagnosticRun(run, cancelled ? "cancelled" : "skipped");
 			return false;
 		}
 
 		try {
 			await this.#host.setModelTemporary(targetModel, undefined, { ephemeral: true });
-			if (
-				signal?.aborted ||
-				this.#host.isDisposed() ||
-				this.#host.promptGeneration() !== generation
-			) {
+			if (signal?.aborted || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
 				if (modelsAreEqual(this.#model, targetModel)) {
 					await this.#host.setModelTemporary(currentModel, undefined, { ephemeral: true });
 				}
+				this.#emitDiagnostic(run, {
+					kind: "promotion",
+					status: "cancelled",
+					candidateModel: targetModel,
+					reason: "maintenance-owner-invalidated",
+				});
+				this.#completeDiagnosticRun(run, "cancelled");
 				return false;
 			}
 			logger.debug("Context promotion switched model on overflow", {
 				from: `${currentModel.provider}/${currentModel.id}`,
 				to: `${targetModel.provider}/${targetModel.id}`,
 			});
+			this.#emitDiagnostic(run, {
+				kind: "promotion",
+				status: "applied",
+				candidateModel: targetModel,
+			});
+			if (diagnostic.continuationMode) this.#pendingPromotionDiagnostic = run;
+			else this.#completeDiagnosticRun(run, "applied");
 			return true;
 		} catch (error) {
 			logger.warn("Context promotion failed", {
@@ -3379,6 +3691,13 @@ export class ContextMaintenance {
 				to: `${targetModel.provider}/${targetModel.id}`,
 				error: String(error),
 			});
+			this.#emitDiagnostic(run, {
+				kind: "promotion",
+				status: "failed",
+				candidateModel: targetModel,
+				error,
+			});
+			this.#completeDiagnosticRun(run, "failed", { error });
 			return false;
 		}
 	}
@@ -3466,6 +3785,7 @@ export class ContextMaintenance {
 		signal: AbortSignal,
 		options?: SummaryOptions,
 		precomputedCandidates?: Model[],
+		diagnosticRun?: MaintenanceDiagnosticRun,
 	): Promise<CompactionResult> {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
@@ -3473,8 +3793,21 @@ export class ContextMaintenance {
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 
 		for (const candidate of candidates) {
+			if (diagnosticRun) {
+				diagnosticRun.attemptId = createAdvisorMaintenanceAttemptId();
+				diagnosticRun.candidateModel = candidate;
+			}
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
-			if (!apiKey) continue;
+			signal.throwIfAborted();
+			if (!apiKey) {
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "attempt",
+					status: "skipped",
+					candidateModel: candidate,
+					reason: "missing-api-key",
+				});
+				continue;
+			}
 			if (
 				nativeCompactionFailure &&
 				(candidate.provider !== nativeCompactionFailure.provider ||
@@ -3484,7 +3817,7 @@ export class ContextMaintenance {
 			}
 
 			try {
-				return await compact(
+				const result = await compact(
 					this.#host.obfuscatePreparationForProvider(preparation),
 					candidate,
 					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
@@ -3519,7 +3852,21 @@ export class ContextMaintenance {
 						},
 					},
 				);
+				signal.throwIfAborted();
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "attempt",
+					status: "prepared-only",
+					candidateModel: candidate,
+					after: { value: null, source: "unknown" },
+				});
+				return result;
 			} catch (error) {
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "attempt",
+					status: signal.aborted ? "cancelled" : "failed",
+					candidateModel: candidate,
+					error,
+				});
 				const id = AIError.classify(error instanceof NativeCompactionError ? error.cause : error, candidate.api);
 				if (AIError.is(id, AIError.Flag.AuthFailed)) continue;
 				if (error instanceof NativeCompactionError) {
@@ -4254,6 +4601,8 @@ export class ContextMaintenance {
 			methodIndex?: number;
 			/** A preceding shake already rewrote history before this fallback attempt. */
 			fallbackFromShake?: boolean;
+			/** Internal durable-observability identity retained across method fallback. */
+			diagnosticRun?: MaintenanceDiagnosticRun;
 			/**
 			 * This call services an explicit model-requested rollover
 			 * (`new_context`): it bypasses the Auto-Compact toggle, and never
@@ -4313,17 +4662,42 @@ export class ContextMaintenance {
 			break;
 		}
 
-		if (!method) return COMPACTION_CHECK_NONE;
+		if (!method) {
+			this.#completeDiagnosticRun(options.diagnosticRun, "skipped", { reason: "no-eligible-maintenance-method" });
+			return COMPACTION_CHECK_NONE;
+		}
 
 		// A speculative pass may have already produced this compaction's summary
 		// in the background. Claiming consumes the slot either way: an in-flight
-		// run is aborted (this real pass supersedes it) and an armed result is
-		// returned only when still valid for the current branch/model/settings.
-		// Snapcompact is local and instant, so an armed LLM summary (possible
-		// only when settings/model changed since arming) never overrides it.
+		// run is aborted (this real pass supersedes it); an armed result is returned only
+		// when still valid for the current branch/model/settings.
 		const claimedSpec = this.#claimArmedSpeculation(options.triggerContextTokens, options.pendingContextTokens);
 		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
-
+		if (method === "snapcompact" && claimedSpec?.diagnosticRun) {
+			this.#emitDiagnostic(claimedSpec.diagnosticRun, {
+				kind: "discard",
+				status: "discarded",
+				reason: "selected-local-snapcompact",
+			});
+			this.#completeDiagnosticRun(claimedSpec.diagnosticRun, "discarded", {
+				reason: "selected-local-snapcompact",
+			});
+		}
+		const diagnosticRun =
+			options.diagnosticRun ??
+			armedSpec?.diagnosticRun ??
+			this.#startDiagnosticRun(
+				reason,
+				options.phase ?? (reason === "threshold" ? "pre_turn" : reason === "idle" ? "standalone_turn" : "mid_turn"),
+				method,
+			);
+		if (diagnosticRun) {
+			diagnosticRun.method = armedSpec?.method ?? method;
+			if (!armedSpec) {
+				diagnosticRun.attemptId = createAdvisorMaintenanceAttemptId();
+				diagnosticRun.candidateModel = null;
+			}
+		}
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;
 		// Shake runs inline (cheap, no remote LLM). If it cannot recover enough
@@ -4340,10 +4714,12 @@ export class ContextMaintenance {
 				suppressContinuation,
 				options.detachPostCommit === true,
 				options.signal,
+				diagnosticRun,
 			);
 			if (outcome !== "fallback") return outcome;
 			return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
 				...options,
+				diagnosticRun,
 				methodIndex: methodIndex + 1,
 				fallbackFromShake: true,
 			});
@@ -4363,14 +4739,28 @@ export class ContextMaintenance {
 			this.#host.schedulePostPromptTask(
 				async signal => {
 					await Promise.resolve();
-					if (signal.aborted) return;
+					if (signal.aborted) {
+						this.#completeDiagnosticRun(diagnosticRun, "cancelled", { reason: "scheduled-maintenance-aborted" });
+						return;
+					}
 					await this.runAutoCompaction(reason, willRetry, true, true, {
 						...options,
+						diagnosticRun,
 						methodIndex,
 						terminalTextAnswer,
 					});
 				},
-				{ generation },
+				{
+					generation,
+					onSkip: skipReason => {
+						this.#emitDiagnostic(diagnosticRun, {
+							kind: "attempt",
+							status: "cancelled",
+							reason: skipReason,
+						});
+						this.#completeDiagnosticRun(diagnosticRun, "cancelled", { reason: skipReason });
+					},
+				},
 			);
 			return {
 				...COMPACTION_CHECK_DEFERRED_HANDOFF,
@@ -4436,6 +4826,7 @@ export class ContextMaintenance {
 					detachPostCommit: options.detachPostCommit === true,
 					autoCompactionSignal,
 					ownerSignal: options.signal,
+					diagnosticRun,
 					onCommitted: () => {
 						compactionCommitted = true;
 					},
@@ -4656,6 +5047,7 @@ export class ContextMaintenance {
 			// configured preference.
 			let handoffDocument: HandoffResult | undefined;
 			if (action === "handoff" && compactionPrep.kind !== "fromHook") {
+				if (diagnosticRun) diagnosticRun.candidateModel = this.#model ?? null;
 				handoffDocument = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
 					autoTriggered: true,
 					signal: autoCompactionSignal,
@@ -4688,8 +5080,14 @@ export class ContextMaintenance {
 						},
 						options.detachPostCommit === true,
 					);
+					this.#emitDiagnostic(diagnosticRun, {
+						kind: "attempt",
+						status: "failed",
+						reason: "handoff-produced-no-document",
+					});
 					return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
 						...options,
+						diagnosticRun,
 						methodIndex: methodIndex + 1,
 					});
 				}
@@ -4825,8 +5223,14 @@ export class ContextMaintenance {
 						},
 						options.detachPostCommit === true,
 					);
+					this.#emitDiagnostic(diagnosticRun, {
+						kind: "attempt",
+						status: "skipped",
+						reason: snapcompactBlocker,
+					});
 					return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
 						...options,
+						diagnosticRun,
 						methodIndex: methodIndex + 1,
 					});
 				}
@@ -4875,8 +5279,14 @@ export class ContextMaintenance {
 						},
 						options.detachPostCommit === true,
 					);
+					this.#emitDiagnostic(diagnosticRun, {
+						kind: "attempt",
+						status: "skipped",
+						reason: "no-eligible-compaction-model",
+					});
 					return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
 						...options,
+						diagnosticRun,
 						methodIndex: methodIndex + 1,
 					});
 				}
@@ -4895,6 +5305,10 @@ export class ContextMaintenance {
 
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
+					if (diagnosticRun) {
+						diagnosticRun.attemptId = createAdvisorMaintenanceAttemptId();
+						diagnosticRun.candidateModel = candidate;
+					}
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 					if (
@@ -4904,7 +5318,15 @@ export class ContextMaintenance {
 					) {
 						return COMPACTION_CHECK_NONE;
 					}
-					if (!apiKey) continue;
+					if (!apiKey) {
+						this.#emitDiagnostic(diagnosticRun, {
+							kind: "attempt",
+							status: "skipped",
+							candidateModel: candidate,
+							reason: "missing-api-key",
+						});
+						continue;
+					}
 					if (
 						nativeCompactionFailure &&
 						(candidate.provider !== nativeCompactionFailure.provider ||
@@ -4914,17 +5336,13 @@ export class ContextMaintenance {
 					}
 					const candidatePreparation =
 						method === "remote" && shouldUseProviderNativeCompaction(candidate, effectiveSettings)
-							? (prepareCompaction(
-									pathEntriesForCompaction,
-									effectiveSettings,
-									candidate,
-									this.#tokenizer,
-								) ?? preparation)
+							? (prepareCompaction(pathEntriesForCompaction, effectiveSettings, candidate, this.#tokenizer) ??
+								preparation)
 							: preparation;
-
 
 					let attempt = 0;
 					while (true) {
+						if (diagnosticRun) diagnosticRun.attemptId = createAdvisorMaintenanceAttemptId();
 						try {
 							compactResult = await compact(
 								this.#host.obfuscatePreparationForProvider(candidatePreparation),
@@ -4965,11 +5383,23 @@ export class ContextMaintenance {
 							) {
 								return COMPACTION_CHECK_NONE;
 							}
+							this.#emitDiagnostic(diagnosticRun, {
+								kind: "attempt",
+								status: "prepared-only",
+								candidateModel: candidate,
+								after: { value: null, source: "unknown" },
+							});
 							break;
 						} catch (error) {
 							if (autoCompactionSignal.aborted) {
 								throw error;
 							}
+							this.#emitDiagnostic(diagnosticRun, {
+								kind: "attempt",
+								status: "failed",
+								candidateModel: candidate,
+								error,
+							});
 
 							const message = error instanceof Error ? error.message : String(error);
 							const id = AIError.classify(
@@ -5080,6 +5510,13 @@ export class ContextMaintenance {
 				preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, compactResult.preserveData);
 			}
 
+			if (action === "handoff" || action === "snapcompact") {
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "attempt",
+					status: "prepared-only",
+					after: { value: null, source: "unknown" },
+				});
+			}
 			return await this.#commitAutoCompactionResult({
 				summary,
 				shortSummary,
@@ -5101,16 +5538,13 @@ export class ContextMaintenance {
 				detachPostCommit: options.detachPostCommit === true,
 				autoCompactionSignal,
 				ownerSignal: options.signal,
+				diagnosticRun,
 				onCommitted: () => {
 					compactionCommitted = true;
 				},
 			});
 		} catch (error) {
-			if (
-				autoCompactionSignal.aborted ||
-				this.#host.isDisposed() ||
-				this.#host.promptGeneration() !== generation
-			) {
+			if (autoCompactionSignal.aborted || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",
@@ -5121,6 +5555,14 @@ export class ContextMaintenance {
 					},
 					options.detachPostCommit === true,
 				);
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "attempt",
+					status: "cancelled",
+					reason: "maintenance-owner-invalidated",
+				});
+				this.#completeDiagnosticRun(diagnosticRun, "cancelled", {
+					reason: "maintenance-owner-invalidated",
+				});
 				return COMPACTION_CHECK_NONE;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
@@ -5146,8 +5588,15 @@ export class ContextMaintenance {
 					},
 					options.detachPostCommit === true,
 				);
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "attempt",
+					status: "failed",
+					reason: contextErrorMessage,
+					error,
+				});
 				return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
 					...options,
+					diagnosticRun,
 					methodIndex: methodIndex + 1,
 				});
 			}
@@ -5162,9 +5611,36 @@ export class ContextMaintenance {
 				},
 				options.detachPostCommit === true,
 			);
+			this.#emitDiagnostic(diagnosticRun, {
+				kind: "attempt",
+				status: "failed",
+				reason: contextErrorMessage,
+				error,
+			});
+			this.#completeDiagnosticRun(diagnosticRun, "failed", {
+				reason: contextErrorMessage,
+				error,
+			});
 		} finally {
 			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
 				this.#autoCompactionAbortController = undefined;
+			}
+			if (diagnosticRun && !diagnosticRun.completed) {
+				const cancelled =
+					autoCompactionSignal.aborted ||
+					options.signal?.aborted === true ||
+					this.#host.isDisposed() ||
+					this.#host.promptGeneration() !== generation;
+				if (cancelled) {
+					this.#emitDiagnostic(diagnosticRun, {
+						kind: "attempt",
+						status: "cancelled",
+						reason: "maintenance-owner-invalidated",
+					});
+				}
+				this.#completeDiagnosticRun(diagnosticRun, cancelled ? "cancelled" : "skipped", {
+					reason: cancelled ? "maintenance-owner-invalidated" : "maintenance-ended-without-commit",
+				});
 			}
 		}
 		return COMPACTION_CHECK_NONE;
@@ -5199,6 +5675,7 @@ export class ContextMaintenance {
 		detachPostCommit: boolean;
 		autoCompactionSignal: AbortSignal;
 		ownerSignal: AbortSignal | undefined;
+		diagnosticRun: MaintenanceDiagnosticRun | undefined;
 		onCommitted: () => void;
 	}): Promise<CompactionCheckResult> {
 		const { action, reason, willRetry, detachPostCommit, autoCompactionSignal, ownerSignal } = args;
@@ -5241,6 +5718,7 @@ export class ContextMaintenance {
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 			advisorResetReason: "auto-compaction",
 			detachExtensionEmit: detachPostCommit,
+			diagnosticRun: args.diagnosticRun,
 		});
 		if (!isCurrent()) return COMPACTION_CHECK_NONE;
 
@@ -5373,6 +5851,15 @@ export class ContextMaintenance {
 		if (deadEndWarning) {
 			this.#host.emitNotice("warning", deadEndWarning, "compaction");
 		}
+		const continuation = continuationScheduled
+			? { decision: "scheduled" as const, mode: willRetry ? ("retry" as const) : ("auto" as const) }
+			: noProgressDeadEnd
+				? { decision: "blocked" as const, mode: null }
+				: { decision: "none" as const, mode: null };
+		this.#completeDiagnosticRun(args.diagnosticRun, noProgressDeadEnd ? "no-progress" : "applied", {
+			continuation,
+			historyChanged: true,
+		});
 		if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
 		return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
 	}
@@ -5396,6 +5883,7 @@ export class ContextMaintenance {
 		suppressContinuation = false,
 		detachPostCommit = false,
 		ownerSignal?: AbortSignal,
+		diagnosticRun?: MaintenanceDiagnosticRun,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
 		this.#autoCompactionAbortController?.abort();
@@ -5403,9 +5891,7 @@ export class ContextMaintenance {
 		this.#autoCompactionAbortController = controller;
 		const signal = ownerSignal ? AbortSignal.any([controller.signal, ownerSignal]) : controller.signal;
 		const isCurrent = () =>
-			!signal.aborted &&
-			!this.#host.isDisposed() &&
-			this.#host.promptGeneration() === generation;
+			!signal.aborted && !this.#host.isDisposed() && this.#host.promptGeneration() === generation;
 		try {
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
 			if (!isCurrent()) return COMPACTION_CHECK_NONE;
@@ -5424,6 +5910,15 @@ export class ContextMaintenance {
 				return COMPACTION_CHECK_NONE;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
+			if (reclaimed) {
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "commit",
+					status: "applied",
+					historyChanged: true,
+					after: this.#diagnosticMeasurement(),
+					workingJournalBoundaryEntryId: this.#host.sessionManager.getLeafId(),
+				});
+			}
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
 			// fires, shake runs, but residual context is still above the configured
 			// threshold. The next agent_end would re-trigger shake, which has nothing
@@ -5475,6 +5970,12 @@ export class ContextMaintenance {
 					},
 					detachPostCommit,
 				);
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "attempt",
+					status: reclaimed ? "no-progress" : "skipped",
+					historyChanged: reclaimed,
+					reason: errorMessage,
+				});
 				if (!isCurrent()) return COMPACTION_CHECK_NONE;
 				return "fallback";
 			}
@@ -5521,6 +6022,18 @@ export class ContextMaintenance {
 					suppressContinuation,
 				});
 			}
+			this.#emitDiagnostic(diagnosticRun, {
+				kind: "attempt",
+				status: reclaimed ? "applied" : "no-progress",
+				historyChanged: reclaimed,
+				reason: reclaimed ? null : "shake-reclaimed-nothing",
+			});
+			this.#completeDiagnosticRun(diagnosticRun, reclaimed ? "applied" : "no-progress", {
+				historyChanged: reclaimed,
+				continuation: continuationScheduled
+					? { decision: "scheduled", mode: willRetry ? "retry" : "auto" }
+					: { decision: "none", mode: null },
+			});
 			if (!reclaimed) {
 				return willRetry && continuationScheduled
 					? { ...COMPACTION_CHECK_CONTINUATION, historyRewritten: true }
@@ -5544,6 +6057,14 @@ export class ContextMaintenance {
 					},
 					detachPostCommit,
 				);
+				this.#emitDiagnostic(diagnosticRun, {
+					kind: "attempt",
+					status: "cancelled",
+					reason: "maintenance-owner-invalidated",
+				});
+				this.#completeDiagnosticRun(diagnosticRun, "cancelled", {
+					reason: "maintenance-owner-invalidated",
+				});
 				return COMPACTION_CHECK_NONE;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
@@ -5559,11 +6080,20 @@ export class ContextMaintenance {
 				},
 				detachPostCommit,
 			);
+			this.#emitDiagnostic(diagnosticRun, {
+				kind: "attempt",
+				status: "failed",
+				error,
+			});
+			if (reason !== "overflow") this.#completeDiagnosticRun(diagnosticRun, "failed", { error });
 			// Overflow still needs recovery even if shake threw.
 			return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
 		} finally {
 			if (this.#autoCompactionAbortController === controller) {
 				this.#autoCompactionAbortController = undefined;
+			}
+			if (!isCurrent()) {
+				this.#completeDiagnosticRun(diagnosticRun, "cancelled", { reason: "maintenance-owner-invalidated" });
 			}
 		}
 	}

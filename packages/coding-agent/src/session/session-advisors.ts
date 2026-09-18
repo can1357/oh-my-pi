@@ -568,6 +568,7 @@ export class SessionAdvisors {
 	/** Reattach recorder feeds and resume work after a rolled-back or preserving transition. */
 	reattachRecorderFeeds(): void {
 		for (const advisor of this.#advisors) {
+			advisor.recorder.resume();
 			if (!advisor.agentUnsubscribe) this.#attachAdvisorRecorderFeed(advisor);
 			advisor.runtime.resumeAfterSessionTransition();
 		}
@@ -1233,7 +1234,9 @@ export class SessionAdvisors {
 				convertToLlmForSideRequest: messages => this.#host.convertToLlmForSideRequest(messages),
 				prepareSimpleStreamOptions: (streamOptions, provider) => ({
 					...streamOptions,
-					metadata: streamOptions.metadata ?? advisorAgent.metadataForProvider(provider ?? advisorAgent.state.model.provider),
+					metadata:
+						streamOptions.metadata ??
+						advisorAgent.metadataForProvider(provider ?? advisorAgent.state.model.provider),
 					onPayload: streamOptions.onPayload ?? this.#host.onPayload,
 					onResponse: streamOptions.onResponse ?? this.#host.onResponse,
 					onSseEvent: streamOptions.onSseEvent ?? this.#host.onSseEvent,
@@ -1249,6 +1252,7 @@ export class SessionAdvisors {
 					await advisorAgent.continue();
 				},
 				isDisposed: () => advisorRef.runtime.disposed,
+				captureMaintenanceSink: () => recorder.captureMaintenanceSink(),
 			});
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,
@@ -1484,10 +1488,10 @@ export class SessionAdvisors {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
 			a.runtime.dispose();
-			a.maintenance.dispose();
-			// Capture each close so dispose()/`/delete` can await the queued open+append+close —
-			// the last advisor turn would otherwise be lost on a fast process exit.
-			a.recorderClosed = a.recorder.close();
+			const maintenanceDisposed = a.maintenance.dispose();
+			// Capture each close so dispose()/`/delete` waits for scheduled
+			// maintenance and its diagnostics before releasing the transcript.
+			a.recorderClosed = maintenanceDisposed.then(() => a.recorder.close());
 			closes.push(a.recorderClosed);
 		}
 		this.#advisorRecorderClosed = Promise.all(closes).then(() => {});
@@ -1558,8 +1562,7 @@ export class SessionAdvisors {
 			return false;
 		}
 		const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
-		const isCurrent = () =>
-			ownsAttempt() && advisor.agent.state.model === currentModel;
+		const isCurrent = () => ownsAttempt() && advisor.agent.state.model === currentModel;
 		const safetyHost: RetryFallbackSafetyHost = {
 			settings: this.#host.settings,
 			modelRegistry: this.#host.modelRegistry,

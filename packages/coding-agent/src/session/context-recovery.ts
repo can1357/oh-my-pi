@@ -16,9 +16,7 @@ export interface ContextRecoveryHost {
 	isCurrent(): boolean;
 }
 
-export type ContextRecoveryTransactionResult<TResult> =
-	| { kind: "complete"; result: TResult }
-	| { kind: "stale" };
+export type ContextRecoveryTransactionResult<TResult> = { kind: "complete"; result: TResult } | { kind: "stale" };
 
 /** Remove a failed turn only when it is still the active assistant tail. */
 export function removeFailedAssistantFromActiveContext(
@@ -57,8 +55,7 @@ export async function dropFailedAssistantTurn(
 		(persistedEntryId === undefined
 			? undefined
 			: branch.find(
-					entry =>
-						entry.id === persistedEntryId && entry.type === "message" && entry.message.role === "assistant",
+					entry => entry.id === persistedEntryId && entry.type === "message" && entry.message.role === "assistant",
 				)) ??
 		branch
 			.slice()

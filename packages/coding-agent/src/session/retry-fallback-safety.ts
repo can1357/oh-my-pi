@@ -111,7 +111,8 @@ export function isRetryFallbackCandidateReplayCompatible(
 		latestAssistant.model !== candidate.id &&
 		latestAssistant.content.some(
 			block =>
-				(block.type === "thinking" && Boolean(block.thinkingSignature?.trim())) || block.type === "redactedThinking",
+				(block.type === "thinking" && Boolean(block.thinkingSignature?.trim())) ||
+				block.type === "redactedThinking",
 		)
 	);
 }
@@ -124,9 +125,7 @@ export async function findSafeRetryFallbackCandidate(
 	options: SafeRetryFallbackCandidateOptions = {},
 ): Promise<SafeRetryFallbackCandidate | undefined> {
 	const ceiling = host.thinkingLevelCeiling();
-	const latestAssistant = options.preserveFailedTurn
-		? failedMessage
-		: host.latestAssistantMessage(failedMessage);
+	const latestAssistant = options.preserveFailedTurn ? failedMessage : host.latestAssistantMessage(failedMessage);
 	for (const role of host.retryFallbackChainKeys(currentSelector)) {
 		for (const selector of host.findRetryFallbackCandidates(role, currentSelector, options)) {
 			if (options.signal?.aborted || !host.isCurrent()) return undefined;
