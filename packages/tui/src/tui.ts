@@ -12,7 +12,7 @@
  */
 import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
-import { $flag, getDebugLogPath } from "@pk-nerdsaver-ai/pi-utils";
+import { $flag, getDebugLogPath, popLoopPhase, pushLoopPhase } from "@pk-nerdsaver-ai/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
 import { planDeccaraFills } from "./deccara";
 import { isKeyRelease, matchesKey } from "./keys";
@@ -386,7 +386,7 @@ function parseSizeValue(value: SizeValue | undefined, referenceSize: number): nu
 }
 
 /** Detect terminal multiplexers where scrollback clearing and height-change redraws are hostile. */
-function isMultiplexerSession(): boolean {
+export function isMultiplexerSession(): boolean {
 	// TMUX/STY/ZELLIJ/CMUX workspace+surface ids are authoritative session
 	// signals. TERM can also survive when those are stripped (`sudo` without -E,
 	// `su`, env-sanitizing launchers/ssh), so keep the TERM prefix fallback aligned
@@ -2484,6 +2484,18 @@ export class TUI extends Container {
 	 * times — no viewport probes, no deferred reconciliation.
 	 */
 	#doRender(): void {
+		if (this.#stopped) return;
+		// Phase-tag the whole frame so a loop-watchdog stall inside compose/diff/
+		// write is attributed to "ui.render" instead of "unknown".
+		pushLoopPhase("ui.render");
+		try {
+			this.#doRenderFrame();
+		} finally {
+			popLoopPhase();
+		}
+	}
+
+	#doRenderFrame(): void {
 		if (this.#stopped) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;

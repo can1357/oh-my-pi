@@ -693,6 +693,11 @@ export function getFastembedRuntimeDir(): string {
 	return dirs.rootSubdir(path.join("cache", "fastembed-runtime"), "cache");
 }
 
+/** Get the shared inference-daemon socket directory (~/.ompk/run/workers). */
+export function getWorkerSocketDir(): string {
+	return dirs.rootSubdir(path.join("run", "workers"), "state");
+}
+
 /** Get the natives directory (~/.ompk/natives). */
 export function getNativesDir(): string {
 	return dirs.rootSubdir("natives", "cache");

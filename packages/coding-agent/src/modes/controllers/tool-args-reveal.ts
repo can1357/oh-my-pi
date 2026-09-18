@@ -1,5 +1,5 @@
 import { parseStreamingJson } from "@pk-nerdsaver-ai/pi-utils";
-import { nextStep, STREAMING_REVEAL_FRAME_MS } from "./streaming-reveal";
+import { nextStep, revealFrameMs } from "./streaming-reveal";
 
 /** Minimal component surface the reveal pushes frames into. */
 type ToolArgsRevealComponent = {
@@ -145,7 +145,7 @@ export class ToolArgsRevealController {
 		if (this.#timer) return;
 		this.#timer = setInterval(() => {
 			this.#tick();
-		}, STREAMING_REVEAL_FRAME_MS);
+		}, revealFrameMs());
 		this.#timer.unref?.();
 	}
 

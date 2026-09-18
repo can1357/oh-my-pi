@@ -1,7 +1,16 @@
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError } from "@pk-nerdsaver-ai/pi-utils";
+import {
+	hasFsCode,
+	isEnoent,
+	logger,
+	peekFileEnds,
+	popLoopPhase,
+	pushLoopPhase,
+	Snowflake,
+	toError,
+} from "@pk-nerdsaver-ai/pi-utils";
 
 const utf8Decoder = new TextDecoder("utf-8");
 
@@ -85,6 +94,9 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	async append(line: string): Promise<void> {
 		if (this.#closed) throw new Error("Writer closed");
 		if (this.#error) throw this.#error;
+		// The writeSync loop is synchronous despite the async signature; tag it so
+		// a slow disk (AV scan, sleeping volume) is attributed instead of "unknown".
+		pushLoopPhase("session.append");
 		try {
 			const buf = Buffer.from(line, "utf-8");
 			let offset = 0;
@@ -97,6 +109,8 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 			}
 		} catch (err) {
 			throw this.#recordError(err);
+		} finally {
+			popLoopPhase();
 		}
 	}
 

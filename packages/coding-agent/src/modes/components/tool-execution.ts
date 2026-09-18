@@ -42,6 +42,7 @@ import { toolRenderers } from "../../tools/renderers";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
 import { isFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
+import { revealFrameMs } from "../controllers/streaming-reveal";
 import { renderDiff } from "./diff";
 
 /**
@@ -537,7 +538,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 				this.#spinnerFrame = sharedSpinnerFrame(frameCount, now);
 				this.#renderState.spinnerFrame = this.#spinnerFrame;
 				this.#ui.requestRender();
-			}, SPINNER_RENDER_INTERVAL_MS);
+			}, revealFrameMs());
 		} else if (!needsSpinner && this.#spinnerInterval) {
 			clearInterval(this.#spinnerInterval);
 			this.#spinnerInterval = undefined;

@@ -1,3 +1,4 @@
+import { popLoopPhase, pushLoopPhase } from "@pk-nerdsaver-ai/pi-utils";
 import { LRUCache } from "lru-cache/raw";
 import { Marked, type Token, Tokenizer, type TokenizerAndRendererExtension, type Tokens } from "marked";
 import { latexToBlock } from "../latex-block";
@@ -920,6 +921,20 @@ export class Markdown implements Component {
 	}
 
 	render(width: number): readonly string[] {
+		// L1 hit returns the cached reference without entering the phase; the
+		// lex+render path below is what a loop-watchdog stall should be pinned to.
+		if (this.#cachedLines && this.#cachedText === this.#text && this.#cachedWidth === width) {
+			return this.#cachedLines;
+		}
+		pushLoopPhase("ui.markdown");
+		try {
+			return this.#renderLines(width);
+		} finally {
+			popLoopPhase();
+		}
+	}
+
+	#renderLines(width: number): readonly string[] {
 		// L1: per-instance cache — fastest path for repeated renders of the same
 		// instance at the same width (e.g. resize debounce, repeated redraws).
 		// Returning the cached reference is load-bearing: parents memoize their

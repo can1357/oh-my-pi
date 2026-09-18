@@ -1,4 +1,6 @@
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
+import { createSharedWorkerHandle } from "../subprocess/shared-worker-client";
+import { sharedWorkersEnabled, workerSocketPath } from "../subprocess/shared-worker-config";
 import {
 	createUnavailableWorker,
 	createWorkerHandle,
@@ -12,6 +14,7 @@ import {
 	type WorkerHandle,
 	workerEnvFromParent,
 } from "../subprocess/worker-client";
+import { MNEMOPI_EMBED_DAEMON_ARG } from "../subprocess/worker-daemon";
 import type { MnemopiEmbedModelId, MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound } from "./embed-protocol";
 
 /**
@@ -76,9 +79,22 @@ function wrapSubprocess(spawned: SpawnedSubprocess<MnemopiEmbedWorkerOutbound>):
 	});
 }
 
+/** Socket path of the shared mnemopi embed daemon (fastembed reads its own config; one daemon per user). */
+export function embedDaemonSocketPath(): string {
+	return workerSocketPath("embed", "default");
+}
+
 function spawnMnemopiEmbedWorker(): MnemopiEmbedWorkerHandle {
 	return spawnWorkerOrUnavailable(
-		() => wrapSubprocess(createMnemopiEmbedSubprocess()),
+		() =>
+			sharedWorkersEnabled()
+				? createSharedWorkerHandle<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>({
+						socketPath: embedDaemonSocketPath(),
+						spawnCommand: resolveWorkerSpawnCmd(MNEMOPI_EMBED_DAEMON_ARG),
+						env: workerEnvFromParent(),
+						label: "mnemopi embed daemon",
+					})
+				: wrapSubprocess(createMnemopiEmbedSubprocess()),
 		createUnavailableWorker<MnemopiEmbedWorkerInbound, MnemopiEmbedWorkerOutbound>,
 		"mnemopi embed worker spawn failed; local embeddings disabled",
 	);

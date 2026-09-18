@@ -1,12 +1,29 @@
 import type { AssistantMessage } from "@pk-nerdsaver-ai/pi-ai";
-import { getSegmenter } from "@pk-nerdsaver-ai/pi-tui";
+import { getSegmenter, isMultiplexerSession } from "@pk-nerdsaver-ai/pi-tui";
+import { isBunTestRuntime, popLoopPhase, pushLoopPhase } from "@pk-nerdsaver-ai/pi-utils";
 import { LRUCache } from "lru-cache/raw";
 import { formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import type { AssistantMessageComponent } from "../components/assistant-message";
 
 export const STREAMING_REVEAL_FRAME_MS = 1000 / 30;
+/**
+ * Inside a multiplexer (tmux/screen/zellij/cmux/pk-herdr) every frame we paint
+ * is re-parsed by the mux's own terminal emulator and re-rendered to the outer
+ * terminal, so the streaming reveal and tool spinners run at 10 fps there.
+ */
+export const MULTIPLEXER_REVEAL_FRAME_MS = 1000 / 10;
 export const MIN_STEP = 3;
 export const CATCHUP_FRAMES = 8;
+
+/** Pure cadence rule; tests always get the base cadence so fake-timer suites stay deterministic. */
+export function resolveRevealFrameMs(inMultiplexer: boolean, inTestRuntime: boolean): number {
+	return !inTestRuntime && inMultiplexer ? MULTIPLEXER_REVEAL_FRAME_MS : STREAMING_REVEAL_FRAME_MS;
+}
+
+/** Frame interval for reveal/spinner timers in the current process. */
+export function revealFrameMs(): number {
+	return resolveRevealFrameMs(isMultiplexerSession(), isBunTestRuntime());
+}
 
 type AssistantContentBlock = AssistantMessage["content"][number];
 type DisplayThinkingContentBlock = Extract<AssistantContentBlock, { type: "thinking" }> & { rawThinking?: string };
@@ -333,7 +350,7 @@ export class StreamingRevealController {
 		if (this.#timer) return;
 		this.#timer = setInterval(() => {
 			this.#tick();
-		}, STREAMING_REVEAL_FRAME_MS);
+		}, revealFrameMs());
 		this.#timer.unref?.();
 	}
 
@@ -344,6 +361,15 @@ export class StreamingRevealController {
 	}
 
 	#tick(): void {
+		pushLoopPhase("ui.stream-reveal");
+		try {
+			this.#tickFrame();
+		} finally {
+			popLoopPhase();
+		}
+	}
+
+	#tickFrame(): void {
 		const target = this.#target;
 		const component = this.#component;
 		if (!target || !component) {

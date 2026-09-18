@@ -99,6 +99,10 @@ const JS_EVAL_WORKER_ARG = "__omp_worker_js_eval";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
+// Shared-daemon variants: same worker code, hosted behind a Unix socket for
+// every ompk instance on the machine. Values mirror subprocess/worker-daemon.ts.
+const TINY_DAEMON_ARG = "__omp_daemon_tiny_inference";
+const MNEMOPI_EMBED_DAEMON_ARG = "__omp_daemon_mnemopi_embed";
 
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TINY_WORKER_ARG) {
@@ -157,6 +161,32 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
+		return true;
+	}
+	if (arg === TINY_DAEMON_ARG) {
+		const [{ startTinyTitleWorker }, { tinyDaemonSocketPath }, { runSocketDaemonWorker }, { resolveDaemonIdleMs }] =
+			await Promise.all([
+				import("./tiny/worker"),
+				import("./tiny/title-client"),
+				import("./subprocess/worker-daemon"),
+				import("./subprocess/shared-worker-config"),
+			]);
+		await runSocketDaemonWorker(tinyDaemonSocketPath(), startTinyTitleWorker, resolveDaemonIdleMs());
+		return true;
+	}
+	if (arg === MNEMOPI_EMBED_DAEMON_ARG) {
+		const [
+			{ startMnemopiEmbedWorker },
+			{ embedDaemonSocketPath },
+			{ runSocketDaemonWorker },
+			{ resolveDaemonIdleMs },
+		] = await Promise.all([
+			import("./mnemopi/embed-worker"),
+			import("./mnemopi/embed-client"),
+			import("./subprocess/worker-daemon"),
+			import("./subprocess/shared-worker-config"),
+		]);
+		await runSocketDaemonWorker(embedDaemonSocketPath(), startMnemopiEmbedWorker, resolveDaemonIdleMs());
 		return true;
 	}
 	return false;
@@ -275,7 +305,7 @@ export async function runCli(argv: string[]): Promise<void> {
 	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
 	// worker's parked initial messages as soon as the entry module's
 	// top-level evaluation finishes.
-	if (resolvedArgv[0]?.startsWith("__omp_worker_")) {
+	if (resolvedArgv[0]?.startsWith("__omp_worker_") || resolvedArgv[0]?.startsWith("__omp_daemon_")) {
 		await runWorkerEntrypoint(resolvedArgv[0]);
 		return;
 	}

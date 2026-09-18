@@ -1,5 +1,7 @@
 import { $env, logger } from "@pk-nerdsaver-ai/pi-utils";
 import { settings } from "../config/settings";
+import { createSharedWorkerHandle } from "../subprocess/shared-worker-client";
+import { sharedWorkersEnabled, workerSocketPath } from "../subprocess/shared-worker-config";
 import {
 	createUnavailableWorker,
 	createWorkerHandle,
@@ -13,6 +15,7 @@ import {
 	spawnWorkerOrUnavailable,
 	workerEnvFromParent,
 } from "../subprocess/worker-client";
+import { TINY_DAEMON_ARG } from "../subprocess/worker-daemon";
 import { safeSend } from "../utils/ipc";
 import { tinyModelDeviceSettingToEnv } from "./device";
 import { tinyModelDtypeSettingToEnv } from "./dtype";
@@ -126,6 +129,15 @@ export function tinyWorkerEnv(): Record<string, string> {
 }
 
 /**
+ * Socket path of the shared tiny-model daemon. Fingerprinted by device/dtype so
+ * two instances with different local-model settings never share one daemon.
+ */
+export function tinyDaemonSocketPath(): string {
+	const env = tinyWorkerEnv();
+	return workerSocketPath("tiny", `${env.PI_TINY_DEVICE ?? "auto"}-${env.PI_TINY_DTYPE ?? "auto"}`);
+}
+
+/**
  * Spawn the tiny-model worker as a subprocess. Exported for tests and the
  * smoke probe; production callers go through {@link spawnTinyTitleWorker}.
  */
@@ -174,7 +186,15 @@ function spawnInlineUnavailableWorker(
 
 function spawnTinyTitleWorker(): RefCountedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound> {
 	return spawnWorkerOrUnavailable(
-		() => wrapSubprocess(createTinyTitleSubprocess()),
+		() =>
+			sharedWorkersEnabled()
+				? createSharedWorkerHandle<TinyTitleWorkerInbound, TinyTitleWorkerOutbound>({
+						socketPath: tinyDaemonSocketPath(),
+						spawnCommand: resolveWorkerSpawnCmd(TINY_DAEMON_ARG),
+						env: tinyWorkerEnv(),
+						label: "tiny model daemon",
+					})
+				: wrapSubprocess(createTinyTitleSubprocess()),
 		spawnInlineUnavailableWorker,
 		"Tiny title worker spawn failed; local titles disabled",
 	);
