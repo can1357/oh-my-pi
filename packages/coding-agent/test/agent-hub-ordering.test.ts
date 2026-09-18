@@ -1001,6 +1001,7 @@ describe("Agent hub row ordering", () => {
 	});
 
 	it("renders parent lineage with bash-style tree connectors", () => {
+		setSystemTime(1_000);
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(32);
 		const agents = new AgentRegistry();
@@ -1020,6 +1021,7 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 	it("keeps tree rails continuous across task and metrics rows", () => {
+		setSystemTime(1_000);
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(32);
 		const agents = new AgentRegistry();
@@ -1052,6 +1054,40 @@ describe("Agent hub row ordering", () => {
 			);
 			expect(new Set(metadataOrigins)).toEqual(new Set([metadataOrigins[0]]));
 			expect(metadataOrigins[0]).toBeGreaterThan(0);
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("keeps tree rails aligned when sibling activity reverses the registration order", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(32);
+		const agents = new AgentRegistry();
+		setSystemTime(1_000);
+		agents.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: null });
+		agents.setActivity("Parent", "Parent task");
+		setSystemTime(2_000);
+		agents.register({ id: "First", displayName: "First", kind: "sub", parentId: "Parent", session: null });
+		agents.setActivity("First", "First task");
+		setSystemTime(3_000);
+		agents.register({ id: "Grandchild", displayName: "Grandchild", kind: "sub", parentId: "First", session: null });
+		agents.setActivity("Grandchild", "Grandchild task");
+		setSystemTime(4_000);
+		agents.register({ id: "Last", displayName: "Last", kind: "sub", parentId: "Parent", session: null });
+		agents.setActivity("Last", "Last task");
+		const hub = makeHub(agents);
+		try {
+			hub.handleInput("t");
+			expect(renderedAgentIds(hub)).toEqual(["Parent", "Last", "First", "Grandchild"]);
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Last", 120))).toContain("├── ⟳ Last");
+			expect(Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "First", 120))).toContain("└── ⟳ First");
+			const lastDetails = renderedRosterEntry(hub, "Last", 120).split("\n").slice(1);
+			const firstDetails = renderedRosterEntry(hub, "First", 120).split("\n").slice(1);
+			const grandchildDetails = renderedRosterEntry(hub, "Grandchild", 120).split("\n").slice(1);
+			for (const details of [lastDetails, firstDetails, grandchildDetails]) expect(details).toHaveLength(2);
+			expect(lastDetails.every(line => line.startsWith("  │   "))).toBe(true);
+			expect(firstDetails.every(line => line.startsWith("      │ "))).toBe(true);
+			expect(grandchildDetails.every(line => !line.includes("│"))).toBe(true);
 		} finally {
 			hub.dispose();
 		}
