@@ -83,9 +83,16 @@ function createMockFetch(events: ReadonlyArray<SseChunk | "[DONE]">): FetchImpl 
 	return Object.assign(fn, { preconnect: fetch.preconnect });
 }
 
-function toRecord(value: unknown): Record<string, unknown> {
-	return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
-}
+/**
+ * The captured request body, validated rather than asserted: it leaves the provider as JSON, and
+ * an inline cast would read a shape nothing ever checked.
+ */
+const requestBodySchema = type({
+	"parallel_tool_calls?": "boolean",
+	"tool_choice?": "string",
+	"stream_options?": "unknown",
+	tools: type({ type: "string", function: type({ name: "string" }) }).array(),
+});
 
 /**
  * Capture the request body `buildParams` produced. The already-aborted signal
@@ -95,15 +102,19 @@ function capturePayload(
 	model: Model<"openai-completions">,
 	context: Context,
 	options?: { readonly toolChoice?: ToolChoice },
-): Promise<Record<string, unknown>> {
-	const { promise, resolve } = Promise.withResolvers<Record<string, unknown>>();
+): Promise<typeof requestBodySchema.infer> {
+	const { promise, resolve } = Promise.withResolvers<typeof requestBodySchema.infer>();
 	const controller = new AbortController();
 	controller.abort();
 	streamOpenAICompletions(model, context, {
 		apiKey: "test-key",
 		fetch: createMockFetch(["[DONE]"]),
 		signal: controller.signal,
-		onPayload: payload => resolve(toRecord(payload)),
+		onPayload: payload => {
+			const parsed = requestBodySchema(payload);
+			if (parsed instanceof type.errors) throw new Error(`unexpected request body: ${parsed.summary}`);
+			resolve(parsed);
+		},
 		...options,
 	});
 	return promise;
@@ -148,10 +159,9 @@ describe("gpt-oss harmony request body", () => {
 		expect(payload.parallel_tool_calls).toBe(false);
 		expect(payload.tool_choice).toBe("required");
 
-		const tools = payload.tools as Array<{ type?: string; function?: { name?: string } }>;
-		expect(tools).toHaveLength(1);
-		expect(tools[0]?.type).toBe("function");
-		expect(tools[0]?.function?.name).toBe("get_weather");
+		expect(payload.tools).toHaveLength(1);
+		expect(payload.tools[0]?.type).toBe("function");
+		expect(payload.tools[0]?.function.name).toBe("get_weather");
 		// Cerebras resolves `supportsUsageInStreaming: false`.
 		expect(payload.stream_options).toBeUndefined();
 	});
@@ -162,8 +172,7 @@ describe("gpt-oss harmony request body", () => {
 
 		expect(payload.parallel_tool_calls).toBeUndefined();
 		expect(payload.tool_choice).toBe("required");
-		const tools = payload.tools as Array<{ function?: { name?: string } }>;
-		expect(tools[0]?.function?.name).toBe("get_weather");
+		expect(payload.tools[0]?.function.name).toBe("get_weather");
 	});
 });
 
