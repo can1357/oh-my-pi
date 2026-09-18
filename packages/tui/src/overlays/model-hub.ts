@@ -22,13 +22,19 @@ import { getKeybindings } from "../keybindings";
 import { Input } from "../components/input";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { truncateToWidth, visibleWidth } from "../utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	ModelBrowserSource,
 	ModelBrowserRegistry,
 	ModelRoleLookup,
 	ResolvedModelRoleValue,
 } from "./model-browser";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	parseConfiguredThinkingLevel,
+} from "../thinking";
 import { thinkingLevelGlyph } from "../render/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
@@ -59,6 +65,8 @@ import { renderSegmentTrack } from "../chrome/segment-track";
  */
 type RolesRow =
 	| { kind: "role"; role: string }
+	| { kind: "preset"; name: string | undefined; model: Model; isDefault: boolean }
+	| { kind: "savePreset"; model: Model }
 	| { kind: "chainKey"; role: string }
 	| { kind: "fallback"; role: string; chainIndex: number; selector: string }
 	| { kind: "separator" }
@@ -75,15 +83,51 @@ type AssignTarget =
 	| { kind: "fallback"; role: string; index: number | null }
 	| { kind: "fallbackKey" };
 
+/** A saved role preset as consumed by the hub: role selectors plus an optional captured fallback-chain snapshot. */
+export interface ModelRolePresetView {
+	roles: Record<string, string>;
+	fallbackChains?: Record<string, string[]>;
+}
+
 /** Live preferences and selector operations supplied by the host. */
 export interface ModelHubSource extends ModelBrowserSource {
 	readonly disabledProviders: readonly string[];
 	readonly fallbackChains: Record<string, string[]>;
+	/** Global settings-layer `retry.fallbackChains` (unsanitized); the layer presets capture and restore. */
+	readonly globalFallbackChains: unknown;
 	readonly modelRoleStorage: "global" | "project";
 	readonly cycleOrder: readonly string[];
+	readonly presetsApplyOnSelect: boolean;
+	readonly presetsAutoSave: boolean;
+	readonly presetsKeepRolesWhenUnset: boolean;
+	/** Global settings-layer default thinking level, used for captured-Auto dirty detection. */
+	readonly globalDefaultThinkingLevel: string;
 	getProjectModelRole(role: string): string | undefined;
 	getGlobalModelRole(role: string): string | undefined;
 	getModelRoleSource(role: string): "global" | "project" | "default";
+	getModelRoleProvenance(role: string): "runtime" | "overlay" | "project" | "global" | "default";
+	getModelRolePresetProvenance(model: Model, name?: string): "runtime" | "overlay" | "project" | "global" | "default";
+	getProjectModelRoles(): Record<string, string | undefined>;
+	getGlobalModelRoles(): Record<string, string | undefined>;
+	/** Format a model as a routing-aware selector (`provider/id[@upstream]`). */
+	formatWithRouting(model: Model): string;
+	/** Filter available models by the configured `enabledModels` patterns (identity when none). */
+	filterEnabledModels(available: Model[]): Model[];
+	/** Whether `name` is a legal saved-preset name (rejects the reserved `default`). */
+	isValidPresetName(name: string): boolean;
+	/** Roles a preset assigns: its built-in set plus custom keys, optionally folding in `extraRoleKeys`. */
+	presetRoles(profile: ModelRolePresetView | undefined, extraRoleKeys?: Iterable<string>): string[];
+	/** OMP's curated built-in Default preset for `model`. */
+	buildBuiltInDefaultPreset(model: Model, available: readonly Model[]): ModelRolePresetView;
+	presetNames(model: Model): string[];
+	preset(model: Model, name: string): ModelRolePresetView | undefined;
+	presetDefault(model: Model): ModelRolePresetView | undefined;
+	presetDefaultName(model: Model): string | undefined;
+	presetKeyExists(model: Model, name: string): boolean;
+	/** Global-layer preset lookups, used only for chain/default dirty detection. */
+	globalPreset(model: Model, name: string): ModelRolePresetView | undefined;
+	globalPresetDefault(model: Model): ModelRolePresetView | undefined;
+	globalPresetDefaultName(model: Model): string | undefined;
 }
 
 /** Catalog capabilities required by the model hub. */
@@ -125,13 +169,29 @@ export interface ModelHubCallbacks {
 		scope?: ModelRoleSelectionScope,
 	) => void | boolean | Promise<void | boolean>;
 	/** Clear a configured role back to auto-selection. */
-	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void;
+	onUnassign: (role: string, scope?: ModelRoleSelectionScope) => void | Promise<void>;
 	/** Persist a `retry.fallbackChains` entry — keyed by a role, `provider/model-id`, or `provider/*`; an empty chain clears the key. */
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
 	/** Persist a new quick-switch cycle order (the ctrl+p role cycle). */
 	onCycleOrderChange?: (order: string[]) => void;
+	/** Select a default model and apply either its Default or one saved role preset. */
+	onApplyPreset?: (
+		model: Model,
+		name: string | undefined,
+		options?: { replaceUnsetRoles?: boolean; useBuiltInDefault?: boolean },
+	) => boolean | void | Promise<boolean | void>;
+	/** Save the current role assignments as a named preset for a model. */
+	onSavePreset?: (model: Model, name: string) => void;
+	/** Set a named preset as Default; undefined restores OMP's built-in Default. */
+	onSetDefaultPreset?: (model: Model, name: string | undefined) => void;
+	/** Save the current roles back into the preset currently being edited. */
+	onSaveActivePreset?: (model: Model, name: string | undefined, automatic: boolean) => void;
+	/** Rename a saved preset, carrying its payload and Default-pointer identity. */
+	onRenamePreset?: (model: Model, from: string, to: string) => void;
+	/** Delete a named saved preset. */
+	onDeletePreset?: (model: Model, name: string) => void;
 	onCancel: () => void;
 }
 
@@ -159,10 +219,19 @@ interface SidebarAnchor {
 }
 
 interface StripChip extends HubStripChip<
-	"assign" | "unassign" | "fallback" | "fallbackModel" | "fallbackProvider" | "scope" | "thinking"
+	| "assign"
+	| "unassign"
+	| "fallback"
+	| "fallbackModel"
+	| "fallbackProvider"
+	| "scope"
+	| "thinking"
+	| "applyPreset"
+	| "savePreset"
 > {
 	role?: string;
 	thinkingLevel?: ConfiguredThinkingLevel;
+	presetName?: string;
 	scope?: ModelRoleSelectionScope;
 }
 
@@ -183,7 +252,8 @@ type StripState =
 			/** Footer text input naming a new custom role. */
 			kind: "roleName";
 			input: Input;
-	  };
+	  }
+	| { kind: "presetName"; item: ModelBrowserItem; input: Input; renameFrom?: string };
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
@@ -213,6 +283,10 @@ export class ModelHubComponent implements Component {
 
 	#browser: ModelBrowser;
 	#roles: RoleAssignments = {};
+	#activePreset: { model: Model; name: string | undefined; useBuiltInDefault: boolean } | undefined;
+	#activePresetDirty = false;
+	#activePresetManuallyDirty = false;
+	#presetApplicationId = 0;
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
 	#configError: string | undefined;
@@ -335,6 +409,7 @@ export class ModelHubComponent implements Component {
 
 	/** Cancel pending provider refresh timers and the spinner. Host calls this on overlay close. */
 	dispose(): void {
+		this.#presetApplicationId++;
 		this.#disposed = true;
 		for (const [, timer] of this.#scheduledProviderRefreshes) clearTimeout(timer);
 		this.#scheduledProviderRefreshes.clear();
@@ -381,7 +456,7 @@ export class ModelHubComponent implements Component {
 			this.#configError = loadError ? String(loadError) : undefined;
 			allModels = this.#registry.getAll();
 			try {
-				availableModels = this.#registry.getAvailable();
+				availableModels = this.#settings.filterEnabledModels(this.#registry.getAvailable());
 			} catch (error) {
 				this.#configError = error instanceof Error ? error.message : String(error);
 				availableModels = [];
@@ -389,7 +464,7 @@ export class ModelHubComponent implements Component {
 		}
 
 		this.#reloadRoles(availableModels);
-		this.#buildRolesRows();
+		this.#buildRolesRows(availableModels);
 
 		const mruOrder = this.#settings.mruOrder;
 		this.#availableItems = buildBrowserItems(availableModels);
@@ -582,9 +657,14 @@ export class ModelHubComponent implements Component {
 
 	#setActiveEntry(id: string): void {
 		if (!this.#entries.some(entry => entry.id === id)) return;
+		const enteringRoles = id === "roles" && this.#activeEntryId !== "roles";
 		this.#activeEntryId = id;
 		this.#sidebarFollowActive = true;
 		this.#applyScope();
+		if (enteringRoles) {
+			const defaultRoleIndex = this.#rolesRows.findIndex(row => row.kind === "role" && row.role === "default");
+			if (defaultRoleIndex >= 0) this.#roleIndex = defaultRoleIndex;
+		}
 		const entry = this.#activeEntry();
 		// Hops must never steal arrow focus: landing on a scope keeps provider
 		// navigation active. Diving into the roles rows is explicit (Enter, →,
@@ -648,13 +728,160 @@ export class ModelHubComponent implements Component {
 	}
 
 	/**
+	 * The global settings layer's `retry.fallbackChains` — the layer presets
+	 * capture and restore. Project-file or overlay chain entries may shadow
+	 * these values in the effective map (shown in the rows) but are never
+	 * part of preset state, so dirty detection compares this layer only.
+	 */
+	#globalFallbackChains(): Record<string, string[]> {
+		try {
+			const chains = this.#settings.globalFallbackChains;
+			if (!chains || typeof chains !== "object" || Array.isArray(chains)) return {};
+			const sanitized: Record<string, string[]> = {};
+			for (const key in chains) {
+				const chain = (chains as Record<string, unknown>)[key];
+				if (!Array.isArray(chain)) continue;
+				sanitized[key] = chain.filter((entry): entry is string => typeof entry === "string");
+			}
+			return sanitized;
+		} catch {
+			return {};
+		}
+	}
+
+	/**
 	 * Rebuild the Roles view rows: each visible role followed by its
 	 * fallback-chain entries, then model-oriented chains (`provider/model-id`
 	 * and `provider/*` keys) as headed groups.
 	 */
-	#buildRolesRows(): void {
+	#buildRolesRows(availableModels: ReadonlyArray<Model>): void {
 		const rows: RolesRow[] = [];
 		const chains = this.#fallbackChains();
+		const defaultModel = this.#roles.default?.model;
+		const presetDefaultIsEditable =
+			this.#settings.modelRoleStorage !== "project" || this.#settings.getModelRoleProvenance("default") !== "global";
+		if (
+			this.#activePreset &&
+			(!presetDefaultIsEditable ||
+				!defaultModel ||
+				this.#activePreset.model.provider !== defaultModel.provider ||
+				this.#activePreset.model.id !== defaultModel.id ||
+				this.#settings.formatWithRouting(this.#activePreset.model) !==
+					this.#settings.formatWithRouting(defaultModel))
+		) {
+			this.#activePreset = undefined;
+			this.#activePresetDirty = false;
+			this.#activePresetManuallyDirty = false;
+		}
+		if (defaultModel && presetDefaultIsEditable) {
+			const defaultName = this.#settings.presetDefaultName(defaultModel);
+			const storedRoles =
+				this.#settings.modelRoleStorage === "project"
+					? this.#settings.getProjectModelRoles()
+					: this.#settings.getGlobalModelRoles();
+			if (!this.#activePreset) {
+				const configuredDefault = this.#settings.presetDefault(defaultModel);
+				const useBuiltInDefault = configuredDefault === undefined && this.#settings.presetsApplyOnSelect;
+				this.#activePreset = { model: defaultModel, name: defaultName, useBuiltInDefault };
+			}
+			const active = this.#activePreset;
+			const activeProfile = active?.useBuiltInDefault
+				? this.#settings.buildBuiltInDefaultPreset(defaultModel, availableModels)
+				: active?.name === undefined
+					? this.#settings.presetDefault(defaultModel)
+					: this.#settings.preset(defaultModel, active.name);
+			const presetScope = this.#settings.modelRoleStorage === "project" ? "project" : "global";
+			const keepUnsetRoles = this.#settings.presetsKeepRolesWhenUnset;
+			const selected = this.#settings.formatWithRouting(defaultModel);
+			const availableForResolution = [...availableModels];
+			// Built-in roles plus custom roles from the active profile. Under replacement
+			// semantics, also fold in custom roles stored in the target scope so a role
+			// the preset omits is compared (and cleared) the same as an application would.
+			const profileRoles = this.#settings.presetRoles(
+				activeProfile,
+				keepUnsetRoles ? undefined : Object.keys(storedRoles),
+			);
+			const roleLookup: ModelRoleLookup = {
+				getModelRole: role => {
+					if (role === "default") return selected;
+					const presetRole = profileRoles.includes(role) ? role : undefined;
+					if (presetRole && activeProfile?.roles[presetRole] !== undefined) {
+						return activeProfile.roles[presetRole];
+					}
+					if (!keepUnsetRoles && presetRole) {
+						return presetScope === "project" ? this.#settings.getGlobalModelRole(role) : undefined;
+					}
+					return presetScope === "project"
+						? (this.#settings.getProjectModelRole(role) ?? this.#settings.getGlobalModelRole(role))
+						: this.#settings.getGlobalModelRole(role);
+				},
+			};
+			const appliedProfile =
+				activeProfile === undefined
+					? undefined
+					: (Object.fromEntries(
+							profileRoles.map(role => {
+								const value = activeProfile.roles[role];
+								if (!value) return [role, undefined];
+								const candidate = this.#settings.resolveRoleValue(
+									value,
+									availableForResolution,
+									roleLookup,
+								).model;
+								return [role, candidate ? value : selected];
+							}),
+						) as Record<string, string | undefined>);
+			const rolesDifferFromPreset =
+				active !== undefined &&
+				(appliedProfile === undefined
+					? profileRoles.some(role => storedRoles[role] !== undefined)
+					: profileRoles.some(role =>
+							appliedProfile[role] === undefined && keepUnsetRoles
+								? false
+								: storedRoles[role] !== appliedProfile[role],
+						));
+			// Chain dirty state compares the global presets layer — the layer
+			// presets capture and restore — so payload overrides from project,
+			// overlay, or runtime layers never flag global-owned chains dirty.
+			// Mirror ModelControls #selectedGlobalPreset: when the merged Default is
+			// a direct payload (no name pointer), the global-layer lookup must not
+			// follow an unrelated global named pointer — identity and payload then
+			// resolve to nothing rather than to a preset the pointer happens to
+			// name, so dirty detection never compares against that unrelated row.
+			const globalProfile = active?.useBuiltInDefault
+				? undefined
+				: active?.name === undefined
+					? this.#settings.globalPresetDefaultName(defaultModel)
+						? undefined
+						: this.#settings.globalPresetDefault(defaultModel)
+					: this.#settings.globalPreset(defaultModel, active.name);
+			const chainsDifferFromPreset =
+				globalProfile?.fallbackChains !== undefined &&
+				!Bun.deepEquals(this.#globalFallbackChains(), globalProfile.fallbackChains);
+			const storedDefault = storedRoles.default;
+			// A bare default role inherits the owned global thinking mode; snapshots
+			// capture that as an explicit suffix so later setting changes do not
+			// rewrite the profile. This covers auto and every concrete effort.
+			const configuredDefaultThinking = parseConfiguredThinkingLevel(this.#settings.globalDefaultThinkingLevel);
+			const matchesCapturedDefaultThinking =
+				storedDefault !== undefined &&
+				globalProfile?.roles.default === formatModelSelectorValue(storedDefault, configuredDefaultThinking);
+			const defaultDiffersFromPreset =
+				globalProfile?.roles.default !== undefined &&
+				storedDefault !== globalProfile.roles.default &&
+				!matchesCapturedDefaultThinking;
+			this.#activePresetDirty =
+				this.#activePresetManuallyDirty ||
+				rolesDifferFromPreset ||
+				chainsDifferFromPreset ||
+				defaultDiffersFromPreset;
+			rows.push({ kind: "preset", name: undefined, model: defaultModel, isDefault: defaultName === undefined });
+			for (const name of this.#settings.presetNames(defaultModel)) {
+				rows.push({ kind: "preset", name, model: defaultModel, isDefault: defaultName === name });
+			}
+			rows.push({ kind: "savePreset", model: defaultModel });
+			rows.push({ kind: "separator" });
+		}
 		for (const role of this.#visibleRoleIds()) {
 			rows.push({ kind: "role", role });
 			const chain = chains[role] ?? [];
@@ -964,23 +1191,93 @@ export class ModelHubComponent implements Component {
 		}
 		const supported = this.#thinkingOptionsFor(item.model);
 		if (!supported.includes(level)) level = ThinkingLevel.Inherit;
+		const commitPresetEdit = this.#notePresetRoleEdit(role, scope);
 		const result = this.#callbacks.onAssign(item.model, role, level, item.selector, scope);
 		this.#finishAssignment(result, () => {
+			commitPresetEdit();
 			this.#refreshAfterMutation();
-			this.#openThinkingStrip(item, role, returnToRoles, scope, level);
+			this.#openThinkingStrip(item, role, returnToRoles, scope);
 		});
 	}
 
 	#unassignRole(role: string): void {
 		const assignment = this.#roles[role];
 		if (!assignment || assignment.autoSelected) return;
-		if (this.#settings.modelRoleStorage === "project") {
-			const source = this.#settings.getModelRoleSource(role);
-			this.#callbacks.onUnassign(role, source === "default" ? undefined : source);
-		} else {
-			this.#callbacks.onUnassign(role);
-		}
+		const source = this.#settings.getModelRoleSource(role);
+		const scope = this.#settings.modelRoleStorage === "project" && source !== "default" ? source : undefined;
+		this.#mutateRole(role, scope, () => this.#callbacks.onUnassign(role, scope));
 		this.#refreshAfterMutation();
+	}
+
+	/**
+	 * Mark the active preset dirty for a role edit and return the commit step
+	 * that auto-saves it once the edit has actually been applied. Every role
+	 * mutation (assign, thinking change, unassign) MUST go through this so
+	 * `modelRolePresets.autoSave` captures it. A `default` edit counts too: the
+	 * preset's captured `default` selector (routing and effort) must follow
+	 * thinking-only edits of the primary. Switching the primary to a different
+	 * model never lands in the old preset — the commit's model guard discards
+	 * the active-preset identity instead of saving.
+	 */
+	#notePresetRoleEdit(role: string, scope?: ModelRoleSelectionScope): () => void {
+		const presetScope = this.#settings.modelRoleStorage === "project" ? "project" : "global";
+		const editsActivePresetScope = (scope ?? presetScope) === presetScope;
+		const active = this.#activePreset;
+		return () => {
+			if (editsActivePresetScope && active && this.#activePreset === active) {
+				this.#activePresetManuallyDirty = true;
+				this.#saveActivePreset(true);
+			}
+		};
+	}
+
+	/** Late role edits must not auto-save into a different model or preset. */
+	#mutateRole(role: string, scope: ModelRoleSelectionScope | undefined, mutate: () => void | Promise<void>): void {
+		const commitPresetEdit = this.#notePresetRoleEdit(role, scope);
+		void Promise.resolve(mutate())
+			.then(() => {
+				commitPresetEdit();
+				this.#refreshAfterMutation();
+			})
+			.catch(error => logger.warn("Model role edit failed", { role, error }));
+	}
+
+	/** Save the active preset only while its model remains the selected default. */
+	#saveActivePreset(automatic: boolean): void {
+		if (automatic && !this.#settings.presetsAutoSave) return;
+		const active = this.#activePreset;
+		const defaultModel = this.#roles.default?.model;
+		if (
+			!active ||
+			!defaultModel ||
+			active.model.provider !== defaultModel.provider ||
+			active.model.id !== defaultModel.id
+		) {
+			this.#activePreset = undefined;
+			this.#activePresetDirty = false;
+			this.#activePresetManuallyDirty = false;
+			return;
+		}
+		if (!this.#canMutatePreset(active.model, active.name)) return;
+		this.#callbacks.onSaveActivePreset?.(active.model, active.name, automatic);
+		if (active.name === undefined) active.useBuiltInDefault = false;
+		this.#activePresetDirty = false;
+		this.#activePresetManuallyDirty = false;
+	}
+
+	/**
+	 * Preset edits persist only to the global layer. Merged project, overlay,
+	 * and runtime entries remain available to apply, but must not accept a
+	 * mutation that would silently change a shadowed global entry instead.
+	 */
+	#canMutatePreset(model: Model, name: string | undefined): boolean {
+		const presetSource = this.#settings.getModelRolePresetProvenance(model, name);
+		if (name === undefined ? presetSource !== "global" && presetSource !== "default" : presetSource !== "global") {
+			return false;
+		}
+		if (this.#settings.presetDefaultName(model) !== name) return true;
+		const defaultSource = this.#settings.getModelRolePresetProvenance(model);
+		return defaultSource === "global" || defaultSource === "default";
 	}
 
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
@@ -1019,6 +1316,16 @@ export class ModelHubComponent implements Component {
 				});
 			}
 		}
+		chips.push({ label: "preset: Default", styled: theme.fg("accent", "preset: Default"), action: "applyPreset" });
+		for (const name of this.#settings.presetNames(item.model)) {
+			chips.push({
+				label: `preset: ${name}`,
+				styled: theme.fg("accent", `preset: ${name}`),
+				action: "applyPreset",
+				presetName: name,
+			});
+		}
+		chips.push({ label: "save preset", styled: theme.fg("muted", "save preset"), action: "savePreset" });
 		chips.push({
 			label: `fallbacks:${item.model.id}`,
 			styled: theme.fg("muted", `fallbacks:${item.model.id}`),
@@ -1046,14 +1353,12 @@ export class ModelHubComponent implements Component {
 		role: string,
 		returnToRoles: boolean,
 		scope?: ModelRoleSelectionScope,
-		committedLevel?: ConfiguredThinkingLevel,
 	): void {
 		const options = this.#thinkingOptionsFor(item.model);
 		const current =
-			committedLevel ??
-			(this.#settings.modelRoleStorage === "project" && scope !== undefined
+			this.#settings.modelRoleStorage === "project" && scope !== undefined
 				? this.#thinkingLevelForScope(role, scope)
-				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit));
+				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit);
 		const chips = this.#thinkingChips(options);
 		const preselect = options.indexOf(current);
 		this.#strip = {
@@ -1218,7 +1523,7 @@ export class ModelHubComponent implements Component {
 
 	#activateStripChip(): void {
 		const strip = this.#strip;
-		if (!strip || strip.kind === "roleName") return;
+		if (!strip || strip.kind === "roleName" || strip.kind === "presetName") return;
 		const chip = strip.chips[strip.index];
 		if (!chip) return;
 		switch (chip.action) {
@@ -1230,11 +1535,9 @@ export class ModelHubComponent implements Component {
 				return;
 			case "unassign":
 				if (chip.role) {
-					if (this.#settings.modelRoleStorage === "project") {
-						this.#callbacks.onUnassign(chip.role, chip.scope);
-					} else {
-						this.#callbacks.onUnassign(chip.role);
-					}
+					const scope = this.#settings.modelRoleStorage === "project" ? chip.scope : undefined;
+					const role = chip.role;
+					this.#mutateRole(role, scope, () => this.#callbacks.onUnassign(role, scope));
 					this.#refreshAfterMutation();
 				}
 				this.#closeStrip();
@@ -1251,37 +1554,49 @@ export class ModelHubComponent implements Component {
 				this.#closeStrip();
 				this.#startAssignFallback(`${strip.item.model.provider}/*`, null);
 				return;
+			case "applyPreset":
+				this.#applyPreset(strip.item.model, chip.presetName);
+				this.#refreshAfterMutation();
+				this.#closeStrip();
+				return;
+			case "savePreset":
+				this.#strip = { kind: "presetName", item: strip.item, input: new Input() };
+				return;
 			case "scope":
 				if (strip.role && chip.scope) {
 					this.#strip = null;
 					this.#assignRole(strip.item, strip.role, strip.returnToRoles, chip.scope);
 				}
 				return;
-			case "thinking": {
-				if (strip.role && chip.thinkingLevel !== undefined && strip.fallbackIndex !== undefined) {
-					this.#setFallbackThinking(strip.role, strip.fallbackIndex, chip.thinkingLevel);
-					this.#strip = null;
-					this.#frame.chipRanges = [];
+			case "thinking":
+				if (strip.role && chip.thinkingLevel !== undefined) {
+					if (strip.kind === "thinking" && strip.fallbackIndex !== undefined) {
+						this.#setFallbackThinking(strip.role, strip.fallbackIndex, chip.thinkingLevel);
+						this.#strip = null;
+						this.#frame.chipRanges = [];
+						return;
+					}
+					const role = strip.role;
+					const changed = chip.thinkingLevel !== strip.initialThinkingLevel;
+					if (changed) {
+						const commitPresetEdit = this.#notePresetRoleEdit(role, strip.scope);
+						const result = this.#callbacks.onAssign(
+							strip.item.model,
+							role,
+							chip.thinkingLevel,
+							strip.item.selector,
+							strip.scope,
+						);
+						this.#closeStrip();
+						this.#finishAssignment(result, () => {
+							commitPresetEdit();
+							this.#refreshAfterMutation();
+						});
+					} else {
+						this.#closeStrip();
+					}
 					return;
 				}
-				// The preselected level is confirmation, not a force-reapply action;
-				// only a changed level should call setModel() again.
-				const changed = chip.thinkingLevel !== strip.initialThinkingLevel;
-				if (strip.role && chip.thinkingLevel !== undefined && changed) {
-					const result = this.#callbacks.onAssign(
-						strip.item.model,
-						strip.role,
-						chip.thinkingLevel,
-						strip.item.selector,
-						strip.scope,
-					);
-					this.#closeStrip();
-					this.#finishAssignment(result, () => this.#refreshAfterMutation());
-				} else {
-					this.#closeStrip();
-				}
-				return;
-			}
 		}
 	}
 
@@ -1368,6 +1683,23 @@ export class ModelHubComponent implements Component {
 	/** Persist `role`'s chain through the host callback and rebuild dependent state. */
 	#setFallbackChain(role: string, chain: string[]): void {
 		this.#callbacks.onFallbackChainChange?.(role, chain);
+		// Chain edits are edits to the active preset's captured snapshot: dirty
+		// the preset (only when it actually captures chains) and auto-save it so
+		// reapplying restores the edited chains.
+		const active = this.#activePreset;
+		// Built-in Default never captures chains: resolving the unnamed Default
+		// row here could follow the named-default pointer and auto-save a
+		// role-only profile over it.
+		if (active && !active.useBuiltInDefault) {
+			const profile =
+				active.name === undefined
+					? this.#settings.presetDefault(active.model)
+					: this.#settings.preset(active.model, active.name);
+			if (profile?.fallbackChains !== undefined) {
+				this.#activePresetManuallyDirty = true;
+				this.#saveActivePreset(true);
+			}
+		}
 		this.#refreshAfterMutation();
 	}
 
@@ -1458,15 +1790,54 @@ export class ModelHubComponent implements Component {
 		this.#startAssign(name);
 	}
 
+	#submitPresetName(): void {
+		const strip = this.#strip;
+		if (strip?.kind !== "presetName") return;
+		const name = strip.input.getValue().trim();
+		if (!this.#settings.isValidPresetName(name)) return;
+		if (strip.renameFrom !== undefined) {
+			if (!this.#canMutatePreset(strip.item.model, strip.renameFrom)) {
+				this.#closeStrip();
+				return;
+			}
+			// Mirror the helper's rejection exactly (any existing entry key, valid
+			// payload or not) so the active preset's identity never follows a
+			// no-op rename.
+			if (name !== strip.renameFrom && this.#settings.presetKeyExists(strip.item.model, name)) {
+				return;
+			}
+			this.#callbacks.onRenamePreset?.(strip.item.model, strip.renameFrom, name);
+			// Advance the active identity only when the rename actually persisted:
+			// the helper no-ops when `from` lives only in a shadowing layer while
+			// the callback renames the global layer.
+			if (
+				this.#settings.presetKeyExists(strip.item.model, name) &&
+				(strip.renameFrom === name || !this.#settings.presetKeyExists(strip.item.model, strip.renameFrom))
+			) {
+				if (this.#activePreset?.name === strip.renameFrom) this.#activePreset.name = name;
+			}
+			this.#closeStrip();
+			this.#refreshAfterMutation();
+			return;
+		}
+		this.#callbacks.onSavePreset?.(strip.item.model, name);
+		if (
+			this.#roles.default?.model.provider === strip.item.model.provider &&
+			this.#roles.default.model.id === strip.item.model.id
+		) {
+			this.#activePreset = { model: strip.item.model, name, useBuiltInDefault: false };
+			this.#activePresetManuallyDirty = false;
+		}
+		this.#closeStrip();
+		this.#refreshAfterMutation();
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════
 	// Input
 	// ═══════════════════════════════════════════════════════════════════════
 
 	handleInput(data: string): void {
-		if (this.#assignmentPending) {
-			if (matchesSelectCancel(data)) this.#callbacks.onCancel();
-			return;
-		}
+		if (this.#assignmentPending) return;
 		if (data.startsWith("\x1b[<")) {
 			routeSgrMouseInput(data, event => this.#routeMouseEvent(event));
 			return;
@@ -1577,9 +1948,10 @@ export class ModelHubComponent implements Component {
 			this.#closeStrip();
 			return;
 		}
-		if (strip.kind === "roleName") {
+		if (strip.kind === "roleName" || strip.kind === "presetName") {
 			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-				this.#submitRoleName();
+				if (strip.kind === "roleName") this.#submitRoleName();
+				else this.#submitPresetName();
 				return;
 			}
 			strip.input.handleInput(data);
@@ -1618,6 +1990,26 @@ export class ModelHubComponent implements Component {
 	/** Enter/click activation for a Roles-view row. */
 	#activateRolesRow(row: RolesRow): void {
 		switch (row.kind) {
+			case "preset":
+				if (this.#discardActivePreset(row)) {
+					this.#refreshAfterMutation();
+					return;
+				}
+				this.#applyPreset(row.model, row.name);
+				this.#refreshAfterMutation();
+				return;
+			case "savePreset":
+				this.#strip = {
+					kind: "presetName",
+					item: {
+						provider: row.model.provider,
+						id: row.model.id,
+						model: row.model,
+						selector: `${row.model.provider}/${row.model.id}`,
+					},
+					input: new Input(),
+				};
+				return;
 			case "role":
 				this.#startAssign(row.role);
 				return;
@@ -1636,6 +2028,74 @@ export class ModelHubComponent implements Component {
 			case "separator":
 				return;
 		}
+	}
+
+	/** Activate the requested profile only after its model and roles have been applied. */
+	#applyPreset(model: Model, name: string | undefined, builtInDefault?: boolean, replaceUnsetRoles = false): void {
+		// The "Default" row keeps its built-in/empty identity regardless of whether
+		// built-in application is enabled: it must never follow a named-default
+		// pointer (that would reapply the named preset). It resolves to a configured
+		// Default only when an unnamed direct snapshot exists. ModelControls still
+		// re-checks `applyOnSelect` to decide built-in-vs-leave-alone.
+		const useBuiltInDefault =
+			builtInDefault ??
+			(name === undefined &&
+				(this.#settings.presetDefaultName(model) !== undefined ||
+					this.#settings.presetDefault(model) === undefined));
+		const applicationId = ++this.#presetApplicationId;
+		// Preset application awaits a model switch/metadata refresh; block hub input
+		// for its duration (same gate as ordinary assignments) so a supporting-role
+		// edit cannot land first and then be overwritten by the slower preset write.
+		this.#finishAssignment(
+			this.#callbacks.onApplyPreset?.(model, name, { replaceUnsetRoles, useBuiltInDefault }),
+			() => {
+				if (applicationId !== this.#presetApplicationId) return;
+				this.#refreshAfterMutation();
+				const current = this.#roles.default?.model;
+				if (current?.provider !== model.provider || current.id !== model.id) return;
+				// Record the live routed default (`current`), not the clicked selector:
+				// a preset whose `default` routes to a different @upstream would otherwise
+				// be cleared by the route-aware rebuild in #buildRolesRows.
+				this.#activePreset = { model: current, name, useBuiltInDefault };
+				this.#activePresetManuallyDirty = false;
+				this.#refreshAfterMutation();
+			},
+		);
+	}
+
+	#isActivePresetTarget(row: Extract<RolesRow, { kind: "preset" }>): boolean {
+		const active = this.#activePreset;
+		return (
+			active !== undefined &&
+			active.model.provider === row.model.provider &&
+			active.model.id === row.model.id &&
+			row.name === active.name
+		);
+	}
+
+	/** Discard unsaved role edits by restoring the active saved or built-in profile. */
+	#discardActivePreset(target?: { model: Model; name: string | undefined }): boolean {
+		const active = this.#activePreset;
+		if (!active || !this.#activePresetDirty) return false;
+		if (
+			target &&
+			(target.model.provider !== active.model.provider ||
+				target.model.id !== active.model.id ||
+				target.name !== active.name)
+		) {
+			return false;
+		}
+		const saved =
+			active.name === undefined
+				? this.#settings.presetDefault(active.model)
+				: this.#settings.preset(active.model, active.name);
+		if (!saved && !active.useBuiltInDefault && !this.#settings.presetsApplyOnSelect) {
+			this.#activePresetDirty = false;
+			this.#activePresetManuallyDirty = false;
+			return true;
+		}
+		this.#applyPreset(active.model, active.name, active.useBuiltInDefault, true);
+		return true;
 	}
 
 	/** Scroll `#roleScrollStart` just enough to keep `#roleIndex` inside a window of `viewHeight` rows, clamped to the list. */
@@ -1710,13 +2170,52 @@ export class ModelHubComponent implements Component {
 		const printable = extractPrintableText(data);
 		if (printable === "x") {
 			if (role) this.#unassignRole(role);
-			else if (row?.kind === "fallback") this.#removeFallback(row);
+			else if (row?.kind === "preset") {
+				if (this.#discardActivePreset(row)) {
+					// Restored the active profile instead of deleting it.
+				} else if (this.#isActivePresetTarget(row)) {
+					this.#applyPreset(row.model, row.name);
+				} else if (row.name && this.#canMutatePreset(row.model, row.name)) {
+					this.#callbacks.onDeletePreset?.(row.model, row.name);
+				}
+				this.#refreshAfterMutation();
+			} else if (row?.kind === "fallback") this.#removeFallback(row);
 			else if (row?.kind === "chainKey") this.#setFallbackChain(row.role, []);
+			return;
+		}
+		if (printable === "s") {
+			this.#saveActivePreset(false);
+			return;
+		}
+		if (printable === "d" && row?.kind === "preset") {
+			if (this.#canMutatePreset(row.model, row.name)) {
+				this.#callbacks.onSetDefaultPreset?.(row.model, row.name);
+			}
+			this.#refreshAfterMutation();
+			return;
+		}
+		if (
+			printable === "r" &&
+			row?.kind === "preset" &&
+			row.name !== undefined &&
+			this.#canMutatePreset(row.model, row.name)
+		) {
+			this.#strip = {
+				kind: "presetName",
+				item: {
+					provider: row.model.provider,
+					id: row.model.id,
+					model: row.model,
+					selector: `${row.model.provider}/${row.model.id}`,
+				},
+				input: new Input(),
+				renameFrom: row.name,
+			};
 			return;
 		}
 		if (printable === "f") {
 			if (row?.kind === "newFallback") this.#startAssignFallbackKey();
-			else if (row && row.kind !== "newRole" && row.kind !== "separator") {
+			else if (row?.kind === "role" || row?.kind === "chainKey" || row?.kind === "fallback") {
 				this.#startAssignFallback(row.role, null);
 			}
 			return;
@@ -1773,7 +2272,6 @@ export class ModelHubComponent implements Component {
 	// ═══════════════════════════════════════════════════════════════════════
 
 	#routeMouseEvent(event: SgrMouseEvent): boolean {
-		if (this.#assignmentPending) return true;
 		const { footerColumn, bodyHeight, contentLine, overSidebar, overBody, bodyLine } = this.#frame.locate(
 			event.row,
 			event.col,
@@ -1783,7 +2281,12 @@ export class ModelHubComponent implements Component {
 		// Footer strip chips (columns stay in frame coordinates).
 		if (footerColumn !== undefined && this.#strip) {
 			const strip = this.#strip;
-			if (event.leftClick && strip.kind !== "roleName" && this.#frame.selectChipAt(strip, footerColumn)) {
+			if (
+				event.leftClick &&
+				strip.kind !== "roleName" &&
+				strip.kind !== "presetName" &&
+				this.#frame.selectChipAt(strip, footerColumn)
+			) {
 				this.#activateStripChip();
 			}
 			return true;
@@ -1928,9 +2431,6 @@ export class ModelHubComponent implements Component {
 	};
 
 	#statusRow(width: number): string {
-		if (this.#assignmentPending) {
-			return truncateToWidth(theme.fg("accent", " Applying model…"), width);
-		}
 		if (this.#assigning !== null) {
 			if (this.#assigning.kind === "fallbackKey") {
 				return truncateToWidth(
@@ -2029,6 +2529,22 @@ export class ModelHubComponent implements Component {
 
 			if (rowDef.kind === "separator") {
 				lines.push(`   ${theme.fg("border", "─".repeat(Math.max(1, width - 6)))}`);
+				continue;
+			}
+
+			if (rowDef.kind === "preset" || rowDef.kind === "savePreset") {
+				const active =
+					rowDef.kind === "preset" &&
+					this.#activePreset?.model.provider === rowDef.model.provider &&
+					this.#activePreset.model.id === rowDef.model.id &&
+					this.#activePreset.name === rowDef.name;
+				const label =
+					rowDef.kind === "preset"
+						? `${rowDef.isDefault ? "★ " : "  "}Preset: ${rowDef.name ?? "Default"}${active ? " (active)" : ""}${active && this.#activePresetDirty ? " (unsaved)" : ""}${this.#canMutatePreset(rowDef.model, rowDef.name) ? "" : " (managed by config)"}`
+						: "+ Save current roles as preset…";
+				let line = ` ${cursor} ${theme.fg(selected ? "accent" : "muted", label)}`;
+				line = this.#finishRolesRow(line, width, hovered);
+				lines.push(line);
 				continue;
 			}
 
@@ -2176,8 +2692,9 @@ export class ModelHubComponent implements Component {
 	#footerHint(): string {
 		const strip = this.#strip;
 		if (strip) {
-			if (strip.kind === "roleName") {
-				return "Enter create + pick model · Esc cancel";
+			if (strip.kind === "roleName") return "Enter create + pick model · Esc cancel";
+			if (strip.kind === "presetName") {
+				return strip.renameFrom !== undefined ? "Enter rename · Esc cancel" : "Enter save preset · Esc cancel";
 			}
 			if (strip.kind === "role") return "←/→ choose · Enter assign/clear · Esc cancel";
 			if (strip.kind === "scope") return "←/→ save scope · Enter choose · Esc cancel";
@@ -2213,7 +2730,7 @@ export class ModelHubComponent implements Component {
 			if (row?.kind === "newFallback") {
 				return "↑/↓ rows · Enter new model/provider fallback chain · ← providers";
 			}
-			return "↑/↓ rows · Enter pick · f fallback · x clear · t thinking · c cycle · [/] reorder · n new";
+			return "↑/↓ rows · Enter apply · s save active · r rename preset · d set default · x reapply/delete · f fallback · t thinking · c cycle · [/] reorder · n new";
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth ? "Enter log in · ↑/↓ providers · Esc close" : "↑/↓ providers · Esc close";
@@ -2224,6 +2741,9 @@ export class ModelHubComponent implements Component {
 	}
 
 	#renderFooter(width: number): string {
+		if (this.#assignmentPending) {
+			return truncateToWidth(theme.fg("accent", " Applying model…"), width);
+		}
 		const strip = this.#strip;
 		return this.#frame.renderFooter(
 			width,
@@ -2233,11 +2753,14 @@ export class ModelHubComponent implements Component {
 	}
 
 	#renderStrip(width: number, strip: StripState): string {
-		if (strip.kind === "roleName") {
-			const label = theme.fg("accent", "New role name:");
+		if (strip.kind === "roleName" || strip.kind === "presetName") {
+			const presetName = strip.kind === "presetName";
+			const renaming = presetName && strip.renameFrom !== undefined;
+			const label = theme.fg("accent", renaming ? "Rename preset:" : presetName ? "Preset name:" : "New role name:");
 			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth("New role name:") - 24));
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
-			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
+			const allowed = presetName ? "(letters, digits, spaces, - and _)" : "(letters, digits, - and _)";
+			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", allowed)}`, width);
 		}
 
 		const prefix =

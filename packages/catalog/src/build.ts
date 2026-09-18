@@ -68,7 +68,7 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * Applies resolved catalog-data axes onto the model: reviewed metadata
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
- * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
+ * (`priority`, `role-preset-priority`, `apply-patch-tool-type`, `service-tier-cost`,
  * `requires-cursor-tool-schema-projection`, `requires-tool-result-image-hoisting`,
  * `supports-assistant-prefill`) is rule-owned; `context-promotion-target` fills
  * only when the spec left it unset.
@@ -85,6 +85,17 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	}
 	const priority = catalog.priority;
 	if (typeof priority === "number") model.priority = priority;
+	const rolePresetPriority = objectPayload(catalog.rolePresetPriority);
+	if (rolePresetPriority !== undefined) {
+		const smol = numberField(rolePresetPriority, "smol");
+		const slow = numberField(rolePresetPriority, "slow");
+		model.rolePresetPriority = {
+			...(smol !== undefined && { smol }),
+			...(slow !== undefined && { slow }),
+		};
+	} else {
+		delete model.rolePresetPriority;
+	}
 	const applyPatchToolType = catalog.applyPatchToolType;
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;

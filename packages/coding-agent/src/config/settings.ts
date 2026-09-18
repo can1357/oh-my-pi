@@ -1028,6 +1028,21 @@ export class Settings {
 	}
 
 	/**
+	 * The global settings layer's configured `retry.fallbackChains`, deep-cloned.
+	 * Unlike {@link get}, this excludes project, overlay, and runtime layers —
+	 * preset capture/restore needs exactly the layer that `set` writes, so
+	 * shadowed chain values are never baked into or restored over global state.
+	 * Undefined when no chains are configured in the global layer.
+	 */
+	getGlobalRetryFallbackChains(): Record<string, string[]> | undefined {
+		const retry = this.#global["retry"];
+		if (!retry || typeof retry !== "object" || Array.isArray(retry)) return undefined;
+		const chains = (retry as Record<string, unknown>)["fallbackChains"];
+		if (!chains || typeof chains !== "object" || Array.isArray(chains)) return undefined;
+		return structuredClone(chains as Record<string, string[]>);
+	}
+
+	/**
 	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
 	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
 	 * pi `SettingsManager` shim's `getProjectSettings()`.
@@ -1352,12 +1367,54 @@ export class Settings {
 		return modelId || undefined;
 	}
 
+	/** Get all model roles from only the global settings layer. */
+	getGlobalModelRoles(): ReadOnlyDict<string> {
+		return this.#modelRolesFromLayer(this.#global);
+	}
+
+	/** Get model-role presets from only the global settings layer. */
+	getGlobalModelRolePresets(): unknown {
+		return this.#global.modelRolePresets;
+	}
+
+	/**
+	 * Report the highest-precedence layer that owns one saved model-role preset
+	 * entry, or a model's Default pointer when `name` is omitted. Preset maps
+	 * deep-merge, so ownership must be determined at the entry level rather
+	 * than from the merged `modelRolePresets` object as a whole.
+	 */
+	getModelRolePresetProvenance(
+		modelSelector: string,
+		name?: string,
+	): "runtime" | "overlay" | "project" | "global" | "default" {
+		const ownsPreset = (layer: RawSettings): boolean => {
+			const configured = layer.modelRolePresets;
+			if (!isRecord(configured)) return false;
+			const entry = configured[modelSelector];
+			if (!isRecord(entry)) return false;
+			if (name === undefined) return Object.hasOwn(entry, "default");
+			return isRecord(entry.presets) && Object.hasOwn(entry.presets, name);
+		};
+		if (ownsPreset(this.#overrides)) return "runtime";
+		if (ownsPreset(this.#configOverlay)) return "overlay";
+		if (ownsPreset(this.#projectSettingsForMerge())) return "project";
+		if (ownsPreset(this.#global)) return "global";
+		return "default";
+	}
+
 	/**
 	 * Get a model role from only the current project settings layer.
 	 */
 	getProjectModelRole(role: ModelRole | string): string | undefined {
 		const modelId = this.#modelRolesFromLayer(this.#project)[role];
 		return modelId || undefined;
+	}
+
+	/**
+	 * Get all model roles from only the current project settings layer.
+	 */
+	getProjectModelRoles(): ReadOnlyDict<string> {
+		return this.#modelRolesFromLayer(this.#project);
 	}
 
 	/**

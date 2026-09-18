@@ -118,6 +118,9 @@
 - A corrupted or externally modified session file no longer leaves the session impossible to close; a subsequent Ctrl+C exits without rewriting the session log.
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- Model role presets now save and restore the primary selector and global fallback chains, preserving routing, fallback order, and per-model reasoning levels. ([extension PR](https://github.com/KiidxAtlas/oh-my-pi/pull/1) by [@bobzhou-source](https://github.com/bobzhou-source))
+- Named model role presets can be renamed with `r` in `/models`, preserving their contents and Default selection. ([extension PR](https://github.com/KiidxAtlas/oh-my-pi/pull/1) by [@bobzhou-source](https://github.com/bobzhou-source))
 
 ## [18.2.1] - 2026-09-15
 
@@ -499,6 +502,7 @@
 - `@upstream` routing selectors accept tiered OpenRouter slugs (`openrouter/google/gemini-3.8-flash@google-ai-studio/priority`), and `omp bench` labels each routed model with its upstream.
 - `/skill:<name>` in the composer becomes an atomic skill chip (icon + name, linked to its SKILL.md) once you finish typing it or accept it from autocomplete — it deletes as one unit and survives draft restores, like image chips.
 - The transcript now flags a gateway serving a different Claude model than requested: a `⚠ served claude-haiku-4-5-20251001 · requested claude-opus-5 · via openrouter/Amazon Bedrock` divider under the first affected turn, shown once per substitution per session.
+- Save and apply model-specific role presets in `/models`, with configurable auto-loading, optional built-in defaults, and project-scoped role assignments ([#12103](https://github.com/can1357/oh-my-pi/pull/12103) by [@KiidxAtlas](https://github.com/KiidxAtlas)).
 
 ### Changed
 

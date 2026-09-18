@@ -13,6 +13,14 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import {
+	buildDefaultModelRolePreset,
+	getModelRolePreset,
+	getModelRolePresetDefault,
+	getModelRolePresetDefaultName,
+	type ModelRolePreset,
+	modelRolePresetRoles,
+} from "../config/model-role-presets";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
@@ -24,6 +32,16 @@ import {
 import { getKnownRoleIds } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { containsUltrathink } from "@oh-my-pi/pi-tui/prompt/ultrathink";
+
+/**
+ * Whether a resolved primary is the preset owner: same provider and the same
+ * base model id. Upstream routing lives in `compat.openRouterRouting` and never
+ * mutates `model.id` (the resolver's applyUpstreamRouting changes compat only),
+ * so the resolved id is compared bare.
+ */
+function resolvesToOwnerModel(resolved: Model, owner: Model): boolean {
+	return resolved.provider === owner.provider && resolved.id === owner.id;
+}
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -60,6 +78,21 @@ export interface ModelControlsHost {
 	emit(event: AgentSessionEvent): void;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
+}
+
+export type ModelRolePresetSelection =
+	| { kind: "on-select"; replaceUnsetRoles?: boolean }
+	| { kind: "configured-default"; replaceUnsetRoles?: boolean }
+	| { kind: "built-in-default"; replaceUnsetRoles?: boolean }
+	| { kind: "named"; name: string; replaceUnsetRoles?: boolean };
+
+export interface SetModelOptions {
+	selector?: string;
+	thinkingLevel?: ThinkingLevel;
+	persist?: boolean;
+	/** Presets default to configured storage; other writes retain the global default. */
+	scope?: "global" | "project";
+	modelRolePreset?: ModelRolePresetSelection;
 }
 
 /** Owns model selection, thinking effort, role cycling, and service tiers. */
@@ -215,43 +248,334 @@ export class ModelControls {
 	async setModel(
 		model: Model,
 		role: string = "default",
-		options?: {
-			selector?: string;
-			thinkingLevel?: ThinkingLevel;
-			persist?: boolean;
-		},
-	): Promise<{ switched: boolean }> {
+		options?: SetModelOptions,
+	): Promise<{
+		switched: boolean;
+		/** The routed model actually applied (preset `default` route/effort included). */
+		effectiveModel: Model;
+		defaultRoleValue?: string;
+		defaultThinking?: ConfiguredThinkingLevel;
+	}> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
+		const presetSelection = role === "default" ? options?.modelRolePreset : undefined;
+		const scope = options?.scope ?? (presetSelection ? this.#host.settings.get("modelRoleStorage") : "global");
+		// Resolve the selected preset's captured `default` selector BEFORE the
+		// switch so the live primary — routing and effort included — is exactly
+		// what the preset restores; the persisted role and the live model can
+		// never diverge. Honors the same autoLoad/applyOnSelect gate as the
+		// supporting-role apply and resolves aliases against the SAME incoming
+		// preset role map the apply will use.
+		const shouldApplyPreset = presetSelection ? this.#presetShouldApply(targetModel, presetSelection) : false;
+		const presetDefault =
+			presetSelection && shouldApplyPreset
+				? this.#resolvePresetDefault(targetModel, presetSelection, scope)
+				: undefined;
+		const effectiveModel = presetDefault?.model ?? targetModel;
+		const provenance = this.#host.settings.getModelRoleProvenance(role);
+		const shadowed =
+			(options?.persist || presetSelection !== undefined) &&
+			(options?.scope !== undefined || presetSelection !== undefined) &&
+			(provenance === "overlay" ||
+				(scope === "global" &&
+					(provenance === "project" ||
+						(provenance === "runtime" && this.#host.settings.isProjectModelRoleRuntimeOverrideActive(role)))));
 
-		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
-		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
-		if (options?.persist) {
-			this.#host.settings.setModelRole(
-				role,
-				formatRoleModelValue(
-					this.#host.settings,
-					this.#host.modelRegistry,
-					role,
-					targetModel,
-					options.selector,
-					options.thinkingLevel,
-				),
-			);
+		if (!shadowed) {
+			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(effectiveModel));
+			this.#host.clearActiveRetryFallback();
+			await this.#host.setModelWithProviderSessionReset(effectiveModel);
+			this.#host.sessionManager.appendModelChange(`${effectiveModel.provider}/${effectiveModel.id}`, role);
 		}
-		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
+		if (options?.persist) {
+			// An honored preset `default` persists its own selector verbatim;
+			// otherwise the caller's requested model/effort is persisted.
+			const persistedValue =
+				role === "default" && presetDefault
+					? presetDefault.value
+					: formatRoleModelValue(
+							this.#host.settings,
+							this.#host.modelRegistry,
+							role,
+							effectiveModel,
+							options.selector,
+							options.thinkingLevel,
+						);
+			this.#setModelRole(role, persistedValue, scope);
+		}
+		if (presetSelection && shouldApplyPreset) {
+			// Supporting roles resolve and persist under the OWNER model key; only
+			// the live switch uses the resolved (routed) primary.
+			this.applyModelRolePreset(targetModel, presetSelection, scope);
+		}
+		if (shadowed) return { switched: false, effectiveModel };
+		this.#host.settings.getStorage()?.recordModelUsage(`${effectiveModel.provider}/${effectiveModel.id}`);
 
-		// Re-apply thinking for the newly selected model. Prefer the model's
-		// configured defaultLevel; otherwise preserve the current level (or auto).
-		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+		// Re-apply thinking for the newly selected model. A preset's captured
+		// `default` selector wins — it records the primary's effort, already
+		// persisted with the role — and is applied to the live session only, never
+		// written to a global thinking setting from here. Otherwise prefer the
+		// model's configured defaultLevel, preserving the current level (or auto).
+		if (presetDefault?.thinking !== undefined) {
+			this.setThinkingLevel(presetDefault.thinking);
+		} else {
+			this.#reapplyThinkingLevel(effectiveModel.thinking?.defaultLevel);
+		}
 		await this.#host.syncAfterModelChange(previousEditMode);
-		return { switched: true };
+		return {
+			switched: true,
+			effectiveModel,
+			defaultRoleValue: presetDefault?.value,
+			defaultThinking: presetDefault?.thinking,
+		};
+	}
+	/** Whether a preset selection actually applies (autoLoad/applyOnSelect gate for on-select). */
+	#presetShouldApply(model: Model, selection: ModelRolePresetSelection): boolean {
+		return (
+			selection.kind !== "on-select" ||
+			(this.#host.settings.get("modelRolePresets.autoLoad") &&
+				(getModelRolePresetDefault(this.#host.settings.get("modelRolePresets"), model) !== undefined ||
+					this.#host.settings.get("modelRolePresets.applyOnSelect")))
+		);
+	}
+
+	/**
+	 * Apply a role preset to one settings layer without touching the live model.
+	 * {@link setModel} routes through this, and so must callers that persist a
+	 * default which a higher-precedence layer shadows — otherwise the newly
+	 * selected default lands without its saved or built-in supporting roles.
+	 * Returns the preset's captured `default` selector (value) and its resolved
+	 * thinking level, if any, so the live session can re-apply it after the
+	 * switch and callers can persist the same value in their own layer.
+	 */
+	applyModelRolePreset(
+		model: Model,
+		selection: ModelRolePresetSelection,
+		scope: "global" | "project",
+	): { value: string; thinking?: ConfiguredThinkingLevel } | undefined {
+		if (!this.#presetShouldApply(model, selection)) return undefined;
+		return this.#applyModelRolePreset(
+			model,
+			selection,
+			this.#host.settings.get("modelRolePresets.keepRolesWhenUnset") && !selection.replaceUnsetRoles,
+			scope,
+		);
+	}
+
+	#setModelRole(role: string, value: string | undefined, scope: "global" | "project"): void {
+		if (scope === "project") {
+			if (value === undefined) {
+				this.#host.settings.clearProjectModelRole(role);
+			} else {
+				this.#host.settings.setProjectModelRole(role, value);
+			}
+		} else {
+			this.#host.settings.setModelRole(role, value);
+		}
+	}
+
+	/** Replace supporting roles with the selected model's curated or saved preset. */
+	/**
+	 * The global-layer payload of the preset a selection resolves to. Identity
+	 * is resolved first (the merged value's default pointer may name a preset an
+	 * overlay or runtime layer moved), then that SAME named payload is read from
+	 * the owned global layer so identity and payload agree. A direct Default —
+	 * roles without a name pointer — never follows an unrelated global named
+	 * pointer.
+	 */
+	#selectedGlobalPreset(model: Model, selection: ModelRolePresetSelection): ModelRolePreset | undefined {
+		if (selection.kind === "built-in-default") return undefined;
+		const globalPresets = this.#host.settings.getGlobalModelRolePresets();
+		if (selection.kind === "named") return getModelRolePreset(globalPresets, model, selection.name);
+		const selectedName = getModelRolePresetDefaultName(this.#host.settings.get("modelRolePresets"), model);
+		if (selectedName) return getModelRolePreset(globalPresets, model, selectedName);
+		return getModelRolePresetDefaultName(globalPresets, model)
+			? undefined
+			: getModelRolePresetDefault(globalPresets, model);
+	}
+	/**
+	 * The staged incoming role map the preset apply resolves against — shared by
+	 * the default pre-resolve and the supporting-role apply so alias references
+	 * inside any selector resolve to the SAME preset payload in both, never to
+	 * the current (pre-apply) persisted values. `default` resolves to the target
+	 * model's own selector, matching the value the apply persists for the
+	 * primary. Non-preset roles fall back to the persisted scope, matching the
+	 * layer the apply writes (clearing project roles exposes the global
+	 * fallback, not runtime/overlay values that may shadow it).
+	 */
+	#presetRoleLookup(
+		preset: Readonly<ModelRolePreset>,
+		presetRoles: string[],
+		keepUnsetRoles: boolean,
+		scope: "global" | "project",
+		selected: string,
+	): { getModelRole: (role: string) => string | undefined } {
+		return {
+			getModelRole: (role: string): string | undefined => {
+				if (role === "default") return selected;
+				if (preset.roles[role]) return preset.roles[role];
+				if (!keepUnsetRoles && presetRoles.includes(role)) {
+					return scope === "project" ? this.#host.settings.getGlobalModelRole(role) : undefined;
+				}
+				return scope === "project"
+					? (this.#host.settings.getProjectModelRole(role) ?? this.#host.settings.getGlobalModelRole(role))
+					: this.#host.settings.getGlobalModelRole(role);
+			},
+		};
+	}
+
+	/**
+	 * Resolve the selected preset's captured `default` selector through the
+	 * existing role resolver (aliases, bare ids, and `@upstream` routing resolve
+	 * exactly like runtime lookups). Returns the honored entry verbatim, its
+	 * resolved model, and the explicit thinking level, if any.
+	 */
+	#resolvePresetDefault(
+		model: Model,
+		selection: ModelRolePresetSelection,
+		scope: "global" | "project",
+	): { value: string; model: Model; thinking?: ConfiguredThinkingLevel } | undefined {
+		const globalPreset = this.#selectedGlobalPreset(model, selection);
+		const defaultEntry = globalPreset?.roles.default;
+		if (defaultEntry === undefined) return undefined;
+		const available =
+			this.#scopedModels.length > 0 ? this.#scopedModels.map(scoped => scoped.model) : this.getAvailableModels();
+		const keepUnsetRoles =
+			this.#host.settings.get("modelRolePresets.keepRolesWhenUnset") && !selection.replaceUnsetRoles;
+		// The staged preset is the SAME payload the supporting-role apply uses —
+		// the saved (merged-layer) preset when present, the built-in curated
+		// profile otherwise — so the pre-resolve and the apply agree on the
+		// incoming map and the ownership decision.
+		const savedPresets = this.#host.settings.get("modelRolePresets");
+		const savedPreset =
+			selection.kind === "built-in-default"
+				? undefined
+				: selection.kind === "named"
+					? getModelRolePreset(savedPresets, model, selection.name)
+					: getModelRolePresetDefault(savedPresets, model);
+		if (!savedPreset && !(selection.kind !== "named" && this.#host.settings.get("modelRolePresets.applyOnSelect"))) {
+			return undefined;
+		}
+		const preset: Readonly<ModelRolePreset> = savedPreset ?? buildDefaultModelRolePreset(model, available);
+		const selected = formatModelStringWithRouting(model);
+		const presetRoles = modelRolePresetRoles(
+			preset,
+			keepUnsetRoles
+				? undefined
+				: Object.keys(
+						scope === "project"
+							? this.#host.settings.getProjectModelRoles()
+							: this.#host.settings.getGlobalModelRoles(),
+					),
+		);
+		const resolved = resolveModelRoleValue(defaultEntry, available, {
+			settings: this.#host.settings,
+			roleLookup: this.#presetRoleLookup(preset, presetRoles, keepUnsetRoles, scope, selected),
+		});
+		if (resolved.model === undefined || !resolvesToOwnerModel(resolved.model, model)) {
+			return undefined;
+		}
+		return {
+			value: defaultEntry,
+			model: resolved.model,
+			thinking:
+				resolved.explicitThinkingLevel && resolved.thinkingLevel !== undefined ? resolved.thinkingLevel : undefined,
+		};
+	}
+
+	#applyModelRolePreset(
+		model: Model,
+		selection: ModelRolePresetSelection,
+		keepUnsetRoles: boolean,
+		scope: "global" | "project",
+	): { value: string; thinking?: ConfiguredThinkingLevel } | undefined {
+		const globalPreset = this.#selectedGlobalPreset(model, selection);
+		const available =
+			this.#scopedModels.length > 0 ? this.#scopedModels.map(scoped => scoped.model) : this.getAvailableModels();
+		const savedPresets = this.#host.settings.get("modelRolePresets");
+		const savedPreset =
+			selection.kind === "built-in-default"
+				? undefined
+				: selection.kind === "named"
+					? getModelRolePreset(savedPresets, model, selection.name)
+					: getModelRolePresetDefault(savedPresets, model);
+		// An empty configured Default means "leave the supporting roles alone"
+		// unless the user explicitly enabled OMP's built-in role defaults. Named
+		// presets never silently become a built-in profile when they are missing.
+		const useBuiltInDefault =
+			savedPreset === undefined &&
+			selection.kind !== "named" &&
+			this.#host.settings.get("modelRolePresets.applyOnSelect");
+		if (!savedPreset && !useBuiltInDefault) return undefined;
+		const preset: Readonly<ModelRolePreset> = savedPreset ?? buildDefaultModelRolePreset(model, available);
+		// Built-in roles plus any custom role the preset carries. When replacement is
+		// requested, also visit custom roles that only exist in the target scope so an
+		// omitted one is cleared instead of silently surviving.
+		const storedScopeRoles = keepUnsetRoles
+			? undefined
+			: Object.keys(
+					scope === "project"
+						? this.#host.settings.getProjectModelRoles()
+						: this.#host.settings.getGlobalModelRoles(),
+				);
+		const presetRoles = modelRolePresetRoles(preset, storedScopeRoles);
+		const selected = formatModelStringWithRouting(model);
+		const roleLookup = this.#presetRoleLookup(preset, presetRoles, keepUnsetRoles, scope, selected);
+		// Resolve against the complete incoming map before writing anything:
+		// forward aliases and invalid cycles must not depend on role order.
+		const assignments = presetRoles.map(role => {
+			const value = preset.roles[role];
+			if (!value) return [role, undefined] as const;
+			const candidate = resolveModelRoleValue(value, available, { settings: this.#host.settings, roleLookup }).model;
+			return [role, candidate && this.#host.modelRegistry.hasConfiguredAuth(candidate) ? value : selected] as const;
+		});
+		for (const [role, resolved] of assignments) {
+			if (resolved === undefined && keepUnsetRoles) continue;
+			this.#setModelRole(role, resolved, scope);
+		}
+
+		// The preset's `default` entry binds the primary selector — routing and
+		// effort included — so a saved Default restores the exact reasoning setup.
+		// Ownership is checked through the existing role resolver (aliases, bare
+		// ids, and `@upstream` routing all resolve like runtime lookups): the
+		// entry is honored only when it resolves to the preset's own model, so
+		// applying a preset can never silently switch the primary. The verbatim
+		// entry (suffixes intact) is persisted; the level applies to the live
+		// session only, never to a global thinking setting from here.
+		let defaultThinking: ConfiguredThinkingLevel | undefined;
+		const defaultEntry = globalPreset?.roles.default;
+		const resolvedDefault = defaultEntry
+			? resolveModelRoleValue(defaultEntry, available, { settings: this.#host.settings, roleLookup })
+			: undefined;
+		const defaultHonored =
+			defaultEntry !== undefined &&
+			resolvedDefault?.model !== undefined &&
+			resolvesToOwnerModel(resolvedDefault.model, model);
+		if (defaultHonored) {
+			this.#setModelRole("default", defaultEntry, scope);
+			if (resolvedDefault.explicitThinkingLevel && resolvedDefault.thinkingLevel !== undefined) {
+				defaultThinking = resolvedDefault.thinkingLevel;
+			}
+		}
+
+		// Restore the captured fallback-chain snapshot wholesale so switching
+		// presets never leaves the previous profile's chains behind. The snapshot
+		// is read from the global presets layer — where presets are defined and
+		// written — and restored to the global chains layer, so project, overlay,
+		// or runtime payload overrides are never persisted into global state. A
+		// preset without `fallbackChains` (role-only or built-in) leaves chains
+		// untouched. on-select and configured-default both restore the global
+		// Default's captured chains; only built-in-default (no payload) skips.
+		if (globalPreset?.fallbackChains) {
+			this.#host.settings.set("retry.fallbackChains", structuredClone(globalPreset.fallbackChains));
+		}
+		return defaultEntry !== undefined && defaultHonored
+			? { value: defaultEntry, thinking: defaultThinking }
+			: undefined;
 	}
 
 	/**

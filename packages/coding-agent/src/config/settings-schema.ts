@@ -230,6 +230,7 @@ export interface ModelTagsSettings {
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
+const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
@@ -515,6 +516,59 @@ export const SETTINGS_SCHEMA = {
 					description: "Save project role models in .omp/config.yml; missing project roles use global defaults",
 				},
 			],
+		},
+	},
+
+	modelRolePresets: {
+		type: "record",
+		default: EMPTY_UNKNOWN_RECORD,
+	},
+
+	"modelRolePresets.autoLoad": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Model Roles",
+			label: "Auto load configured model role presets",
+			description:
+				"Load the selected model's Default preset when changing models in /models. Off preserves supporting roles, even when built-in presets are enabled. Default remains active for editing; explicitly selected presets still apply.",
+		},
+	},
+
+	"modelRolePresets.applyOnSelect": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Model Roles",
+			label: "Apply built-in presets",
+			description:
+				"When changing the default model in /models, apply OMP's built-in preset if no saved Default exists. Off preserves supporting roles in that case. Saved Defaults and explicitly selected presets still apply.",
+		},
+	},
+
+	"modelRolePresets.keepRolesWhenUnset": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Model Roles",
+			label: "Keep roles when Default is unset",
+			description:
+				"When switching default models, preserve supporting roles omitted by the selected Default profile. Turn off to clear omitted roles instead.",
+		},
+	},
+
+	"modelRolePresets.autoSave": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Model Roles",
+			label: "Auto-save active role preset",
+			description:
+				"When editing roles after applying a preset in /models, save each role change back to that preset. Off lets you press s to save it manually.",
 		},
 	},
 

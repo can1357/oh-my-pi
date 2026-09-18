@@ -313,6 +313,7 @@ export async function resolveEffectiveSubagentPolicy(
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
+		availableModels: request.session.modelRegistry?.getAvailable() ?? [],
 	};
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the

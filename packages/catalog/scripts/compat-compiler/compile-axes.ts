@@ -75,9 +75,29 @@ function axisValue(node: KdlNodeView, axis: AxisDef): unknown {
 				return value;
 			});
 		}
-		case "object":
+		case "object": {
 			if (node.args.length > 0 || !node.children) malformed(node);
+			if (axis.key === "rolePresetPriority") {
+				const seen = new Set<string>();
+				for (const child of node.children) {
+					const value = child.args[0];
+					if (
+						(child.name !== "smol" && child.name !== "slow") ||
+						seen.has(child.name) ||
+						child.args.length !== 1 ||
+						child.children ||
+						typeof value !== "number" ||
+						!Number.isFinite(value) ||
+						value < 0
+					) {
+						malformed(child);
+					}
+					seen.add(child.name);
+				}
+				if (seen.size === 0) malformed(node);
+			}
 			return objectValue(node.children, axis.verbatimKeys === true);
+		}
 	}
 }
 

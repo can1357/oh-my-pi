@@ -101,6 +101,7 @@ export interface VibeParentSession {
 		>;
 	asyncJobManager?: AsyncJobManager;
 	settings: ToolSession["settings"];
+	modelRegistry?: ToolSession["modelRegistry"];
 	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
 }
@@ -355,6 +356,7 @@ export class VibeSessionRegistry {
 			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
+			availableModels: session.modelRegistry?.getAvailable() ?? [],
 		});
 		return { agent, modelOverride: patterns, modelRole: role };
 	}

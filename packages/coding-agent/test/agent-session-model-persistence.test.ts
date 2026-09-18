@@ -212,7 +212,7 @@ describe("AgentSession model persistence", () => {
 
 		const result = await created.session.setModel(nextModel, "default", { persist: true });
 
-		expect(result).toEqual({ switched: true });
+		expect(result.switched).toBe(true);
 		expect(created.session.model?.id).toBe(nextModel.id);
 		expect(created.settings.getModelRole("default")).toBe(modelValue(nextModel));
 	});

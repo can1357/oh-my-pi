@@ -1409,13 +1409,17 @@ export async function buildSessionOptions(
 			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
 		const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
-		let targetPatterns: string[];
-
-		if (parsed.prewalkInto === undefined) {
-			// Preserve the existing default-prewalk behavior; this PR only needs
-			// pre-override role semantics for an explicit target.
-			targetPatterns = [expandRoleAlias(DEFAULT_PREWALK_TARGET, activeSettings)];
-		} else {
+		// Build the ordered candidate patterns. Alias expansion canonicalizes
+		// literal effort-like model ids against the catalog it can see, so pass the
+		// available models and re-run after a discovery refresh widens that catalog
+		// — otherwise a cold-start expansion of `@smol:high` over
+		// `custom/coding-router:low` stays rewritten to `…:high` and misses.
+		const expandTargetPatterns = (): string[] => {
+			if (parsed.prewalkInto === undefined) {
+				// Preserve the existing default-prewalk behavior; pre-override role
+				// semantics are only needed for an explicit target.
+				return [expandRoleAlias(DEFAULT_PREWALK_TARGET, activeSettings, modelRegistry.getAvailable())];
+			}
 			// `--model` mutates only the session default role. Resolve explicit
 			// prewalk aliases against the pre-mutation default while leaving all
 			// other role lookups live.
@@ -1423,14 +1427,19 @@ export async function buildSessionOptions(
 				getModelRole: (role: string) =>
 					role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
 			};
-
 			// Bare `default` is a backwards-compatible special selector handled
 			// by expandRoleAlias rather than the prefixed role-alias grammar.
 			const targetSelector =
-				target.trim() === "default" ? expandRoleAlias(target, preModelOverrideRoleLookup) : target;
-			const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, preModelOverrideRoleLookup);
-			targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
-		}
+				target.trim() === "default"
+					? expandRoleAlias(target, preModelOverrideRoleLookup, modelRegistry.getAvailable())
+					: target;
+			const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, preModelOverrideRoleLookup, {
+				availableModels: modelRegistry.getAvailable(),
+			});
+			return configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
+		};
+
+		let targetPatterns = expandTargetPatterns();
 
 		const resolveCandidate = (pattern: string) =>
 			resolveCliModel({ cliModel: pattern, modelRegistry, preferences: modelMatchPreferences });
@@ -1445,8 +1454,8 @@ export async function buildSessionOptions(
 
 		// Preserve fallback priority. Each provider-qualified candidate gets its
 		// scoped discovery opportunity before we advance to the next candidate.
-		for (const pattern of targetPatterns) {
-			let candidate = resolveCandidate(pattern);
+		for (let index = 0; index < targetPatterns.length; index++) {
+			let candidate = resolveCandidate(targetPatterns[index]);
 			lastResolution = candidate;
 
 			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
@@ -1458,15 +1467,18 @@ export async function buildSessionOptions(
 				continue;
 			}
 
-			const requestedProvider = parseModelString(pattern)?.provider.toLowerCase();
+			const requestedProvider = parseModelString(targetPatterns[index])?.provider.toLowerCase();
 			if (!requestedProvider || refreshedProviders.has(requestedProvider)) continue;
 			const discoverableProvider = discoverableProviders.get(requestedProvider);
 			if (!discoverableProvider) continue;
 
 			refreshedProviders.add(requestedProvider);
 			await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
+			// Re-expand against the widened catalog so a literal effort-like id is
+			// canonicalized post-discovery instead of staying rewritten to `…:high`.
+			targetPatterns = expandTargetPatterns();
 
-			candidate = resolveCandidate(pattern);
+			candidate = resolveCandidate(targetPatterns[index]);
 			lastResolution = candidate;
 			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
 				authenticatedResolution = candidate;
@@ -1507,7 +1519,7 @@ export async function buildSessionOptions(
 		throw new Error("--plan-yolo-into requires --plan-yolo");
 	}
 	if (parsed.planYolo) {
-		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
+		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings, modelRegistry.getAvailable());
 		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);

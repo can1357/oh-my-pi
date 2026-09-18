@@ -2509,7 +2509,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							},
 						];
 					}
-					return resolveConfiguredModelPatterns([trimmedSelector], settings).map(pattern => ({
+					return resolveConfiguredModelPatterns([trimmedSelector], settings, { availableModels }).map(pattern => ({
 						pattern,
 						retryFallback: undefined,
 					}));

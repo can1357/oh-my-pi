@@ -9,6 +9,12 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import {
+	getModelRolePreset,
+	getModelRolePresetDefault,
+	saveModelRolePreset,
+	saveModelRolePresetDefault,
+} from "@oh-my-pi/pi-coding-agent/config/model-role-presets";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	type ModelHubCallbacks,
@@ -89,10 +95,10 @@ function makeRegistry(models: () => Model[], overrides: RegistryOverrides = {}):
 
 interface HubHarness {
 	hub: ModelHubComponent;
-	onAssign: ReturnType<typeof vi.fn>;
-	onUnassign: ReturnType<typeof vi.fn>;
-	onLoginRequest: ReturnType<typeof vi.fn>;
-	onCancel: ReturnType<typeof vi.fn>;
+	onAssign: Mock<ModelHubCallbacks["onAssign"]>;
+	onUnassign: Mock<ModelHubCallbacks["onUnassign"]>;
+	onLoginRequest: Mock<(providerId: string) => void>;
+	onCancel: Mock<() => void>;
 	onFallbackChainChange: Mock<(role: string, chain: string[]) => void>;
 }
 
@@ -138,6 +144,12 @@ function createHub(options: {
 			onCycleOrderChange: options.callbacks?.onCycleOrderChange,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
+			onApplyPreset: options.callbacks?.onApplyPreset,
+			onSavePreset: options.callbacks?.onSavePreset,
+			onSetDefaultPreset: options.callbacks?.onSetDefaultPreset,
+			onSaveActivePreset: options.callbacks?.onSaveActivePreset,
+			onRenamePreset: options.callbacks?.onRenamePreset,
+			onDeletePreset: options.callbacks?.onDeletePreset,
 		},
 		options.hub,
 	);
@@ -225,6 +237,520 @@ describe("ModelHub", () => {
 			expect(defaultRow).not.toContain("inherit");
 			expect(smolRow).toContain("auto");
 		});
+
+		test("allows saving the active Default without applying built-in roles", () => {
+			const model = makeModel("test", "primary");
+			const settings = Settings.isolated();
+			settings.setModelRole("default", "test/primary");
+			settings.setModelRole("smol", "test/existing");
+			settings.set("modelRolePresets", {
+				applyOnSelect: false,
+				"test/primary": { presets: {}, default: { roles: {} } },
+			});
+			const onSaveActivePreset = vi.fn();
+			const onApplyPreset = vi.fn();
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				callbacks: { onSaveActivePreset, onApplyPreset },
+			});
+			hub.handleInput(UP);
+			hub.handleInput("\n");
+			expect(normalize(hub.render(220))).not.toContain("(unsaved)");
+			hub.handleInput("s");
+			expect(onSaveActivePreset).toHaveBeenCalledWith(model, undefined, false);
+			expect(onApplyPreset).not.toHaveBeenCalled();
+			expect(settings.getModelRole("smol")).toBe("test/existing");
+		});
+
+		test("does not mark a preset unsaved when an unavailable assignment falls back to the selected model", () => {
+			const model = makeModel("test", "primary");
+			const settings = Settings.isolated({
+				modelRolePresets: { "test/primary": { default: { roles: { smol: "test/missing" } } } },
+			});
+			settings.setModelRole("default", "test/primary");
+			settings.setModelRole("smol", "test/primary");
+			const { hub } = createHub({ models: [model], scoped: true, settings });
+
+			hub.handleInput(UP); // All models → Roles.
+			expect(normalize(hub.render(220))).not.toContain("(unsaved)");
+		});
+
+		test("does not mark a saved default dirty when global concrete thinking is captured as a suffix", () => {
+			const model = makeModel("test", "primary");
+			const selector = `${model.provider}/${model.id}`;
+			const settings = Settings.isolated();
+			settings.setModelRole("default", selector);
+			settings.set("defaultThinkingLevel", ThinkingLevel.High);
+			settings.set("modelRolePresets", {
+				[selector]: { default: { roles: { default: `${selector}:high` } } },
+			});
+			const { hub } = createHub({ models: [model], scoped: true, settings });
+
+			hub.handleInput(UP); // All models → Roles.
+			expect(normalize(hub.render(220))).not.toContain("(unsaved)");
+		});
+
+		test("disabling built-ins clears the stale Default comparison and reset selection", () => {
+			const model = makeModel("test", "primary");
+			const settings = Settings.isolated();
+			settings.setModelRole("default", "test/primary");
+			settings.setModelRole("smol", "test/existing");
+			settings.set("modelRolePresets.applyOnSelect", true);
+			const onApplyPreset = vi.fn();
+			const { hub } = createHub({ models: [model], scoped: true, settings, callbacks: { onApplyPreset } });
+			hub.handleInput(UP);
+			hub.handleInput("\n");
+			expect(normalize(hub.render(220))).toContain("(unsaved)");
+			settings.set("modelRolePresets.applyOnSelect", false);
+			hub.refreshAfterExternalMutation();
+			expect(normalize(hub.render(220))).toContain("(unsaved)");
+			hub.handleInput("x");
+			expect(onApplyPreset).not.toHaveBeenCalled();
+			expect(settings.getModelRole("smol")).toBe("test/existing");
+		});
+
+		test("applies the named preset selected from the roles view", () => {
+			const model = makeModel("test", "primary");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/primary" },
+				modelRolePresets: {
+					"test/primary": {
+						presets: {
+							quality: { roles: { slow: "test/primary" } },
+						},
+					},
+				},
+			});
+			const onApplyPreset = vi.fn();
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				callbacks: { onApplyPreset },
+			});
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Dive into role rows on DEFAULT.
+			hub.handleInput(UP); // Save preset.
+			hub.handleInput(UP); // Named quality preset.
+			hub.handleInput("\n");
+
+			expect(onApplyPreset).toHaveBeenCalledWith(model, "quality", {
+				replaceUnsetRoles: false,
+				useBuiltInDefault: false,
+			});
+		});
+
+		test("leaves a higher-precedence preset read-only instead of mutating a shadowed global copy", async () => {
+			const model = makeModel("test", "primary");
+			const selector = `${model.provider}/${model.id}`;
+			const settings = Settings.isolated();
+			settings.setModelRole("default", selector);
+			settings.set("modelRolePresets", {
+				[selector]: { presets: { quality: { roles: { smol: "test/global" } } } },
+			});
+			settings.override("modelRolePresets", {
+				[selector]: { presets: { quality: { roles: { smol: "test/managed" } } } },
+			});
+			const onDeletePreset = vi.fn();
+			const onSetDefaultPreset = vi.fn();
+			const onRenamePreset = vi.fn();
+			const onSaveActivePreset = vi.fn();
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				callbacks: {
+					onApplyPreset: () => true,
+					onDeletePreset,
+					onSetDefaultPreset,
+					onRenamePreset,
+					onSaveActivePreset,
+				},
+			});
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Enter role rows.
+			hub.handleInput(UP); // Save preset.
+			hub.handleInput(UP); // Managed named preset.
+			expect(normalize(hub.render(220))).toContain("Preset: quality (managed by config)");
+			hub.handleInput("x");
+			hub.handleInput("d");
+			hub.handleInput("r");
+			expect(onDeletePreset).not.toHaveBeenCalled();
+			expect(onSetDefaultPreset).not.toHaveBeenCalled();
+			expect(onRenamePreset).not.toHaveBeenCalled();
+			expect(normalize(hub.render(220))).not.toContain("Rename preset:");
+
+			hub.handleInput("\n"); // Applying remains allowed.
+			await Promise.resolve();
+			hub.handleInput("s");
+			expect(onSaveActivePreset).not.toHaveBeenCalled();
+		});
+		test("resets a named preset when the default route changes", async () => {
+			const base = getBundledModel("openrouter", "z-ai/glm-4.7");
+			if (!base) throw new Error("Expected bundled OpenRouter model for routed preset test");
+			const fireworks = {
+				...base,
+				compat: { ...base.compat, openRouterRouting: { only: ["fireworks"] } },
+			} as Model;
+			const deepinfra = {
+				...base,
+				compat: { ...base.compat, openRouterRouting: { only: ["deepinfra"] } },
+			} as Model;
+			const selector = `${base.provider}/${base.id}`;
+			const fireworksSelector = `${selector}@fireworks`;
+			const deepinfraSelector = `${selector}@deepinfra`;
+			const settings = Settings.isolated({
+				modelRoles: { default: fireworksSelector, smol: fireworksSelector },
+				modelRolePresets: {
+					applyOnSelect: true,
+					[selector]: {
+						default: { roles: { smol: deepinfraSelector } },
+						presets: { quality: { roles: { smol: fireworksSelector } } },
+					},
+				},
+			});
+			const { hub } = createHub({
+				models: [fireworks, deepinfra],
+				scoped: true,
+				settings,
+				callbacks: { onApplyPreset: () => true },
+			});
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Enter role rows.
+			hub.handleInput(UP); // Save preset.
+			hub.handleInput(UP); // Named quality preset.
+			hub.handleInput("\n"); // Make quality active.
+			await Promise.resolve();
+			settings.setModelRole("default", deepinfraSelector);
+			settings.setModelRole("smol", deepinfraSelector);
+			hub.refreshAfterExternalMutation();
+
+			expect(normalize(hub.render(220))).not.toContain("(unsaved)");
+		});
+		test("keeps a preset active when its default routes to a different upstream", async () => {
+			const base = getBundledModel("openrouter", "z-ai/glm-4.7");
+			if (!base) throw new Error("Expected bundled OpenRouter model for routed preset test");
+			const fireworks = {
+				...base,
+				compat: { ...base.compat, openRouterRouting: { only: ["fireworks"] } },
+			} as Model;
+			const deepinfra = {
+				...base,
+				compat: { ...base.compat, openRouterRouting: { only: ["deepinfra"] } },
+			} as Model;
+			const selector = `${base.provider}/${base.id}`;
+			const fireworksSelector = `${selector}@fireworks`;
+			const deepinfraSelector = `${selector}@deepinfra`;
+			// The clicked default routes to fireworks, but the saved "quality" preset's
+			// captured default routes to deepinfra.
+			const settings = Settings.isolated({
+				modelRoles: { default: fireworksSelector, smol: fireworksSelector },
+				modelRolePresets: {
+					applyOnSelect: true,
+					[selector]: {
+						presets: { quality: { roles: { default: deepinfraSelector, smol: deepinfraSelector } } },
+					},
+				},
+			});
+			const { hub } = createHub({
+				models: [fireworks, deepinfra],
+				scoped: true,
+				settings,
+				// Simulate the controller persisting the preset's effective routed default.
+				callbacks: {
+					onApplyPreset: () => {
+						settings.setModelRole("default", deepinfraSelector);
+						settings.setModelRole("smol", deepinfraSelector);
+						return true;
+					},
+				},
+			});
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Enter role rows.
+			hub.handleInput(UP); // Save preset.
+			hub.handleInput(UP); // Named quality preset.
+			hub.handleInput("\n"); // Apply it.
+			await Promise.resolve();
+
+			// The applied preset routes the default to a different upstream than the
+			// clicked selector; it must stay active (not cleared by the route-aware
+			// rebuild) so a later save/auto-save still targets it.
+			expect(normalize(hub.render(220))).toContain("(active)");
+		});
+
+		test("keeps the Default row separate from a named default pointer", async () => {
+			const model = makeModel("test", "primary");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/primary" },
+				modelRolePresets: {
+					applyOnSelect: false,
+					"test/primary": {
+						presets: { quality: { roles: { smol: "test/quality" } } },
+						default: "quality",
+					},
+				},
+			});
+			const onApplyPreset = vi.fn(() => true);
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				callbacks: { onApplyPreset },
+			});
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Enter role rows.
+			hub.handleInput(UP); // Save preset → named preset → Default row.
+			hub.handleInput(UP);
+			hub.handleInput(UP);
+			hub.handleInput("\n"); // Apply the unnamed Default row.
+
+			await Promise.resolve();
+			expect(onApplyPreset).toHaveBeenCalledWith(model, undefined, {
+				replaceUnsetRoles: false,
+				useBuiltInDefault: true,
+			});
+		});
+
+		test("failed preset application keeps subsequent saves on the previous active profile", async () => {
+			const model = makeModel("test", "primary");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/primary", smol: "test/edited" },
+				modelRolePresets: {
+					"test/primary": { presets: { quality: { roles: { smol: "test/saved" } } } },
+				},
+			});
+			const applied = Promise.withResolvers<boolean>();
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				callbacks: {
+					onApplyPreset: () => applied.promise,
+					onSaveActivePreset: (selected, name) => {
+						const presets = settings.get("modelRolePresets");
+						const roles = settings.getModelRoles();
+						settings.set(
+							"modelRolePresets",
+							name === undefined
+								? saveModelRolePresetDefault(presets, selected, roles)
+								: saveModelRolePreset(presets, selected, name, roles),
+						);
+					},
+				},
+			});
+			hub.handleInput(UP);
+			hub.handleInput("\n");
+			hub.handleInput(UP);
+			hub.handleInput(UP);
+			hub.handleInput("\n");
+			applied.resolve(false);
+			await applied.promise;
+			hub.handleInput("s");
+			expect(getModelRolePreset(settings.get("modelRolePresets"), model, "quality")?.roles.smol).toBe("test/saved");
+			expect(getModelRolePresetDefault(settings.get("modelRolePresets"), model)?.roles.smol).toBe("test/edited");
+		});
+		test("blocks hub input while an async preset application is pending", async () => {
+			const model = makeModel("test", "primary");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/primary" },
+				modelRolePresets: { "test/primary": { presets: { quality: { roles: { slow: "test/primary" } } } } },
+			});
+			const applied = Promise.withResolvers<boolean>();
+			const onApplyPreset = vi.fn(() => applied.promise);
+			const onAssign = vi.fn();
+			const { hub } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				callbacks: { onApplyPreset, onAssign },
+			});
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput("\n"); // Dive into role rows on DEFAULT.
+			hub.handleInput(UP); // Save preset.
+			hub.handleInput(UP); // Named quality preset.
+			hub.handleInput("\n"); // Apply it — resolves asynchronously.
+			expect(onApplyPreset).toHaveBeenCalledTimes(1);
+			expect(normalize(hub.render(220))).toContain("Applying model");
+
+			// A role edit while the application is pending must not slip through and be
+			// overwritten by the slower preset write.
+			hub.handleInput("\n");
+			hub.handleInput("\n");
+			expect(onAssign).not.toHaveBeenCalled();
+
+			applied.resolve(true);
+			await applied.promise;
+			await Promise.resolve();
+			expect(normalize(hub.render(220))).not.toContain("Applying model");
+		});
+
+		test("switching default models does not auto-save carried roles over the destination preset", async () => {
+			const first = makeModel("test", "first");
+			const second = makeModel("test", "second");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/first", smol: "test/first" },
+				modelRolePresets: {
+					autoLoad: false,
+					autoSave: true,
+					"test/second": { default: { roles: { smol: "test/second" } } },
+				},
+			});
+			const { hub } = createHub({
+				models: [first, second],
+				scoped: true,
+				settings,
+				callbacks: {
+					onAssign: (_model, role, _thinking, selector) => settings.setModelRole(role, selector),
+					onSaveActivePreset: (selected, name) => {
+						const presets = settings.get("modelRolePresets");
+						const roles = settings.getModelRoles();
+						settings.set(
+							"modelRolePresets",
+							name === undefined
+								? saveModelRolePresetDefault(presets, selected, roles)
+								: saveModelRolePreset(presets, selected, name, roles),
+						);
+					},
+				},
+			});
+			for (const ch of "second") hub.handleInput(ch);
+			hub.handleInput("\n");
+			hub.handleInput("\n");
+			await Promise.resolve();
+			expect(settings.getModelRole("default")).toBe("test/second");
+			expect(getModelRolePresetDefault(settings.get("modelRolePresets"), second)?.roles.smol).toBe("test/second");
+			expect(settings.getModelRole("smol")).toBe("test/first");
+		});
+		test("auto-save captures a supporting-role assignment into the active preset", async () => {
+			const primary = makeModel("test", "primary");
+			const helper = makeModel("test", "helper");
+			const settings = Settings.isolated();
+			settings.setModelRole("default", "test/primary");
+			settings.setModelRole("smol", "test/primary");
+			settings.set("modelRolePresets.autoSave", true);
+			settings.set(
+				"modelRolePresets",
+				saveModelRolePresetDefault(settings.get("modelRolePresets"), primary, { smol: "test/primary" }),
+			);
+			const { hub } = createHub({
+				models: [primary, helper],
+				scoped: true,
+				settings,
+				callbacks: {
+					onAssign: (_model, role, _thinking, selector) => settings.setModelRole(role, selector),
+					onSaveActivePreset: (selected, name) => {
+						const presets = settings.get("modelRolePresets");
+						const roles = settings.getModelRoles();
+						settings.set(
+							"modelRolePresets",
+							name === undefined
+								? saveModelRolePresetDefault(presets, selected, roles)
+								: saveModelRolePreset(presets, selected, name, roles),
+						);
+					},
+				},
+			});
+			for (const ch of "helper") hub.handleInput(ch);
+			hub.handleInput("\n"); // Role strip for test/helper.
+			hub.handleInput(DOWN); // default chip → smol chip.
+			hub.handleInput("\n"); // Assign smol.
+			await Promise.resolve();
+
+			expect(settings.getModelRole("smol")).toBe("test/helper");
+			expect(getModelRolePresetDefault(settings.get("modelRolePresets"), primary)?.roles.smol).toBe("test/helper");
+		});
+
+		test("global edits do not dirty a project-scoped active preset", async () => {
+			const primary = makeModel("test", "primary");
+			const helper = makeModel("test", "helper");
+			const settings = Settings.isolated({
+				modelRoleStorage: "project",
+				modelRolePresets: {
+					"test/primary": { default: { roles: { smol: "test/primary" } } },
+				},
+			});
+			settings.setProjectModelRole("default", "test/primary");
+			settings.setModelRole("smol", "test/primary");
+			const onSaveActivePreset = vi.fn();
+			const { hub } = createHub({
+				models: [primary, helper],
+				scoped: true,
+				settings,
+				callbacks: {
+					onAssign: (_model, role, _thinking, selector, scope) => {
+						if (scope === "project") settings.setProjectModelRole(role, selector);
+						else settings.setModelRole(role, selector);
+					},
+					onSaveActivePreset,
+				},
+			});
+
+			for (const ch of "helper") hub.handleInput(ch);
+			hub.handleInput("\n"); // Open helper's role strip.
+			hub.handleInput(DOWN); // project default → global default
+			hub.handleInput(DOWN); // → project smol
+			hub.handleInput(DOWN); // → global smol
+			hub.handleInput("\n");
+			hub.handleInput(ESC); // Keep the inherited thinking level.
+			await Promise.resolve();
+
+			expect(settings.getGlobalModelRole("smol")).toBe("test/helper");
+			expect(settings.getProjectModelRole("smol")).toBeUndefined();
+			expect(getModelRolePresetDefault(settings.get("modelRolePresets"), primary)?.roles.smol).toBe("test/primary");
+			expect(onSaveActivePreset).not.toHaveBeenCalled();
+			expect(normalize(hub.render(220))).not.toContain("(unsaved)");
+		});
+		test("does not activate a project preset for a global default model", () => {
+			const global = makeModel("test", "global-default");
+			const settings = Settings.isolated({
+				modelRoleStorage: "project",
+				modelRolePresets: {
+					"test/global-default": { default: { smol: "test/global-default" } },
+				},
+			});
+			settings.setModelRole("default", "test/global-default");
+			settings.setModelRole("smol", "test/global-default");
+
+			const { hub } = createHub({ models: [global], scoped: true, settings });
+
+			expect(normalize(hub.render(220))).not.toContain("(unsaved)");
+		});
+
+		test("failed supporting-role assignments do not dirty the active preset", () => {
+			const primary = makeModel("test", "primary");
+			const helper = makeModel("test", "helper");
+			const settings = Settings.isolated({
+				modelRoles: { default: "test/primary" },
+				modelRolePresets: {
+					"test/primary": { default: { smol: "test/primary" } },
+				},
+			});
+			const onAssign = vi.fn(() => false);
+			const { hub } = createHub({
+				models: [primary, helper],
+				scoped: true,
+				settings,
+				callbacks: { onAssign },
+			});
+
+			for (const ch of "helper") hub.handleInput(ch);
+			hub.handleInput("\n"); // Open helper's role strip.
+			hub.handleInput(DOWN); // Select smol.
+			hub.handleInput("\n"); // Assignment fails.
+
+			expect(onAssign).toHaveBeenCalledTimes(1);
+			expect(settings.getModelRole("smol")).toBeUndefined();
+			expect(normalize(hub.render(220))).not.toContain("(unsaved)");
+		});
+
 		test("thinking-only edits preserve the model and scope from the persisted role layer", () => {
 			const storedModel = makeModel("test", "global-role-model");
 			const effectiveModel = makeModel("test", "runtime-role-model");
@@ -800,14 +1326,19 @@ describe("ModelHub", () => {
 		test("Enter on a chip already holding this model unassigns it", () => {
 			const model = makeModel("test", "toggled-model");
 			const settings = Settings.isolated({ modelRoles: { smol: "test/toggled-model" } });
-			const { hub, onAssign, onUnassign } = createHub({ models: [model], scoped: true, settings });
+			const { hub, onAssign } = createHub({
+				models: [model],
+				scoped: true,
+				settings,
+				callbacks: { onUnassign: role => settings.setModelRole(role, undefined) },
+			});
 			installTestTheme();
 
 			hub.handleInput("\n"); // role strip
 			hub.handleInput(DOWN); // default → smol chip (down moves right)
 			hub.handleInput("\n");
 
-			expect(onUnassign).toHaveBeenCalledWith("smol");
+			expect(settings.getModelRole("smol")).toBeUndefined();
 			expect(onAssign).not.toHaveBeenCalled();
 			// Toggle closes the strip without a thinking step.
 			expect(footerLine(hub.render(220))).not.toContain("inherit");
@@ -1425,7 +1956,6 @@ describe("ModelHub", () => {
 
 			hub.handleInput(UP); // back to All models
 			hub.handleInput(DOWN); // revisit prov-a
-			await Bun.sleep(140);
 			// Lifetime guard: revisiting must not re-fetch.
 			expect(refreshProvider).toHaveBeenCalledTimes(1);
 
@@ -1504,21 +2034,28 @@ describe("ModelHub", () => {
 		});
 
 		test("shows a refreshing status while the provider fetch is in flight", async () => {
-			const model = makeModel("prov-b", "model-b");
-			const gate = Promise.withResolvers<void>();
-			const { hub } = createHub({
-				models: [model],
-				registry: { refreshProvider: () => gate.promise },
-			});
-			installTestTheme();
+			vi.useFakeTimers();
+			try {
+				const model = makeModel("prov-b", "model-b");
+				const gate = Promise.withResolvers<void>();
+				const { hub } = createHub({
+					models: [model],
+					registry: { refreshProvider: () => gate.promise },
+				});
+				installTestTheme();
 
-			hub.handleInput(DOWN);
-			await Bun.sleep(140);
-			expect(normalize(hub.render(220))).toContain("refreshing model list");
+				hub.handleInput(DOWN);
+				vi.advanceTimersByTime(120);
+				await Promise.resolve();
+				expect(normalize(hub.render(220))).toContain("refreshing model list");
 
-			gate.resolve();
-			await Bun.sleep(0);
-			expect(normalize(hub.render(220))).not.toContain("refreshing model list");
+				gate.resolve();
+				await Promise.resolve();
+				await Promise.resolve();
+				expect(normalize(hub.render(220))).not.toContain("refreshing model list");
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 	});
 

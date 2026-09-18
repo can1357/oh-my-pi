@@ -51,7 +51,7 @@ export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision", "Model Roles"],
 	interaction: [
 		"Input",
 		"Approvals",
