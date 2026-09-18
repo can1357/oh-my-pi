@@ -5,6 +5,14 @@
 
 - Fixed auth-broker client config resolution failing silently on Windows when reading the token file or `config.yml`; reads now use `node:fs` instead of `Bun.file`.
 
+### Added
+
+- Added persisted `contextOmitted` metadata for tool calls and results so hosts can exclude selected pairs from model context without deleting transcript data ([#12397](https://github.com/can1357/oh-my-pi/pull/12397) by [@prickly-dingus](https://github.com/prickly-dingus)).
+
+### Fixed
+
+- Fixed delayed cancellation and deadline expiry during TypeSafe judgment retry backoff ([#12397](https://github.com/can1357/oh-my-pi/pull/12397) by [@prickly-dingus](https://github.com/prickly-dingus)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

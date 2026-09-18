@@ -11,7 +11,7 @@ import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { validateProviderMaxInFlightRequests } from "../config/settings";
 import type { LocalProtocolOptions } from "../internal-urls";
-import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
+import { deobfuscateSessionContext, obfuscateMessages, obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
@@ -101,6 +101,12 @@ export class SessionProviderBoundary {
 	obfuscateText(text: string | undefined): string | undefined {
 		if (!text || !this.#host.obfuscator?.hasSecrets()) return text;
 		return this.#host.obfuscator.obfuscate(text);
+	}
+
+	/** Obfuscates every string value in one provider-bound JSON record with a shared regex-secret set. */
+	obfuscateJsonRecord<T extends Record<string, unknown>>(value: T): T {
+		if (!this.#host.obfuscator?.hasSecrets()) return value;
+		return obfuscateToolArguments(this.#host.obfuscator, value) as T;
 	}
 
 	/** Obfuscates summaries and snapcompact plaintext carried into compaction. */

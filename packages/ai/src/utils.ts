@@ -142,7 +142,8 @@ function clampReplayItemImageDetail(
 	return changed ? { ...item, content } : item;
 }
 
-function isOpenAIResponsesClientInputBoundary(item: Record<string, unknown>): boolean {
+/** Whether a native Responses item starts a client-input segment between model outputs. */
+export function isOpenAIResponsesClientInputBoundary(item: Record<string, unknown>): boolean {
 	if (item.type === "message") return item.role !== "assistant";
 	if (item.type === undefined && typeof item.role === "string") return item.role !== "assistant";
 

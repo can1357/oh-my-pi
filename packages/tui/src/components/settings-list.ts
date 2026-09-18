@@ -38,6 +38,8 @@ export interface SettingItem {
 	changed?: boolean;
 	/** Render as a non-interactive section heading. Skipped by navigation and search. */
 	heading?: boolean;
+	/** Block activation while retaining keyboard focus, search, and the description. */
+	disabled?: boolean;
 }
 
 export interface SettingsListTheme {
@@ -522,8 +524,14 @@ export class SettingsList implements Component {
 		}
 		const warningStyle = this.#theme.warning ?? this.#theme.description;
 		const labelText =
-			this.#theme.label(item.label, isSelected, item.changed === true) + (mark ? warningStyle(mark) : "") + labelPad;
-		const valueText = this.#theme.value(valuePlain, isSelected, item.changed === true);
+			(item.disabled
+				? this.#theme.hint(item.label)
+				: this.#theme.label(item.label, isSelected, item.changed === true)) +
+			(mark ? warningStyle(mark) : "") +
+			labelPad;
+		const valueText = item.disabled
+			? this.#theme.hint(valuePlain)
+			: this.#theme.value(valuePlain, isSelected, item.changed === true);
 		const text = truncateToWidth(prefix + labelText + separator + valueText, Math.max(0, rowWidth));
 		// Pointer hover paints a band behind the whole row, distinct from the
 		// keyboard selection (cursor glyph + accent) which stays where it is.
@@ -780,7 +788,7 @@ export class SettingsList implements Component {
 
 	#activateItem(): void {
 		const item = this.#filteredItems[this.#selectedIndex];
-		if (!item || item.heading) return;
+		if (!item || item.heading || item.disabled) return;
 
 		if (item.submenu) {
 			// Open submenu, passing current value so it can pre-select correctly

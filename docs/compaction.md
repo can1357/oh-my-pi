@@ -187,6 +187,86 @@ store.[^experimental-context-history]
     images as markers. Notebook quality and timely updates remain the model's
     responsibility; the mode does not automatically generate missing notes.
 
+### Experimental Jev compaction booster
+
+`compaction.boosterEnabled` is an experimental, default-off pre-pass for
+automatic and idle compaction. It is adapted from the MIT-licensed
+[`fast-jev-compaction`](https://github.com/tamaratran/fast-jev-compaction/tree/e3f262a7f4d42bd8dd32ced30d26176f7cb545b0)
+state-fitting and relevance algorithm. It is not another
+`compaction.methodOrder` strategy: when a normal method is usable, Jev first asks
+TypeSafe whether each eligible native tool pair should be kept, have only its
+result shortened, or be omitted from model context. If that creates enough
+headroom, the normal method is skipped for that attempt; otherwise the configured
+method order continues against the reduced context.
+
+Enable it in `/settings` or with:
+
+```yaml
+compaction:
+  boosterEnabled: true
+```
+
+The setting is always visible. Enabling requires a configured TypeSafe credential
+(`TYPESAFE_API_KEY` or `/login typesafe`) and
+`providers.judgmentProvider: auto` or `typesafe`. The settings row explains a
+missing prerequisite without making a network request. An unavailable saved
+`true` value remains visible and can be turned off, but cannot be enabled again
+until eligible. Runtime checks enforce the same rules for file-based settings.
+The booster uses `TypeSafeJudge` directly; it does not fall back to chat or
+another LLM judgment backend.
+
+Privacy and selection boundaries:
+
+- The judging state sends conversation text, tool names and serialized tool
+  inputs to TypeSafe. Tool-result bodies are omitted; TypeSafe receives only
+  result status and character counts. Configured secret obfuscation is applied
+  before serializing tool inputs or fitting the scoring state. Other conversation
+  text and tool inputs may still be sensitive, so review this boundary before
+  opting in.
+- Only complete, uniquely matched, chronological native call/result pairs in the
+  active materialized model context are candidates. Pairs before the first
+  surviving user message, the first and newest six messages, the recent
+  tool-output protection window, skills, active-plan and
+  artifact-recovery results, shared ancestry at or before a conversation fork,
+  provider-opaque or multimodal pairs, and already reduced pairs are protected.
+- A shortened result keeps its first 300 characters and an `artifact://`
+  recovery link; the full original is saved in the session artifact directory.
+  An omitted pair keeps both original bodies and tree links in the journal and
+  display transcript, marked only for exclusion from model context. This reduces
+  prompts, not stored session size.
+
+The pass runs only on automatic/idle maintenance, with one 10-second deadline
+covering all judgment batches. Manual `/compact` modes and instructions are
+unchanged, though they operate on any context already reduced by an earlier
+pass. Missing credentials, scoring or validation errors, deadline expiry,
+recoverable persistence failure, or insufficient headroom continue through normal
+compaction; caller cancellation stops the attempt instead. A failed durable
+rollback is surfaced as an error, not hidden as stale cancellation or advisory
+fallback. While the preference is enabled, speculative compaction is canceled
+and bypassed so a summary cannot race a pruning decision.
+
+Omission markers and artifact references persist across resume and later
+compaction. Older OMP versions do not understand the omission markers and may
+replay the original omitted pairs; they do not delete those journal rows.
+Turning the booster off prevents future decisions but does not restore shortened
+results or clear accepted omission markers.
+
+The shared model-context projection also removes omitted call/result pairs from
+native Responses deltas and later replacement snapshots, preserving unrelated
+native history and opaque compaction records.
+
+Automatic lifecycle observers receive `action: "prune"` for this phase.
+`auto_compaction_end` has no `result`, no `CompactionEntry` is created, and no
+`session_compact` event is emitted. TypeSafe usage is recorded with purpose
+`compaction-booster`.
+
+No measured task-correctness, total-cost, or latency advantage over existing
+compaction is claimed. Relevance decisions are probabilistic, and normal
+fallback cannot repair an incorrect accepted decision because it sees the
+already-reduced context. Keep the feature off unless you are evaluating those
+tradeoffs; lower prompt-token counts alone are not evidence of an end-to-end
+benefit.
+
 ### Shake method
 
 Including `shake` in `compaction.methodOrder` performs an inline, local reduction instead of calling a summarization model. It replaces eligible tool results and large fenced/XML blocks with recoverable `artifact://` references, using a protected recent-token window and minimum-savings threshold. Automatic shake emits the normal auto-compaction events with `action: "shake"`.
@@ -473,7 +553,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 
 - Manual compaction aborts current agent operation first. If that abort cut a turn in flight, the compaction resumes it once the summary is committed — or immediately when it rejects as a no-op (session too small / already compacted), since that pass makes no history change — using a queued steer/follow-up first, otherwise the auto-continue prompt. A hook cancel or summarizer failure does not resume. The resume is skipped when `compaction.autoContinue` is `false` or the caller passed `suppressContinuation` (plan-mode approval dispatches its own execution turn). A manual compaction issued while idle never starts a turn. A prompt submitted while the compaction runs waits for it and, if it starts or queues a turn, replaces the resume; a locally handled extension/custom command hands the resume back — unless a turn it triggered (`pi.sendMessage(..., { triggerTurn: true })`, `pi.sendUserMessage()`), a later prompt, or any other turn starts first. A second manual compaction started while such a resume is still withheld takes it over.
 - `abortCompaction()` cancels manual compaction, auto-compaction, and handoff generation controllers.
-- Auto compaction emits start/end session events for UI/state updates.
+- Automatic maintenance emits start/end session events for UI/state updates. The experimental Jev pre-pass uses `action: "prune"` with no compaction result and does not emit `session_compact`.
 - Auto compaction can try multiple model candidates and retry transient failures; long retry delays prefer the next candidate when one is available.
 - Overflow errors are excluded from generic retry path because they are handled by context promotion/compaction.
 - If auto-compaction fails:
@@ -487,6 +567,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
+- `compaction.boosterEnabled` = `false`. Experimental TypeSafe-only selective pruning before automatic/idle compaction; see [Experimental Jev compaction booster](#experimental-jev-compaction-booster).
 - `compaction.experimentalContextManagement` = `false`. Opt-in persistent notes, branch-bound raw-history retrieval, and local context-window rollover; restart after enabling to refresh available tools.
 - `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta) when available; unavailable or failed methods advance to the next preference.
 - `compaction.asyncEnabled` = `true`. Async (speculative) compaction: when context enters the pre-threshold band `[threshold − lead, threshold)` (lead = `clamp(threshold × 0.125, 8192, 32000)`), maintenance starts a background summarization for the first configured LLM-backed method (`remote`, `handoff`, or `soft`) off a branch snapshot, isolated from the live turn by a side session id. The armed result is committed instantly when the threshold is actually crossed, hiding summarization latency; post-snapshot turns are appended after the summary unchanged. Armed results are discarded when the branch prefix changes (new compaction, reset boundary, `/tree` navigation), when a provider-native replay payload is no longer readable by the active model, or when context grows past `keepRecentTokens` since compute (a fresh speculation replaces it). Speculation is skipped while an extension registers `session_before_compact`. The status line pulses the auto-compact icon while a speculation runs and holds it in accent when a result is armed.

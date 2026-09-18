@@ -49,13 +49,25 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type {
-	AssistantMessage,
-	CodexCompactionContext,
-	Message,
-	Model,
-	OpenAIResponsesHistoryPayload,
-	ProviderSessionState,
+import {
+	isArtifactRecoveryToolResult,
+	isProtectedToolResult,
+} from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
+
+import {
+	type AssistantMessage,
+	type CodexCompactionContext,
+	type Judge,
+	type JudgeOptions,
+	type JudgmentRequest,
+	type JudgmentResult,
+	type Message,
+	type Model,
+	type OpenAIResponsesHistoryPayload,
+	type ProviderSessionState,
+	type Questions,
+	TYPESAFE_PROVIDER,
+	TypeSafeJudge,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
@@ -99,8 +111,15 @@ import {
 } from "./role-models";
 import type { SessionContext } from "./session-context";
 import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
-import type { CompactionEntry, SessionEntry } from "./session-entries";
+import type { CompactionEntry, SessionEntry, SessionMessageEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
+import {
+	collectJevCandidates,
+	getJevBoosterUnavailableReason,
+	type JevCandidate,
+	type JevDecision,
+	scoreJevCandidates,
+} from "./jev-compaction";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
@@ -338,6 +357,39 @@ interface SpeculationRun {
 	armed?: ArmedSpeculation;
 }
 
+interface RecordedJevUsage {
+	api: string;
+	provider: string;
+	model: string;
+	usage: JudgmentResult["usage"];
+}
+
+interface JevBoosterFallback {
+	kind: "fallback";
+	tokensSaved: number;
+}
+
+type JevBoosterOutcome = { kind: "handled"; result: CompactionCheckResult } | JevBoosterFallback;
+
+function createRecordingJudge(judge: TypeSafeJudge, usages: RecordedJevUsage[]): Judge {
+	return {
+		label: judge.label,
+		async judge<Q extends Questions>(
+			request: JudgmentRequest<Q>,
+			options?: JudgeOptions,
+		): Promise<JudgmentResult<Q>> {
+			const result = await judge.judge(request, options);
+			usages.push({
+				api: result.api,
+				provider: result.provider,
+				model: result.model,
+				usage: result.usage,
+			});
+			return result;
+		},
+	};
+}
+
 function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
@@ -433,6 +485,7 @@ export interface SessionMaintenanceHost {
 	buildDisplaySessionContext(): SessionContext;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
+	obfuscateJsonForProvider<T extends Record<string, unknown>>(value: T): T;
 	obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
@@ -1971,6 +2024,10 @@ export class SessionMaintenance {
 	maybeStartSpeculativeCompaction(contextTokens: number, contextWindow: number): void {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return;
 		const settings = this.#host.settings.getGroup("compaction");
+		if (settings.boosterEnabled) {
+			this.cancelSpeculation();
+			return;
+		}
 		if (this.#usesExperimentalContextManagement()) {
 			this.#maybeQueueExperimentalNotesReminder(contextTokens, contextWindow);
 			return;
@@ -2035,6 +2092,10 @@ export class SessionMaintenance {
 	deferThresholdCompactionToSpeculation(contextTokens: number, contextWindow: number): boolean {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return false;
 		const settings = this.#host.settings.getGroup("compaction");
+		if (settings.boosterEnabled) {
+			this.cancelSpeculation();
+			return false;
+		}
 		if (this.#usesExperimentalContextManagement()) return false;
 		if (!settings.enabled || settings.asyncEnabled === false || !hasConfiguredCompactionMethod(settings))
 			return false;
@@ -3615,13 +3676,16 @@ export class SessionMaintenance {
 	 * When the model/window is unknown we cannot evaluate the band, so we
 	 * optimistically allow the continuation (preserving prior behavior).
 	 */
-	#compactionCreatedHeadroom(): boolean {
+	#compactionCreatedHeadroom(minimumResidualTokens = 0): boolean {
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		const residualTokens = compactionContextTokens(
-			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
-			this.#estimateStoredContextTokens(),
+		const residualTokens = Math.max(
+			minimumResidualTokens,
+			compactionContextTokens(
+				this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
+				this.#estimateStoredContextTokens(),
+			),
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 		const recoveryBand = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
@@ -3658,7 +3722,7 @@ export class SessionMaintenance {
 	 * cannot evaluate the budget, so we optimistically report a fit (preserving
 	 * prior behavior).
 	 */
-	contextFitsModel(model: Model, excludedMessage?: AssistantMessage): boolean {
+	contextFitsModel(model: Model, excludedMessage?: AssistantMessage, minimumResidualTokens = 0): boolean {
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
 		const activeExcludedMessage =
@@ -3668,9 +3732,12 @@ export class SessionMaintenance {
 			? this.#tokenizer.countMessage(activeExcludedMessage, { excludeEncryptedReasoning: true })
 			: 0;
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		const residualTokens = compactionContextTokens(
-			Math.max(0, (this.#host.getContextUsage({ contextWindow })?.tokens ?? 0) - providerExcludedTokens),
-			Math.max(0, this.#estimateStoredContextTokens() - storedExcludedTokens),
+		const residualTokens = Math.max(
+			minimumResidualTokens,
+			compactionContextTokens(
+				Math.max(0, (this.#host.getContextUsage({ contextWindow })?.tokens ?? 0) - providerExcludedTokens),
+				Math.max(0, this.#estimateStoredContextTokens() - storedExcludedTokens),
+			),
 		);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
@@ -3686,8 +3753,8 @@ export class SessionMaintenance {
 	 * compacted from overflow down to ~150k is retryable even though it sits above
 	 * `0.8 × 170k` (PR #3412 review).
 	 */
-	#compactionCreatedRetryFit(): boolean {
-		return this.#model ? this.contextFitsModel(this.#model) : true;
+	#compactionCreatedRetryFit(minimumResidualTokens = 0): boolean {
+		return this.#model ? this.contextFitsModel(this.#model, undefined, minimumResidualTokens) : true;
 	}
 
 	/**
@@ -4008,6 +4075,8 @@ export class SessionMaintenance {
 			methodIndex?: number;
 			/** A preceding shake already rewrote history before this fallback attempt. */
 			fallbackFromShake?: boolean;
+			/** A Jev pre-pass already ran for this automatic maintenance attempt. */
+			boosterAttempted?: boolean;
 			/**
 			 * This call services an explicit model-requested rollover
 			 * (`new_context`): it bypasses the Auto-Compact toggle, and never
@@ -4068,6 +4137,36 @@ export class SessionMaintenance {
 		}
 
 		if (!method) return COMPACTION_CHECK_NONE;
+
+		if (compactionSettings.boosterEnabled && options.boosterAttempted !== true) {
+			// Jev owns the first rewrite opportunity for this route. Any speculative
+			// summary was built from the unpruned history and must not race or bypass it.
+			this.cancelSpeculation();
+			const boosterOutcome = await this.#runJevBooster(
+				reason,
+				willRetry,
+				generation,
+				shouldAutoContinue,
+				terminalTextAnswer,
+				suppressContinuation,
+				options.pendingContextTokens,
+				options.preparedContextTokens,
+				options.detachPostCommit === true,
+			);
+			if (boosterOutcome.kind === "handled") return boosterOutcome.result;
+			options = {
+				...options,
+				boosterAttempted: true,
+				triggerContextTokens:
+					options.triggerContextTokens === undefined
+						? undefined
+						: Math.max(0, options.triggerContextTokens - boosterOutcome.tokensSaved),
+				preparedContextTokens:
+					options.preparedContextTokens === undefined
+						? undefined
+						: Math.max(0, options.preparedContextTokens - boosterOutcome.tokensSaved),
+			};
+		}
 
 		// A speculative pass may have already produced this compaction's summary
 		// in the background. Claiming consumes the slot either way: an in-flight
@@ -4874,6 +4973,615 @@ export class SessionMaintenance {
 			}
 		}
 		return COMPACTION_CHECK_NONE;
+	}
+
+	/**
+	 * Run one bounded Jev relevance pass before the configured automatic
+	 * compaction method. The scorer is advisory: every unavailable, invalid,
+	 * stale, timed-out, or non-saving proposal falls through to normal
+	 * maintenance, while caller cancellation stops the attempt outright.
+	 */
+	async #runJevBooster(
+		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		willRetry: boolean,
+		generation: number,
+		shouldAutoContinue: boolean,
+		terminalTextAnswer: boolean,
+		suppressContinuation: boolean,
+		pendingContextTokens: number | undefined,
+		preparedContextTokens: number | undefined,
+		detachPostCommit: boolean,
+	): Promise<JevBoosterOutcome> {
+		const settings = this.#host.settings;
+		if (getJevBoosterUnavailableReason(settings, this.#host.modelRegistry) !== undefined) {
+			return { kind: "fallback", tokensSaved: 0 };
+		}
+
+		const sourceSessionId = this.#host.sessionManager.getSessionId();
+		const sourceProviderSessionId = this.#host.sessionId();
+		const sourceLeafId = this.#host.sessionManager.getLeafId();
+		const sourceGeneration = this.#host.promptGeneration();
+		const sourceModel = this.#model;
+		const usageOwner = { sessionId: sourceSessionId, parentId: sourceLeafId };
+		const branchEntries = this.#host.sessionManager.getBranch();
+		const sourceMessages = this.#host.sessionManager.buildSessionContext().messages;
+		const protection = this.#withPlanProtection({
+			...DEFAULT_PRUNE_CONFIG,
+			protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools, isArtifactRecoveryToolResult],
+		});
+		const candidates = collectJevCandidates({
+			entries: branchEntries,
+			allEntries: this.#host.sessionManager.getEntries(),
+			messages: sourceMessages,
+			tokenizer: this.#tokenizer,
+			protectTokens: DEFAULT_PRUNE_CONFIG.protectTokens,
+			isProtected: (result, call) => isProtectedToolResult(result, call, protection.protectedTools),
+		});
+		const candidateSnapshots = candidates.map(candidate => ({
+			callEntry: candidate.callEntry,
+			callMessage: candidate.callEntry.message,
+			callBody: stringifyJson(candidate.callEntry.message),
+			resultEntry: candidate.resultEntry,
+			resultMessage: candidate.resultEntry.message,
+			resultBody: stringifyJson(candidate.resultEntry.message),
+		}));
+		const ownerIsCurrent = (): boolean =>
+			!this.#host.isDisposed() &&
+			this.#host.sessionManager.getSessionId() === sourceSessionId &&
+			this.#host.sessionManager.getLeafId() === sourceLeafId &&
+			this.#host.promptGeneration() === sourceGeneration &&
+			modelsAreEqual(this.#model, sourceModel);
+		const proposalIsCurrent = (): boolean => {
+			if (!ownerIsCurrent()) return false;
+			const currentSettings = this.#host.settings.getGroup("compaction");
+			if (
+				currentSettings.boosterEnabled !== true ||
+				getJevBoosterUnavailableReason(this.#host.settings, this.#host.modelRegistry) !== undefined
+			) {
+				return false;
+			}
+			return candidateSnapshots.every(
+				snapshot =>
+					snapshot.callEntry.message === snapshot.callMessage &&
+					snapshot.resultEntry.message === snapshot.resultMessage &&
+					stringifyJson(snapshot.callEntry.message) === snapshot.callBody &&
+					stringifyJson(snapshot.resultEntry.message) === snapshot.resultBody,
+			);
+		};
+
+		this.#autoCompactionAbortController?.abort();
+		const controller = new AbortController();
+		this.#autoCompactionAbortController = controller;
+		const callerSignal = controller.signal;
+		const timeoutSignal = AbortSignal.timeout(10_000);
+		const signal = AbortSignal.any([callerSignal, timeoutSignal]);
+		const recordedUsages: RecordedJevUsage[] = [];
+		const typeSafeJudge = new TypeSafeJudge({
+			apiKey: this.#host.modelRegistry.authStorage.resolver(TYPESAFE_PROVIDER, {
+				sessionId: sourceProviderSessionId,
+			}),
+		});
+		const judge = createRecordingJudge(typeSafeJudge, recordedUsages);
+		let lifecycleStarted = false;
+		let historyCommitted = false;
+		let lifecycleEnded = false;
+		let fatalPersistenceFailure: { error: unknown } | undefined;
+		const emitEnd = async (event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> => {
+			if (!lifecycleStarted || lifecycleEnded) return;
+			lifecycleEnded = true;
+			await this.#emitLifecycleEvent(event, detachPostCommit);
+		};
+		const discardStaleOwner = async (): Promise<JevBoosterOutcome> => {
+			const activeController = this.#autoCompactionAbortController;
+			if (
+				this.#host.sessionManager.getSessionId() === sourceSessionId &&
+				(activeController === undefined || activeController === controller) &&
+				lifecycleStarted &&
+				!lifecycleEnded
+			) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				});
+			}
+			return { kind: "handled", result: COMPACTION_CHECK_NONE };
+		};
+		const continueNormalMaintenance = async (tokensSaved: number): Promise<JevBoosterOutcome> => {
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (callerSignal.aborted) {
+				return {
+					kind: "handled",
+					result: historyCommitted ? { ...COMPACTION_CHECK_NONE, historyRewritten: true } : COMPACTION_CHECK_NONE,
+				};
+			}
+			return { kind: "fallback", tokensSaved };
+		};
+		try {
+			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action: "prune" }, false);
+			lifecycleStarted = true;
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (callerSignal.aborted) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				});
+				return { kind: "handled", result: COMPACTION_CHECK_NONE };
+			}
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (!proposalIsCurrent()) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				return await continueNormalMaintenance(0);
+			}
+			if (candidates.length === 0) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				return await continueNormalMaintenance(0);
+			}
+
+			let decisions: JevDecision[];
+			try {
+				decisions = await scoreJevCandidates(sourceMessages, candidates, judge, signal, values =>
+					this.#host.obfuscateJsonForProvider(values),
+				);
+			} catch (error) {
+				if (!ownerIsCurrent()) return await discardStaleOwner();
+				if (callerSignal.aborted) {
+					await emitEnd({
+						type: "auto_compaction_end",
+						action: "prune",
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					});
+					return { kind: "handled", result: COMPACTION_CHECK_NONE };
+				}
+				if (!ownerIsCurrent()) return await discardStaleOwner();
+				if (!proposalIsCurrent()) {
+					await emitEnd({
+						type: "auto_compaction_end",
+						action: "prune",
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+						skipped: true,
+					});
+					return await continueNormalMaintenance(0);
+				}
+				const errorMessage = timeoutSignal.aborted
+					? "Jev pruning reached its deadline; trying the configured compaction method."
+					: `Jev pruning failed: ${error instanceof Error ? error.message : String(error)}; trying the configured compaction method.`;
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage,
+				});
+				return await continueNormalMaintenance(0);
+			}
+
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (!proposalIsCurrent()) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				return await continueNormalMaintenance(0);
+			}
+			if (timeoutSignal.aborted) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage: "Jev pruning reached its deadline; trying the configured compaction method.",
+				});
+				return await continueNormalMaintenance(0);
+			}
+
+			const candidatesById = new Map(candidates.map(candidate => [candidate.id, candidate]));
+			const proposedMessages = new Map<SessionMessageEntry, AgentMessage>();
+			const accepted: Array<{ candidate: JevCandidate; action: JevDecision["action"] }> = [];
+			const commitTime = Date.now();
+
+			const countDistinctMessages = (
+				callEntry: SessionMessageEntry,
+				callMessage: AgentMessage,
+				resultEntry: SessionMessageEntry,
+				resultMessage: AgentMessage,
+			): number =>
+				callEntry === resultEntry
+					? this.#tokenizer.countMessage(callMessage)
+					: this.#tokenizer.countMessage(callMessage) + this.#tokenizer.countMessage(resultMessage);
+
+			for (const decision of decisions) {
+				if (decision.action === "keep") continue;
+				const candidate = candidatesById.get(decision.id);
+				if (!candidate) continue;
+				const currentCallMessage = proposedMessages.get(candidate.callEntry) ?? candidate.callEntry.message;
+				const currentResultMessage = proposedMessages.get(candidate.resultEntry) ?? candidate.resultEntry.message;
+				if (currentCallMessage.role !== "assistant" || currentResultMessage.role !== "toolResult") continue;
+
+				let callTrial = currentCallMessage;
+				const resultTrial = { ...currentResultMessage };
+				if (decision.action === "drop_pair") {
+					let foundCall = false;
+					callTrial = {
+						...currentCallMessage,
+						content: currentCallMessage.content.map(block => {
+							if (block.type !== "toolCall" || block.id !== candidate.call.id) return block;
+							foundCall = true;
+							return { ...block, contextOmitted: true };
+						}),
+					};
+					if (!foundCall) continue;
+					resultTrial.contextOmitted = true;
+					resultTrial.prunedAt = commitTime;
+				} else {
+					const resultText = resultTrial.content
+						.filter((block): block is { type: "text"; text: string } => block.type === "text")
+						.map(block => block.text)
+						.join("");
+					let artifact: { id?: string; path?: string };
+					try {
+						artifact = await this.#host.sessionManager.allocateArtifactPath("jev");
+						if (!artifact.id || !artifact.path) continue;
+						const shortened =
+							`${resultText.slice(0, 300)}\n\n` +
+							`[Jev shortened this result — recover: artifact://${artifact.id}]`;
+						resultTrial.content = [{ type: "text", text: shortened }];
+						resultTrial.prunedAt = commitTime;
+						const beforeTokens = this.#tokenizer.countMessage(currentResultMessage);
+						const afterTokens = this.#tokenizer.countMessage(resultTrial);
+						if (afterTokens >= beforeTokens) continue;
+						await writeArtifact(artifact.path, resultText);
+					} catch (error) {
+						logger.warn("Jev pruning could not save a result recovery artifact", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+						continue;
+					}
+				}
+
+				const beforeTokens = countDistinctMessages(
+					candidate.callEntry,
+					currentCallMessage,
+					candidate.resultEntry,
+					currentResultMessage,
+				);
+				const afterTokens = countDistinctMessages(
+					candidate.callEntry,
+					callTrial,
+					candidate.resultEntry,
+					resultTrial,
+				);
+				if (afterTokens >= beforeTokens) continue;
+				if (decision.action === "drop_pair") proposedMessages.set(candidate.callEntry, callTrial);
+				proposedMessages.set(candidate.resultEntry, resultTrial);
+				accepted.push({ candidate, action: decision.action });
+			}
+
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (callerSignal.aborted) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				});
+				return { kind: "handled", result: COMPACTION_CHECK_NONE };
+			}
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (!proposalIsCurrent()) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				return await continueNormalMaintenance(0);
+			}
+			if (timeoutSignal.aborted) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage: "Jev pruning reached its deadline; trying the configured compaction method.",
+				});
+				return await continueNormalMaintenance(0);
+			}
+
+			const projectedMessages = sourceMessages.slice();
+			for (const { candidate } of accepted) {
+				const callMessage = proposedMessages.get(candidate.callEntry);
+				const resultMessage = proposedMessages.get(candidate.resultEntry);
+				if (callMessage && candidate.callIndex >= 0 && candidate.callIndex < projectedMessages.length) {
+					projectedMessages[candidate.callIndex] = callMessage;
+				}
+				if (resultMessage && candidate.resultIndex >= 0 && candidate.resultIndex < projectedMessages.length) {
+					projectedMessages[candidate.resultIndex] = resultMessage;
+				}
+			}
+			const beforeTokens = this.#tokenizer.countMessages(sourceMessages);
+			const afterTokens = this.#tokenizer.countMessages(projectedMessages);
+			const tokensSaved = Math.max(0, beforeTokens - afterTokens);
+			if (accepted.length === 0 || tokensSaved === 0) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				return await continueNormalMaintenance(0);
+			}
+
+			const latestCompaction = getLatestCompactionEntry(branchEntries);
+			const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+			const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+			let anchorIndex = -1;
+			for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+				const entry = branchEntries[index];
+				if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+				anchorIndex = index;
+				break;
+			}
+			const entryIndexes = new Map(branchEntries.map((entry, index) => [entry, index]));
+			let anchoredTokensRemoved = 0;
+			for (const [entry, proposed] of proposedMessages) {
+				const entryIndex = entryIndexes.get(entry) ?? -1;
+				if (
+					entryIndex >= 0 &&
+					entryIndex < anchorIndex &&
+					(!hasRemoteReplacementHistory || entryIndex > compactionIndex)
+				) {
+					anchoredTokensRemoved += Math.max(
+						0,
+						this.#tokenizer.countMessage(entry.message) - this.#tokenizer.countMessage(proposed),
+					);
+				}
+			}
+
+			const entrySnapshots = new Map<SessionEntry, SessionEntry>();
+			for (const entry of proposedMessages.keys()) entrySnapshots.set(entry, structuredClone(entry));
+			const anchorEntry = anchorIndex >= 0 ? branchEntries[anchorIndex] : undefined;
+			if (anchorEntry && !entrySnapshots.has(anchorEntry)) {
+				entrySnapshots.set(anchorEntry, structuredClone(anchorEntry));
+			}
+			const restoreEntrySnapshots = (): void => {
+				for (const [entry, snapshot] of entrySnapshots) {
+					Object.assign(entry, snapshot);
+					if (entry.type === "message") invalidateMessageCache(entry.message);
+				}
+			};
+			for (const [entry, proposed] of proposedMessages) {
+				entry.message = proposed;
+				invalidateMessageCache(entry.message);
+			}
+			try {
+				this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
+				await this.#host.sessionManager.rewriteEntries();
+				if (!ownerIsCurrent()) {
+					restoreEntrySnapshots();
+					if (this.#host.sessionManager.getSessionId() === sourceSessionId) {
+						try {
+							await this.#host.sessionManager.recoverPersistenceFromCurrentState();
+						} catch (error) {
+							fatalPersistenceFailure = { error };
+							throw error;
+						}
+					}
+					return await discardStaleOwner();
+				}
+			} catch (error) {
+				restoreEntrySnapshots();
+				if (fatalPersistenceFailure !== undefined) throw fatalPersistenceFailure.error;
+				if (ownerIsCurrent()) {
+					const restoredContext = this.#host.buildDisplaySessionContext();
+					this.#host.agent.replaceMessages(restoredContext.messages);
+				}
+				if (!ownerIsCurrent()) return await discardStaleOwner();
+				const errorMessage = `Jev pruning could not persist its history rewrite: ${
+					error instanceof Error ? error.message : String(error)
+				}; trying the configured compaction method.`;
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage,
+				});
+				return await continueNormalMaintenance(0);
+			}
+			historyCommitted = true;
+
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			const rebuiltContext = this.#host.buildDisplaySessionContext();
+			this.#host.agent.replaceMessages(rebuiltContext.messages);
+			this.#host.rebaseAfterCompaction();
+			this.#host.resetAdvisorRuntimes("jev-prune");
+			this.#host.syncTodoPhasesFromBranch();
+			this.#host.closeCodexProviderSessionsForHistoryRewrite();
+
+			const pairsOmitted = accepted.filter(item => item.action === "drop_pair").length;
+			const resultsShortened = accepted.filter(item => item.action === "truncate_result").length;
+			this.#host.emitNotice(
+				"info",
+				`Jev pruning omitted ${pairsOmitted} pair${pairsOmitted === 1 ? "" : "s"}, shortened ${resultsShortened} result${resultsShortened === 1 ? "" : "s"}, and saved ~${tokensSaved.toLocaleString("en-US")} tokens.`,
+				"compaction",
+			);
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (callerSignal.aborted) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				});
+				return {
+					kind: "handled",
+					result: { ...COMPACTION_CHECK_NONE, historyRewritten: true },
+				};
+			}
+
+			const minimumResidualTokens =
+				(preparedContextTokens === undefined
+					? this.#estimateStoredContextTokens()
+					: Math.max(0, preparedContextTokens - tokensSaved)) + (pendingContextTokens ?? 0);
+			const hasHeadroom =
+				!timeoutSignal.aborted &&
+				(willRetry
+					? this.#compactionCreatedRetryFit(minimumResidualTokens)
+					: reason === "idle" || this.#compactionCreatedHeadroom(minimumResidualTokens));
+			if (!hasHeadroom) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					errorMessage: timeoutSignal.aborted
+						? "Jev pruning reached its deadline after saving reductions; trying the configured compaction method."
+						: "Jev pruning saved context but more headroom is required; trying the configured compaction method.",
+				});
+				return await continueNormalMaintenance(tokensSaved);
+			}
+
+			await emitEnd({
+				type: "auto_compaction_end",
+				action: "prune",
+				result: undefined,
+				aborted: false,
+				willRetry,
+			});
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (callerSignal.aborted) {
+				return {
+					kind: "handled",
+					result: { ...COMPACTION_CHECK_NONE, historyRewritten: true },
+				};
+			}
+			let continuationScheduled = false;
+			if (willRetry) {
+				this.#host.scheduleAgentContinue({
+					source: "compaction-booster-retry",
+					delayMs: 100,
+					generation,
+				});
+				continuationScheduled = true;
+			} else {
+				continuationScheduled = this.#host.scheduleCompactionContinuation({
+					generation,
+					autoContinue: reason !== "idle" && shouldAutoContinue,
+					terminalTextAnswer,
+					suppressContinuation,
+				});
+			}
+			return {
+				kind: "handled",
+				result: {
+					...(continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE),
+					historyRewritten: true,
+				},
+			};
+		} catch (error) {
+			if (fatalPersistenceFailure !== undefined) {
+				await discardStaleOwner();
+				throw fatalPersistenceFailure.error;
+			}
+			if (!ownerIsCurrent()) return await discardStaleOwner();
+			if (callerSignal.aborted) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				});
+				return {
+					kind: "handled",
+					result: historyCommitted ? { ...COMPACTION_CHECK_NONE, historyRewritten: true } : COMPACTION_CHECK_NONE,
+				};
+			}
+			if (!historyCommitted && !proposalIsCurrent()) {
+				await emitEnd({
+					type: "auto_compaction_end",
+					action: "prune",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				return await continueNormalMaintenance(0);
+			}
+			const errorMessage = timeoutSignal.aborted
+				? "Jev pruning reached its deadline; trying the configured compaction method."
+				: `Jev pruning failed: ${error instanceof Error ? error.message : String(error)}; trying the configured compaction method.`;
+			await emitEnd({
+				type: "auto_compaction_end",
+				action: "prune",
+				result: undefined,
+				aborted: false,
+				willRetry: false,
+				errorMessage,
+			});
+			if (historyCommitted) {
+				return {
+					kind: "handled",
+					result: { ...COMPACTION_CHECK_NONE, historyRewritten: true },
+				};
+			}
+			return await continueNormalMaintenance(0);
+		} finally {
+			for (const usage of recordedUsages) {
+				const entryId = this.#host.sessionManager.appendModelUsage(
+					{
+						purpose: "compaction-booster",
+						role: "judge",
+						...usage,
+						stopReason: "stop",
+					},
+					usageOwner,
+				);
+				if (entryId) usageOwner.parentId = entryId;
+			}
+			if (this.#autoCompactionAbortController === controller) {
+				this.#autoCompactionAbortController = undefined;
+			}
+		}
 	}
 
 	/**

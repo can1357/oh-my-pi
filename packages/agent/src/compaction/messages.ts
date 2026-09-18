@@ -1,11 +1,14 @@
 import type {
+	AssistantMessage,
 	ImageContent,
 	Message,
 	MessageAttribution,
 	ProviderPayload,
 	TextContent,
+	ToolCall,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import { isOpenAIResponsesClientInputBoundary, normalizeResponsesToolCallId } from "@oh-my-pi/pi-ai/utils";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
 import branchSummaryContextPrompt from "./prompts/branch-summary-context.md" with { type: "text" };
@@ -78,6 +81,237 @@ declare module "../types" {
 	}
 }
 export type ConvertToLlm = (messages: AgentMessage[]) => Message[];
+
+function projectOpenAIResponsesHistoryPayload(
+	providerPayload: ProviderPayload | undefined,
+	omittedCallIds: ReadonlySet<string> | undefined,
+	rewrittenTurn: boolean,
+): ProviderPayload | undefined {
+	if (
+		providerPayload?.type !== "openaiResponsesHistory" ||
+		omittedCallIds === undefined ||
+		omittedCallIds.size === 0
+	) {
+		return providerPayload;
+	}
+
+	const dropAllReasoning = rewrittenTurn && providerPayload.dt === true;
+	const reasoningToRemove = new Set<Record<string, unknown>>();
+	if (!dropAllReasoning) {
+		let responseReasoning: Array<Record<string, unknown>> = [];
+		let responseHasOmittedCall = false;
+		const finishResponse = (): void => {
+			if (responseHasOmittedCall) {
+				for (const reasoning of responseReasoning) reasoningToRemove.add(reasoning);
+			}
+			responseReasoning = [];
+			responseHasOmittedCall = false;
+		};
+		for (const item of providerPayload.items) {
+			if (isOpenAIResponsesClientInputBoundary(item)) {
+				finishResponse();
+				continue;
+			}
+			if (item.type === "reasoning") {
+				responseReasoning.push(item);
+				continue;
+			}
+			if (
+				typeof item.type === "string" &&
+				item.type.endsWith("_call") &&
+				typeof item.call_id === "string" &&
+				omittedCallIds.has(item.call_id)
+			) {
+				responseHasOmittedCall = true;
+			}
+		}
+		finishResponse();
+	}
+
+	let changed = false;
+	const items = providerPayload.items.filter(item => {
+		const omit =
+			(typeof item.call_id === "string" && omittedCallIds.has(item.call_id)) ||
+			(item.type === "reasoning" && (dropAllReasoning || reasoningToRemove.has(item)));
+		if (omit) changed = true;
+		return !omit;
+	});
+	return changed ? { ...providerPayload, items } : providerPayload;
+}
+
+function projectMessageOpenAIResponsesHistory(
+	message: Extract<AgentMessage, { role: "user" | "developer" | "compactionSummary" }>,
+	omittedCallIds: ReadonlySet<string>,
+): AgentMessage {
+	const providerPayload = projectOpenAIResponsesHistoryPayload(message.providerPayload, omittedCallIds, false);
+	return providerPayload === message.providerPayload ? message : { ...message, providerPayload };
+}
+
+function normalizeAssistantAfterToolRemovalWithNativeHistory(
+	message: AssistantMessage,
+	remove: (call: ToolCall) => boolean,
+	keepEmpty: boolean,
+	previouslyOmittedCallIds?: ReadonlySet<string>,
+): AssistantMessage | undefined {
+	let removedCalls: Set<ToolCall> | undefined;
+	let omittedCallIds = previouslyOmittedCallIds;
+	let locallyOmittedCallIds: Set<string> | undefined;
+	for (const block of message.content) {
+		if (block.type !== "toolCall" || !remove(block)) continue;
+		removedCalls ??= new Set<ToolCall>();
+		removedCalls.add(block);
+		const callId = normalizeResponsesToolCallId(block.id).callId;
+		if (omittedCallIds?.has(callId)) continue;
+		locallyOmittedCallIds ??= new Set(omittedCallIds);
+		locallyOmittedCallIds.add(callId);
+		omittedCallIds = locallyOmittedCallIds;
+	}
+
+	const providerPayload = projectOpenAIResponsesHistoryPayload(
+		message.providerPayload,
+		omittedCallIds,
+		removedCalls !== undefined,
+	);
+	if (!removedCalls) {
+		return providerPayload === message.providerPayload ? message : { ...message, providerPayload };
+	}
+	const callsToRemove = removedCalls;
+	const content = message.content
+		.filter(block => !(block.type === "toolCall" && callsToRemove.has(block)) && block.type !== "redactedThinking")
+		.map(block =>
+			block.type === "thinking" && block.thinkingSignature ? { ...block, thinkingSignature: undefined } : block,
+		);
+	const hasSurvivingProviderPayload =
+		providerPayload?.type === "openaiResponsesHistory"
+			? providerPayload.items.length > 0
+			: providerPayload !== undefined;
+	if (content.length === 0 && !keepEmpty && !hasSurvivingProviderPayload) return undefined;
+	return { ...message, content, providerPayload };
+}
+
+/**
+ * Remove selected native tool calls from an assistant turn and normalize
+ * provider-bound reasoning on the rewritten turn. Opaque reasoning is tied to
+ * the original turn shape, so a changed turn drops encrypted reasoning and
+ * clears signatures while preserving visible thinking.
+ */
+export function normalizeAssistantAfterToolRemoval(
+	message: AssistantMessage,
+	remove: (call: ToolCall) => boolean,
+	keepEmpty = false,
+): AssistantMessage | undefined {
+	return normalizeAssistantAfterToolRemovalWithNativeHistory(message, remove, keepEmpty);
+}
+
+/**
+ * Project persisted native tool-history omission markers into model context.
+ * Unchanged messages retain identity; journal objects are never mutated.
+ */
+export function projectToolHistoryMessage(message: AgentMessage): AgentMessage | undefined {
+	if (message.role === "toolResult" && message.contextOmitted === true) return undefined;
+	if (message.role !== "assistant") return message;
+	return normalizeAssistantAfterToolRemoval(message, call => call.contextOmitted === true);
+}
+
+/** Newest persisted tool-result rewrite timestamp in a message sequence. */
+export function latestToolHistoryRewriteAt(messages: readonly AgentMessage[]): number | undefined {
+	let latest: number | undefined;
+	for (const message of messages) {
+		if (message.role !== "toolResult" || message.prunedAt === undefined || !Number.isFinite(message.prunedAt)) {
+			continue;
+		}
+		latest = latest === undefined ? message.prunedAt : Math.max(latest, message.prunedAt);
+	}
+	return latest;
+}
+
+/**
+ * Carry a persisted rewrite timestamp on a copy of the first surviving user
+ * message. The source message and journal remain untouched.
+ */
+export function withToolHistoryRewriteAnchor(
+	messages: readonly AgentMessage[],
+	latestRewriteAt: number | undefined,
+): AgentMessage[] {
+	const output = [...messages];
+	if (latestRewriteAt === undefined) return output;
+	const firstUserIndex = output.findIndex(message => message.role === "user");
+	if (firstUserIndex < 0) return output;
+	const firstUser = output[firstUserIndex];
+	if (firstUser.role !== "user") return output;
+	output[firstUserIndex] = {
+		...firstUser,
+		historyRewriteAt: Math.max(firstUser.historyRewriteAt ?? 0, latestRewriteAt),
+	};
+	return output;
+}
+
+/**
+ * Project a message sequence while preserving one output slot per source
+ * message. Omitted messages occupy `undefined` slots so callers can retain
+ * journal-entry alignment without giving up sequence-aware native filtering.
+ */
+export function projectToolHistoryMessagesAligned(messages: readonly AgentMessage[]): Array<AgentMessage | undefined> {
+	let omittedCallIds: Set<string> | undefined;
+	for (const message of messages) {
+		if (message.role === "toolResult" && message.contextOmitted === true) {
+			omittedCallIds ??= new Set<string>();
+			omittedCallIds.add(normalizeResponsesToolCallId(message.toolCallId).callId);
+			continue;
+		}
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall" && block.contextOmitted === true) {
+				omittedCallIds ??= new Set<string>();
+				omittedCallIds.add(normalizeResponsesToolCallId(block.id).callId);
+			}
+		}
+	}
+
+	const projected: Array<AgentMessage | undefined> = [];
+	for (const message of messages) {
+		if (message.role === "toolResult" && message.contextOmitted === true) {
+			projected.push(undefined);
+			continue;
+		}
+		if (message.role === "assistant") {
+			projected.push(
+				normalizeAssistantAfterToolRemovalWithNativeHistory(
+					message,
+					call => call.contextOmitted === true,
+					false,
+					omittedCallIds,
+				),
+			);
+			continue;
+		}
+		if (
+			omittedCallIds !== undefined &&
+			(message.role === "user" || message.role === "developer" || message.role === "compactionSummary")
+		) {
+			projected.push(projectMessageOpenAIResponsesHistory(message, omittedCallIds));
+			continue;
+		}
+		projected.push(message);
+	}
+	return projected;
+}
+
+/**
+ * Project a message sequence and carry the newest persisted rewrite timestamp
+ * on a copy of its first surviving user message.
+ */
+export function projectToolHistoryMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+	const projected = projectToolHistoryMessagesAligned(messages);
+	let outputIndex = 0;
+	for (let inputIndex = 0; inputIndex < projected.length; inputIndex++) {
+		const message = projected[inputIndex];
+		if (message === undefined) continue;
+		projected[outputIndex++] = message;
+	}
+	projected.length = outputIndex;
+	return withToolHistoryRewriteAnchor(projected as AgentMessage[], latestToolHistoryRewriteAt(messages));
+}
 
 function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | ImageContent)[] {
 	if (message.prunedAt === undefined) {
@@ -201,6 +435,9 @@ function isCoreCompactionMessage(message: AgentMessage): message is AgentMessage
  * snapcompact frames once silently fell off the provider request.
  */
 export function convertMessageToLlm(message: AgentMessage): Message | undefined {
+	const projected = projectToolHistoryMessage(message);
+	if (projected === undefined) return undefined;
+	message = projected;
 	if (isCoreCompactionMessage(message)) {
 		switch (message.role) {
 			case "custom":
@@ -279,5 +516,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
  * core LLM roles and the compaction messages owned by this package.
  */
 export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.map(convertMessageToLlm).filter(message => message !== undefined);
+	return projectToolHistoryMessages(messages)
+		.map(convertMessageToLlm)
+		.filter(message => message !== undefined);
 }

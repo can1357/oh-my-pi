@@ -10,6 +10,7 @@
  * the auth registry (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL`
  * overrides the API root, `TYPESAFE_DEFAULT_MODEL` the model.
  */
+import { scheduler } from "node:timers/promises";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
@@ -157,7 +158,7 @@ export class TypeSafeJudge implements Judge {
 				});
 			} catch (error) {
 				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
-				await Bun.sleep(backoffMs(attempt, undefined));
+				await scheduler.wait(backoffMs(attempt, undefined), { signal });
 				continue;
 			}
 			if (response.ok) return (await response.json()) as T;
@@ -167,7 +168,7 @@ export class TypeSafeJudge implements Judge {
 			});
 			const transient = response.status === 408 || response.status === 429 || response.status >= 500;
 			if (!transient || attempt + 1 >= MAX_ATTEMPTS) throw error;
-			await Bun.sleep(backoffMs(attempt, response.headers));
+			await scheduler.wait(backoffMs(attempt, response.headers), { signal });
 		}
 	}
 }

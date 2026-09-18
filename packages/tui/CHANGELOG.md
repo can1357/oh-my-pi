@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Settings rows can remain visible, focusable, and searchable while unavailable, with enabled boolean preferences still allowed to switch off ([#12397](https://github.com/can1357/oh-my-pi/pull/12397) by [@prickly-dingus](https://github.com/prickly-dingus)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

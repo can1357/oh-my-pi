@@ -124,6 +124,8 @@ export interface SettingsDisplayEntry {
 	enumValues?: readonly string[];
 	credential?: boolean;
 	condition?: () => boolean;
+	/** Live reason this setting cannot currently be enabled; the row stays visible. */
+	unavailableReason?: () => string | undefined;
 }
 
 export interface SettingsHost {
@@ -154,6 +156,8 @@ interface BaseSettingDef {
 	 * enums, submenus, and text inputs.
 	 */
 	condition?: () => boolean;
+	/** Live enablement gate, independent of row visibility. */
+	unavailableReason?: () => string | undefined;
 }
 
 export interface BooleanSettingDef extends BaseSettingDef {
@@ -220,6 +224,7 @@ function entryToSettingDef(entry: SettingsDisplayEntry): SettingDef | null {
 		tab: ui.tab,
 		group: ui.group,
 		condition,
+		unavailableReason: entry.unavailableReason,
 	};
 
 	if (schemaType === "boolean") {

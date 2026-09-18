@@ -638,6 +638,7 @@ contextPromotion:
 
 compaction:
   enabled: true
+  boosterEnabled: false # experimental TypeSafe pre-pass for automatic/idle compaction
   methodOrder: [remote, snapcompact, handoff, shake, soft]
   midTurnEnabled: true # check thresholds between tool-loop provider requests
   thresholdPercent: -1 # -1 = default reserve-based behavior
@@ -651,6 +652,7 @@ memory:
 | `extendedContext` | boolean | `false` | Opt in to larger model windows; `/extended-context on`, `off`, or `status`. |
 | `contextPromotion.enabled`    | boolean | `false`                                  | Promote to the active model's explicit `contextPromotionTarget` on context overflow.                                                                                                                                                      |
 | `compaction.enabled`          | boolean | `true`                                   | Automatic conversation compaction.                                                                                                                                                                                                        |
+| `compaction.boosterEnabled`   | boolean | `false`                                  | Experimental selective pruning before automatic/idle compaction. Requires configured TypeSafe credentials and `providers.judgmentProvider: auto` or `typesafe`; sends conversation text and tool inputs, but not tool-result bodies, to TypeSafe. Manual `/compact` is unchanged. |
 | `compaction.asyncEnabled`     | boolean | `true`                                   | Speculatively summarize in the background as context nears the compaction threshold, then splice the ready result in when the threshold is crossed.                                                                                        |
 | `compaction.midTurnEnabled`   | boolean | `true`                                   | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request.                                                                                                                                                  |
 | `compaction.methodOrder`      | array   | `remote, snapcompact, handoff, shake, soft` | Ordered fallbacks. `remote` uses provider-native server compaction (OpenAI Responses compact, Anthropic compaction beta); unavailable or failed methods advance. |
@@ -663,6 +665,13 @@ memory:
 | `autolearn.enabled`           | boolean | `false`       | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
 | `autolearn.autoContinue`      | boolean | `false`       | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn.                                                                                                           |
 | `autolearn.minToolCalls`      | number  | `5`           | Only nudge after a turn that used at least this many tools.                                                                                                                                                                               |
+
+The `/settings` row for `compaction.boosterEnabled` remains visible when TypeSafe
+credentials are missing or the judgment provider is `llm`. It shows the reason
+and cannot be switched on, while an already-enabled saved value can still be
+switched off. Opening the panel checks only locally configured credentials and
+does not contact TypeSafe. See [Compaction](./compaction.md#experimental-jev-compaction-booster)
+for persistence, fallback, and downgrade caveats.
 
 `compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
 

@@ -4,6 +4,7 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { stringifyJson } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isEstimateCacheable, messageEstimateVersion } from "./compaction/message-cache";
+import { projectToolHistoryMessage } from "./compaction/messages";
 import type { AgentMessage } from "./types";
 
 const testEnv = Bun.env.NODE_ENV === "test";
@@ -207,6 +208,9 @@ export class Tokenizer {
 	}
 
 	#measureMessage(message: AgentMessage, excludeEncryptedReasoning: boolean): number {
+		const projected = projectToolHistoryMessage(message);
+		if (projected === undefined) return 0;
+		message = projected;
 		const fragments: string[] = [];
 		let extra = 0;
 		// Declaration-merged app roles (the coding-agent's bashExecution) are

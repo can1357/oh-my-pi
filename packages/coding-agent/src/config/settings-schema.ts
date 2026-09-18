@@ -2556,6 +2556,17 @@ export const SETTINGS_SCHEMA = {
 			description: "Automatically compact context when it gets too large",
 		},
 	},
+	"compaction.boosterEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Jev Compaction Booster",
+			description:
+				"Experimental selective pruning before automatic/idle compaction only. Sends conversation text and tool inputs to TypeSafe.",
+		},
+	},
 	"compaction.experimentalContextManagement": {
 		type: "boolean",
 		default: false,
@@ -6274,6 +6285,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
+	boosterEnabled: boolean;
 	experimentalContextManagement?: boolean;
 	methodOrder: CompactionMethod[];
 	thresholdPercent: number;
