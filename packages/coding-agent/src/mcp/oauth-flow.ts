@@ -96,6 +96,12 @@ export interface MCPStoredOAuthCredential extends OAuthCredential {
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
+const FIGMA_MCP_AUTHORIZATION_HOSTNAME = "www.figma.com";
+const FIGMA_MCP_AUTHORIZATION_PATH = "/oauth/mcp";
+const FIGMA_MCP_REGISTRATION_HOSTNAME = "api.figma.com";
+const FIGMA_MCP_REGISTRATION_PATH = "/v1/oauth/mcp/register";
+const FIGMA_MCP_CLIENT_NAME = "GitHub Copilot CLI";
+const FIGMA_MCP_REDIRECT_URI = "http://127.0.0.1:51160/";
 
 function hasOAuthScope(scopes: string | null | undefined, scope: string): boolean {
 	return !!scopes && scopes.split(/\s+/).includes(scope);
@@ -217,8 +223,31 @@ function staticClientIdFromConfig(config: MCPOAuthConfig): string | undefined {
 	}
 }
 
+function matchesHttpsEndpoint(value: string | undefined, hostname: string, pathname: string): boolean {
+	if (!value) return false;
+	try {
+		const url = new URL(value);
+		return url.protocol === "https:" && url.hostname === hostname && url.port === "" && url.pathname === pathname;
+	} catch {
+		return false;
+	}
+}
+
+function usesFigmaMcpDcrCompatibility(config: MCPOAuthConfig): boolean {
+	if (staticClientIdFromConfig(config)) return false;
+	return (
+		matchesHttpsEndpoint(config.registrationUrl, FIGMA_MCP_REGISTRATION_HOSTNAME, FIGMA_MCP_REGISTRATION_PATH) ||
+		matchesHttpsEndpoint(config.authorizationUrl, FIGMA_MCP_AUTHORIZATION_HOSTNAME, FIGMA_MCP_AUTHORIZATION_PATH)
+	);
+}
+
 function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOptions {
-	const redirectUri = resolveRedirectUri(config.redirectUri);
+	const useFigmaDefaults =
+		usesFigmaMcpDcrCompatibility(config) &&
+		config.redirectUri === undefined &&
+		config.callbackPort === undefined &&
+		config.callbackPath === undefined;
+	const redirectUri = resolveRedirectUri(useFigmaDefaults ? FIGMA_MCP_REDIRECT_URI : config.redirectUri);
 	validateRedirectConfig(config, redirectUri);
 	// When a client_id is already pinned (config-supplied or embedded in the
 	// authorization URL), it was registered against a specific redirect URI.
@@ -230,8 +259,10 @@ function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOption
 	// registration on demand with whichever loopback URI we actually bound —
 	// the provider issues a client_id tied to *that* URI, so the random-port
 	// fallback remains safe for first-install DCR flows whose preferred port
-	// happens to be occupied.
-	const allowPortFallback = staticClientIdFromConfig(config) === undefined;
+	// happens to be occupied. Figma is the exception: its catalog gate accepts
+	// only Copilot's fixed loopback URI, so that compatibility path cannot fall
+	// back to another port.
+	const allowPortFallback = !useFigmaDefaults && staticClientIdFromConfig(config) === undefined;
 	return {
 		preferredPort: resolveCallbackPort(config.callbackPort, redirectUri),
 		callbackPath: resolveCallbackPath(config.callbackPath, redirectUri),
@@ -614,7 +645,13 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 		try {
 			const registrationBody: Record<string, unknown> = {
-				client_name: "oh-my-pi",
+				client_name: matchesHttpsEndpoint(
+					registrationEndpoint,
+					FIGMA_MCP_REGISTRATION_HOSTNAME,
+					FIGMA_MCP_REGISTRATION_PATH,
+				)
+					? FIGMA_MCP_CLIENT_NAME
+					: "oh-my-pi",
 				redirect_uris: [redirectUri],
 				grant_types: ["authorization_code", "refresh_token"],
 				response_types: ["code"],
