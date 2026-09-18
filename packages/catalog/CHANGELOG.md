@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Union Alpha using the wrong API on OpenCode Go and Zen; it now uses the Messages endpoint ([#12380](https://github.com/can1357/oh-my-pi/pull/12380) by [@Dante-dan](https://github.com/Dante-dan)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
