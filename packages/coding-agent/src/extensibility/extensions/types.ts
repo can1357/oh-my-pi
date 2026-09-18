@@ -75,12 +75,16 @@ import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
+
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
+import type { RemoteTransport } from "../../irc/bus";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
+import type { AgentStatus } from "../../registry/agent-registry";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
@@ -1174,6 +1178,53 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		: ServiceTier;
 
 /**
+ * Scoped inbound-IRC surface exposed to extensions (the murmur bridge, murmur-4e7n).
+ * A narrow door onto the process-global IrcBus so extensions never touch the bus class
+ * directly. Always injected into the ExtensionAPI (like the sibling module surfaces); an
+ * extension that also targets older omp builds may runtime-detect `pi.irc` before use.
+ */
+export interface IrcApi {
+	/**
+	 * Deliver a message that arrived from a remote transport (e.g. the murmur bridge)
+	 * into a local agent's session on the process-global bus. Local-only: a registry
+	 * miss returns `failed` and never bounces back onto the bus (contract §8). Returns
+	 * omp's freshly-minted native id so the caller can correlate it with its own msgId.
+	 */
+	deliverInbound(
+		msg: Omit<IrcMessage, "id" | "ts">,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<{ receipt: IrcDeliveryReceipt; id: string }>;
+
+	/**
+	 * Claim a globally-unique `namespace` and install (or, with `undefined`, clear) its outbound
+	 * transport. A send addressed to `@<namespace>/<name>` routes to this transport with the bare
+	 * `<name>` in `opts.toName`. Claiming a namespace already owned by another live extension throws.
+	 * OPTIONAL: present only on omp builds carrying the outbound/[3] transport seam (murmur-l5vv);
+	 * capability-detected by callers, absent on inbound-only builds.
+	 */
+	setRemoteTransport?(namespace: string, transport: RemoteTransport | undefined): void;
+
+	/**
+	 * Register a cross-process `remote` proxy peer at `@<namespace>/<name>`, using the namespace this
+	 * extension claimed via {@link IrcApi.setRemoteTransport} (call that first, else this returns
+	 * `undefined`). The bare `name` is composed into the id; `kind` is forced to `remote` and `session`
+	 * to `null`. Returns the composed `@ns/name` id (the caller can address it) or `undefined` on an
+	 * invalid name / no claimed namespace. Attributed to this load so a failed load or the extension's
+	 * own teardown rolls it back. Remote ids are disjoint from local ids and from other extensions'
+	 * namespaces, so registration is collision-free — no reserved-id or clobber guards. OPTIONAL:
+	 * outbound-seam builds only.
+	 */
+	registerRemotePeer?(peer: { name: string; displayName?: string; status?: AgentStatus }): string | undefined;
+
+	/**
+	 * Retract a `remote` proxy peer previously registered by THIS extension (ownership-checked, so one
+	 * extension cannot evict another's peers). Accepts either the composed `@ns/name` id or the bare
+	 * `name` (composed against the claimed namespace). OPTIONAL: outbound-seam builds only.
+	 */
+	unregisterRemotePeer?(idOrName: string): boolean;
+}
+
+/**
  * ExtensionAPI passed to extension factory functions.
  */
 export interface ExtensionAPI {
@@ -1195,6 +1246,9 @@ export interface ExtensionAPI {
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
+
+	/** Scoped inbound-IRC surface for the murmur bridge (murmur-4e7n) — always injected (see IrcApi). */
+	irc: IrcApi;
 
 	// =========================================================================
 	// Event Subscription
@@ -1449,6 +1503,13 @@ export interface ExtensionAPI {
 	/** Set the session name. Persists to the session file. */
 	setSessionName(name: string): Promise<void>;
 
+	/**
+	 * The session's own agent id in the global registry — `"Main"` (or `acp:<sessionId>`) for a
+	 * top-level session, a subagent id otherwise. A session-scoped extension (e.g. an IRC bridge)
+	 * uses it to filter the global registry to the agents rooted at this session.
+	 */
+	getAgentId(): string | undefined;
+
 	// =========================================================================
 	// Provider Registration
 	// =========================================================================
@@ -1680,6 +1741,8 @@ export interface ExtensionActions {
 	getServiceTiers?: GetServiceTiersHandler;
 	setServiceTier?: SetServiceTierHandler;
 	getSessionName: () => string | undefined;
+	/** The session's own agent id in the registry (e.g. "Main", "acp:<sessionId>", or a subagent id). */
+	getAgentId: () => string | undefined;
 	setSessionName: (name: string) => Promise<void>;
 }
 

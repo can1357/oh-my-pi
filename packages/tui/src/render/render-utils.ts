@@ -57,6 +57,14 @@ export function disambiguateDisplayLabels(rawLabels: string[], reservedLabels: r
 	});
 }
 
+/** Normalize a single-line, externally-sourced string (e.g. a remote-transport receipt error or id)
+ * for TUI display: strip ANSI/VT escapes and C0/C1 control chars (which would otherwise break the
+ * row layout or inject terminal sequences), collapse whitespace, and bound length. */
+export function sanitizeInline(value: string, max = 200): string {
+	const clean = sanitizeText(value).replace(/\s+/g, " ").trim();
+	return truncateToWidth(clean, max);
+}
+
 // =============================================================================
 // Standardized Display Constants
 // =============================================================================

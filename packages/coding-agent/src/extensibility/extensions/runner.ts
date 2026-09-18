@@ -683,6 +683,7 @@ export class ExtensionRunner {
 		this.runtime.getServiceTiers = actions.getServiceTiers ?? throwUnsupportedServiceTierAction;
 		this.runtime.setServiceTier = actions.setServiceTier ?? throwUnsupportedServiceTierAction;
 		this.runtime.getSessionName = actions.getSessionName;
+		this.runtime.getAgentId = actions.getAgentId;
 		this.runtime.setSessionName = actions.setSessionName;
 		this.runtime.registerProvider = (name, config, sourceId) => {
 			this.modelRegistry.registerProvider(name, config, sourceId);

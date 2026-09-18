@@ -17,7 +17,7 @@ import type {
 	TSchema,
 } from "@oh-my-pi/pi-ai";
 import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
-import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEacces, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
 import { isServiceTierFamily, isServiceTierForFamily } from "../../config/service-tier";
@@ -27,6 +27,8 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
+import { composeRemoteId, IrcBus, isValidRemoteName, isValidRemoteNamespace, remoteNamespaceOf } from "../../irc/bus";
+import { AgentRegistry } from "../../registry/agent-registry";
 import type { SendUserMessageOptions } from "../../session/agent-session";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
@@ -46,6 +48,7 @@ import type {
 	ExtensionContext,
 	ExtensionFactory,
 	ExtensionRuntime as IExtensionRuntime,
+	IrcApi,
 	LoadExtensionsResult,
 	MessageRenderer,
 	PreparedExtension,
@@ -166,9 +169,35 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
+	getAgentId(): string | undefined {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
 	setSessionName(): Promise<void> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
+}
+
+/**
+ * Sanitize a bridge-provided remote peer display name before it is stored on an AgentRef and later
+ * interpolated into subagent system prompts (renderIrcPeerRoster). The value arrives over the
+ * transport from another process, so an unsanitized name with newlines/control chars could inject
+ * lines into every spawned subagent's prompt. Collapse to a bounded single line; fall back to the
+ * (already isValidRemoteName-validated) bare name when nothing usable remains.
+ */
+const REMOTE_DISPLAY_NAME_MAX = 64;
+function sanitizeRemoteDisplayName(raw: string | undefined, fallback: string): string {
+	if (typeof raw !== "string") return fallback;
+	let out = "";
+	for (const ch of raw) {
+		const code = ch.codePointAt(0) ?? 0;
+		// Drop C0/C1 control chars (incl. newlines, tabs, ESC) so a hostile name can't break out of
+		// its roster line; printable chars pass through and whitespace runs are collapsed below.
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? " " : ch;
+	}
+	const single = out.replace(/\s+/g, " ").trim();
+	if (single.length === 0) return fallback;
+	return single.length > REMOTE_DISPLAY_NAME_MAX ? `${single.slice(0, REMOTE_DISPLAY_NAME_MAX - 1)}…` : single;
 }
 
 /**
@@ -181,6 +210,117 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	readonly typebox = TypeBox;
 	readonly arktype = type;
 	readonly zod = zod;
+	/** The single namespace this extension load claimed via `irc.setRemoteTransport` (one per load). */
+	#claimedNamespace: string | undefined;
+	#ircTeardownArmed = false;
+	// Set by the safety-net teardown (session_shutdown): once released, this load's IRC surface is
+	// closed, so a later install/registration (e.g. an async reconnect firing after teardown) is
+	// rejected — it must not re-establish a transport/proxy that no teardown will release (#7401 review).
+	#ircClosed = false;
+	readonly irc: IrcApi = {
+		deliverInbound: (msg, opts) => {
+			// A load may only inject inbound from the namespace it claimed via setRemoteTransport, so a
+			// bridge for namespace A cannot forge `@B/x` and have B's wait/auto-reply route a reply back
+			// out through B's transport (#7401 review). Enforced per-load, above the shared-registry bus.
+			if (this.#claimedNamespace === undefined || remoteNamespaceOf(msg.from) !== this.#claimedNamespace) {
+				return Promise.resolve({
+					receipt: {
+						to: msg.to,
+						outcome: "failed" as const,
+						error: `Inbound sender "${msg.from}" is not in this load's claimed IRC namespace "@${this.#claimedNamespace ?? "(none)"}/".`,
+					},
+					id: Snowflake.next(),
+				});
+			}
+			return IrcBus.forRegistry(this.registry).deliverInbound(msg, opts);
+		},
+		setRemoteTransport: (namespace, transport) => {
+			if (!isValidRemoteNamespace(namespace)) {
+				throw new Error(
+					`Invalid IRC namespace ${JSON.stringify(namespace)} (allowed: letters, digits, ".", "_", "-").`,
+				);
+			}
+			if (this.#claimedNamespace !== undefined && this.#claimedNamespace !== namespace) {
+				throw new Error(
+					`This extension already claimed IRC namespace "${this.#claimedNamespace}"; an extension load owns a single namespace.`,
+				);
+			}
+			const bus = IrcBus.forRegistry(this.registry);
+			if (transport === undefined) {
+				// Clearing this load's transport (reconnect / teardown). A clear of a namespace this load
+				// never claimed stays a hard error, but a clear when the claim is already gone — the
+				// session_shutdown safety net released it first, and those handlers run concurrently
+				// (ExtensionRunner awaits them via Promise.all) — is a no-op, so a bridge's own teardown
+				// clear never races the net (#7401 review).
+				if (this.#claimedNamespace !== namespace) {
+					throw new Error(
+						`IRC namespace ${JSON.stringify(namespace)} is not claimed; install a transport before clearing.`,
+					);
+				}
+				if (bus.namespaceOwner(namespace) === this.ownerToken) {
+					bus.setRemoteTransport(namespace, undefined, this.ownerToken, this.extension.path);
+				}
+				return;
+			}
+			if (this.#ircClosed) {
+				throw new Error(
+					`IRC namespace ${JSON.stringify(namespace)} cannot be claimed: this extension load's IRC surface was released at session shutdown.`,
+				);
+			}
+			// Root-only claim origination: only a top-level (root) session may CLAIM an unowned namespace.
+			// A subagent that inherits the same bridge may only SHARE an already-claimed one (the same-
+			// source no-op below); it must not originate a claim, else a transient subagent would own the
+			// namespace and its teardown would strand still-live siblings (#7401 review).
+			if (bus.namespaceOwner(namespace) === undefined && !this.isRootSession) {
+				throw new Error(
+					`Only the top-level session may claim IRC namespace ${JSON.stringify(namespace)}; a subagent shares the root's claim rather than originating one.`,
+				);
+			}
+			bus.setRemoteTransport(namespace, transport, this.ownerToken, this.extension.path);
+			this.#claimedNamespace = namespace;
+			this.#armIrcTeardown();
+		},
+		registerRemotePeer: peer => {
+			// A remote peer lives at `@<claimedNamespace>/<name>`; a namespace must be claimed first (via
+			// setRemoteTransport). The composed id is disjoint from local ids (`@` reserved) and from other
+			// extensions' peers (namespaces are globally unique), so registration is collision-free — no
+			// reserved-id or clobber guards — and is attributed to this load's ownerToken for rollback.
+			if (this.#ircClosed) return undefined; // released at shutdown: no post-teardown roster writes
+			const namespace = this.#claimedNamespace;
+			if (namespace === undefined || !isValidRemoteName(peer.name)) return undefined;
+			const id = composeRemoteId(namespace, peer.name);
+			// Only the namespace OWNER writes the roster. A subagent sharing the root's claim (a same-
+			// source non-owner no-op in setRemoteTransport) is a read-only passenger: registering here
+			// would overwrite the owner's `@ns/name` ref with this load's ownerToken, and this load's
+			// teardown (releaseExtensionIrc) would then unregister a peer the owner still needs (#7401
+			// review). Return the composed id so a passenger's call still resolves to the shared peer.
+			if (IrcBus.forRegistry(this.registry).namespaceOwner(namespace) !== this.ownerToken) {
+				return id;
+			}
+			this.registry.register({
+				id,
+				displayName: sanitizeRemoteDisplayName(peer.displayName, peer.name),
+				kind: "remote",
+				session: null,
+				status: peer.status,
+				ownerToken: this.ownerToken,
+			});
+			return id;
+		},
+		unregisterRemotePeer: idOrName => {
+			// Accept the composed `@ns/name` id or a bare name (composed against the claimed namespace).
+			let id = idOrName;
+			const namespace = this.#claimedNamespace;
+			if (remoteNamespaceOf(idOrName) === undefined && namespace !== undefined && isValidRemoteName(idOrName)) {
+				id = composeRemoteId(namespace, idOrName);
+			}
+			const registry = this.registry;
+			const ref = registry.get(id);
+			// Ownership-checked: a load may retract only the remote proxies it registered.
+			if (ref?.kind !== "remote" || ref.ownerToken !== this.ownerToken) return false;
+			return registry.unregister(id);
+		},
+	};
 	readonly flagValues = new Map<string, boolean | string>();
 	readonly pendingProviderRegistrations: Array<{
 		name: string;
@@ -194,7 +334,37 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
 		public readonly events: EventBus,
+		/** Per-load owner token stamped on refs this load registers (see {@link AgentRef.ownerToken}). */
+		private readonly ownerToken: string,
+		/**
+		 * The session's agent registry (default AgentRegistry.global()). Remote-peer proxies this load
+		 * registers - and their teardown - target THIS registry, so an SDK embedder with a custom
+		 * per-session registry lists/receives its own peers instead of leaking into the global one.
+		 */
+		private readonly registry: AgentRegistry,
+		/** Whether this load's session is the top-level root of its registry (agentKind "main"). Only a
+		 * root may ORIGINATE a namespace claim via setRemoteTransport; a subagent may only share the
+		 * root's existing claim (see setRemoteTransport / registerRemotePeer). */
+		private readonly isRootSession: boolean,
 	) {}
+
+	/**
+	 * Arm the one-shot IRC safety-net teardown on the FIRST namespace claim: release this load's
+	 * process-global namespace claims, transports, and `remote` refs on `session_shutdown`, so a claim
+	 * never outlives its load in a long-lived (SDK/ACP) host. Registered at claim time (not deferred to
+	 * after the factory) so a delayed claim from a runtime handler — e.g. a bridge calling
+	 * setRemoteTransport from `session_start` once it has `pi.getAgentId()` — is covered too (#7401
+	 * review). Ordering among shutdown handlers is irrelevant: the release and the extension's own
+	 * transport clear are each idempotent, and session_shutdown handlers run concurrently anyway.
+	 */
+	#armIrcTeardown(): void {
+		if (this.#ircTeardownArmed) return;
+		this.#ircTeardownArmed = true;
+		this.on("session_shutdown", async () => {
+			this.#ircClosed = true;
+			releaseExtensionIrc(this.ownerToken, this.registry);
+		});
+	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
 		const list = this.extension.handlers.get(event) ?? [];
@@ -344,6 +514,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.getSessionName();
 	}
 
+	getAgentId(): string | undefined {
+		return this.runtime.getAgentId();
+	}
+
 	setSessionName(name: string): Promise<void> {
 		return this.runtime.setSessionName(name);
 	}
@@ -379,14 +553,34 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 }
 
 /**
- * Runs an extension factory with provider registration rollback on failure.
- * Restores the complete registration queue when the factory throws because an
- * extension may unregister entries queued by an earlier extension.
+ * Release the IRC resources a single extension load owns, keyed by its `ownerToken`: drop its
+ * namespace claims + transports on the process-global bus (freeing the namespaces for re-claim) and
+ * unregister from `registry` (the load's session registry) every `remote` proxy ref it registered.
+ * Owner-scoped + idempotent, so sibling loads are untouched. Runs on BOTH factory-failure rollback and
+ * clean session_shutdown teardown, so a claim never outlives its load.
+ */
+function releaseExtensionIrc(ownerToken: string, registry: AgentRegistry): void {
+	IrcBus.forRegistry(registry).releaseTransportsForOwner(ownerToken);
+	for (const ref of registry.list()) {
+		if (ref.ownerToken === ownerToken) registry.unregister(ref.id);
+	}
+}
+
+/**
+ * Runs an extension factory with rollback of process-global state the factory may have mutated
+ * before throwing. Restores the complete provider-registration queue (an extension may unregister
+ * entries queued by an earlier extension), this load's {@link IrcBus} remote transport, and any `remote`
+ * proxy refs the factory registered via `pi.irc.registerRemotePeer` (attributed by the per-load
+ * `ownerToken`). So a factory that installs a transport / seeds remote peers and then throws leaves
+ * no stale transport and no orphaned proxies — and, because the token is per LOAD not per source
+ * path, a failed load never retracts a sibling load's peers (can1357/oh-my-pi#7401 review).
  */
 async function runExtensionFactory(
 	factory: ExtensionFactory,
 	api: ExtensionAPI,
 	runtime: IExtensionRuntime,
+	ownerToken: string,
+	registry: AgentRegistry,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
 
@@ -398,6 +592,9 @@ async function runExtensionFactory(
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
 		);
+		// Release this load's IRC state (namespace claims + transports + `remote` refs), owner-scoped so
+		// sibling loads are untouched. Identical to the clean session_shutdown teardown (#armIrcTeardown).
+		releaseExtensionIrc(ownerToken, registry);
 		throw error;
 	}
 }
@@ -430,6 +627,8 @@ async function bindExtension(
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
+	registry: AgentRegistry,
+	isRootSession: boolean,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const factory = imported.factory;
 	if (imported.error !== null || factory === null) {
@@ -437,8 +636,18 @@ async function bindExtension(
 	}
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
-		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
+		const ownerToken = `${extension.path}:${crypto.randomUUID()}`;
+		const api = new ConcreteExtensionAPI(
+			PiCodingAgent,
+			extension,
+			runtime,
+			cwd,
+			eventBus,
+			ownerToken,
+			registry,
+			isRootSession,
+		);
+		await withHostGuard(() => runExtensionFactory(factory, api, runtime, ownerToken, registry));
 
 		return { extension, error: null };
 	} catch (err) {
@@ -456,10 +665,22 @@ export async function loadExtensionFromFactory(
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
 	name = "<inline>",
+	registry: AgentRegistry = AgentRegistry.global(),
+	isRootSession = true,
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
-	await runExtensionFactory(factory, api, runtime);
+	const ownerToken = `${extension.path}:${crypto.randomUUID()}`;
+	const api = new ConcreteExtensionAPI(
+		PiCodingAgent,
+		extension,
+		runtime,
+		cwd,
+		eventBus,
+		ownerToken,
+		registry,
+		isRootSession,
+	);
+	await runExtensionFactory(factory, api, runtime, ownerToken, registry);
 	return extension;
 }
 
@@ -471,9 +692,15 @@ export async function loadExtensionFromFactory(
  * sequentially in the original path order, so registration semantics
  * (last-wins collisions, shared runtime flag defaults) stay deterministic.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	registry: AgentRegistry = AgentRegistry.global(),
+	isRootSession = true,
+): Promise<LoadExtensionsResult> {
 	const preparedExtensions = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
-	return bindPreparedExtensions(preparedExtensions, cwd, eventBus);
+	return bindPreparedExtensions(preparedExtensions, cwd, eventBus, registry, isRootSession);
 }
 
 /** Bind previously imported extension factories to a fresh session runtime. */
@@ -481,6 +708,8 @@ export async function bindPreparedExtensions(
 	preparedExtensions: readonly PreparedExtension[],
 	cwd: string,
 	eventBus?: EventBus,
+	registry: AgentRegistry = AgentRegistry.global(),
+	isRootSession = true,
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
@@ -488,7 +717,15 @@ export async function bindPreparedExtensions(
 	const runtime = new ExtensionRuntime();
 
 	for (const prepared of preparedExtensions) {
-		const { extension, error } = await bindExtension(prepared.path, prepared, cwd, resolvedEventBus, runtime);
+		const { extension, error } = await bindExtension(
+			prepared.path,
+			prepared,
+			cwd,
+			resolvedEventBus,
+			runtime,
+			registry,
+			isRootSession,
+		);
 
 		if (error) {
 			errors.push({ path: prepared.path, error });
@@ -660,7 +897,9 @@ export async function discoverAndLoadExtensions(
 	eventBus?: EventBus,
 	disabledExtensionIds?: string[],
 	options: DiscoverExtensionPathOptions = {},
+	registry: AgentRegistry = AgentRegistry.global(),
+	isRootSession = true,
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, options);
-	return loadExtensions(paths, cwd, eventBus);
+	return loadExtensions(paths, cwd, eventBus, registry, isRootSession);
 }

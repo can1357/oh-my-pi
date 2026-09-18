@@ -401,6 +401,27 @@ describe("collab read-only links", () => {
 		}
 	});
 
+	it("rejects agent-cmd for a remote proxy and never tombstones it (Codex)", async () => {
+		const guest = await joinAsGuest(host.link, "writer-remote");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
+
+		const id = "remote-proxy-peer";
+		const registry = AgentRegistry.global();
+		const ref = registry.register({ id, displayName: "remote peer", kind: "remote", session: null, status: "idle" });
+		try {
+			guest.socket.send({ t: "agent-cmd", cmd: "kill", agentId: id });
+			const reply = await guest.nextFrame();
+			expect(reply.t).toBe("error");
+			if (reply.t === "error") expect(reply.message).toContain("remote");
+			// The remote proxy must be untouched — not tombstoned/aborted by the local lifecycle.
+			expect(registry.get(id)).toMatchObject({ status: "idle", kind: "remote" });
+		} finally {
+			registry.unregister(id, ref);
+		}
+	});
+
 	it("routes host UI requests to write guests and resolves their response", async () => {
 		const guest = await joinAsGuest(host.link, "writer-ui");
 		guestCleanups.push(() => guest.socket.close());

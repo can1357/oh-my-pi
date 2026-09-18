@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { AgentOutputManager } from "@oh-my-pi/pi-coding-agent/task/output-manager";
-import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 // Contract: subagent output ids are the requested name, used verbatim the first
@@ -94,12 +93,10 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("__advisor-notes")).toBe("__advisor-notes");
 	});
 
-	it("reserves the pinned-HUD toggle sentinel so a task can't collide with it", async () => {
+	it("rejects a subagent name that starts with the reserved remote prefix `@`", async () => {
 		const mgr = new AgentOutputManager(() => null);
-		// A subagent allocated the sentinel id would be indistinguishable from
-		// the jump-list expander row in click routing; it bumps to a suffix.
-		expect(await mgr.allocate(PINNED_HUD_TOGGLE_ID)).toBe(`${PINNED_HUD_TOGGLE_ID}-2`);
-		// Unrelated names sharing the prefix are unaffected.
-		expect(await mgr.allocate("@omp:other")).toBe("@omp:other");
+		// `@` is reserved for the cross-process remote id space (`@ns/name`); a local subagent name
+		// may never intrude on it.
+		await expect(mgr.allocate("@spoof")).rejects.toThrow(/reserved for cross-process remote peers/);
 	});
 });

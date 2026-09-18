@@ -79,6 +79,40 @@ describe("hubToolRenderer send", () => {
 		);
 	});
 
+	it("sanitizes a remote transport's failed-receipt id and error before rendering (#7401)", async () => {
+		const uiTheme = await theme();
+		// A bridge-controlled receipt must not insert terminal escapes or Unicode line breaks.
+		const component = hubToolRenderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					op: "send",
+					from: "Main",
+					to: "all",
+					receipts: [
+						{ to: "AuthLoader", outcome: "woken" },
+						{
+							to: "@cluster/e\tvil\u2028name",
+							outcome: "failed",
+							error: "\x1b[2Jboom\nINJECTED\u2029tail\ud800",
+						},
+					],
+				} satisfies CoordinationDetails,
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+			{ op: "send", to: "all", message: "heads up" },
+		);
+		const rendered = component.render(200).join("\n");
+		expect(rendered).not.toContain("\x1b[2J");
+		expect(rendered).not.toMatch(/[\u2028\u2029\ud800]/u);
+		const raw = Bun.stripANSI(rendered);
+		expect(raw).toContain("boom INJECTED tail");
+		expect(raw).toContain("@cluster/e vil name");
+		expect(raw).not.toContain("boom\n");
+		expect(raw).not.toContain("e\tvil");
+	});
+
 	it("flags an awaited send whose reply timed out", async () => {
 		const uiTheme = await theme();
 		const rendered = lines(

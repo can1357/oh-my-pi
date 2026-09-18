@@ -65,6 +65,8 @@ export interface AdoptOptions {
 
 interface AdoptedAgent {
 	ref: AgentRef;
+	/** Top-level (parentless) session this subagent's tree is rooted at; keys root-scoped release. */
+	rootId: string;
 	idleTtlMs: number;
 	revive?: AgentReviver;
 	onRelease?: () => Promise<void>;
@@ -90,28 +92,38 @@ interface RevivingAgent {
 }
 
 export class AgentLifecycleManager {
+	/**
+	 * One manager per AgentRegistry — mirrors IrcBus.forRegistry so the per-registry
+	 * (registry, bus, lifecycle) trio stays consistent: the root + its subagents share the
+	 * process-global registry (one manager, so Main<->Scout adoption/revival works), while an
+	 * isolated session registry gets its own manager owning ONLY its refs. Weak so a manager is
+	 * collected with its registry; #global caches the global-registry manager for a deterministic,
+	 * order-independent test reset.
+	 */
+	static #managers = new WeakMap<AgentRegistry, AgentLifecycleManager>();
 	static #global: AgentLifecycleManager | undefined;
 
-	static global(): AgentLifecycleManager {
-		const current = AgentLifecycleManager.#global;
-		if (current) {
-			// The manager captures its registry at construction and subscribes to
-			// it for the manager's lifetime. A test that swaps the global registry
-			// (`AgentRegistry.resetGlobalForTests`) without also resetting this
-			// manager would strand it on the dead instance: terminal transitions
-			// (`release`) would mutate the old registry while consumers subscribe
-			// to the new one, so `status_changed` never reaches them (issue #11432).
-			// Rebind by retiring the stale manager and reconstructing against the
-			// current global registry. In production the registry is never reset, so
-			// this always short-circuits and the singleton is stable.
-			if (current.#registry === AgentRegistry.global()) return current;
-			current.#retire();
+	/** The manager owning `registry`'s adopted-subagent lifecycle, created on first use. */
+	static forRegistry(registry: AgentRegistry = AgentRegistry.global()): AgentLifecycleManager {
+		if (registry === AgentRegistry.global()) {
+			const current = AgentLifecycleManager.#global;
+			if (current && current.#registry !== registry) current.#retire();
 		}
-		AgentLifecycleManager.#global = new AgentLifecycleManager();
-		return AgentLifecycleManager.#global;
+		let manager = AgentLifecycleManager.#managers.get(registry);
+		if (!manager) {
+			manager = new AgentLifecycleManager(registry);
+			AgentLifecycleManager.#managers.set(registry, manager);
+		}
+		if (registry === AgentRegistry.global()) AgentLifecycleManager.#global = manager;
+		return manager;
 	}
 
-	/** Reset the global manager. Test-only. */
+	/** The manager for the process-global registry — the default for the root session and subagents. */
+	static global(): AgentLifecycleManager {
+		return AgentLifecycleManager.forRegistry(AgentRegistry.global());
+	}
+
+	/** Reset the global registry's manager. Test-only. */
 	static resetGlobalForTests(): void {
 		const current = AgentLifecycleManager.#global;
 		if (current) current.#retire();
@@ -129,10 +141,17 @@ export class AgentLifecycleManager {
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
+		AgentLifecycleManager.#managers.delete(this.#registry);
 	}
 
 	readonly #registry: AgentRegistry;
 	readonly #adopted = new Map<string, AdoptedAgent>();
+	/**
+	 * Top-level sessions (root main ids) whose adopted subagents live in this manager. The manager
+	 * fully disposes only when its LAST root leaves, so a shared (custom) registry's sessions never
+	 * tear down each other's keep-alive subagents (can1357/oh-my-pi#7401 review).
+	 */
+	readonly #roots = new Set<string>();
 	/**
 	 * In-flight park attempts, each bound to the ref it started from. A park is
 	 * cancelable until the live session is detached; after detach, ensureLive
@@ -184,9 +203,43 @@ export class AgentLifecycleManager {
 			idleTtlMs: opts.idleTtlMs,
 			revive: opts.revive,
 			onRelease: opts.onRelease,
+			rootId: this.#rootIdOf(id),
 		};
 		this.#adopted.set(id, adopted);
 		this.#armTimer(id, adopted);
+	}
+
+	/** Register a top-level session (root main id) whose adopted subagents this manager owns. */
+	retainRoot(rootId: string): void {
+		this.#roots.add(rootId);
+	}
+
+	/**
+	 * Tear down a top-level session: when it was the manager's LAST retained root, fully
+	 * {@link dispose} it; otherwise release only the adopted subtree rooted at `rootId`, so a shared
+	 * (custom) registry's other sessions keep their own keep-alive subagents.
+	 */
+	async releaseRoot(rootId: string, deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
+		this.#roots.delete(rootId);
+		if (this.#roots.size === 0) {
+			await this.dispose(deadlineAt);
+			return;
+		}
+		const subtree = [...this.#adopted.entries()].filter(([, adopted]) => adopted.rootId === rootId).map(([id]) => id);
+		await this.#releaseIds(subtree, deadlineAt);
+	}
+
+	/** Walk `id`'s parentId chain to the registry's top-level (parentless) agent — its tree root. */
+	#rootIdOf(id: string): string {
+		let ref = this.#registry.get(id);
+		const seen = new Set<string>();
+		while (ref?.parentId && !seen.has(ref.id)) {
+			seen.add(ref.id);
+			const parent = this.#registry.get(ref.parentId);
+			if (!parent) break;
+			ref = parent;
+		}
+		return ref?.id ?? id;
 	}
 
 	/** True if the id is adopted (parked or live) — and, when `expected` is given, still bound to that ref. */
@@ -400,7 +453,7 @@ export class AgentLifecycleManager {
 				);
 			}
 			if (revive) {
-				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
+				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive, rootId: this.#rootIdOf(id) };
 				this.#adopted.set(id, adoption);
 				coldAdopted = true;
 			}
@@ -502,12 +555,27 @@ export class AgentLifecycleManager {
 		return true;
 	}
 
-	/** Teardown everything; disposing the global manager makes its next owner a fresh instance. */
+	/** Teardown everything; the registry's next owner gets a fresh manager. */
 	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
 		this.#unsubscribe?.();
 		this.#disposed = true;
 		this.#unsubscribe = undefined;
-		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
+		this.#roots.clear();
+		// Evict this dead manager so a later session on the same registry gets a FRESH, re-subscribed
+		// one from forRegistry() — a disposed manager has torn down its registry.onChange listener and
+		// would silently miss status_changed/removed for future adopted subagents (#7401 review).
+		if (AgentLifecycleManager.#managers.get(this.#registry) === this) {
+			AgentLifecycleManager.#managers.delete(this.#registry);
+		}
+		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
+		await this.#releaseIds([...new Set([...this.#adopted.keys(), ...this.#parks.keys()])], deadlineAt);
+		this.#revivals.clear();
+		this.#parks.clear();
+		this.#persistedReviverFactory = undefined;
+	}
+
+	/** Release the given adopted/parked ids together under a shared cleanup deadline. */
+	async #releaseIds(ids: string[], deadlineAt: number): Promise<void> {
 		await Promise.all(
 			ids.map(async id => {
 				const release = this.release(id).then(() => {});
@@ -524,10 +592,6 @@ export class AgentLifecycleManager {
 				}
 			}),
 		);
-		this.#revivals.clear();
-		this.#parks.clear();
-		this.#persistedReviverFactory = undefined;
-		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 	}
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {

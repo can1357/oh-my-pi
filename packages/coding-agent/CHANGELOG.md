@@ -1,6 +1,12 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added `pi.irc.deliverInbound` — a scoped extension API (`ExtensionAPI.irc`) for delivering an inbound IRC message (e.g. from an external transport) into a local agent's session on the session registry’s IRC bus; local-only, so a registry miss returns `failed` and never re-forwards, and it returns omp's freshly-minted native message id so callers can correlate it ([#7400](https://github.com/can1357/oh-my-pi/pull/7400)).
+- Added the outbound half of the extension IRC bridge on a `@<namespace>/<name>` remote-agent scheme: `pi.irc.setRemoteTransport(namespace, transport)` claims a namespace unique within that registry’s IRC bus (a second live claim by a different extension throws; the same extension re-loaded in a subagent — e.g. inherited by a spawned child — shares the claim) and installs its outbound transport; `pi.irc.registerRemotePeer({ name })` / `unregisterRemotePeer` seed and retract `@ns/name` proxies under that namespace, attributed to the owning extension so a failed load or session teardown releases them; and `pi.getAgentId()` exposes the session's own agent id. Routing is prefix-authoritative: an `@ns/name` recipient goes to its namespace's transport (with the bare name in `opts.toName`) whether or not a proxy is registered, while a bare unknown id stays local (`Unknown agent`) and never leaves the process. Local agent ids may not start with `@`, so the local and remote id spaces never collide. Exports the `RemoteTransport`/`IrcMessage`/`IrcDeliveryReceipt` wire shapes and a remote `AgentKind` so cross-process peers are addressable and broadcastable like local agents ([#7401](https://github.com/can1357/oh-my-pi/pull/7401)).
+
 ### Fixed
 
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.

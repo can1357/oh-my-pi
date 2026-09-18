@@ -606,7 +606,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			effortEnabled: this.session.settings.get("task.enableEffort"),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			asyncEnabled: this.session.settings.get("async.enabled"),
-			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
 	}
@@ -655,7 +655,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
-			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 			maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 		});
 	}
@@ -742,7 +742,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.settings.get("task.maxRecursionDepth") ?? 2,
 			this.session.taskDepth ?? 0,
 		);
-		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
+		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry);
 
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
@@ -1083,6 +1083,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}): string {
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
+		const registry = this.session.agentRegistry ?? AgentRegistry.global();
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			// Isolated runs are parked without a reviver once the run ends
 			// (`finalizeSubagentLifecycle`), so "message it" would point the
@@ -1090,14 +1091,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			// nothing about the worktree itself: the runner keeps it when captured
 			// changes could not be written, and names that path in the result.
 			const isolated = spawnParams.isolated === true;
-			const ref = aborted ? AgentRegistry.global().get(agentId) : undefined;
+			const ref = aborted ? registry.get(agentId) : undefined;
 			return `\n\n${prompt.render(taskFollowUpTemplate, {
 				agentId,
 				aborted,
 				isolated,
 				ircEnabled,
 				resumable: !isolated && (ref?.status === "idle" || ref?.status === "parked"),
-				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId) : true,
+				transcriptAvailable: aborted ? await hasResolvableTranscript(agentId, registry) : true,
 			})}`;
 		};
 		return manager.register(
@@ -1254,7 +1255,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+					const hint = registry.get(agentId) ? await buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
@@ -1505,7 +1506,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
-				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
+				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0, this.session.agentRegistry),
 				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 				signal,
 				onProgress: progress => {

@@ -349,7 +349,7 @@ export async function resolveEffectiveSubagentPolicy(
 			!planMode &&
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
-					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0, request.session.agentRegistry))),
 	};
 }
 
@@ -416,6 +416,7 @@ function buildExecutorOptions(
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
+		agentRegistry: session.agentRegistry,
 		agent: policy.effectiveAgent,
 		task: renderSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),

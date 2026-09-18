@@ -18,10 +18,10 @@ import type { Settings } from "../../config/settings";
 import { IrcAwaitTargetStopped, IrcBus } from "../../irc/bus";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 
-import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRegistry, BROADCAST_ID } from "../../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
-
+import { sanitizeInline } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	type CoordinationDetails,
 	DEFAULT_HUB_LIST_LIMIT,
@@ -93,12 +93,15 @@ function formatRosterSummary(counts: HubRosterCounts, emptyNoun: string): string
  * session that can still spawn subagents through the task tool. Only a
  * top-level session with task spawning unavailable has no peers.
  */
-export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
+export function isIrcEnabled(settings: Settings, taskDepth: number, registry?: AgentRegistry): boolean {
 	if (taskDepth > 0) return true;
-	// Top-level session: peers exist only if it can still spawn subagents — the
-	// same capacity gate the task tool uses, reused here to avoid drift.
+	// Top-level session: peers exist if it can still spawn subagents (the capacity gate the task tool
+	// uses, reused to avoid drift) OR a remote namespace is claimed — the murmur bridge seeds remote
+	// cluster peers as proxy refs (murmur-q00p), so even a leaf root has peers to reach. Gate on the
+	// CLAIM (not an installed transport) so hub survives a bridge's install→clear→reinstall reconnect.
 	const maxDepth = settings.get("task.maxRecursionDepth") ?? 2;
-	return canSpawnAtDepth(maxDepth, taskDepth);
+	const bus = registry ? IrcBus.forRegistry(registry) : IrcBus.global();
+	return canSpawnAtDepth(maxDepth, taskDepth) || bus.hasClaimedNamespace();
 }
 
 export function formatIncoming(msg: IrcMessage): string {
@@ -163,7 +166,7 @@ export async function executeList(
 		truncated,
 	};
 
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	const peers = shownRefs.map(ref => ({
 		id: ref.id,
 		displayName: ref.displayName,
@@ -222,7 +225,7 @@ export async function executeSend(
 	if (to === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	}
-	const isBroadcast = to === "all";
+	const isBroadcast = to === BROADCAST_ID;
 	if (isBroadcast && params.await) {
 		return hubErrorResult('`await` is invalid with to:"all" — broadcasts have no single replier.', {
 			op: "send",
@@ -242,7 +245,7 @@ export async function executeSend(
 		await ensurePersistedRoster(registry, sessionFileHint);
 	}
 
-	const bus = IrcBus.global();
+	const bus = IrcBus.forRegistry(registry);
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? normalizeIrcTimeoutMs(settings.get("irc.timeoutMs")) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -279,10 +282,12 @@ export async function executeSend(
 		// parked agent on a broadcast would be a stampede. Direct sends go
 		// through the bus unfiltered so parked recipients are revived.
 		const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];
-		// A broadcast that also reaches the main agent delivers the body to it
-		// directly (its own incoming card); relaying the sibling legs to the
-		// main UI would then show the same body once per other recipient.
-		const suppressRelay = isBroadcast && targets.includes(MAIN_AGENT_ID);
+		// A broadcast that also reaches the sender's own root delivers the body to it directly (its
+		// own incoming card); relaying the sibling legs to that root's UI would then duplicate the
+		// body once per other recipient. Resolve the sender's ACTUAL root — an ACP/custom-root
+		// registry's root is not "Main" — so the dedup fires for every root, not just the default.
+		const rootId = bus.rootIdFor(senderId);
+		const suppressRelay = isBroadcast && rootId !== undefined && targets.includes(rootId);
 		const receipts = await Promise.all(
 			targets.map(target =>
 				bus.send(
@@ -307,8 +312,8 @@ export async function executeSend(
 		for (const receipt of receipts) {
 			lines.push(
 				receipt.outcome === "failed"
-					? `- ${receipt.to}: failed — ${receipt.error ?? "unknown error"}`
-					: `- ${receipt.to}: ${receipt.outcome}`,
+					? `- ${sanitizeInline(receipt.to)}: failed — ${sanitizeInline(receipt.error ?? "unknown error")}`
+					: `- ${sanitizeInline(receipt.to)}: ${receipt.outcome}`,
 			);
 		}
 
@@ -383,7 +388,7 @@ export async function executeMessageWait(
 	const { timeoutMs } = params;
 	const from = params.from?.trim() || undefined;
 	try {
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
+		const waited = await IrcBus.forRegistry(registry).wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },
 		});
 		if (!waited) {
@@ -409,7 +414,7 @@ export function executeInbox(
 	senderId: string,
 	peek?: boolean,
 ): AgentToolResult<CoordinationDetails> {
-	const busMessages = IrcBus.global().inbox(senderId, { peek });
+	const busMessages = IrcBus.forRegistry(registry).inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
 	const pendingMessages =
 		typeof session?.drainPendingIrcInboxMessages === "function" ? session.drainPendingIrcInboxMessages(senderId) : [];

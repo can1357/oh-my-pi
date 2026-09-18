@@ -178,6 +178,29 @@ describe("history:// protocol", () => {
 		expect(resource.content).toContain("| HubAgent | idle | sub |");
 	});
 
+	it("excludes remote proxies from the index and rejects direct resolve (murmur-q00p — no local transcript)", async () => {
+		AgentRegistry.global().register({
+			id: "HubAgent",
+			displayName: "task",
+			kind: "sub",
+			session: fakeLiveSession([]),
+			status: "idle",
+		});
+		AgentRegistry.global().register({
+			id: "remote-peer",
+			displayName: "remote-peer",
+			kind: "remote",
+			session: null,
+			status: "idle",
+		});
+
+		const index = await InternalUrlRouter.instance().resolve("history://");
+		expect(index.content).toContain("| HubAgent | idle | sub |");
+		expect(index.content).not.toContain("remote-peer");
+
+		await expect(InternalUrlRouter.instance().resolve("history://remote-peer")).rejects.toThrow(/Unknown agent/);
+	});
+
 	it("history://<id> renders a live ref's in-memory transcript", async () => {
 		AgentRegistry.global().register({
 			id: "HubAgent",
@@ -193,6 +216,30 @@ describe("history:// protocol", () => {
 		expect(resource.content).toContain("## user");
 		expect(resource.content).toContain("hello from live");
 		expect(resource.notes).toContain("Source: live session");
+	});
+
+	it("resolves a live ref from the caller-bound registry, not a same-id agent in the global one (per-registry)", async () => {
+		// finding 7: history:// resolve must honor context.agentRegistry so a custom-registry session
+		// reads its OWN child history, never a same-id agent that happens to live in the global registry.
+		AgentRegistry.global().register({
+			id: "Kid",
+			displayName: "global kid",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "GLOBAL registry transcript", timestamp: 1 }]),
+			status: "idle",
+		});
+		const custom = new AgentRegistry();
+		custom.register({
+			id: "Kid",
+			displayName: "custom kid",
+			kind: "sub",
+			session: fakeLiveSession([{ role: "user", content: "CUSTOM registry transcript", timestamp: 1 }]),
+			status: "idle",
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("history://Kid", { agentRegistry: custom });
+		expect(resource.content).toContain("CUSTOM registry transcript");
+		expect(resource.content).not.toContain("GLOBAL registry transcript");
 	});
 
 	it("preserves the existing bare history://current named-agent route", async () => {

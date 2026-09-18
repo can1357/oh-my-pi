@@ -459,6 +459,7 @@ describe("runEvalAgent", () => {
 			});
 			await taskExecutor.finalizeSubagentLifecycle({
 				id: options.id,
+				registry: AgentRegistry.global(),
 				session: cleanupSession,
 				aborted: false,
 				keepAlive: options.keepAlive !== false,

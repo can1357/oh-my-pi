@@ -23,7 +23,7 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, isLocalSession } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
@@ -1013,10 +1013,11 @@ export class CollabHost {
 		return (
 			AgentRegistry.global()
 				.list()
-				// Advisor transcripts are local observability only; never mirror them to
-				// guests (the wire AgentSnapshot kind has no `advisor`, and guests must not
-				// be able to chat/kill/revive them).
-				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => ref.kind !== "advisor")
+				// Only mirror the user-facing agent tree (main | sub) to guests. Advisor
+				// transcripts are local observability only, and `remote` proxies (murmur-q00p)
+				// have no local session — the wire AgentSnapshot kind is `main | sub`, and guests
+				// must never chat/kill/revive either (guest actions call ensureLive/release).
+				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => isLocalSession(ref.kind))
 				.map(ref => ({
 					id: ref.id,
 					displayName: ref.displayName,
@@ -1043,10 +1044,17 @@ export class CollabHost {
 			this.#rejectReadOnly("agent control", fromPeer);
 			return;
 		}
-		// Advisor refs are excluded from snapshots, but reject control by id defensively:
-		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
+		// Advisor + remote refs are excluded from snapshots, but reject control by id defensively — a
+		// stale/malicious client can send agent-cmd for any id, not only snapshotted ones. Neither may
+		// drive the local lifecycle: an advisor is a read-only transcript, a remote proxy has no local
+		// session (remote peers are controlled over IRC, not the hub).
+		const targetKind = AgentRegistry.global().get(agentId)?.kind;
+		if (targetKind && !isLocalSession(targetKind)) {
+			const why =
+				targetKind === "advisor"
+					? "advisor transcripts are read-only"
+					: "remote peers are controlled over IRC, not the hub";
+			this.#send({ t: "error", message: `agent ${agentId}: ${why}` }, fromPeer);
 			return;
 		}
 		const fail = (err: unknown) => {

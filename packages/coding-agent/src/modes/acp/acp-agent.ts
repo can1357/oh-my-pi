@@ -2591,6 +2591,7 @@ export class AcpAgent implements Agent {
 				getServiceTiers: () => record.session.serviceTierByFamily,
 				setServiceTier: (family, tier) => record.session.setServiceTierFamily(family, tier),
 				getSessionName: () => record.session.sessionManager.getSessionName(),
+				getAgentId: () => record.session.getAgentId(),
 				setSessionName: async name => {
 					await record.session.sessionManager.setSessionName(name, "user");
 				},

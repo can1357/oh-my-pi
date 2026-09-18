@@ -142,6 +142,8 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	requestRender: () => void;
 	/** Registry supplying the roster. */
 	registry: AgentHubRegistry<TRecord>;
+	/** Host policy for records with a local session or transcript. */
+	hasLocalPresence: (kind: AgentRecordLike["kind"]) => boolean;
 	/** Resolve lifecycle actions lazily when a local action needs them. */
 	lifecycle: () => AgentLifecycleLike<TRecord>;
 	/** Host message bus supplying unread counts. */
@@ -181,6 +183,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	implements SelectListMouseTarget
 {
 	#registry: AgentHubRegistry<TRecord>;
+	#hasLocalPresence: (kind: AgentRecordLike["kind"]) => boolean;
 	#observers: SessionObserverRegistry;
 	#getRoleInfo: ((role: string) => AgentRoleDisplay) | undefined;
 	#transcript: AgentTranscriptSource;
@@ -316,6 +319,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#activity = deps.activity;
 		this.#manageActivityLive = deps.manageActivityLive ?? true;
 		this.#registry = deps.registry;
+		this.#hasLocalPresence = deps.hasLocalPresence;
 		this.#observers = deps.observers;
 		this.#getRoleInfo = deps.getRoleInfo;
 		this.#transcript = deps.transcript;
@@ -539,7 +543,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#refreshRows(): void {
 		const selectedId = this.#rows[this.#selectedRow]?.id;
-		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
+		// Remote proxies (murmur-q00p) are messaging peers, not local sessions: they have no local
+		// presence to display and the hub's focus/revive/kill act on the local lifecycle. `main`/`sub`
+		// (and read-only `advisor`) stay; remotes stay discoverable via `hub list` + broadcast.
+		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID && this.#hasLocalPresence(ref.kind));
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
 		// Stable roster order: capture the status+recency ranking once so keyboard

@@ -374,10 +374,22 @@ describe("runIsolatedSubprocess", () => {
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 	});
 
-	it("captures follow-up changes before releasing a kept-alive isolated worktree", async () => {
+	it("captures follow-up changes in the owning registry before releasing a kept-alive isolated worktree", async () => {
 		const isolationDir = "/repo/isolated";
 		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-retained-"));
 		tempRoots.push(artifactsDir);
+		const registry = new AgentRegistry();
+		const lifecycle = AgentLifecycleManager.forRegistry(registry);
+		const globalRef = AgentRegistry.global().register({
+			id: "RetainedIsolation",
+			displayName: "Global retained isolation",
+			kind: "sub",
+			session: null,
+			status: "parked",
+			history: { outputPath: "/global/output", patchPath: "/global/patch", branchName: "global-branch" },
+		});
+		const globalSnapshot = structuredClone(globalRef);
+		const outputPath = path.join(artifactsDir, "RetainedIsolation.output");
 		const initialPatch = "diff --git a/task.txt b/task.txt\n+initial\n";
 		const finalPatch = "diff --git a/task.txt b/task.txt\n+initial\n+follow-up\n";
 		const baseline = {
@@ -403,7 +415,7 @@ describe("runIsolatedSubprocess", () => {
 			dispose: async () => {},
 		} as unknown as AgentSession;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
-			AgentRegistry.global().register({
+			registry.register({
 				id: options.id,
 				displayName: options.id,
 				kind: "sub",
@@ -413,6 +425,7 @@ describe("runIsolatedSubprocess", () => {
 			});
 			await executorModule.finalizeSubagentLifecycle({
 				id: options.id,
+				registry,
 				session: liveSession,
 				aborted: false,
 				keepAlive: true,
@@ -421,7 +434,7 @@ describe("runIsolatedSubprocess", () => {
 				reviveSession: async () => liveSession,
 				onRelease: options.onRelease,
 			});
-			return result({ id: options.id, exitCode: 0 });
+			return result({ id: options.id, exitCode: 0, outputPath });
 		});
 		const captureSpy = vi
 			.spyOn(worktreeModule, "captureDeltaPatch")
@@ -441,6 +454,7 @@ describe("runIsolatedSubprocess", () => {
 				task: "Do work",
 				index: 0,
 				id: "RetainedIsolation",
+				agentRegistry: registry,
 			},
 			context: { repoRoot: "/repo", baseline },
 			preferredBackend: undefined,
@@ -453,15 +467,27 @@ describe("runIsolatedSubprocess", () => {
 		const patchPath = path.join(artifactsDir, "RetainedIsolation.patch");
 		expect(outcome.exitCode).toBe(0);
 		expect(await Bun.file(patchPath).text()).toBe(initialPatch);
-		expect(AgentRegistry.global().get("RetainedIsolation")?.status).toBe("idle");
+		const retainedRef = registry.get("RetainedIsolation");
+		expect(retainedRef?.status).toBe("idle");
+		expect(retainedRef?.history).toMatchObject({ outputPath, patchPath });
+		expect(lifecycle.has("RetainedIsolation")).toBe(true);
+		expect(AgentRegistry.global().get("RetainedIsolation")).toEqual(globalSnapshot);
 		expect(cleanupSpy).not.toHaveBeenCalled();
 
-		await AgentLifecycleManager.global().release("RetainedIsolation");
+		await lifecycle.release("RetainedIsolation");
 
 		expect(captureSpy).toHaveBeenCalledTimes(2);
 		expect(await Bun.file(patchPath).text()).toBe(finalPatch);
 		expect(commitSpy).toHaveBeenCalledWith(isolationDir, baseline, "RetainedIsolation", undefined, undefined);
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
+		expect(retainedRef?.history).toMatchObject({
+			outputPath,
+			patchPath,
+			branchName: "omp/task/RetainedIsolation",
+		});
+		expect(lifecycle.has("RetainedIsolation")).toBe(false);
+		expect(registry.get("RetainedIsolation")).toBeUndefined();
+		expect(AgentRegistry.global().get("RetainedIsolation")).toEqual(globalSnapshot);
 	});
 
 	it("captures a one-shot isolated patch before cleanup when its lifecycle releases early", async () => {
@@ -508,6 +534,7 @@ describe("runIsolatedSubprocess", () => {
 			// Eval-bridge one-shot: keepAlive false drives onRelease immediately.
 			await executorModule.finalizeSubagentLifecycle({
 				id: options.id,
+				registry: AgentRegistry.global(),
 				session: oneShotSession,
 				aborted: false,
 				keepAlive: false,
