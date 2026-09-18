@@ -4,22 +4,13 @@
 
 ### Added
 
-- Exposed model-selection provenance for callers without changing model or thinking-level precedence ([#12346](https://github.com/can1357/oh-my-pi/pull/12346) by [@Xytronix](https://github.com/Xytronix)).
 - Added a per-call `model` selector to task items, eval `agent()`, and `workpool()`: a `provider/model[:level]` pattern or role alias, or an ordered array of them, that takes precedence over `task.agentModelOverrides` and the agent definition. Selection is an ordered preference — requested candidates are tried before configured fallbacks — and the spawn fails at preflight instead of silently routing elsewhere when the selector is the ambiguous literal `default`/`inherit` (use `@default`), is blank or comma-only, carries an invalid thinking suffix, matches no available model, or sits on the batch container instead of a `tasks[]` item. A pool applies its selector to each worker's first turn and reuses that worker's session afterwards ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
-### Breaking Changes
-
-- Moved every terminal-UI module (theme, tool renderers, chat/overlay/status-line/composer components, setup wizard, git/ps/debug apps) to `@oh-my-pi/pi-tui`; `@oh-my-pi/pi-coding-agent/modes/theme/*`, `/modes/components/*`, `/tui/*`, `/tools/render-utils` and related subpaths no longer exist. Names re-exported from the package root (`Theme`, `theme`, hook/editor components, tool Details types) are unchanged.
-
-### Changed
-
-- Keyless Parallel web search now leads the default provider chain ahead of Perplexity.
+- Exposed model-selection provenance for callers without changing model or thinking-level precedence ([#12346](https://github.com/can1357/oh-my-pi/pull/12346) by [@Xytronix](https://github.com/Xytronix)).
 
 ### Fixed
 
 - Preserve the parent’s upstream route and live reasoning effort for inherited task/eval/workpool selectors and restored workers; explicit child effort overrides remain authoritative ([#12229](https://github.com/can1357/oh-my-pi/pull/12229) by [@Xytronix](https://github.com/Xytronix)).
 
-- Fixed the `edit` tool splicing a literal `…` into the file when a `<SM:FIND>` opened or closed with an ellipsis (a line-end `…` spanning the rest of a line, or a whole-line `…` at either edge) and `<SM:PUT>` re-emitted it. An edge gap captures nothing, so the matching `<SM:PUT>` ellipsis now re-emits nothing and the anchor keeps its own newline; an identical `<SM:FIND>`/`<SM:PUT>` pair reports no change instead of writing the marker. A leading gap combined with an inner gap no longer panics.
-- Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
@@ -95,8 +86,6 @@
 - Cancelled background jobs remain tracked until execution finishes, so cleanup cannot report completion prematurely after retention expires. ([#12278](https://github.com/can1357/oh-my-pi/pull/12278) by [@iliaal](https://github.com/iliaal))
 - Fixed localized edits rewriting unrelated bytes in files with invalid UTF-8; these edits now fail without modifying the file. ([#12277](https://github.com/can1357/oh-my-pi/pull/12277) by [@iliaal](https://github.com/iliaal))
 - Fixed sloppy edits crashing with a char-boundary panic instead of reporting a match error when the file contains multibyte (e.g. CJK) text.
-- Subagent model resolution now tries every requested candidate, including role-expanded alternatives, for working credentials before falling back to the parent's model — also when no parent model is supplied — and accepts keyless parent providers.
-- Task preflight failures are reported as tool errors and render with an error status.
 - Fixed retry timing reliability in agent sessions by ensuring sleep durations are monotonic
 - Fixed data stability issues when processing streamed lines
 - Resolved same-path move failures in indexed session storage
