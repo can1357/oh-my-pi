@@ -690,6 +690,9 @@ function isWithin(parent: string, child: string): boolean {
  * home directory's own copy as project context. A repository rooted at the
  * home directory itself is not "nested below" it, so the home-level file
  * remains project context.
+ *
+ * `ctx.stopAtRepoRoot` opts out of that walk-to-home raise and keeps the
+ * boundary at the git root (or the no-repo fallback when `repoRoot` is null).
  */
 export async function loadStandaloneContextFiles(
 	ctx: LoadContext,
@@ -705,7 +708,7 @@ export async function loadStandaloneContextFiles(
 	const cwdIsUnderHome = isWithin(home, cwd);
 	const repoIsHome = repoRoot !== null && samePath(home, repoRoot);
 	const repoIsUnderHome = repoRoot !== null && isWithin(home, repoRoot) && !repoIsHome;
-	const scanToHome = repoRoot !== null && cwdIsUnderHome && repoIsUnderHome;
+	const scanToHome = !ctx.stopAtRepoRoot && repoRoot !== null && cwdIsUnderHome && repoIsUnderHome;
 	const boundary = scanToHome ? home : (repoRoot ?? (cwdIsUnderHome ? home : filesystemRoot));
 	const includeBoundary = repoRoot === null ? cwdIsUnderHome : !samePath(boundary, home) || repoIsHome;
 	const excludeHome = scanToHome;

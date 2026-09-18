@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { getDefault } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { loadAgentsMd } from "@oh-my-pi/pi-coding-agent/discovery/agents-md";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -12,6 +13,10 @@ function writeAgents(filePath: string, content: string): void {
 }
 
 describe("standalone AGENTS.md discovery", () => {
+	test("context.stopAtRepoRoot defaults off so discovery still walks to home", () => {
+		expect(getDefault("context.stopAtRepoRoot")).toBe(false);
+	});
+
 	let tempDir!: string;
 
 	beforeEach(() => {
@@ -40,6 +45,45 @@ describe("standalone AGENTS.md discovery", () => {
 		const result = await loadAgentsMd(context);
 
 		expect(result.items.map(file => file.path)).toEqual([repoAgents, workspaceAgents]);
+	});
+
+	test("keeps the walk-to-home default when stopAtRepoRoot is omitted or false", async () => {
+		const home = path.join(tempDir, "home");
+		const workspaceRoot = path.join(home, "repos", "writer");
+		const repoRoot = path.join(workspaceRoot, "internal", "service");
+		const cwd = path.join(repoRoot, "src");
+		fs.mkdirSync(cwd, { recursive: true });
+
+		const repoAgents = path.join(repoRoot, "AGENTS.md");
+		const workspaceAgents = path.join(workspaceRoot, "AGENTS.md");
+		writeAgents(repoAgents, "repo context");
+		writeAgents(workspaceAgents, "workspace context");
+
+		const omitted = await loadAgentsMd({ cwd, home, repoRoot });
+		const explicitFalse = await loadAgentsMd({ cwd, home, repoRoot, stopAtRepoRoot: false });
+
+		expect(omitted.items.map(file => file.path)).toEqual([repoAgents, workspaceAgents]);
+		expect(explicitFalse.items.map(file => file.path)).toEqual([repoAgents, workspaceAgents]);
+	});
+
+	test("clamps standalone AGENTS.md at the git root when stopAtRepoRoot is true", async () => {
+		const home = path.join(tempDir, "home");
+		const workspaceRoot = path.join(home, "repos", "writer");
+		const repoRoot = path.join(workspaceRoot, "internal", "service");
+		const cwd = path.join(repoRoot, "src");
+		fs.mkdirSync(cwd, { recursive: true });
+
+		const repoAgents = path.join(repoRoot, "AGENTS.md");
+		const workspaceAgents = path.join(workspaceRoot, "AGENTS.md");
+		const homeAgents = path.join(home, "AGENTS.md");
+		writeAgents(repoAgents, "repo context");
+		writeAgents(workspaceAgents, "workspace context");
+		writeAgents(homeAgents, "home context");
+
+		const context: LoadContext = { cwd, home, repoRoot, stopAtRepoRoot: true };
+		const result = await loadAgentsMd(context);
+
+		expect(result.items.map(file => file.path)).toEqual([repoAgents]);
 	});
 
 	test("loads cwd and intermediate context with no repository root under home", async () => {
