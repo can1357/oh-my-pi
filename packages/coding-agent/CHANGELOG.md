@@ -824,6 +824,10 @@
 - Tool-scoped TTSR rules now match finalized arguments reliably when providers stream short or throttled tool calls ([#10910](https://github.com/can1357/oh-my-pi/issues/10910)).
 - Restored `getSupportedThinkingLevels` in the legacy `pi-ai` shim so extensions importing it from `@earendil-works/pi-ai` (e.g. `@companion-ai/feynman`) pass Bun's named-export check and load ([#10800](https://github.com/can1357/oh-my-pi/issues/10800)).
 
+### Fixed
+
+- Preserved Codex thread and window identity when resuming a session, retaining provider affinity and prompt-cache reuse ([#10799](https://github.com/can1357/oh-my-pi/issues/10799)).
+
 ## [18.1.10] - 2026-09-04
 
 ### Changed
