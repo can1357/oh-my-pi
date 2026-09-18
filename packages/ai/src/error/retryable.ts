@@ -1,4 +1,5 @@
 import { isRetryableError, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
+import { BedrockApiError, isBedrockModelProcessingErrorCode } from "./classes";
 import {
 	CODEX_HTTP_BODY_READ_ERROR_PATTERN,
 	isRetryableStreamEnvelopeError,
@@ -45,6 +46,9 @@ export function isProviderRetryableError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	if (isUsageLimit(error)) return false;
 	const httpStatus = status(error);
+	if (error instanceof BedrockApiError && httpStatus === 424 && isBedrockModelProcessingErrorCode(error.code)) {
+		return true;
+	}
 	if (httpStatus !== undefined && httpStatus >= 400 && httpStatus < 500 && httpStatus !== 408 && httpStatus !== 429) {
 		return false;
 	}
