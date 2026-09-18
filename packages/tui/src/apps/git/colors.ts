@@ -4,32 +4,35 @@
  * theme's own canvas, and filled pill buttons pick their label contrast from
  * the button color's luminance.
  */
+import { colorLuma, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
+import { colorToAnsi } from "../../theme/color";
 import { theme } from "../../theme/theme";
 
 /** Decode a hex color into RGB channels. */
 export function hexChannels(hex: string): [number, number, number] {
-	const value = Number.parseInt(hex.replace("#", ""), 16);
-	return [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+	const { r, g, b } = hexToRgb(hex);
+	return [r, g, b];
 }
 
 /** Linear blend of two hex colors (`t` = 0 → `a`, 1 → `b`). */
 export function mixHex(a: string, b: string, t: number): string {
-	const ca = hexChannels(a);
-	const cb = hexChannels(b);
-	const out = ca.map((channel, i) => Math.round(channel + (cb[i] - channel) * t));
-	return `#${out.map(channel => channel.toString(16).padStart(2, "0")).join("")}`;
+	const ca = hexToRgb(a);
+	const cb = hexToRgb(b);
+	return rgbToHex({
+		r: ca.r + (cb.r - ca.r) * t,
+		g: ca.g + (cb.g - ca.g) * t,
+		b: ca.b + (cb.b - ca.b) * t,
+	});
 }
 
 /** Encode a truecolor background escape sequence. */
-export function bgAnsi(hex: string): string {
-	const [r, g, b] = hexChannels(hex);
-	return `\x1b[48;2;${r};${g};${b}m`;
+export function bgAnsiHex(hex: string): string {
+	return colorToAnsi(hex, "truecolor").replace("\x1b[38;", "\x1b[48;");
 }
 
 /** Encode a truecolor foreground escape sequence. */
-export function fgAnsi(hex: string): string {
-	const [r, g, b] = hexChannels(hex);
-	return `\x1b[38;2;${r};${g};${b}m`;
+export function fgAnsiHex(hex: string): string {
+	return colorToAnsi(hex, "truecolor");
 }
 
 /** True when the theme sits on a dark surface. */
@@ -51,8 +54,7 @@ export function textHex(): string {
 
 /** Perceptual luminance of a hex color (0..1). */
 export function luminance(hex: string): number {
-	const [r, g, b] = hexChannels(hex);
-	return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+	return colorLuma(hex)!;
 }
 
 /**
@@ -71,7 +73,7 @@ export function withBg(text: string, bg: string): string {
 export function pill(label: string, hex: string, options: { selected?: boolean; dim?: boolean } = {}): string {
 	const fill = options.selected ? mixHex(hex, textHex(), 0.22) : options.dim ? mixHex(hex, canvasHex(), 0.55) : hex;
 	const labelHex = luminance(fill) > 0.5 ? mixHex(fill, "#000000", 0.82) : mixHex(fill, "#ffffff", 0.92);
-	return `${fgAnsi(fill)}▐${bgAnsi(fill)}${fgAnsi(labelHex)}${label}\x1b[0m${fgAnsi(fill)}▌\x1b[0m`;
+	return `${fgAnsiHex(fill)}▐${bgAnsiHex(fill)}${fgAnsiHex(labelHex)}${label}\x1b[0m${fgAnsiHex(fill)}▌\x1b[0m`;
 }
 
 /**
@@ -81,7 +83,7 @@ export function pill(label: string, hex: string, options: { selected?: boolean; 
  */
 export function chipFill(label: string, hex: string): string {
 	const labelHex = luminance(hex) > 0.5 ? mixHex(hex, "#000000", 0.82) : mixHex(hex, "#ffffff", 0.92);
-	return `${bgAnsi(hex)}${fgAnsi(labelHex)}${label}\x1b[0m`;
+	return `${bgAnsiHex(hex)}${fgAnsiHex(labelHex)}${label}\x1b[0m`;
 }
 
 /**
@@ -91,17 +93,17 @@ export function chipFill(label: string, hex: string): string {
  * `dim` renders a fainter band for cursors in unfocused panes.
  */
 export function selectionBgAnsi(dim = false): string {
-	return bgAnsi(mixHex(canvasHex(), textHex(), dim ? 0.08 : 0.14));
+	return bgAnsiHex(mixHex(canvasHex(), textHex(), dim ? 0.08 : 0.14));
 }
 
 /** Tinted chip: faint fill of a theme color with the full color as label. */
 export function tintChip(label: string, hex: string): string {
-	return `${bgAnsi(mixHex(canvasHex(), hex, 0.18))}${fgAnsi(hex)}${label}\x1b[0m`;
+	return `${bgAnsiHex(mixHex(canvasHex(), hex, 0.18))}${fgAnsiHex(hex)}${label}\x1b[0m`;
 }
 
 /** Subtle toggle chip: accent fill when active, neutral surface otherwise. */
 export function softPill(label: string, options: { active?: boolean } = {}): string {
 	if (options.active) return chipFill(label, theme.getColorHex("accent"));
 	const canvas = canvasHex();
-	return `${bgAnsi(mixHex(canvas, textHex(), 0.1))}${fgAnsi(mixHex(canvas, textHex(), 0.62))}${label}\x1b[0m`;
+	return `${bgAnsiHex(mixHex(canvas, textHex(), 0.1))}${fgAnsiHex(mixHex(canvas, textHex(), 0.62))}${label}\x1b[0m`;
 }

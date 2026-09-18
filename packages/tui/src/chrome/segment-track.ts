@@ -9,12 +9,10 @@
  * the ctrl+p role-cycle status so both surfaces read identically.
  */
 import { type ThemeColor, theme } from "../theme/index";
+import { BG_RESET, FG_RESET } from "../theme/color";
 export interface TrackSegment {
 	label: string;
 }
-
-const FG_RESET = "\x1b[39m";
-const BG_RESET = "\x1b[49m";
 
 /** Vivid theme colors for position-based segment coloring, in preference
  *  order. Themes alias many of these to the same value (titanium maps most of

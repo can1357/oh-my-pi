@@ -7,32 +7,7 @@ import { expandAtImports } from "../discovery/at-imports";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
-/**
- * One advisor declared in a `WATCHDOG.yml` file. `model` is a model selector
- * with an optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`),
- * resolved exactly like any other model override; `tools` is a subset of
- * `BUILTIN_TOOL_NAMES` — any built-in name, including mutating tools such as
- * `edit`/`write`/`bash` (the advisor is a full agent). Omitted falls back to
- * the default `read`/`grep`/`glob` subset (plus `recall` when the active
- * memory backend provides it); an explicit empty list grants no
- * tools. `instructions` is the advisor's specialization, appended to the shared
- * baseline.
- */
-export interface AdvisorConfig {
-	name: string;
-	model?: string;
-	tools?: string[];
-	instructions?: string;
-	/** Per-advisor on/off toggle (default `true`). When `false`, the advisor
-	 *  stays in the roster but its runtime is never built — it shows `○` in
-	 *  the status line and `/advisor status` rather than disappearing. */
-	enabled?: boolean;
-	/**
-	 * Per-advisor maximum non-blocker advice notes accepted per advisor prompt
-	 * update (default `4`). Blockers are exempt from the budget.
-	 */
-	maxNotesPerUpdate?: number;
-}
+import type { AdvisorConfig, AdvisorConfigScope, WatchdogConfigDoc } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 
 /**
  * Runtime health of a single advisor, surfaced in stats and the status line.
@@ -255,23 +230,6 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 		sharedMaxNotesPerUpdate,
 		warnings,
 	};
-}
-
-/** Which level a `WATCHDOG.yml` lives at: the project root or the user agent dir. */
-export type AdvisorConfigScope = "project" | "user";
-
-/**
- * The editable contents of a single `WATCHDOG.yml` file: the shared top-level
- * `instructions` plus the advisor roster. Unlike {@link DiscoveredAdvisors}, this
- * is one file's raw view (no cross-level merge, no `@import` expansion) so the
- * config editor round-trips exactly what the user wrote.
- */
-export interface WatchdogConfigDoc {
-	instructions?: string;
-	maxNotesPerUpdate?: number;
-	advisors: AdvisorConfig[];
-	/** Per-entry problems found while loading (dropped entries). Shown when the file becomes active in the editor. */
-	warnings?: string[];
 }
 
 /**

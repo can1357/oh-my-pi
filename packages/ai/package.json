@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-ai",
-	"version": "18.2.4",
+	"version": "18.2.6",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"keywords": [
 		"ai",

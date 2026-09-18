@@ -6,6 +6,7 @@
  * TUI editor (`packages/tui/src/components/editor.ts`); the editor fires the
  * popup, this module decides whether there are candidates to show.
  */
+import { subsequenceMatch, subsequenceScore } from "../autocomplete";
 import type { AutocompleteItem } from "../index";
 /** Lazy runtime capabilities supplied by the internal URL host. */
 export interface InternalUrlCompletionHost {
@@ -42,37 +43,6 @@ export interface InternalUrlContext {
 	query: string;
 	/** Exact buffer token from its boundary to the cursor (the completion prefix). */
 	token: string;
-}
-
-// Subsequence fuzzy match: `hum` matches `humanizer`, `lp` matches `local-plan`.
-function fuzzyMatch(query: string, target: string): boolean {
-	if (query.length === 0) return true;
-	if (query.length > target.length) return false;
-	let q = 0;
-	for (let t = 0; t < target.length && q < query.length; t += 1) {
-		if (query[q] === target[t]) q += 1;
-	}
-	return q === query.length;
-}
-
-// Higher is better: exact > prefix > substring > scattered subsequence.
-function fuzzyScore(query: string, target: string): number {
-	if (query.length === 0) return 1;
-	if (target === query) return 100;
-	if (target.startsWith(query)) return 80;
-	if (target.includes(query)) return 60;
-	let q = 0;
-	let gaps = 0;
-	let last = -1;
-	for (let t = 0; t < target.length && q < query.length; t += 1) {
-		if (query[q] === target[t]) {
-			if (last >= 0 && t - last > 1) gaps += 1;
-			last = t;
-			q += 1;
-		}
-	}
-	if (q !== query.length) return 0;
-	return Math.max(1, 40 - gaps * 5);
 }
 
 /** Decode a completion `value` for fuzzy matching (the inserted value may be
@@ -135,14 +105,14 @@ export async function getInternalUrlSuggestions(
 	const scored: Array<{ item: AutocompleteItem; score: number }> = [];
 	for (const candidate of candidates) {
 		const target = decodeUrlCompletionValue(candidate.value).toLowerCase();
-		if (!fuzzyMatch(query, target)) continue;
+		if (!subsequenceMatch(query, target)) continue;
 		scored.push({
 			item: {
 				value: `${ctx.scheme}://${candidate.value}`,
 				label: candidate.label ?? candidate.value,
 				...(candidate.description ? { description: candidate.description } : {}),
 			},
-			score: fuzzyScore(query, target),
+			score: subsequenceScore(query, target),
 		});
 	}
 	if (scored.length === 0) return null;

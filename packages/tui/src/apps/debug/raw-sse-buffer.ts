@@ -59,7 +59,7 @@ type TrimResult = { raw: string[]; truncated: boolean; originalChars: number; ch
 // the accounting matches the previous `countRecordChars` byte-for-byte (the
 // trailing +1 covers the record-level newline that `rawRecordText` appends in
 // `toRawText`).
-function countLines(lines: readonly string[]): number {
+function countChars(lines: readonly string[]): number {
 	let chars = 0;
 	for (let i = 0; i < lines.length; i++) chars += lines[i].length + 1;
 	return chars;
@@ -166,7 +166,7 @@ function headTailTrim(lines: string[], budget: number, elidedTotal: number): str
 	}
 	tail.reverse();
 
-	let elided = elidedTotal - countLines(out) - countLines(tail);
+	let elided = elidedTotal - countChars(out) - countChars(tail);
 	if (i <= j) {
 		// lines[i..j] straddle the cut: keep a head slice of the first and a
 		// tail slice of the last (the same line when i === j).
@@ -196,14 +196,14 @@ function headTailTrim(lines: string[], budget: number, elidedTotal: number): str
 // Any trimmed result ends with the `: omp-debug-truncated` marker carrying
 // the original size.
 function trimRawLines(raw: string[]): TrimResult {
-	const originalChars = countLines(raw);
+	const originalChars = countChars(raw);
 	if (originalChars <= MAX_RAW_SSE_EVENT_CHARS) {
 		return { raw, truncated: false, originalChars, chars: originalChars + 1 };
 	}
 
 	const budget = MAX_RAW_SSE_EVENT_CHARS - TRIM_MARKER_RESERVE;
 	let lines = compactToolLines(raw) ?? raw;
-	const compactedChars = lines === raw ? originalChars : countLines(lines);
+	const compactedChars = lines === raw ? originalChars : countChars(lines);
 	if (compactedChars > budget) {
 		lines = headTailTrim(lines, budget, compactedChars);
 	} else if (lines === raw) {
@@ -212,7 +212,7 @@ function trimRawLines(raw: string[]): TrimResult {
 	// Kept windows outlive the incoming frame; detach them from its backing storage.
 	lines = lines.map(materializeString);
 	lines.push(`: omp-debug-truncated originalChars=${originalChars}`);
-	return { raw: lines, truncated: true, originalChars, chars: countLines(lines) + 1 };
+	return { raw: lines, truncated: true, originalChars, chars: countChars(lines) + 1 };
 }
 
 /** Format a captured event timestamp as an ISO instant. */

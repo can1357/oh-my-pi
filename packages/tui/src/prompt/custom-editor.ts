@@ -1,6 +1,7 @@
 import * as url from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { BracketedPasteHandler } from "../bracketed-paste";
+import { BRACKETED_PASTE_END, BRACKETED_PASTE_START } from "../stdin-buffer";
 import { Editor, type EditorTextDecorationContext, type EditorTheme } from "../components/editor";
 import { addKeyAliases, canonicalKeyId, getKeybindings } from "../keybindings";
 import { type KeyId, parseKey, parseKittySequence } from "../keys";
@@ -81,8 +82,6 @@ function unionOfMatchKeys(matchKeys: ReadonlyMap<ConfigurableEditorAction, Reado
 	return union;
 }
 
-const BRACKETED_PASTE_START = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
 const BRACKETED_IMAGE_PATH_REGEX = /\.(?:png|jpe?g|gif|webp)$/i;
 const SHELL_ESCAPED_PATH_CHAR_REGEX = /\\([\\\s'"()[\]{}&;<>|?*!$`])/g;
 const URI_SCHEME_REGEX = /^[a-z][a-z0-9+.-]*:/i;

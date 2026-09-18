@@ -21,6 +21,7 @@ import {
 	isModelMentionPrefix,
 	type ModelMentionCandidateSource,
 } from "./model-mention-autocomplete";
+import { subsequenceMatch, subsequenceScore } from "../autocomplete";
 
 let emojiAutocompleteEnabled = true;
 
@@ -59,43 +60,6 @@ interface PromptActionAutocompleteOptions {
 	moveCursorToMessageStart: () => void;
 	moveCursorToLineStart: () => void;
 	moveCursorToLineEnd: () => void;
-}
-
-function fuzzyMatch(query: string, target: string): boolean {
-	if (query.length === 0) return true;
-	if (query.length > target.length) return false;
-
-	let queryIndex = 0;
-	for (let targetIndex = 0; targetIndex < target.length && queryIndex < query.length; targetIndex += 1) {
-		if (query[queryIndex] === target[targetIndex]) {
-			queryIndex += 1;
-		}
-	}
-
-	return queryIndex === query.length;
-}
-
-function fuzzyScore(query: string, target: string): number {
-	if (query.length === 0) return 1;
-	if (target === query) return 100;
-	if (target.startsWith(query)) return 80;
-	if (target.includes(query)) return 60;
-
-	let queryIndex = 0;
-	let gaps = 0;
-	let lastMatchIndex = -1;
-	for (let targetIndex = 0; targetIndex < target.length && queryIndex < query.length; targetIndex += 1) {
-		if (query[queryIndex] === target[targetIndex]) {
-			if (lastMatchIndex >= 0 && targetIndex - lastMatchIndex > 1) {
-				gaps += 1;
-			}
-			lastMatchIndex = targetIndex;
-			queryIndex += 1;
-		}
-	}
-
-	if (queryIndex !== query.length) return 0;
-	return Math.max(1, 40 - gaps * 5);
 }
 
 function isPromptActionItem(item: AutocompleteItem): item is PromptActionAutocompleteItem {
@@ -207,14 +171,14 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			const items = this.#actions
 				.map(action => {
 					const searchable = [action.label, action.description, ...action.keywords].join(" ").toLowerCase();
-					if (!fuzzyMatch(query, searchable)) return null;
+					if (!subsequenceMatch(query, searchable)) return null;
 					return {
 						value: action.label,
 						label: action.label,
 						description: action.description,
 						actionId: action.id,
 						execute: action.execute,
-						score: fuzzyScore(query, searchable),
+						score: subsequenceScore(query, searchable),
 					} satisfies PromptActionAutocompleteItem & { score: number };
 				})
 				.filter(item => item !== null)

@@ -191,7 +191,7 @@ function renderNoteLines(uiTheme: Theme, note: string, width: number): string[] 
  * Marker glyph for a question option. Single-choice questions render circular radio
  * buttons (pick one); multi-select questions render rectangular checkboxes (pick many).
  */
-function optionMarker(uiTheme: Theme, multi: boolean | undefined, selected: boolean): string {
+export function optionMarker(uiTheme: Theme, multi: boolean | undefined, selected: boolean): string {
 	if (multi) return selected ? uiTheme.checkbox.checked : uiTheme.checkbox.unchecked;
 	return selected ? uiTheme.radio.selected : uiTheme.radio.unselected;
 }

@@ -43,13 +43,23 @@ export interface ResolveInvocation {
 
 /** Streaming-safe call preview for a resolution-device write: `Resolve/Reject/Propose: <text>`. */
 export function renderResolutionDeviceCall(device: ResolutionDeviceName, content: unknown, uiTheme: Theme): Component {
-	const body = typeof content === "string" ? replaceTabs(content.trim().split("\n")[0] ?? "") : "";
 	const title = device === PROPOSE_DEVICE_NAME ? "Propose" : device === REJECT_DEVICE_NAME ? "Reject" : "Resolve";
+	return renderDeviceCallPreview(title, content, uiTheme, Ellipsis.Omit);
+}
+
+/** Render the first content line of a pending device write. */
+export function renderDeviceCallPreview(
+	title: string,
+	content: unknown,
+	uiTheme: Theme,
+	ellipsis?: Ellipsis,
+): Component {
+	const body = typeof content === "string" ? replaceTabs(content.trim().split("\n")[0] ?? "") : "";
 	const text = renderStatusLine(
 		{
 			icon: "pending",
 			title,
-			description: body ? truncateToWidth(body, 72, Ellipsis.Omit) : undefined,
+			description: body ? truncateToWidth(body, 72, ellipsis) : undefined,
 		},
 		uiTheme,
 	);

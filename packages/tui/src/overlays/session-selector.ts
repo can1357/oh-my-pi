@@ -15,6 +15,7 @@ import {
 } from "../index";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { theme } from "../theme/theme";
+import { contentRowWidth } from "../chrome/selector-helpers";
 import { matchesAppInterrupt, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 /** Session lifecycle status presented by the picker. */
 export type SessionSelectorStatus = "complete" | "interrupted" | "aborted" | "error" | "pending" | "unknown";
@@ -656,8 +657,7 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		// so the right-edge scrollbar is proportional at the physical-line level.
 		const sessionLines: string[] = [];
 		const sessionRowIndex: number[] = [];
-		const overflow = startIndex > 0 || endIndex < filtered.length;
-		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
+		const rowWidth = contentRowWidth(width, rawTotalRows, budget);
 		const currentPath = this.#getCurrentSessionPath();
 		for (let i = startIndex; i < endIndex; i++) {
 			const blockStart = sessionLines.length;

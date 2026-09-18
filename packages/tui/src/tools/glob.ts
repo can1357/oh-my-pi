@@ -52,8 +52,6 @@ function formatGlobRenderPaths(args: GlobRenderArgs | undefined): string | undef
 	return list.length > 0 ? list.join(", ") : undefined;
 }
 
-const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
-
 function globStatusIcon(uiTheme: Theme): string {
 	return uiTheme.fg("toolTitle", uiTheme.symbol("icon.search"));
 }
@@ -122,7 +120,7 @@ export const globToolRenderer = {
 						{
 							items: lines,
 							expanded: options.expanded,
-							maxCollapsed: COLLAPSED_LIST_LIMIT,
+							maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 							itemType: "file",
 							renderItem: line => uiTheme.fg("accent", line),
 						},
@@ -201,7 +199,7 @@ export const globToolRenderer = {
 							absPath: cwd && !entry.endsWith("/") ? path.resolve(cwd, entry) : undefined,
 						})),
 						expanded: options.expanded,
-						maxCollapsed: COLLAPSED_LIST_LIMIT,
+						maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 						hyperlinkFn: fileHyperlink,
 					},
 					uiTheme,

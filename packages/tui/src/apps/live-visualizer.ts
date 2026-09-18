@@ -1,14 +1,13 @@
 import type { Component } from "../tui";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
 import { type KeyId, matchesKey } from "../keys";
-import { replaceTabs, sliceWithWidth, truncateToWidth, visibleWidth } from "../utils";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sliceWithWidth, truncateToWidth, visibleWidth } from "../utils";
+import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { type ThemeColor, theme } from "../theme/theme";
 
 /** Distinct states of a realtime call connection. */
 export type LivePhase = "connecting" | "listening" | "working" | "speaking" | "muted" | "error";
 
-const LIVE_SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 const PHASE_ICONS: Record<LivePhase, string> = {
 	connecting: "○",
 	listening: "●",
@@ -33,10 +32,6 @@ export interface LiveVisualizerOptions {
 	onToggleMute(): void;
 	/** Configured `app.live.toggle` chords that also end the call (Ctrl+L by default). */
 	stopKeys?: readonly KeyId[];
-}
-
-function normalizeTranscript(text: string): string {
-	return replaceTabs(sanitizeText(text)).replace(/\s+/g, " ").trim();
 }
 
 function truncateFromStart(text: string, width: number): string {
@@ -107,7 +102,7 @@ export class LiveVisualizer implements Component {
 
 	/** Updates the user's streaming voice transcript. */
 	setTranscript(text: string): void {
-		const normalized = normalizeTranscript(text);
+		const normalized = sanitizeDisplaySingleLine(text).replace(/\s+/g, " ").trim();
 		if (this.#userTranscript === normalized) return;
 		this.#userTranscript = normalized;
 		this.invalidate();
@@ -199,8 +194,8 @@ export class LiveVisualizer implements Component {
 	}
 
 	#renderFooter(width: number, innerWidth: number): string {
-		const icon =
-			this.#phase === "working" ? LIVE_SPINNERS[this.#frame % LIVE_SPINNERS.length] : PHASE_ICONS[this.#phase];
+		const frames = theme.spinnerFrames;
+		const icon = this.#phase === "working" ? frames[this.#frame % frames.length] : PHASE_ICONS[this.#phase];
 		const status = `${icon} ${this.#phase}`;
 		const fullLabel = ` ${status} · space mute · esc end `;
 		const shortLabel = ` ${status} `;

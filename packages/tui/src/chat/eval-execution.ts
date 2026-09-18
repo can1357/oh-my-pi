@@ -14,13 +14,12 @@ import { OutputPane } from "../render/output-pane";
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
+	clampDisplayLine,
 	type ExecutionColorKey,
 	type ExecutionStatus,
+	PREVIEW_LINES,
 	resolveExecutionStatus,
 } from "./execution-shared";
-
-const PREVIEW_LINES = 20;
-const MAX_DISPLAY_LINE_CHARS = 4000;
 
 export type EvalExecutionLanguage = "python" | "js";
 
@@ -76,7 +75,7 @@ export class EvalExecutionComponent extends Container {
 			showHiddenMarker: false,
 			showExpandHint: false,
 			styleLine: line => theme.fg("muted", line),
-			normalizeLine: line => this.#clampDisplayLine(line),
+			normalizeLine: clampDisplayLine,
 		});
 
 		this.#contentContainer.addChild(this.#formatHeader(colorKey));
@@ -156,14 +155,6 @@ export class EvalExecutionComponent extends Container {
 			});
 			if (footer) this.#contentContainer.addChild(footer);
 		}
-	}
-
-	#clampDisplayLine(line: string): string {
-		if (line.length <= MAX_DISPLAY_LINE_CHARS) {
-			return line;
-		}
-		const omitted = line.length - MAX_DISPLAY_LINE_CHARS;
-		return `${line.slice(0, MAX_DISPLAY_LINE_CHARS)}… [${omitted} chars omitted]`;
 	}
 
 	#setOutput(output: string): void {

@@ -69,6 +69,7 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../keybinding-matchers";
+import { optionMarker } from "../tools/ask";
 import { CountdownTimer } from "../chrome/countdown-timer";
 import { editorKey } from "../chrome/keybinding-hints";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
@@ -381,11 +382,6 @@ function noteForSubmittedAnswer(question: ExtensionAskDialogQuestion, state: Que
 	return option && state.selectedOptions.has(option.label) ? state.note : undefined;
 }
 
-function optionMarker(question: ExtensionAskDialogQuestion, checked: boolean): string {
-	if (question.multi) return checked ? theme.checkbox.checked : theme.checkbox.unchecked;
-	return checked ? theme.radio.selected : theme.radio.unselected;
-}
-
 function renderRowLabel(
 	rowItem: QuestionRow,
 	question: ExtensionAskDialogQuestion,
@@ -402,7 +398,7 @@ function renderRowLabel(
 	const checked =
 		option !== undefined ? state.selectedOptions.has(option.label) : isOther && state.customInput !== undefined;
 	const color = selected ? "accent" : checked ? "toolOutput" : "text";
-	const marker = `${theme.fg(checked ? "success" : "dim", optionMarker(question, checked))} `;
+	const marker = `${theme.fg(checked ? "success" : "dim", optionMarker(theme, question.multi, checked))} `;
 	const cursor = selected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
 	const label = renderInlineMarkdown(rowItem.label, mdTheme, t => theme.fg(color, t));
 	const noteMarker = state.note && state.noteRowKey === rowItem.key ? theme.fg("success", "  ✎ note") : "";

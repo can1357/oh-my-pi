@@ -70,7 +70,7 @@ function clampPathLength(pwd: string, maxLen: number): string {
  * Compact mode promotes this glyph to the model-segment icon so the level
  * stays visible without the verbose " · <level>" tail.
  */
-function thinkingGlyph(display: string): string {
+function leadingGlyph(display: string): string {
 	const space = display.indexOf(" ");
 	return space === -1 ? display : display.slice(0, space);
 }
@@ -243,13 +243,13 @@ const modelSegment: StatusLineSegment = {
 		}
 
 		if (ctx.startupPlaceholder && thinkingDisplay) {
-			thinkingDisplay = withIcon(thinkingGlyph(thinkingDisplay), STARTUP_PLACEHOLDER);
+			thinkingDisplay = withIcon(leadingGlyph(thinkingDisplay), STARTUP_PLACEHOLDER);
 		}
 
 		// Compact mode swaps the model icon for the thinking-level glyph and drops
 		// the " · <level>" tail, keeping the level visible as a single icon.
 		const compact = ctx.compactThinkingLevel && thinkingDisplay !== "";
-		const modelIcon = compact ? thinkingGlyph(thinkingDisplay) : theme.icon.model;
+		const modelIcon = compact ? leadingGlyph(thinkingDisplay) : theme.icon.model;
 
 		// Fast-mode icon and thinking-level suffix trail the model name and are
 		// colored together with it as `statusLineModel`. The advisor symbol sits
@@ -755,6 +755,15 @@ const collabSegment: StatusLineSegment = {
 	},
 };
 
+const streamSegment: StatusLineSegment = {
+	id: "stream",
+	render(ctx) {
+		if (!ctx.stream) return { content: "", visible: false };
+		const viewers = statusValue(ctx, `${ctx.stream.viewers}`);
+		return { content: theme.fg("thinkingHigh", `● LIVE ${viewers}`), visible: true };
+	},
+};
+
 /**
  * Vim modal state, in the shape Vim itself uses: the mode, the half-typed command echoed beside it
  * (`showcmd`), and the Visual selection size. Hidden entirely when `tui.vimMode` is off, so it
@@ -910,6 +919,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,
+	stream: streamSegment,
 	vim: vimSegment,
 };
 

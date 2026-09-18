@@ -1,3 +1,5 @@
+import { FENCE_RE } from "../render/render-utils";
+
 /**
  * Markdown structure awareness for the magic-keyword affordances
  * ("ultrathink"/"orchestrate"/"workflowz").
@@ -14,10 +16,6 @@
 // Tag/element name: HTML5/XML start char + name chars. Sticky so we can probe at
 // a precise offset without slicing.
 const TAG_NAME = /[A-Za-z][A-Za-z0-9-]*/y;
-
-// A line that opens or closes a fenced code block: up to 3 leading spaces then a
-// run of >=3 backticks or tildes.
-const FENCE = /^( {0,3})([`~]{3,})/;
 
 /** Index just past the run of backticks beginning at `i`. */
 function backtickRunEnd(text: string, i: number, n: number): number {
@@ -174,7 +172,7 @@ export function maskNonProse(text: string): string {
 		let nl = text.indexOf("\n", lineStart);
 		if (nl < 0) nl = n;
 		const line = text.slice(lineStart, nl);
-		const open = FENCE.exec(line);
+		const open = FENCE_RE.exec(line);
 		if (fenceChar) {
 			for (let p = lineStart; p < nl; p++) masked[p] = 1;
 			// A closing fence is the same char, at least as long, with nothing else on the line.

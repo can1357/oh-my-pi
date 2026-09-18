@@ -3,11 +3,12 @@ import { Ellipsis, visibleWidth } from "../utils";
 import { formatMetricRow } from "../components/metric";
 import { renderProgressBar } from "../components/progress-bar";
 import { renderTableRow } from "../components/table";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import type { ThemeColor } from "../theme/theme";
 import { type AgentRecordLike, MAIN_AGENT_ID } from "./agent-hub-types";
 import { parseThinkingLevel } from "../thinking";
-import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import { TRUNCATE_LENGTHS, truncateToWidth } from "../render/render-utils";
+import { sanitizeDisplaySingleLine } from "./extensions/display-text";
 import type { ObservableSession } from "./session-observer-registry";
 import { theme } from "../theme/theme";
 import type { AgentMetrics } from "./agent-hub-projection";
@@ -27,14 +28,9 @@ export function contentWidth(): number {
 	return Math.max(TRUNCATE_LENGTHS.SHORT, (process.stdout.columns || 80) - 6);
 }
 
-/** Remove terminal controls and normalize a value before it reaches the TUI. */
-export function sanitizeDisplayText(text: string): string {
-	return replaceTabs(sanitizeText(text)).replace(/[\r\n]+/g, " ");
-}
-
 /** Sanitize a line for TUI display and truncate it to the viewport width. */
 export function sanitizeLine(text: string, maxWidth?: number): string {
-	return truncateToWidth(sanitizeDisplayText(text), maxWidth ?? contentWidth());
+	return truncateToWidth(sanitizeDisplaySingleLine(text), maxWidth ?? contentWidth());
 }
 
 export function clampHubLine(line: string, width: number): string {
@@ -70,7 +66,7 @@ export function statusText(status: AgentRecordLike["status"], text: string): str
 
 /** Model id + thinking level (`sonnet-4-6 ◒ high`), level colored per theme. */
 function formatModelBadge(modelId: string, level: ThinkingLevel | undefined): string {
-	const model = theme.fg("muted", sanitizeDisplayText(modelId));
+	const model = theme.fg("muted", sanitizeDisplaySingleLine(modelId));
 	if (!level || level === ThinkingLevel.Off || level === ThinkingLevel.Inherit) return model;
 	const display = theme.thinking[level] ?? level;
 	return `${model} ${theme.getThinkingBorderColor(level)(display)}`;
@@ -85,12 +81,12 @@ export interface AgentRoleDisplay {
 
 /** Textual model-role tag; color reinforces (but never replaces) the label. */
 export function formatRoleBadge(role: string, info: AgentRoleDisplay): string {
-	return theme.fg(info.color ?? "muted", sanitizeDisplayText(info.tag ?? info.name ?? role));
+	return theme.fg(info.color ?? "muted", sanitizeDisplaySingleLine(info.tag ?? info.name ?? role));
 }
 
 /** Format a resolved selector, preserving provider identity when requested. */
 function formatResolvedModelBadge(resolved: string, preserveProvider = false, fallbackLevel?: ThinkingLevel): string {
-	const cleanResolved = sanitizeDisplayText(resolved);
+	const cleanResolved = sanitizeDisplaySingleLine(resolved);
 	// Model ids may themselves contain colons (`qwen3:14b`), so only treat the
 	// suffix as a thinking level when it parses as one.
 	const colon = cleanResolved.lastIndexOf(":");
@@ -275,39 +271,6 @@ export function treeContinuation(
 /** One roster-wide origin for metric columns, independent of tree depth. */
 export function treeMetadataIndent(maxWidth: number, maxDepth: number): number {
 	return Math.min(Math.max(0, maxWidth - 1), TREE_DETAIL_BASE_INDENT + Math.max(0, maxDepth) * TREE_SEGMENT_WIDTH);
-}
-
-/** Higher is better: exact > prefix > substring > scattered subsequence. */
-export function fuzzyAgentScore(query: string, target: string): number {
-	if (query.length === 0) return 1;
-	if (target === query) return 100;
-	if (target.startsWith(query)) return 80;
-	if (target.includes(query)) return 60;
-	let q = 0;
-	let gaps = 0;
-	let last = -1;
-	for (let t = 0; t < target.length && q < query.length; t += 1) {
-		if (query[q] === target[t]) {
-			if (last >= 0 && t - last > 1) gaps += 1;
-			last = t;
-			q += 1;
-		}
-	}
-	if (q !== query.length) return 0;
-	return Math.max(1, 40 - gaps * 5);
-}
-
-/** Case-insensitive scattered-subsequence match used by the agent filter. */
-export function fuzzyAgentMatch(query: string, target: string): boolean {
-	const q = query.toLowerCase();
-	const t = target.toLowerCase();
-	if (q.length === 0) return true;
-	if (q.length > t.length) return false;
-	let i = 0;
-	for (let j = 0; j < t.length && i < q.length; j += 1) {
-		if (q[i] === t[j]) i += 1;
-	}
-	return i === q.length;
 }
 
 /** Right-align `text` inside a fixed-width cell, truncating overflow. */

@@ -8,15 +8,9 @@
 import { type Component, type Focusable, Key, matchesKey } from "../index";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
+import { formTheme } from "../chrome/form-theme";
 import { bottomBorder, row, topBorder } from "../chrome/overlay-box";
-import { TextFormField, type FormFieldTheme } from "../components/form";
-
-const formTheme: FormFieldTheme = {
-	label: text => theme.bold(theme.fg("accent", text)),
-	description: text => theme.fg("muted", text),
-	error: text => theme.fg("error", text),
-	hint: text => theme.fg("dim", text),
-};
+import { TextFormField } from "../components/form";
 
 export interface MoveOverlayResult {
 	directory: string;

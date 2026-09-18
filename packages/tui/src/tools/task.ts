@@ -14,11 +14,11 @@ import { Container, type Component } from "../tui";
 import { Markdown } from "../components/markdown";
 import { Text } from "../components/text";
 import { visibleWidth, wrapTextWithAnsi } from "../utils";
-import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "./renderer";
-import { formatContextUsage } from "../chrome/context-thresholds";
+import { formatAgentStatRun, renderAgentTreeRow } from "./agent-tree";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
-import { stripGeneratedOutputNotice, stripRawOutputArtifactNotice } from "./output-meta";
+import { stripGeneratedOutputNotice, stripRawOutputArtifactNotice, stripTrailingNotice } from "./output-meta";
 import {
 	capPreviewLines,
 	FEED_MODEL_BADGE_WIDTH,
@@ -27,7 +27,7 @@ import {
 	formatExpandHint,
 	formatFeedModelBadge,
 	formatMoreItems,
-	formatStatusIcon,
+	formatNumber,
 	isFeedModelBadgeEnabled,
 	previewLine,
 	previewWindowRows,
@@ -39,7 +39,7 @@ import {
 } from "../render/render-utils";
 import { renderStatusLine } from "../render/index";
 import { framedToolCard } from "../render/tool-card";
-import { renderJsonTreeLines } from "./json-tree";
+import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
 import { getSubprocessToolRenderer } from "./subprocess";
 import { assembleYieldResult } from "./task-yield-assembly";
@@ -67,61 +67,6 @@ const MAX_NESTED_TASK_RENDER_DEPTH = 8;
 
 function renderNestedCycleLine(theme: Theme): string {
 	return theme.fg("dim", "… nested task progress already shown");
-}
-
-/**
- * Get status icon for agent state.
- * For running status, uses animated spinner if spinnerFrame is provided.
- * Maps AgentProgress status to styled icon format.
- */
-function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFrame?: number): string {
-	switch (status) {
-		case "pending":
-			return formatStatusIcon("pending", theme);
-		case "running":
-			return formatStatusIcon("running", theme, spinnerFrame);
-		case "completed":
-			return formatStatusIcon("success", theme);
-		case "failed":
-			return formatStatusIcon("error", theme);
-		case "aborted":
-			return formatStatusIcon("aborted", theme);
-	}
-}
-
-/**
- * Append tool-count, context, and cost stats to a status line string.
- */
-function appendAgentStats(
-	line: string,
-	opts: {
-		toolCount?: number;
-		requests?: number;
-		tokens: number;
-		contextTokens?: number;
-		contextWindow?: number;
-		cost: number;
-	},
-	theme: Theme,
-): string {
-	if (opts.toolCount) {
-		line += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(opts.toolCount)} ${theme.icon.extensionTool}`)}`;
-	}
-	if (opts.requests) {
-		line += `${theme.sep.dot}${theme.fg("dim", `${formatNumber(opts.requests)} req`)}`;
-	}
-	// Current per-turn context — match the status line's `<pct>%/<window>` gauge (e.g. `5.1%/1M`).
-	if (opts.contextTokens && opts.contextTokens > 0) {
-		const ctx =
-			opts.contextWindow && opts.contextWindow > 0
-				? formatContextUsage((opts.contextTokens / opts.contextWindow) * 100, opts.contextWindow)
-				: `${formatNumber(opts.contextTokens)}`;
-		line += `${theme.sep.dot}${theme.fg("dim", ctx)}`;
-	}
-	if (opts.cost > 0) {
-		line += `${theme.sep.dot}${theme.fg("statusLineCost", `$${opts.cost.toFixed(2)}`)}`;
-	}
-	return line;
 }
 
 function formatFindingSummary(findings: FindingDetails[], theme: Theme): string {
@@ -255,11 +200,11 @@ function getRenderYieldLabels(type: RenderYieldItem["type"]): string[] {
 function formatYieldPreview(item: RenderYieldItem): string {
 	if (item.useLastTurn === true && item.data === undefined) return "last assistant turn";
 	if (item.data === undefined) return "last assistant turn";
-	if (typeof item.data === "string") return previewLine(replaceTabs(sanitizeText(item.data)), 70);
+	if (typeof item.data === "string") return previewLine(sanitizeText(item.data), 70);
 	try {
-		return previewLine(replaceTabs(sanitizeText(JSON.stringify(item.data) ?? "null")), 70);
+		return previewLine(sanitizeText(JSON.stringify(item.data) ?? "null"), 70);
 	} catch {
-		return previewLine(replaceTabs(sanitizeText(String(item.data))), 70);
+		return previewLine(sanitizeText(String(item.data)), 70);
 	}
 }
 
@@ -311,15 +256,6 @@ function extractMissingYieldWarning(output: string): { warning?: string; rest: s
 const BASH_WALL_TIME_NOTICE_RE = /^Wall time: \d+(?:\.\d+)? seconds$/u;
 const BASH_EXIT_CODE_NOTICE_RE = /^Command exited with code -?\d+$/u;
 
-function stripRecentOutputNoticeLine(text: string): string {
-	const trimmed = text.trimEnd();
-	const lineStart = trimmed.lastIndexOf("\n");
-	const candidateStart = lineStart === -1 ? 0 : lineStart + 1;
-	const line = trimmed.slice(candidateStart);
-	if (!BASH_WALL_TIME_NOTICE_RE.test(line) && !BASH_EXIT_CODE_NOTICE_RE.test(line)) return text;
-	return trimmed.slice(0, lineStart === -1 ? 0 : lineStart).trimEnd();
-}
-
 function sanitizeRecentOutput(output: string): string {
 	let text = sanitizeText(output).trimEnd();
 	while (text) {
@@ -333,7 +269,10 @@ function sanitizeRecentOutput(output: string): string {
 			text = withoutOutputNotice;
 			continue;
 		}
-		const withoutRuntimeNotice = stripRecentOutputNoticeLine(text);
+		const withoutRuntimeNotice = stripTrailingNotice(
+			text,
+			line => BASH_WALL_TIME_NOTICE_RE.test(line) || BASH_EXIT_CODE_NOTICE_RE.test(line),
+		);
 		if (withoutRuntimeNotice !== text) {
 			text = withoutRuntimeNotice;
 			continue;
@@ -375,7 +314,7 @@ function renderOutputSection(
 				const parsed = JSON.parse(trimmedOutput);
 
 				if (!expanded) {
-					lines.push(`${continuePrefix}  ${theme.fg("dim", formatOutputInline(parsed, theme))}`);
+					lines.push(`${continuePrefix}  ${theme.fg("dim", formatOutputInline(parsed))}`);
 					return lines;
 				}
 
@@ -424,7 +363,7 @@ function renderOutputSection(
 
 			// Collapsed: inline format like Args
 			if (!expanded) {
-				lines.push(`${continuePrefix}${theme.fg("dim", formatOutputInline(parsed, theme))}`);
+				lines.push(`${continuePrefix}${theme.fg("dim", formatOutputInline(parsed))}`);
 				return lines;
 			}
 
@@ -490,66 +429,6 @@ function renderTaskSection(
 	}
 
 	return lines;
-}
-
-function formatScalarInline(value: unknown, maxLen: number, _theme: Theme): string {
-	if (value === null) return "null";
-	if (value === undefined) return "undefined";
-	if (typeof value === "boolean") return String(value);
-	if (typeof value === "number") return String(value);
-	if (typeof value === "string") {
-		const sanitizedValue = sanitizeText(value);
-		const firstLine = sanitizedValue.split("\n")[0].trim();
-		if (firstLine.length === 0) return `"" (${sanitizedValue.split("\n").length} lines)`;
-		const preview = truncateToWidth(firstLine, maxLen);
-		if (sanitizedValue.includes("\n")) return `"${preview}…" (${sanitizedValue.split("\n").length} lines)`;
-		return `"${preview}"`;
-	}
-	if (Array.isArray(value)) return `[${value.length} items]`;
-	if (typeof value === "object") {
-		const keys = Object.keys(value);
-		return `{${keys.length} keys}`;
-	}
-	return sanitizeText(String(value));
-}
-
-function formatOutputInline(data: unknown, theme: Theme, maxWidth = 80): string {
-	if (data === null || data === undefined) return "Output: none";
-
-	// For scalars, show directly
-	if (typeof data !== "object") {
-		return `Output: ${formatScalarInline(data, 60, theme)}`;
-	}
-
-	// For arrays, show count and first element preview
-	if (Array.isArray(data)) {
-		if (data.length === 0) return "Output: []";
-		const preview = formatScalarInline(data[0], 40, theme);
-		return `Output: [${data.length} items] ${preview}${data.length > 1 ? "…" : ""}`;
-	}
-
-	// For objects, show key=value pairs inline
-	const entries = Object.entries(data as Record<string, unknown>);
-	if (entries.length === 0) return "Output: {}";
-
-	const pairs: string[] = [];
-	let totalLen = "Output: ".length;
-
-	for (const [key, value] of entries) {
-		const valueStr = formatScalarInline(value, 24, theme);
-		const pairStr = `${sanitizeText(key)}=${valueStr}`;
-		const addLen = pairs.length > 0 ? pairStr.length + 2 : pairStr.length; // +2 for ", "
-
-		if (totalLen + addLen > maxWidth && pairs.length > 0) {
-			pairs.push("…");
-			break;
-		}
-
-		pairs.push(pairStr);
-		totalLen += addLen;
-	}
-
-	return `Output: ${pairs.join(", ")}`;
 }
 
 /**
@@ -775,92 +654,38 @@ function renderAgentProgress(
 ): string[] {
 	const lines: string[] = [];
 
-	const icon = getStatusIcon(progress.status, theme, spinnerFrame);
-	const iconColor =
-		progress.status === "completed"
-			? "success"
-			: progress.status === "failed" || progress.status === "aborted"
-				? "error"
-				: "accent";
-
-	// Reserve the name and required badges before optional model metadata and details.
 	const fullDescription = progress.description ? replaceTabs(sanitizeText(progress.description)).trim() : undefined;
-	const indent = prefix ? `${prefix} ` : "";
-	let statusBadge = "";
-	// Provider retry state takes precedence over the generic failure marker.
+	let statusBadge: string | undefined;
 	if (progress.retryState && progress.status === "running") {
 		statusBadge = ` ${formatBadge("retrying", "warning", theme)}`;
 	} else if (progress.retryFailure && (progress.status === "failed" || progress.status === "aborted")) {
 		statusBadge = ` ${formatBadge("rate-limited", "error", theme)}`;
-	} else if (progress.status === "failed" || progress.status === "aborted") {
-		statusBadge = ` ${formatBadge(progress.status, iconColor, theme)}`;
 	}
-	const rowIcon =
-		progress.status === "running" || progress.status === "pending" || progress.status === "completed"
-			? theme.status.done
-			: icon;
-	const displayId = truncateTaskRow(
-		formatTaskId(progress.id),
-		Math.max(0, maxWidth - visibleWidth(`${indent}${rowIcon} ${statusBadge}`)),
+	const row = renderAgentTreeRow(
+		{
+			presentation: "task",
+			status: progress.status,
+			prefix,
+			id: formatTaskId(progress.id),
+			width: maxWidth,
+			model: progress.resolvedModelIdentity ?? progress.resolvedModel,
+			thinkingLevel: progress.resolvedThinkingLevel,
+			advisor: progress.advisor,
+			spinnerFrame,
+			frozen,
+			roleBadge: agentTypeBadge(progress.agent, theme),
+			statusBadge,
+			description: fullDescription,
+			preview:
+				progress.status === "running" && !fullDescription
+					? ` ${theme.fg("muted", previewLine(sanitizeText(progress.assignment ?? progress.task), 40))}`
+					: undefined,
+			stats: progress.status === "running" || progress.status === "completed" ? progress : undefined,
+		},
+		theme,
 	);
-	const roleBadge = truncateTaskRow(
-		agentTypeBadge(progress.agent, theme),
-		Math.max(0, maxWidth - visibleWidth(`${indent}${rowIcon} ${displayId}${statusBadge}`)),
-	);
-	const badges = `${roleBadge}${statusBadge}`;
-	const modelBadge = isFeedModelBadgeEnabled()
-		? formatFeedModelBadge(
-				progress.resolvedModelIdentity ?? progress.resolvedModel,
-				progress.resolvedThinkingLevel,
-				progress.advisor,
-				theme,
-				Math.min(
-					FEED_MODEL_BADGE_WIDTH,
-					Math.max(0, maxWidth - visibleWidth(`${indent}${rowIcon} ${displayId}${badges}`) - 1),
-				),
-			)
-		: "";
-	const modelLead = modelBadge ? `${modelBadge} ` : "";
-	const description =
-		fullDescription &&
-		visibleWidth(`${indent}${rowIcon} ${modelLead}${displayId}: ${fullDescription}${badges}`) <= maxWidth
-			? fullDescription
-			: undefined;
-	const titlePart = description ? `${theme.bold(displayId)}: ${description}` : displayId;
-	let statusLine: string;
-	if (progress.status === "running" || progress.status === "pending") {
-		// Live (or queued) agents use the same dot finished rows keep: detached
-		// async spawns can stay "pending" while real work is running, so a
-		// pending/hourglass or spinner glyph reads wrong in the transcript. Keep
-		// the row static; the Task tool header already carries the dispatch icon.
-		const dot = theme.styledSymbol("status.done", frozen ? "dim" : "accent");
-		const nameColor = frozen ? "dim" : "accent";
-		const name = theme.fg(nameColor, description ? theme.bold(displayId) : displayId);
-		statusLine = `${indent}${dot} ${modelLead}${name}`;
-		if (description) {
-			statusLine += `${theme.fg(nameColor, ":")} ${theme.fg(nameColor, description)}`;
-		}
-	} else if (progress.status === "completed") {
-		// Finished rows keep the dot but settle from accent to the plain
-		// foreground: completion reads as a color change, not a new glyph.
-		statusLine = `${indent}${theme.styledSymbol("status.done", "text")} ${modelLead}${theme.fg("text", titlePart)}`;
-	} else {
-		statusLine = `${indent}${theme.fg(iconColor, icon)} ${modelLead}${theme.fg("accent", titlePart)}`;
-	}
-	statusLine += badges;
-
-	if (progress.status === "running") {
-		if (!fullDescription) {
-			const taskPreview = previewLine(sanitizeText(progress.assignment ?? progress.task), 40);
-			statusLine += ` ${theme.fg("muted", taskPreview)}`;
-		}
-		statusLine = appendAgentStats(statusLine, progress, theme);
-	} else if (progress.status === "completed") {
-		statusLine = appendAgentStats(statusLine, progress, theme);
-	}
-
-	lines.push(truncateTaskRow(statusLine, maxWidth, ""));
-	if (fullDescription && !description) {
+	lines.push(row.line);
+	if (fullDescription && !row.descriptionShown) {
 		lines.push(...renderDescriptionLines(fullDescription, continuePrefix, maxWidth, theme));
 	}
 
@@ -1185,10 +1010,8 @@ function renderAgentResult(
 		success && !needsWarning ? "text" : "accent",
 		titlePart,
 	)}${badges}`;
-	statusLine = appendAgentStats(
-		statusLine,
+	statusLine += formatAgentStatRun(
 		{
-			tokens: result.tokens,
 			requests: result.requests,
 			contextTokens: result.contextTokens,
 			contextWindow: result.contextWindow,

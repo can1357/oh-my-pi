@@ -1,6 +1,6 @@
 import { matchesKey } from "../keys";
 import type { Component } from "../tui";
-import { Ellipsis, getWidthConfigEpoch, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
+import { Ellipsis, getWidthConfigEpoch, padding, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
 import {
 	clampScrollOffset,
 	maxScrollOffset,
@@ -475,7 +475,7 @@ export class ScrollView implements Component {
 				lines.push(truncated);
 				continue;
 			}
-			const content = `${truncated}${" ".repeat(Math.max(0, contentWidth - visibleWidth(truncated)))}`;
+			const content = `${truncated}${padding(Math.max(0, contentWidth - visibleWidth(truncated)))}`;
 			lines.push(`${content}${thumb && row >= thumb.start && row < thumb.end ? thumbSample : trackSample}`);
 		}
 

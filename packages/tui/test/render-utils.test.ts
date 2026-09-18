@@ -423,6 +423,12 @@ describe("formatExpandHint / expandKeyHint", () => {
 });
 
 describe("sanitizeDisplayLines", () => {
+	it("strips terminal escapes and controls from each retained progress line", () => {
+		expect(sanitizeDisplayLines("old\r\x1b[31mnew\x1b[0m\x00\x07\n\x1b]8;;https://host\x07link\x1b]8;;\x07")).toEqual(
+			["new", "link"],
+		);
+	});
+
 	it("expands tabs so error lines never emit raw tab stops", () => {
 		expect(sanitizeDisplayLines("offending\tkey")).toEqual([`offending${" ".repeat(DEFAULT_TAB_WIDTH)}key`]);
 	});

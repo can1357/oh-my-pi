@@ -37,6 +37,7 @@ import {
 	getStreamingPartialJson,
 	kCursorExecResolved,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
 import {
 	createHarmonyAuditEvent,
 	detectHarmonyLeakInAssistantMessage,
@@ -886,6 +887,29 @@ export function normalizeMessagesForProvider(
 const INTENT_FIELD_DESCRIPTION = "concise intent";
 const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 
+// Memoize injection per input schema identity: normalizeTools runs on every
+// model call and injectIntentIntoSchema mints a fresh root object each time,
+// which defeats the stamp-keyed schema memos downstream (toolWireSchema,
+// stripSchemaDescriptions, tryEnforceStrictSchema each deep-clone + re-walk
+// the whole catalog per request). The injected object is shared across
+// requests — the same profile as the intent-off path, where parameters IS the
+// shared memoized wire schema (see schema-immutability.test.ts). One stamp
+// key per (mode, describeIntent) variant; index 0 = bare, 1 = described.
+const INTENT_STAMPS = {
+	require: [Symbol("intent:require"), Symbol("intent:require:described")],
+	optional: [Symbol("intent:optional"), Symbol("intent:optional:described")],
+} as const;
+
+function memoizedInjectIntentIntoSchema(
+	schema: Record<string, unknown>,
+	mode: "require" | "optional",
+	describeIntent: boolean,
+): unknown {
+	return stamp(schema, INTENT_STAMPS[mode][describeIntent ? 1 : 0], host =>
+		injectIntentIntoSchema(host, mode, describeIntent),
+	);
+}
+
 function injectIntentIntoSchema(
 	schema: unknown,
 	mode: "require" | "optional" = "require",
@@ -965,12 +989,14 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		// re-inject `i` (without its hint, which `describeIntent: false` omits) so
 		// intent tracing keeps the field while no descriptions ride the wire.
 		if (pruneDescriptions) {
-			let parameters = stripSchemaDescriptions(toolWireSchema(t)) as TSchema;
-			if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode, false) as TSchema;
+			const stripped = stripSchemaDescriptions(toolWireSchema(t));
+			const parameters = (
+				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, false) : stripped
+			) as TSchema;
 			return { ...t, parameters, description: "" };
 		}
-		let parameters = toolWireSchema(t) as TSchema;
-		if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode) as TSchema;
+		const wire = toolWireSchema(t);
+		const parameters = (doInjectIntent ? memoizedInjectIntentIntoSchema(wire, intentMode, true) : wire) as TSchema;
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
