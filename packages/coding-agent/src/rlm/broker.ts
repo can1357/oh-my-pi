@@ -22,7 +22,7 @@ export interface RlmWorkerMessage {
  * Integration tests assert this payload — not a mocked prompt alone.
  */
 export interface RlmWorkerContext {
-	purpose: "rlm-query" | "rlm-subcall";
+	purpose: "rlm-query" | "rlm-subcall" | "rlm-evidence-packet";
 	viewId: string;
 	depth: number;
 	messages: readonly RlmWorkerMessage[];

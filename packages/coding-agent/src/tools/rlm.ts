@@ -2,9 +2,10 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { buildRlmSessionAccounting, formatRlmAccountingSummary, exportRlmExperimentRecord } from "../rlm/accounting";
+import { rlmEvidenceQuery } from "../rlm/evidence-query";
 import { rlmQuery } from "../rlm/query";
 import { parseGrantRanges, selectGrantsFromSearch } from "../rlm/select-grants";
-import { getRlmRuntime, rlmEnabled } from "../rlm/session";
+import { getRlmRuntime, rlmEnabled, rlmWorkerMode } from "../rlm/session";
 import { parseRlmGrants, rlmSubcall } from "../rlm/subcall";
 import type { ToolSession } from ".";
 import { toolResult } from "./tool-result";
@@ -228,7 +229,7 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 			}
 
 			const rangeGrants = parseGrantRanges(params.handle, params.ranges);
-			const result = await rlmQuery(runtime, {
+			const queryArgs = {
 				handle: params.handle,
 				question: params.question,
 				complete: this.session.rlmComplete,
@@ -244,8 +245,19 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 							mode: params.mode === "regex" ? "regex" : "literal",
 						}
 					: undefined,
-			});
-			const header = result.grantedBytes !== undefined ? `grantedBytes=${result.grantedBytes}\n` : "";
+			};
+			const useEvidence = rlmWorkerMode(this.session) === "evidence-packet";
+			const result = useEvidence
+				? await rlmEvidenceQuery(runtime, queryArgs)
+				: await rlmQuery(runtime, queryArgs);
+			const headerParts: string[] = [];
+			if (result.grantedBytes !== undefined) headerParts.push(`grantedBytes=${result.grantedBytes}`);
+			if ("packet" in result && result.packet) {
+				headerParts.push(`packet.status=${result.packet.status}`);
+				if (result.packetBytes !== undefined) headerParts.push(`packetBytes=${result.packetBytes}`);
+				if ("workerSkipped" in result && result.workerSkipped) headerParts.push("workerSkipped=true");
+			}
+			const header = headerParts.length > 0 ? `${headerParts.join(" ")}\n` : "";
 			return toolResult<RlmToolDetails>({
 				op: "query",
 				handle: params.handle,

@@ -165,6 +165,13 @@ export function rlmSubModel(session: Pick<RlmSessionHost, "settings">): string |
 	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+export type RlmWorkerMode = "prose" | "evidence-packet";
+
+export function rlmWorkerMode(session: Pick<RlmSessionHost, "settings">): RlmWorkerMode {
+	const value = session.settings.get("rlm.workerMode");
+	return value === "evidence-packet" ? "evidence-packet" : "prose";
+}
+
 export function rlmKernelBindEnabled(session: Pick<RlmSessionHost, "settings">): boolean {
 	return session.settings.get("rlm.kernelBind") === true;
 }

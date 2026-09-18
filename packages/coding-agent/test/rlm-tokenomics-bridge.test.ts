@@ -30,6 +30,19 @@ describe("OmpTokenomicsBridge", () => {
 		).toBe("rlm-search-grants");
 	});
 
+	test("deriveContextPolicy selects arm D for evidence-packet worker", () => {
+		expect(
+			deriveContextPolicy({
+				get: (p) =>
+					p === "rlm.enabled"
+						? true
+						: p === "rlm.workerMode"
+							? "evidence-packet"
+							: undefined,
+			}),
+		).toBe("rlm-search-grants-groq");
+	});
+
 	test("stable session trace_id", () => {
 		const a = createTokenomicsBridge({ sessionId: "sess-1", memoryOnly: true, contextPolicy: "native" });
 		const b = createTokenomicsBridge({ sessionId: "sess-1", memoryOnly: true, contextPolicy: "native" });

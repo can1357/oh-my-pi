@@ -19,6 +19,31 @@ export type {
 	RlmUsageReconcile,
 } from "./store";
 
+export {
+	EVIDENCE_PACKET_V1_JSON_SCHEMA,
+	EVIDENCE_WORKER_STATIC_SYSTEM,
+	emptyEvidencePacket,
+	evidencePacketByteSize,
+	formatEvidencePacketForRoot,
+	parseEvidencePacketV1,
+	tryParseEvidencePacketJson,
+} from "./evidence-packet";
+export type {
+	EvidenceCitationV1,
+	EvidenceClaimV1,
+	EvidenceContradictionV1,
+	EvidencePacketStatus,
+	EvidencePacketV1,
+	EvidenceRelevantRangeV1,
+} from "./evidence-packet";
+export { buildEvidenceWorkerContext, rlmEvidenceQuery, tryDeterministicEvidencePacket } from "./evidence-query";
+export type { RlmEvidenceQueryResult } from "./evidence-query";
+export { runRlmWorkerCompletion } from "./worker-completion";
+export type {
+	RlmWorkerCompletionHost,
+	RlmWorkerCompletionOptions,
+	RlmWorkerCompletionResult,
+} from "./worker-completion";
 export { promptContainsCorpus, QUERY_SLICE, rlmQuery, workerContextContains } from "./query";
 export type {
 	RlmBrokerResult,
@@ -80,8 +105,7 @@ export {
 	rlmKernelBindEnabled,
 	rlmSessionKey,
 	rlmSpillBytes,
-	rlmSubModel,
-	systemPromptWithRlmGuide,
+	rlmWorkerMode,
 } from "./session";
 export type { ContextEngine, RlmSessionHost } from "./session";
 export { appendRlmRuntimeGuide, RLM_RUNTIME_GUIDE, rlmGuideIsAppendOnly } from "./guide";

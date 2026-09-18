@@ -33,7 +33,20 @@ export interface RlmCompleter {
 	(
 		prompt: string,
 		options?: RlmCompleterOptions,
-	): Promise<{ text: string; tokens?: number; cost?: number } | string>;
+	): Promise<
+		| {
+				text: string;
+				tokens?: number;
+				cost?: number;
+				inputTokens?: number;
+				outputTokens?: number;
+				cacheReadTokens?: number;
+				provider?: string;
+				model?: string;
+				structured?: unknown;
+		  }
+		| string
+	>;
 }
 
 export interface RlmQueryResult {

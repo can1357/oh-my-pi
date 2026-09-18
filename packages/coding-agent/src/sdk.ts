@@ -240,6 +240,9 @@ import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
 import { createRlmPrelude } from "./rlm/prelude";
 import { disposeRlmStore } from "./rlm/session";
+import type { RlmWorkerMessage } from "./rlm/broker";
+import { EVIDENCE_PACKET_V1_JSON_SCHEMA } from "./rlm/evidence-packet";
+import { runRlmWorkerCompletion } from "./rlm/worker-completion";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -1981,6 +1984,91 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					return { text: "rlm query unavailable: session not ready (fail-open)" };
 				}
 				try {
+					if (options?.purpose === "rlm-evidence-packet") {
+						const workerResult = await runRlmWorkerCompletion(
+							{
+								settings,
+								modelRegistry,
+								getSessionId: () => sessionManager.getSessionId?.(),
+								getTelemetry: () => agent?.telemetry,
+								getActiveModel: () => agent?.state.model ?? model,
+							},
+							prompt,
+							{
+								signal: options?.signal,
+								purpose: options.purpose,
+								workerMessages: options?.workerMessages as RlmWorkerMessage[] | undefined,
+								responseSchema: EVIDENCE_PACKET_V1_JSON_SCHEMA,
+							},
+						);
+						const usage =
+							workerResult.inputTokens !== undefined
+								? {
+										input: workerResult.inputTokens,
+										output: workerResult.outputTokens ?? 0,
+										cacheRead: workerResult.cacheReadTokens ?? 0,
+										cacheWrite: 0,
+										totalTokens:
+											workerResult.tokens ??
+											workerResult.inputTokens + (workerResult.outputTokens ?? 0),
+										cost: {
+											input: 0,
+											output: 0,
+											cacheRead: 0,
+											cacheWrite: 0,
+											total: workerResult.cost ?? 0,
+										},
+									}
+								: undefined;
+						if (usage && workerResult.provider && workerResult.model) {
+							try {
+								sessionManager.appendModelUsage(
+									{
+										purpose: "rlm-evidence-packet",
+										api: model?.api ?? "openai-responses",
+										provider: workerResult.provider,
+										model: workerResult.model,
+										usage,
+										stopReason: "stop",
+									},
+									{
+										sessionId: sessionManager.getSessionId(),
+										parentId: sessionManager.getLeafId(),
+									},
+								);
+							} catch {
+								/* fail-open */
+							}
+						}
+						let packetStatus: string | undefined;
+						if (workerResult.structured && typeof workerResult.structured === "object") {
+							const status = (workerResult.structured as { status?: unknown }).status;
+							if (typeof status === "string") packetStatus = status;
+						}
+						void session
+							.getTokenomicsBridge?.()
+							?.emitModelCall({
+								role: "rlm_worker",
+								name: "omp.rlm-evidence-packet",
+								provider: workerResult.provider,
+								model: workerResult.model,
+								usage: usage as never,
+								costUsd: workerResult.cost,
+								attributes: {
+									"omp.rlm.worker.provider": workerResult.provider ?? "unknown",
+									"omp.rlm.packet.status": packetStatus ?? "unknown",
+									"omp.rlm.packet.bytes": Buffer.byteLength(workerResult.text, "utf8"),
+									"omp.rlm.worker.granted_bytes": options?.workerMessages
+										? Buffer.byteLength(
+												options.workerMessages.map(m => m.content).join("\n"),
+												"utf8",
+											)
+										: undefined,
+								},
+							})
+							.catch(() => {});
+						return workerResult;
+					}
 					const { replyText, assistantMessage } = await session.runIsolatedCompletion({
 						purpose: options?.purpose ?? "rlm",
 						promptText: prompt,

@@ -2661,6 +2661,18 @@ export const SETTINGS_SCHEMA = {
 			description: "Optional model id for query/subcall. Empty = active session model (via rlmComplete).",
 		},
 	},
+	"rlm.workerMode": {
+		type: "enum",
+		values: ["prose", "evidence-packet"],
+		default: "prose",
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM worker mode",
+			description:
+				"prose = legacy isolated completion answer; evidence-packet = typed EvidencePacketV1 via rlm.subModel (Groq coprocessor path)",
+		},
+	},
 	"rlm.kernelBind": {
 		type: "boolean",
 		default: false,

@@ -29,7 +29,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import type { RlmMetrics } from "./store";
 import type { EvidenceQualityLabel } from "./accounting";
 
-export type ContextPolicy = "native" | "rlm-fixed-grant" | "rlm-search-grants";
+export type ContextPolicy = "native" | "rlm-fixed-grant" | "rlm-search-grants" | "rlm-search-grants-groq";
 
 export interface TokenomicsBridgeOptions {
 	sessionId: string;
@@ -61,6 +61,7 @@ export interface ModelCallEmit {
 	costUsd?: number;
 	/** If true, skip emission when usage missing (default true for provider path). */
 	requireUsage?: boolean;
+	attributes?: Record<string, string | number | boolean | undefined>;
 }
 
 function sessionTraceId(sessionId: string): string {
@@ -86,6 +87,7 @@ function mapUsage(usage: Usage | null | undefined, attribution: TokenUsage["attr
 function armForPolicy(policy: ContextPolicy): string {
 	if (policy === "native") return "A";
 	if (policy === "rlm-fixed-grant") return "B";
+	if (policy === "rlm-search-grants-groq") return "D";
 	return "C";
 }
 
@@ -216,6 +218,7 @@ export class OmpTokenomicsBridge {
 				ended_at: ended,
 				attributes: {
 					"tokenomics.context.policy": this.contextPolicy,
+					...(call.attributes ?? {}),
 				},
 			}),
 		);
@@ -406,6 +409,7 @@ export function deriveContextPolicy(settings?: {
 	// Fixed-grant arm is selected only when OMP_RLM_POLICY=fixed.
 	const env = process.env.OMP_RLM_POLICY?.trim().toLowerCase();
 	if (env === "fixed" || env === "rlm-fixed-grant" || env === "b") return "rlm-fixed-grant";
+	if (settings?.get?.("rlm.workerMode") === "evidence-packet") return "rlm-search-grants-groq";
 	return "rlm-search-grants";
 }
 
