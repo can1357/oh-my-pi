@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pasted or dragged image files now reach the agent with their original filesystem path, so it can read and act on the source file directly; clipboard screenshots keep working unchanged. ([#12404](https://github.com/can1357/oh-my-pi/pull/12404) by [@xiechimon](https://github.com/xiechimon))
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
@@ -52,10 +56,6 @@
 ### Changed
 
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
-
-### Fixed
-
-- Pasted or dragged image files now reach the agent with their original filesystem path, so it can read and act on the source file directly; clipboard screenshots keep working unchanged. ([#12244](https://github.com/can1357/oh-my-pi/issues/12244))
 
 ## [18.2.3] - 2026-09-17
 
