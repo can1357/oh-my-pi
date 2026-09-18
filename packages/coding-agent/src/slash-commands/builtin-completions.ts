@@ -6,7 +6,9 @@ import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
+import { getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import { expandTilde } from "../tools/path-utils";
+import { availableEffortSelectors } from "./helpers/effort";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";
 
 /**
@@ -26,6 +28,44 @@ export function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix:
 				hint: s.usage,
 			}));
 		return matches.length > 0 ? matches : null;
+	};
+}
+
+/**
+ * Build getArgumentCompletions for `/effort <level>`. The static `subcommands`
+ * list documents the full vocabulary for ACP clients, but the dropdown must
+ * offer only what the active model exposes: suggesting a tier the model lacks
+ * (e.g. `xhigh` on a model capped at `high`) would make the handler answer the
+ * accepted completion with `Unknown effort`. Returns null for a model with no
+ * reasoning dial — there is nothing to pick.
+ */
+export function buildEffortArgumentCompletions(
+	runtime: TuiSlashCommandRuntime,
+): (argumentPrefix: string) => AutocompleteItem[] | null {
+	return (argumentPrefix: string) => {
+		if (argumentPrefix.includes(" ")) return null;
+		const lower = argumentPrefix.toLowerCase();
+		const matches = availableEffortSelectors(runtime.ctx.session)
+			.filter(level => level.startsWith(lower))
+			.map(level => ({
+				value: `${level} `,
+				label: level,
+				description: getConfiguredThinkingLevelMetadata(level).description,
+			}));
+		return matches.length > 0 ? matches : null;
+	};
+}
+
+/**
+ * Build getInlineHint for `/effort <level>` from the same live list as the
+ * dropdown, so the ghost text never completes a tier the active model lacks.
+ */
+export function buildEffortInlineHint(runtime: TuiSlashCommandRuntime): (argumentText: string) => string | null {
+	return (argumentText: string) => {
+		const prefix = argumentText.trim().toLowerCase();
+		if (prefix.length === 0 || prefix.includes(" ")) return null;
+		const match = availableEffortSelectors(runtime.ctx.session).find(level => level.startsWith(prefix));
+		return match ? match.slice(prefix.length) : null;
 	};
 }
 

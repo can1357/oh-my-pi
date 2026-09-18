@@ -183,6 +183,10 @@ class FakeAgentSession {
 		return this.models;
 	}
 
+	getAvailableEffortSelectors(): ReadonlyArray<string> {
+		return ["off", "auto", ...this.getAvailableThinkingLevels()];
+	}
+
 	getAvailableThinkingLevels(): ReadonlyArray<string> {
 		return ["low", "medium", "high"];
 	}
@@ -1007,6 +1011,78 @@ describe("ACP agent", () => {
 			| { currentValue?: unknown }
 			| undefined;
 		expect(thinkingOption?.currentValue).toBe("high");
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("emits a single config_option_update per /effort change", async () => {
+		// `/effort <level>` calls AgentSession.setThinkingLevel, which fires
+		// `thinking_level_changed`; the lifetime subscription turns that into a
+		// `config_option_update`. The command's explicit notifyConfigChanged
+		// must not add a second identical push, or clients redraw their config
+		// UI twice per change.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await advanceBootstrapGuard();
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(session.thinkingLevel).toBe("high");
+		expect(configUpdates.length).toBe(1);
+		expectAcpNotifications(configUpdates);
+		const update = configUpdates[0]!.update;
+		if (update.sessionUpdate !== "config_option_update") {
+			throw new Error("expected config_option_update");
+		}
+		const thinkingOption = update.configOptions.find(option => option.id === "thinking") as
+			| { currentValue?: unknown }
+			| undefined;
+		expect(thinkingOption?.currentValue).toBe("high");
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("still pushes config_option_update for /effort before the lifetime subscription exists", async () => {
+		// Pre-bootstrap there is no lifetime subscription, so the explicit
+		// notifyConfigChanged is the only path that tells the client — same
+		// contract as `setSessionConfigOption`'s pre-bootstrap push.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		// Deliberately do not advance the 50ms bootstrap guard: the lifetime
+		// subscription is not installed yet.
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(configUpdates.length).toBe(1);
 
 		vi.useRealTimers();
 		harness.abortController.abort();

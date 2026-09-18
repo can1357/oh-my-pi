@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add /effort with active-model-aware completions and validation, including off/auto selectors. ([#12222](https://github.com/can1357/oh-my-pi/pull/12222) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
