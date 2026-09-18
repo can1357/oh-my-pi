@@ -13,7 +13,7 @@ import {
 } from "../src/rlm";
 import { buildEvidenceWorkerRequest } from "../src/rlm/evidence-query";
 import { selectGrantsFromSearch } from "../src/rlm/select-grants";
-import type { EvidencePacketV1 } from "../src/rlm/evidence-packet";
+import type { EvidencePacketV2 } from "../src/rlm/evidence-packet-v2";
 
 afterEach(() => {
 	resetRlmStoresForTest();
@@ -48,6 +48,8 @@ describe("evidence worker firewall", () => {
 		const handle = rec.id;
 
 		let capturedMessages: readonly { role: string; content: string }[] | undefined;
+		const selection = selectGrantsFromSearch(runtime.store, handle, "root_cause=");
+		const grant = selection.grants[0]!;
 		const result = await rlmEvidenceQuery(runtime, {
 			handle,
 			question: "Summarize the ERROR block for disk failure diagnosis",
@@ -57,18 +59,27 @@ describe("evidence worker firewall", () => {
 				expect(opts?.purpose).toBe("rlm-evidence-packet");
 				expect(opts?.workerMessages?.some(m => m.content.includes(SECRET))).toBe(false);
 				expect(opts?.workerMessages?.some(m => m.content.includes(TAIL_NEEDLE))).toBe(true);
-				const packet: EvidencePacketV1 = {
+				const cite = { handle: `rlm://h/${handle}`, start: grant.start ?? 0, end: grant.end ?? 40 };
+				const packet: EvidencePacketV2 = {
 					status: "sufficient",
+					atoms: [
+						{
+							id: "root_cause",
+							key: "root_cause",
+							value: TAIL_NEEDLE,
+							citations: [{ handle: `rlm://h/${handle}`, start: 0, end: 40 }],
+						},
+					],
 					claims: [
 						{
 							fact: TAIL_NEEDLE,
+							supports: ["root_cause"],
 							confidence: 1,
 							citations: [{ handle: `rlm://h/${handle}`, start: 0, end: 40 }],
 						},
 					],
 					contradictions: [],
 					missingEvidence: [],
-					relevantRanges: [],
 				};
 				return { text: JSON.stringify(packet), structured: packet, tokens: 120, inputTokens: 900, outputTokens: 120 };
 			},
@@ -110,7 +121,7 @@ describe("deterministic gates", () => {
 		const selection = selectGrantsFromSearch(runtime.store, rec.id, "root_cause=");
 		const packet = tryDeterministicEvidencePacket(selection, "What is root_cause?");
 		expect(packet?.status).toBe("sufficient");
-		expect(packet?.claims[0]?.fact).toBe(TAIL_NEEDLE);
+		expect(packet?.atoms[0]?.value).toBe(TAIL_NEEDLE);
 	});
 });
 
@@ -124,7 +135,7 @@ describe("prompt caching layout", () => {
 		const ctx = buildEvidenceWorkerRequest({ task: "extract fact", view: resolved });
 		const system = ctx.messages.find(m => m.role === "system")?.content ?? "";
 		const user = ctx.messages.find(m => m.role === "user")?.content ?? "";
-		expect(system.includes("EvidencePacketV1")).toBe(true);
+		expect(system.includes("EvidencePacketV2")).toBe(true);
 		expect(system.includes("Schema")).toBe(true);
 		expect(user.startsWith("Task:")).toBe(true);
 		expect(system.length).toBeGreaterThan(user.length / 4);

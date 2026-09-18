@@ -7,11 +7,14 @@ import { ModelRegistry } from "../../../src/config/model-registry";
 import { resolveModelFromString } from "../../../src/config/model-resolver";
 import { Settings } from "../../../src/config/settings";
 import {
-	EVIDENCE_PACKET_V1_JSON_SCHEMA,
+	EVIDENCE_PACKET_V2_JSON_SCHEMA,
 	formatEvidencePacketForRoot,
-	parseEvidencePacketV1,
-	type EvidencePacketV1,
-} from "../../../src/rlm/evidence-packet";
+	parseEvidencePacketV2,
+	type EvidencePacketV2,
+	type EvidencePacketStatus,
+} from "../../../src/rlm/evidence-packet-v2";
+import { validateEvidencePacket, type EvidenceValidationResult } from "../../../src/rlm/evidence-validator";
+import { computeCodecMetrics, type CodecMetrics } from "./evidence-codec-rubric";
 import { buildEvidenceWorkerRequest } from "../../../src/rlm/evidence-query";
 import type { RlmCompleter } from "../../../src/rlm/query";
 import {
@@ -50,7 +53,10 @@ export interface LiveFixture {
 	question: string;
 	parentSecret: string;
 	requiredFacts: string[];
-	expectStatus?: EvidencePacketV1["status"] | EvidencePacketV1["status"][];
+	requiredAtoms?: Array<{ key: string; valuePattern?: RegExp; grantTextPattern?: RegExp }>;
+	requiredRelations?: Array<{ id: string; atomKeys: string[]; pattern?: RegExp }>;
+	requiredContradiction?: { leftGrantPattern: RegExp; rightGrantPattern: RegExp };
+	expectStatus?: EvidencePacketStatus | EvidencePacketStatus[];
 	expectContradictions?: boolean;
 	expectMissing?: boolean;
 	grantedNeedle: string;
@@ -173,7 +179,7 @@ export function createEvidenceCompleter(host: LiveGroqHost): RlmCompleter {
 			{
 				purpose: options?.purpose ?? "rlm-evidence-packet",
 				workerMessages: options?.workerMessages,
-				responseSchema: EVIDENCE_PACKET_V1_JSON_SCHEMA,
+				responseSchema: EVIDENCE_PACKET_V2_JSON_SCHEMA,
 				signal: options?.signal,
 			},
 		);
@@ -276,35 +282,33 @@ export function firewallProof(
 	};
 }
 
-export function validateCitations(
+export function validatePacketStructural(
 	store: RlmStore,
-	handle: string,
-	packet: EvidencePacketV1,
-): { validCount: number; invalidCount: number; wrongCitation: boolean } {
-	let validCount = 0;
-	let invalidCount = 0;
-	for (const claim of packet.claims) {
-		for (const cite of claim.citations) {
-			const rec = store.get(cite.handle.includes("rlm://") ? cite.handle : handle);
-			if (!rec) {
-				invalidCount += 1;
-				continue;
-			}
-			if (cite.start < 0 || cite.end > rec.text.length || cite.start >= cite.end) {
-				invalidCount += 1;
-				continue;
-			}
-			validCount += 1;
-		}
-	}
-	return { validCount, invalidCount, wrongCitation: invalidCount > 0 && validCount === 0 };
+	view: import("../../../src/rlm/view").RlmView,
+	packet: EvidencePacketV2,
+): EvidenceValidationResult {
+	return validateEvidencePacket(store, view, packet);
 }
 
-export function semanticRetention(requiredFacts: string[], packet: EvidencePacketV1): number {
+export function validateCitations(
+	store: RlmStore,
+	view: import("../../../src/rlm/view").RlmView,
+	packet: EvidencePacketV2,
+): { validCount: number; invalidCount: number; wrongCitation: boolean } {
+	const validation = validateEvidencePacket(store, view, packet);
+	return {
+		validCount: validation.validCitationCount,
+		invalidCount: validation.totalCitationCount - validation.validCitationCount,
+		wrongCitation: validation.totalCitationCount > 0 && validation.validCitationCount === 0,
+	};
+}
+
+export function semanticRetention(requiredFacts: string[], packet: EvidencePacketV2): number {
 	if (requiredFacts.length === 0) return 1;
 	const blob = [
+		...packet.atoms.map(a => `${a.key}=${a.value}`),
 		...packet.claims.map(c => c.fact),
-		...packet.contradictions.flatMap(c => [c.left, c.right]),
+		...packet.contradictions.flatMap(c => [c.left.value, c.right.value]),
 	].join("\n").toLowerCase();
 	const preserved = requiredFacts.filter(f => blob.includes(f.toLowerCase()));
 	return preserved.length / requiredFacts.length;
@@ -312,23 +316,37 @@ export function semanticRetention(requiredFacts: string[], packet: EvidencePacke
 
 export function labelEvidencePacket(
 	fixture: LiveFixture,
-	packet: EvidencePacketV1 | undefined,
-	citationCheck: ReturnType<typeof validateCitations>,
+	packet: EvidencePacketV2 | undefined,
+	metrics: CodecMetrics,
+	validation: EvidenceValidationResult | undefined,
 ): EvidenceLabel {
 	if (!packet) return "UNSUPPORTED";
-	if (citationCheck.wrongCitation && citationCheck.validCount === 0) return "WRONG_CITATION";
-	const retention = semanticRetention(fixture.requiredFacts, packet);
-	if (fixture.requiredFacts.length > 0 && retention < 0.5) return "MISSED_EVIDENCE";
+	if (validation && validation.validCitationCount === 0 && validation.totalCitationCount > 0) return "WRONG_CITATION";
+
 	if (fixture.expectContradictions) {
-		return packet.contradictions.length > 0 ? "SUPPORTED" : "UNSUPPORTED";
+		return metrics.structuralValid && metrics.contradictionValid ? "SUPPORTED" : "UNSUPPORTED";
 	}
+
 	if (fixture.expectMissing) {
 		const okStatus =
 			packet.status === "partial" ||
 			packet.status === "abstain" ||
 			packet.missingEvidence.length > 0;
-		return okStatus ? "PARTIAL_OK" : "UNSUPPORTED";
+		const strongClaims = packet.claims.filter(c => c.confidence >= 0.7);
+		return okStatus && strongClaims.length === 0 ? "PARTIAL_OK" : "UNSUPPORTED";
 	}
+
+	const atomOk = (fixture.requiredAtoms?.length ?? 0) === 0 || metrics.atomRecall >= 0.99;
+	const relationOk = (fixture.requiredRelations?.length ?? 0) === 0 || metrics.relationRecall >= 0.99;
+
+	if (fixture.requiredAtoms?.length || fixture.requiredRelations?.length) {
+		if (atomOk && relationOk && metrics.structuralValid) return "SUPPORTED";
+		if (metrics.atomRecall < 0.5 || metrics.relationRecall < 0.5) return "MISSED_EVIDENCE";
+		return metrics.semanticRetention >= 0.5 ? "PARTIAL_OK" : "MISSED_EVIDENCE";
+	}
+
+	const retention = semanticRetention(fixture.requiredFacts, packet);
+	if (fixture.requiredFacts.length > 0 && retention < 0.5) return "MISSED_EVIDENCE";
 	if (Array.isArray(fixture.expectStatus)) {
 		return fixture.expectStatus.includes(packet.status) && retention >= 0.5 ? "SUPPORTED" : "UNSUPPORTED";
 	}
@@ -417,7 +435,18 @@ export const LIVE_FIXTURES: LiveFixture[] = [
 		},
 		patterns: ["active_connections", "pool_limit", "timeout cascade"],
 		question: "What is the likely first causal condition before downstream errors?",
-		requiredFacts: ["pool_limit", "active_connections"],
+		requiredFacts: [],
+		requiredAtoms: [
+			{ key: "pool_limit", grantTextPattern: /pool_limit/ },
+			{ key: "active_connections", grantTextPattern: /active_connections/ },
+		],
+		requiredRelations: [
+			{
+				id: "causal_timeout",
+				atomKeys: ["pool_limit", "active_connections"],
+				pattern: /timeout|reaches pool_limit|active_connections/i,
+			},
+		],
 		expectStatus: "sufficient",
 		grantedNeedle: "active_connections reaches pool_limit",
 	},
@@ -435,6 +464,10 @@ export const LIVE_FIXTURES: LiveFixture[] = [
 		question: "What is the effective connection pool limit under load?",
 		requiredFacts: [],
 		expectContradictions: true,
+		requiredContradiction: {
+			leftGrantPattern: /max_connections=100/,
+			rightGrantPattern: /pool_limit=50/,
+		},
 		grantedNeedle: "pool_limit=50",
 	},
 	{
@@ -469,22 +502,27 @@ export const LIVE_FIXTURES: LiveFixture[] = [
 		},
 		patterns: ["ERROR", "pool_limit", "active_connections"],
 		question: "What infrastructure condition most likely triggered the checkout timeouts?",
-		requiredFacts: ["pool", "connection", "timeout"],
+		requiredFacts: [],
+		requiredAtoms: [
+			{ key: "pool_limit", grantTextPattern: /pool_limit=100/ },
+			{ key: "active_connections", grantTextPattern: /active_connections=100/ },
+			{ key: "timeout", grantTextPattern: /timeout/ },
+		],
 		expectStatus: ["sufficient", "partial"],
 		grantedNeedle: "pool_limit=100",
 	},
 ];
 
-export function parsePacketFromResult(structured: unknown, text: string): EvidencePacketV1 | undefined {
+export function parsePacketFromResult(structured: unknown, text: string): EvidencePacketV2 | undefined {
 	try {
-		if (structured !== undefined) return parseEvidencePacketV1(structured);
-		return parseEvidencePacketV1(JSON.parse(text));
+		if (structured !== undefined) return parseEvidencePacketV2(structured);
+		return parseEvidencePacketV2(JSON.parse(text));
 	} catch {
 		return undefined;
 	}
 }
 
-export function formatPacketSummary(packet: EvidencePacketV1 | undefined): string {
+export function formatPacketSummary(packet: EvidencePacketV2 | undefined): string {
 	if (!packet) return "(no packet)";
 	return formatEvidencePacketForRoot(packet);
 }

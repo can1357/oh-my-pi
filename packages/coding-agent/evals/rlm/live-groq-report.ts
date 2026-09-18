@@ -84,6 +84,16 @@ function main(): void {
 		console.log(`P2 gate (D earns continuation): ${dWin ? "LIKELY YES — review smoke/cache" : "NOT YET — D did not beat C on retention/root-load"}`);
 	}
 
+	console.log("\n--- P0.2 codec metrics (smoke) ---");
+	console.log("fixture               label            atomR  relR   struct  citeV  retain compress");
+	console.log("-".repeat(95));
+	for (const r of smoke) {
+		console.log(
+			`${String(r.fixture).padEnd(21)} ${String(r.evidenceLabel).padEnd(16)} ${Number(r.atomRecall ?? 0).toFixed(2).padStart(5)} ${Number(r.relationRecall ?? 0).toFixed(2).padStart(6)} ${String(r.structuralValid ?? false).padEnd(6)} ${Number(r.citationValidity ?? 0).toFixed(2).padStart(5)} ${Number(r.semanticRetention ?? 0).toFixed(2).padStart(6)} ${Number(r.compressionRatio ?? 0).toFixed(1).padStart(7)}`,
+		);
+	}
+
+
 	console.log("\n--- Tokenomics ---");
 	console.log(JSON.stringify(tok?.summary ?? {}, null, 2));
 	console.log(`reconciliation_delta: ${tok?.reconciliationDelta ?? "n/a"}`);

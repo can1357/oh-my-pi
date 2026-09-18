@@ -14,7 +14,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { rlmEvidenceQuery, rlmQuery } from "../../src/rlm";
 import { resolveRlmView } from "../../src/rlm/view";
-import { evidencePacketByteSize } from "../../src/rlm/evidence-packet";
+import { evidencePacketByteSize } from "../../src/rlm/evidence-packet-v2";
 import {
 	buildCacheProbeMessages,
 	buildRuntime,
@@ -36,8 +36,10 @@ import {
 	spillFixture,
 	validateCitations,
 	workerUsageFromResult,
+	validatePacketStructural,
 	type LiveFixture,
 } from "./lib/live-groq-common";
+import { computeCodecMetrics, P01_SMOKE_BASELINE } from "./lib/evidence-codec-rubric";
 
 const OUT = path.join(RESULTS_DIR, "live-groq.jsonl");
 const SMOKE_FIXTURES = LIVE_FIXTURES.filter(f => f.id.startsWith("S"));
@@ -86,8 +88,21 @@ async function runSmoke(host: Awaited<ReturnType<typeof createLiveGroqHost>>, fi
 	const e2eMs = performance.now() - t0;
 
 	const packet = result.packet ?? parsePacketFromResult(undefined, result.text);
-	const citations = packet ? validateCitations(runtime.store, handle, packet) : { validCount: 0, invalidCount: 0, wrongCitation: true };
-	const label = labelEvidencePacket(fixture, packet, citations);
+	const validation = packet
+		? result.packetValidation ?? validatePacketStructural(runtime.store, view, packet)
+		: undefined;
+	const citations = packet
+		? validateCitations(runtime.store, view, packet)
+		: { validCount: 0, invalidCount: 0, wrongCitation: true };
+	const metrics = computeCodecMetrics(
+		packet,
+		fixture,
+		runtime.store,
+		view,
+		validation,
+		result.grantedBytes ?? selection.grantedBytes,
+	);
+	const label = labelEvidencePacket(fixture, packet, metrics, validation);
 	const fw = result.context
 		? firewallProof(result.context, fixture, decoy.id, view)
 		: {
@@ -115,7 +130,13 @@ async function runSmoke(host: Awaited<ReturnType<typeof createLiveGroqHost>>, fi
 		schemaValid: packet !== undefined,
 		citationValidCount: citations.validCount,
 		citationInvalidCount: citations.invalidCount,
-		semanticRetention: packet ? semanticRetention(fixture.requiredFacts, packet) : 0,
+		semanticRetention: metrics.semanticRetention,
+		atomRecall: metrics.atomRecall,
+		relationRecall: metrics.relationRecall,
+		structuralValid: metrics.structuralValid,
+		citationValidity: metrics.citationValidity,
+		validationFailed: result.validationFailed ?? false,
+		compressionRatio: metrics.compressionRatio,
 		contradictions: packet?.contradictions.length ?? 0,
 		missingEvidence: packet?.missingEvidence.length ?? 0,
 		firewall: fw,
@@ -141,10 +162,22 @@ async function runCacheProbe(host: Awaited<ReturnType<typeof createLiveGroqHost>
 		const line = lines[i]!;
 		const ctx = buildCacheProbeMessages(runtime, handle, `Cache probe ${i + 1}: first causal condition?`, line);
 		const t0 = performance.now();
-		const raw = await evidence(ctx.prompt, {
-			purpose: "rlm-evidence-packet",
-			workerMessages: ctx.messages,
-		});
+		let raw: Awaited<ReturnType<typeof evidence>>;
+		try {
+			raw = await evidence(ctx.prompt, {
+				purpose: "rlm-evidence-packet",
+				workerMessages: ctx.messages,
+			});
+		} catch (error) {
+			rows.push({
+				phase: "cache",
+				call: i + 1,
+				error: error instanceof Error ? error.message : String(error),
+				latencyMs: performance.now() - t0,
+				ts: Date.now(),
+			});
+			continue;
+		}
 		const latencyMs = performance.now() - t0;
 		const usage = typeof raw === "string" ? null : workerUsageFromResult(raw as never);
 		rows.push({
@@ -201,10 +234,15 @@ async function runCvD(
 	});
 	const dMs = performance.now() - tD0;
 
+	const view = resolveRlmView(runtime.store, grants);
 	const packet = dResult.packet ?? parsePacketFromResult(undefined, dResult.text);
+	const validation = packet
+		? dResult.packetValidation ?? validatePacketStructural(runtime.store, view, packet)
+		: undefined;
 	const citations = packet
-		? validateCitations(runtime.store, handle, packet)
+		? validateCitations(runtime.store, view, packet)
 		: { validCount: 0, invalidCount: 0, wrongCitation: true };
+	const dMetrics = computeCodecMetrics(packet, fixture, runtime.store, view, validation, grantedBytes);
 	const dPacketBytes = packet ? evidencePacketByteSize(packet) : Buffer.byteLength(dResult.text, "utf8");
 	const cAnswerBytes = Buffer.byteLength(cResult.text, "utf8");
 
@@ -238,9 +276,14 @@ async function runCvD(
 		grantedTokensEst: estimateTokens(grantedBytes),
 		packetBytes: dPacketBytes,
 		rootTokensEst: estimateTokens(dPacketBytes),
-		compressionRatio: compressionRatio(grantedBytes, dPacketBytes),
-		semanticRetention: packet ? semanticRetention(fixture.requiredFacts, packet) : 0,
-		evidenceLabel: labelEvidencePacket(fixture, packet, citations),
+		compressionRatio: dMetrics.compressionRatio,
+		semanticRetention: dMetrics.semanticRetention,
+		atomRecall: dMetrics.atomRecall,
+		relationRecall: dMetrics.relationRecall,
+		structuralValid: dMetrics.structuralValid,
+		citationValidity: dMetrics.citationValidity,
+		validationFailed: dResult.validationFailed ?? false,
+		evidenceLabel: labelEvidencePacket(fixture, packet, dMetrics, validation),
 		citationValidCount: citations.validCount,
 		citationInvalidCount: citations.invalidCount,
 		packetStatus: packet?.status,
@@ -265,6 +308,7 @@ async function main(): Promise<void> {
 			reasoning: host.reasoning,
 			d1: "forced evidence_packet tool via runRlmWorkerCompletion",
 			d2: d2StructuredOutputAvailable(),
+			packetSchema: "EvidencePacketV2",
 			ts: Date.now(),
 		});
 

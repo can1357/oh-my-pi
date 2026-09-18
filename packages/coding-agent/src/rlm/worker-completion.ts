@@ -97,7 +97,7 @@ export async function runRlmWorkerCompletion(
 		? [
 				{
 					name: STRUCTURED_TOOL_NAME,
-					description: "Return EvidencePacketV1 as structured JSON fields.",
+					description: "Return EvidencePacketV2 as structured JSON fields.",
 					parameters: schema,
 					strict: true,
 				},
@@ -110,43 +110,56 @@ export async function runRlmWorkerCompletion(
 	const thinkingLevel = host.getThinkingLevel?.();
 	const telemetry = resolveTelemetry(host.getTelemetry?.() as never, sessionId);
 
-	const response: AssistantMessage = await instrumentedCompleteSimple(
-		model,
-		{
-			systemPrompt,
-			messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
-			tools,
-		},
-		{
-			apiKey: registry.resolver(model, sessionId),
-			signal: options?.signal,
-			reasoning: toReasoningEffort(thinkingLevel as never),
-			disableReasoning: shouldDisableReasoning(thinkingLevel as never),
-			toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
-		},
-		{ telemetry, oneshotKind: "rlm_worker" },
-	);
+	const completeOnce = async (): Promise<AssistantMessage> =>
+		instrumentedCompleteSimple(
+			model,
+			{
+				systemPrompt,
+				messages: [{ role: "user", content: [{ type: "text", text: userText }], timestamp: Date.now() }],
+				tools,
+			},
+			{
+				apiKey: registry.resolver(model, sessionId),
+				signal: options?.signal,
+				reasoning: toReasoningEffort(thinkingLevel as never),
+				disableReasoning: shouldDisableReasoning(thinkingLevel as never),
+				toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
+			},
+			{ telemetry, oneshotKind: "rlm_worker" },
+		);
 
-	if (response.stopReason === "aborted") throw new Error("rlm worker: aborted");
-	if (response.stopReason === "error") throw new Error(response.errorMessage ?? "rlm worker: provider error");
-
-	let text: string;
+	let response: AssistantMessage | undefined;
+	let text: string | undefined;
 	let structured: unknown;
-	if (schema) {
-		const call = extractToolCall(response, STRUCTURED_TOOL_NAME);
-		if (call) {
-			structured = call.arguments;
-			text = JSON.stringify(call.arguments);
-		} else {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		response = await completeOnce();
+		if (response.stopReason === "aborted") throw new Error("rlm worker: aborted");
+		if (response.stopReason === "error") throw new Error(response.errorMessage ?? "rlm worker: provider error");
+
+		if (schema) {
+			const call = extractToolCall(response, STRUCTURED_TOOL_NAME);
+			if (call) {
+				structured = call.arguments;
+				text = JSON.stringify(call.arguments);
+				break;
+			}
 			const raw = extractTextContent(response);
-			if (!raw) throw new Error("rlm worker: empty structured response");
-			structured = parseJsonPayload(raw);
-			text = JSON.stringify(structured);
+			if (raw) {
+				structured = parseJsonPayload(raw);
+				text = JSON.stringify(structured);
+				break;
+			}
+			if (attempt === 0) continue;
+			throw new Error("rlm worker: empty structured response");
 		}
-	} else {
+
 		text = extractTextContent(response);
-		if (!text) throw new Error("rlm worker: empty response");
+		if (text) break;
+		if (attempt === 0) continue;
+		throw new Error("rlm worker: empty response");
 	}
+
+	if (!response || text === undefined) throw new Error("rlm worker: empty response");
 
 	const usage = response.usage;
 	return {

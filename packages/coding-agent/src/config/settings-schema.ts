@@ -2670,7 +2670,7 @@ export const SETTINGS_SCHEMA = {
 			group: "RLM",
 			label: "RLM worker mode",
 			description:
-				"prose = legacy isolated completion answer; evidence-packet = typed EvidencePacketV1 via rlm.subModel (Groq coprocessor path)",
+				"prose = legacy isolated completion answer; evidence-packet = typed EvidencePacketV2 via rlm.subModel (Groq coprocessor path)",
 		},
 	},
 	"rlm.kernelBind": {

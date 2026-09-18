@@ -28,6 +28,32 @@ export {
 	parseEvidencePacketV1,
 	tryParseEvidencePacketJson,
 } from "./evidence-packet";
+
+export {
+	EVIDENCE_PACKET_MAX_OUTPUT_BYTES,
+	EVIDENCE_PACKET_V2_JSON_SCHEMA,
+	EVIDENCE_WORKER_STATIC_SYSTEM as EVIDENCE_WORKER_V2_STATIC_SYSTEM,
+	allPacketCitations,
+	emptyEvidencePacketV2,
+	evidencePacketByteSize as evidencePacketV2ByteSize,
+	formatEvidencePacketForRoot as formatEvidencePacketV2ForRoot,
+	parseEvidencePacketV2,
+	tryParseEvidencePacketV2Json,
+} from "./evidence-packet-v2";
+export type {
+	EvidenceAtomV2,
+	EvidenceCitationV2,
+	EvidenceClaimV2,
+	EvidenceContradictionSideV2,
+	EvidenceContradictionV2,
+	EvidencePacketV2,
+} from "./evidence-packet-v2";
+export {
+	rejectInvalidEvidencePacket,
+	resolveCitationText,
+	validateEvidencePacket,
+} from "./evidence-validator";
+export type { EvidenceValidationResult, EvidenceValidationViolation } from "./evidence-validator";
 export type {
 	EvidenceCitationV1,
 	EvidenceClaimV1,
