@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -16,13 +16,23 @@ describe("getEditorCommand", () => {
 	const originalPlatform = process.platform;
 	const originalVisual = Bun.env.VISUAL;
 	const originalEditor = Bun.env.EDITOR;
+	const originalOmpEditor = Bun.env.OMP_EDITOR;
+	const originalPiEditor = Bun.env.PI_EDITOR;
 
+	beforeEach(() => {
+		delete Bun.env.OMP_EDITOR;
+		delete Bun.env.PI_EDITOR;
+	});
 	afterEach(() => {
 		setPlatform(originalPlatform);
 		if (originalVisual === undefined) delete Bun.env.VISUAL;
 		else Bun.env.VISUAL = originalVisual;
 		if (originalEditor === undefined) delete Bun.env.EDITOR;
 		else Bun.env.EDITOR = originalEditor;
+		if (originalOmpEditor === undefined) delete Bun.env.OMP_EDITOR;
+		else Bun.env.OMP_EDITOR = originalOmpEditor;
+		if (originalPiEditor === undefined) delete Bun.env.PI_EDITOR;
+		else Bun.env.PI_EDITOR = originalPiEditor;
 	});
 
 	it("prefers $VISUAL over $EDITOR and the platform default", () => {
@@ -36,6 +46,33 @@ describe("getEditorCommand", () => {
 		delete Bun.env.VISUAL;
 		Bun.env.EDITOR = "nano";
 		expect(getEditorCommand()).toBe("nano");
+	});
+
+	it("prefers $OMP_EDITOR over $VISUAL and $EDITOR", () => {
+		Bun.env.OMP_EDITOR = "hx";
+		Bun.env.VISUAL = "nvim";
+		Bun.env.EDITOR = "nano";
+		expect(getEditorCommand()).toBe("hx");
+	});
+
+	it("prefers $PI_EDITOR over $VISUAL and $EDITOR", () => {
+		Bun.env.PI_EDITOR = "micro";
+		Bun.env.VISUAL = "nvim";
+		Bun.env.EDITOR = "nano";
+		expect(getEditorCommand()).toBe("micro");
+	});
+
+	it("prefers $OMP_EDITOR over $PI_EDITOR", () => {
+		Bun.env.OMP_EDITOR = "code --wait";
+		Bun.env.PI_EDITOR = "micro";
+		expect(getEditorCommand()).toBe("code --wait");
+	});
+
+	it("falls back from a whitespace-only $OMP_EDITOR to $VISUAL", () => {
+		Bun.env.OMP_EDITOR = "   ";
+		Bun.env.VISUAL = "nvim";
+		Bun.env.EDITOR = "nano";
+		expect(getEditorCommand()).toBe("nvim");
 	});
 
 	it("trims whitespace so an accidentally padded value still works", () => {

@@ -1181,6 +1181,10 @@
 - Improved `xd://` MCP failure messages with actionable transport stages, failure categories, server and tool context, retryability, trace IDs, and redacted JSON-RPC details.
 - Fixed ACP `read` tool-call locations so clients such as Zed Follow receive the resolved filesystem path rather than the OMP line-range selector.
 
+### Added
+
+- Added `OMP_EDITOR`/`PI_EDITOR` environment variables to override the external editor, taking precedence over `VISUAL`/`EDITOR` ([#9996](https://github.com/can1357/oh-my-pi/issues/9996)).
+
 ## [18.0.9] - 2026-08-28
 
 ### Breaking Changes
