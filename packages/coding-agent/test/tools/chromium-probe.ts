@@ -1,4 +1,6 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 
 /**
@@ -71,4 +73,70 @@ export function visibleBrowserAvailable(): Promise<boolean> {
 		return Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
 	})();
 	return visibleProbe;
+}
+
+let cdpProbe: Promise<boolean> | undefined;
+
+/**
+ * Gate for tests that need Chromium to actually **serve CDP**, not merely exec.
+ *
+ * `chromiumAvailable()` only proves the binary exits 0 on `--version`. On
+ * snap-shim hosts the wrapper answers but puppeteer-launched CDP never comes
+ * up, and every attach test fails at its `waitForCdp` deadline (#12095). This
+ * probe launches the resolved binary headless with
+ * `--remote-debugging-port=0` and waits for the `DevTools listening on ws://…`
+ * line chrome prints to stderr once the devtools server is up — a real CDP
+ * serviceability check — then kills the child and removes the throwaway
+ * profile. Linux-only: the shim-wrapper fleet is Linux; other platforms keep
+ * the exec-only semantics (and headful gates keep their display check).
+ *
+ * Same promise-not-awaited-const shape as `chromiumAvailable()`.
+ */
+export function chromiumCdpAvailable(): Promise<boolean> {
+	cdpProbe ??= (async () => {
+		if (!(await chromiumAvailable())) return false;
+		if (process.platform !== "linux") return true;
+		const executable = await ensureChromiumExecutable().catch(() => null);
+		if (!executable) return false;
+		const profile = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cdp-probe-"));
+		const child = Bun.spawn(
+			[
+				executable,
+				"--headless=new",
+				"--no-sandbox",
+				"--disable-gpu",
+				"--disable-dev-shm-usage",
+				`--user-data-dir=${profile}`,
+				"--remote-debugging-port=0",
+				"about:blank",
+			],
+			{ stdin: "ignore", stdout: "ignore", stderr: "pipe" },
+		);
+		try {
+			const stderrText = new Promise<string>(resolve => {
+				const decoder = new TextDecoder();
+				let text = "";
+				const pump = async () => {
+					const reader = child.stderr.getReader();
+					for (;;) {
+						const { value, done } = await reader.read();
+						if (done) break;
+						text += decoder.decode(value, { stream: true });
+						if (text.includes("DevTools listening")) break;
+					}
+					resolve(text);
+				};
+				void pump();
+			});
+			const served = await Promise.race([
+				stderrText.then(text => text.includes("DevTools listening")),
+				Bun.sleep(8_000).then(() => false),
+			]);
+			return served;
+		} finally {
+			child.kill();
+			await Promise.allSettled([child.exited, fs.rm(profile, { recursive: true, force: true })]);
+		}
+	})();
+	return cdpProbe;
 }

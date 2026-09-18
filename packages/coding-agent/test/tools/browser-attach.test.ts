@@ -24,9 +24,10 @@ import {
 import { acquireTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
-import { chromiumAvailable } from "./chromium-probe";
+import { chromiumCdpAvailable } from "./chromium-probe";
 
-const CHROMIUM_AVAILABLE = await chromiumAvailable();
+// Attach-over-CDP tests: skip where the resolved chromium cannot serve it (#12095).
+const CHROMIUM_AVAILABLE = await chromiumCdpAvailable();
 let sharedHeadless: BrowserHandle | undefined;
 
 function makeSession(): ToolSession {
@@ -344,11 +345,13 @@ describe("pickElectronTarget", () => {
 			const ownedName = `owned-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
+				// Attach over the borrowed Chrome's existing CDP — re-spawning on
+				// the same user-data-dir trips chrome's SingletonLock (#12095).
 				await invoke({
 					action: "open",
 					name: borrowedName,
 					url: "data:text/html,<title>Borrowed</title>",
-					app: { path: exe, args: [...flags, "--user-data-dir", borrowedProfile] },
+					app: { cdp_url: `http://127.0.0.1:${port}` },
 				});
 				await invoke({
 					action: "open",
