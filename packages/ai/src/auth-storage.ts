@@ -56,6 +56,7 @@ import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "
 import { charmHyperUsageProvider } from "./usage/charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
 import { clinePassUsageProvider } from "./usage/cline-pass";
+import { commandCodeUsageProvider } from "./usage/commandcode";
 import { cursorUsageProvider } from "./usage/cursor";
 import { devinUsageProvider } from "./usage/devin";
 import { googleGeminiCliUsageProvider } from "./usage/gemini";
@@ -672,6 +673,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	ollamaCloudUsageProvider,
 	claudeUsageProvider,
 	clinePassUsageProvider,
+	commandCodeUsageProvider,
 	zaiUsageProvider,
 	umansUsageProvider,
 	opencodeGoUsageProvider,

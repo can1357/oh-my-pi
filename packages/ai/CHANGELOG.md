@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a Command Code usage provider that reads the account's rolling 5-hour and weekly credit windows plus its monthly credit pool from the Studio quota endpoints the official CLI uses, so `omp usage` and `/usage` report the subscription instead of "no usage data" (#12401 by @c4ys).
+
 ### Fixed
 
 - Fixed auth-broker client config resolution failing silently on Windows when reading the token file or `config.yml`; reads now use `node:fs` instead of `Bun.file`.
