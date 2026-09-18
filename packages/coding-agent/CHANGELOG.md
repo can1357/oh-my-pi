@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Subagent model requests, agent overrides, and frontmatter selections now respect the active `enabledModels` scope, including parent-model auth fallback ([#12345](https://github.com/can1357/oh-my-pi/pull/12345) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
