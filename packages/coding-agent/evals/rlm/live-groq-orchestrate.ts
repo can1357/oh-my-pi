@@ -13,6 +13,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { rlmEvidenceQuery, rlmQuery } from "../../src/rlm";
+import { resolveRlmView } from "../../src/rlm/view";
 import { evidencePacketByteSize } from "../../src/rlm/evidence-packet";
 import {
 	buildCacheProbeMessages,
@@ -65,6 +66,7 @@ async function runSmoke(host: Awaited<ReturnType<typeof createLiveGroqHost>>, fi
 			ts: Date.now(),
 		};
 	}
+	const view = resolveRlmView(runtime.store, selection.grants);
 
 	let lastWorkerUsage: ReturnType<typeof workerUsageFromResult> | null = null;
 	const evidence = createEvidenceCompleter(host);
@@ -87,7 +89,7 @@ async function runSmoke(host: Awaited<ReturnType<typeof createLiveGroqHost>>, fi
 	const citations = packet ? validateCitations(runtime.store, handle, packet) : { validCount: 0, invalidCount: 0, wrongCitation: true };
 	const label = labelEvidencePacket(fixture, packet, citations);
 	const fw = result.context
-		? firewallProof(result.context, fixture, decoy.id)
+		? firewallProof(result.context, fixture, decoy.id, view)
 		: {
 				parentSecretInWorker: true,
 				grantedNeedleInWorker: false,

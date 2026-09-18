@@ -1,5 +1,6 @@
 import {
 	buildQueryWorkerContext,
+	buildQueryWorkerRequest,
 	executeLeasedCompletion,
 	workerContextContains,
 	type RlmBrokerResult,
@@ -158,7 +159,7 @@ export async function rlmQuery(
 		return { text: `${msg} (fail-open)`, citation: handle, failOpen: true, selection };
 	}
 
-	const worker = buildQueryWorkerContext(view, q);
+	const worker = buildQueryWorkerRequest({ question: q, view });
 	const result = await executeLeasedCompletion(runtime, worker, args.complete, "query");
 	return {
 		text: result.text,

@@ -11,7 +11,7 @@ import {
 	tryDeterministicEvidencePacket,
 	workerContextContains,
 } from "../src/rlm";
-import { buildEvidenceWorkerContext } from "../src/rlm/evidence-query";
+import { buildEvidenceWorkerRequest } from "../src/rlm/evidence-query";
 import { selectGrantsFromSearch } from "../src/rlm/select-grants";
 import type { EvidencePacketV1 } from "../src/rlm/evidence-packet";
 
@@ -121,7 +121,7 @@ describe("prompt caching layout", () => {
 		const rec = runtime.store.put("FACT_A=1");
 		const selection = selectGrantsFromSearch(runtime.store, rec.id, "FACT_A");
 		const resolved = resolveRlmView(runtime.store, selection.grants);
-		const ctx = buildEvidenceWorkerContext(resolved, "extract fact");
+		const ctx = buildEvidenceWorkerRequest({ task: "extract fact", view: resolved });
 		const system = ctx.messages.find(m => m.role === "system")?.content ?? "";
 		const user = ctx.messages.find(m => m.role === "user")?.content ?? "";
 		expect(system.includes("EvidencePacketV1")).toBe(true);

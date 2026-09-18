@@ -2,7 +2,19 @@ import type { RlmCompleter } from "./query";
 import type { RlmLedger, RlmLease } from "./ledger";
 import type { RlmRuntime } from "./runtime";
 import type { RlmView } from "./view";
-import { formatViewExcerpts, viewCitations } from "./view";
+import { assertWorkerMembrane } from "./worker-membrane";
+import { formatViewExcerpts, viewCitations, type RlmView } from "./view";
+
+export interface QueryWorkerRequestInput {
+	question: string;
+	view: RlmView;
+}
+
+export interface SubcallWorkerRequestInput {
+	task: string;
+	view: RlmView;
+	depth: number;
+}
 
 /** Stable worker system instructions — never the root agent system prompt. */
 export const RLM_WORKER_SYSTEM =
@@ -62,8 +74,9 @@ export interface RlmTrajectoryRecord {
 	citations: string[];
 }
 
-/** Build depth-0 query worker context from a resolved view. */
-export function buildQueryWorkerContext(view: RlmView, question: string): RlmWorkerContext {
+/** Build depth-0 query worker context from a resolved view only. */
+export function buildQueryWorkerRequest(input: QueryWorkerRequestInput): RlmWorkerContext {
+	const { question, view } = input;
 	const excerpts = formatViewExcerpts(view);
 	const citations = viewCitations(view);
 	const user =
@@ -74,7 +87,7 @@ export function buildQueryWorkerContext(view: RlmView, question: string): RlmWor
 		{ role: "system", content: RLM_WORKER_SYSTEM },
 		{ role: "user", content: user },
 	];
-	return {
+	const context: RlmWorkerContext = {
 		purpose: "rlm-query",
 		viewId: view.id,
 		depth: 0,
@@ -83,10 +96,18 @@ export function buildQueryWorkerContext(view: RlmView, question: string): RlmWor
 		citations,
 		grantedBytes: view.grantedBytes,
 	};
+	assertWorkerMembrane(context, view);
+	return context;
 }
 
-/** Build depth-1 subcall worker context from a resolved view. */
-export function buildSubcallWorkerContext(view: RlmView, task: string, depth: number): RlmWorkerContext {
+/** @deprecated Prefer {@link buildQueryWorkerRequest}. */
+export function buildQueryWorkerContext(view: RlmView, question: string): RlmWorkerContext {
+	return buildQueryWorkerRequest({ question, view });
+}
+
+/** Build depth-1 subcall worker context from a resolved view only. */
+export function buildSubcallWorkerRequest(input: SubcallWorkerRequestInput): RlmWorkerContext {
+	const { task, view, depth } = input;
 	const excerpts = formatViewExcerpts(view);
 	const citations = viewCitations(view);
 	const user =
@@ -97,7 +118,7 @@ export function buildSubcallWorkerContext(view: RlmView, task: string, depth: nu
 		{ role: "system", content: RLM_WORKER_SYSTEM },
 		{ role: "user", content: user },
 	];
-	return {
+	const context: RlmWorkerContext = {
 		purpose: "rlm-subcall",
 		viewId: view.id,
 		depth,
@@ -106,6 +127,13 @@ export function buildSubcallWorkerContext(view: RlmView, task: string, depth: nu
 		citations,
 		grantedBytes: view.grantedBytes,
 	};
+	assertWorkerMembrane(context, view);
+	return context;
+}
+
+/** @deprecated Prefer {@link buildSubcallWorkerRequest}. */
+export function buildSubcallWorkerContext(view: RlmView, task: string, depth: number): RlmWorkerContext {
+	return buildSubcallWorkerRequest({ task, view, depth });
 }
 
 /**

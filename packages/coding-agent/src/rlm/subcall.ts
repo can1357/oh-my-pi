@@ -1,5 +1,5 @@
 import {
-	buildSubcallWorkerContext,
+	buildSubcallWorkerRequest,
 	executeLeasedCompletion,
 } from "./broker";
 import type { RlmCompleter, RlmQueryResult } from "./query";
@@ -90,7 +90,7 @@ export async function rlmSubcall(
 
 	store.metrics.subcalls += 1;
 	store.note("subcall", `depth=${depth} grants=${view.grants.length} task_bytes=${trimmedTask.length}`);
-	const worker = buildSubcallWorkerContext(view, trimmedTask, depth);
+	const worker = buildSubcallWorkerRequest({ task: trimmedTask, view, depth });
 	const result = await executeLeasedCompletion(runtime, worker, complete, "subcall");
 
 	if (!result.failOpen) {

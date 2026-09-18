@@ -18,7 +18,8 @@ import { QUERY_SLICE } from "./query";
 import { RlmRuntime } from "./runtime";
 import { selectGrantsFromSearch, type RlmGrantSelectResult } from "./select-grants";
 import type { RlmStore } from "./store";
-import { resolveRlmView, type RlmGrant } from "./view";
+import { assertWorkerMembrane } from "./worker-membrane";
+import { formatViewExcerpts, resolveRlmView, viewCitations, type RlmGrant, type RlmView } from "./view";
 
 export interface RlmEvidenceQueryResult extends RlmQueryResult {
 	packet?: EvidencePacketV1;
@@ -47,10 +48,19 @@ function citationHandle(citation: string, fallback: string): string {
 	const m = /^([^\[]+)/.exec(citation.trim());
 	return m?.[1]?.trim() ?? fallback;
 }
-/** Build static-first worker messages for prefix caching. */
-export function buildEvidenceWorkerContext(view: import("./view").RlmView, task: string): import("./broker").RlmWorkerContext {
-	const excerpts = view.grants.map(g => `${g.citation}\n${g.text}`).join("\n---\n");
-	const citations = view.grants.map(g => g.citation).join("; ");
+export interface EvidenceWorkerRequestInput {
+	task: string;
+	view: RlmView;
+}
+
+/**
+ * Build evidence-worker provider payload from a resolved view only.
+ * Intentionally cannot access {@link RlmStore} — grants must be resolved upstream.
+ */
+export function buildEvidenceWorkerRequest(input: EvidenceWorkerRequestInput): import("./broker").RlmWorkerContext {
+	const { task, view } = input;
+	const excerpts = formatViewExcerpts(view);
+	const citations = viewCitations(view);
 	const schemaBlock = JSON.stringify(EVIDENCE_PACKET_V1_JSON_SCHEMA, null, 2);
 	const user =
 		`Task:\n${task}\n\n` +
@@ -67,7 +77,7 @@ export function buildEvidenceWorkerContext(view: import("./view").RlmView, task:
 		{ role: "user", content: user },
 	];
 	const prompt = messages.map(m => `[${m.role}]\n${m.content}`).join("\n\n");
-	return {
+	const context: import("./broker").RlmWorkerContext = {
 		purpose: "rlm-evidence-packet",
 		viewId: view.id,
 		depth: 0,
@@ -76,6 +86,13 @@ export function buildEvidenceWorkerContext(view: import("./view").RlmView, task:
 		citations,
 		grantedBytes: view.grantedBytes,
 	};
+	assertWorkerMembrane(context, view);
+	return context;
+}
+
+/** @deprecated Prefer {@link buildEvidenceWorkerRequest}. */
+export function buildEvidenceWorkerContext(view: RlmView, task: string): import("./broker").RlmWorkerContext {
+	return buildEvidenceWorkerRequest({ task, view });
 }
 
 /** Deterministic gate: single obvious extraction → packet without model call. */
@@ -212,7 +229,7 @@ export async function rlmEvidenceQuery(
 		return { text: `${msg} (fail-open)`, citation: handle, failOpen: true, selection };
 	}
 
-	const worker = buildEvidenceWorkerContext(view, q);
+	const worker = buildEvidenceWorkerRequest({ task: q, view });
 	let structuredFromWorker: unknown;
 	const wrappedComplete: RlmCompleter | undefined = args.complete
 		? async (prompt, opts) => {

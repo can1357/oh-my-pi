@@ -12,7 +12,7 @@ import {
 	parseEvidencePacketV1,
 	type EvidencePacketV1,
 } from "../../../src/rlm/evidence-packet";
-import { buildEvidenceWorkerContext } from "../../../src/rlm/evidence-query";
+import { buildEvidenceWorkerRequest } from "../../../src/rlm/evidence-query";
 import type { RlmCompleter } from "../../../src/rlm/query";
 import {
 	createTokenomicsBridge,
@@ -23,8 +23,12 @@ import { runRlmWorkerCompletion } from "../../../src/rlm/worker-completion";
 import { workerContextContains } from "../../../src/rlm/broker";
 import { selectGrantsFromSearch, type RlmGrantSelectPolicy, type RlmGrantSelectResult } from "../../../src/rlm/select-grants";
 import { RlmRuntime, resetRlmStoresForTest } from "../../../src/rlm";
-import type { RlmStore } from "../../../src/rlm/store";
+import { formatHandle, type RlmStore } from "../../../src/rlm/store";
 import { resolveRlmView } from "../../../src/rlm/view";
+import {
+	validateWorkerMembrane,
+	workerContextContainsHandle,
+} from "../../../src/rlm/worker-membrane";
 import { AuthStorage } from "../../../src/session/auth-storage";
 
 export const P0_CHECKPOINT_SHA = "53769bf12d48233bb262cd4bd61de93e18f400e8";
@@ -248,14 +252,25 @@ export function selectGrantsForFixture(
 }
 
 export function firewallProof(
-	context: { messages: readonly { role: string; content: string }[]; grantedBytes: number },
+	context: { messages: readonly { role: string; content: string }[]; grantedBytes: number; viewId?: string },
 	fixture: LiveFixture,
 	ungrantedHandle: string,
+	view?: import("../../../src/rlm/view").RlmView,
 ): FirewallProof {
+	const ctx = context as import("../../../src/rlm/broker").RlmWorkerContext;
+	const membrane =
+		view !== undefined
+			? validateWorkerMembrane(ctx, view, {
+					forbiddenNeedles: [fixture.parentSecret, "UNGRANTED_DECOY_HANDLE_CONTENT"],
+				})
+			: undefined;
 	return {
-		parentSecretInWorker: workerContextContains(context as never, fixture.parentSecret),
-		grantedNeedleInWorker: workerContextContains(context as never, fixture.grantedNeedle),
-		ungrantedHandleInWorker: workerContextContains(context as never, ungrantedHandle),
+		parentSecretInWorker: workerContextContains(ctx, fixture.parentSecret),
+		grantedNeedleInWorker: workerContextContains(ctx, fixture.grantedNeedle),
+		ungrantedHandleInWorker:
+			membrane !== undefined
+				? !membrane.ok && membrane.violations.some(v => v.kind === "ungranted_handle")
+				: workerContextContainsHandle(ctx, ungrantedHandle),
 		messageRoles: context.messages.map(m => m.role),
 		grantedBytes: context.grantedBytes,
 	};
@@ -378,13 +393,13 @@ export function buildCacheProbeMessages(
 	handle: string,
 	task: string,
 	evidenceLine: string,
-): ReturnType<typeof buildEvidenceWorkerContext> {
+): ReturnType<typeof buildEvidenceWorkerRequest> {
 	const corpus = runtime.store.get(handle)?.text ?? evidenceLine;
 	const at = corpus.indexOf(evidenceLine);
 	const start = Math.max(0, at - 64);
 	const end = Math.min(corpus.length, at + evidenceLine.length + 64);
 	const view = resolveRlmView(runtime.store, [{ handle, start, end }]);
-	return buildEvidenceWorkerContext(view, task);
+	return buildEvidenceWorkerRequest({ task, view });
 }
 
 export const LIVE_FIXTURES: LiveFixture[] = [

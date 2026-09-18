@@ -36,8 +36,8 @@ export type {
 	EvidencePacketV1,
 	EvidenceRelevantRangeV1,
 } from "./evidence-packet";
-export { buildEvidenceWorkerContext, rlmEvidenceQuery, tryDeterministicEvidencePacket } from "./evidence-query";
-export type { RlmEvidenceQueryResult } from "./evidence-query";
+export { buildEvidenceWorkerContext, buildEvidenceWorkerRequest, rlmEvidenceQuery, tryDeterministicEvidencePacket } from "./evidence-query";
+export type { EvidenceWorkerRequestInput, RlmEvidenceQueryResult } from "./evidence-query";
 export { runRlmWorkerCompletion } from "./worker-completion";
 export type {
 	RlmWorkerCompletionHost,
@@ -69,11 +69,13 @@ export { parseRlmGrants, rlmSubcall } from "./subcall";
 export type { RlmGrant } from "./view";
 export {
 	buildQueryWorkerContext,
+	buildQueryWorkerRequest,
 	buildSubcallWorkerContext,
+	buildSubcallWorkerRequest,
 	executeLeasedCompletion,
 	RLM_WORKER_SYSTEM,
 } from "./broker";
-export type { RlmTrajectoryRecord, RlmWorkerContext } from "./broker";
+export type { QueryWorkerRequestInput, RlmTrajectoryRecord, RlmWorkerContext, SubcallWorkerRequestInput } from "./broker";
 export { RlmLedger } from "./ledger";
 export type {
 	RlmLease,
@@ -82,6 +84,14 @@ export type {
 	RlmLedgerReconcileResult,
 	RlmLedgerUsage,
 } from "./ledger";
+export {
+	assertWorkerMembrane,
+	extractRlmHandleIds,
+	serializeWorkerProviderPayload,
+	validateWorkerMembrane,
+	workerContextContainsHandle,
+} from "./worker-membrane";
+export type { WorkerMembraneValidation, WorkerMembraneViolation } from "./worker-membrane";
 export { RlmRuntime } from "./runtime";
 export type { RlmRuntimeOptions } from "./runtime";
 export {
