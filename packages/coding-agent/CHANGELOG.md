@@ -17,6 +17,10 @@
 - Added Stencil account support to `/login`. `omp stream` uses a signed-in Stencil account or `STENCIL_API_KEY` for channel ownership and authentication. Sensitive environment, dotenv, `secrets.yml`, credential-shaped, and configured pattern-matching values are redacted before screen data is transmitted.
 - Added faster keyless web search fallback by prioritizing the default keyless Parallel provider ahead of Perplexity.
 
+### Added
+
+- Documented every custom status-line segment id, hide rule, and `segmentOptions` key in the settings reference ([#12371](https://github.com/can1357/oh-my-pi/pull/12371) by [@Frank-zhu0404](https://github.com/Frank-zhu0404)).
+
 ### Changed
 
 - Improved parent IRC message prompts to make interruption handling more reliable.
