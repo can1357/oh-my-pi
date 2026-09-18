@@ -4,9 +4,9 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
+import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -288,8 +288,8 @@ describe("libkitty end-to-end", () => {
 		void mode.getUserInput();
 		await term.waitForRender();
 
+		// Tool visibility is a global input-controller action; it reads the live keybindings.
 		mode.keybindings.setUserBindings({ "app.tools.toggleVisibility": "alt+o" });
-		mode.editor.setActionKeys("app.tools.toggleVisibility", mode.keybindings.getKeys("app.tools.toggleVisibility"));
 		mode.renderSessionContext({
 			messages: [
 				toolCall,

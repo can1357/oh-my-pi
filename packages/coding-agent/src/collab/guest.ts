@@ -19,12 +19,12 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
-import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/components/agent-hub";
+import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
-import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { setSessionTerminalTitle } from "../utils/title-generator";
 import { importRoomKey } from "./crypto";
@@ -458,6 +458,10 @@ export class CollabGuestLink {
 		}
 		this.#replicaActivated = true;
 		if (this.#left) return;
+		const orphanedLiveBlocks = [
+			...this.#ctx.pendingTools.values(),
+			...this.#ctx.eventController.takeDisplaceableComponents(),
+		];
 		this.#clearTransientUi();
 		this.#clearAgentMirror();
 		this.state = pending.state;
@@ -468,8 +472,34 @@ export class CollabGuestLink {
 		this.#ctx.syncRunningSubagentBadge();
 		this.#assistantStreamSynced = false;
 		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
-		this.#ctx.chatContainer.disposeChildren();
-		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+		// No eager teardown here: renderInitialMessages() stages the replacement
+		// transcript and disposes the visible children only when the staged tree
+		// commits (ui-helpers), which both preserves its atomicity/rollback
+		// behavior and unregisters live tool blocks from the shared spinner
+		// ticker via ToolExecutionComponent.dispose().
+		try {
+			await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+		} catch (err) {
+			// #clearTransientUi() above already dropped the pendingTools blocks,
+			// and #handleToolExecutionEnd settles a displaceable hub/todo result out
+			// of pendingTools into EventController's own trackers instead (Codex
+			// review on #9377): orphanedLiveBlocks folds both in via
+			// takeDisplaceableComponents() above, or a still-animated "waiting" card
+			// would survive the resync with no remaining reference to stop it. A
+			// failed renderInitialMessages() restores the untouched visible
+			// container without disposing its children (its own rollback only tears
+			// down the staged tree that never committed), so every orphaned block
+			// here is still a live, rendered row. dispose() would be wrong: it
+			// propagates teardown to a component's own renderer children
+			// (Container.dispose()), releasing resources that row's still-visible
+			// children may use (Codex review on #9377). seal() only unregisters the
+			// shared-ticker registration and stops the animation, leaving the
+			// rendered row and its children intact.
+			for (const handle of orphanedLiveBlocks) {
+				handle.seal();
+			}
+			throw err;
+		}
 		if (this.#left) return;
 		await this.#ctx.reloadTodos();
 		if (this.#left) return;

@@ -6,8 +6,8 @@ import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bun
 import { resolveModelReference } from "@oh-my-pi/pi-catalog/identity/reference";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models/cache-provider-id";
-import type { ProviderCatalogEntry } from "@oh-my-pi/pi-catalog/provider-models/descriptor-types";
-import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { MODELS_DEV_PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import {
 	OPENZOO_DEFAULT_BASE_URL,
@@ -121,9 +121,20 @@ function stubFetch(seen: { urls: string[]; authorization: (string | null)[] }): 
 
 describe("openzoo built-in provider", () => {
 	test("ships no bundled catalog — the proxy's live /v1/models is the model list", () => {
-		const entry: ProviderCatalogEntry | undefined = CATALOG_PROVIDERS.find(item => item.id === "openzoo");
+		const entry = providerEntry("openzoo");
 		expect(entry).toBeDefined();
-		expect(entry?.catalogDiscovery).toBeUndefined();
+		expect(entry?.defaultModel).toBe("auto");
+		expect(entry?.allowUnauthenticated).toBe(true);
+		expect(entry?.dynamicModelsAuthoritative).toBe(true);
+		expect(entry?.discovery).toBeUndefined();
+		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "openzoo");
+		expect(descriptor).toMatchObject({
+			defaultModel: "auto",
+			allowUnauthenticated: true,
+			dynamicModelsAuthoritative: true,
+		});
+		expect(descriptor?.catalogDiscovery).toBeUndefined();
+		expect(DEFAULT_MODEL_PER_PROVIDER.openzoo).toBe("auto");
 		expect(MODELS_DEV_PROVIDER_DESCRIPTORS.some(d => d.providerId === "openzoo")).toBe(false);
 		expect(getBundledProviders()).not.toContain("openzoo");
 	});

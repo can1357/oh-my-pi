@@ -7,6 +7,23 @@
 // the advertised vocabulary contains `none`. Only facts the gateway does not
 // publish, or publishes wrongly, belong in this file.
 provider "charm-hyper" {
+	default-model "glm-5.3"
+	env "CHARM_HYPER_API_KEY" "HYPER_API_KEY"
+	allow-unauthenticated #true
+	dynamic-models-authoritative #true
+	// The gateway row is the whole truth for a Hyper deployment. Same-id rows
+	// on other hosts disagree with it in both directions (it serves
+	// non-thinking Kimi K2.5/K2.7-Code and a text-only Gemma 4 that their
+	// upstream homes list as reasoning/vision), so foreign backfills would
+	// advertise capabilities this deployment does not have.
+	skip-cross-provider-reference-fills #true
+	// Deliberately NO `discovery` node: that node is what enrolls a provider in
+	// generate-models.ts. This gateway's catalog is live deployment truth, so
+	// generating would freeze one hyper.charm.land snapshot into models.json —
+	// and since discovery here needs no credentials, it would happen on every
+	// regen, contradicting the runtime-only contract compat-conformance.test.ts
+	// pins for this provider.
+
 	// OpenAI-dialect gateway in front of open-weight and third-party models.
 	// `developer` and `store` are accepted (HTTP 200) but the gateway accepts
 	// every unknown field it is handed, so acceptance is not evidence the

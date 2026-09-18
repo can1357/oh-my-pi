@@ -278,6 +278,42 @@ describe("pickElectronTarget", () => {
 		}
 	});
 
+	test.skipIf(process.platform !== "linux")("reuses Chromium launched through a distro wrapper", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-wrapper-"));
+		const wrapper = path.join(root, "google-chrome");
+		const target = path.join(root, "chrome");
+		const profile = path.join(root, "profile");
+		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+		await Bun.write(target, Bun.file(process.execPath));
+		await fs.chmod(target, 0o755);
+		await Bun.write(wrapper, '#!/bin/bash\nHERE="$(dirname "$0")"\nexec -a "$0" "$HERE/chrome" "$@"\n');
+		await fs.chmod(wrapper, 0o755);
+		const child = Bun.spawn(
+			[
+				wrapper,
+				"--eval",
+				'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+				`--user-data-dir=${profile}`,
+				`--remote-debugging-port=${cdp.port}`,
+			],
+			{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+		);
+		const readiness = child.stdout.getReader();
+		await readiness.read();
+		readiness.releaseLock();
+		try {
+			expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
+				cdpUrl: `http://127.0.0.1:${cdp.port}`,
+				pid: child.pid,
+			});
+		} finally {
+			child.kill();
+			await child.exited;
+			cdp.stop(true);
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps profile tabs isolated and never kills a borrowed Chrome on close",
 		async () => {
@@ -286,7 +322,16 @@ describe("pickElectronTarget", () => {
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-profile-isolation-"));
 			const borrowedProfile = path.join(root, "borrowed");
 			const port = await findFreeCdpPort();
-			const flags = ["--headless=new", "--no-sandbox", "--no-first-run", "--no-default-browser-check"];
+			// Explicit profiles keep the real OS keystore, so bypass it here or macOS
+			// blocks each spawn on a keychain-access dialog.
+			const flags = [
+				"--headless=new",
+				"--no-sandbox",
+				"--no-first-run",
+				"--no-default-browser-check",
+				"--use-mock-keychain",
+				"--password-store=basic",
+			];
 			const child = Bun.spawn(
 				[exe, ...flags, `--user-data-dir=${borrowedProfile}`, `--remote-debugging-port=${port}`],
 				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
@@ -432,6 +477,16 @@ describe("resolveSpawnArgs", () => {
 		const args = resolveSpawnArgs("/var/lib/flatpak/exports/bin/com.google.Chrome", []);
 		expect(args.some(arg => arg.startsWith("--user-data-dir="))).toBe(true);
 		expect(resolveSpawnArgs("/Applications/Slack.app/Contents/MacOS/Slack", ["--foo"])).toEqual(["--foo"]);
+	});
+
+	test("bypasses the OS keystore only for omp-owned Chromium profiles", () => {
+		const owned = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--password-store=gnome"]);
+		expect(owned).toContain("--use-mock-keychain");
+		expect(owned).toContain("--password-store=gnome");
+		expect(owned).not.toContain("--password-store=basic");
+
+		const borrowed = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--user-data-dir=/home/me/.config/chrome"]);
+		expect(borrowed).toEqual(["--user-data-dir=/home/me/.config/chrome"]);
 	});
 });
 

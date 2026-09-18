@@ -10,9 +10,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { getEditorTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 function createContext(options?: {

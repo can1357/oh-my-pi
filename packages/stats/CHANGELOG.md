@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved session and fork-detection polling performance, reducing unnecessary filesystem and database work when monitoring sessions.
+
+## [18.2.1] - 2026-09-15
+
+### Fixed
+
+- Fixed the sessions API returning an encoded storage key instead of the session working directory ([#12078](https://github.com/can1357/oh-my-pi/pull/12078) by [@Dante-dan](https://github.com/Dante-dan)).
+- Fixed Traces search inputs and checkbox using unthemed browser defaults, and iOS viewport zoom on search focus.
+- Fixed garbage tool names from provider-side parse failures (e.g. a gateway returning the model's whole invocation text as the tool name) polluting the tools dashboard's per-tool rows and filter dropdown; such names now collapse to their leading identifier, and existing databases re-ingest cleaned on next sync.
+- Reduced repeat stats-sync reads to appended transcript data while preserving service-tier accounting across restarts.
+- Rebuilt stats for replaced or truncated session files instead of retaining stale totals.
+- Reclaimed lingering stats dashboards from older releases using their versioned HTTP identity when process command lines are unavailable, so upgrades no longer leave `omp stats` blocked by an opaque Bun listener.
+
 ## [18.1.17] - 2026-09-10
 
 ### Fixed

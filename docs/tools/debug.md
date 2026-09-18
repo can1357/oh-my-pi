@@ -13,15 +13,15 @@
   - `packages/coding-agent/src/dap/types.ts` — request/response/capability shapes
   - `packages/coding-agent/src/tools/tool-timeouts.ts` — per-tool timeout clamp
   - `packages/coding-agent/src/debug/index.ts` — interactive debug selector menu
-  - `packages/coding-agent/src/debug/log-viewer.ts` — recent-log TUI viewer
-  - `packages/coding-agent/src/debug/raw-sse.ts` — raw SSE TUI viewer
-  - `packages/coding-agent/src/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
+  - `packages/tui/src/apps/debug/log-viewer.ts` — recent-log TUI viewer
+  - `packages/tui/src/apps/debug/raw-sse.ts` — raw SSE TUI viewer
+  - `packages/tui/src/apps/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
   - `packages/coding-agent/src/debug/remote-debugger.ts` — one-shot JavaScriptCore remote inspector socket
   - `packages/coding-agent/src/debug/profiler.ts` — CPU/heap profiling helpers
   - `packages/coding-agent/src/debug/report-bundle.ts` — `.tar.gz` report bundling, log source, cache cleanup
   - `packages/coding-agent/src/debug/system-info.ts` — system snapshot collection and env redaction
-  - `packages/coding-agent/src/debug/terminal-info.ts` — terminal state collection/formatting
-  - `packages/coding-agent/src/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
+  - `packages/tui/src/apps/debug/terminal-info.ts` — terminal state collection/formatting
+  - `packages/tui/src/apps/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
 
 ## Inputs
 
@@ -304,11 +304,11 @@ GDB example for an OpenOCD remote target:
 - Output capture cap: `MAX_OUTPUT_BYTES = 128 * 1024`; whole chunks are dropped from the front (then the front chunk is byte-sliced so exactly the cap remains) and `outputTruncated` is recorded.
 - Initial stop capture timeout after launch/attach: `STOP_CAPTURE_TIMEOUT_MS = 5_000`.
 - Socket-mode adapter readiness timeout: `10_000` ms in `waitForCondition()` and TCP connect timeout logic in `packages/coding-agent/src/dap/client.ts`.
-- Raw SSE buffer caps in `packages/coding-agent/src/debug/raw-sse-buffer.ts`:
+- Raw SSE buffer caps in `packages/tui/src/apps/debug/raw-sse-buffer.ts`:
   - `MAX_RAW_SSE_EVENTS = 1_000`
   - `MAX_RAW_SSE_CHARS = 512_000`
   - `MAX_RAW_SSE_EVENT_CHARS = 64_000` per event; over-budget events first get `tools` schemas compacted (name kept, schema/description elided), then a head+tail trim that keeps the first and last portions with a `: omp-debug-elided chars=...` comment in the middle and a final `: omp-debug-truncated originalChars=...` marker
-- Log viewer window in `packages/coding-agent/src/debug/log-viewer.ts`:
+- Log viewer window in `packages/tui/src/apps/debug/log-viewer.ts`:
   - `INITIAL_LOG_CHUNK = 50`
   - `LOAD_OLDER_CHUNK = 50`
 - Report/log ingestion caps in `packages/coding-agent/src/debug/report-bundle.ts`:

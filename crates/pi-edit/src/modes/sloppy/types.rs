@@ -46,10 +46,20 @@ pub const MAX_COMBINATIONS: usize = 20_000;
 pub const ATOMICITY_NOTICE: &str =
 	"No operations were applied — ops apply atomically; re-send the full corrected payload.";
 
+/// Replacement or insertion applied by the sloppy engine to a matched source
+/// span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OperationRewrite {
-	Explicit { text: String },
-	Inline { replacements: Vec<String> },
+	Explicit {
+		text: String,
+	},
+	/// Literal, LF-terminated lines inserted after the last matched source line.
+	After {
+		text: String,
+	},
+	Inline {
+		replacements: Vec<String>,
+	},
 }
 
 /// One compiled `«` … `»` … operation.
@@ -97,9 +107,21 @@ pub struct SelectionPair {
 	pub gap_only:        bool,
 }
 
+/// Open-ended `…` edges of a `<SM:FIND>`.
+///
+/// An edge gap spans no text inside the match: it is dropped from the token
+/// stream (taking the newline that joined it to its neighbour with it), and a
+/// `…` on the same edge of `<SM:PUT>` re-emits it as nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EdgeGaps {
+	pub leading:  bool,
+	pub trailing: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedPattern {
 	pub tokens:                   Vec<PatternToken>,
+	pub edge_gaps:                EdgeGaps,
 	pub selection_start:          usize,
 	pub selection_end:            usize,
 	pub insertion:                bool,
@@ -137,6 +159,9 @@ pub struct Candidate {
 	pub captures:        Vec<String>,
 	pub selection_spans: Vec<(usize, usize)>,
 	pub tuple:           Vec<usize>,
+	/// Located through the literal fallback: the pattern's `…` matched file
+	/// text verbatim, so `<SM:PUT>` ellipses are literal too.
+	pub literal_gaps:    bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

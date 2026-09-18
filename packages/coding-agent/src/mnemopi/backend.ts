@@ -15,13 +15,14 @@ import type {
 	MemoryBackendSearchItem,
 	MemoryBackendStartOptions,
 	MemoryBackendStatus,
+	MemoryPromptPreparation,
 } from "../memory-backend/types";
 import memoryConsolidationPrompt from "../prompts/system/memory-consolidation-system.md" with { type: "text" };
 import memoryExtractionPrompt from "../prompts/system/memory-extraction-system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
-import { shortenPath } from "../tools/render-utils";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	loadMnemopiConfig,
 	type MnemopiBackendConfig,
@@ -145,9 +146,23 @@ export const mnemopiBackend: MemoryBackend = {
 		return truncateApproxTokens(rendered, settings.get("mnemopi.injectionTokenLimit"));
 	},
 
-	async beforeAgentStartPrompt(session, promptText): Promise<string | undefined> {
+	async beforeAgentStartPrompt(session, promptText): Promise<MemoryPromptPreparation | undefined> {
 		const state = getMnemopiSessionState(session);
-		return await state?.beforeAgentStartPrompt(promptText);
+		const preparation = await state?.beforeAgentStartPrompt(promptText);
+		if (!preparation) return undefined;
+		if (preparation.context) {
+			// Match the canonical memory block's budget while the recall is staged
+			// separately from its static instructions. Commit still caches the full snippet.
+			const rendered = [STATIC_INSTRUCTIONS, preparation.context].join("\n\n").trim();
+			preparation.context =
+				truncateApproxTokens(rendered, session.settings.get("mnemopi.injectionTokenLimit"))
+					.slice(STATIC_INSTRUCTIONS.length)
+					.trim() || undefined;
+		}
+		return {
+			context: preparation.context,
+			commit: () => getMnemopiSessionState(session) === state && preparation.commit(),
+		};
 	},
 
 	async clear(agentDir, _cwd, session): Promise<void> {
@@ -579,20 +594,22 @@ async function resolveMnemopiProviderOptions(
 					});
 					return null;
 				}
-				const message = await retryTransientCompletion(() =>
-					completeSimple(
-						model,
-						{
-							...(request.systemPrompt ? { systemPrompt: [request.systemPrompt] } : {}),
-							messages: [{ role: "user", content: request.prompt, timestamp: Date.now() }],
-						},
-						{
-							apiKey: modelRegistry.resolver(model, sessionId),
-							sessionId,
-							maxTokens: opts?.maxTokens,
-							temperature: opts?.temperature,
-						},
-					),
+				const message = await retryTransientCompletion(
+					() =>
+						completeSimple(
+							model,
+							{
+								...(request.systemPrompt ? { systemPrompt: [request.systemPrompt] } : {}),
+								messages: [{ role: "user", content: request.prompt, timestamp: Date.now() }],
+							},
+							{
+								apiKey: modelRegistry.resolver(model, sessionId),
+								sessionId,
+								maxTokens: opts?.maxTokens,
+								temperature: opts?.temperature,
+							},
+						),
+					{ provider: model.provider },
 				);
 				return message.content
 					.filter(

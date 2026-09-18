@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	detectStyledUnderlineSupport,
 	detectTerminalId,
 	getTerminalInfo,
 	hyperlinksUserOverride,
@@ -49,6 +50,21 @@ describe("isInsideTerminalMultiplexer", () => {
 	it("is true for HERDR_PANE_ID without HERDR_ENV", () => {
 		expect(isInsideTerminalMultiplexer({ HERDR_PANE_ID: "p1" })).toBe(true);
 	});
+
+	it("is true for a wmux pane (WMUX=1 and native WMUX_SURFACE_ID)", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX: "1" })).toBe(true);
+		expect(isInsideTerminalMultiplexer({ WMUX_SURFACE_ID: "3f2a" })).toBe(true);
+	});
+
+	it("is false for WMUX=0 or an empty surface id", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX: "0" })).toBe(false);
+		expect(isInsideTerminalMultiplexer({ WMUX_SURFACE_ID: "" })).toBe(false);
+	});
+
+	it("is false for client-only wmux CLI vars", () => {
+		expect(isInsideTerminalMultiplexer({ WMUX_CLI: "C:/wmux/wmux.exe" })).toBe(false);
+		expect(isInsideTerminalMultiplexer({ WMUX_PIPE: "\\\\.\\pipe\\wmux" })).toBe(false);
+	});
 });
 
 describe("detectTerminalId", () => {
@@ -92,12 +108,20 @@ describe("shouldEnableSynchronizedOutputByDefault", () => {
 		}
 	});
 
-	it("enables sync in Windows Terminal / WSL via WT_SESSION regardless of terminal id", () => {
+	it("enables sync only when WT_SESSION does not contradict the terminal identity", () => {
 		expect(shouldEnableSynchronizedOutputByDefault({ WT_SESSION: "abc" }, "trueColor")).toBe(true);
-		// WSL shape: Linux + WT_SESSION + COLORTERM=truecolor collapses to trueColor id.
-		expect(shouldEnableSynchronizedOutputByDefault({ WT_SESSION: "abc", COLORTERM: "truecolor" }, "trueColor")).toBe(
-			true,
-		);
+		expect(
+			shouldEnableSynchronizedOutputByDefault(
+				{ WT_SESSION: "abc", TERM_PROGRAM: "Windows_Terminal", COLORTERM: "truecolor" },
+				"trueColor",
+			),
+		).toBe(true);
+		expect(
+			shouldEnableSynchronizedOutputByDefault(
+				{ WT_SESSION: "0", TERM_PROGRAM: "Tabby", COLORTERM: "truecolor" },
+				"trueColor",
+			),
+		).toBe(false);
 	});
 
 	it("enables sync when TERM_FEATURES advertises the Sy capability, even through SSH/mux", () => {
@@ -552,5 +576,41 @@ describe("shouldEnableHyperlinksByDefault", () => {
 		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "1" }, "base")).toBe(true);
 		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "1", TMUX: "1" }, "wezterm")).toBe(true);
 		expect(shouldEnableHyperlinksByDefault({ PI_FORCE_HYPERLINKS: "1", STY: "1.pts-0" }, "kitty")).toBe(true);
+	});
+});
+
+describe("detectStyledUnderlineSupport", () => {
+	it("enables the colon form only on terminals that implement styled underlines", () => {
+		expect(detectStyledUnderlineSupport("kitty", {})).toBe(true);
+		expect(detectStyledUnderlineSupport("ghostty", {})).toBe(true);
+		expect(detectStyledUnderlineSupport("wezterm", {})).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "3.5.0" })).toBe(true);
+	});
+
+	it("keeps Apple Terminal and other unproven hosts on the flat underline", () => {
+		// Apple Terminal advertises no id marker and resolves to `base`, where the
+		// colon-form reset paints a black bar — so base and every fallback stay off.
+		expect(detectTerminalId({ TERM_PROGRAM: "Apple_Terminal" })).toBe("base");
+		expect(detectStyledUnderlineSupport("base")).toBe(false);
+		expect(detectStyledUnderlineSupport("trueColor")).toBe(false);
+		expect(detectStyledUnderlineSupport("vscode")).toBe(false);
+		expect(detectStyledUnderlineSupport("alacritty")).toBe(false);
+		expect(detectStyledUnderlineSupport("warp")).toBe(false);
+		expect(detectStyledUnderlineSupport("orca")).toBe(false);
+	});
+
+	it("enables iTerm2 only on a confirmed version >= 3.5, else flat fallback", () => {
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "2.1.4" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "3.4.0" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "3.5.0" })).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "4.0.0" })).toBe(true);
+		expect(detectStyledUnderlineSupport("iterm2", {})).toBe(false);
+	});
+
+	it("disables the colon form under a multiplexer even when a proven terminal id leaks through", () => {
+		expect(detectStyledUnderlineSupport("kitty", { TMUX: "/tmp/tmux-1000/default,1,0" })).toBe(false);
+		expect(detectStyledUnderlineSupport("ghostty", { STY: "1234.pts-0.host" })).toBe(false);
+		expect(detectStyledUnderlineSupport("wezterm", { TERM: "screen-256color" })).toBe(false);
+		expect(detectStyledUnderlineSupport("iterm2", { TERM_PROGRAM_VERSION: "3.5.0", ZELLIJ: "0" })).toBe(false);
 	});
 });

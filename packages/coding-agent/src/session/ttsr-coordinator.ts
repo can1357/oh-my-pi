@@ -18,12 +18,19 @@ import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" w
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { SessionManager } from "./session-manager";
 
+type TtsrContinueSkipReason =
+	| "aborted"
+	| "stale-generation"
+	| "session-unavailable"
+	| "should-continue-false"
+	| "post-restore-unavailable";
+
 interface TtsrContinueOptions {
 	source: string;
 	delayMs?: number;
 	generation?: number;
 	shouldContinue?: () => boolean;
-	onSkip?: () => void;
+	onSkip?: (reason: TtsrContinueSkipReason) => void;
 	onError?: () => void;
 }
 
@@ -44,6 +51,8 @@ export class TtsrCoordinator {
 	readonly #manager: TtsrManager | undefined;
 	#pendingInjections: Rule[] = [];
 	#perToolInjections = new Map<string, Rule[]>();
+	#deferredReservations = new Map<string, number>();
+	#nextDeferredDeliveryId = 0;
 	#abortPending = false;
 	#retryToken = 0;
 	#resumePromise: Promise<void> | undefined;
@@ -122,9 +131,13 @@ export class TtsrCoordinator {
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
 		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
-		// AST rules use the reconstructed edit/write snapshot and are awaited so
-		// the manager self-throttles native matching.
-		if (matchContext.source === "tool" && this.#manager.hasAstRules()) {
+		// AST rules match whole-file structure against the reconstructed edit/write
+		// snapshot, so they run once on the finalized call: per-delta snapshots are
+		// always partial source (a truncated prefix of the final arguments) and
+		// each run costs a native `astMatch` pass (~90ms at 150KB × entries ×
+		// rules). Awaiting that per delta serializes hundreds of milliseconds onto
+		// the streaming event path and wedges the loop (ui.loop-blocked).
+		if (assistantEvent.type === "toolcall_end" && matchContext.source === "tool" && this.#manager.hasAstRules()) {
 			const astMatches = await this.#checkAstStream(matchContext, streamingToolCall);
 			if (astMatches.length > 0 && this.#handleMatches(astMatches, matchContext, targetMessageTimestamp))
 				return true;
@@ -144,7 +157,19 @@ export class TtsrCoordinator {
 		if (!details || typeof details !== "object" || Array.isArray(details)) return;
 		const rules = "rules" in details ? details.rules : undefined;
 		if (!Array.isArray(rules)) return;
-		this.#markInjected(rules.filter((ruleName): ruleName is string => typeof ruleName === "string"));
+		const ruleNames = rules.filter((ruleName): ruleName is string => typeof ruleName === "string");
+		this.#markInjected(ruleNames);
+		this.releaseDeferredReservationFromDetails(details);
+	}
+
+	/** Releases a queued delivery that was discarded before persistence. */
+	releaseDeferredReservationFromDetails(details: unknown): void {
+		if (!details || typeof details !== "object" || Array.isArray(details)) return;
+		const rules = "rules" in details ? details.rules : undefined;
+		const deliveryId = "deliveryId" in details ? details.deliveryId : undefined;
+		if (!Array.isArray(rules) || typeof deliveryId !== "number") return;
+		const ruleNames = rules.filter((ruleName): ruleName is string => typeof ruleName === "string");
+		this.#releaseDeferredReservation(deliveryId, ruleNames);
 	}
 
 	/** Folds per-tool reminders into the matched tool's result. */
@@ -219,9 +244,21 @@ export class TtsrCoordinator {
 	#addPendingInjections(rules: Rule[]): void {
 		const seen = new Set(this.#pendingInjections.map(rule => rule.name));
 		for (const rule of rules) {
-			if (seen.has(rule.name)) continue;
+			if (seen.has(rule.name) || this.#deferredReservations.has(rule.name)) continue;
 			this.#pendingInjections.push(rule);
 			seen.add(rule.name);
+		}
+	}
+
+	#reserveDeferredInjection(rules: Rule[]): number {
+		const deliveryId = ++this.#nextDeferredDeliveryId;
+		for (const rule of rules) this.#deferredReservations.set(rule.name, deliveryId);
+		return deliveryId;
+	}
+
+	#releaseDeferredReservation(deliveryId: number, ruleNames: string[]): void {
+		for (const ruleName of ruleNames) {
+			if (this.#deferredReservations.get(ruleName) === deliveryId) this.#deferredReservations.delete(ruleName);
 		}
 	}
 
@@ -296,29 +333,48 @@ export class TtsrCoordinator {
 		}
 		const injection = this.#getInjectionContent();
 		if (!injection) return;
-		this.#host.agent.followUp({
-			role: "custom",
-			customType: "ttsr-injection",
-			content: injection.content,
-			display: false,
-			details: { rules: injection.rules.map(rule => rule.name) },
-			attribution: "agent",
-			timestamp: Date.now(),
-		});
+		const ruleNames = injection.rules.map(rule => rule.name);
+		const deliveryId = this.#reserveDeferredInjection(injection.rules);
+		try {
+			this.#host.agent.followUp({
+				role: "custom",
+				customType: "ttsr-injection",
+				content: injection.content,
+				display: false,
+				details: { rules: ruleNames, deliveryId },
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		} catch (error) {
+			this.#releaseDeferredReservation(deliveryId, ruleNames);
+			throw error;
+		}
 		this.#ensureResumePromise();
+		const releaseReservation = () => {
+			this.#releaseDeferredReservation(deliveryId, ruleNames);
+			this.resolveResume();
+		};
 		this.#host.scheduleAgentContinue({
 			source: "ttsr-injection",
 			delayMs: 1,
 			generation: this.#host.promptGeneration(),
-			onSkip: () => this.resolveResume(),
+			onSkip: reason => {
+				if (reason !== "should-continue-false") releaseReservation();
+			},
 			shouldContinue: () => {
-				if (this.#host.agent.state.isStreaming || !this.#host.agent.hasQueuedMessages()) {
+				// A running agent may already have taken the queued message. In that
+				// case message_end remains the authority for committing the cooldown.
+				if (this.#host.agent.state.isStreaming) {
 					this.resolveResume();
+					return false;
+				}
+				if (!this.#host.agent.hasQueuedMessages()) {
+					releaseReservation();
 					return false;
 				}
 				return true;
 			},
-			onError: () => this.resolveResume(),
+			onError: releaseReservation,
 		});
 	}
 

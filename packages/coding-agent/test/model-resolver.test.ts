@@ -3,12 +3,12 @@ import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
 	parseModelPattern,
-	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
@@ -905,6 +905,25 @@ describe("resolveModelRoleValue", () => {
 		expect(result.warning).toBeUndefined();
 	});
 
+	test("resolves a custom role that references another custom role (#10853)", () => {
+		// modelRoles.fast_worker = "@task" must expand through the referenced
+		// role to its concrete model at the pure resolution layer, without
+		// relying on the retry model-fallback path (which retry.modelFallback:
+		// false disables).
+		const roles: Record<string, string> = {
+			task: "openrouter/qwen/qwen3-coder:exacto",
+			fast_worker: "@task",
+		};
+		const settings = {
+			getModelRole: (role: string) => roles[role],
+		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+
+		const result = resolveModelRoleValue("@fast_worker", allModels, { settings });
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+
 	test("splits direct comma fallback chains before parsing thinking selectors", () => {
 		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:off,openai/gpt-4o:off", allModels);
 
@@ -1136,6 +1155,66 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(["baseten/custom-smol:max"]);
+	});
+
+	test("uses configured slow for unconfigured advisor before priority defaults", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default",
+				slow: "baseten/custom-slow:max",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@advisor", settings })).toEqual(["baseten/custom-slow:max"]);
+	});
+
+	test("expands nested role aliases from the configured slow fallback", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "openrouter/qwen/qwen3-coder:exacto",
+				smol: "@default",
+				slow: "@smol",
+			},
+		});
+
+		const result = resolveModelRoleValue("@advisor", allModels, { settings });
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+
+	test("outer advisor thinking level overrides the inherited slow effort", () => {
+		const settings = Settings.isolated({
+			modelRoles: { slow: "nanogpt/coding-router:max" },
+		});
+
+		const result = resolveModelRoleValue("@advisor:high", [mockMaxSuffixModels[0]], { settings });
+
+		expect(result.model?.id).toBe("coding-router");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("outer advisor thinking level preserves an inherited literal suffix model id", () => {
+		const settings = Settings.isolated({
+			modelRoles: { slow: "nanogpt/coding-router:max" },
+		});
+
+		const result = resolveModelRoleValue("@advisor:high", mockMaxSuffixModels, { settings });
+
+		expect(result.model?.id).toBe("coding-router:max");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+	});
+
+	test("keeps advisor on the built-in slow chain when slow is unconfigured", () => {
+		const baseline = resolveAgentModelPatterns({ agentModel: "@advisor", settings: Settings.isolated() });
+		const settings = Settings.isolated({ modelRoles: { default: "local/default" } });
+
+		const advisor = resolveAgentModelPatterns({ agentModel: "@advisor", settings });
+
+		expect(advisor).not.toContain("local/default");
+		expect(advisor).toEqual(baseline);
 	});
 
 	test("breaks the tiny/smol fallback cycle via a default alias", () => {
@@ -2070,6 +2149,13 @@ describe("provider routing selector (@upstream)", () => {
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
 	});
 
+	test("pins a tiered upstream slug with a path segment", () => {
+		const result = parseModelPattern("openrouter/z-ai/glm-4.7@google-ai-studio/priority:high", allModels);
+		expect(result.model?.id).toBe("z-ai/glm-4.7");
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(openRouterOnly(result.model)).toEqual(["google-ai-studio/priority"]);
+	});
+
 	test("combines @slug with a trailing thinking level", () => {
 		const result = parseModelPattern("openrouter/z-ai/glm-4.7@cerebras:high", allModels);
 		expect(result.model?.id).toBe("z-ai/glm-4.7");
@@ -2161,6 +2247,36 @@ describe("provider routing selector (@upstream)", () => {
 		expect(result.model?.id).toBe("z-ai/glm-4.7");
 		expect(result.selector).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
+	});
+
+	test("resolveCliModel routes an aggregator id the first-party provider also bundles", () => {
+		// `google/gemini-2.5-pro` is provider-locked to the bundled `google` provider when
+		// matched as a raw id; the explicit `openrouter/` prefix must unlock it so the
+		// tiered upstream selector reaches OpenRouter's copy.
+		const mirrored = buildModel({
+			id: "google/gemini-2.5-pro",
+			name: "Gemini 2.5 Pro",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		});
+		const models = [...allModels, mirrored];
+		const registry = { getAll: () => models, getAvailable: () => models } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+		const result = resolveCliModel({
+			cliModel: "openrouter/google/gemini-2.5-pro@google-ai-studio/priority",
+			modelRegistry: registry,
+		});
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.selector).toBe("openrouter/google/gemini-2.5-pro@google-ai-studio/priority");
+		expect(openRouterOnly(result.model)).toEqual(["google-ai-studio/priority"]);
 	});
 });
 

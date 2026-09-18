@@ -98,6 +98,8 @@ const PRELUDE_GLOBAL_KEYS = [
 	"wait",
 	"AgentHandle",
 	"CompletionHandle",
+	"judge",
+	"JudgmentHandle",
 	"workpool",
 	"WorkPool",
 	"log",
@@ -297,6 +299,18 @@ export class JsRuntime {
 		activateGlobalOwner(this.#globalOwner, this.#ownedGlobalKeys, action);
 	}
 
+	/**
+	 * Capture the current values of every owned global back into this owner's
+	 * global stack. A cell may rebind a reserved injected global (e.g.
+	 * `var fs = await import("node:fs/promises")`); without this, the next
+	 * `activateGlobalOwner` would restore the install-time value and silently
+	 * clobber the reassignment. Called after each run so bindings persist across
+	 * cells like the eval persistence contract promises.
+	 */
+	#recordGlobals(): void {
+		for (const key of this.#ownedGlobalKeys) recordGlobalValue(key, this.#globalOwner);
+	}
+
 	readonly helpers: HelperBundle;
 	#cwd: string;
 	#session: { cwd: string; sessionId: string };
@@ -376,8 +390,8 @@ export class JsRuntime {
 		if (this.#disposed) throw new Error("Cannot set cwd on a disposed JS runtime");
 		// Always stamp the runtime and session state: WorkerCore/browser/cmux call
 		// setCwd from init and pre-run paths that may race another same-realm
-		// runtime, and a throw here used to escape the inline-worker microtask
-		// path as a fatal unhandledRejection that killed the whole session.
+		// runtime, and a throw here used to escape the harness microtask path as
+		// a fatal unhandledRejection that killed the whole session.
 		// #session is the same object saved in this owner's global stack entry,
 		// so the new cwd survives deferred activation and is visible to this
 		// runtime's next run; run()/setRunScope still assert exclusive ownership.
@@ -478,6 +492,7 @@ export class JsRuntime {
 		try {
 			return await this.#als.run(context, callback);
 		} finally {
+			this.#recordGlobals();
 			leaveRun();
 		}
 	}
@@ -516,6 +531,7 @@ export class JsRuntime {
 				return await awaitMaybePromise(value);
 			});
 		} finally {
+			this.#recordGlobals();
 			leaveRun();
 		}
 	}
@@ -737,7 +753,7 @@ interface GlobalStack {
 	entries: GlobalOwnerEntry[];
 }
 
-// Inline fallback and cmux tabs can create multiple JsRuntime instances in one Bun realm.
+// Same-realm harnesses and cmux tabs can create multiple JsRuntime instances in one Bun realm.
 // Track reserved helper globals by owner so disposing one runtime restores the next active
 // owner (or the original process global after the last owner), not a stale snapshot.
 const GLOBAL_STACKS = new Map<string, GlobalStack>();

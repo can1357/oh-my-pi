@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
-import { chipLabel } from "@oh-my-pi/pi-coding-agent/modes/composer-attachments";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { chipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { getEditorTheme, initTheme } from "@oh-my-pi/pi-tui/theme";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -75,6 +75,21 @@ describe("CustomEditor draft restore", () => {
 		const chips = editor.composerChips();
 		expect(chips).toHaveLength(1);
 		expect(chips[0]).toMatchObject({ kind: "paste", n: 2 });
+	});
+
+	it("reuses attachment chips until text or attachment state changes", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setDraft("[Image #1]", [image]);
+		const initial = editor.composerChips();
+		expect(editor.composerChips()).toBe(initial);
+
+		editor.handleInput("\x7f");
+		expect(editor.composerChips()).toEqual([]);
+		editor.handleInput("\x1f");
+		expect(editor.composerChips()).toEqual([{ kind: "image", n: 1, image, link: undefined }]);
+
+		editor.pendingImageLinks = ["file:///tmp/image.png"];
+		expect(editor.composerChips()).toEqual([{ kind: "image", n: 1, image, link: "file:///tmp/image.png" }]);
 	});
 });
 

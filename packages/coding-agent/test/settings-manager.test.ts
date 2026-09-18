@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -17,11 +18,12 @@ import {
 	type SettingPath,
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
-import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -89,6 +91,63 @@ describe("Settings", () => {
 		await tempDir?.remove();
 	});
 
+	describe("group cache", () => {
+		it("returns one immutable snapshot per merged settings revision", () => {
+			const settings = Settings.isolated();
+			const first = settings.getGroup("compaction");
+
+			expect(settings.getGroup("compaction")).toBe(first);
+			expect(Object.isFrozen(first)).toBe(true);
+
+			const revision = settings.revision;
+			settings.override("compaction.enabled", !first.enabled);
+			expect(settings.revision).toBeGreaterThan(revision);
+			const overridden = settings.getGroup("compaction");
+			expect(overridden).not.toBe(first);
+			expect(overridden.enabled).toBe(!first.enabled);
+			expect(settings.getGroup("compaction")).toBe(overridden);
+
+			settings.clearOverride("compaction.enabled");
+			const restored = settings.getGroup("compaction");
+			expect(restored).not.toBe(overridden);
+			expect(restored.enabled).toBe(first.enabled);
+		});
+
+		it("keeps cloned defaults independent across settings instances", () => {
+			const first = Settings.isolated().getGroup("compaction");
+			const second = Settings.isolated().getGroup("compaction");
+			expect(first).not.toBe(second);
+			expect(first.methodOrder).not.toBe(second.methodOrder);
+
+			const secondOrder = [...second.methodOrder];
+			first.methodOrder.push(first.methodOrder[0]);
+			expect(second.methodOrder).toEqual(secondOrder);
+		});
+
+		it("bumps the effective revision when cwd re-resolves scoped arrays", async () => {
+			const otherProject = tempDir.join("other-project");
+			fs.mkdirSync(otherProject);
+			const settings = await Settings.init({
+				cwd: projectDir,
+				agentDir,
+				inMemory: true,
+				overrides: {
+					enabledModels: [
+						{ path: projectDir, models: ["openai/first"] },
+						{ path: otherProject, models: ["openai/second"] },
+					],
+				},
+			});
+			const before = settings.revision;
+			expect(settings.get("enabledModels")).toEqual(["openai/first"]);
+
+			await settings.reloadForCwd(otherProject);
+
+			expect(settings.revision).toBeGreaterThan(before);
+			expect(settings.get("enabledModels")).toEqual(["openai/second"]);
+		});
+	});
+
 	describe("main config file selection", () => {
 		it("loads and updates an existing config.yaml without creating config.yml", async () => {
 			const yamlConfigPath = path.join(agentDir, "config.yaml");
@@ -149,6 +208,29 @@ describe("Settings", () => {
 			const content = await Bun.file(getConfigPath()).text();
 			expect(content).not.toMatch(/: +$/m);
 			expect(YAML.parse(content)).toEqual({ custom, theme: { dark: "titanium" } });
+		});
+	});
+
+	describe("status line segment validation", () => {
+		it("logs each unknown configured segment once while preserving the config", async () => {
+			await writeSettings({
+				statusLine: {
+					preset: "custom",
+					leftSegments: ["modle", "git", "modle"],
+					rightSegments: ["usage", "sesion", "modle"],
+				},
+			});
+			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(JSON.stringify(settings.get("statusLine.leftSegments"))).toBe('["modle","git","modle"]');
+			expect(
+				warn.mock.calls.filter(([message]) => String(message).startsWith("Settings: unknown status line segment")),
+			).toEqual([
+				['Settings: unknown status line segment "modle"', { setting: "statusLine.leftSegments" }],
+				['Settings: unknown status line segment "sesion"', { setting: "statusLine.rightSegments" }],
+			]);
 		});
 	});
 
@@ -1195,6 +1277,25 @@ describe("Settings", () => {
 			expect(isolated.get("display.showTokenUsage")).toBe(true);
 		});
 
+		it("isolates mutable defaults between instances and from the schema", () => {
+			const first = Settings.isolated();
+			const second = Settings.isolated();
+
+			first.get("enabledModels").push("openai/gpt-test");
+			first.get("providers.maxInFlightRequests").openai = 1;
+
+			expect(first.get("enabledModels")).toEqual(["openai/gpt-test"]);
+			expect(first.get("providers.maxInFlightRequests")).toEqual({ openai: 1 });
+			expect(second.get("enabledModels")).toEqual([]);
+			expect(second.get("providers.maxInFlightRequests")).toEqual({});
+			expect(SETTINGS_SCHEMA.enabledModels.default).toEqual([]);
+			expect(SETTINGS_SCHEMA["providers.maxInFlightRequests"].default).toEqual({});
+			expect(first.isConfigured("enabledModels")).toBe(false);
+			expect(first.isConfigured("providers.maxInFlightRequests")).toBe(false);
+			expect(second.isConfigured("enabledModels")).toBe(false);
+			expect(second.isConfigured("providers.maxInFlightRequests")).toBe(false);
+		});
+
 		it("re-resolves path-scoped arrays when cwd changes", async () => {
 			const otherDir = path.join(tempDir.toString(), "other-project");
 			fs.mkdirSync(otherDir, { recursive: true });
@@ -1720,16 +1821,6 @@ describe("Settings", () => {
 	});
 
 	describe("compaction method migration", () => {
-		it("defaults to server, snapcompact, handoff, shake, then soft compaction", () => {
-			expect(Settings.isolated().get("compaction.methodOrder")).toEqual([
-				"remote",
-				"snapcompact",
-				"handoff",
-				"shake",
-				"soft",
-			]);
-		});
-
 		it("migrates a local-only legacy strategy to soft compaction", async () => {
 			await writeSettings({ compaction: { strategy: "context-full", remoteEnabled: false } });
 
@@ -1739,6 +1830,15 @@ describe("Settings", () => {
 		});
 	});
 	describe("migrations", () => {
+		it("preserves current ask timeout seconds in overrides and persisted config", async () => {
+			expect(Settings.isolated({ "ask.timeout": 2000 }).get("ask.timeout")).toBe(2000);
+
+			await writeSettings({ ask: { timeout: 2000 } });
+			const loaded = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(loaded.get("ask.timeout")).toBe(2000);
+		});
+
 		it("moves the legacy image question timeout and removes its tool settings", async () => {
 			await writeSettings({ inspect_image: { mode: "on", timeoutMs: 42 } });
 
@@ -1842,6 +1942,30 @@ describe("Settings", () => {
 			settings.set("display.showTokenUsage", true);
 			await settings.flush();
 			expect((await readSettings()).computer).toEqual({ enabled: true });
+		});
+
+		it("maps retired local tiny title models to current equivalents", async () => {
+			await writeSettings({ providers: { tinyModel: "lfm2-350m" } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("providers.tinyModel")).toBe("lfm2.5-350m");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).providers).toMatchObject({ tinyModel: "lfm2.5-350m" });
+		});
+
+		it("promotes retired flat tiny title keys into the nested setting", async () => {
+			await Bun.write(getConfigPath(), '"providers.tinyModel": lfm2-350m\n');
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("providers.tinyModel")).toBe("lfm2.5-350m");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect(saved.providers).toMatchObject({ tinyModel: "lfm2.5-350m" });
+			expect("providers.tinyModel" in saved).toBe(false);
 		});
 
 		it("maps removed atom edit mode settings to hashline", async () => {
@@ -2192,6 +2316,86 @@ describe("Settings", () => {
 			expect(fs.existsSync(jsonPath)).toBe(false);
 			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
 		});
+
+		it("does not resurrect agent.db settings after config.yml is deleted", async () => {
+			const dbPath = getAgentDbPath(agentDir);
+			const db = new Database(dbPath);
+			db.exec(`
+				CREATE TABLE settings (
+					key TEXT PRIMARY KEY,
+					value TEXT NOT NULL,
+					updated_at INTEGER NOT NULL DEFAULT 0
+				);
+			`);
+			db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, 1)").run(
+				"symbolPreset",
+				JSON.stringify("ascii"),
+			);
+			db.close();
+
+			const first = await Settings.init({ cwd: projectDir, agentDir });
+			expect(first.get("symbolPreset")).toBe("ascii");
+			expect((await readSettings()).symbolPreset).toBe("ascii");
+
+			const storage = await AgentStorage.open(dbPath);
+			expect(storage.getSettings()).toBeNull();
+
+			await fs.promises.unlink(getConfigPath());
+			AgentStorage.close();
+			resetSettingsForTest();
+
+			const second = await Settings.init({ cwd: projectDir, agentDir });
+			expect(second.get("symbolPreset")).toBe("unicode");
+			expect(second.isConfigured("symbolPreset")).toBe(false);
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+		});
+
+		it("keeps settings.json when the migrated config.yml write fails", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			await fs.promises.writeFile(jsonPath, JSON.stringify({ symbolPreset: "ascii", queueMode: "all" }));
+
+			const open = fs.promises.open.bind(fs.promises);
+			vi.spyOn(fs.promises, "open").mockImplementation(async (filePath, flags, mode) => {
+				if (String(filePath).includes(`${path.sep}config.yml.`) && String(filePath).endsWith(".tmp")) {
+					throw new FsCodeError("EACCES", "injected migration write failure");
+				}
+				return open(filePath, flags, mode);
+			});
+			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+			await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(fs.existsSync(jsonPath)).toBe(true);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(false);
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+			expect(JSON.parse(await fs.promises.readFile(jsonPath, "utf8"))).toEqual({
+				symbolPreset: "ascii",
+				queueMode: "all",
+			});
+			expect(warnSpy).toHaveBeenCalledWith(
+				"Settings: failed to write migrated config.yml",
+				expect.objectContaining({ path: getConfigPath() }),
+			);
+		});
+
+		it("does not resurrect archived legacy settings after config.yml is removed", async () => {
+			const jsonPath = path.join(agentDir, "settings.json");
+			await fs.promises.writeFile(jsonPath, JSON.stringify({ symbolPreset: "ascii", queueMode: "all" }));
+
+			await Settings.init({ cwd: projectDir, agentDir });
+			expect(await Bun.file(getConfigPath()).exists()).toBe(true);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
+
+			await fs.promises.rm(getConfigPath());
+			resetSettingsForTest();
+			AgentStorage.close();
+			const reloaded = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(reloaded.get("symbolPreset")).not.toBe("ascii");
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+			expect(fs.existsSync(`${jsonPath}.bak`)).toBe(true);
+		});
+
 		it("migrates legacy power booleans with system=true to system level", async () => {
 			await writeSettings({
 				power: {

@@ -21,7 +21,7 @@ import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
-import { ToolError } from "../../src/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 async function runEvalCompletionAndWait(
 	args: unknown,

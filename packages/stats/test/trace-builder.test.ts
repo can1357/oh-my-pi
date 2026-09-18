@@ -523,6 +523,59 @@ describe("getTraceEntry", () => {
 });
 
 describe("listSessionSummaries", () => {
+	it("uses the session cwd for home-relative storage keys and keeps the legacy path fallback", async () => {
+		const sessionsDir = getSessionsDir();
+		const currentFile = path.join(sessionsDir, "-project-omp-kit", "current.jsonl");
+		const compressedFile = path.join(sessionsDir, "-project-compressed", "compressed.jsonl.gz");
+		const legacyFile = path.join(sessionsDir, "--work--legacy--", "legacy.jsonl");
+		await fs.mkdir(path.dirname(currentFile), { recursive: true });
+		await fs.mkdir(path.dirname(compressedFile), { recursive: true });
+		await fs.mkdir(path.dirname(legacyFile), { recursive: true });
+		await Bun.write(
+			currentFile,
+			[
+				{ type: "title", v: 1, title: "Current title" },
+				{
+					type: "session",
+					version: 3,
+					id: "current",
+					timestamp: iso(T),
+					cwd: "/home/han/project/omp-kit",
+					title: "Stale header title",
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n"),
+		);
+		await Bun.write(
+			compressedFile,
+			Bun.gzipSync(
+				Buffer.from(
+					[
+						{ type: "title", v: 1, title: "Compressed title" },
+						{
+							type: "session",
+							version: 3,
+							id: "compressed",
+							timestamp: iso(T),
+							cwd: "/home/han/project/compressed",
+						},
+					]
+						.map(entry => JSON.stringify(entry))
+						.join("\n"),
+				),
+			),
+		);
+		await Bun.write(legacyFile, JSON.stringify({ type: "title", v: 1, title: "Legacy session" }));
+
+		const rows = await listSessionSummaries();
+		expect(rows.find(row => row.file === currentFile)?.folder).toBe("/home/han/project/omp-kit");
+		expect(rows.find(row => row.file === currentFile)?.title).toBe("Current title");
+		expect(rows.find(row => row.file === compressedFile)?.folder).toBe("/home/han/project/compressed");
+		expect(rows.find(row => row.file === compressedFile)?.title).toBe("Compressed title");
+		expect(rows.find(row => row.file === legacyFile)?.folder).toBe("/work/legacy/");
+	});
+
 	it("lists unsynced on-disk sessions with titles before any sync", async () => {
 		const rootFile = await writeFixture();
 		const rows = await listSessionSummaries();

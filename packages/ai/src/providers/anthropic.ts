@@ -60,8 +60,10 @@ import {
 import { createAbortSourceTracker } from "../utils/abort";
 import {
 	clearStreamingPartialJson,
+	copyPerCallContextMessage,
 	type ConversationalUserCarrier,
 	isConversationalUser,
+	isPerCallContextMessage,
 	isSyntheticUser,
 	kConversationalUser,
 	kStreamingBlockIndex,
@@ -122,6 +124,7 @@ import {
 	resolveGitHubCopilotBaseUrl,
 	wrapFetchForCopilotFallback,
 } from "./github-copilot-headers";
+import { servedModelFromAnthropicSignature } from "./anthropic-signature";
 import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
@@ -453,6 +456,15 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * `compat.replayUnsignedThinking: false`. Cleared on session close.
 	 */
 	replayUnsignedThinkingDisabled: boolean;
+	/**
+	 * Runtime-learned: this endpoint kept rejecting replayed thinking
+	 * signatures even after unsigned demotion — every surviving block is
+	 * signed by a foreign signer (e.g. a failover proxy swapped upstreams
+	 * mid-conversation and minted signatures the restored upstream cannot
+	 * verify). All subsequent requests drop replayed thinking entirely for
+	 * this (baseUrl, modelId). Cleared on session close.
+	 */
+	thinkingReplayDisabled: boolean;
 	/** Thinking blocks the API permanently dropped after a prefix mismatch. */
 	prefixDroppedThinkingBlocks: Set<string>;
 	/** Conversation-scoped control baselines, isolated from side requests and advisors. */
@@ -477,12 +489,14 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		strictToolsDisabled: false,
 		fastModeDisabled: false,
 		replayUnsignedThinkingDisabled: false,
+		thinkingReplayDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
 		controlStates: new Map(),
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
+			state.thinkingReplayDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
 			state.controlStates.clear();
 		},
@@ -1549,7 +1563,9 @@ async function* iterateAnthropicEvents(
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
 
-	for await (const sse of readSseEvents(response.body, signal)) {
+	// Capture `raw` only when the diagnostic observer exists; otherwise the
+	// per-frame wire-line array is pure token-path garbage.
+	for await (const sse of readSseEvents(response.body, signal, onSseEvent ? { captureRaw: true } : undefined)) {
 		notifyRawSseEvent(onSseEvent, sse);
 		if (sse.event === "error") {
 			throw createAnthropicSseStreamError(sse.data);
@@ -2295,7 +2311,8 @@ const streamAnthropicOnce = (
 				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
-			let dropAllThinking = false;
+			let droppedAllThinkingForSignature = providerSessionState?.thinkingReplayDisabled ?? false;
+			let dropAllThinking = droppedAllThinkingForSignature;
 			let prefixBindingRetryAttempted = false;
 			let prefixMismatchBehavior =
 				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
@@ -2588,6 +2605,11 @@ const streamAnthropicOnce = (
 					if (unwrappedThinking !== undefined) {
 						block.thinking = unwrappedThinking;
 						block.thinkingSignature = undefined;
+					} else if (!output.upstreamModel && block.thinkingSignature) {
+						// The signature names the model that actually produced the
+						// block; a gateway serving a different model than requested
+						// cannot mint one that says otherwise.
+						output.upstreamModel = servedModelFromAnthropicSignature(block.thinkingSignature);
 					}
 					stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial: output });
 				} else if (block.type === "anthropicServerTool" && block.block.type === "server_tool_use") {
@@ -3289,6 +3311,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = model.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3318,6 +3341,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = model.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.inputTransformations = undefined;
 						output.providerPayload = undefined;
@@ -3351,7 +3375,50 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = model.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
+					if (
+						!dropAllThinking &&
+						firstTokenTime === undefined &&
+						!streamedReplayUnsafeContent &&
+						!isThinkingPrefixBindingError(streamFailureMessage) &&
+						isInvalidThinkingSignatureError(streamFailureMessage)
+					) {
+						// The unsigned-demotion retry only rewrites UNSIGNED blocks;
+						// when every replayed block carries a signature the signer no
+						// longer accepts (e.g. a failover proxy swapped upstreams
+						// mid-conversation and minted foreign signatures), the retry
+						// resends a byte-identical body and the session 400s forever.
+						// Escalate: drop all replayed thinking — prior-turn reasoning
+						// is optional context — and retry once. Stored history keeps
+						// its thinking blocks; only the wire payload changes.
+						logger.warn(
+							"anthropic: thinking signatures still rejected after unsigned demotion, dropping replayed thinking and retrying",
+							{
+								provider: model.provider,
+								model: model.id,
+								baseUrl,
+								error: streamFailureMessage,
+							},
+						);
+						if (providerSessionState) {
+							providerSessionState.thinkingReplayDisabled = true;
+						}
+						droppedAllThinkingForSignature = true;
+						dropAllThinking = true;
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.inputTransformations = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
 						output.stopReason = "stop";
@@ -3378,6 +3445,7 @@ const streamAnthropicOnce = (
 						output.content.length = 0;
 						output.model = model.id;
 						output.responseId = undefined;
+						output.upstreamModel = undefined;
 						output.errorMessage = undefined;
 						output.providerPayload = undefined;
 						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
@@ -3440,6 +3508,9 @@ const streamAnthropicOnce = (
 			}
 			if (forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking) {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "unsigned-thinking-replay"];
+			}
+			if (droppedAllThinkingForSignature) {
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "thinking-replay"];
 			}
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
@@ -3882,14 +3953,35 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		params.messages[trailingIndex - 1]?.role === "assistant";
 	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
 
+	// A breakpoint caches every preceding byte, not only the decorated message.
+	// A per-call or turn-scoped message is rebuilt next request, so a prefix
+	// spanning it cannot match — but only at its own position. Messages after
+	// the mark are ordinary persisted history with stable bytes, so a later
+	// breakpoint still matches everything after the mark. The cost is bounded
+	// to re-billing the marked bytes themselves, not the growing tail.
+	// Hence two anchors, not a truncation: the newest candidate at or before
+	// the first per-call/turn-scoped message (when one exists) pins the
+	// reusable prefix behind the mark, and the rolling tail candidates pin
+	// the suffix after it. Turn-scoped `clear_at` messages are absent next
+	// request, so they still truncate the decimation range (ordinals would
+	// shift), but per-call marks no longer freeze the tail.
+	let stableMessageEnd = messageEnd;
+	for (let index = 0; index <= messageEnd; index++) {
+		const message = params.messages[index];
+		if (message && (message.clear_at === "next_user_message" || isPerCallContextMessage(message))) {
+			stableMessageEnd = index - 1;
+			break;
+		}
+	}
+
 	// Decimation counts conversational turns, so it reads the provenance marker
 	// `convertAnthropicMessages` records rather than the wire role. A wire `user`
 	// can also be a serialized `developer` message, a tool_result run, or an
 	// interior `Continue.` pad, none of which advance the user turn ordinal.
 	const userIndices: number[] = [];
-	for (let index = 0; index <= messageEnd; index++) {
+	for (let index = 0; index <= stableMessageEnd; index++) {
 		const message = params.messages[index];
-		if (message && message.clear_at !== "next_user_message" && isConversationalUser(message)) {
+		if (message && isConversationalUser(message)) {
 			userIndices.push(index);
 		}
 	}
@@ -3897,18 +3989,39 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
 	const decimationIndices = userIndices.filter((_, ordinal) => (ordinal + 1) % ANTHROPIC_DECIMATION_INTERVAL === 0);
 
-	// Collect eligible trailing candidates (up to 2 messages walking backward from messageEnd).
+	// Collect up to 2 trailing candidates from the message tail, skipping
+	// per-call messages, turn-scoped messages, and mid-conversation
+	// tool-control messages. A per-call tail candidate is rebuilt next request
+	// (fresh timestamps on appended probes, fresh redaction bytes), so a
+	// breakpoint on it cannot match — it would spend the tail anchor on bytes
+	// that never repeat while the persisted history behind it goes uncached.
+	// Turn-scoped messages are absent next request for the same reason, and
+	// tool controls reject cache_control outright. The walk starts at the
+	// message tail (not the truncated prefix end) so the anchor advances every
+	// turn; the sub-prefix candidate below covers the reusable region behind
+	// a mark.
 	const trailingCandidates: number[] = [];
 	for (let index = messageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
 		const message = params.messages[index];
-		if (!message || message.clear_at === "next_user_message") continue;
+		if (!message || message.clear_at === "next_user_message" || isPerCallContextMessage(message)) continue;
+		if (
+			message.role === "system" &&
+			typeof message.content !== "string" &&
+			Array.isArray(message.content) &&
+			message.content.length > 0 &&
+			message.content.every(block => block.type === "tool_addition" || block.type === "tool_removal")
+		) {
+			continue;
+		}
 		trailingCandidates.push(index);
 	}
-
 	// Prioritize:
 	// 1. Most recent trailing message
 	// 2. Latest decimation checkpoints (newest first) to maintain stable long-context anchors
-	// 3. Second trailing message
+	// 3. Newest message at or before the first per-call/turn-scoped mark, so a
+	//    volatile interior message costs only its own re-billed bytes instead
+	//    of invalidating the whole reusable prefix behind it
+	// 4. Second trailing message
 	const candidateIndices: number[] = [];
 	if (trailingCandidates.length > 0) {
 		candidateIndices.push(trailingCandidates[0]);
@@ -3917,6 +4030,9 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		if (!candidateIndices.includes(decimationIndices[i])) {
 			candidateIndices.push(decimationIndices[i]);
 		}
+	}
+	if (stableMessageEnd < messageEnd && stableMessageEnd >= 0 && !candidateIndices.includes(stableMessageEnd)) {
+		candidateIndices.push(stableMessageEnd);
 	}
 	for (const index of trailingCandidates) {
 		if (!candidateIndices.includes(index)) {
@@ -3937,15 +4053,55 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 }
 
 /**
+ * Trailing system-prompt segments carrying per-turn volatile content (memory
+ * recall blocks). They are rendered by the coding agent as their own
+ * `systemPrompt` array elements and appended last, so on the wire they
+ * normally form a volatile suffix after the stable prefix. The system cache
+ * breakpoint anchors on the last stable segment instead of the array tail, so
+ * a recall refresh re-bills only the suffix and the message tail for one turn
+ * while the tools+stable-system prefix stays a cache hit. The fingerprint in
+ * `planStableAnthropicSystem` is scoped the same way, so a recall-only change
+ * no longer resets the tool/control baselines either.
+ *
+ * Only a genuinely trailing volatile run counts: a `before_agent_start`
+ * extension override may append a stable policy block after the staged recall
+ * block, and that block must stay fingerprinted stable (a change to it has to
+ * re-baseline). A volatile block stranded mid-array still poisons the prefix
+ * at its position — prefix caching is positional, so no classification can
+ * save the bytes after it — but the stable tail is at least fingerprinted
+ * instead of silently excluded.
+ *
+ * Detection is by our own markup, not model identity: recall blocks always
+ * open with `<memories>`. Stable segments containing recalled text elsewhere
+ * (e.g. quoted in conversation) are unaffected — only a leading tag counts.
+ */
+const VOLATILE_SYSTEM_SEGMENT_MARKERS = ["<memories>"];
+
+function stableSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]): number {
+	let start = systemBlocks.length;
+	while (start > 0) {
+		const text = systemBlocks[start - 1]?.text ?? "";
+		if (!VOLATILE_SYSTEM_SEGMENT_MARKERS.some(marker => text.startsWith(marker))) break;
+		start--;
+	}
+	return start;
+}
+
+/**
  * Anchor cache_control on the stable request head — the last (non-deferred)
- * tool definition and the last system block. The canonical cache order is
- * tools → system → messages, so a breakpoint on the final system block caches
- * the entire tools+system prefix, and the extra tool breakpoint keeps the tool
+ * tool definition and the last stable system block. The canonical cache order is
+ * tools → system → messages, so a breakpoint on the final stable system block caches
+ * the entire tools+stable-system prefix, and the extra tool breakpoint keeps the tool
  * definitions cached even when the system text changes. This guarantees the
  * large, unchanging head is a cache hit on every turn regardless of how the
  * message tail churns — the breakpoint placement first-party Anthropic clients
  * (Claude Code, Pi) use. Without it, the general API-key path anchors only the
  * moving message tail, so tail churn re-writes the whole head uncached.
+ *
+ * Volatile trailing segments (memory recall) sit after the breakpoint, so a
+ * recall refresh re-bills only the suffix and the tail for one turn instead of
+ * the whole head. When every system block is volatile there is no stable
+ * boundary and the breakpoint stays on the array tail (previous behavior).
  *
  * Anthropic allows at most 4 cache breakpoints per request. At most one is
  * spent on tools and one on system here, leaving the remaining budget for
@@ -3982,9 +4138,28 @@ function applyHeadCaching(
 		}
 	}
 
-	if (systemBlocks && systemBlocks.length > 0 && !systemBlocks.some(block => block.cache_control != null)) {
-		const lastBlock = systemBlocks[systemBlocks.length - 1];
-		if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+	if (systemBlocks && systemBlocks.length > 0) {
+		// Anchor on the last stable block so a volatile recall suffix refresh
+		// re-bills only the suffix, not the whole head. The skip-if-decorated
+		// check applies only when there is no volatile suffix (previous
+		// behavior): with a suffix present the boundary anchor is added
+		// whenever the anchor block itself lacks a breakpoint, even if the
+		// OAuth path pre-decorated its identity block — otherwise the only
+		// system breakpoint sits before the stable prompt and a recall
+		// refresh re-bills it. The message budget in `applyPromptCaching`
+		// shrinks accordingly (4 minus head breakpoints). All-volatile falls
+		// back to tail anchoring (previous behavior).
+		const suffixStart = stableSystemSuffixStart(systemBlocks);
+		if (suffixStart === systemBlocks.length) {
+			if (!systemBlocks.some(block => block.cache_control != null)) {
+				const lastBlock = systemBlocks[systemBlocks.length - 1];
+				if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+			}
+		} else {
+			const anchorIndex = suffixStart === 0 ? systemBlocks.length - 1 : suffixStart - 1;
+			const anchor = systemBlocks[anchorIndex];
+			if (anchor && anchor.cache_control == null) anchor.cache_control = cloneAnthropicCacheControl(cacheControl);
+		}
 	}
 }
 
@@ -4068,11 +4243,15 @@ function getAnthropicControlState(
 ): AnthropicControlState | undefined {
 	if (!state) return undefined;
 	const root = messages[0];
+	// Key on the stable system prefix, not the full array: a volatile recall
+	// suffix refresh must resolve the same baseline or the declared-tool,
+	// effort, and control-transition state it preserves is lost with it.
+	const stablePrefix = system?.slice(0, stableSystemSuffixStart(system)) ?? null;
 	const fingerprint = String(
 		Bun.hash(
 			JSON.stringify([
 				sessionId ?? "",
-				system?.map(block => block.text) ?? null,
+				stablePrefix?.map(block => block.text) ?? null,
 				root ? anthropicControlMessageProjection(root) : null,
 			]),
 		),
@@ -4118,14 +4297,16 @@ function syncAnthropicControlState(state: AnthropicControlState, messages: reado
 }
 
 /**
- * Keep the top-level `system` array byte-stable across a session. The blocks
- * captured on the first request are replayed verbatim (with the current
- * request's cache breakpoints) while their text is unchanged. A text change
+ * Keep the top-level `system` array byte-stable across a session. The stable
+ * prefix captured on the first request is replayed verbatim (with the current
+ * request's cache breakpoints) while its text is unchanged; the volatile
+ * recall suffix always passes through current-turn. A stable-prefix change
  * re-baselines instead of duplicating the prompt as a mid-conversation
  * system message: omp's system prompt is one rendered segment that embeds
  * the tool roster, so replaying a second copy on every later request would
  * cost the full prompt again per change. The prefix rewrite is absorbed by
- * `prefix_mismatch_behavior: "drop_block"` and one cache miss.
+ * `prefix_mismatch_behavior: "drop_block"` and one cache miss, while a
+ * recall-only change keeps the tool/control baselines intact.
  */
 function planStableAnthropicSystem(
 	current: AnthropicSystemBlock[] | undefined,
@@ -4133,16 +4314,21 @@ function planStableAnthropicSystem(
 	enabled: boolean,
 ): AnthropicSystemBlock[] | undefined {
 	if (!state || !enabled) return current;
-	const fingerprint = JSON.stringify(current?.map(block => block.text) ?? null);
+	const suffixStart = stableSystemSuffixStart(current ?? []);
+	const fingerprint = JSON.stringify(current?.slice(0, suffixStart).map(block => block.text) ?? null);
 	if (state.systemFingerprint !== fingerprint) {
 		resetAnthropicControlState(state);
 		state.systemFingerprint = fingerprint;
-		state.stableSystemBlocks = current?.map(block => ({ type: block.type, text: block.text }));
+		state.stableSystemBlocks = current?.slice(0, suffixStart).map(block => ({ type: block.type, text: block.text }));
 	}
-	return state.stableSystemBlocks?.map((block, index) => {
-		const cacheControl = current?.[index]?.cache_control;
-		return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
-	});
+	const stableReplay =
+		state.stableSystemBlocks?.map((block, index) => {
+			const cacheControl = current?.[index]?.cache_control;
+			return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
+		}) ?? [];
+	const suffix = current?.slice(suffixStart).map(block => ({ ...block })) ?? [];
+	const replayed = [...stableReplay, ...suffix];
+	return replayed.length > 0 ? replayed : undefined;
 }
 
 function anthropicToolDefinitionKey(tool: AnthropicWireTool): string {
@@ -4764,7 +4950,12 @@ export function convertAnthropicMessages(
 			(msg.role === "user" || msg.role === "developer") &&
 			isReplayableAnthropicCompaction(msg.providerPayload, model)
 		) {
-			params.push({ role: "assistant", content: [compactionBlockParam(msg.providerPayload)] });
+			const compactionParam: AnthropicMessageParam = {
+				role: "assistant",
+				content: [compactionBlockParam(msg.providerPayload)],
+			};
+			copyPerCallContextMessage(compactionParam, msg);
+			params.push(compactionParam);
 			// The block carries the verbatim API summary, so the message text
 			// (which holds the harness file lists) would be dropped with it.
 			// Queue the file metadata for after the block: it sits past the
@@ -4835,6 +5026,7 @@ export function convertAnthropicMessages(
 			if (msg.role === "user" && !agentAuthored && !isSyntheticUser(msg)) {
 				param[kConversationalUser] = true;
 			}
+			copyPerCallContextMessage(param, msg);
 			params.push(param);
 		} else if (msg.role === "assistant") {
 			const blocks: ContentBlockParam[] = [];
@@ -4972,10 +5164,12 @@ export function convertAnthropicMessages(
 				blocks.push(...nonToolUse, ...toolUse);
 			}
 			if (blocks.length === 0) continue;
-			params.push({
+			const assistantParam: AnthropicMessageParam = {
 				role: "assistant",
 				content: blocks,
-			});
+			};
+			copyPerCallContextMessage(assistantParam, msg);
+			params.push(assistantParam);
 			// Flush queued file metadata unless this turn left tool calls open:
 			// their results must follow the turn contiguously, so the metadata
 			// waits for the merged result message (or the end of the list).
@@ -4987,15 +5181,21 @@ export function convertAnthropicMessages(
 			const toolResults: ContentBlockParam[] = [];
 			// Images stripped out of error tool results, re-attached after the run.
 			const hoistedImages: ContentBlockParam[] = [];
+			const toolResultParam: AnthropicMessageParam = {
+				role: "user",
+				content: toolResults,
+			};
 
 			// Add the current tool result
 			toolResults.push(buildToolResultBlock(model, msg, hoistedImages));
+			copyPerCallContextMessage(toolResultParam, msg);
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 				const nextMsg = transformedMessages[j] as ToolResultMessage; // We know it's a toolResult
 				toolResults.push(buildToolResultBlock(model, nextMsg, hoistedImages));
+				copyPerCallContextMessage(toolResultParam, nextMsg);
 				j++;
 			}
 
@@ -5010,10 +5210,7 @@ export function convertAnthropicMessages(
 			}
 
 			// Add a single user message with all tool results
-			params.push({
-				role: "user",
-				content: toolResults,
-			});
+			params.push(toolResultParam);
 			// An open tool_use turn's results are whole again; queued file
 			// metadata can follow without splitting the pairing.
 			flushCompactionFiles();
@@ -5050,20 +5247,24 @@ export function convertAnthropicMessages(
 				const controlContent = content.filter(block => block.type !== "text");
 				if (scopedContent.length > 0) {
 					params[idx] = {
+						...params[idx],
 						role: "system",
 						content: scopedContent,
 						clear_at: "next_user_message",
 					};
-					params.splice(idx + 1, 0, {
+					const controlParam: AnthropicMessageParam = {
 						role: "system",
 						content: controlContent,
 						...(hasEffort ? { output_config: { effort: developer.payload?.effort } } : {}),
-					});
+					};
+					copyPerCallContextMessage(controlParam, params[idx]);
+					params.splice(idx + 1, 0, controlParam);
 					continue;
 				}
 			}
 
 			params[idx] = {
+				...params[idx],
 				role: "system",
 				content,
 				...(turnScoped && !hasEffort && !hasToolChanges ? { clear_at: "next_user_message" } : {}),

@@ -9,6 +9,7 @@ Ask user for clarification/input during task execution.
 - Use `questions` for related questions, not one at a time.
 - Set `multi: true` on a question to allow multiple selections.
 - Short option labels; explanatory tradeoffs in `description`, not labels.
+- A custom input (`Other`) can be a clarifying question, not an answer (e.g. "what do you mean?", "explain X", "why?"). If so, answer it in response text first, then call `ask` again for the still-open question(s).
 </instruction>
 
 <caution>

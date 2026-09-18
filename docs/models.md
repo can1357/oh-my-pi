@@ -153,7 +153,7 @@ It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 
 ### Command-resolved secrets
 
-Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. The command is run with a 10 s timeout, stdout is trimmed, and empty/failing commands are omitted:
+Provider `apiKey` values and provider/model `headers` values may start with `!` to read a secret from command stdout. Commands run asynchronously with a 10 s timeout; stdout is trimmed, and empty/failing commands are omitted. Loading or inspecting the catalog does not execute them: credentials resolve when a request or online credential probe needs them.
 
 ```yaml
 providers:
@@ -163,7 +163,7 @@ providers:
       X-Team-Key: "!bw get password omp-team-key"
 ```
 
-Successful command outputs are cached for the process lifetime so the command is not re-run for every model.
+Successful command outputs are cached for the process lifetime, and concurrent requests share an in-flight execution. Failures back off for 30 seconds. An explicit model refresh or 401 credential refresh invalidates the relevant cached API keys and headers. Runtime API-key overrides, including `--api-key`, take precedence over configured credentials.
 
 ## Merge and override order
 
@@ -283,7 +283,7 @@ When `litellm` is active (for example through `LITELLM_API_KEY` or stored auth),
 
 Runtime discovery probes LiteLLM management metadata in order: `GET /model_group/info`, `GET /v2/model/info`, `GET /model/info`, and `GET /v1/model/info`. The configured key must be authorized to read at least one of these routes; on deployments that restrict management endpoints, grant the route through LiteLLM's `allowed_routes` access controls or use a master/admin key for discovery.
 
-If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
+If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Both paths exclude models explicitly marked with known task-specific LiteLLM modes: `audio_speech`, `audio_transcription`, `batch`, `embedding`, `guardrail`, `image_edit`, `image_generation`, `moderation`, `ocr`, `rerank`, `search`, `vector_store`, and `video_generation`. Missing, null, and unrecognized modes remain selectable so router aliases continue to work. Rich metadata maps per-model context, capability, and upstream-provider fields. OpenAI-backed models use LiteLLM's Responses route so reasoning summaries remain available; mixed-provider groups stay on Chat Completions. Bare fallback ids use the known OpenAI model families for routing and bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
 
 ### Explicit provider discovery
 
@@ -566,6 +566,7 @@ Request shaping:
 - `supportsLongPromptCacheRetention` — host honors `prompt_cache_retention: "24h"` on the Responses API. Default: auto (api.openai.com).
 - `supportsImageDetailOriginal` — allow the Responses API's nonstandard `detail: "original"` image
   mode where the endpoint supports it.
+- `supportsConfigurationUpdate` — let the Responses API change `reasoning.effort` mid-session through a `configuration_update` input item while the request-level effort stays pinned for prompt caching (GPT-6 Astra). Default: auto (`true` for `gpt-6-astra` on every host, `false` otherwise). Set `false` for custom `openai-responses` / `openai-codex-responses` endpoints that reject the item type with HTTP 400; effort changes are then sent as the top-level `reasoning.effort` and no update items are emitted.
 - `extraBody` — extra top-level fields merged into every request body (gateway hints, controller selectors, etc.).
 
 Image handling:
@@ -628,6 +629,33 @@ Anthropic-side knobs are supplied by built-in catalog metadata and are not confi
 The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `explicit`),
 `supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`, and
 `promptCacheMaximumCheckpoints` for Bedrock models.
+
+By default `bedrock-converse-stream` requests go to `bedrock-runtime.{region}.amazonaws.com`, where
+`{region}` comes from an explicit per-request region, the model id (ARN or cross-region
+inference-profile prefix), or `AWS_REGION`/`AWS_DEFAULT_REGION`/the AWS profile — falling back to
+`us-east-1`. Set `baseUrl` on `providers.amazon-bedrock` (or on a custom provider using
+`api: bedrock-converse-stream`) to send requests somewhere else instead — a VPC/PrivateLink
+endpoint, a FIPS host, or a gateway. Any path or query string on the `baseUrl` is kept — the path
+as a prefix, the query appended to the final URL (and included in SigV4's canonical request when
+signing) — so `{baseUrl}/model/{id}/converse-stream[?query]` is the final URL. That covers gateways
+that authenticate via a query parameter instead of a header:
+
+```yaml
+providers:
+  amazon-bedrock:
+    baseUrl: https://vpce-0123456789abcdef0.bedrock-runtime.us-east-1.vpce.amazonaws.com
+```
+
+One host shape is not taken literally: a `baseUrl` of exactly
+`bedrock-runtime.{region}.amazonaws.com` is AWS's own endpoint, and its region segment is replaced
+with the resolved region — signing has to match the region it sends to, and every bundled Bedrock
+model already carries such a `baseUrl`. Use a distinct host (VPC endpoint, `-fips`, gateway) to
+pin an origin exactly.
+
+Region resolution itself is unaffected by `baseUrl`, because SigV4 still signs with a real AWS
+region — set `AWS_REGION` or use a region-scoped model id/ARN if the endpoint expects a specific
+one. A gateway that accepts a bearer token instead of SigV4 needs no region at all: set the
+provider's `apiKey` (or `AWS_BEARER_TOKEN_BEDROCK`) and signing is skipped.
 
 ### Strict tool schemas (`disableStrictTools`)
 

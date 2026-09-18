@@ -4,18 +4,21 @@
  * Ports the o2 runtime-behavior grammar (openai-responses-heuristic,
  * model-operations, cursor-effort, cursor-model-parameter, quota-tiers,
  * hosted-default) and adds the pi-only nodes: api-routes, model-limits,
- * exclude-models, plan-requirement, pricing-peer. Every node kind is
- * optional; per-node shapes are strict.
+ * exclude-discovery-modes, exclude-models, plan-requirement, pricing-peer,
+ * and retry-reset-timezone.
+ * Every node kind is optional; per-node shapes are strict.
  */
 import type {
 	CompiledApiRoutes,
 	CompiledBehavior,
+	CompiledExcludeDiscoveryModes,
 	CompiledExcludeModels,
 	CompiledMatchList,
 	CompiledModelLimits,
 	CompiledModelOperations,
 	CompiledPlanRequirement,
 	CompiledPricingPeer,
+	CompiledRetryResetTimezone,
 	CompiledQuotaRule,
 	CompiledResponsesHeuristic,
 } from "../../src/compat/types";
@@ -79,6 +82,16 @@ function matchListFromProps(node: KdlNodeView, skip: readonly string[]): Compile
 		}
 	}
 	return match;
+}
+
+const UTC_OFFSET_PATTERN = /^(?:Z|[+-](?:(?:0\d|1[0-3]):[0-5]\d|14:00))$/;
+
+function parseRetryResetTimezone(node: KdlNodeView): CompiledRetryResetTimezone {
+	ensureLeaf(node, ["provider", "offset"]);
+	const provider = requiredProp(node, "provider");
+	const offset = requiredProp(node, "offset");
+	if (!provider || !UTC_OFFSET_PATTERN.test(offset) || node.args.length > 0) malformed(node);
+	return { provider, offset };
 }
 
 function hasMatchers(match: CompiledMatchList): boolean {
@@ -229,6 +242,15 @@ function parseExcludeModels(node: KdlNodeView): CompiledExcludeModels {
 	return { provider, match };
 }
 
+function parseExcludeDiscoveryModes(node: KdlNodeView): CompiledExcludeDiscoveryModes {
+	ensureLeaf(node, ["provider"]);
+	if (node.props.filter(prop => prop.name === "provider").length !== 1) malformed(node);
+	const provider = requiredProp(node, "provider");
+	const modes = positionalStrings(node);
+	if (!provider || modes.length === 0 || new Set(modes).size !== modes.length) malformed(node);
+	return { provider, modes };
+}
+
 function parsePlanRequirement(node: KdlNodeView): CompiledPlanRequirement {
 	const children = ensureContainer(node, ["provider"]);
 	const provider = requiredProp(node, "provider");
@@ -275,9 +297,12 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 		hostedDefaults: [],
 		apiRoutes: [],
 		modelLimits: [],
+		excludeDiscoveryModes: [],
 		excludeModels: [],
 		retiredProviders: [],
+		referenceIsolatedProviders: [],
 		planRequirements: [],
+		retryResetTimezones: [],
 		pricingPeers: [],
 	};
 	if (!source) return behavior;
@@ -335,11 +360,17 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 			case "model-limits":
 				behavior.modelLimits.push(parseModelLimits(node));
 				break;
+			case "exclude-discovery-modes":
+				behavior.excludeDiscoveryModes.push(parseExcludeDiscoveryModes(node));
+				break;
 			case "exclude-models":
 				behavior.excludeModels.push(parseExcludeModels(node));
 				break;
 			case "plan-requirement":
 				behavior.planRequirements.push(parsePlanRequirement(node));
+				break;
+			case "retry-reset-timezone":
+				behavior.retryResetTimezones.push(parseRetryResetTimezone(node));
 				break;
 			case "pricing-peer":
 				behavior.pricingPeers.push(parsePricingPeer(node));
@@ -349,6 +380,13 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 				const values = positionalStrings(node);
 				if (values.length === 0 || values.some(value => !value)) malformed(node);
 				behavior.retiredProviders.push(...values);
+				break;
+			}
+			case "reference-isolated-providers": {
+				ensureLeaf(node, []);
+				const values = positionalStrings(node);
+				if (values.length === 0 || values.some(value => !value)) malformed(node);
+				behavior.referenceIsolatedProviders.push(...values);
 				break;
 			}
 			default:
