@@ -278,8 +278,7 @@ Uses the same location normalization and output shape as `definition`, but sends
 - Idle-client sweep interval when enabled: `60_000ms` — `IDLE_CHECK_INTERVAL_MS` in `packages/coding-agent/src/lsp/client.ts`.
 - Failed initialization backoff: `3 * 60 * 1000ms` — `INIT_FAILURE_BACKOFF_MS`; a matching single-file or workspace `reload` clears this negative cache so retry is immediate.
 - Diagnostic message output cap: first `50` messages — `DIAGNOSTIC_MESSAGE_LIMIT` in `packages/coding-agent/src/lsp/index.ts`.
-- Single-file diagnostics wait: `3_000ms` — `SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS`.
-- Batch/glob diagnostics wait per file: `400ms` — `BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS`.
+- Single-file and batch/glob diagnostics wait per file: `3_000ms` (`SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS`), or `10_000ms` for project-aware servers (`PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS`); the tool-level `timeout` bounds the whole batch.
 - Glob diagnostic target cap: first `20` matches — `MAX_GLOB_DIAGNOSTIC_TARGETS`.
 - Workspace symbol cap: first `200` entries — `WORKSPACE_SYMBOL_LIMIT`.
 - Reference context cap: first `50` references include source context — `REFERENCE_CONTEXT_LIMIT`.

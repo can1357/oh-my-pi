@@ -884,6 +884,10 @@
 - Fixed the `inspect_image` status hint showing the wrong model after switching between image-capable model roles.
 - Fixed multi-minute TUI freezes during subagent activity and batch execution.
 
+### Fixed
+
+- Fixed `lsp diagnostics` on a glob reporting every file as "all language servers failed" on large workspaces; batches now use the same per-file wait budget as single-file requests instead of a 400ms cap ([#10701](https://github.com/can1357/oh-my-pi/issues/10701)).
+
 ## [18.1.7] - 2026-09-03
 
 ### Breaking Changes
