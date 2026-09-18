@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added the `reasoningLanguage` setting (`auto`, `off`, `zh`, `en`) to steer the language of visible thinking text on providers that stream raw reasoning. `auto` follows a clearly Chinese user turn. The transient `<reasoning-language>` block rides the user turn at request time — never the system prompt or session history — so earlier turns replay byte-identically and prompt caching is preserved. ([#12406](https://github.com/can1357/oh-my-pi/pull/12406) by [@c4ys](https://github.com/c4ys))
+
 ### Fixed
 
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.

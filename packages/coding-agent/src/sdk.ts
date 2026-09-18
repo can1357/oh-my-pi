@@ -158,6 +158,7 @@ import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewa
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
+import { ReasoningLanguageInjector } from "./session/reasoning-language";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import { recoverInlineSloppyEdit } from "./session/inline-edit-recovery";
 import {
@@ -3539,6 +3540,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		);
 		blobBroker?.prewarm();
 		const dateCwdReminder = new DateCwdReminderInjector();
+		const reasoningLanguage = new ReasoningLanguageInjector();
 		const snapcompactSystemPromptMode = settings.get("snapcompact.systemPrompt");
 		const snapcompactInline =
 			snapcompactSystemPromptMode !== "none" || settings.get("snapcompact.toolResults")
@@ -3566,6 +3568,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// else, and it runs before the blob broker uploads any of these bytes.
 			transformed = await dropUnreadableContextImages(transformed, transformModel);
 			if (blobBroker) transformed = await blobBroker.decorateContext(transformed, transformModel);
+			// Visible thinking language rides on the user turn for the same reason the
+			// date/cwd reminder does (#7404): request-time, append-only, and never
+			// written to the session. Applied before the reminder so both injections
+			// stay byte-stable across requests.
+			transformed = reasoningLanguage.transform(transformed, settings.get("reasoningLanguage"));
 			// Keep per-request volatility out of the system prompt: the date/cwd
 			// reminder rides on the first user turn so open-weight providers keep
 			// their tool-schema prefix cache (#7404).

@@ -1309,6 +1309,28 @@ export const SETTINGS_SCHEMA = {
 			description: "Hide thinking blocks in assistant responses",
 		},
 	},
+	reasoningLanguage: {
+		type: "enum",
+		values: ["auto", "off", "zh", "en"] as const,
+		default: "auto",
+		ui: {
+			tab: "model",
+			group: "Thinking",
+			label: "Reasoning Language",
+			description:
+				"Language of visible thinking text when a provider streams raw reasoning; auto follows a clearly Chinese user turn",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Ask for Simplified Chinese thinking when the user's turn is clearly Chinese",
+				},
+				{ value: "off", label: "Off", description: "Never ask for a reasoning language" },
+				{ value: "zh", label: "简体中文", description: "Always ask for Simplified Chinese thinking" },
+				{ value: "en", label: "English", description: "Always ask for English thinking" },
+			],
+		},
+	},
 	proseOnlyThinking: {
 		type: "boolean",
 		default: true,
