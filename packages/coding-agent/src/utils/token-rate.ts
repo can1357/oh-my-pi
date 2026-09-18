@@ -151,8 +151,9 @@ class DecayedSums {
  * message's own request-start timestamp and `timestamp + duration` (epoch ms,
  * the `Date.now()` clock) so dispatch latency never shortens a span. Tool
  * execution between messages neither ages the sums nor counts as time, so the
- * readout holds across it. {@link reset} blanks it on a session switch while
- * keeping the hidden-rate estimate.
+ * readout holds across it. Each `AgentSession` owns one meter, so background
+ * subagents keep their own reading; {@link seed} restores it from the last
+ * completed turn after a history swap and {@link reset} blanks it.
  *
  * Whole-message averages come from {@link calculateTokensPerSecond} instead.
  */
@@ -230,6 +231,24 @@ export class TokenRateMeter {
 	reset(): void {
 		this.#clearInflight();
 		for (const sums of this.#history) sums.reset();
+	}
+	/**
+	 * Seed the window from a completed turn (`outputTokens` over `durationMs`),
+	 * scaled past the evidence gate so even short turns read immediately. Like
+	 * a just-finished turn, the reading holds until the next message blends
+	 * with it or {@link reset} blanks it.
+	 */
+	seed(outputTokens: number, durationMs: number): void {
+		if (!Number.isFinite(outputTokens) || outputTokens <= 0 || !Number.isFinite(durationMs) || durationMs <= 0) {
+			this.reset();
+			return;
+		}
+		this.#clearInflight();
+		const scale = Math.max(1, METER_MIN_TOKENS / outputTokens, METER_MIN_TIME_MS / durationMs);
+		for (const sums of this.#history) {
+			sums.tokens = outputTokens * scale;
+			sums.time = durationMs * scale;
+		}
 	}
 
 	/** Tokens per second over the decayed window, or null until enough tokens have accumulated. */

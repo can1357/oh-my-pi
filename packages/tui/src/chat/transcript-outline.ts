@@ -6,11 +6,16 @@
  */
 import { type Component } from "../tui";
 import { visibleWidth } from "../utils";
-import { isUserRequestEntry, type TranscriptEntryLike as TranscriptEntry, userTurnDraft } from "./transcript-entry";
+import {
+	isUserRequestEntry,
+	type TranscriptEntryLike as TranscriptEntry,
+	userMessageLabel,
+	userTurnDraft,
+} from "./transcript-entry";
 import type { SessionMessageEntryLike as SessionMessageEntry } from "./transcript-entry";
 import { type ThemeColor, theme } from "../theme";
 import type { ChatTranscriptBuilder } from "./chat-transcript-builder";
-import { fit } from "../chrome/overlay-box";
+import { padToWidth } from "../render/utils";
 import { isUsageRowBlock } from "../overlays/usage-row";
 
 /** One selectable transcript item: a message entry plus its rendered block range. */
@@ -167,7 +172,7 @@ export function outlineRows(rows: readonly string[], innerWidth: number, style: 
 	const lines: string[] = [
 		outlineRule(theme.boxRound.topLeft, theme.boxRound.topRight, innerWidth, color, style.caption),
 	];
-	for (const row of rows) lines.push(`${vertical} ${fit(row, innerWidth)} ${vertical}`);
+	for (const row of rows) lines.push(`${vertical} ${innerWidth > 0 ? padToWidth(row, innerWidth) : ""} ${vertical}`);
 	lines.push(outlineRule(theme.boxRound.bottomLeft, theme.boxRound.bottomRight, innerWidth, color));
 	return lines;
 }
@@ -242,21 +247,9 @@ export function isUserTurnEntry(entry: TranscriptEntry): boolean {
 
 /** Single-line label for a user turn: its prompt text, or the custom message's draft. */
 export function userTurnLabel(entry: TranscriptEntry): string | undefined {
-	if (entry.type === "message" && entry.message.role === "user") return userMessageText(entry.message);
+	if (entry.type === "message" && entry.message.role === "user") return userMessageLabel(entry.message.content);
 	const draft = userTurnDraft(entry);
-	return draft === undefined ? undefined : draft.replace(/\s+/g, " ").trim();
-}
-
-/** Plain text of a user message (string or text blocks), single line. */
-export function userMessageText(message: Extract<SessionMessageEntry["message"], { role: "user" }>): string {
-	const text =
-		typeof message.content === "string"
-			? message.content
-			: message.content
-					.filter((block): block is { type: "text"; text: string } => block.type === "text")
-					.map(block => block.text)
-					.join(" ");
-	return text.replace(/\s+/g, " ").trim();
+	return draft === undefined ? undefined : userMessageLabel(draft);
 }
 
 /** Whether a user message carries prompt text (string or text blocks). */

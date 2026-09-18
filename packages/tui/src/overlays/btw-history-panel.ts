@@ -28,7 +28,8 @@ import {
 import { sanitizeErrorLine } from "../chrome/error-block";
 import { sanitizeDisplayLine, sanitizeDisplayText } from "./extensions/display-text";
 import { editorKey, rawKeyHint } from "../chrome/keybinding-hints";
-import { bottomBorder, fit, row, topBorder } from "../chrome/overlay-box";
+import { bottomBorder, row, topBorder } from "../chrome/overlay-box";
+import { padToWidth } from "../render/utils";
 import { SplitPane } from "../components/layout/split-pane";
 import { clampSelection, contentRowWidth, padLinesToHeight, renderScrollableList } from "../chrome/selector-helpers";
 
@@ -365,10 +366,18 @@ export class BtwHistoryPanel implements Component, Focusable {
 				Math.max(0, contentWidth - (rowSpan === 2 ? 2 : visibleWidth(prefix))),
 			);
 			const text = rowSpan === 2 ? prefix : `${prefix}${selected ? theme.bold(snippet) : snippet}`;
-			lines.push(selected ? theme.bg("selectedBg", fit(text, contentWidth)) : truncateToWidth(text, contentWidth));
+			lines.push(
+				selected
+					? theme.bg("selectedBg", contentWidth > 0 ? padToWidth(text, contentWidth) : "")
+					: truncateToWidth(text, contentWidth),
+			);
 			if (rowSpan === 2) {
 				const questionLine = `  ${selected ? theme.bold(snippet) : snippet}`;
-				lines.push(selected ? theme.bg("selectedBg", fit(questionLine, contentWidth)) : questionLine);
+				lines.push(
+					selected
+						? theme.bg("selectedBg", contentWidth > 0 ? padToWidth(questionLine, contentWidth) : "")
+						: questionLine,
+				);
 			}
 		}
 		return renderScrollableList(padLinesToHeight(lines, height), {

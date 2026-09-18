@@ -17,7 +17,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Terminal, TerminalAppearance, TerminalAppearanceRequestToken } from "@oh-my-pi/pi-tui/terminal";
 import type { RenderScheduler } from "@oh-my-pi/pi-tui/tui";
-import { getProjectDir, isEnoent, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { formatBytes, getProjectDir, isEnoent, logger, TempDir } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
@@ -152,12 +152,6 @@ async function resolveTargetSession(sessionArg: string | undefined, cwd: string)
 	const recent = await findMostRecentSession(SessionManager.getDefaultSessionDir(cwd));
 	if (!recent) throw new Error(`No sessions found for ${cwd}. Pass a session file or id.`);
 	return recent;
-}
-
-function formatBytes(bytes: number): string {
-	if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-	if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-	return `${bytes} B`;
 }
 
 function formatMs(ms: number): string {

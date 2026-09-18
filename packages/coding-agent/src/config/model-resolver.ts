@@ -23,6 +23,7 @@ import {
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
@@ -981,10 +982,6 @@ export function parseModelPattern(
 
 const DEFAULT_MODEL_ROLE = "default";
 const MODEL_ROLE_ALIAS_PREFIXES = [MODEL_ROLE_ALIAS_PREFIX, LEGACY_MODEL_ROLE_ALIAS_PREFIX];
-
-export interface ModelRoleLookup {
-	getModelRole(role: ModelRole | string): string | undefined;
-}
 
 function isModelRole(role: string): role is ModelRole {
 	return (MODEL_ROLE_IDS as string[]).includes(role);

@@ -6,7 +6,7 @@ import { Text } from "../components/text";
 import { XD_URL_PREFIX } from "../tools/xd-url";
 import { getLanguageFromPath, theme } from "../theme";
 import { parseLineRanges, selectorLineRanges } from "../tools/line-ranges";
-import { splitPathAndSel } from "../tools/read";
+import { type ReadRenderArgs, type ReadToolDetails, readSourceFsPath, splitPathAndSel } from "../tools/read";
 import { PREVIEW_LIMITS, shortenPath } from "../render/render-utils";
 import { fileHyperlink, renderCodeCell } from "../render";
 import { canonicalizeMessage } from "./thinking-display";
@@ -72,44 +72,16 @@ export function groupedReadUsageCallIds(message: AssistantMessage): string[] | u
 	return toolCallIds.length > 0 ? toolCallIds : undefined;
 }
 
-type ReadRenderArgs = {
-	path?: string;
-	file_path?: string;
-};
-
 type ReadToolSuffixResolution = {
 	from: string;
 	to: string;
-};
-
-type ReadToolResultDetails = {
-	displayTarget?: string;
-	resolvedPath?: string;
-	suffixResolution?: {
-		from?: string;
-		to?: string;
-	};
-	conflictCount?: number;
-	displayReadTargets?: unknown;
-	displayReadTargetLinks?: unknown;
-	displayContent?: {
-		text?: string;
-		startLine?: number;
-		lineNumbers?: Array<number | null>;
-	};
-	meta?: {
-		source?: {
-			type?: string;
-			value?: string;
-		};
-	};
 };
 
 type ReadToolGroupOptions = {
 	showContentPreview?: boolean;
 };
 
-function getSuffixResolution(details: ReadToolResultDetails | undefined): ReadToolSuffixResolution | undefined {
+function getSuffixResolution(details: ReadToolDetails | undefined): ReadToolSuffixResolution | undefined {
 	if (typeof details?.suffixResolution?.from !== "string" || typeof details.suffixResolution.to !== "string") {
 		return undefined;
 	}
@@ -167,7 +139,7 @@ const READ_STATUS_RANK: Record<ReadEntry["status"], number> = {
 
 const URL_LIKE_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
-function getDisplayReadTargets(details: ReadToolResultDetails | undefined): ReadDisplayPathSpec[] | undefined {
+function getDisplayReadTargets(details: ReadToolDetails | undefined): ReadDisplayPathSpec[] | undefined {
 	if (!Array.isArray(details?.displayReadTargets)) return undefined;
 	const links = Array.isArray(details.displayReadTargetLinks) ? details.displayReadTargetLinks : undefined;
 	const targets: ReadDisplayPathSpec[] = [];
@@ -187,12 +159,7 @@ function displayPathWithSuffixResolution(currentPath: string, suffixResolution: 
 	return `${suffixResolution.to}:${currentSelector}`;
 }
 
-function readSourceFsPath(details: ReadToolResultDetails | undefined): string | undefined {
-	const source = details?.meta?.source;
-	return source?.type === "path" && typeof source.value === "string" ? source.value : undefined;
-}
-
-function readResultLinkPath(details: ReadToolResultDetails | undefined): string | undefined {
+function readResultLinkPath(details: ReadToolDetails | undefined): string | undefined {
 	return (
 		details?.displayTarget ??
 		(typeof details?.resolvedPath === "string" ? details.resolvedPath : readSourceFsPath(details))
@@ -415,7 +382,8 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 
 	updateArgs(args: ReadRenderArgs, toolCallId?: string): void {
 		if (!toolCallId) return;
-		const rawPath = args.file_path || args.path || "";
+		const rawPath =
+			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
 		const entry: ReadEntry = this.#entries.get(toolCallId) ?? {
 			toolCallId,
 			path: rawPath,
@@ -462,7 +430,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		if (!entry) return;
 		if (isPartial) return;
 		this.#blockVersion++;
-		const details = result.details as ReadToolResultDetails | undefined;
+		const details = result.details as ReadToolDetails | undefined;
 		const suffixResolution = getSuffixResolution(details);
 		const displayPaths = getDisplayReadTargets(details);
 		entry.linkPath = readResultLinkPath(details);

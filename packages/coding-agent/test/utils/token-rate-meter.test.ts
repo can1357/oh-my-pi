@@ -112,4 +112,33 @@ describe("TokenRateMeter", () => {
 		meter.reset();
 		expect(meter.rate(clock)).toBeNull();
 	});
+
+	it("seed shows a completed turn's rate immediately and it holds like a settled turn", () => {
+		const meter = new TokenRateMeter(words);
+		// 600 tokens over 10s (60 tok/s).
+		meter.seed(600, 10_000);
+		expect(meter.rate(1_000)).toBeCloseTo(60, 0);
+		expect(meter.rate(61_000)).toBeCloseTo(60, 0);
+	});
+
+	it("seed scales small turns past the evidence gate without changing the rate", () => {
+		const meter = new TokenRateMeter(words);
+		// 120 tokens over 2s (60 tok/s) is below the gate unscaled.
+		meter.seed(120, 2_000);
+		expect(meter.rate(0)).toBeCloseTo(60, 0);
+		// Invalid seeds blank the meter instead of throwing or showing garbage.
+		meter.seed(0, 2_000);
+		expect(meter.rate(0)).toBeNull();
+	});
+
+	it("a new turn blends with the seeded baseline instead of replacing it", () => {
+		const meter = new TokenRateMeter(words);
+		meter.seed(600, 10_000);
+		meter.begin(5_000);
+		// 10s at 30 tok/s against a 60 tok/s baseline: the reading sits between.
+		stream(meter, 5_000, 15_000, 3);
+		const blended = meter.rate(15_000) ?? 0;
+		expect(blended).toBeGreaterThan(30);
+		expect(blended).toBeLessThan(60);
+	});
 });

@@ -14,6 +14,7 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	PREVIEW_LIMITS,
 	type RenderedStringCache,
 	replaceTabs,
 	shortenPath,
@@ -54,7 +55,6 @@ interface WriteRenderArgs {
 }
 
 const WRITE_PREVIEW_LINES = 6;
-const WRITE_STREAMING_PREVIEW_LINES = 12;
 
 function countLines(text: string): number {
 	if (!text) return 0;
@@ -239,7 +239,7 @@ function formatStreamingContent(
 		let visibleLines: string[];
 		if (state) {
 			totalLines = state.lineCount;
-			startIndex = expanded ? 0 : Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
+			startIndex = expanded ? 0 : Math.max(0, totalLines - PREVIEW_LIMITS.EXPANDED_LINES);
 			const flushed = argsComplete === true && state.finalFlushedLength === content.length;
 			const trailingLine = flushed ? state.finalTrailing : content.slice(state.completeLength).replace(/\r/g, "");
 			if (totalLines === 1 && trailingLine.length === 0) return "";
@@ -249,7 +249,7 @@ function formatStreamingContent(
 			if (normalized.length === 0) return "";
 			const lines = normalized.split("\n");
 			totalLines = lines.length;
-			startIndex = expanded ? 0 : Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
+			startIndex = expanded ? 0 : Math.max(0, totalLines - PREVIEW_LIMITS.EXPANDED_LINES);
 			visibleLines = highlightCode(lines.slice(startIndex).join("\n"), language);
 		}
 		const hidden = startIndex;
@@ -507,5 +507,5 @@ export const writeToolRenderer = {
 	// as stale content above the new frame without a full replay. Expanded and
 	// short previews stay top-anchored and skip the (scrollback-wiping) reset.
 	forceFirstResultViewportRepaint: (args: unknown, options: RenderResultOptions) =>
-		!options.expanded && exceedsLineCount(writeContentOf(args), WRITE_STREAMING_PREVIEW_LINES),
+		!options.expanded && exceedsLineCount(writeContentOf(args), PREVIEW_LIMITS.EXPANDED_LINES),
 } satisfies ToolRenderer<WriteRenderArgs, WriteToolDetails>;

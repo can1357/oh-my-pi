@@ -2,7 +2,7 @@
  * Shared helpers for tool-rendered UI components.
  */
 import type { Theme, ThemeBg } from "../theme/theme";
-import { padding, visibleWidth } from "../utils";
+import { padding, truncateToWidth, visibleWidth } from "../utils";
 import type { State } from "./types";
 
 /** Cached typed-array scratch space for hashing non-string primitives. */
@@ -90,11 +90,14 @@ export function getTreeContinuePrefix(isLast: boolean, theme: Theme): string {
 	return isLast ? "   " : `${theme.tree.vertical}  `;
 }
 
-/** Pad visible text to a target width and optionally apply a background. */
+/** Pad or truncate visible text to exactly `width` columns and optionally apply a background. */
 export function padToWidth(text: string, width: number, bgFn?: (s: string) => string): string {
 	if (width <= 0) return bgFn ? bgFn(text) : text;
-	const paddingNeeded = Math.max(0, width - visibleWidth(text));
-	const padded = paddingNeeded > 0 ? text + padding(paddingNeeded) : text;
+	const w = visibleWidth(text);
+	if (w === width) return bgFn ? bgFn(text) : text;
+	const fitted = w < width ? text + padding(width - w) : truncateToWidth(text, width);
+	const drift = width - visibleWidth(fitted);
+	const padded = drift > 0 ? fitted + padding(drift) : fitted;
 	return bgFn ? bgFn(padded) : padded;
 }
 

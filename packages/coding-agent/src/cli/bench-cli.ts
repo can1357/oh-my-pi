@@ -33,6 +33,7 @@ import {
 	type StreamSimpleFn,
 } from "./bench-runtime";
 import { createLiveBoard, type LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
+import { formatCost } from "@oh-my-pi/pi-tui/overlays/agent-hub-renderer";
 
 const DEFAULT_PAR = 4;
 const DEFAULT_CACHE_MAX_TOKENS = 64;
@@ -530,12 +531,6 @@ async function runWithConcurrency<T>(
 	};
 	await Promise.all(Array.from({ length: Math.min(count, concurrency) }, worker));
 	return results;
-}
-
-function formatCost(cost: number): string {
-	if (cost < 0.01) return `$${cost.toFixed(4)}`;
-	if (cost < 1) return `$${cost.toFixed(3)}`;
-	return `$${cost.toFixed(2)}`;
 }
 
 function formatCachePairLine(pair: BenchCachePairReport, index: number, total: number): string {

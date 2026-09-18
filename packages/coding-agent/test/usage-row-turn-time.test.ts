@@ -282,8 +282,6 @@ describe("UiHelpers.renderSessionContext turn elapsed", () => {
 				get: (key: string) =>
 					key === "display.showTokenUsage" ? true : key === "display.showTurnTime" ? turnTimeOn : false,
 			},
-			getUserMessageText: (message: { content?: unknown }) =>
-				typeof message.content === "string" ? message.content : "",
 			addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
 			session: {
 				retryAttempt: 0,
@@ -337,7 +335,6 @@ describe("focus-attach mid-turn keeps the prompt→yield delta", () => {
 					return streamState.isStreaming;
 				},
 			},
-			getUserMessageText: message => (typeof message.content === "string" ? message.content : ""),
 		});
 		ctx.chatContainer.setToolActivityVisible(true);
 		const helpers = new UiHelpers(ctx);

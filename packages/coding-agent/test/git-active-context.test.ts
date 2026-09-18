@@ -4,10 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
-	type ActiveRepoContext,
 	resolveActiveRepoContext,
 	resolveActiveRepoContextSync,
 } from "@oh-my-pi/pi-coding-agent/utils/active-repo-context";
+import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 
 const itWithSymlinkPrivilege = process.platform === "win32" ? it.skip : it;
 

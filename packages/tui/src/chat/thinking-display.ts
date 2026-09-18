@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { FENCE_RE } from "../render/render-utils";
 
 // Single-slot-per-mode memo for formatThinkingForDisplay. During a streaming
 // tick the same growing thinking text is formatted up to three times (reveal
@@ -114,7 +115,6 @@ const MAX_RESUME_PARTIAL_BYTES = 8192;
 // ` -->`. Comments with actual content are left untouched.
 const EMPTY_COMMENT_RE = /^<!--\s*-->$/;
 const OPEN_COMMENT_RE = /^<!--\s*$/;
-const FENCE = /^( {0,3})([`~]{3,})/;
 
 /**
  * Whether `line` is reasoning-summary comment noise: an empty HTML comment,
@@ -233,7 +233,7 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 		if (i === last) cache.state = { ...state };
 
 		if (state.inFence) {
-			const close = FENCE.exec(line);
+			const close = FENCE_RE.exec(line);
 			// A closing fence is the same char, at least as long, with nothing else on the line.
 			if (
 				close &&
@@ -254,7 +254,7 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 		// Drop the whole line so `**Headline**\n\n<!-- -->` leaves no blank tail.
 		if (hasComment && isCommentNoise(line, i === last)) continue;
 
-		const open = FENCE.exec(line);
+		const open = FENCE_RE.exec(line);
 		if (open) {
 			const marker = open[2]!;
 			const ch = marker[0]!;

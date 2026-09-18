@@ -11,15 +11,9 @@ import { Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "../i
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesAppExternalEditor, matchesAppFollowUp, matchesAppInterrupt } from "../keybinding-matchers";
+import { formTheme } from "../chrome/form-theme";
 import { OverlayPanel } from "../chrome/overlay-box";
-import { FormField, type FormFieldTheme } from "../components/form";
-
-const formTheme: FormFieldTheme = {
-	label: text => theme.bold(theme.fg("accent", text)),
-	description: text => theme.fg("muted", text),
-	error: text => theme.fg("error", text),
-	hint: text => theme.fg("dim", text),
-};
+import { FormField } from "../components/form";
 
 export interface HookEditorOptions {
 	/** Edit text with the host's configured external editor. */

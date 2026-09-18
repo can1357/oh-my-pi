@@ -15,11 +15,13 @@ import {
 	readArgsHaveTarget,
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
+import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
+import type { InteractiveModeContext } from "../../modes/types";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
 import {
@@ -682,12 +684,6 @@ export class EventController {
 		// cumulative snapshot is later superseded and never rebuilt.
 		this.#vocalizeDelta(event);
 		this.#vocalizedMessageUpdates.add(event);
-		// The rate meter is per-delta too: a coalesced-away snapshot still
-		// carried generated tokens.
-		const delta = event.assistantMessageEvent;
-		if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
-			this.ctx.tokenRate.push(delta.delta);
-		}
 		this.#pendingMessageUpdate = event;
 		if (this.#messageUpdateTimer) return;
 		this.#messageUpdateTimer = setTimeout(() => {
@@ -960,7 +956,7 @@ export class EventController {
 			// Only genuinely user-attributed prompts anchor the delta; a mid-run
 			// agent-attributed `user` message (advisor tool-loop redirect) must not.
 			if (event.message.attribution !== "agent") this.#turnStartedAt = event.message.timestamp;
-			const textContent = this.ctx.getUserMessageText(event.message);
+			const userText = textContent(event.message.content);
 			const imageBlocks =
 				typeof event.message.content === "string"
 					? []
@@ -971,7 +967,7 @@ export class EventController {
 								typeof content.mimeType === "string",
 						);
 			const imageCount = imageBlocks.length;
-			const signature = `${textContent}\u0000${imageCount}`;
+			const signature = `${userText}\u0000${imageCount}`;
 
 			this.#resetReadGroup();
 			this.#resolveDisplaceablePoll();
@@ -1037,7 +1033,6 @@ export class EventController {
 			this.#finalizeAbandonedPostToolSegments();
 			this.#lastVisibleBlockCount = 0;
 			this.#streamedToolCallIdByIndex.clear();
-			this.ctx.tokenRate.begin(event.message.timestamp);
 			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingMessage = event.message;
 			this.ctx.streamingComponent.pickReactionTarget(this.ctx.chatContainer.children);
@@ -1470,10 +1465,6 @@ export class EventController {
 			}
 		}
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
-			this.ctx.tokenRate.end(
-				event.message.usage?.output,
-				event.message.duration ? event.message.timestamp + event.message.duration : undefined,
-			);
 			this.ctx.streamingMessage = event.message;
 			this.#streamingReveal.stop();
 			this.#toolArgsReveal.flushAll();

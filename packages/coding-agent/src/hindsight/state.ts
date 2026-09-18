@@ -6,7 +6,6 @@ import type { HindsightApi, MemoryItemInput } from "./client";
 import type { HindsightConfig } from "./config";
 import {
 	composeRecallQuery,
-	formatCurrentTime,
 	formatMemories,
 	type HindsightMessage,
 	prepareRetentionTranscript,
@@ -309,7 +308,7 @@ export class HindsightSessionState {
 			const results = response.results ?? [];
 			if (results.length === 0) return { context: null, ok: true };
 			const formatted = formatMemories(results);
-			const block = `<memories>\n${this.config.recallPromptPreamble}\nCurrent time: ${formatCurrentTime()} UTC\n\n${formatted}\n</memories>`;
+			const block = `<memories>\n${this.config.recallPromptPreamble}\n\n${formatted}\n</memories>`;
 			return { context: block, ok: true };
 		} catch (err) {
 			if (this.config.debug) {

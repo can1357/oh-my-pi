@@ -38,7 +38,7 @@ import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
 import { TranscriptBrowser, type TranscriptBrowserFrame } from "../chat/transcript-browser";
-import { fit } from "../chrome/overlay-box";
+import { padToWidth } from "../render/utils";
 import {
 	appendOutlineEntries,
 	type ComposedColumn,
@@ -475,9 +475,11 @@ export class RewindSelectorComponent implements Component {
 				const visible0 = Math.max(0, x0);
 				const visible1 = Math.min(contentWidth, x1);
 				if (visible1 <= visible0) continue;
-				const source = fit(composedColumns[index]!.lines[row] ?? "", colWidth);
+				const source = colWidth > 0 ? padToWidth(composedColumns[index]!.lines[row] ?? "", colWidth) : "";
 				const slice = sliceByColumn(source, visible0 - x0, visible1 - visible0, true);
-				line += padding(Math.max(0, visible0 - filled)) + fit(slice, visible1 - visible0);
+				line +=
+					padding(Math.max(0, visible0 - filled)) +
+					(visible1 - visible0 > 0 ? padToWidth(slice, visible1 - visible0) : "");
 				filled = visible1;
 			}
 			lines.push(line);

@@ -76,7 +76,7 @@ import {
 	formatPathRelativeToCwd,
 	pathTargetsSsh,
 	probeLiteralPathExists,
-	resolveReadPath,
+	resolveReadPathAsync,
 	splitDelimitedPathEntry,
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
@@ -1692,7 +1692,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				? { kind: "none" as const }
 				: parseSel(localTarget.sel);
 
-		let absolutePath = resolveReadPath(localReadPath, this.session.cwd);
+		let absolutePath = await resolveReadPathAsync(localReadPath, this.session.cwd);
 		let suffixResolution: { from: string; to: string } | undefined;
 
 		let isDirectory = false;

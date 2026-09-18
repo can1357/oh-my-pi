@@ -28,6 +28,8 @@ export interface TodoItem {
 	status: TodoStatus;
 	/** When `status === "blocked"`, an optional note on what the task is waiting for. */
 	blocker?: string;
+	details?: string;
+	notes?: string[];
 }
 
 /** A named group of todo tasks. */

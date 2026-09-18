@@ -8,7 +8,6 @@ import type { Loader } from "../components/loader";
 import { Text } from "../components/text";
 import { getImageDimensions, imageFallback, ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import { Container, type TUI } from "../tui";
-import { Ellipsis, truncateToWidth, visibleWidth } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
 import { theme } from "../theme/theme";
@@ -21,14 +20,13 @@ import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelP
 import {
 	buildExecutionFrame,
 	buildStatusFooter,
+	clampDisplayLine,
 	type ExecutionStatus,
+	PREVIEW_LINES,
 	resolveExecutionStatus,
 } from "./execution-shared";
 
-// Preview line limit when not expanded (matches tool execution behavior)
-const PREVIEW_LINES = 20;
 const STREAMING_LINE_CAP = PREVIEW_LINES * 5;
-const MAX_DISPLAY_LINE_CHARS = 4000;
 // Minimum interval between processing incoming chunks for display (ms).
 // Chunks arriving faster than this are accumulated and processed in one batch.
 const CHUNK_THROTTLE_MS = 50;
@@ -366,22 +364,13 @@ export class BashExecutionComponent extends Container {
 		return this.#ptyMode ? line : theme.fg("muted", line);
 	}
 
-	#clampDisplayLine(line: string): string {
-		const visible = visibleWidth(line);
-		if (visible <= MAX_DISPLAY_LINE_CHARS) {
-			return line;
-		}
-		const omitted = visible - MAX_DISPLAY_LINE_CHARS;
-		return `${truncateToWidth(line, MAX_DISPLAY_LINE_CHARS, Ellipsis.Omit)}… [${omitted} visible columns omitted]`;
-	}
-
 	#clampLinesPreservingSixel(lines: string[]): string[] {
 		if (lines.length === 0) return [];
 		const sixelLineMask = getSixelLineMask(lines);
 		if (!sixelLineMask.some(Boolean)) {
-			return lines.map(line => this.#clampDisplayLine(line));
+			return lines.map(clampDisplayLine);
 		}
-		return lines.map((line, index) => (sixelLineMask[index] ? line : this.#clampDisplayLine(line)));
+		return lines.map((line, index) => (sixelLineMask[index] ? line : clampDisplayLine(line)));
 	}
 
 	#setOutput(output: string): void {
