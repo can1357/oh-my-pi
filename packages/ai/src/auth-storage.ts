@@ -8,6 +8,7 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
@@ -2953,15 +2954,56 @@ export class AuthStorage {
 	}
 
 	/**
+	 * True when a stored credential is the provider's KDL `empty-fallback`
+	 * keyless-mode marker — what an empty paste at an "Optional: paste API key"
+	 * login prompt stores (e.g. `lm-studio-local` for lm-studio). The wire layer
+	 * never sends these as a bearer (`isDiscoveryBearerApiKey` strips them), so
+	 * auth-status surfaces must not count them either; otherwise the model hub
+	 * and `/login` report the provider as authenticated while every request
+	 * goes out bare (issue #12281). The credential itself stays stored: `/logout`
+	 * can still remove it, and availability treats the provider as keyless.
+	 */
+	#isKeylessFallbackCredential(provider: string, credential: AuthCredential): boolean {
+		if (credential.type !== "api_key") return false;
+		const login = authPolicyFor(provider)?.login;
+		if (login?.kind !== "api-key") return false;
+		const fallback = login.emptyFallback;
+		return fallback !== undefined && fallback !== "" && credential.key === fallback;
+	}
+
+	/** Stored credentials that carry real auth — keyless-fallback markers excluded. */
+	#getAuthBearingCredentials(provider: string): AuthCredential[] {
+		return this.#getCredentialsForProvider(provider).filter(
+			credential => !this.#isKeylessFallbackCredential(provider, credential),
+		);
+	}
+
+	/**
+	 * True when the provider has stored credentials but none of them carries
+	 * auth — i.e. its only credential is the KDL `empty-fallback` keyless-mode
+	 * marker (an empty paste at an optional-key login prompt). Such a provider
+	 * is configured-but-keyless: model availability treats it like an
+	 * `auth: none` endpoint instead of locking it out (issue #12281).
+	 */
+	hasKeylessPlaceholder(provider: string): boolean {
+		const stored = this.#getCredentialsForProvider(provider);
+		return stored.length > 0 && stored.every(credential => this.#isKeylessFallbackCredential(provider, credential));
+	}
+
+	/**
 	 * Dedicated auth for default-model availability (picker / `getAvailable`).
 	 * Unlike {@link getApiKey}, this does not refresh OAuth tokens, and unlike
 	 * {@link hasResolvableAuth} it ignores cross-provider env aliases so
 	 * `XAI_API_KEY` does not auto-select SuperGrok (`xai-oauth`).
+	 *
+	 * A stored keyless-fallback marker (empty paste at an optional-key login)
+	 * does not count: it never reaches the wire as a bearer, so treating it as
+	 * auth would present the provider as signed-in while requests go out bare.
 	 */
 	hasAuth(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getAuthBearingCredentials(provider).length > 0) return true;
 		if (this.#hasDedicatedEnvAuth(provider)) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
@@ -2981,7 +3023,7 @@ export class AuthStorage {
 	hasConcreteAuth(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getAuthBearingCredentials(provider).length > 0) return true;
 		if ((provider === "amazon-bedrock" || provider === "bedrock-mantle") && $env.AWS_BEARER_TOKEN_BEDROCK?.trim()) {
 			return true;
 		}
@@ -3021,7 +3063,7 @@ export class AuthStorage {
 	hasNonEnvCredential(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
 		if (this.#configOverrides.has(provider)) return true;
-		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#getAuthBearingCredentials(provider).length > 0) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
 		return false;
 	}
@@ -3053,7 +3095,7 @@ export class AuthStorage {
 	getCredentialOrigin(provider: string): CredentialOrigin | undefined {
 		if (this.#runtimeOverrides.has(provider)) return { kind: "runtime" };
 		if (this.#configOverrides.has(provider)) return { kind: "config" };
-		const stored = this.#getCredentialsForProvider(provider);
+		const stored = this.#getAuthBearingCredentials(provider);
 		if (stored.some(credential => credential.type === "oauth")) return { kind: "oauth" };
 		if (stored.some(credential => credential.type === "api_key" && credential.source === "login")) {
 			return { kind: "api_key" };
@@ -5997,7 +6039,10 @@ export class AuthStorage {
 			provider,
 			"api_key",
 			undefined,
-			credential => credential.type === "api_key" && credential.source === "login",
+			credential =>
+				credential.type === "api_key" &&
+				credential.source === "login" &&
+				!this.#isKeylessFallbackCredential(provider, credential),
 		);
 		if (loginApiKeySelection) {
 			return this.#configValueResolver(loginApiKeySelection.credential.key);
@@ -6052,7 +6097,7 @@ export class AuthStorage {
 			provider,
 			sessionId,
 			options,
-			credential => credential.source === "login",
+			credential => credential.source === "login" && !this.#isKeylessFallbackCredential(provider, credential),
 		);
 		if (loginApiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
