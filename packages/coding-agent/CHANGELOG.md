@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a per-request web_search provider override while honoring the configured provider exclusion list. ([#12221](https://github.com/can1357/oh-my-pi/pull/12221) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
