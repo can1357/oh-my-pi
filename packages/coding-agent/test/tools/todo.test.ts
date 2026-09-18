@@ -3,22 +3,24 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	TodoTool,
+} from "@oh-my-pi/pi-coding-agent/tools";
+import {
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
-	TodoTool,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
-} from "@oh-my-pi/pi-coding-agent/tools";
+} from "@oh-my-pi/pi-tui/tools/todo";
 import type { Component } from "@oh-my-pi/pi-tui";
 
 function createSession(initialPhases: TodoPhase[] = []): ToolSession {

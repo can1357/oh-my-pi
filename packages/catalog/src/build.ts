@@ -24,6 +24,41 @@ function objectPayload(value: unknown): object | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
 }
 
+/**
+ * Overwrite seeded fallback rates with the latest dated card whose
+ * `effectiveFrom` is already due. Leaves the seed unchanged when no card
+ * has started, and never attaches a `timeBased` tariff.
+ */
+function applyEffectiveFallbackRates(
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number },
+	effectiveRates: unknown,
+	now = Date.now(),
+): void {
+	const rates = objectPayload(effectiveRates);
+	if (rates === undefined) return;
+	let latestFrom = Number.NEGATIVE_INFINITY;
+	let latest: object | undefined;
+	for (const entry of Object.values(rates)) {
+		const payload = objectPayload(entry);
+		if (payload === undefined) continue;
+		const date = Reflect.get(payload, "effectiveFrom");
+		if (typeof date !== "string") continue;
+		const from = Date.parse(date);
+		if (!Number.isFinite(from) || from > now || from < latestFrom) continue;
+		latestFrom = from;
+		latest = payload;
+	}
+	if (latest === undefined) return;
+	const input = numberField(latest, "input");
+	if (input !== undefined) cost.input = input;
+	const output = numberField(latest, "output");
+	if (output !== undefined) cost.output = output;
+	const cacheRead = numberField(latest, "cacheRead");
+	if (cacheRead !== undefined) cost.cacheRead = cacheRead;
+	const cacheWrite = numberField(latest, "cacheWrite");
+	if (cacheWrite !== undefined) cost.cacheWrite = cacheWrite;
+}
+
 /** Narrow a compiled `input-modalities` axis value to the model input union. */
 function isInputModalities(value: unknown): value is ("text" | "image")[] {
 	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
@@ -139,6 +174,30 @@ export function applyCatalogCorrections(
 		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
 	}
+	const fallback = objectPayload(catalog.costFallback);
+	if (fallback !== undefined) {
+		const base = model.cost;
+		const hasTokenPrice = base.input !== 0 || base.output !== 0 || base.cacheRead !== 0 || base.cacheWrite !== 0;
+		if (!hasTokenPrice) {
+			// Upstream reported no token price (plan-included or promo-free
+			// rows): seed the reviewed list price instead of overwriting real
+			// discovery data the way `cost-patch` would.
+			model.cost = { ...model.cost };
+			const input = numberField(fallback, "input");
+			if (input !== undefined) model.cost.input = input;
+			const output = numberField(fallback, "output");
+			if (output !== undefined) model.cost.output = output;
+			const cacheRead = numberField(fallback, "cacheRead");
+			if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
+			const cacheWrite = numberField(fallback, "cacheWrite");
+			if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
+			// Dated fallback rates overwrite the seeded numbers when they have
+			// already taken effect. They are not a recurring tariff: wrapping
+			// them in `timeBased` with empty peak windows would report
+			// permanent off-peak and never wake at the dated boundary.
+			applyEffectiveFallbackRates(model.cost, Reflect.get(fallback, "effectiveRates"));
+		}
+	}
 	if (catalog.timeBased !== undefined) {
 		model.cost = { ...model.cost, timeBased: materializeTimeBasedCost(catalog.timeBased) };
 	}
@@ -231,7 +290,7 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",
-		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
+		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id, spec.provider),
 		thinking: policy.thinking,
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,

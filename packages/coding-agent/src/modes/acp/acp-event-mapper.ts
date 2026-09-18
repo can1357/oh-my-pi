@@ -7,11 +7,11 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
-import { parseXdUrl } from "../../internal-urls/xd-protocol";
+import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
-import type { TodoStatus } from "../../tools/todo";
-import { canonicalizeMessage } from "../../utils/thinking-display";
+import type { TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 
 interface MessageProgress {
 	textEmitted: boolean;

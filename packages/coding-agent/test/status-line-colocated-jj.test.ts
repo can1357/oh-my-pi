@@ -13,9 +13,10 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { StatusLineSettings } from "@oh-my-pi/pi-tui/status-line";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
@@ -162,7 +163,7 @@ describe("StatusLineComponent display detector", () => {
 		}) as unknown as typeof vcs.watch);
 
 		const onBranchChange = vi.fn();
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 
@@ -182,7 +183,7 @@ describe("StatusLineComponent display detector", () => {
 		const operational = operationalGit(root, headFor("git-branch-name"));
 		mockRepos(operational, operationalGit(root, headFor("git-branch-name")), root);
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(() => {});
 
@@ -197,7 +198,7 @@ describe("StatusLineComponent display detector", () => {
 		const operational = operationalGit(root, detachedHead);
 		mockRepos(operational, operationalGit(root, detachedHead), root);
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(() => {});
 
@@ -215,7 +216,7 @@ describe("StatusLineComponent display detector", () => {
 		vi.spyOn(vcs, "git").mockReturnValue(gitWithDefaultBranch("main"));
 		const run = vi.spyOn(github, "run").mockResolvedValue({ exitCode: 0, stdout: "{}", stderr: "" });
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitPrSegments);
 		component.watchBranch(() => {});
 
@@ -237,7 +238,7 @@ describe("StatusLineComponent display detector", () => {
 			.spyOn(github, "run")
 			.mockResolvedValue({ exitCode: 0, stdout: '{"number":7,"url":"https://example.test/x/7"}', stderr: "" });
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitPrSegments);
 		component.watchBranch(() => {});
 
@@ -260,7 +261,7 @@ describe("StatusLineComponent display detector", () => {
 		});
 		mockRepos(operational, display, root);
 
-		const component = new StatusLineComponent(makeSession());
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
 		component.updateSettings(gitSegment);
 		component.watchBranch(() => {});
 

@@ -30,7 +30,7 @@ import {
 	type SkillPromptInput,
 } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
-import { type Theme, theme } from "../../modes/theme/theme";
+import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -1627,6 +1627,12 @@ export async function runRpcMode(
 							uiCtx.notify(message, "info");
 						},
 						onPrompt: async prompt => {
+							if (prompt.secret) {
+								throw new Error(
+									`Provider '${command.providerId}' requires secret input, ` +
+										"which is not supported in RPC mode. Use the terminal UI to log in.",
+								);
+							}
 							if (!authEmitted) {
 								// onPrompt called before any auth URL — provider requires
 								// interactive input that cannot be satisfied headlessly.

@@ -16,8 +16,8 @@ import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
-import { buildAsyncResultBlock } from "@oh-my-pi/pi-coding-agent/modes/utils/transcript-render-helpers";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
@@ -29,7 +29,8 @@ import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/sess
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils";
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {

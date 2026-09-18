@@ -50,6 +50,8 @@ regex!(
 regex!(ALL_ATTRIBUTE_RE, r#"(?iu)\ball\b(?:\s*=\s*(?:\"([^\"\n]*)\"|'([^'\n]*)'|([^\s\"'>]+)))?"#);
 regex!(INLINE_TAG_RE, r"(?iu)^<(SM:FIND|SM:PUT|SM:AFTER)>(.*)</(SM:FIND|SM:PUT|SM:AFTER)>$");
 regex!(BLOCK_TAG_RE, r"(?iu)^<(/?)(SM:FIND|SM:PUT|SM:AFTER)\s*(/?)>$");
+regex!(GLUED_CLOSE_TAG_RE, r"(?iu)^(.*\S)\s*(</SM:(?:FIND|PUT|AFTER)>)\s*$");
+regex!(GLUED_OPEN_TAG_RE, r"(?iu)^\s*(<SM:(?:FIND|PUT|AFTER)>)(.*\S.*)$");
 regex!(ENVELOPE_WORDS_RE, r"(?iu)^\s*(?:Begin|End)(?:\s+of)?\s+(?:patch|edits?|file)\b");
 regex!(
 	ENVELOPE_LINE_RE,
@@ -183,6 +185,26 @@ fn parse_tag_line(line: &str) -> Option<TagLine> {
 	})
 }
 
+/// Split a content line with a block tag glued to one end into the content
+/// and the tag, so `foo</SM:FIND>` reads as `foo` + `</SM:FIND>` and
+/// `<SM:PUT>bar` as `<SM:PUT>` + `bar`. Content keeps its leading indentation;
+/// whitespace between content and a trailing tag is dropped. Lines that are
+/// already a whole tag (including `<SM:PUT>x</SM:PUT>`) are left alone.
+fn unglue_tag(line: &str) -> Option<[&str; 2]> {
+	if !line.contains("SM:") || parse_tag_line(line).is_some() {
+		return None;
+	}
+	if let Some(captures) = GLUED_CLOSE_TAG_RE.captures(line) {
+		let content = captures.get(1)?;
+		let tag = captures.get(2)?;
+		return Some([&line[..content.end()], tag.as_str()]);
+	}
+	let captures = GLUED_OPEN_TAG_RE.captures(line)?;
+	let tag = captures.get(1)?;
+	let content = captures.get(2)?;
+	Some([tag.as_str(), &line[content.start()..]])
+}
+
 fn envelope_words(line: &str) -> bool {
 	ENVELOPE_WORDS_RE.is_match(line)
 }
@@ -193,6 +215,14 @@ fn envelope_line(line: &str) -> bool {
 
 /// Remove foreign patch envelopes and the noise following end sentinels.
 pub fn strip_envelope_noise(lines: Vec<&str>) -> Vec<String> {
+	let mut split = Vec::with_capacity(lines.len());
+	for line in lines {
+		match unglue_tag(line) {
+			Some(parts) => split.extend(parts),
+			None => split.push(line),
+		}
+	}
+	let lines = split;
 	let mut result = Vec::new();
 	let mut skipping = false;
 	let mut after = false;
@@ -1487,6 +1517,7 @@ pub fn create_operation(
 fn finish_operation(
 	lines: &[String],
 	end_index: usize,
+	path: &str,
 	pattern_lines: &[String],
 	rewrite_lines: &[String],
 	reference_separator: Option<&str>,
@@ -1508,7 +1539,7 @@ fn finish_operation(
 			return Err(parse_error(format!(
 				"{reference} after <SM:FIND> reads as the <SM:PUT> separator, leaving <SM:PUT> \
 				 empty.\nCopy-ready corrected payload (fill in the final text):\n{}",
-				ir_to_xml(&corrected.iter().map(String::as_str).collect::<Vec<_>>())
+				ir_to_xml(&corrected.iter().map(String::as_str).collect::<Vec<_>>(), path)
 			)));
 		}
 		operations.push(create_operation_text(&source, "", all, operations.len() + 1, false)?);
@@ -1571,6 +1602,7 @@ fn finish_pattern(
 	lines: &[String],
 	end_index: usize,
 	content: &str,
+	path: &str,
 	pattern_lines: &[String],
 	all: bool,
 	operations: &mut Vec<Operation>,
@@ -1713,7 +1745,7 @@ fn finish_pattern(
 	let needs_separator = format!(
 		"Operation {number} has <SM:FIND> but no <SM:PUT>.{context_echo}\nCopy-ready corrected \
 		 payload (fill in the new text):\n{}",
-		ir_to_xml(&corrected.iter().map(String::as_str).collect::<Vec<_>>())
+		ir_to_xml(&corrected.iter().map(String::as_str).collect::<Vec<_>>(), path)
 	);
 	if !source.contains('\n') || js_len(&normalized_pattern) < 24 {
 		return Err(parse_error(needs_separator));
@@ -1725,8 +1757,13 @@ fn finish_pattern(
 	Ok(())
 }
 
-/// Parse a canonical or taught sloppy payload into operations.
-pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, EditError> {
+/// Parse a canonical or taught sloppy payload into operations. `path` is the
+/// authored target, echoed in copy-ready payloads inside parse errors.
+pub fn parse_operations(
+	input: &str,
+	content: &str,
+	path: &str,
+) -> Result<Vec<Operation>, EditError> {
 	let payload = normalize_input(input);
 	let mut lines: Vec<String> = payload.split('\n').map(str::to_owned).collect();
 	if parse_opener(lines.first().map_or("", String::as_str)).is_none()
@@ -1849,6 +1886,7 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 						&lines,
 						index,
 						content,
+						path,
 						&pattern_lines,
 						all,
 						&mut operations,
@@ -1868,6 +1906,7 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 			finish_operation(
 				&lines,
 				index,
+				path,
 				&pattern_lines,
 				&rewrite_lines,
 				reference_separator.as_deref(),
@@ -1902,6 +1941,7 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 		State::Rewrite => finish_operation(
 			&lines,
 			lines.len(),
+			path,
 			&pattern_lines,
 			&rewrite_lines,
 			reference_separator.as_deref(),
@@ -1912,6 +1952,7 @@ pub fn parse_operations(input: &str, content: &str) -> Result<Vec<Operation>, Ed
 			&lines,
 			lines.len(),
 			content,
+			path,
 			&pattern_lines,
 			all,
 			&mut operations,
@@ -2012,8 +2053,14 @@ fn operation_pattern(operation: &Operation, pattern_text: Option<&str>) -> Strin
 	}
 }
 
-/// Render canonical IR lines as the taught XML surface.
-pub fn ir_to_xml(lines: &[&str]) -> String {
+/// `<SM:EDIT path="…">` opener for a copy-ready payload; the path makes the
+/// payload accepted verbatim on resend.
+pub(crate) fn edit_header(path: &str, all: bool) -> String {
+	format!("<SM:EDIT path=\"{path}\"{}>", if all { " all" } else { "" })
+}
+
+/// Render canonical IR lines as the taught XML surface targeting `path`.
+pub fn ir_to_xml(lines: &[&str], path: &str) -> String {
 	#[derive(Clone, Copy, PartialEq, Eq)]
 	enum State {
 		Idle,
@@ -2033,14 +2080,7 @@ pub fn ir_to_xml(lines: &[&str]) -> String {
 	for line in lines {
 		if parse_opener(line).is_some() {
 			close(&mut state, &mut out);
-			out.push(
-				if line.trim() == format!("{OPENER}*") {
-					"<SM:EDIT all>"
-				} else {
-					"<SM:EDIT>"
-				}
-				.to_owned(),
-			);
+			out.push(edit_header(path, line.trim() == format!("{OPENER}*")));
 			out.push("<SM:FIND>".to_owned());
 			state = State::Find;
 		} else if let Some(text) = line
@@ -2064,17 +2104,15 @@ pub fn ir_to_xml(lines: &[&str]) -> String {
 	out.join("\n")
 }
 
-/// Render one operation as a copy-ready sloppy payload.
+/// Render one operation as a copy-ready sloppy payload targeting `path`;
+/// `all` selects the `<SM:EDIT … all>` opener.
 pub fn operation_payload(
 	operation: &Operation,
-	target: &str,
+	path: &str,
+	all: bool,
 	pattern_text: Option<&str>,
 ) -> String {
-	let open = if target == "*" {
-		"<SM:EDIT all>"
-	} else {
-		"<SM:EDIT>"
-	};
+	let open = edit_header(path, all);
 	let pattern = operation_pattern(operation, pattern_text);
 	match &operation.rewrite {
 		OperationRewrite::Inline { .. } => {
@@ -2118,12 +2156,14 @@ mod tests {
 
 	#[test]
 	fn operation_payload_restores_inline_desired_text() {
-		let operation = parse_operations("«\nconst \u{27ea}old\u{2502}new\u{27eb};", "const old;\n")
-			.unwrap()
-			.remove(0);
+		let operation =
+			parse_operations("«\nconst \u{27ea}old\u{2502}new\u{27eb};", "const old;\n", "a.ts")
+				.unwrap()
+				.remove(0);
 		assert_eq!(
-			operation_payload(&operation, "*", None),
-			"<SM:EDIT all>\n<SM:FIND>\nconst \u{27ea}old\u{2502}new\u{27eb};\n</SM:FIND>\n</SM:EDIT>"
+			operation_payload(&operation, "a.ts", true, None),
+			"<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\nconst \
+			 \u{27ea}old\u{2502}new\u{27eb};\n</SM:FIND>\n</SM:EDIT>"
 		);
 	}
 }

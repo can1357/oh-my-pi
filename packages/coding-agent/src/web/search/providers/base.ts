@@ -1,7 +1,7 @@
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../../config/model-registry";
 import type { StructuredQuery } from "../query";
-import type { SearchProviderId, SearchResponse } from "../types";
+import type { SearchProviderId, SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
 
 /**
  * Shared web search parameters passed to providers.

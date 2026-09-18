@@ -9,7 +9,7 @@ import {
 	parseDateValue,
 	parseSearchQuery,
 } from "@oh-my-pi/pi-coding-agent/web/search/query";
-import type { SearchSource } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import type { SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
 
 describe("parseSearchQuery", () => {
 	it("leaves plain queries untouched", () => {

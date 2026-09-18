@@ -456,6 +456,10 @@ export interface CompiledOAuthCodeLogin {
 	kind: "oauth-code";
 	clientId?: CompiledAuthValue;
 	clientSecret?: CompiledAuthValue;
+	/** `{base}` placeholder source (the provider's API origin). */
+	baseUrl?: CompiledAuthValue;
+	/** `{auth}` placeholder source for the authorize, token, and userinfo URLs when the issuer is a separate host. */
+	authUrl?: CompiledAuthValue;
 	authorizeUrl: CompiledAuthValue;
 	scopes: string[];
 	scopeSeparator: string;

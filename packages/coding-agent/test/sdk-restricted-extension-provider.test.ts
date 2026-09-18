@@ -9,12 +9,14 @@ import { runCommitAgentSession } from "@oh-my-pi/pi-coding-agent/commit/agentic/
 import * as commitTools from "@oh-my-pi/pi-coding-agent/commit/agentic/tools";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import {
 	type CreateAgentSessionOptions,
 	createAgentSession,
 	type ExtensionFactory,
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -123,6 +125,145 @@ describe("restricted sessions sharing extension providers", () => {
 		};
 	}
 
+	async function withRestrictedChild(
+		extension: ExtensionFactory,
+		run: (child: AgentSession, parent: AgentSession) => Promise<void>,
+	): Promise<void> {
+		const { session: parent } = await createAgentSession({
+			...createOptions(),
+			extensions: [providerExtension, extension],
+		});
+		try {
+			const { session: child } = await createAgentSession({
+				...createOptions(),
+				model: parent.model,
+				restrictToolNames: true,
+				preloadedPreparedExtensions: parent.preparedExtensions,
+				extensions: [
+					() => {
+						throw new Error("New inline extensions must not run in restricted children");
+					},
+				],
+				additionalExtensionPaths: [path.join(tempDir, "untrusted.mjs")],
+			});
+			try {
+				await initializeExtensions(child, { reportSendError: vi.fn(), reportRuntimeError: vi.fn() });
+				await run(child, parent);
+			} finally {
+				await child.dispose();
+			}
+		} finally {
+			await parent.dispose();
+		}
+	}
+
+	test("rebinds inherited policy to restricted children and their descendants", async () => {
+		const blocked = path.join(tempDir, "blocked.txt");
+		const allowed = path.join(tempDir, "allowed.txt");
+		await Bun.write(blocked, "private fixture");
+		await Bun.write(allowed, "allowed fixture");
+		await Bun.write(path.join(tempDir, "untrusted.mjs"), "throw new Error('New extension path executed');");
+		const policy: ExtensionFactory = pi => {
+			let initialized = false;
+			pi.on("session_start", () => {
+				initialized = true;
+			});
+			pi.on("tool_call", (event, ctx) => {
+				if (!initialized) throw new Error("Policy has not initialized");
+				if (event.toolName === "read" && event.input.path === blocked) {
+					return { block: true, reason: `Denied by ${ctx.sessionManager.getSessionId()}` };
+				}
+			});
+		};
+		await withRestrictedChild(policy, async (child, parent) => {
+			const { session: grandchild } = await createAgentSession({
+				...createOptions(),
+				model: child.model,
+				restrictToolNames: true,
+				preloadedPreparedExtensions: child.preparedExtensions,
+			});
+			try {
+				await initializeExtensions(grandchild, { reportSendError: vi.fn(), reportRuntimeError: vi.fn() });
+				for (const session of [child, grandchild]) {
+					const read = session.getToolByName("read");
+					if (!read) throw new Error("Missing restricted read tool");
+					expect(session.sessionManager.getSessionId()).not.toBe(parent.sessionManager.getSessionId());
+					await expect(read.execute("denied", { path: blocked })).rejects.toThrow(
+						`Denied by ${session.sessionManager.getSessionId()}`,
+					);
+					const result = await read.execute("allowed", { path: allowed });
+					expect(result.content).toEqual(
+						expect.arrayContaining([
+							expect.objectContaining({ type: "text", text: expect.stringContaining("allowed fixture") }),
+						]),
+					);
+				}
+			} finally {
+				await grandchild.dispose();
+			}
+		});
+	});
+
+	test("ignores inherited extension tools and replacements, including late registration", async () => {
+		const allowed = path.join(tempDir, "allowed.txt");
+		await Bun.write(allowed, "built-in reader");
+		await withRestrictedChild(
+			pi => {
+				const register = (name: string) =>
+					pi.registerTool({
+						name,
+						label: name,
+						description: "Must not replace or expand restricted tools",
+						parameters: type({}),
+						async execute() {
+							throw new Error("Extension tool escaped the restriction");
+						},
+					});
+				register("extra");
+				register("read");
+				pi.on("session_start", () => {
+					register("late_extra");
+					register("read");
+				});
+			},
+			async child => {
+				expect(child.getAllToolNames()).toEqual(["read"]);
+				const read = child.getToolByName("read");
+				if (!read) throw new Error("Missing restricted read tool");
+				const result = await read.execute("allowed", { path: allowed });
+				expect(result.content).toEqual(
+					expect.arrayContaining([
+						expect.objectContaining({ type: "text", text: expect.stringContaining("built-in reader") }),
+					]),
+				);
+			},
+		);
+	});
+
+	test("fails closed when inherited tool policy throws, times out, or is cancelled", async () => {
+		const blocked = path.join(tempDir, "blocked.txt");
+		await Bun.write(blocked, "must not be read");
+		settings.set("extensionHandlers.toolCallTimeoutMs", 25);
+		await withRestrictedChild(
+			pi => {
+				pi.on("tool_call", event => {
+					if (event.toolCallId === "throw") throw new Error("Policy failed");
+					return Promise.withResolvers<undefined>().promise;
+				});
+			},
+			async child => {
+				const read = child.getToolByName("read");
+				if (!read) throw new Error("Missing restricted read tool");
+				await expect(read.execute("throw", { path: blocked })).rejects.toThrow("Policy failed");
+				await expect(read.execute("timeout", { path: blocked })).rejects.toThrow("timed out");
+				const controller = new AbortController();
+				const cancelled = read.execute("cancel", { path: blocked }, controller.signal);
+				queueMicrotask(() => controller.abort());
+				await expect(cancelled).rejects.toThrow(/cancel|abort/i);
+			},
+		);
+	});
+
 	test("does not unregister the parent's provider when extension loading is restricted", async () => {
 		const { session: parent } = await createAgentSession({
 			...createOptions(),
@@ -138,6 +279,7 @@ describe("restricted sessions sharing extension providers", () => {
 				...createOptions(),
 				model: parent.model,
 				restrictToolNames: true,
+				preloadedPreparedExtensions: parent.preparedExtensions,
 				toolNames: ["read"],
 			});
 
@@ -149,6 +291,13 @@ describe("restricted sessions sharing extension providers", () => {
 			} finally {
 				await child.dispose();
 			}
+			// Provider registration rebound in the child must remain usable after disposal.
+			providerRequests = 1;
+			await parent.prompt("Use the registered provider.");
+			expect(parent.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "Commit proposal complete." }],
+			});
 		} finally {
 			await parent.dispose();
 		}

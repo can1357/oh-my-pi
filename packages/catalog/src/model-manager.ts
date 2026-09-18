@@ -59,6 +59,13 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	 * bearer header comes from the current local config.
 	 */
 	restorableHeaderFallback?: Record<string, string>;
+	/**
+	 * Reconstruct omitted request headers from authoritative local configuration
+	 * when no trusted static source remains. Return undefined to keep the row
+	 * unavailable. This hook must not perform I/O; attach `resolveHeaders` for
+	 * command-backed credentials that must wait until an actual request.
+	 */
+	restoreCachedHeaders?: (model: Readonly<Model>) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
@@ -153,6 +160,7 @@ function restoreCachedModelHeaders<TApi extends Api>(
 	unrestorableHeaderModelIds: readonly string[],
 	legacyHeaderRestoreMarkers: boolean,
 	restorableHeaderFallback: Record<string, string> | undefined,
+	restoreCachedHeaders: ModelManagerOptions<TApi>["restoreCachedHeaders"],
 ): CachedHeaderRestoreResult<TApi> {
 	if (headerOmittedModelIds.length === 0) {
 		return { models: [...cachedModels], unresolvedModelIds: new Set() };
@@ -172,7 +180,7 @@ function restoreCachedModelHeaders<TApi extends Api>(
 				? staticById.get(model.requestModelId)
 				: undefined
 			: (staticById.get(model.id) ?? (model.requestModelId ? staticById.get(model.requestModelId) : undefined));
-		if (!staticModel?.headers) {
+		if (!staticModel?.headers && !staticModel?.resolveHeaders) {
 			// A non-unrestorable row whose static source is gone was cached with
 			// headers matching the provider's trusted constant (e.g. a Copilot
 			// model with no bundled entry). Reattach the constant by value instead
@@ -180,10 +188,12 @@ function restoreCachedModelHeaders<TApi extends Api>(
 			if (!unrestorable && restorableHeaderFallback) {
 				return { ...model, headers: { ...restorableHeaderFallback } };
 			}
+			const configured = restoreCachedHeaders?.(model);
+			if (configured?.headers || configured?.resolveHeaders) return { ...model, ...configured };
 			unresolvedModelIds.add(model.id);
 			return model;
 		}
-		return { ...model, headers: staticModel.headers };
+		return { ...model, headers: staticModel.headers, resolveHeaders: staticModel.resolveHeaders };
 	});
 	return { models: restored, unresolvedModelIds };
 }
@@ -219,6 +229,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cache?.unrestorableHeaderModelIds ?? [],
 		cache?.legacyHeaderRestoreMarkers ?? false,
 		restorableHeaderFallback,
+		options.restoreCachedHeaders,
 	);
 	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
 	const cacheHasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
@@ -361,6 +372,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				latestCache?.unrestorableHeaderModelIds ?? cache?.unrestorableHeaderModelIds ?? [],
 				latestCache?.legacyHeaderRestoreMarkers ?? cache?.legacyHeaderRestoreMarkers ?? false,
 				restorableHeaderFallback,
+				options.restoreCachedHeaders,
 			);
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
 				model => !latestRestoredCache.unresolvedModelIds.has(model.id),
@@ -582,6 +594,16 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
+	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
+	const dynamicHeaders = dynamicModel.resolveHeaders ?? dynamicModel.headers;
+	let resolveHeaders = dynamicModel.resolveHeaders ?? existingModel.resolveHeaders;
+	if (resolveHeaders && existingHeaders && dynamicHeaders && existingHeaders !== dynamicHeaders) {
+		resolveHeaders = async signal => {
+			const previous = typeof existingHeaders === "function" ? await existingHeaders(signal) : existingHeaders;
+			const next = typeof dynamicHeaders === "function" ? await dynamicHeaders(signal) : dynamicHeaders;
+			return { ...previous, ...next };
+		};
+	}
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({
@@ -600,7 +622,12 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		},
 		contextWindow: preferDiscoveryLimit(dynamicModel.contextWindow, existingModel.contextWindow),
 		maxTokens: preferDiscoveryLimit(dynamicModel.maxTokens, existingModel.maxTokens),
-		headers: dynamicModel.headers ? { ...existingModel.headers, ...dynamicModel.headers } : existingModel.headers,
+		headers: resolveHeaders
+			? undefined
+			: dynamicModel.headers
+				? { ...existingModel.headers, ...dynamicModel.headers }
+				: existingModel.headers,
+		resolveHeaders,
 		compat: dynamicModel.compatConfig ?? existingModel.compatConfig,
 		contextPromotionTarget: dynamicModel.contextPromotionTarget ?? existingModel.contextPromotionTarget,
 	} as ModelSpec<TApi>);
