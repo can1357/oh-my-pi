@@ -13,7 +13,7 @@
  * a 400 so the request short-circuits.
  */
 import { describe, expect, it } from "bun:test";
-import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import type { MessageCreateParams, TextBlockParam } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
@@ -104,6 +104,12 @@ function countCacheBreakpoints(body: MessageCreateParams): number {
 	return count;
 }
 
+function textSystemBlocks(body: MessageCreateParams): TextBlockParam[] {
+	const system = body.system;
+	if (!Array.isArray(system)) return [];
+	return system.filter((block): block is TextBlockParam => typeof block !== "string");
+}
+
 function findCachedMessageIndices(body: MessageCreateParams): number[] {
 	const indices: number[] = [];
 	for (let idx = 0; idx < (body.messages?.length ?? 0); idx++) {
@@ -173,27 +179,38 @@ describe("anthropic head caching (general API-key path)", () => {
 		expect(lastBlock.cache_control?.type).toBe("ephemeral");
 	});
 
-	it("keeps rolling and decimation breakpoints before per-call context", async () => {
-		const messages: Message[] = [
-			{ role: "user", content: "stable user", timestamp: 1 },
-			assistantMessage("stable assistant", 2),
-		];
-		const perCallMessage: Message = {
-			role: "developer",
-			content: "per-call context",
-			attribution: "agent",
-			timestamp: 3,
+	it("keeps the rolling tail breakpoint advancing past interior per-call context", async () => {
+		const buildHistory = (turns: number): Message[] => {
+			const messages: Message[] = [
+				{ role: "user", content: "stable user", timestamp: 1 },
+				assistantMessage("stable assistant", 2),
+			];
+			const perCallMessage: Message = {
+				role: "developer",
+				content: "per-call context",
+				attribution: "agent",
+				timestamp: 3,
+			};
+			markPerCallContextMessage(perCallMessage);
+			messages.push(perCallMessage);
+			for (let turn = 1; turn <= turns; turn++) {
+				messages.push({ role: "user", content: `later user ${turn}`, timestamp: turn * 2 + 2 });
+				messages.push(assistantMessage(`later assistant ${turn}`, turn * 2 + 3));
+			}
+			return messages;
 		};
-		markPerCallContextMessage(perCallMessage);
-		messages.push(perCallMessage);
-		for (let turn = 1; turn <= 15; turn++) {
-			messages.push({ role: "user", content: `later user ${turn}`, timestamp: turn * 2 + 2 });
-			messages.push(assistantMessage(`later assistant ${turn}`, turn * 2 + 3));
-		}
-
-		const body = await captureWireBody(undefined, { ...CONTEXT, messages });
-
-		expect(findCachedMessageIndices(body)).toEqual([0, 1]);
+		// The interior per-call mark truncates the reusable prefix at the mark
+		// but must not freeze the tail: across two successive histories the
+		// tail breakpoint index must advance with the new messages.
+		const tailBreakpoint = async (turns: number): Promise<number> => {
+			const body = await captureWireBody(undefined, { ...CONTEXT, messages: buildHistory(turns) });
+			expect(countCacheBreakpoints(body)).toBeLessThanOrEqual(4);
+			const cached = findCachedMessageIndices(body);
+			return Math.max(...cached);
+		};
+		const first = await tailBreakpoint(15);
+		const second = await tailBreakpoint(16);
+		expect(second).toBeGreaterThan(first);
 	});
 
 	it("stays within Anthropic's 4-breakpoint budget", async () => {
@@ -591,5 +608,73 @@ describe("anthropic head caching (general API-key path)", () => {
 		expect(cached).toContain(68);
 		expect(cached).toContain(69);
 		expect(cached).toHaveLength(4);
+	});
+	it("keeps the head breakpoint on the stable prefix when the recall suffix refreshes", async () => {
+		const oAuthModel = buildModel({ ...MODEL_SPEC, id: "claude-opus-5", name: "Claude Opus 5" });
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const captureRecall = (recall: string, messages: Message[]): Promise<MessageCreateParams> => {
+			const controller = new AbortController();
+			const { promise, resolve } = Promise.withResolvers<MessageCreateParams>();
+			const stream = streamAnthropic(
+				oAuthModel,
+				{ systemPrompt: ["You are helpful.", "Follow the house style.", recall], messages, tools: CONTEXT.tools },
+				{
+					apiKey: "sk-ant-api-test",
+					signal: controller.signal,
+					isOAuth: true,
+					sessionId: "sess-recall",
+					providerSessionState,
+					onPayload: payload => {
+						resolve(payload as unknown as MessageCreateParams);
+						controller.abort();
+					},
+				},
+			);
+			void stream.result().catch(() => undefined);
+			return promise;
+		};
+		const messages: Message[] = [{ role: "user", content: "hello", timestamp: 1 }];
+		const before = await captureRecall("<memories>\nrecall v1\n</memories>", messages);
+		const systemBlocksBefore = textSystemBlocks(before);
+		const breakpointBefore = systemBlocksBefore.findIndex(
+			block => "cache_control" in block && block.cache_control != null,
+		);
+		const after = await captureRecall("<memories>\nrecall v2\n</memories>", [
+			...messages,
+			assistantMessage("hi there", 2),
+			{ role: "user", content: "again", timestamp: 3 },
+		]);
+		expect(countCacheBreakpoints(after)).toBeLessThanOrEqual(4);
+		// The boundary breakpoint sits on the last stable block: with 2 OAuth
+		// identity blocks + 2 stable prompt blocks + 1 recall suffix, the
+		// anchor is index 3 — not the pre-decorated identity block (index 1)
+		// and not the volatile suffix at the tail (index 4).
+		const systemAfter = textSystemBlocks(after);
+		const cachedSystem = systemAfter
+			.map((block, index) => ("cache_control" in block && block.cache_control != null ? index : -1))
+			.filter(index => index >= 0);
+		expect(cachedSystem).toContain(systemAfter.length - 2);
+		expect(cachedSystem).not.toContain(systemAfter.length - 1);
+		expect(systemBlocksBefore.length).toBe(systemAfter.length);
+		// Stable prefix bytes survive the recall refresh: strip the volatile
+		// suffix and the per-turn cache_control, then compare.
+		const stableText = (body: MessageCreateParams): string[] =>
+			textSystemBlocks(body)
+				.filter(block => !block.text.startsWith("<memories>"))
+				.map(block => block.text);
+		expect(stableText(after)).toEqual(stableText(before));
+	});
+
+	it("falls back to tail anchoring when every system block is volatile", async () => {
+		const body = await captureWireBody(undefined, {
+			systemPrompt: ["<memories>\nonly recall\n</memories>"],
+			tools: [],
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		});
+		const systemAfter = textSystemBlocks(body);
+		const cachedSystem = systemAfter
+			.map((block, index) => ("cache_control" in block && block.cache_control != null ? index : -1))
+			.filter(index => index >= 0);
+		expect(cachedSystem).toContain(systemAfter.length - 1);
 	});
 });

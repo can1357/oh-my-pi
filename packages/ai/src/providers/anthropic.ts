@@ -3954,8 +3954,17 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
 
 	// A breakpoint caches every preceding byte, not only the decorated message.
-	// Once per-call or turn-scoped content appears, no later message can anchor a
-	// prefix reusable by the next request.
+	// A per-call or turn-scoped message is rebuilt next request, so a prefix
+	// spanning it cannot match — but only at its own position. Messages after
+	// the mark are ordinary persisted history with stable bytes, so a later
+	// breakpoint still matches everything after the mark. The cost is bounded
+	// to re-billing the marked bytes themselves, not the growing tail.
+	// Hence two anchors, not a truncation: the newest candidate at or before
+	// the first per-call/turn-scoped message (when one exists) pins the
+	// reusable prefix behind the mark, and the rolling tail candidates pin
+	// the suffix after it. Turn-scoped `clear_at` messages are absent next
+	// request, so they still truncate the decimation range (ordinals would
+	// shift), but per-call marks no longer freeze the tail.
 	let stableMessageEnd = messageEnd;
 	for (let index = 0; index <= messageEnd; index++) {
 		const message = params.messages[index];
@@ -3980,17 +3989,21 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
 	const decimationIndices = userIndices.filter((_, ordinal) => (ordinal + 1) % ANTHROPIC_DECIMATION_INTERVAL === 0);
 
-	// Collect up to 2 trailing candidates from the reusable prefix, skipping
-	// mid-conversation tool-control messages. They contain only tool_addition /
-	// tool_removal blocks, so cache_control is always rejected there; parking
-	// the rolling window on one spends the tail breakpoint on a decoration
-	// that always fails, and with decimation checkpoints present the remaining
-	// breakpoints land on already-cached history while the growing tail is
-	// re-billed as uncached input every turn.
+	// Collect up to 2 trailing candidates from the message tail, skipping
+	// per-call messages, turn-scoped messages, and mid-conversation
+	// tool-control messages. A per-call tail candidate is rebuilt next request
+	// (fresh timestamps on appended probes, fresh redaction bytes), so a
+	// breakpoint on it cannot match — it would spend the tail anchor on bytes
+	// that never repeat while the persisted history behind it goes uncached.
+	// Turn-scoped messages are absent next request for the same reason, and
+	// tool controls reject cache_control outright. The walk starts at the
+	// message tail (not the truncated prefix end) so the anchor advances every
+	// turn; the sub-prefix candidate below covers the reusable region behind
+	// a mark.
 	const trailingCandidates: number[] = [];
-	for (let index = stableMessageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
+	for (let index = messageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
 		const message = params.messages[index];
-		if (!message) continue;
+		if (!message || message.clear_at === "next_user_message" || isPerCallContextMessage(message)) continue;
 		if (
 			message.role === "system" &&
 			typeof message.content !== "string" &&
@@ -4002,11 +4015,13 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		}
 		trailingCandidates.push(index);
 	}
-
 	// Prioritize:
 	// 1. Most recent trailing message
 	// 2. Latest decimation checkpoints (newest first) to maintain stable long-context anchors
-	// 3. Second trailing message
+	// 3. Newest message at or before the first per-call/turn-scoped mark, so a
+	//    volatile interior message costs only its own re-billed bytes instead
+	//    of invalidating the whole reusable prefix behind it
+	// 4. Second trailing message
 	const candidateIndices: number[] = [];
 	if (trailingCandidates.length > 0) {
 		candidateIndices.push(trailingCandidates[0]);
@@ -4015,6 +4030,9 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		if (!candidateIndices.includes(decimationIndices[i])) {
 			candidateIndices.push(decimationIndices[i]);
 		}
+	}
+	if (stableMessageEnd < messageEnd && stableMessageEnd >= 0 && !candidateIndices.includes(stableMessageEnd)) {
+		candidateIndices.push(stableMessageEnd);
 	}
 	for (const index of trailingCandidates) {
 		if (!candidateIndices.includes(index)) {
@@ -4035,15 +4053,55 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 }
 
 /**
+ * Trailing system-prompt segments carrying per-turn volatile content (memory
+ * recall blocks). They are rendered by the coding agent as their own
+ * `systemPrompt` array elements and appended last, so on the wire they
+ * normally form a volatile suffix after the stable prefix. The system cache
+ * breakpoint anchors on the last stable segment instead of the array tail, so
+ * a recall refresh re-bills only the suffix and the message tail for one turn
+ * while the tools+stable-system prefix stays a cache hit. The fingerprint in
+ * `planStableAnthropicSystem` is scoped the same way, so a recall-only change
+ * no longer resets the tool/control baselines either.
+ *
+ * Only a genuinely trailing volatile run counts: a `before_agent_start`
+ * extension override may append a stable policy block after the staged recall
+ * block, and that block must stay fingerprinted stable (a change to it has to
+ * re-baseline). A volatile block stranded mid-array still poisons the prefix
+ * at its position — prefix caching is positional, so no classification can
+ * save the bytes after it — but the stable tail is at least fingerprinted
+ * instead of silently excluded.
+ *
+ * Detection is by our own markup, not model identity: recall blocks always
+ * open with `<memories>`. Stable segments containing recalled text elsewhere
+ * (e.g. quoted in conversation) are unaffected — only a leading tag counts.
+ */
+const VOLATILE_SYSTEM_SEGMENT_MARKERS = ["<memories>"];
+
+function stableSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]): number {
+	let start = systemBlocks.length;
+	while (start > 0) {
+		const text = systemBlocks[start - 1]?.text ?? "";
+		if (!VOLATILE_SYSTEM_SEGMENT_MARKERS.some(marker => text.startsWith(marker))) break;
+		start--;
+	}
+	return start;
+}
+
+/**
  * Anchor cache_control on the stable request head — the last (non-deferred)
- * tool definition and the last system block. The canonical cache order is
- * tools → system → messages, so a breakpoint on the final system block caches
- * the entire tools+system prefix, and the extra tool breakpoint keeps the tool
+ * tool definition and the last stable system block. The canonical cache order is
+ * tools → system → messages, so a breakpoint on the final stable system block caches
+ * the entire tools+stable-system prefix, and the extra tool breakpoint keeps the tool
  * definitions cached even when the system text changes. This guarantees the
  * large, unchanging head is a cache hit on every turn regardless of how the
  * message tail churns — the breakpoint placement first-party Anthropic clients
  * (Claude Code, Pi) use. Without it, the general API-key path anchors only the
  * moving message tail, so tail churn re-writes the whole head uncached.
+ *
+ * Volatile trailing segments (memory recall) sit after the breakpoint, so a
+ * recall refresh re-bills only the suffix and the tail for one turn instead of
+ * the whole head. When every system block is volatile there is no stable
+ * boundary and the breakpoint stays on the array tail (previous behavior).
  *
  * Anthropic allows at most 4 cache breakpoints per request. At most one is
  * spent on tools and one on system here, leaving the remaining budget for
@@ -4080,9 +4138,28 @@ function applyHeadCaching(
 		}
 	}
 
-	if (systemBlocks && systemBlocks.length > 0 && !systemBlocks.some(block => block.cache_control != null)) {
-		const lastBlock = systemBlocks[systemBlocks.length - 1];
-		if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+	if (systemBlocks && systemBlocks.length > 0) {
+		// Anchor on the last stable block so a volatile recall suffix refresh
+		// re-bills only the suffix, not the whole head. The skip-if-decorated
+		// check applies only when there is no volatile suffix (previous
+		// behavior): with a suffix present the boundary anchor is added
+		// whenever the anchor block itself lacks a breakpoint, even if the
+		// OAuth path pre-decorated its identity block — otherwise the only
+		// system breakpoint sits before the stable prompt and a recall
+		// refresh re-bills it. The message budget in `applyPromptCaching`
+		// shrinks accordingly (4 minus head breakpoints). All-volatile falls
+		// back to tail anchoring (previous behavior).
+		const suffixStart = stableSystemSuffixStart(systemBlocks);
+		if (suffixStart === systemBlocks.length) {
+			if (!systemBlocks.some(block => block.cache_control != null)) {
+				const lastBlock = systemBlocks[systemBlocks.length - 1];
+				if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+			}
+		} else {
+			const anchorIndex = suffixStart === 0 ? systemBlocks.length - 1 : suffixStart - 1;
+			const anchor = systemBlocks[anchorIndex];
+			if (anchor && anchor.cache_control == null) anchor.cache_control = cloneAnthropicCacheControl(cacheControl);
+		}
 	}
 }
 
@@ -4166,11 +4243,15 @@ function getAnthropicControlState(
 ): AnthropicControlState | undefined {
 	if (!state) return undefined;
 	const root = messages[0];
+	// Key on the stable system prefix, not the full array: a volatile recall
+	// suffix refresh must resolve the same baseline or the declared-tool,
+	// effort, and control-transition state it preserves is lost with it.
+	const stablePrefix = system?.slice(0, stableSystemSuffixStart(system)) ?? null;
 	const fingerprint = String(
 		Bun.hash(
 			JSON.stringify([
 				sessionId ?? "",
-				system?.map(block => block.text) ?? null,
+				stablePrefix?.map(block => block.text) ?? null,
 				root ? anthropicControlMessageProjection(root) : null,
 			]),
 		),
@@ -4216,14 +4297,16 @@ function syncAnthropicControlState(state: AnthropicControlState, messages: reado
 }
 
 /**
- * Keep the top-level `system` array byte-stable across a session. The blocks
- * captured on the first request are replayed verbatim (with the current
- * request's cache breakpoints) while their text is unchanged. A text change
+ * Keep the top-level `system` array byte-stable across a session. The stable
+ * prefix captured on the first request is replayed verbatim (with the current
+ * request's cache breakpoints) while its text is unchanged; the volatile
+ * recall suffix always passes through current-turn. A stable-prefix change
  * re-baselines instead of duplicating the prompt as a mid-conversation
  * system message: omp's system prompt is one rendered segment that embeds
  * the tool roster, so replaying a second copy on every later request would
  * cost the full prompt again per change. The prefix rewrite is absorbed by
- * `prefix_mismatch_behavior: "drop_block"` and one cache miss.
+ * `prefix_mismatch_behavior: "drop_block"` and one cache miss, while a
+ * recall-only change keeps the tool/control baselines intact.
  */
 function planStableAnthropicSystem(
 	current: AnthropicSystemBlock[] | undefined,
@@ -4231,16 +4314,21 @@ function planStableAnthropicSystem(
 	enabled: boolean,
 ): AnthropicSystemBlock[] | undefined {
 	if (!state || !enabled) return current;
-	const fingerprint = JSON.stringify(current?.map(block => block.text) ?? null);
+	const suffixStart = stableSystemSuffixStart(current ?? []);
+	const fingerprint = JSON.stringify(current?.slice(0, suffixStart).map(block => block.text) ?? null);
 	if (state.systemFingerprint !== fingerprint) {
 		resetAnthropicControlState(state);
 		state.systemFingerprint = fingerprint;
-		state.stableSystemBlocks = current?.map(block => ({ type: block.type, text: block.text }));
+		state.stableSystemBlocks = current?.slice(0, suffixStart).map(block => ({ type: block.type, text: block.text }));
 	}
-	return state.stableSystemBlocks?.map((block, index) => {
-		const cacheControl = current?.[index]?.cache_control;
-		return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
-	});
+	const stableReplay =
+		state.stableSystemBlocks?.map((block, index) => {
+			const cacheControl = current?.[index]?.cache_control;
+			return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
+		}) ?? [];
+	const suffix = current?.slice(suffixStart).map(block => ({ ...block })) ?? [];
+	const replayed = [...stableReplay, ...suffix];
+	return replayed.length > 0 ? replayed : undefined;
 }
 
 function anthropicToolDefinitionKey(tool: AnthropicWireTool): string {
