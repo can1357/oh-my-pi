@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { addCustomOpenAIProvider } from "../config/models-config-writer";
 import {
 	formatModelString,
 	getModelMatchPreferences,
@@ -8,6 +9,7 @@ import {
 import type { SettingPath, Settings } from "../config/settings";
 import { describeLoopCondition } from "../modes/loop-condition";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
+import { ModelAddWizard } from "../modes/components/model-add-wizard";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
@@ -325,15 +327,21 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		name: "model",
 		aliases: ["models"],
 		icon: "model",
-		description: "Switch model for this session",
-		acpDescription: "Show current model selection",
+		description: "Switch model for this session, or add custom models (/model add)",
 		getTuiAutocompleteDescription: runtime => {
 			const model = runtime.ctx.session.model;
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
 		},
 		handle: async (command, runtime) => {
+			const trimmed = command.args?.trim() ?? "";
+			if (trimmed === "add" || trimmed.startsWith("add ") || trimmed.startsWith("add\t")) {
+				return usage(
+					"To add a custom OpenAI provider interactively, use /model add in the TUI or run 'omp models add' in your terminal.",
+					runtime,
+				);
+			}
+
 			if (command.args) {
-				const selector = command.args.trim();
 				const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
 				const match = resolved.model;
 				if (!match) {
@@ -360,7 +368,55 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			);
 			return commandConsumed();
 		},
-		handleTui: (_command, runtime) => {
+		handleTui: (command, runtime) => {
+			const trimmed = command.args?.trim() ?? "";
+			if (trimmed === "add" || trimmed.startsWith("add ") || trimmed.startsWith("add\t")) {
+				const { ctx } = runtime;
+				const restoreEditor = () => {
+					ctx.editorContainer.clear();
+					ctx.editorContainer.addChild(ctx.editor);
+					ctx.ui.setFocus(ctx.editor);
+					ctx.editor.setText("");
+					ctx.ui.requestRender();
+				};
+
+				const initialProvider =
+					trimmed.startsWith("add ") || trimmed.startsWith("add\t")
+						? trimmed.slice(4).trim()
+						: undefined;
+
+				const wizard = new ModelAddWizard(
+					async options => {
+						restoreEditor();
+						try {
+							const result = await addCustomOpenAIProvider(options);
+							await ctx.session.modelRegistry.refresh("online-if-uncached");
+							const switchHint = result.modelId
+								? `Switch using /model ${result.provider}/${result.modelId}`
+								: `Switch using /model ${result.provider}/<model-id>`;
+							ctx.showStatus(`Added custom provider "${result.provider}". ${switchHint}`);
+							runtime.notifyTitleChanged?.();
+							runtime.notifyConfigChanged?.();
+						} catch (error) {
+							ctx.showError(`Failed to save provider "${options.provider}": ${errorMessage(error)}`);
+						}
+					},
+					() => {
+						restoreEditor();
+						ctx.showStatus("Add model cancelled.");
+					},
+					() => {
+						ctx.ui.requestRender();
+					},
+					initialProvider,
+				);
+
+				ctx.editorContainer.clear();
+				ctx.editorContainer.addChild(wizard);
+				ctx.ui.setFocus(wizard);
+				ctx.ui.requestRender();
+				return;
+			}
 			runtime.ctx.showModelSelector();
 			runtime.ctx.editor.setText("");
 		},

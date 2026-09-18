@@ -23,6 +23,10 @@
 - Improved subagent task labels and plan filenames to use concise, action-oriented descriptions.
 - Updated CLI byte sizes to use decimal KB units and made duration displays coarser and easier to read.
 
+### Added
+
+- Added `/model add` interactive TUI wizard and `omp models add` CLI command to add custom OpenAI-compatible models (vLLM, Ollama, LM Studio, proxies) with full tool calling and MCP support enabled by default.
+
 ### Fixed
 
 - Fixed `edit` auto-repair waiting up to 60 seconds when the `smol` model does not respond; it now times out after 20 seconds and reports repair start and timeout details.
