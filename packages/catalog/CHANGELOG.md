@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed `KIMI_API_KEY` not resolving as the `kimi-code` provider env credential: the `env` axis sat inside the `discovery` block, so `getEnvApiKey("kimi-code")` returned nothing and env-key users were skipped by usage probing ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano)).
 
 ## [18.2.5] - 2026-09-17
 

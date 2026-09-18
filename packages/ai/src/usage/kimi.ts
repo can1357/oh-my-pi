@@ -242,14 +242,18 @@ function parseUsagePayload(payload: unknown, nowMs: number): { rows: KimiUsageRo
 export const kimiUsageProvider: UsageProvider = {
 	id: "kimi-code",
 	supports(params: UsageFetchParams): boolean {
-		return params.provider === "kimi-code" && params.credential.type === "oauth";
+		if (params.provider !== "kimi-code") return false;
+		// `/coding/v1/usages` also accepts a subscription API key (KIMI_API_KEY)
+		// as the bearer, so key-only setups (no /login OAuth) can report quota.
+		return params.credential.type === "oauth"
+			? Boolean(params.credential.accessToken)
+			: Boolean(params.credential.apiKey);
 	},
 	async fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 		if (params.provider !== "kimi-code") return null;
 		const { credential } = params;
-		if (credential.type !== "oauth") return null;
-
-		const accessToken = credential.accessToken;
+		// OAuth sessions carry the bearer in accessToken; pasted/env keys in apiKey.
+		const accessToken = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
 		if (!accessToken) return null;
 
 		const nowMs = Date.now();

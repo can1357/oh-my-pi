@@ -11,6 +11,13 @@ function makeCredential(accountId?: string): UsageFetchParams["credential"] {
 	};
 }
 
+function makeApiKeyCredential(): UsageFetchParams["credential"] {
+	return {
+		type: "api_key",
+		apiKey: "kimi-test-api-key",
+	};
+}
+
 function makeCtx(payload: unknown): UsageFetchContext {
 	const fetch: FetchImpl = async () =>
 		new Response(JSON.stringify(payload), {
@@ -148,5 +155,52 @@ describe("kimi usage provider", () => {
 		expect(report).not.toBeNull();
 		expect(report!.limits).toHaveLength(1);
 		expect(report!.limits[0]!.label).toBe("Weekly limit");
+	});
+
+	it("probes API-key credentials with the key as the bearer token", async () => {
+		// Regression: key-only setups (KIMI_API_KEY, no /login) must appear in
+		// `omp usage`; the endpoint accepts the raw key as the bearer.
+		const seen: { authorization: string | null } = { authorization: null };
+		const fetch: FetchImpl = async (_input, init) => {
+			seen.authorization = new Headers(init?.headers).get("authorization");
+			return new Response(JSON.stringify({ usage: { limit: "100", used: "41", remaining: "59" } }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		const report = await kimiUsageProvider.fetchUsage!(
+			{ provider: "kimi-code", credential: makeApiKeyCredential(), signal: undefined },
+			{ fetch },
+		);
+
+		expect(report).not.toBeNull();
+		expect(seen.authorization).toBe("Bearer kimi-test-api-key");
+		expect(report!.limits[0]!.amount.used).toBe(41);
+	});
+
+	it("admits only credentials that carry a usable token", () => {
+		// The old oauth-only gate silently skipped env-key users; a missing-token
+		// row must still be skipped so the auth layer never fires a bare probe.
+		expect(
+			kimiUsageProvider.supports?.({
+				provider: "kimi-code",
+				credential: makeApiKeyCredential(),
+				signal: undefined,
+			}),
+		).toBe(true);
+		expect(
+			kimiUsageProvider.supports?.({
+				provider: "kimi-code",
+				credential: { type: "api_key" },
+				signal: undefined,
+			}),
+		).toBe(false);
+		expect(
+			kimiUsageProvider.supports?.({
+				provider: "kimi-code",
+				credential: { type: "oauth" },
+				signal: undefined,
+			}),
+		).toBe(false);
 	});
 });
