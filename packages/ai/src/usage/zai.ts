@@ -14,7 +14,10 @@ import type {
 import { isRecord } from "../utils";
 import { DAY_MS, HOUR_MS, WEEK_MS } from "./shared";
 
+const ZAI_PROVIDER = "zai";
+const ZHIPU_PROVIDER = "zhipu-coding-plan";
 const DEFAULT_ENDPOINT = "https://api.z.ai";
+const ZHIPU_ENDPOINT = "https://open.bigmodel.cn";
 const QUOTA_PATH = "/api/monitor/usage/quota/limit";
 const MODEL_USAGE_PATH = "/api/monitor/usage/model-usage";
 const MONTH_MS = 30 * DAY_MS;
@@ -24,12 +27,12 @@ interface ZaiUsageDetail {
 	usage?: number;
 }
 
-function normalizeZaiBaseUrl(baseUrl?: string): string {
-	if (!baseUrl?.trim()) return DEFAULT_ENDPOINT;
+function normalizeZaiBaseUrl(baseUrl: string | undefined, fallback: string): string {
+	if (!baseUrl?.trim()) return fallback;
 	try {
 		return new URL(baseUrl.trim()).origin;
 	} catch {
-		return DEFAULT_ENDPOINT;
+		return fallback;
 	}
 }
 
@@ -182,11 +185,6 @@ function isZaiFeatureRequestLimit(parsed: ZaiUsageLimitItem): boolean {
 	return detailCodes.includes("search-prime") && detailCodes.includes("web-reader") && detailCodes.includes("zread");
 }
 
-function requestQuotaLabel(parsed: ZaiUsageLimitItem): string {
-	if (isZaiFeatureRequestLimit(parsed)) return "ZAI Zread Quota";
-	return "ZAI Request Quota";
-}
-
 function buildModelUsageUrl(baseUrl: string, now: Date): string {
 	const start = new Date(now.getTime() - WEEK_MS);
 	const startTime = formatDate(start);
@@ -195,6 +193,8 @@ function buildModelUsageUrl(baseUrl: string, now: Date): string {
 }
 
 function getZaiCredentialLimits(report: UsageReport): UsageLimit[] {
+	// The `zai:` prefixes are shared by `zai` and `zhipu-coding-plan` by design:
+	// both report through this ranking strategy and filter on these prefixes.
 	return report.limits.filter(
 		limit =>
 			limit.id.startsWith("zai:requests:") ||
@@ -234,7 +234,7 @@ function rankZaiRequestLimits(report: UsageReport): UsageLimit[] {
 }
 
 async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
-	if (params.provider !== "zai") return null;
+	if (params.provider !== ZAI_PROVIDER && params.provider !== ZHIPU_PROVIDER) return null;
 	const credential = params.credential;
 	// Sign-in (oauth) stores the minted id.secret key in accessToken; the paste
 	// path stores it in apiKey. Both are the same raw key used verbatim as the
@@ -242,7 +242,9 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 	const token = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
 	if (!token) return null;
 
-	const baseUrl = normalizeZaiBaseUrl(params.baseUrl);
+	const isZhipu = params.provider === ZHIPU_PROVIDER;
+	const logPrefix = isZhipu ? "Zhipu" : "ZAI";
+	const baseUrl = normalizeZaiBaseUrl(params.baseUrl, isZhipu ? ZHIPU_ENDPOINT : DEFAULT_ENDPOINT);
 	const url = `${baseUrl}${QUOTA_PATH}`;
 	const headers: Record<string, string> = {
 		Authorization: token,
@@ -257,18 +259,21 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			signal: params.signal,
 		});
 		if (!response.ok) {
-			ctx.logger?.warn("ZAI usage fetch failed", { status: response.status, statusText: response.statusText });
+			ctx.logger?.warn(`${logPrefix} usage fetch failed`, {
+				status: response.status,
+				statusText: response.statusText,
+			});
 			return null;
 		}
 		payload = (await response.json()) as ZaiQuotaPayload;
 	} catch (error) {
-		ctx.logger?.warn("ZAI usage fetch error", { error: String(error) });
+		ctx.logger?.warn(`${logPrefix} usage fetch error`, { error: String(error) });
 		return null;
 	}
 
 	if (!payload) return null;
 	if (payload.success !== true) {
-		ctx.logger?.warn("ZAI usage response invalid", { code: payload.code, message: payload.msg });
+		ctx.logger?.warn(`${logPrefix} usage response invalid`, { code: payload.code, message: payload.msg });
 		return null;
 	}
 
@@ -289,7 +294,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			const window = buildZaiWindow(parsed);
 			limits.push({
 				id: `zai:tokens:${window.id}`,
-				label: `ZAI ${window.label} Token Quota`,
+				label: `${window.label} Tokens`,
 				scope: {
 					provider: params.provider,
 					windowId: window.id,
@@ -312,7 +317,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			const featureLimit = isZaiFeatureRequestLimit(parsed);
 			limits.push({
 				id: featureLimit ? `zai:features:zread:${window.id}` : `zai:requests:${window.id}`,
-				label: requestQuotaLabel(parsed),
+				label: featureLimit ? `${window.label} Zread` : `${window.label} Requests`,
 				scope: {
 					provider: params.provider,
 					windowId: window.id,
@@ -340,7 +345,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			});
 			limits.push({
 				id: `zai:credits:${window.id}`,
-				label: `ZAI ${window.label} Credit Quota`,
+				label: `${window.label} Credits`,
 				scope: {
 					provider: params.provider,
 					windowId: window.id,
@@ -384,17 +389,25 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 			}
 		}
 	} catch (error) {
-		ctx.logger?.debug("ZAI model usage fetch failed", { error: String(error) });
+		ctx.logger?.debug(`${logPrefix} model usage fetch failed`, { error: String(error) });
 	}
 
 	return report;
 }
 
 export const zaiUsageProvider: UsageProvider = {
-	id: "zai",
+	id: ZAI_PROVIDER,
 	fetchUsage: fetchZaiUsage,
 	supports: params =>
-		params.provider === "zai" &&
+		params.provider === ZAI_PROVIDER &&
+		(params.credential.type === "oauth" ? Boolean(params.credential.accessToken) : Boolean(params.credential.apiKey)),
+};
+
+export const zhipuCodingPlanUsageProvider: UsageProvider = {
+	id: ZHIPU_PROVIDER,
+	fetchUsage: fetchZaiUsage,
+	supports: params =>
+		params.provider === ZHIPU_PROVIDER &&
 		(params.credential.type === "oauth" ? Boolean(params.credential.accessToken) : Boolean(params.credential.apiKey)),
 };
 
