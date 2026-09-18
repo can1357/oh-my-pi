@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--new` (alias `--new-session`) to start a fresh session even when the `autoResume` setting is enabled ([#11762](https://github.com/can1357/oh-my-pi/pull/11762) by [@labi-le](https://github.com/labi-le)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
