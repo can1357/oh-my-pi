@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add a declarative YAML workload runner for ordered tasks and templated inputs. ([#12226](https://github.com/can1357/oh-my-pi/pull/12226) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
