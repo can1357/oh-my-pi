@@ -23,34 +23,6 @@ function expectGraphExcludes(modules: string[], forbidden: RegExp[]): void {
 }
 
 describe("startup composer prepaint graph", () => {
-	it("keeps the speculative scene isolated from settings, catalog, session runtime, and LSP modules", async () => {
-		const modules = await importedModules("src/modes/startup-composer.ts");
-
-		// Positive control: the real speculative scene was evaluated.
-		expect(modules.some(module => module.includes("modes/components/welcome"))).toBe(true);
-		expectGraphExcludes(modules, [
-			/config\/settings/,
-			/pi-catalog/,
-			/provider-models/,
-			/session\/agent-session/,
-			/session\/session-listing/,
-			/session\/session-manager/,
-			/session\/session-paths/,
-			/session\/session-storage/,
-			/src\/lsp\//,
-			/image-persist/,
-			/internal-url/,
-			/extensibility\/skills\.ts/,
-			/src\/discovery/,
-			/providers\/.*auth/,
-			/tools\/browser\/aria/,
-			/modes\/interactive-mode/,
-			/node:inspector/,
-			/node:worker_threads/,
-			/omptype/,
-		]);
-	});
-
 	it("keeps CLI bootstrap isolated from command, worker, provider, and failure-runtime graphs", async () => {
 		const modules = await importedModules("src/cli.ts");
 

@@ -1,5 +1,5 @@
 import type { AgentSession } from "../../session/agent-session";
-import type { ConfiguredThinkingLevel } from "../../thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 /**
  * Effort selectors `/effort` accepts for the session's active model. `off` and

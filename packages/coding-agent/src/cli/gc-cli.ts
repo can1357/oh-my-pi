@@ -6,6 +6,7 @@ import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
+	formatBytes,
 	getAgentDir,
 	getBlobsDir,
 	getCustomSessionFilesDir,
@@ -1650,13 +1651,6 @@ async function withGcLock<T>(agentDir: string, fn: (lockPath: string) => Promise
 	if (closeError) throw closeError;
 	if (unlinkError) throw unlinkError;
 	return result as T;
-}
-
-function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes} B`;
-	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-	if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-	return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GiB`;
 }
 
 function renderText(result: GcResult): string {

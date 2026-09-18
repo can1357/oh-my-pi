@@ -9,12 +9,8 @@ import {
 	isRetriableConnectionError,
 	MCPTool,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import type {
-	MCPImageContent,
-	MCPServerConnection,
-	MCPToolCallResult,
-	MCPTransport,
-} from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPImageContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
 

@@ -201,6 +201,8 @@ If restore fails, `modelFallbackMessage` explains fallback.
 6. other stored API-key credential in `agent.db` / broker-backed storage
 7. custom-provider resolver fallback
 
+Configured values are resolved asynchronously through the registry-installed resolver; catalog construction does not execute credential commands. `ModelRegistry.getProviderHeaders(provider)` and `resolveModelHeaders(model, signal?)` return promises. For direct provider requests, await the latter instead of reading config-backed values from `model.headers`. The AI client's `stream()` and `streamSimple()` materialize `model.resolveHeaders` automatically for each request attempt, including authentication retries.
+
 ## Event subscription model
 
 Subscribe with `session.subscribe(listener)`; it returns an unsubscribe function.
@@ -299,6 +301,9 @@ Only after work capable of appending session entries has settled does disposal c
 - Set `restrictToolNames: true` to limit the session to the names in
   `toolNames`. Restricted sessions disable ambient MCP, extensions, custom
   commands, and LSP by default.
+- Restricted children retain hooks/providers from the parent's
+  `preloadedPreparedExtensions`, rebound to their own session. Contributed tools
+  cannot extend or replace the restricted tool set, even when registered later.
 - In a restricted session, SDK-supplied `customTools` are excluded unless
   `allowRestrictedCustomTools: true` and their names also appear in
   `toolNames`.
@@ -320,8 +325,13 @@ const { session } = await createAgentSession({
   inline factories still load
 - `preloadedExtensions`: reuse an extension set loaded early by the same
   session-owning process. Never pass loaded extension instances from a parent
-  to another session; use `preloadedExtensionPaths` so each session gets its
+  to another session; use `preloadedPreparedExtensions` so each session gets its
   own `ExtensionAPI` binding.
+- `preloadedPreparedExtensions`: already-imported factories to rebind, including
+  in restricted children; does not reevaluate the module graph.
+- `extensionRoots`: a live owner-root provider for child discovery and revival.
+  Its explicit roots, discovery mode, and configured roots take precedence over
+  the child's local extension-loading inputs.
 
 ### Runtime tool set changes
 

@@ -344,6 +344,26 @@ describe("GuestClient frame apply", () => {
 		const after = client.getSnapshot();
 		expect(after).not.toBe(before);
 		expect(after.agents).not.toBe(before.agents);
+		// Non-entry frames must not invalidate entry identity: Transcript's
+		// memo and useSyncExternalStore skip their O(n) scans per token.
 		expect(after.entries).toBe(before.entries);
+	});
+
+	it("replaces the entries reference when entry frames arrive", () => {
+		const client = liveClient();
+		const before = client.getSnapshot();
+		client.applyFrameForTest({
+			t: "entry",
+			entry: {
+				type: "message",
+				id: "m-new",
+				parentId: null,
+				timestamp: "2026-06-12T00:00:02Z",
+				message: { role: "user", content: "hi", timestamp: 2 },
+			},
+		});
+		const after = client.getSnapshot();
+		expect(after.entries).not.toBe(before.entries);
+		expect(after.entries).toHaveLength(before.entries.length + 1);
 	});
 });

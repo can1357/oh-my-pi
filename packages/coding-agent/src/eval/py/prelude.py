@@ -773,6 +773,14 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self):
             return f"<completion {self.id}>"
 
+    class JudgmentHandle(CompletionHandle):
+        """Typed judgment handle returned by ``judge()``; ``wait()`` yields ``{id: answer}`` (choice/bool/score)."""
+
+        __slots__ = ()
+
+        def __repr__(self):
+            return f"<judgment {self.id}>"
+
     def _handle_value(handle, snapshot):
         status = snapshot.get("status") if isinstance(snapshot, dict) else "failed"
         if status == "running":
@@ -841,6 +849,15 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
             raise RuntimeError("completion() did not return a handle")
         return CompletionHandle(result["id"], schema)
+
+    def judge(state, questions):
+        """Start a typed judgment over ``state`` and return its handle."""
+        if not isinstance(questions, dict):
+            raise TypeError("judge(state, questions) expects questions as a dict keyed by id")
+        result = _bridge_call("__judge__", {"state": state, "questions": questions})
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+            raise RuntimeError("judge() did not return a handle")
+        return JudgmentHandle(result["id"])
 
     def agent(
         prompt,

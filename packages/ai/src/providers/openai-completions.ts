@@ -1277,6 +1277,12 @@ const streamOpenAICompletionsOnce = (
 
 					if (choice?.delta?.tool_calls && choice.delta.tool_calls.length > 0) {
 						const toolCalls = choice.delta.tool_calls;
+						// Pure tool-call responses never emit a text/thinking delta, so
+						// without this stamp TTFT stays undefined for every turn that
+						// begins with a structured call (measured: all toolUse-stop
+						// rows on OpenAI-compatible gateways) and the usage row's
+						// TTFT/tok/s figures silently degrade.
+						if (!firstTokenTime) firstTokenTime = performance.now();
 						for (let toolCallOffset = 0; toolCallOffset < toolCalls.length; toolCallOffset++) {
 							const toolCall = toolCalls[toolCallOffset]!;
 							const streamIndex = typeof toolCall.index === "number" ? toolCall.index : undefined;

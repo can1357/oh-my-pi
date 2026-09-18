@@ -474,15 +474,18 @@ async function postImageEndpointRequest(options: {
 	url: string;
 	body: unknown;
 	apiKey: ApiKey;
+	resolveHeaders?: () => Promise<Record<string, string> | undefined>;
 	fetchImpl: FetchImpl;
 	signal: AbortSignal | undefined;
 }): Promise<string> {
 	return withAuth(
 		options.apiKey,
 		async key => {
+			const configuredHeaders = await options.resolveHeaders?.();
 			const resp = await options.fetchImpl(options.url, {
 				method: "POST",
 				headers: {
+					...configuredHeaders,
 					Authorization: `Bearer ${key}`,
 					"Content-Type": "application/json",
 					"User-Agent": USER_AGENT,
@@ -1081,8 +1084,13 @@ function getOpenAIResponsesUrl(model: Model): string {
 		.replace(URL_PATHS.RESPONSES, URL_PATHS.CODEX_RESPONSES);
 }
 
-function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string | undefined): Headers {
-	const headers = new Headers(model.headers ?? {});
+function buildOpenAIImageHeaders(
+	model: Model,
+	configuredHeaders: Record<string, string> | undefined,
+	apiKey: string,
+	sessionId: string | undefined,
+): Headers {
+	const headers = new Headers(configuredHeaders);
 	headers.set("Content-Type", "application/json");
 	headers.set("Authorization", `Bearer ${apiKey}`);
 
@@ -1141,6 +1149,7 @@ async function parseOpenAIHostedImageSse(response: Response, signal?: AbortSigna
 async function generateOpenAIHostedImage(
 	apiKey: string,
 	model: Model,
+	configuredHeaders: Record<string, string> | undefined,
 	params: ImageGenParams,
 	inputImages: InlineImageData[],
 	fetchImpl: FetchImpl,
@@ -1152,7 +1161,7 @@ async function generateOpenAIHostedImage(
 	const requestBody = buildOpenAIHostedImageRequest(model, promptText, params, inputImages, stream);
 	const response = await fetchImpl(getOpenAIResponsesUrl(model), {
 		method: "POST",
-		headers: buildOpenAIImageHeaders(model, apiKey, sessionId),
+		headers: buildOpenAIImageHeaders(model, configuredHeaders, apiKey, sessionId),
 		body: JSON.stringify(requestBody),
 		signal,
 	});
@@ -1362,10 +1371,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 						const parsed = await withAuth(
 							hostedKey,
-							key =>
+							async key =>
 								generateOpenAIHostedImage(
 									key,
 									hostedModel,
+									await ctx.modelRegistry.resolveModelHeaders(hostedModel, requestSignal),
 									params,
 									resolvedImages,
 									fetchImpl,
@@ -1597,6 +1607,12 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 							url: `${xaiCreds.baseURL}${xaiEndpoint}`,
 							body: xaiBody,
 							apiKey: xaiKey,
+							resolveHeaders: () => {
+								const requestModel = ctx.modelRegistry!.find(xaiCreds.provider, resolvedModel);
+								return requestModel
+									? ctx.modelRegistry!.resolveModelHeaders(requestModel, requestSignal)
+									: ctx.modelRegistry!.getProviderHeaders(xaiCreds.provider);
+							},
 							fetchImpl,
 							signal: requestSignal,
 						});
@@ -1619,12 +1635,17 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						const rawText = await withAuth(
 							apiKey.apiKey,
 							async key => {
+								const requestModel = ctx.modelRegistry!.find("openrouter", resolvedModel);
+								const configuredHeaders = requestModel
+									? await ctx.modelRegistry!.resolveModelHeaders(requestModel, requestSignal)
+									: await ctx.modelRegistry!.getProviderHeaders("openrouter");
 								const resp = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
 									method: "POST",
 									headers: {
+										...configuredHeaders,
+										...getOpenRouterHeaders(),
 										"Content-Type": "application/json",
 										Authorization: `Bearer ${key}`,
-										...getOpenRouterHeaders(),
 									},
 									body: JSON.stringify(requestBody),
 									signal: requestSignal,
@@ -1714,6 +1735,12 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 							url: DEEPINFRA_IMAGES_URL,
 							body: requestBody,
 							apiKey: apiKey.apiKey,
+							resolveHeaders: () => {
+								const requestModel = ctx.modelRegistry!.find("deepinfra", resolvedModel);
+								return requestModel
+									? ctx.modelRegistry!.resolveModelHeaders(requestModel, requestSignal)
+									: ctx.modelRegistry!.getProviderHeaders("deepinfra");
+							},
 							fetchImpl,
 							signal: requestSignal,
 						});

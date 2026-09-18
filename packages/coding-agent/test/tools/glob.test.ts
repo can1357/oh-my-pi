@@ -5,7 +5,8 @@ import { Settings } from "../../src/config/settings";
 import type { ToolSession } from "../../src/tools";
 import { GlobTool } from "../../src/tools/glob";
 import { findUniqueWorkspaceSuffixWithGlobForTest } from "../../src/tools/path-utils";
-import { ToolAbortError, ToolError } from "../../src/tools/tool-errors";
+import { ToolAbortError } from "../../src/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 function createSession(cwd = process.cwd()): ToolSession {
 	return {

@@ -19,7 +19,7 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { TaskEffort } from "../thinking";
+import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -39,21 +39,16 @@ import {
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
-import {
-	type AgentDefinition,
-	type AgentProgress,
-	canSpawnAtDepth,
-	type SingleResult,
-	type StructuredSubagentOutput,
-} from "./types";
+import { type AgentDefinition, canSpawnAtDepth } from "./types";
+import type {
+	AgentProgress,
+	SingleResult,
+	StructuredSubagentOutput,
+	StructuredSubagentSchemaMode,
+	StructuredSubagentSchemaSource,
+} from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import { parseIsolationBackend } from "./worktree";
-
-/** Validation behavior requested for an effective output schema. */
-export type StructuredSubagentSchemaMode = "permissive" | "strict";
-
-/** Where an effective output schema came from. */
-export type StructuredSubagentSchemaSource = "caller" | "agent" | "session" | "none";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
 export type StructuredSubagentSchemaResult = StructuredSubagentOutput;
@@ -276,14 +271,15 @@ export async function resolveEffectiveSubagentPolicy(
 	assertDepthAndSpawnAllowed(request, agentName);
 
 	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
-	const agent = getAgent(discovery.agents, agentName);
+	const agents = [...discovery.agents, ...(request.session.getSessionAgents?.() ?? [])];
+	const agent = getAgent(agents, agentName);
 	if (!agent) {
-		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
+		const available = agents.map(candidate => candidate.name).join(", ") || "none";
 		throw new StructuredSubagentError("preflight", `Unknown agent "${agentName}". Available: ${available}`);
 	}
 	const disabledAgents = request.session.settings.get("task.disabledAgents") as string[];
 	if (disabledAgents.includes(agentName)) {
-		const enabled = discovery.agents
+		const enabled = agents
 			.filter(candidate => !disabledAgents.includes(candidate.name))
 			.map(candidate => candidate.name);
 		throw new StructuredSubagentError(
@@ -479,7 +475,7 @@ function buildExecutorOptions(
 		// parent-bound extension instances while constructing the child.
 		extensionRoots: session.effectiveExtensionRoots?.bind(session),
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
-		preloadedPreparedExtensions: restrictToolNames ? [] : session.preparedExtensions,
+		preloadedPreparedExtensions: session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,

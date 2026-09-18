@@ -15,7 +15,7 @@ import {
 	type ConfiguredThinkingLevel,
 	getConfiguredThinkingLevelMetadata,
 	parseCliThinkingLevel,
-} from "../thinking";
+} from "@oh-my-pi/pi-tui/thinking";
 import { availableEffortSelectors } from "./helpers/effort";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";

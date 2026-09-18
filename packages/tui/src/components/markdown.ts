@@ -988,14 +988,6 @@ const FAST_LINE_START_HAZARD_RE =
 	// chars are in ASCENDING code-point order (no reversed ranges that
 	// rely on engine leniency): * + = – — ─ ━ ═ then the literal `-`.
 	/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|\d{1,9}[.)](?:[ \t]|$)|[*+=–—─━═-](?:[ \t]|$)|(?:[*+=–—─━═-][ \t]*){2,}[ \t]*$)/;
-/** @internal exported for tests — counts fast-tail splice frames. A future
- *  regression that silently disarms the fast path (e.g. an over-broad gate)
- *  leaves byte-identity intact but drops the counter to zero. */
-export let fastTailSplices = 0;
-/** @internal exported for tests — resets the splice counter. */
-export function resetFastTailSplices(): void {
-	fastTailSplices = 0;
-}
 
 /** @internal exported for tests — the grown-line-start block-kind gate. */
 export function fastLineStartHazard(grownLine: string): boolean {
@@ -2069,17 +2061,8 @@ export class Markdown implements Component {
 			return EMPTY_RENDER_LINES;
 		}
 
-		// Replace tabs with spaces, then repair orphan fences in final mode.
-		const tabbed = replaceTabs(this.#text);
-		const normalizedText = this.transientRenderCache ? tabbed : repairOrphanClosingFence(tabbed);
-		if (!this.transientRenderCache && normalizedText.length < tabbed.length) {
-			// repairOrphanClosingFence deleted bytes this frame (orphan fence
-			// removed): the guard-scan memo's checked region is no longer
-			// byte-identical, and a cached false verdict may have been based
-			// on the very CR/ref-def line that was deleted. Invalidate so the
-			// next #lexTokens re-derives on the repaired buffer.
-			this.#lastScanValid = false;
-		}
+		// Fast-path inputs only: signature first, so the append-only branch below
+		// can return without scanning the whole document for tabs.
 		const signature = this.#renderSignature(width, paddingX);
 		// B+ fast path: an append-only, same-line delta re-renders ONLY the
 		// last content row (the paragraph's trailing wrapped row) with the
@@ -2199,14 +2182,26 @@ export class Markdown implements Component {
 						rowEnd: recipe.rowStart + wrapped.length,
 						signature: recipe.signature,
 					};
-					fastTailSplices++;
 					return fastResult;
 				}
 			}
 			// Hazard → disarm until the next real render re-captures.
 			this.#fastTail = undefined;
 		}
-		// Replace tabs with 3 spaces for consistent rendering
+		// Normalize only after the append-only branch: the fast path above
+		// returns without ever reading these, so streaming frames skip the
+		// whole-document tab scan/copy (the delta-only replaceTabs inside the
+		// branch is the only tab work a streamed frame pays).
+		const tabbed = this.#text.includes("\t") ? replaceTabs(this.#text) : this.#text;
+		const normalizedText = this.transientRenderCache ? tabbed : repairOrphanClosingFence(tabbed);
+		if (!this.transientRenderCache && normalizedText.length < tabbed.length) {
+			// repairOrphanClosingFence deleted bytes this frame (orphan fence
+			// removed): the guard-scan memo's checked region is no longer
+			// byte-identical, and a cached false verdict may have been based
+			// on the very CR/ref-def line that was deleted. Invalidate so the
+			// next #lexTokens re-derives on the repaired buffer.
+			this.#lastScanValid = false;
+		}
 
 		// L2: module-level LRU — survives component disposal/recreation across
 		// session-tree navigations. Key encodes every dimension that affects the

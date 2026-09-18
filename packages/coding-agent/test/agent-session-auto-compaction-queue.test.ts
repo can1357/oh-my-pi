@@ -15,6 +15,7 @@ import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/une
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
 
@@ -211,6 +212,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// so consumers must see it as a non-terminal scheduling pause.
 		const agentEndTerminalStates: Array<boolean | undefined> = [];
 		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		// Session subscribers are notified before extension listeners settle, so the
+		// continuation's delay timer is armed some microtasks after
+		// auto_compaction_end reaches this test; wait for the arm itself.
+		const waitSpy = vi.spyOn(scheduler, "wait");
 		session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "auto_compaction_end") onCompactionDone();
 			if (event.type === "agent_end") agentEndTerminalStates.push(event.isTerminal);
@@ -247,7 +252,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 
 		// Wait for compaction completion, then verify waitForIdle blocks on queued continuation.
 		await compactionDone;
-		await Promise.resolve();
+		while (!waitSpy.mock.calls.some(([delayMs]) => delayMs === 100)) {
+			await Promise.resolve();
+		}
 		const idlePromise = session.waitForIdle();
 		let idleResolved = false;
 		void idlePromise.then(() => {
@@ -1626,7 +1633,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("retry.maxRetries", 1);
 		session.settings.set("retry.modelFallback", false);
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
 			session.agent.clearAllQueues();
 		});
@@ -1685,6 +1692,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 		session.agent.emitExternalEvent({ type: "message_end", message: recoveredOverThreshold });
 		await withTimeout(retryEnded, 1000, "Retry end timed out");
+		// Subscribers see auto_retry_end before the retry lifecycle closes behind
+		// the extension notification; the state must settle within the same task.
+		await scheduler.yield();
 		expect(session.isRetrying).toBe(false);
 
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [recoveredOverThreshold] });
@@ -1861,10 +1871,11 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
 
 		await withTimeout(reminderDone, 1000, "Todo reminder timed out");
-		await Promise.resolve();
+		// The extension notification and the resume it precedes settle behind the
+		// agent_end handler that waitForIdle drains.
+		await session.waitForIdle();
 
 		expect(getRuntimeSignals()).toContain("todo:1/3");
 		expect(continueSpy).toHaveBeenCalledTimes(1);
-		await session.waitForIdle();
 	});
 });

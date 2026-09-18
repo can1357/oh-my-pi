@@ -10,11 +10,11 @@ import {
 	getBtwLatestTurn,
 	getBtwTurns,
 } from "../../session/btw-history";
-import { TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
-import { BtwHistoryPanel } from "../components/btw-history-panel";
-import { BtwPanelComponent } from "../components/btw-panel";
-import { sanitizeErrorLine } from "../components/error-block";
+import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
+import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import type { InteractiveModeContext } from "../types";
 
 interface BtwRequest {

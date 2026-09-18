@@ -6,7 +6,7 @@ import { getMCPConfigPath, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import { formatModelRoleAlias, getKnownRoleIds } from "../config/model-roles";
 import { readMCPConfigFile } from "../mcp/config-writer";
 import { collectMcpServerNames } from "../modes/controllers/mcp-command-controller";
-import { getConfiguredThinkingLevelMetadata } from "../thinking";
+import { getConfiguredThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import { expandTilde } from "../tools/path-utils";
 import { availableEffortSelectors } from "./helpers/effort";
 import type { SubcommandDef, TuiSlashCommandRuntime } from "./types";

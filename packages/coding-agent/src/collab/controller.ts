@@ -11,9 +11,9 @@
  */
 import { randomBytes } from "node:crypto";
 import { logger } from "@oh-my-pi/pi-utils";
-import { sanitizeDisplayLine } from "../modes/components/extensions/display-text";
+import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import type { InteractiveModeContext } from "../modes/types";
-import { TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import { TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { CollabHost, CollabHostStoppedError } from "./host";
 import type { CollabAccess } from "./registry";
 

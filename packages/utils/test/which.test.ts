@@ -67,4 +67,18 @@ describe("$which", () => {
 		expect($which(command, { cache: WhichCachePolicy.Bypass })).toBe(stubbedPath);
 		expect(whichSpy).toHaveBeenCalledWith(command, expect.objectContaining({ PATH: process.env.PATH }));
 	});
+
+	it("keeps cache entries distinct when cwd/PATH share a concatenation", () => {
+		const first = `/tmp/which-first-${process.pid}`;
+		const second = `/tmp/which-second-${process.pid}`;
+		const whichSpy = vi
+			.spyOn(Bun, "which")
+			.mockImplementation((_command: string, options?: Bun.WhichOptions) =>
+				options?.cwd === "ab" && options?.PATH === "c" ? first : second,
+			);
+
+		expect($which("cmd", { cwd: "ab", PATH: "c" })).toBe(first);
+		expect($which("cmd", { cwd: "a", PATH: "bc" })).toBe(second);
+		expect(whichSpy).toHaveBeenCalledTimes(2);
+	});
 });

@@ -257,8 +257,11 @@ describe("searchCodex model selection", () => {
 		getProviderBaseUrl() {
 			return "https://proxy.example/backend-api";
 		},
-		getProviderHeaders() {
+		async getProviderHeaders() {
 			return { "X-Proxy-Tenant": "tenant-1" };
+		},
+		async resolveModelHeaders(model: { headers?: Record<string, string> }) {
+			return model.headers;
 		},
 		hasCommandBackedApiKey() {
 			return false;
