@@ -564,6 +564,34 @@ describe("AgentSession advisor toggle", () => {
 		expect(advisorPrompt).toContain("Keep advice concrete.");
 		expect(advisorPrompt).toContain("Review module boundaries.");
 	});
+	it("rebuilds the default advisor after advisor.reviewMode setting change", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.settings.set("advisor.reviewMode", "turn");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const turnAgent = session.getAdvisorAgent();
+		expect(turnAgent).toBeDefined();
+
+		// Change reviewMode and re-enable — simulates selector-controller rebuild.
+		session.settings.set("advisor.reviewMode", "agent-end");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const agentEndAgent = session.getAdvisorAgent();
+		expect(agentEndAgent).toBeDefined();
+		expect(agentEndAgent).not.toBe(turnAgent);
+	});
+	it("rebuilds the default advisor after advisor.reviewInterval setting change", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.settings.set("advisor.reviewInterval", 1);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const interval1Agent = session.getAdvisorAgent();
+		expect(interval1Agent).toBeDefined();
+
+		// Change reviewInterval and re-enable.
+		session.settings.set("advisor.reviewInterval", 3);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const interval3Agent = session.getAdvisorAgent();
+		expect(interval3Agent).toBeDefined();
+		expect(interval3Agent).not.toBe(interval1Agent);
+	});
 	it("retains cumulative advisor cost after an in-session history rewrite", async () => {
 		const advisor = enableAdvisor();
 		appendAdvisorCost(advisor, 0.5, 1);
