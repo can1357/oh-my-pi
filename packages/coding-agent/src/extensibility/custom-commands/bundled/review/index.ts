@@ -5,7 +5,8 @@
  * 1. Review against a base branch (PR style)
  * 2. Review uncommitted changes
  * 3. Review a specific commit
- * 4. Custom review instructions
+ * 4. Review a specific PR (open pull requests in the current repo, with search)
+ * 5. Custom review instructions
  *
  * Runs VCS diffs upfront, parses results, filters noise, and provides
  * rich context for the orchestrating agent to distribute work across
@@ -13,6 +14,8 @@
  */
 
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
 import type { HookCommandContext } from "../../../../extensibility/hooks/types";
@@ -20,6 +23,7 @@ import reviewCustomRequestTemplate from "../../../../prompts/review-custom-reque
 import reviewHeadlessRequestTemplate from "../../../../prompts/review-headless-request.md" with { type: "text" };
 import reviewRequestTemplate from "../../../../prompts/review-request.md" with { type: "text" };
 import * as gh from "../../../../tools/gh";
+import { github } from "../../../../utils/github";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -63,7 +67,18 @@ type ReviewMenuChoice =
 	| { kind: "base-branch" }
 	| { kind: "uncommitted" }
 	| { kind: "commit" }
+	| { kind: "pick-pr" }
 	| { kind: "custom" };
+
+interface PrListItem {
+	number?: number;
+	title?: string;
+	author?: { login?: string } | null;
+	isDraft?: boolean;
+	url?: string;
+}
+
+type PickablePr = PrListItem & { number: number };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Exclusion patterns for noise files
@@ -276,6 +291,9 @@ function buildHeadlessReviewPrompt(focus?: string): string {
 }
 
 const REVIEW_CONTEXT_PR_LIMIT = 3;
+/** `gh pr list` page size. 100 is gh's per-page maximum. */
+const PR_PICKER_LIMIT = 100;
+const PR_PICKER_SEARCH_ENTRY = "Search open pull requests…";
 const REPO_SEGMENT_PATTERN = /^[A-Za-z0-9_.-]+$/;
 const PR_SCHEME_PATTERN = /^pr:\/\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/([1-9]\d*)(?:\/diff(?:\/(?:all|[1-9]\d*))?)?$/;
 const PR_REF_TEXT_PATTERN = /https:\/\/github\.com\/[^\s<>"']+|pr:\/\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/[^\s<>"']+/g;
@@ -472,6 +490,121 @@ function findRecentPrRefs(ctx: HookCommandContext, limit: number): ReviewPrRef[]
 	return refs;
 }
 
+function formatPrPickerLabel(item: PrListItem, number: number): string {
+	const collapsed = (item.title ?? "(no title)").replace(/[\r\n\x00-\x1F\x7F]+/g, " ");
+	const singleLine = replaceTabs(collapsed).replace(/\s+/g, " ").trim() || "(no title)";
+	const title = truncateToWidth(singleLine, TRUNCATE_LENGTHS.TITLE);
+	const author = item.author?.login?.trim() ? item.author.login.trim() : "unknown";
+	const draftSuffix = item.isDraft ? "  [draft]" : "";
+	return `#${number}  ${title}  @${author}${draftSuffix}`;
+}
+
+function prListItemToRef(repo: string, number: number, url: string | undefined): ReviewPrRef {
+	const parsed = url ? parseGithubPrUrl(url) : undefined;
+	if (parsed) return parsed;
+	return { repo, number, raw: `pr://${repo}/${number}`, kind: "pr-url" };
+}
+
+function pickablePrs(items: PrListItem[]): PickablePr[] {
+	return items.filter(
+		(item): item is PickablePr =>
+			typeof item.number === "number" && Number.isSafeInteger(item.number) && item.number > 0,
+	);
+}
+
+async function fetchOpenPullRequests(
+	api: CustomCommandAPI,
+	ctx: HookCommandContext,
+	repo: string,
+	search: string | undefined,
+): Promise<PrListItem[] | undefined> {
+	const args = [
+		"pr",
+		"list",
+		"--repo",
+		repo,
+		"--state",
+		"open",
+		"--limit",
+		String(PR_PICKER_LIMIT),
+		"--json",
+		"number,title,author,isDraft,url",
+	];
+	if (search !== undefined) args.push("--search", search);
+	ctx.ui.setStatus("review", "Loading open pull requests…");
+	try {
+		return await github.json<PrListItem[]>(api.cwd, args, undefined, { repoProvided: true });
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		ctx.ui.notify(`Failed to list open pull requests in ${repo}: ${message}`, "error");
+		return undefined;
+	} finally {
+		ctx.ui.setStatus("review", undefined);
+	}
+}
+
+async function selectPullRequestRef(api: CustomCommandAPI, ctx: HookCommandContext): Promise<ReviewPrRef | undefined> {
+	let repo: string;
+	try {
+		repo = await gh.resolveDefaultRepoMemoized(api.cwd);
+	} catch (err) {
+		const message = err instanceof Error ? err.message : String(err);
+		ctx.ui.notify(`Failed to resolve repository for PR picker: ${message}`, "error");
+		return undefined;
+	}
+	const fullItems = await fetchOpenPullRequests(api, ctx, repo, undefined);
+	if (fullItems === undefined) return undefined;
+	const validFullItems = pickablePrs(fullItems);
+	if (validFullItems.length === 0) {
+		ctx.ui.notify(`No open pull requests in ${repo}`, "warning");
+		return undefined;
+	}
+	let activeQuery: string | undefined;
+	let currentItems = validFullItems;
+	for (;;) {
+		const rows = currentItems.map(item => ({ label: formatPrPickerLabel(item, item.number), item }));
+		const labels = rows.map(row => row.label);
+		labels.push(PR_PICKER_SEARCH_ENTRY);
+		const title =
+			activeQuery === undefined
+				? `Open pull requests in ${repo}`
+				: `Open pull requests in ${repo} matching "${activeQuery}"`;
+		const selected = await ctx.ui.select(title, labels);
+		if (selected === undefined) return undefined;
+		if (selected !== PR_PICKER_SEARCH_ENTRY) {
+			const match = rows.find(row => row.label === selected);
+			if (!match) return undefined;
+			return prListItemToRef(repo, match.item.number, match.item.url);
+		}
+		// The hint rides in the title: `HookInputComponent` accepts a placeholder
+		// and never renders it, so a second argument would be invisible.
+		const input = await ctx.ui.input("Search open pull requests — title, author, or #123");
+		if (input === undefined) continue;
+		const trimmed = input.trim();
+		if (trimmed === "") {
+			activeQuery = undefined;
+			currentItems = validFullItems;
+			continue;
+		}
+		const numericCandidate = trimmed.startsWith("#") ? trimmed.slice(1) : trimmed;
+		const numeric = parsePositivePrNumber(numericCandidate);
+		if (numeric !== undefined) {
+			return { repo, number: numeric, raw: `pr://${repo}/${numeric}`, kind: "pr-url" };
+		}
+		const filtered = await fetchOpenPullRequests(api, ctx, repo, trimmed);
+		if (filtered === undefined) return undefined;
+		const validFiltered = pickablePrs(filtered);
+		if (validFiltered.length === 0) {
+			ctx.ui.notify(`No open pull requests matching "${trimmed}" in ${repo}`, "warning");
+			activeQuery = undefined;
+			currentItems = validFullItems;
+			continue;
+		}
+		activeQuery = trimmed;
+		currentItems = validFiltered;
+	}
+}
+
 export class ReviewCommand implements CustomCommand {
 	name = "review";
 	description = "Launch interactive code review";
@@ -506,11 +639,15 @@ export class ReviewCommand implements CustomCommand {
 				label: "3. Review a specific commit",
 				value: { kind: "commit" },
 			},
+			{
+				label: "4. Review a specific PR",
+				value: { kind: "pick-pr" },
+			},
 		];
 
 		if (!extraInstructions) {
 			choices.push({
-				label: "4. Custom review instructions",
+				label: "5. Custom review instructions",
 				value: { kind: "custom" },
 			});
 		}
@@ -612,6 +749,12 @@ export class ReviewCommand implements CustomCommand {
 					"Commit has no diff content",
 					{ filteredMessage: "No reviewable files in commit (all changes filtered out)" },
 				);
+			}
+
+			case "pick-pr": {
+				const ref = await selectPullRequestRef(this.api, ctx);
+				if (!ref) return undefined;
+				return buildPrReviewPrompt(this.api, ctx, ref, extraInstructions ?? "");
 			}
 
 			case "custom": {

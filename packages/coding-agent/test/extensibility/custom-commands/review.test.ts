@@ -8,6 +8,7 @@ import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
+import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -46,10 +47,19 @@ interface SelectCall {
 	title: string;
 	options: string[];
 }
-
 interface NotifyCall {
 	message: string;
 	type: "info" | "warning" | "error" | undefined;
+}
+
+interface InputCall {
+	title: string;
+	placeholder: string | undefined;
+}
+
+interface StatusCall {
+	key: string;
+	text: string | undefined;
 }
 
 function makePrDiffLookup(unified: string): ViewLookupResult<PrDiffPayload> {
@@ -104,14 +114,18 @@ describe("ReviewCommand", () => {
 	function createContext(options?: {
 		selectedMode?: string;
 		selectResults?: string[];
+		inputResults?: Array<string | undefined>;
 		editorValue?: string | undefined;
 		sessionEntries?: SessionEntry[];
 		branchEntries?: SessionEntry[];
 		onEditorCall?: (call: EditorCall) => void;
 		onSelectCall?: (call: SelectCall) => void;
+		onInputCall?: (call: InputCall) => void;
+		onStatusCall?: (call: StatusCall) => void;
 		onNotify?: (call: NotifyCall) => void;
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
+		const inputResults = [...(options?.inputResults ?? [])];
 		return {
 			hasUI: true,
 			sessionManager: {
@@ -122,8 +136,15 @@ describe("ReviewCommand", () => {
 				select: (title: string, selectOptions: string[]) => {
 					options?.onSelectCall?.({ title, options: selectOptions });
 					return Promise.resolve(
-						selectResults.shift() ?? options?.selectedMode ?? "4. Custom review instructions",
+						selectResults.shift() ?? options?.selectedMode ?? "5. Custom review instructions",
 					);
+				},
+				input: (title: string, placeholder?: string) => {
+					options?.onInputCall?.({ title, placeholder });
+					return Promise.resolve(inputResults.shift());
+				},
+				setStatus: (key: string, text: string | undefined) => {
+					options?.onStatusCall?.({ key, text });
 				},
 				editor: (
 					title: string,
@@ -555,8 +576,92 @@ describe("ReviewCommand", () => {
 			"1. Review against a base branch (PR Style)",
 			"2. Review uncommitted changes",
 			"3. Review a specific commit",
-			"4. Custom review instructions",
+			"4. Review a specific PR",
+			"5. Custom review instructions",
 		]);
+	});
+
+	it("reviews a PR picked from the open pull request list", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const listSpy = spyOn(github, "json").mockResolvedValue([
+			{ number: 42, title: "Fix login", author: { login: "octocat" }, url: "https://github.com/owner/repo/pull/42" },
+			{ number: 43, title: "WIP thing", author: { login: "hubot" }, isDraft: true },
+		]);
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "#42  Fix login  @octocat"],
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#42");
+		expect(result!).toContain("src/pr.ts");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 42 });
+		expect(listSpy).toHaveBeenCalled();
+	});
+
+	it("searches open pull requests and reviews a filtered pick", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const fullList = [
+			{ number: 42, title: "Fix login", author: { login: "octocat" } },
+			{ number: 43, title: "Other work", author: { login: "hubot" } },
+		];
+		const filteredList = [{ number: 7, title: "Filtered match", author: { login: "octocat" } }];
+		const listSpy = spyOn(github, "json").mockImplementation(async (_cwd: string, args: string[]) => {
+			const searchIndex = args.indexOf("--search");
+			return (searchIndex === -1 ? fullList : filteredList) as never;
+		});
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const selectCalls: SelectCall[] = [];
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "Search open pull requests…", "#7  Filtered match  @octocat"],
+			inputResults: ["match"],
+			onSelectCall: call => {
+				selectCalls.push(call);
+			},
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#7");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 7 });
+		expect(
+			listSpy.mock.calls.some(
+				call => (call[1] as string[]).includes("--search") && (call[1] as string[]).includes("match"),
+			),
+		).toBe(true);
+		const filteredSelect = selectCalls.find(
+			call => call.title === 'Open pull requests in owner/repo matching "match"',
+		);
+		expect(filteredSelect?.options).toContain("#7  Filtered match  @octocat");
+	});
+
+	it("resolves a numeric search query directly without a search request", async () => {
+		const dir = await createTempDir();
+		spyOn(gh, "resolveDefaultRepoMemoized").mockResolvedValue("owner/repo");
+		const listSpy = spyOn(github, "json").mockResolvedValue([
+			{ number: 42, title: "Fix login", author: { login: "octocat" } },
+		]);
+		const diffSpy = spyOn(gh, "getOrFetchPrDiff").mockResolvedValue(makePrDiffLookup(SAMPLE_PR_DIFF));
+		const command = new ReviewCommand({ cwd: dir } as unknown as CustomCommandAPI);
+		const ctx = createContext({
+			selectResults: ["4. Review a specific PR", "Search open pull requests…"],
+			inputResults: ["#123"],
+		});
+
+		const result = await command.execute([], ctx);
+
+		expect(result).toBeDefined();
+		expect(result!).toContain("PR owner/repo#123");
+		expect(diffSpy).toHaveBeenCalledWith({ cwd: dir, repo: "owner/repo", number: 123 });
+		expect(listSpy).toHaveBeenCalledTimes(1);
+		expect(listSpy.mock.calls.every(call => !(call[1] as string[]).includes("--search"))).toBe(true);
 	});
 
 	it("keeps base branch review mode working", async () => {
