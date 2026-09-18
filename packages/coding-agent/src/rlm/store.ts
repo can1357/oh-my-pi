@@ -56,6 +56,10 @@ export interface RlmMetrics {
 	failOpen: number;
 	/** Ordinary read/grep resolves of rlm://. */
 	resourceResolves: number;
+	/** Grant ranges selected via search/select (cumulative). */
+	grantsSelected: number;
+	/** Query/subcall abstentions that skipped worker inference (empty search). */
+	workerCallsAvoided: number;
 }
 
 
@@ -112,6 +116,8 @@ export class RlmStore {
 		subcalls: 0,
 		failOpen: 0,
 		resourceResolves: 0,
+		grantsSelected: 0,
+		workerCallsAvoided: 0,
 	};
 
 	#disposed = false;
@@ -346,6 +352,8 @@ export class RlmStore {
 			`subcalls=${m.subcalls}`,
 			`fail_open=${m.failOpen}`,
 			`rlm_reads=${m.resourceResolves}`,
+			`grants_selected=${m.grantsSelected}`,
+			`worker_avoided=${m.workerCallsAvoided}`,
 		];
 		if (this.budget.maxCost > 0) parts.push(`cost=${this.budget.cost.toFixed(4)}/${this.budget.maxCost}`);
 		if (this.budget.wallClockMs > 0) {

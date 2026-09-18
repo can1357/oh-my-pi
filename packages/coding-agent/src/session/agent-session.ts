@@ -81,6 +81,14 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import {
+	buildRlmSessionAccounting,
+	exportRlmExperimentRecord,
+	type EvidenceQualityLabel,
+	type RlmSessionAccounting,
+} from "../rlm/accounting";
+import { getRlmRuntime, rlmEnabled } from "../rlm/session";
+
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
@@ -9297,15 +9305,99 @@ export class AgentSession {
 		conversationKey?: string;
 		onTextDelta?: (delta: string) => void;
 	}): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
-		return this.runEphemeralTurn({
+		const purpose = args.purpose ?? "rlm";
+		const result = await this.runEphemeralTurn({
 			promptText: args.promptText,
 			history: [],
 			isolated: true,
-			conversationKey: args.conversationKey ?? `rlm:${args.purpose ?? "worker"}:${Snowflake.next()}`,
+			conversationKey: args.conversationKey ?? `rlm:${purpose}:${Snowflake.next()}`,
 			signal: args.signal,
 			onTextDelta: args.onTextDelta,
 			dedupeReply: false,
 		});
+		// Durable side-channel usage for whole-session accounting (purpose=rlm).
+		// Partitioned out of "root" by buildRlmSessionAccounting — not double-counted there.
+		const usage = result.assistantMessage.usage;
+		const model = this.model;
+		if (usage && model && (purpose === "rlm" || purpose.startsWith("rlm"))) {
+			try {
+				this.sessionManager.appendModelUsage(
+					{
+						purpose: purpose.startsWith("rlm") ? purpose : "rlm",
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage,
+						stopReason: result.assistantMessage.stopReason ?? "stop",
+					},
+					{
+						sessionId: this.sessionManager.getSessionId(),
+						parentId: this.sessionManager.getLeafId(),
+					},
+				);
+			} catch {
+				// fail-open: accounting prefers ledger when model_usage missing
+			}
+		}
+		return result;
+	}
+
+	/**
+	 * Whole-session RLM + root usage partition for experiment export.
+	 * Does not invent root counters — reads sessionManager + RLM runtime.
+	 */
+	getRlmSessionAccounting(options?: {
+		taskId?: string;
+		evidenceQuality?: EvidenceQualityLabel;
+		durationMs?: number;
+		retries?: number;
+	}): RlmSessionAccounting {
+		const raw = this.sessionManager.getUsageStatistics();
+		const store = (this as { rlmStore?: import("../rlm/store").RlmStore }).rlmStore;
+		let runtime: import("../rlm/runtime").RlmRuntime | undefined;
+		try {
+			if (rlmEnabled(this as never) || store) {
+				runtime = getRlmRuntime(this as never);
+			}
+		} catch {
+			runtime = undefined;
+		}
+		return buildRlmSessionAccounting({
+			sessionId: this.sessionManager.getSessionId(),
+			taskId: options?.taskId,
+			branch: this.sessionManager.getBranch(),
+			messages: this.messages as never,
+			sessionRaw: {
+				input: raw.input,
+				output: raw.output,
+				cacheRead: raw.cacheRead,
+				cacheWrite: raw.cacheWrite,
+				total: raw.totalTokens,
+				cost: raw.cost,
+			},
+			runtime: runtime ?? undefined,
+			store: store ?? runtime?.store,
+			config: {
+				contextEngine: this.settings.get("context.engine") as string | undefined,
+				rlmEnabled: this.settings.get("rlm.enabled") === true,
+				rlmMaxDepth: this.settings.get("rlm.maxDepth") as number | undefined,
+			},
+			durationMs: options?.durationMs,
+			evidenceQuality: options?.evidenceQuality,
+			retries: options?.retries,
+		});
+	}
+
+	/** Append one experiment JSONL row under ~/.omp/rlm-experiments. */
+	exportRlmExperimentRecord(options?: {
+		taskId?: string;
+		evidenceQuality?: EvidenceQualityLabel;
+		durationMs?: number;
+		dir?: string;
+	}): { accounting: RlmSessionAccounting; jsonlPath: string; snapshotPath?: string } {
+		const accounting = this.getRlmSessionAccounting(options);
+		const paths = exportRlmExperimentRecord(accounting, { dir: options?.dir });
+		return { accounting, ...paths };
 	}
 
 	/**

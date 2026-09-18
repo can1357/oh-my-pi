@@ -86,3 +86,19 @@ export {
 export type { ContextEngine, RlmSessionHost } from "./session";
 export { appendRlmRuntimeGuide, RLM_RUNTIME_GUIDE, rlmGuideIsAppendOnly } from "./guide";
 export { wrapToolWithRlmSpill } from "./wrap";
+
+export {
+	RLM_ACCOUNTING_SCHEMA_VERSION,
+	buildRlmSessionAccounting,
+	collectRlmSessionAccounting,
+	exportRlmExperimentRecord,
+	formatRlmAccountingSummary,
+} from "./accounting";
+export type {
+	AccountingSources,
+	EvidenceQualityLabel,
+	ExperimentRecordOptions,
+	RlmOpsCounters,
+	RlmSessionAccounting,
+	TokenBucket,
+} from "./accounting";

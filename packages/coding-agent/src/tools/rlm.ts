@@ -1,6 +1,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { buildRlmSessionAccounting, formatRlmAccountingSummary, exportRlmExperimentRecord } from "../rlm/accounting";
 import { rlmQuery } from "../rlm/query";
 import { parseGrantRanges, selectGrantsFromSearch } from "../rlm/select-grants";
 import { getRlmRuntime, rlmEnabled } from "../rlm/session";
@@ -10,9 +11,9 @@ import { toolResult } from "./tool-result";
 
 const rlmSchema = type({
 	op: type
-		.enumerated("peek", "search", "query", "subcall", "status", "select")
+		.enumerated("peek", "search", "query", "subcall", "status", "select", "export")
 		.describe(
-			"peek a handle, search, select grants from search, query a slice (or search-selected ranges), depth-1 subcall, or status",
+			"peek/search/select/query/subcall/status, or export session accounting JSONL",
 		),
 	"handle?": type("string").describe("rlm://h/<id> from a spilled stub — also readable via read/grep rlm://h/<id>"),
 	"handles?": type("string").describe("comma/space-separated handles for subcall multi-hop grants"),
@@ -46,7 +47,7 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 	readonly summary = "Peek, search, select grants, query, or depth-1 subcall over spilled long context";
 	readonly description =
 		"Inspect spilled evidence that is not in the neural context. " +
-		"op=peek|search|select|query|subcall|status. Handles look like rlm://h/<id> " +
+		"op=peek|search|select|query|subcall|status|export. Handles look like rlm://h/<id> " +
 		"(also ordinary `read` / `grep` on rlm://h/<id>). " +
 		"For query: pass pattern (or ranges) so the worker sees search-selected slices — not the first fixed 8KiB. " +
 		"subcall requires rlm.maxDepth≥1 and a task over one or more granted handles.";
@@ -64,7 +65,45 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 		const runtime = getRlmRuntime(this.session);
 		const store = runtime.store;
 		if (params.op === "status") {
-			return toolResult<RlmToolDetails>({ op: "status" }).text(runtime.status()).done();
+			const lines = [runtime.status()];
+			try {
+				const sm = (this.session as { sessionManager?: { getBranch?: () => unknown[]; getSessionId?: () => string; getUsageStatistics?: () => { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number } } }).sessionManager;
+				const accounting = buildRlmSessionAccounting({
+					sessionId: sm?.getSessionId?.() ?? (this.session as { sessionId?: string }).sessionId,
+					branch: (sm?.getBranch?.() ?? []) as never,
+					sessionRaw: sm?.getUsageStatistics?.(),
+					runtime,
+					store: store,
+					config: {
+						contextEngine: this.session.settings?.get?.("context.engine") as string | undefined,
+						rlmEnabled: this.session.settings?.get?.("rlm.enabled") === true,
+						rlmMaxDepth: this.session.settings?.get?.("rlm.maxDepth") as number | undefined,
+					},
+				});
+				lines.push(formatRlmAccountingSummary(accounting));
+				if (!accounting.doubleCountCheck.ok) lines.push(`accounting_warn: ${accounting.doubleCountCheck.detail}`);
+			} catch (err) {
+				lines.push(`accounting_unavailable: ${err instanceof Error ? err.message : String(err)}`);
+			}
+			return toolResult<RlmToolDetails>({ op: "status" }).text(lines.join("\n")).done();
+		}
+		if (params.op === "export") {
+			const sm = (this.session as { sessionManager?: { getBranch?: () => unknown[]; getSessionId?: () => string; getUsageStatistics?: () => { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number } } }).sessionManager;
+			const accounting = buildRlmSessionAccounting({
+				sessionId: sm?.getSessionId?.() ?? (this.session as { sessionId?: string }).sessionId,
+				branch: (sm?.getBranch?.() ?? []) as never,
+				sessionRaw: sm?.getUsageStatistics?.(),
+				runtime,
+				store,
+				config: {
+					contextEngine: this.session.settings?.get?.("context.engine") as string | undefined,
+					rlmEnabled: true,
+				},
+			});
+			const paths = exportRlmExperimentRecord(accounting);
+			return toolResult<RlmToolDetails>({ op: "export" })
+				.text(`${formatRlmAccountingSummary(accounting)}\njsonl=${paths.jsonlPath}${paths.snapshotPath ? `\nsnapshot=${paths.snapshotPath}` : ""}`)
+				.done();
 		}
 
 		if (params.op === "subcall") {
@@ -134,10 +173,12 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 					mode: params.mode === "regex" ? "regex" : "literal",
 				});
 				if (selected.empty) {
+					store.metrics.workerCallsAvoided += 1;
 					return toolResult<RlmToolDetails>({ op: "select", handle: params.handle })
 						.text("no matches — no grants")
 						.done();
 				}
+				store.metrics.grantsSelected += selected.grants.length;
 				const text = [
 					`grantedBytes=${selected.grantedBytes}${selected.truncated ? " truncated" : ""}`,
 					...selected.grants.map(g => `${g.handle}[${g.start ?? 0}:${g.end ?? "?"}]`),

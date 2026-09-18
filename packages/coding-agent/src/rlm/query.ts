@@ -118,6 +118,7 @@ export async function rlmQuery(
 		}
 		if (selection.empty || selection.grants.length === 0) {
 			store.metrics.queries += 1;
+			store.metrics.workerCallsAvoided += 1;
 			store.note("query", `no search hits for patterns on ${handle}`, true);
 			return {
 				text: "no matching evidence in spilled corpus — abstain rather than guess (fail-open)",
@@ -127,6 +128,7 @@ export async function rlmQuery(
 				grantedBytes: 0,
 			};
 		}
+		store.metrics.grantsSelected += selection.grants.length;
 		grants = selection.grants;
 	} else {
 		grants = [{ handle, start: args.start ?? 0, end: args.end }];
