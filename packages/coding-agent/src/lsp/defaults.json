@@ -373,6 +373,13 @@
 			}
 		}
 	},
+	"ansible": {
+		"command": "ansible-language-server",
+		"args": ["--stdio"],
+		"fileTypes": [".yml", ".yaml"],
+		"languageId": "ansible",
+		"rootMarkers": ["ansible.cfg", ".ansible-lint", "ansible-navigator.yml"]
+	},
 	"yamlls": {
 		"command": "yaml-language-server",
 		"args": ["--stdio"],
