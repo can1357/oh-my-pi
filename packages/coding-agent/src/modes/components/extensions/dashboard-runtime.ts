@@ -1,5 +1,5 @@
 import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
-import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, logger, Serial } from "@oh-my-pi/pi-utils";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
 import type { Settings } from "../../../config/settings";
 import { getAllProvidersInfo, isForeignUserProvider, isUserSourceEnabled } from "../../../discovery";
@@ -19,20 +19,41 @@ export function createExtensionDashboardRuntime(options: {
 	mcpManager?: MCPManager;
 	eventBus?: EventBus;
 	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
+	onSkillsChanged?: () => Promise<void>;
 	browserMcpFilterEnabled?: () => boolean;
 }): ExtensionDashboardRuntime {
-	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
+	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, onSkillsChanged, browserMcpFilterEnabled } = options;
+	const skillsRefresh = new Serial();
+	let pendingSkillsRefresh = Promise.resolve();
+	const refreshSkills = () => {
+		if (!onSkillsChanged) return;
+		pendingSkillsRefresh = skillsRefresh.run(onSkillsChanged).catch(error => {
+			logger.warn("Failed to refresh skills after extension toggle", { error: String(error) });
+		});
+	};
 	return {
 		getDisabledExtensions: () => settings.get("disabledExtensions") ?? [],
-		setDisabledExtensions: ids => settings.set("disabledExtensions", ids),
+		setDisabledExtensions(ids) {
+			const previous = new Set((settings.get("disabledExtensions") ?? []).filter(id => id.startsWith("skill:")));
+			const next = new Set(ids.filter(id => id.startsWith("skill:")));
+			settings.set("disabledExtensions", ids);
+			if (previous.size !== next.size || [...next].some(id => !previous.has(id))) refreshSkills();
+		},
 		getProviders: () =>
 			getAllProvidersInfo().map(provider => ({
 				...provider,
 				userSourceEnabled: isUserSourceEnabled(provider.id),
 				foreignUserSource: isForeignUserProvider(provider.id),
 			})),
-		loadExtensions: disabledIds => loadAllExtensions(cwd, disabledIds),
-		toggleProvider,
+		async loadExtensions(disabledIds) {
+			await pendingSkillsRefresh;
+			return loadAllExtensions(cwd, disabledIds);
+		},
+		toggleProvider(providerId) {
+			const enabled = toggleProvider(providerId);
+			refreshSkills();
+			return enabled;
+		},
 		toggleUserSource,
 		async persistMcpToggle(name, enabled, sourcePath) {
 			await setMcpServerEnabled({

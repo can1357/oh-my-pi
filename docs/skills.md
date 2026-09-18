@@ -126,6 +126,9 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 
 ## Runtime usage behavior
 
+Changing a skill's enabled state in `/extensions` refreshes the current session's skill list, system prompt metadata,
+and `/skill:<name>` commands without restarting. Discovery-provider toggles also refresh their skills.
+
 ### System prompt exposure
 
 System prompt construction (`src/system-prompt.ts`) uses discovered skills as follows:

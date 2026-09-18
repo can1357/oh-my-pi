@@ -3,6 +3,7 @@
 ## [Unreleased]
 ### Fixed
 
+- Fixed skill toggles in `/extensions` taking effect only after restarting; the active session now refreshes its skills when their availability changes ([#12220](https://github.com/can1357/oh-my-pi/issues/12220); [#12424](https://github.com/can1357/oh-my-pi/pull/12424) by [@Quiyyy](https://github.com/Quiyyy)).
 - Fixed memory recall blocks carrying a minute-resolution `Current time` stamp that dirtied the cached system prompt on every refresh; recall rows already carry dates, so the stamp is removed.
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
 
