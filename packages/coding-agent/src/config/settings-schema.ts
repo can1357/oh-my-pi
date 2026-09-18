@@ -6091,6 +6091,19 @@ export const SETTINGS_SCHEMA = {
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
 
+	"extensionHandlers.timeoutMs": {
+		type: "number",
+		default: 30_000,
+		ui: {
+			tab: "tools",
+			group: "Extensions",
+			label: "Handler Timeout (ms)",
+			description:
+				"Positive finite wall-clock timeout for extension handlers. " +
+				"When explicitly configured, toolCallTimeoutMs overrides this for tool_call; session_shutdown keeps its dedicated 2s cap",
+		},
+	},
+
 	"extensionHandlers.toolCallTimeoutMs": {
 		type: "number",
 		default: 30_000,
@@ -6099,7 +6112,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Extensions",
 			label: "Tool Call Handler Timeout (ms)",
 			description:
-				"Positive finite active-work timeout for extension tool_call handlers; invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
+				"Positive finite active-work timeout for extension tool_call handlers; when unconfigured, extensionHandlers.timeoutMs applies, invalid values use 30000ms, and time awaiting OMP-owned dialogs does not count",
 		},
 	},
 

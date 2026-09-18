@@ -672,6 +672,9 @@
 - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
 
+### Added
+
+- Added the `extensionHandlers.timeoutMs` setting: a global wall-clock timeout for all extension handler events, so long legitimate workloads (e.g. multi-model compaction) are no longer killed by the fixed 30s cap ([#11286](https://github.com/can1357/oh-my-pi/issues/11286)).
 ## [18.1.17] - 2026-09-10
 
 ### Added
