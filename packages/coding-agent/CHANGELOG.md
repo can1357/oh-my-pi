@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Hashline edit errors now tell agents to replace incompatible patch bodies on the first rejection and keep echoed malformed input bounded, instead of only asking for a snapshot header ([#11771](https://github.com/can1357/oh-my-pi/issues/11771); [#12085](https://github.com/can1357/oh-my-pi/pull/12085) by [@vwsa](https://github.com/vwsa)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
@@ -123,8 +127,6 @@
 - A corrupted or externally modified session file no longer leaves the session impossible to close; a subsequent Ctrl+C exits without rewriting the session log.
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked ([#12236](https://github.com/can1357/oh-my-pi/pull/12236) by [@shivamklr](https://github.com/shivamklr)).
-- Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked.
-- Hashline edit errors now tell agents to replace incompatible patch bodies on the first rejection instead of only asking for a snapshot header ([#11771](https://github.com/can1357/oh-my-pi/issues/11771); [#12085](https://github.com/can1357/oh-my-pi/pull/12085) by [@vwsa](https://github.com/vwsa)).
 
 ## [18.2.1] - 2026-09-15
 

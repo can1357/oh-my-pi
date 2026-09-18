@@ -14,10 +14,10 @@ use super::{
 	messages::{
 		self, BARE_BODY_AUTO_PIPED_WARNING, BARE_RANGE_AUTO_PUT_WARNING, COLON_ON_REGISTER_PUT,
 		COLONLESS_PUT_TAKES_NO_BODY, COLONLESS_SPAN_PUT, CUT_COLON_IGNORED_WARNING,
-		CUT_TAKES_NO_BODY, DIFF_OLD_ROWS_IGNORED_WARNING, EMPTY_INSERT, EMPTY_PUT_AUTO_CUT_WARNING,
-		MINUS_BULLET_AUTO_PIPED_WARNING, MINUS_ROW_REJECTED, MOVE_TAKES_NO_BODY,
-		READ_METADATA_IGNORED_WARNING, REGISTER_PUT_TAKES_NO_BODY, REM_TAKES_NO_BODY,
-		REPLACE_PAIR_COALESCED_WARNING, SNAPSHOT_ROWS_AUTO_PUT_WARNING,
+		CUT_TAKES_NO_BODY, DIAGNOSTIC_PREVIEW_WIDTH, DIFF_OLD_ROWS_IGNORED_WARNING, EMPTY_INSERT,
+		EMPTY_PUT_AUTO_CUT_WARNING, MINUS_BULLET_AUTO_PIPED_WARNING, MINUS_ROW_REJECTED,
+		MOVE_TAKES_NO_BODY, READ_METADATA_IGNORED_WARNING, REGISTER_PUT_TAKES_NO_BODY,
+		REM_TAKES_NO_BODY, REPLACE_PAIR_COALESCED_WARNING, SNAPSHOT_ROWS_AUTO_PUT_WARNING,
 	},
 	prefixes::{is_read_metadata_line, strip_one_leading_hashline_prefix},
 	tokenizer::{BlockTarget, Token, Tokenizer, is_hunk_header_text},
@@ -785,16 +785,11 @@ fn parse_bare_range(text: &str) -> Option<ParsedRange> {
 fn contamination_message(text: &str) -> Option<String> {
 	let trimmed = text.trim_start();
 	if is_apply_patch_marker(trimmed) {
-		let preview = if trimmed.chars().count() > 48 {
-			format!("{}…", trimmed.chars().take(48).collect::<String>())
-		} else {
-			trimmed.into()
-		};
+		let preview = messages::json_quote_preview(trimmed, DIAGNOSTIC_PREVIEW_WIDTH);
 		return Some(format!(
-			"apply_patch sentinel {} is not valid in hashline. File sections start with \
+			"apply_patch sentinel {preview} is not valid in hashline. File sections start with \
 			 `[path#HASH]` (no `Update File:` / `Add File:` keyword). Use `PUT N.=M:`, `CUT N.=M`, \
-			 or `PUT <N:`/`PUT >N:` ops.",
-			messages::json_quote(&preview)
+			 or `PUT <N:`/`PUT >N:` ops."
 		));
 	}
 	if trimmed.starts_with("@@") {
@@ -805,15 +800,10 @@ fn contamination_message(text: &str) -> Option<String> {
 					.to_string(),
 			);
 		}
-		let preview = if trimmed.chars().count() > 48 {
-			format!("{}…", trimmed.chars().take(48).collect::<String>())
-		} else {
-			trimmed.into()
-		};
+		let preview = messages::json_quote_preview(trimmed, DIAGNOSTIC_PREVIEW_WIDTH);
 		return Some(format!(
-			"`@@`-bracketed hunk header {} is not valid in hashline. Drop the `@@ ... @@` brackets \
-			 and write a header such as `PUT N.=M:`.",
-			messages::json_quote(&preview)
+			"`@@`-bracketed hunk header {preview} is not valid in hashline. Drop the `@@ ... @@` \
+			 brackets and write a header such as `PUT N.=M:`."
 		));
 	}
 	if !trimmed.is_empty()

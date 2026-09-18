@@ -661,6 +661,16 @@ fn input_reports_contextual_unified_hunks_on_first_failure() {
 }
 
 #[test]
+fn input_bounds_wide_missing_header_previews() {
+	let context = "界".repeat(80);
+	let error = Patch::parse(&format!("@@ -1,3 +1,3 @@ {context}\n-old\n+new"), &options())
+		.unwrap_err()
+		.to_string();
+	assert!(error.contains("…\". Copy"), "{error}");
+	assert!(!error.contains(&context), "{error}");
+}
+
+#[test]
 fn input_supports_fallback_path_and_absolute_paths_in_cwd() {
 	let fallback = SplitOptions { cwd: None, path: Some("a.ts") };
 	let patch = Patch::parse("PUT <1:\n+x", &fallback).unwrap();

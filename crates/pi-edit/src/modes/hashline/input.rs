@@ -13,8 +13,8 @@ use super::{
 	clipboard::has_clipboard_edit,
 	format::{HL_FILE_HASH_EXAMPLES, HL_FILE_HASH_LENGTH},
 	messages::{
-		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, END_PATCH_MARKER,
-		json_quote,
+		ABORT_MARKER, BEGIN_PATCH_MARKER, CLIPBOARD_INTERLEAVED_SECTIONS, DIAGNOSTIC_PREVIEW_WIDTH,
+		END_PATCH_MARKER, json_quote, json_quote_preview,
 	},
 	parser::{detect_foreign_syntax, parse_patch},
 	tokenizer::{Token, Tokenizer, header_path_has_orphan_bracket},
@@ -346,13 +346,12 @@ fn split_raw_sections(
 	let tokenizer = Tokenizer::new();
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
-		let preview: String = first.chars().take(120).collect();
+		let preview = json_quote_preview(first, DIAGNOSTIC_PREVIEW_WIDTH);
 		let mut message = format!(
 			"Missing Hashline header: input must begin with `[PATH#HASH]` on the first non-blank \
 			 line; got {}. Copy the exact header and original line numbers from the latest \
 			 read/search output. Example: `[src/foo.ts#{}]`.",
-			json_quote(&preview),
-			HL_FILE_HASH_EXAMPLES[0]
+			preview, HL_FILE_HASH_EXAMPLES[0]
 		);
 		// Heuristic only: append a format hint without changing the parser's
 		// missing-header error.
