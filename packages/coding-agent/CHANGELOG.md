@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `/pets on` and `/pets off` to show or hide the Code Cat status-line companion, with persistent settings and session-aware faces and messages ([#12230](https://github.com/can1357/oh-my-pi/pull/12230) by [@Sandu1213](https://github.com/Sandu1213)).
+
 ### Fixed
 
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.

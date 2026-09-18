@@ -150,6 +150,39 @@ export function formatTokenCount(value: number): string {
 
 export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
+		name: "pets",
+		icon: "settings",
+		description: "Show or hide the Code Cat status-line companion",
+		allowArgs: true,
+		subcommands: [
+			{ name: "on", description: "Show the pet" },
+			{ name: "off", description: "Hide the pet" },
+		],
+		getTuiAutocompleteDescription: runtime => `Pets: ${runtime.ctx.settings.get("statusLine.pets") ? "on" : "off"}`,
+		handleTui: (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg === "on" || arg === "off") {
+				runtime.ctx.settings.set("statusLine.pets", arg === "on");
+				refreshStatusLine(runtime.ctx);
+				const enabled = runtime.ctx.settings.get("statusLine.pets");
+				if (enabled === (arg === "on")) {
+					runtime.ctx.showStatus(`Pets ${arg}.`);
+				} else {
+					runtime.ctx.showWarning(
+						`Saved pets ${arg} globally, but a higher-priority setting keeps pets ${enabled ? "on" : "off"}. Check project or --config overrides.`,
+					);
+				}
+			} else if (!arg) {
+				runtime.ctx.showStatus(
+					`Pets are ${runtime.ctx.settings.get("statusLine.pets") ? "on" : "off"}. Use /pets on|off.`,
+				);
+			} else {
+				runtime.ctx.showWarning("Usage: /pets on|off");
+			}
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "security",
 		icon: "shield",
 		description: "Plan, run, inspect, import, and compare OMP-native security scans",

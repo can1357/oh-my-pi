@@ -34,6 +34,7 @@ export interface StatusLineSession {
 	sessionManager: {
 		getSessionName(): string | undefined;
 		getSessionId(): string;
+		getHeader?(): { timestamp: string } | null;
 		getUsageStatistics(): {
 			input: number;
 			output: number;
@@ -78,6 +79,7 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 	getSettings(): StatusLineSettings;
 	gitEnabled(): boolean;
 	codexResetFireworksEnabled(): boolean;
+	petsEnabled(): boolean;
 	getSettingsRevision(): number;
 	getSessionSettingsIdentity(session: TSession): unknown;
 	getSessionSettingsRevision(session: TSession): number;

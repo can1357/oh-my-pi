@@ -31,6 +31,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	}),
 	gitEnabled: () => settings.get("git.enabled"),
 	codexResetFireworksEnabled: () => settings.get("tui.codexResetFireworks"),
+	petsEnabled: () => settings.get("statusLine.pets"),
 	getSettingsRevision: () => settings.revision,
 	getSessionSettingsIdentity: session => session.settings,
 	getSessionSettingsRevision: session => session.settings?.revision ?? 0,

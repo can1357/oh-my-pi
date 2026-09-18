@@ -829,6 +829,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"statusLine.pets": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Pets",
+			description: "Show the Code Cat companion below the status line (/pets on|off)",
+		},
+	},
+
 	"statusLine.leftSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.left },
 
 	"statusLine.rightSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.right },
