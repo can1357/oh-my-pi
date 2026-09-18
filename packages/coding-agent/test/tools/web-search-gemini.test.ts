@@ -334,4 +334,33 @@ describe("searchGemini tools serialization", () => {
 			}),
 		).rejects.toThrow("Gemini API returned an empty grounded response");
 	});
+
+	it("omits requestType from Antigravity search requests", async () => {
+		const antigravityAuthStorage = {
+			async getOAuthAccess(provider: string) {
+				if (provider !== "google-antigravity") return undefined;
+				return {
+					accessToken: "test-antigravity-token",
+					projectId: "test-antigravity-project",
+				};
+			},
+			hasOAuth(provider: string) {
+				return provider === "google-antigravity";
+			},
+		} as unknown as AuthStorage;
+
+		const fetchMock = mockGeminiFetch();
+		await searchGemini({
+			...makeParams("antigravity search"),
+			authStorage: antigravityAuthStorage,
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest).not.toBeNull();
+		expect(capturedRequest?.body?.requestType).toBeUndefined();
+		expect(capturedRequest?.body?.userAgent).toBe("antigravity");
+		expect(capturedRequest?.url).toBe(
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+		);
+	});
 });
