@@ -1,3 +1,4 @@
+import type { SearchProviderId, SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
 /**
  * `web_search` exposes the per-request `provider` override that `executeSearch`
  * already implemented for the CLI path: an explicit provider is terminal, so it
@@ -12,11 +13,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { webSearchSchema, WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
-import {
-	SEARCH_PROVIDER_PREFERENCES,
-	type SearchProviderId,
-	type SearchResponse,
-} from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { SEARCH_PROVIDER_PREFERENCES } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 const FAKE_SESSION = {} as ToolSession;
 

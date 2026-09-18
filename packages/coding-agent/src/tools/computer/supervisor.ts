@@ -4,7 +4,8 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
 import type { ToolSession } from "../index";
-import { ToolAbortError, ToolError } from "../tool-errors";
+import { ToolAbortError } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	COMPUTER_WORKER_ARG,
 	type ComputerRunOk,

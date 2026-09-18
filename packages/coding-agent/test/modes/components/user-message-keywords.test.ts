@@ -3,11 +3,11 @@ import * as path from "node:path";
 import * as url from "node:url";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
-import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
-import { chipLabel } from "@oh-my-pi/pi-coding-agent/modes/composer-attachments";
-import { imageReferenceHyperlink } from "@oh-my-pi/pi-coding-agent/modes/image-references";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { chipLabel, modelChipStyle, modelMentionChipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { imageReferenceHyperlink } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { Container } from "@oh-my-pi/pi-tui";
@@ -89,6 +89,16 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		expect(raw).toContain("\x1b[1m");
 	});
 
+	it("collapses model tags before Markdown and renders the visible label in model styling", () => {
+		const label = modelMentionChipLabel("Claude (Fast)");
+		const bubbleReset = `${theme.getFgOnBgAnsi("userMessageText", "userMessageBg")}${theme.getBgAnsi("userMessageBg")}`;
+		const raw = render('ask <model agent="m1" name="Claude (Fast)"/> then continue');
+		expect(Bun.stripANSI(raw)).toContain(`ask ${label} then continue`);
+		expect(raw).not.toContain("<model agent=");
+		expect(raw).toContain(modelChipStyle(label, bubbleReset));
+		expect(raw).toContain(theme.getFgAnsi("statusLineModel"));
+	});
+
 	it("wraps image references in file hyperlinks when a blob path is available", () => {
 		const imagePath = path.resolve("/tmp/omp-image.png");
 		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
@@ -141,7 +151,6 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		};
 		const helpers = new UiHelpers({
 			chatContainer,
-			getUserMessageText: () => "please inspect [Image #1]",
 			sessionManager: sessionManagerMock,
 			viewSession: { sessionManager: sessionManagerMock },
 			transcriptMessageComponents: new WeakMap(),

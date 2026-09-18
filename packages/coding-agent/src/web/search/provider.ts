@@ -1,3 +1,4 @@
+import { getSearchProviderLabel } from "@oh-my-pi/pi-tui/tools/web-search";
 // Lazy registry of web search providers.
 //
 // Each provider is loaded on first use; importing this module loads zero
@@ -10,7 +11,8 @@
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { SearchProvider } from "./providers/base";
-import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
+import { SEARCH_PROVIDER_LABELS, type SearchProviderId } from "@oh-my-pi/pi-tui/tools/web-search";
+import { SEARCH_PROVIDER_ORDER, SearchProviderError } from "./types";
 
 export type { SearchParams } from "./providers/base";
 export { SearchProvider } from "./providers/base";
@@ -147,11 +149,6 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 };
 
 const instanceCache = new Map<SearchProviderId, SearchProvider>();
-
-/** Cheap, sync metadata accessor — never triggers a provider load. */
-export function getSearchProviderLabel(id: SearchProviderId): string {
-	return PROVIDER_META[id]?.label ?? id;
-}
 
 /** Format one provider failure for the user-facing fallback summary. */
 export function formatSearchProviderFailure(error: unknown, provider: Pick<SearchProvider, "id" | "label">): string {

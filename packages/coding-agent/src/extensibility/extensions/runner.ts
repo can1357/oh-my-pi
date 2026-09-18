@@ -22,13 +22,14 @@ import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
-import { type Theme, theme } from "../../modes/theme/theme";
+import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
+import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AfterProviderResponseEvent,
 	AssistantThinkingRenderer,
@@ -37,7 +38,6 @@ import type {
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	CompactOptions,
-	ComposerShapeDefinition,
 	ContextEvent,
 	ContextEventResult,
 	ContextUsage,
@@ -1410,13 +1410,14 @@ export class ExtensionRunner {
 				}
 
 				if (event.type === "session_stop" && handlerResult) {
-					result = handlerResult as SessionStopEventResult;
-					const hasContinuationContext =
-						(typeof result.additionalContext === "string" && result.additionalContext.length > 0) ||
-						(typeof result.reason === "string" && result.reason.length > 0);
-					if ((result.continue === true || result.decision === "block") && hasContinuationContext) {
-						return result as RunnerEmitResult<TEvent>;
+					const stopResult = handlerResult as SessionStopEventResult;
+					if (stopResult.decision === "block") {
+						return stopResult as RunnerEmitResult<TEvent>;
 					}
+					const hasContinuationContext =
+						(typeof stopResult.additionalContext === "string" && stopResult.additionalContext.length > 0) ||
+						(typeof stopResult.reason === "string" && stopResult.reason.length > 0);
+					if (stopResult.continue === true && hasContinuationContext) result ??= stopResult;
 				}
 			}
 		}

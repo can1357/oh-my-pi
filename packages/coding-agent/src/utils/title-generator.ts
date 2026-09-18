@@ -13,8 +13,9 @@ import {
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { isConPTYHosted, writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
-import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
+import { writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
+import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
+import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { formatModelStringWithRouting } from "../config/model-resolver";
@@ -564,16 +565,62 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
  * Repeating the same sanitized title is a no-op on every platform.
  */
 export function setTerminalTitle(title: string): void {
-	// The teardown latch belongs HERE, not only on the composed-state path: this
-	// is the sink every title write funnels through, and it is exported, so a
-	// direct importer firing from a delayed callback after
-	// `disposeTerminalTitleState()` would otherwise write straight into the
-	// parent shell's tab whose title teardown just restored.
+	writeTerminalTitle(title);
+}
+
+/**
+ * The sink every title write funnels through — and it is exported via
+ * {@link setTerminalTitle}, so the teardown latch belongs HERE, not only on
+ * the composed-state path: a direct importer firing from a delayed callback
+ * after `disposeTerminalTitleState()` would otherwise write straight into the
+ * parent shell's tab whose title teardown just restored.
+ *
+ * When `recomposeStaticOnFailure` is set (only the composed working title
+ * passes it), a native-path failure on Windows re-composes the title with the
+ * failure latched — the static `:` separator — instead of emitting the
+ * animated frame that just failed as OSC. Direct titles always preserve
+ * verbatim: the caller's own sanitized title is the OSC fallback. The latch
+ * check runs on every failure, not just the first: a direct write may latch
+ * first, and a later working emit must still collapse to static rather than
+ * emit one animated OSC frame.
+ */
+function writeTerminalTitle(title: string, recomposeStaticOnFailure = false): void {
 	if (terminalTitleRuntime.disposed) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
 	if (next === lastTerminalTitle) return;
-	if (!setWindowsConsoleTitle(next)) writeTitleSequence(`\x1b]0;${next}\x07`);
+	if (!setWindowsConsoleTitle(next)) {
+		// Native path failed on a Windows console: every later frame would cross
+		// ConPTY as OSC and reintroduce the write-loop CPU cost the static
+		// separator exists to avoid. Latch static and stop the interval now.
+		// WSL never reaches this branch (the API getter returns null off win32);
+		// the platform guard keeps a mocked win32 in tests from mislatching.
+		if (process.platform === "win32") {
+			if (!terminalTitleRuntime.nativeTitleFailed) {
+				terminalTitleRuntime.nativeTitleFailed = true;
+				stopTerminalTitleSpinner();
+			}
+			if (recomposeStaticOnFailure) {
+				const latched =
+					terminalTitleRuntime.extensionOverride ??
+					buildTerminalTitleWithState(
+						terminalTitleRuntime.label,
+						terminalTitleRuntime.state,
+						terminalTitleRuntime.frame,
+						terminalTitleRuntime.enabled,
+						process.platform,
+						terminalTitleRuntime.style,
+						$env as NodeJS.ProcessEnv,
+						true,
+					);
+				if (latched === lastTerminalTitle) return;
+				writeTitleSequence(`\x1b]0;${latched}\x07`);
+				lastTerminalTitle = latched;
+				return;
+			}
+		}
+		writeTitleSequence(`\x1b]0;${next}\x07`);
+	}
 	lastTerminalTitle = next;
 }
 
@@ -613,21 +660,28 @@ export function setExtensionTerminalTitle(title: string): void {
 
 export type TerminalTitleState = "idle" | "working" | "attention";
 
-export type TerminalTitleSpinnerStyle = "braille" | "dots" | "line";
+export type TerminalTitleSpinnerStyle = "braille" | "pulse" | "dots" | "line";
 
 /**
  * Working-state spinner frames per `tui.titleSpinner` style. `braille` is the
- * historical default; `dots` cycles single braille dots; `line` is plain ASCII
- * (`- \ | /`) for fonts without braille coverage.
+ * historical default; `pulse` fills and empties a moon; `dots` cycles single
+ * braille dots; `line` is plain ASCII (`- \ | /`) for fonts without braille
+ * coverage. Every frame is a single column so the separator never reflows the
+ * title.
  */
 export const TERMINAL_TITLE_SPINNER_STYLES: Record<TerminalTitleSpinnerStyle, readonly string[]> = {
-	braille: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+	braille: SPINNER_FRAMES.unicode.activity,
+	pulse: ["○", "◔", "◑", "◕", "●", "◕", "◑", "◔"],
 	dots: ["⠁", "⠂", "⠄", "⠠", "⠐", "⠈"],
 	line: ["-", "\\", "|", "/"],
 };
 
-/** Windows uses a static working separator instead of scheduling title animation. */
-const WINDOWS_TITLE_WORKING_SEPARATOR = ":";
+/** WSL stdout still crosses ConPTY at the `wslhost` boundary, so its working title stays static (`:`). */
+const isStaticTitleHost = (
+	platform: NodeJS.Platform = process.platform,
+	env: NodeJS.ProcessEnv = $env as NodeJS.ProcessEnv,
+): boolean => isWsl(platform, env);
+const STATIC_TITLE_WORKING_SEPARATOR = ":";
 const TITLE_SPINNER_INTERVAL_MS = 80;
 /** The user's turn: the title reads like a shell prompt awaiting input. */
 const TITLE_IDLE_SEPARATOR = ">";
@@ -651,6 +705,13 @@ const terminalTitleRuntime: {
 	 *  title, so a later write would land in the parent shell's tab. Cleared only
 	 *  by `initTerminalTitleState()`, when the app takes the terminal over again. */
 	disposed: boolean;
+	/** Latched the first time the sink falls back to OSC on a Windows console.
+	 *  The 80ms spinner interval is only cheap through `SetConsoleTitleW`; once
+	 *  the native path fails, every new frame would cross ConPTY as OSC and
+	 *  reintroduce the write-loop CPU cost the static separator exists to avoid.
+	 *  While latched the working separator stays `:` and no interval is
+	 *  scheduled. */
+	nativeTitleFailed: boolean;
 } = {
 	label: undefined,
 	state: "idle",
@@ -660,13 +721,14 @@ const terminalTitleRuntime: {
 	timer: undefined,
 	extensionOverride: undefined,
 	disposed: false,
+	nativeTitleFailed: false,
 };
 
 /**
  * Compose the terminal title from the `π` brand, a state-carrying separator, and
  * the session label. Pure (no I/O) so the state→separator contract is testable:
  *   - `idle` (user's turn):  `π > label`;
- *   - `working`:             `π ⠋ label` (`π : label` on Windows);
+ *   - `working`:             `π ⠋ label` (static `π : label` under WSL, or on Windows once the native title path has failed);
  *   - `attention`:           `π ! label`;
  *   - disabled:              `π: label`.
  * Without a label the separator trails the brand (`π >`) so the state stays visible.
@@ -680,13 +742,16 @@ export function buildTerminalTitleWithState(
 	enabled: boolean,
 	platform: NodeJS.Platform = process.platform,
 	style: TerminalTitleSpinnerStyle = "braille",
+	env: NodeJS.ProcessEnv = $env as NodeJS.ProcessEnv,
+	nativeTitleFailed = false,
 ): string {
 	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
 	const frames = TERMINAL_TITLE_SPINNER_STYLES[style] ?? TERMINAL_TITLE_SPINNER_STYLES.braille;
+	const staticHost = isStaticTitleHost(platform, env) || (platform === "win32" && nativeTitleFailed);
 	const separator =
 		state === "working"
-			? platform === "win32"
-				? WINDOWS_TITLE_WORKING_SEPARATOR
+			? staticHost
+				? STATIC_TITLE_WORKING_SEPARATOR
 				: frames[frame % frames.length]
 			: state === "attention"
 				? TITLE_ATTENTION_SEPARATOR
@@ -695,7 +760,7 @@ export function buildTerminalTitleWithState(
 }
 
 function emitTerminalTitle(): void {
-	// The teardown latch lives at the sink (`setTerminalTitle`), so every path
+	// The teardown latch lives at the sink (`writeTerminalTitle`), so every path
 	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
@@ -706,10 +771,20 @@ function emitTerminalTitle(): void {
 			terminalTitleRuntime.state,
 			terminalTitleRuntime.frame,
 			terminalTitleRuntime.enabled,
-			isConPTYHosted() ? "win32" : process.platform,
+			process.platform,
 			terminalTitleRuntime.style,
+			$env as NodeJS.ProcessEnv,
+			terminalTitleRuntime.nativeTitleFailed,
 		);
-	setTerminalTitle(next);
+	// The composed working title is the only write that can fail into an
+	// animated OSC frame: on native failure it re-pins static (`:`), while a
+	// direct `setTerminalTitle` preserves its caller's title verbatim.
+	const recomposeStaticOnFailure =
+		terminalTitleRuntime.extensionOverride === undefined &&
+		terminalTitleRuntime.state === "working" &&
+		terminalTitleRuntime.enabled &&
+		!isStaticTitleHost();
+	writeTerminalTitle(next, recomposeStaticOnFailure);
 }
 
 function stopTerminalTitleSpinner(): void {
@@ -718,7 +793,15 @@ function stopTerminalTitleSpinner(): void {
 }
 
 function startTerminalTitleSpinner(): void {
-	if (isConPTYHosted() || terminalTitleRuntime.disposed || terminalTitleRuntime.timer || !process.stdout.isTTY) return;
+	if (
+		isStaticTitleHost() ||
+		terminalTitleRuntime.disposed ||
+		terminalTitleRuntime.timer ||
+		terminalTitleRuntime.nativeTitleFailed ||
+		!process.stdout.isTTY
+	)
+		return;
+
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame =
 			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
@@ -730,9 +813,8 @@ function startTerminalTitleSpinner(): void {
 
 /**
  * Reflect the agent run state in the terminal title's separator: `working`
- * animates outside Windows and stays `:` on Windows, `idle` shows `>` (your
- * turn), and `attention` shows `!` (agent blocked on you). Gated off by
- * `tui.titleState`.
+ * animates (static `:` under WSL), `idle` shows `>` (your turn), and
+ * `attention` shows `!` (agent blocked on you). Gated off by `tui.titleState`.
  */
 export function setTerminalTitleState(state: TerminalTitleState): void {
 	terminalTitleRuntime.state = state;
@@ -757,7 +839,7 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
  */
 export function setTerminalTitleSpinnerStyle(style: string | undefined): void {
 	const next: TerminalTitleSpinnerStyle =
-		style === "dots" || style === "line" || style === "braille" ? style : "braille";
+		style === "braille" || style === "pulse" || style === "dots" || style === "line" ? style : "braille";
 	if (next === terminalTitleRuntime.style) return;
 	terminalTitleRuntime.style = next;
 	terminalTitleRuntime.frame = 0;
@@ -778,9 +860,16 @@ export function setTerminalTitleSpinnerStyle(style: string | undefined): void {
  */
 export function initTerminalTitleState(): void {
 	terminalTitleRuntime.disposed = false;
+	// The native-failure latch is claim-scoped like the spinner timer: a fresh
+	// owner gets a re-probed native path, so a transient SetConsoleTitleW
+	// failure in one session must not pin every later session static. The next
+	// write re-latches only if the native path still fails. Reset the cached
+	// binding too — tests swap the dlopen double per case via beforeEach, and a
+	// stale failure-shaped binding would otherwise survive the reset.
+	disposeWindowsConsoleTitleApi();
+	terminalTitleRuntime.nativeTitleFailed = false;
 	// A fresh claim starts from the shell's title, not whatever the previous
 	// session last emitted: the dedupe cache must not swallow the first write.
-	lastTerminalTitle = undefined;
 	// Releasing the latch alone would leave a stopped timer behind a `working`
 	// state — a frozen spinner frame. Mirror the enable path and re-arm.
 	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();

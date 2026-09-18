@@ -5,6 +5,9 @@
  * SigV4 signing and decodes the `application/vnd.amazon.eventstream` response.
  * No `@aws-sdk/*`, no `@smithy/*`, no `proxy-agent`. Proxies are honored via
  * Bun's native `HTTPS_PROXY` support.
+ *
+ * A `models.yml` `baseUrl` is the request origin verbatim (VPC endpoint, gateway, …);
+ * only AWS's own regional host is re-pointed at the resolved region. SigV4 unaffected.
  */
 
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -144,6 +147,13 @@ const INFERENCE_PROFILE_GEO_DEFAULT_REGION: Record<string, string> = {
 	au: "ap-southeast-2",
 	jp: "ap-northeast-1",
 };
+
+/**
+ * AWS's own regional host, which every bundled catalog entry carries as a required
+ * placeholder `baseUrl` — no routing info, so its region segment is re-derived.
+ * FIPS, VPC-endpoint and gateway hosts don't match and are used as configured.
+ */
+const AWS_REGIONAL_BEDROCK_HOST = /^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$/;
 
 /** Geo prefix of a cross-region inference-profile id, e.g. `eu.anthropic.…` → `eu`. */
 function inferenceProfileGeo(modelId: string): string | undefined {
@@ -453,9 +463,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// raw dump so the inspector shows exactly what was sent.
 			commandInput = { ...commandInput, requestMetadata: sanitizeRequestMetadata(commandInput.requestMetadata) };
 
-			const host = `bedrock-runtime.${region}.amazonaws.com`;
-			const url = `https://${host}/model/${encodeURIComponent(model.id)}/converse-stream`;
-			const urlPath = `/model/${encodeURIComponent(model.id)}/converse-stream`;
+			// `baseUrl` is the origin verbatim, path prefix (and query, for gateways
+			// that authenticate via a query parameter) included, so a gateway mounted
+			// under a path works. AWS's own host is re-pointed: the catalog can't know the region.
+			const base = new URL(model.baseUrl || `https://bedrock-runtime.${region}.amazonaws.com`);
+			if (AWS_REGIONAL_BEDROCK_HOST.test(base.host)) base.host = `bedrock-runtime.${region}.amazonaws.com`;
+			const host = base.host;
+			const urlPath = `${base.pathname.replace(/\/+$/, "")}/model/${encodeURIComponent(model.id)}/converse-stream`;
+			const query = base.search.slice(1) || undefined;
+			const url = `${base.origin}${urlPath}${base.search}`;
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
@@ -527,6 +543,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					method: "POST",
 					host,
 					path: urlPath,
+					query,
 					body,
 					region,
 					service: "bedrock",

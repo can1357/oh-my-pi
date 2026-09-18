@@ -30,17 +30,12 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
-import {
-	$env,
-	$flag,
-	getAgentDir,
-	getModelDbPath,
-	getProjectDir,
-	logger,
-	postmortem,
-	prompt,
-	Snowflake,
-} from "@oh-my-pi/pi-utils";
+import { $env, $flag } from "@oh-my-pi/pi-utils/env";
+import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
 	discoverAdvisorConfigs,
@@ -66,18 +61,17 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
-	formatModelSelectorValue,
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	parseModelPattern,
-	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAllowedModels,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 } from "./config/model-resolver";
+import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
@@ -93,7 +87,7 @@ import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
-import type { EditMode } from "./edit";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	type CustomCommandsLoadResult,
 	type LoadedCustomCommand,
@@ -128,7 +122,8 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
-import { LocalProtocolHandler, type LocalProtocolOptions, stripXdUrlPrefix } from "./internal-urls";
+import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -139,9 +134,9 @@ import {
 	MCPManager,
 	MCPToolCache,
 	type MCPToolsLoadResult,
-	parseMCPToolName,
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
+import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
@@ -200,7 +195,7 @@ import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
-import type { StructuredSubagentSchemaMode } from "./task/types";
+import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -211,7 +206,7 @@ import {
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
-} from "./thinking";
+} from "@oh-my-pi/pi-tui/thinking";
 import {
 	BashTool,
 	BUILTIN_TOOLS,
@@ -255,7 +250,7 @@ import { ttsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
-import { formatLocalCalendarDate } from "./utils/local-date";
+import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { buildNamedToolChoice } from "./utils/tool-choice";
 import { VibeSessionRegistry } from "./vibe/runtime";
@@ -513,8 +508,10 @@ export interface CreateAgentSessionOptions {
 	 */
 	preloadedExtensionPaths?: string[];
 	/**
-	 * Session-independent imported extension factories. Child sessions rebind
-	 * these to their own ExtensionAPI without re-evaluating the module graph.
+	 * Session-independent imported extension factories. Child sessions, including
+	 * restricted children, rebind these to their own ExtensionAPI without
+	 * re-evaluating the module graph. Restricted children retain hooks/providers,
+	 * but never expose extension-contributed tools.
 	 * @internal
 	 */
 	preloadedPreparedExtensions?: readonly PreparedExtension[];
@@ -789,18 +786,22 @@ export async function discoverExtensions(cwd?: string): Promise<LoadExtensionsRe
  * runtime) is its own.
  */
 export async function discoverSessionExtensionPaths(
-	options: Pick<CreateAgentSessionOptions, "disableExtensionDiscovery" | "additionalExtensionPaths">,
+	options: Pick<
+		CreateAgentSessionOptions,
+		"disableExtensionDiscovery" | "additionalExtensionPaths" | "extensionRoots"
+	>,
 	cwd: string,
 	settings: Settings,
 ): Promise<string[]> {
-	const configuredPaths = options.disableExtensionDiscovery
-		? (options.additionalExtensionPaths ?? [])
-		: [...(options.additionalExtensionPaths ?? []), ...(settings.get("extensions") ?? [])];
-	const disabledExtensionIds = options.disableExtensionDiscovery
-		? undefined
-		: (settings.get("disabledExtensions") ?? []);
+	const roots = options.extensionRoots?.();
+	const explicit = roots?.explicit ?? options.additionalExtensionPaths ?? [];
+	const explicitOnly = roots ? roots.mode === "explicit-only" : options.disableExtensionDiscovery;
+	const configuredPaths = explicitOnly
+		? [...explicit]
+		: [...explicit, ...(roots?.configured ?? settings.get("extensions") ?? [])];
+	const disabledExtensionIds = explicitOnly ? undefined : (settings.get("disabledExtensions") ?? []);
 	return discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds, {
-		ambient: !options.disableExtensionDiscovery,
+		ambient: !explicitOnly,
 	});
 }
 
@@ -1758,7 +1759,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Only the first top-level session in a process owns an AsyncJobManager.
 	// Subagents inherit the parent's manager via `AsyncJobManager.instance()`
 	// (set below), and any additional top-level session spun up in-process
-	// (e.g. the agent-creation architect in `agents-hub.ts`) must share
+	// (e.g. the agent-creation architect in `agents-hub-deps.ts`) must share
 	// the live singleton — otherwise its dispose path would clobber the
 	// owning session's manager and break the `task`/`bash` async paths
 	// (issue #1923). The `instance()` guard means later sessions also skip
@@ -1882,6 +1883,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
 			getSessionSpawns: () => options.spawns ?? "*",
+			getSessionAgents: () => session?.getSessionAgents() ?? [],
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -2176,7 +2178,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// re-bind under their own `CustomToolAPI` while skipping the FS scan.
 		toolSession.customToolPaths = customToolPaths;
 
-		// Load extensions. Three paths:
+		// Load extensions. Four paths:
 		//   1. `preloadedExtensions` (CLI): caller already loaded — reuse the
 		//      Extension instances. Shallow-clone `extensions` so the inline
 		//      push below cannot mutate the caller's array. `runtime` is shared
@@ -2191,12 +2193,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
-			// Allocate a session runtime without evaluating caller-provided extension
-			// instances, paths, or factories.
-			extensionPaths = [];
-			extensionsResult = await loadExtensions([], cwd, eventBus);
-		} else if (options.preloadedExtensions) {
+		if (!restrictToolNames && options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,
 				extensions: [...options.preloadedExtensions.extensions],
@@ -2206,12 +2203,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionPaths = extensionsResult.extensions
 				.map(ext => ext.resolvedPath)
 				.filter(p => !p.startsWith("<inline"));
-		} else if (options.preloadedPreparedExtensions) {
-			extensionPaths = options.preloadedPreparedExtensions.map(prepared => prepared.path);
+		} else if (restrictToolNames || options.preloadedPreparedExtensions) {
+			// Restricted children retain parent hooks, not ambient discovery, new
+			// extension inputs, or parent-bound instances. Tool admission stays clamped.
+			const preparedExtensions = options.preloadedPreparedExtensions ?? [];
+			extensionPaths = preparedExtensions.map(prepared => prepared.path);
 			extensionsResult = await logger.time(
 				"bindPreparedExtensions",
 				bindPreparedExtensions,
-				options.preloadedPreparedExtensions,
+				preparedExtensions,
 				cwd,
 				eventBus,
 			);

@@ -1,3 +1,4 @@
+import type { GhToolDetails } from "@oh-my-pi/pi-tui/tools/github";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -6,7 +7,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
-import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
+
 import {
 	BINARY_SNIFF_BYTES,
 	formatBytes,
@@ -17,7 +18,8 @@ import {
 } from "@oh-my-pi/pi-utils";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
 import { github } from "../utils/github";
-import { loadImageAttachmentInput, webpExclusionForModel } from "../utils/image-loading";
+import { loadImageAttachmentInput } from "../utils/image-loading";
+import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import type { ToolSession } from ".";
 import {
 	buildTextResult,
@@ -38,8 +40,8 @@ import {
 	executeSearchRepos,
 } from "./gh-search";
 import { executeRepoView } from "./gh-view";
-import type { OutputMeta } from "./output-meta";
-import { ToolError } from "./tool-errors";
+
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
 export { formatRepoRef, parsePositiveDecimalInt, resolveDefaultRepoMemoized } from "./gh-common";
@@ -127,78 +129,6 @@ function buildBinaryFileReadResult(
 		sourceUrl,
 		{ repo, branch },
 	);
-}
-
-export interface GhToolDetails {
-	meta?: OutputMeta;
-	artifactId?: string;
-	repo?: string;
-	branch?: string;
-	worktreePath?: string;
-	remote?: string;
-	remoteBranch?: string;
-	headSha?: string;
-	runId?: number;
-	runIds?: number[];
-	status?: string;
-	conclusion?: string;
-	failedJobs?: string[];
-	watch?: GhRunWatchViewDetails;
-	checkouts?: GhPrCheckoutSummary[];
-}
-
-export interface GhPrCheckoutSummary {
-	prNumber?: number;
-	url?: string;
-	branch: string;
-	worktreePath: string;
-	remote: string;
-	remoteBranch: string;
-	reused: boolean;
-	clonedWith?: IsoBackendKind;
-}
-
-export interface GhRunWatchJobDetails {
-	id: number;
-	name: string;
-	status?: string;
-	conclusion?: string;
-	durationSeconds?: number;
-	url?: string;
-}
-
-export interface GhRunWatchRunDetails {
-	id: number;
-	workflowName?: string;
-	displayTitle?: string;
-	status?: string;
-	conclusion?: string;
-	branch?: string;
-	headSha?: string;
-	url?: string;
-	jobs: GhRunWatchJobDetails[];
-}
-
-export interface GhRunWatchFailedLogDetails {
-	runId: number;
-	workflowName?: string;
-	jobName: string;
-	conclusion?: string;
-	tail?: string;
-	available: boolean;
-}
-
-export interface GhRunWatchViewDetails {
-	mode: "run" | "commit";
-	state: "watching" | "completed";
-	repo: string;
-	branch?: string;
-	headSha?: string;
-	pollCount?: number;
-	note?: string;
-	run?: GhRunWatchRunDetails;
-	runs?: GhRunWatchRunDetails[];
-	failedLogs?: GhRunWatchFailedLogDetails[];
 }
 
 export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {

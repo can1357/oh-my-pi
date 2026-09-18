@@ -96,17 +96,58 @@ async fn after_requires_all_even_when_ambiguous_insertions_have_identical_outcom
 	assert!(writer.requests.lock().is_empty());
 	assert_eq!(workspace.read("a.txt").unwrap(), "item\nitem\n");
 
-	let message = error.to_string();
-	let (_, retry) = message
-		.split_once("<SM:EDIT all>")
-		.expect("all-match retry");
-	let (body, _) = retry.split_once("</SM:EDIT>").expect("complete retry");
-	let input = format!("<SM:EDIT path=\"a.txt\" all>{body}</SM:EDIT>\n");
+	let input = copy_ready_payload(&error.to_string(), "<SM:EDIT path=\"a.txt\" all>");
 	workspace
 		.apply_json(&json!({ "input": input }), &writer)
 		.await
 		.expect("explicitly insert after every match");
 	assert_eq!(workspace.read("a.txt").unwrap(), "item\nitem\nitem\nitem\n");
+}
+
+/// The payload an error hands back for verbatim resend: from `opener` through
+/// its `</SM:EDIT>`, untouched.
+fn copy_ready_payload(message: &str, opener: &str) -> String {
+	let start = message.find(opener).expect("pathful copy-ready opener");
+	let end = message[start..]
+		.find("</SM:EDIT>")
+		.expect("complete payload")
+		+ "</SM:EDIT>".len();
+	message[start..start + end].to_owned()
+}
+
+#[tokio::test]
+async fn no_match_correction_resends_verbatim() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "const RUNNER = compute(1);\nkeep();\n");
+	let writer = DiskWriter::default();
+	let input = "<SM:EDIT path=\"a.txt\">\n<SM:FIND>\nconst RUNNER = \
+	             computeValue(1);\n</SM:FIND>\n<SM:PUT>\nconst RUNNER = \
+	             compute(2);\n</SM:PUT>\n</SM:EDIT>";
+	let error = workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect_err("anchor drifted past the fuzzy edit limit");
+	let message = error.to_string();
+	assert!(message.contains("Copy-ready corrected operation:\n<SM:EDIT path=\"a.txt\">"));
+	let input = copy_ready_payload(&message, "<SM:EDIT path=\"a.txt\">");
+	workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect("the correction applies as handed back");
+	assert_eq!(workspace.read("a.txt").unwrap(), "const RUNNER = compute(2);\nkeep();\n");
+}
+
+#[tokio::test]
+async fn tags_glued_to_content_lines_still_close_and_open_blocks() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "fn run() {\n\tfirst();\n}\n");
+	let input = "<SM:EDIT path=\"a.txt\">\n<SM:FIND>\nfn run() {\n\tfirst();</SM:FIND>\n<SM:PUT>fn \
+	             run() {\n\tsecond();</SM:PUT>\n</SM:PUT>\n</SM:EDIT>";
+	workspace
+		.apply_json(&json!({ "input": input }), &DiskWriter::default())
+		.await
+		.expect("glued tags are still tags");
+	assert_eq!(workspace.read("a.txt").unwrap(), "fn run() {\n\tsecond();\n}\n");
 }
 
 #[tokio::test]
@@ -327,4 +368,24 @@ async fn missing_file_target_uses_the_taught_opener() {
 		error.to_string(),
 		"Missing file target: start the payload with <SM:EDIT path=\"relative/path.ts\">."
 	);
+}
+
+#[tokio::test]
+async fn miss_with_cjk_content_returns_match_error_without_panicking() {
+	// `closest_fragment` slides a byte-width window over the normalized line and
+	// appends a `len - width` tail fallback. With normalized `ab戸cd` (7 bytes)
+	// and a 4-byte needle the tail is byte 3, inside `戸` (bytes 2..5): slicing
+	// there panicked instead of reporting the miss.
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "ab戸cd\n");
+	let error = workspace
+		.apply_json(
+			&json!({
+				"input": "<SM:EDIT path=\"a.txt\">\n<SM:FIND>\nwxyz\n</SM:FIND>\n<SM:PUT>\nnew();\n</SM:PUT>\n</SM:EDIT>\n",
+			}),
+			&DiskWriter::default(),
+		)
+		.await
+		.expect_err("CJK miss must surface a match error, not panic");
+	assert!(error.to_string().contains("did not match"));
 }

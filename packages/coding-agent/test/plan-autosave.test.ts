@@ -5,7 +5,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as modes from "@oh-my-pi/pi-coding-agent/modes";
-import { getSettingsForTab } from "@oh-my-pi/pi-coding-agent/modes/components/settings-defs";
+import { getSettingsForTab } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import {
 	autosaveApprovedPlan,
 	defaultPlanAutosaveDir,
@@ -38,7 +39,7 @@ function makeCwd(): string {
 
 describe("plan autosave settings UI", () => {
 	it("gates the autosave directory on plan.autosave", () => {
-		const defs = getSettingsForTab("tasks");
+		const defs = getSettingsForTab(createSettingsHost().entries, "tasks");
 		const autosave = defs.find(def => def.path === "plan.autosave");
 		const autosaveDir = defs.find(def => def.path === "plan.autosaveDir");
 		if (!autosave?.condition || !autosaveDir?.condition) {

@@ -11,6 +11,7 @@ use super::{
 	messages::{
 		RECOVERY_EXTERNAL_WARNING, RECOVERY_LINE_REMAP_WARNING, RECOVERY_SESSION_CHAIN_WARNING,
 	},
+	syntax::node_chain,
 	types::{Anchor, Cursor, Edit, ParsedRange, PasteTarget},
 };
 use crate::{
@@ -300,6 +301,68 @@ fn remap_edits(previous: &str, current: &str, edits: &[Edit]) -> Option<(Vec<Edi
 	Some((remapped, first))
 }
 
+/// Identity of the constructs enclosing `line`: each node's kind paired with
+/// the trimmed text of the row it opens, innermost first.
+///
+/// Positions are useless here — the point is to tell "the list under key `a`"
+/// apart from an identically shaped list under key `b`, so the opening row's
+/// content carries the identity.
+fn enclosing_context(lines: &[String], path: &str, line: u32) -> Vec<(String, String)> {
+	node_chain(lines, path, line)
+		.into_iter()
+		.filter_map(|span| {
+			let opener = lines.get((span.start_line - 1) as usize)?;
+			Some((span.kind, opener.trim().to_owned()))
+		})
+		.collect()
+}
+
+/// Whether every remapped anchor still sits in the construct it was authored
+/// against.
+///
+/// The line map is built from a text diff, which only aligns equal rows: an
+/// anchor whose row is repeated in the file can therefore map onto the
+/// identical row of a sibling construct with a uniform offset and matching
+/// neighbors, and the edit lands in the wrong block while every positional
+/// check passes. Comparing the enclosing constructs by content rejects those
+/// landings. Unparsed or non-source targets report no chain on either side and
+/// stay allowed.
+fn context_preserved(
+	previous: &str,
+	current: &str,
+	path: &Path,
+	authored: &[Edit],
+	remapped: &[Edit],
+) -> bool {
+	let Some(path) = path.to_str() else {
+		return true;
+	};
+	let previous_lines = previous.split('\n').map(str::to_owned).collect::<Vec<_>>();
+	let current_lines = current.split('\n').map(str::to_owned).collect::<Vec<_>>();
+	let mut checked = HashSet::new();
+	for (authored, remapped) in authored.iter().zip(remapped) {
+		// The offset is uniform across a remapped patch, so the endpoints of a
+		// span pin the interior: parsing every line of a wide CUT would not.
+		let authored = edit_anchors(authored);
+		let remapped = edit_anchors(remapped);
+		let edges = [(authored.first(), remapped.first()), (authored.last(), remapped.last())];
+		for (authored, remapped) in edges {
+			let (Some(authored), Some(remapped)) = (authored, remapped) else {
+				continue;
+			};
+			if !checked.insert((authored.line, remapped.line)) {
+				continue;
+			}
+			if enclosing_context(&previous_lines, path, authored.line)
+				!= enclosing_context(&current_lines, path, remapped.line)
+			{
+				return false;
+			}
+		}
+	}
+	true
+}
+
 /// Attempt to rebase stale anchors from a retained snapshot onto current text.
 pub fn try_recover(
 	store: &EditStore,
@@ -319,6 +382,9 @@ pub fn try_recover(
 	let Some((edits, offset)) = remap_edits(&snapshot.text, args.current_text, args.edits) else {
 		return Ok(None);
 	};
+	if !context_preserved(&snapshot.text, args.current_text, args.path, args.edits, &edits) {
+		return Ok(None);
+	}
 	let Ok(applied) = apply_edits(args.current_text, &edits, ApplyOptions {
 		clipboard:      args.clipboard.take(),
 		path:           args.path.to_str(),

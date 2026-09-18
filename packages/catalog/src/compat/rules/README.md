@@ -310,6 +310,8 @@ auth "anthropic" {
     env hook="anthropic-foundry"                 // or: env "ANTHROPIC_OAUTH_TOKEN" "ANTHROPIC_API_KEY"
     login "oauth-code" {
         client-id "OWQxYzI1…" encoding="base64"  // env="VAR" adds an override; child `env "A" "B"` an ordered list
+        base-url "https://api.example" { env "X_BASE_URL" }      // optional; `{base}` placeholder (API origin)
+        auth-url "https://auth.example" { env "X_AUTH_URL" }     // optional; `{auth}` placeholder for authorize/token/userinfo
         authorize-url "https://claude.ai/oauth/authorize"
         scopes "org:create_api_key" "user:profile"      // separator=" " default
         pkce #true

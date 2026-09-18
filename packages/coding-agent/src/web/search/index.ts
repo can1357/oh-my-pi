@@ -12,32 +12,36 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
 import { settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../extensibility/custom-tools/types";
-import type { Theme } from "../../modes/theme/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
 import { discoverAuthStorage } from "../../sdk";
 import type { ToolSession } from "../../tools";
-import { formatAge } from "../../tools/render-utils";
+import { formatAge } from "@oh-my-pi/pi-tui/render/render-utils";
 import { throwIfAborted } from "../../tools/tool-errors";
 import {
 	formatSearchProviderFailure,
 	formatSearchProviderFailures,
 	getSearchProvider,
-	getSearchProviderLabel,
 	isSearchProviderExcluded,
 	resolveProviderCandidates,
 	type SearchProvider,
 	type SearchProviderCandidate,
 } from "./provider";
+import { getSearchProviderLabel } from "@oh-my-pi/pi-tui/tools/web-search";
 import { applyQueryConstraints, parseSearchQuery } from "./query";
-import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
+import {
+	renderSearchCall,
+	renderSearchResult,
+	type SearchRenderDetails,
+	type SearchProviderId,
+	type SearchResponse,
+} from "@oh-my-pi/pi-tui/tools/web-search";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
 	SEARCH_PROVIDER_PREFERENCES,
 	SearchProviderError,
-	type SearchProviderId,
-	type SearchResponse,
 } from "./types";
 
 /**
@@ -427,5 +431,5 @@ export function getSearchTools(): CustomTool<any, any>[] {
 }
 
 export { getSearchProvider, setExcludedSearchProviders, setSearchProviderOrder } from "./provider";
-export type { SearchProviderId as SearchProvider, SearchResponse } from "./types";
+export type { SearchProviderId as SearchProvider, SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
 export { isSearchProviderId, isSearchProviderPreference } from "./types";

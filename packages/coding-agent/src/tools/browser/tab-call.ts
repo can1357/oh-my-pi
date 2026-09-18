@@ -1,5 +1,5 @@
 import { renderCallChain, renderRunArg } from "../run-code";
-import { ToolError } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** One allowlisted method invocation in a tab call chain. */
 export interface TabCallStep {

@@ -3,7 +3,7 @@
  * index modules): session-id namespacing, settings access, and projection of
  * executor results into the ExecutorBackend result shape.
  */
-import type { OutputArtifactError } from "../session/streaming-output";
+import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import type { ExecutorBackendResult } from "./backend";
 import type { EvalDisplayOutput } from "./types";

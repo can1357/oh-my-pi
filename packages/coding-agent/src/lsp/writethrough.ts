@@ -8,14 +8,13 @@ import {
 	captureDiagnosticVersions,
 	captureOpenFileVersions,
 	DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
-	type FileDiagnosticsResult,
-	FileFormatResult,
 	formatContent,
 	getDiagnosticsForFile,
 	INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	limitDiagnosticMessages,
 	type ServerVersionMap,
 } from "./diagnostics";
+import { type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { notifyFileSaved, splitServers, syncFileContent } from "./servers";
 import type { ServerConfig } from "./types";
 import { summarizeDiagnosticMessages } from "./utils";

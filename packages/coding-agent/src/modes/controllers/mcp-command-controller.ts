@@ -25,6 +25,7 @@ import {
 	removeMCPServer,
 	setServerDisabled,
 	updateMCPServer,
+	validateServerName,
 } from "../../mcp/config-writer";
 import {
 	lookupMcpOAuthCredentialForServer,
@@ -56,17 +57,17 @@ import type {
 	MCPServerConfig,
 	MCPServerConnection,
 } from "../../mcp/types";
-import { shortenPath } from "../../tools/render-utils";
-import { urlHyperlinkAlways } from "../../tui";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { urlHyperlinkAlways } from "@oh-my-pi/pi-tui/render";
 import { copyToClipboard } from "../../utils/clipboard";
 import { isTimeoutError } from "../../utils/fetch-timeout";
 import { openPath } from "../../utils/open";
-import { ChatBlock } from "../components/chat-block";
-import { DynamicBorder } from "../components/dynamic-border";
-import { MCPAddWizard } from "../components/mcp-add-wizard";
-import { TranscriptBlock } from "../components/transcript-container";
-import { parseCommandArgs } from "../shared";
-import { theme } from "../theme/theme";
+import { ChatBlock } from "@oh-my-pi/pi-tui/chrome/chat-block";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
+import { MCPAddWizard } from "@oh-my-pi/pi-tui/overlays/mcp-add-wizard";
+import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { parseCommandArgs } from "../../utils/command-args";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../types";
 import { groupBySource, parseRemoveArgs, readScopeFlag, showCommandMessage } from "./command-controller-shared";
 
@@ -792,6 +793,7 @@ export class MCPCommandController {
 
 		// Create wizard with OAuth handler and connection test
 		const wizard = new MCPAddWizard(
+			{ validateServerName, analyzeAuthError, discoverOAuthEndpoints, fetchResourceMetadataScopes },
 			async (name: string, config: MCPServerConfig, scope: "user" | "project") => {
 				done();
 				await this.#handleWizardComplete(name, config, scope);

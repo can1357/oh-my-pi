@@ -3,9 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { resetSettingsForTest, Settings } from "../../../src/config/settings";
-import { SkillMessageComponent } from "../../../src/modes/components/skill-message";
-import { skillChipLabel } from "../../../src/modes/composer-attachments";
-import { getThemeByName, setThemeInstance, type Theme } from "../../../src/modes/theme/theme";
+import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
+import { skillChipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { CustomMessage, SkillPromptDetails } from "../../../src/session/messages";
 
 // Drop SGR colors and OSC 8 hyperlink wrappers so assertions see the visible text only.
