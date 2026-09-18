@@ -4,6 +4,7 @@
 ### Fixed
 
 - Fixed auth-broker client config resolution failing silently on Windows when reading the token file or `config.yml`; reads now use `node:fs` instead of `Bun.file`.
+- Fixed ToolCallLoopGuard zeroing its consecutive-repeat counter when all tool calls in a turn are exempt, allowing interleaved polling turns to bypass repeat detection ([#11874](https://github.com/can1357/oh-my-pi/pull/11874) by [@dickyudhandika](https://github.com/dickyudhandika)).
 
 ## [18.2.5] - 2026-09-17
 
