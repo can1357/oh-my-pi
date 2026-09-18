@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Record the session working directory's Git branch in new and moved session headers; omit pure Jujutsu workspaces and redact the field in shared exports. ([#12225](https://github.com/can1357/oh-my-pi/pull/12225) by [@Xytronix](https://github.com/Xytronix)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

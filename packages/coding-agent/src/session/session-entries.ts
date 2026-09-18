@@ -41,6 +41,13 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	/**
+	 * Branch of `cwd`'s checkout when the session file was created, re-resolved
+	 * when the session moves to another directory. Absent outside a checkout, on
+	 * a detached HEAD, in a pure-jj workspace, and on sessions written before
+	 * this field existed. Mid-session checkouts are not tracked.
+	 */
+	gitBranch?: string;
+	/**
 	 * Additional workspace directories beyond `cwd` (multi-root workspace).
 	 * Absolute, normalized, deduplicated. Absent on legacy single-cwd sessions.
 	 * See {@link SessionWorkspace} in `./session-workspace`.

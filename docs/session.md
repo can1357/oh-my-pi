@@ -75,6 +75,7 @@ Session files are JSONL: one JSON object per line. Current files physically begi
   "id": "1f9d2a6b9c0d1234",
   "timestamp": "2026-02-16T10:20:30.000Z",
   "cwd": "/work/pi",
+  "gitBranch": "optional branch of cwd's checkout",
   "title": "optional session title",
   "titleSource": "auto",
   "additionalDirectories": ["/work/shared"],
@@ -87,6 +88,7 @@ Session files are JSONL: one JSON object per line. Current files physically begi
 Notes:
 
 - `additionalDirectories` records normalized, deduplicated workspace roots beyond `cwd`.
+- `gitBranch` records the branch of `cwd`'s checkout at session-file creation, re-resolved on a session move. It is absent outside a checkout, on a detached `HEAD`, in a pure-jj workspace, and on sessions written before the field existed. Mid-session checkouts are not tracked, so consumers should read it as session-level provenance rather than per-request state.
 - `previousSessionFiles` records prior absolute locations after successful moves.
 - `providerPromptCacheKey` carries an inherited provider prompt-cache identity for eligible full forks.
 - `parentSession` is an opaque lineage string. Current code writes either a session id or a session path depending on flow (`fork`, `forkFrom`, `createBranchedSession`, or explicit `newSession({ parentSession })`). Treat it as metadata, not a typed foreign key.
