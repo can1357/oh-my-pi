@@ -48,6 +48,10 @@
 
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
 
+### Fixed
+
+- Fixed the headless browser leaving a blank window on the Windows desktop. ([#12299](https://github.com/can1357/oh-my-pi/pull/12299) by [@oldschoola](https://github.com/oldschoola))
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes

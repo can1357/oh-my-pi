@@ -47,6 +47,13 @@ export type WorkerInitPayload =
 			mode: "headless";
 			browserWSEndpoint: string;
 			safeDir: string;
+			/**
+			 * Whether the owning browser is actually headless. `mode: "headless"`
+			 * only means "OMP owns this page"; a visible shared browser uses the
+			 * same mode, and its window must never be parked offscreen. Required
+			 * so a new producer cannot silently inherit the parking behavior.
+			 */
+			headless: boolean;
 			/** Keep the page tied to an OMP-owned worker without pinning a visible window's layout viewport. */
 			emulateViewport?: boolean;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };

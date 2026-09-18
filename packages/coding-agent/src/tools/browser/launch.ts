@@ -434,17 +434,36 @@ export interface LaunchHeadlessResult {
 }
 
 /**
- * Base Chromium argv shared by process-local puppeteer launches and the
- * broker-owned shared browser: sandbox/stealth flags, window size, and
- * PUPPETEER_PROXY* env-derived proxy flags.
+ * Off-desktop origin for headless Chromium windows. Win32's minimized-window
+ * sentinel: far outside any monitor's bounds, and Chrome honors it rather than
+ * clamping back onto a display.
  */
-export function buildHeadlessLaunchArgs(viewport: { width: number; height: number }): string[] {
+export const OFFSCREEN_WINDOW_ORIGIN = -32000;
+
+/**
+ * Base Chromium argv shared by process-local puppeteer launches and the
+ * broker-owned shared browser: sandbox/stealth flags, window size/position, and
+ * PUPPETEER_PROXY* env-derived proxy flags.
+ *
+ * `--headless=new` on Windows still creates a real platform window (verified
+ * with and without `--window-size`: only its dimensions change). That window
+ * never gets `WS_VISIBLE`, yet Chrome 150 + Windows 11 composites its surface
+ * onto the desktop anyway: a blank, shadowed, click-through rectangle at the
+ * default (10,10) position that no `IsWindowVisible` enumeration reports, that
+ * `WindowFromPoint` cannot hit, and that no desktop repaint clears. Park
+ * headless windows far offscreen so a composited surface can never land on a
+ * monitor; headed launches must stay where the user can see them. The headless
+ * viewport comes from CDP emulation, so window geometry never affects page
+ * metrics.
+ */
+export function buildHeadlessLaunchArgs(viewport: { width: number; height: number }, headless = true): string[] {
 	const launchArgs = [
 		"--no-sandbox",
 		"--disable-setuid-sandbox",
 		"--disable-blink-features=AutomationControlled",
 		`--window-size=${viewport.width},${viewport.height}`,
 	];
+	if (headless) launchArgs.push(`--window-position=${OFFSCREEN_WINDOW_ORIGIN},${OFFSCREEN_WINDOW_ORIGIN}`);
 	const proxy = process.env.PUPPETEER_PROXY;
 	if (proxy) {
 		launchArgs.push(`--proxy-server=${proxy}`);
@@ -470,7 +489,7 @@ export async function launchHeadlessBrowser(opts: LaunchHeadlessOptions): Promis
 		deviceScaleFactor: vp.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
 	};
 	const puppeteer = await loadPuppeteer();
-	const launchArgs = buildHeadlessLaunchArgs(initialViewport);
+	const launchArgs = buildHeadlessLaunchArgs(initialViewport, opts.headless);
 	for (const arg of opts.args ?? []) {
 		if (!launchArgs.includes(arg)) launchArgs.push(arg);
 	}
@@ -530,7 +549,7 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
 	const ignored = new Set(stealthIgnoreDefaultArgs(executablePath));
 	const defaults = await puppeteer.defaultArgs({
 		headless: opts.headless,
-		args: buildHeadlessLaunchArgs(vp),
+		args: buildHeadlessLaunchArgs(vp, opts.headless),
 		userDataDir: opts.userDataDir,
 	});
 	return {
