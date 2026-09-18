@@ -34,14 +34,7 @@
 import { ThinkingInbandScanner } from "../dialect/thinking";
 import type { InbandScanEvent } from "../dialect/types";
 import { isAnthropicServerToolHistoryBlock } from "../providers/anthropic-wire";
-import type {
-	AnthropicServerToolContent,
-	AssistantMessage,
-	ImageContent,
-	TextContent,
-	ThinkingContent,
-	ToolCall,
-} from "../types";
+import type { AssistantMessage, ImageContent, TextContent, ThinkingContent, ToolCall } from "../types";
 import {
 	clearStreamingPartialJson,
 	copyCursorExecResolved,
@@ -371,7 +364,7 @@ class LeakedThinkingProjector {
 		this.#flushHealer();
 		this.#closeText();
 		this.#closeThinking();
-		return this.#mergeServerToolHistory(message);
+		return this.#mergeEventlessBlocks(message);
 	}
 
 	#apply(events: readonly InbandScanEvent[], signature: string | undefined, srcIndex: number): void {
@@ -455,7 +448,16 @@ class LeakedThinkingProjector {
 		if (block) this.#sourceAnchors.set(block, srcIndex);
 	}
 
-	#mergeServerToolHistory(message: AssistantMessage): AssistantMessage["content"] {
+	/**
+	 * Blocks the projector never re-projects because the provider streams no
+	 * per-block event for them — a server-side `fallback` handoff marker,
+	 * `redactedThinking`, and complete `anthropicServerTool` call/result pairs —
+	 * only exist in the terminal message. Merge them back at their source
+	 * positions; dropping any of them rewrites the persisted turn, and Anthropic
+	 * rejects the replay of a rewritten latest assistant turn ("`thinking` …
+	 * blocks in the latest assistant message cannot be modified").
+	 */
+	#mergeEventlessBlocks(message: AssistantMessage): AssistantMessage["content"] {
 		const pendingCalls = new Map<string, number>();
 		const pairedIndexes = new Set<number>();
 		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
@@ -477,14 +479,24 @@ class LeakedThinkingProjector {
 			sourceIndex: this.#sourceAnchors.get(block) ?? message.content.length + order,
 			order,
 		}));
-		for (const srcIndex of pairedIndexes) {
+		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
 			const content = message.content[srcIndex];
-			if (content?.type !== "anthropicServerTool") continue;
-			const cloned: AnthropicServerToolContent = {
-				type: "anthropicServerTool",
-				block: structuredClone(content.block),
-			};
-			anchored.push({ block: cloned, sourceIndex: srcIndex, order: srcIndex });
+			if (!content) continue;
+			if (content.type === "fallback") {
+				anchored.push({
+					block: { type: "fallback", from: { ...content.from }, to: { ...content.to } },
+					sourceIndex: srcIndex,
+					order: srcIndex,
+				});
+			} else if (content.type === "redactedThinking") {
+				anchored.push({ block: { ...content }, sourceIndex: srcIndex, order: srcIndex });
+			} else if (content.type === "anthropicServerTool" && pairedIndexes.has(srcIndex)) {
+				anchored.push({
+					block: { type: "anthropicServerTool", block: structuredClone(content.block) },
+					sourceIndex: srcIndex,
+					order: srcIndex,
+				});
+			}
 		}
 		anchored.sort((left, right) => left.sourceIndex - right.sourceIndex || left.order - right.order);
 		return anchored.map(({ block }) => block);
