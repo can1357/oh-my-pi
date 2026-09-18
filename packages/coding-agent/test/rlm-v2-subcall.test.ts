@@ -156,3 +156,38 @@ describe("RFC v2 kernel bind", () => {
 		expect(rlmKernelPrelude(true)).not.toContain("NEEDLE");
 	});
 });
+
+describe("RFC v2 RLM eval prelude", () => {
+	test("createRlmPrelude enabled only with kernelBind", async () => {
+		const { createRlmPrelude } = await import("../src/rlm/prelude");
+		const off = Settings.isolated({ "rlm.enabled": true, "rlm.kernelBind": false });
+		const offSession = { cwd: "/tmp/rlm-pre-off", settings: off } as ToolSession;
+		const offP = createRlmPrelude(offSession);
+		expect(offP.enabled?.()).toBe(false);
+
+		const on = Settings.isolated({ "rlm.enabled": true, "rlm.kernelBind": true, "rlm.maxDepth": 1 });
+		const onSession = { cwd: "/tmp/rlm-pre-on", settings: on } as ToolSession;
+		const onP = createRlmPrelude(onSession);
+		expect(onP.enabled?.()).toBe(true);
+		expect(onP.exports).toContain("rlm");
+		expect(onP.javascript).toContain("__omp_prelude__");
+		expect(onP.python).toContain("_omp_prelude");
+
+		const store = (await import("../src/rlm")).getRlmStore(onSession);
+		const body = `${"n".repeat(30_000)}PRELUDE_NEEDLE_99${"n".repeat(100)}`;
+		const rec = store.put(body);
+		const handles = await onP.invoke({ op: "handles" }, { session: onSession, toolCallId: "p1" });
+		expect(JSON.stringify(handles.details)).toContain(`rlm://h/${rec.id}`);
+		expect(JSON.stringify(handles.details)).not.toContain("PRELUDE_NEEDLE_99");
+
+		const peek = await onP.invoke(
+			{ op: "peek", handle: rec.id, start: 29_990, end: 30_030 },
+			{ session: onSession, toolCallId: "p2" },
+		);
+		expect(String((peek.details as { text?: string }).text ?? "")).toContain("PRELUDE_NEEDLE_99");
+
+		const bad = await onP.invoke({ op: "peek", handle: "missing" }, { session: onSession, toolCallId: "p3" });
+		expect(bad.isError === true || (bad.details as { error?: string }).error).toBeTruthy();
+	});
+});
+

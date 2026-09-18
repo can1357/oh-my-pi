@@ -55,3 +55,16 @@ Offline: `bun test test/rlm-v2-subcall.test.ts`
 
 - `rlm op=subcall` with `task` + `handle`/`handles` when `rlm.maxDepth≥1` (ephemeral worker A2 — no third runtime, no depth≥2).
 - `rlm.kernelBind` (default false): read-only bind helpers in `src/rlm/kernel-bind.ts` for EvalRunner injection.
+
+### Depth-1 offline
+
+```bash
+bun evals/rlm/depth1-orchestrate.ts
+bun evals/rlm/depth1-report.ts
+```
+
+### Depth-1 live vLLM
+
+```bash
+VLLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct bun evals/rlm/live-vllm-depth1.ts
+```

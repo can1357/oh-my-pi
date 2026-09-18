@@ -238,6 +238,7 @@ import {
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
+import { createRlmPrelude } from "./rlm/prelude";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -1987,6 +1988,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
+		let rlmPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -1997,6 +1999,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (settings.get("computer.enabled")) {
 				computerPrelude ??= createComputerPrelude(toolSession);
 				builtins.push(computerPrelude);
+			}
+			if (settings.get("rlm.enabled") || settings.get("context.engine") === "rlm") {
+				if (settings.get("rlm.kernelBind") === true) {
+					rlmPrelude ??= createRlmPrelude(toolSession);
+					builtins.push(rlmPrelude);
+				}
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
