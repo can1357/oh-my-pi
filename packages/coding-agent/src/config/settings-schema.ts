@@ -2597,7 +2597,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "RLM",
 			label: "RLM max depth",
-			description: "0 = peek/search plus non-recursive llm_query over a slice. Depth ≥ 1 is not implemented.",
+			description:
+				"0 = peek/search/query only (v1). 1 = allow one nested rlm subcall over granted handle slices (v2). Depth ≥ 2 is not implemented.",
 		},
 	},
 	"rlm.maxCalls": {
@@ -2657,7 +2658,18 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "RLM",
 			label: "RLM sub-model",
-			description: "Optional model id for depth-0 llm_query. Empty = active session model (via rlmComplete).",
+			description: "Optional model id for query/subcall. Empty = active session model (via rlmComplete).",
+		},
+	},
+	"rlm.kernelBind": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM kernel bind",
+			description:
+				"When true, expose read-only RLM handle helpers to the session EvalRunner kernel (no full-body repr). Default off.",
 		},
 	},
 

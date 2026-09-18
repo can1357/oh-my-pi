@@ -3,17 +3,21 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { rlmQuery } from "../rlm/query";
 import { getRlmStore, rlmEnabled } from "../rlm/session";
+import { parseRlmGrants, rlmSubcall } from "../rlm/subcall";
 import type { ToolSession } from ".";
 import { toolResult } from "./tool-result";
 
-
 const rlmSchema = type({
-	op: type.enumerated("peek", "search", "query", "status").describe("peek a handle, search, query a slice, or status"),
+	op: type
+		.enumerated("peek", "search", "query", "subcall", "status")
+		.describe("peek a handle, search, query a slice, depth-1 subcall, or status"),
 	"handle?": type("string").describe("rlm://h/<id> from a spilled stub"),
-	"start?": type("number").describe("peek/query start offset"),
-	"end?": type("number").describe("peek/query end offset"),
+	"handles?": type("string").describe("comma/space-separated handles for subcall multi-hop grants"),
+	"start?": type("number").describe("peek/query/subcall start offset (primary handle)"),
+	"end?": type("number").describe("peek/query/subcall end offset (primary handle)"),
 	"pattern?": type("string").describe("search regex"),
 	"question?": type("string").describe("query question"),
+	"task?": type("string").describe("subcall worker task (depth-1)"),
 	"limit?": type("number").describe("search hit cap"),
 	"+": "reject",
 });
@@ -27,15 +31,16 @@ export interface RlmToolDetails {
 	meta?: OutputMeta;
 }
 
-
-/** Depth-0 RLM: inspect spilled corpus without injecting it into the root prompt. */
+/** RLM: inspect spilled corpus; depth-1 subcall when rlm.maxDepth ≥ 1. */
 export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 	readonly name = "rlm";
 	readonly approval = "read" as const;
 	readonly label = "RLM";
-	readonly summary = "Peek, search, or query spilled long context";
+	readonly summary = "Peek, search, query, or depth-1 subcall over spilled long context";
 	readonly description =
-		"Inspect spilled evidence that is not in the neural context. op=peek|search|query|status. Handles look like rlm://h/<id>.";
+		"Inspect spilled evidence that is not in the neural context. " +
+		"op=peek|search|query|subcall|status. Handles look like rlm://h/<id>. " +
+		"subcall requires rlm.maxDepth≥1 and a task over one or more granted handles.";
 	readonly parameters = rlmSchema;
 	readonly strict = true;
 	readonly loadMode = "essential" as const;
@@ -51,6 +56,32 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 		if (params.op === "status") {
 			return toolResult<RlmToolDetails>({ op: "status" }).text(store.status()).done();
 		}
+
+		if (params.op === "subcall") {
+			const grants = parseRlmGrants(params.handle, params.handles, params.start, params.end);
+			const task = params.task ?? params.question ?? "";
+			if (!grants.length) {
+				return toolResult<RlmToolDetails>({ op: "subcall" })
+					.error()
+					.text("handle or handles is required for subcall")
+					.done();
+			}
+			if (!task.trim()) {
+				return toolResult<RlmToolDetails>({ op: "subcall", handle: grants[0]?.handle })
+					.error()
+					.text("task (or question) is required for subcall")
+					.done();
+			}
+			const result = await rlmSubcall(store, grants, task, this.session.rlmComplete, 1);
+			return toolResult<RlmToolDetails>({
+				op: "subcall",
+				handle: grants[0]?.handle,
+				failOpen: result.failOpen,
+			})
+				.text(result.citation ? `${result.citation}\n${result.text}` : result.text)
+				.done();
+		}
+
 		if (!params.handle) {
 			return toolResult<RlmToolDetails>({ op: params.op })
 				.error()

@@ -86,3 +86,8 @@ export function rlmSubModel(session: Pick<RlmSessionHost, "settings">): string |
 	const value = session.settings.get("rlm.subModel");
 	return typeof value === "string" && value.length > 0 ? value : null;
 }
+
+/** When true, hosts may inject read-only RLM helpers into the session kernel. */
+export function rlmKernelBindEnabled(session: Pick<RlmSessionHost, "settings">): boolean {
+	return session.settings.get("rlm.kernelBind") === true;
+}

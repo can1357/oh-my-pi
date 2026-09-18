@@ -48,3 +48,10 @@ VLLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct bun evals/rlm/live-vllm-harness.ts
 Measures: spill stub + root payload drop, `RlmStore.search` needle (M5), live `rlmQuery` TTFT/tokens via streaming chat completions (`cost=$0` local).
 
 Agent multi-turn RPC (`live-slm-bench.ts`) is optional; small SLMs often fail bash/eval schemas — the harness is the load-bearing live gate.
+
+## RFC v2 (depth-1)
+
+Offline: `bun test test/rlm-v2-subcall.test.ts`
+
+- `rlm op=subcall` with `task` + `handle`/`handles` when `rlm.maxDepth≥1` (ephemeral worker A2 — no third runtime, no depth≥2).
+- `rlm.kernelBind` (default false): read-only bind helpers in `src/rlm/kernel-bind.ts` for EvalRunner injection.
