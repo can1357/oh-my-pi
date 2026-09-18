@@ -26,6 +26,7 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -279,7 +280,11 @@ async function relocateArtifactsDirectory(source: string, destination: string): 
 			}),
 			fs.promises.lstat(source),
 		]);
-		if (occupant === null || !occupant.isDirectory() || !origin.isDirectory()) throw err;
+		if (occupant === null && origin.isDirectory() && isFsError(err) && err.code === "EXDEV") {
+			await fs.promises.mkdir(destination);
+		} else if (occupant === null || !occupant.isDirectory() || !origin.isDirectory()) {
+			throw err;
+		}
 	}
 	const stranded = await mergeDirectoryInto(source, destination);
 	if (stranded.length > 0) {
@@ -767,7 +772,7 @@ export class SessionManager {
 	 * once rename has landed (source gone). Never recreates a vacated source.
 	 * `null` outside an active relocation.
 	 */
-	#sessionFileRelocating: { source: string; dest: string } | null = null;
+	#sessionFileRelocating: { source: string; dest: string; copying?: boolean } | null = null;
 	/** Atomic entry batch currently staged for a full-file commit. */
 	#atomicEntryBatch: AtomicEntryBatch | undefined;
 
@@ -1124,6 +1129,7 @@ export class SessionManager {
 	#liveRelocationWritePath(): string | null {
 		const relocating = this.#sessionFileRelocating;
 		if (!relocating) return null;
+		if (relocating.copying && this.#storage.existsSync(relocating.source)) return relocating.source;
 		if (this.#storage.existsSync(relocating.dest)) return relocating.dest;
 		if (this.#storage.existsSync(relocating.source)) return relocating.source;
 		// Rename in flight with neither path visible (rare cross-device edge):
@@ -1984,7 +1990,13 @@ export class SessionManager {
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
-						await fs.promises.rename(oldSessionFile, newSessionFile);
+						try {
+							await fs.promises.rename(oldSessionFile, newSessionFile);
+						} catch (error) {
+							if (!isFsError(error) || error.code !== "EXDEV") throw error;
+							if (this.#sessionFileRelocating) this.#sessionFileRelocating.copying = true;
+							await moveFileAcrossDevices(oldSessionFile, newSessionFile);
+						}
 						sessionMoved = true;
 					}
 
@@ -2015,7 +2027,12 @@ export class SessionManager {
 
 					if (sessionMoved) {
 						try {
-							await fs.promises.rename(newSessionFile, oldSessionFile);
+							try {
+								await fs.promises.rename(newSessionFile, oldSessionFile);
+							} catch (error) {
+								if (!isFsError(error) || error.code !== "EXDEV") throw error;
+								await moveFileAcrossDevices(newSessionFile, oldSessionFile);
+							}
 						} catch (rollbackErr) {
 							throw new Error(
 								`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
