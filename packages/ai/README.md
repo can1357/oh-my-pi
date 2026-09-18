@@ -564,6 +564,8 @@ if (message.stopReason === "error" || message.stopReason === "aborted") {
 }
 ```
 
+Provider concurrency accounting retries temporary stale-lease cleanup failures locally before dispatch. Cleanup remains bounded, and a persistent failure still surfaces to the caller.
+
 ### Aborting Requests
 
 The abort signal allows you to cancel in-progress requests. Aborted requests have `stopReason === 'aborted'`:

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -446,6 +446,39 @@ describe("provider in-flight request limits", () => {
 		controller.abort(new Error("cancel partial-info waiter"));
 		await expect(stream.result()).rejects.toThrow("cancel partial-info waiter");
 		expect(mock.calls).toHaveLength(0);
+	});
+
+	test("retries transient stale lease removal before dispatching within provider capacity", async () => {
+		registerMockApi();
+		const providerDir = limiterDir("tests");
+		const staleLease = path.join(providerDir, "stale");
+		await fs.mkdir(staleLease, { recursive: true });
+		await Bun.write(
+			path.join(staleLease, "info.json"),
+			JSON.stringify({ pid: process.pid, timestamp: Date.now() - 60_000, token: "stale" }),
+		);
+
+		const realRm = fs.rm.bind(fs);
+		let staleRemovalAttempts = 0;
+		const rm = spyOn(fs, "rm").mockImplementation(async (target, options) => {
+			if (target === staleLease) {
+				staleRemovalAttempts++;
+				if (staleRemovalAttempts === 1) {
+					throw Object.assign(new Error("simulated transient stale lease cleanup failure"), { code: "ENOTEMPTY" });
+				}
+			}
+			return realRm(target as Parameters<typeof fs.rm>[0], options as Parameters<typeof fs.rm>[1]);
+		});
+		try {
+			const mock = createMockModel({ provider: "tests", responses: [{ content: ["reply"] }] });
+			const result = await streamSimple(mock.model, context(), { maxInFlightRequests: { tests: 1 } }).result();
+
+			expect(result.content).toEqual([{ type: "text", text: "reply" }]);
+			expect(mock.calls).toHaveLength(1);
+			expect(staleRemovalAttempts).toBe(2);
+		} finally {
+			rm.mockRestore();
+		}
 	});
 
 	test("does not delete a fresh lock after observing a stale lock", async () => {
