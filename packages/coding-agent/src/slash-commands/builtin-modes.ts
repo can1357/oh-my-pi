@@ -99,6 +99,30 @@ function applyExtendedContextCommand(settings: Settings, args: string): string |
 	return undefined;
 }
 
+function applyRlmCommand(session: AgentSession, args: string): string | undefined {
+	const arg = args.trim().toLowerCase();
+	const settings = session.settings;
+	if (arg === "status") {
+		const on = settings.get("rlm.enabled") ? "on" : "off";
+		return `RLM is ${on}. spillBytes=${settings.get("rlm.spillBytes")} maxCalls=${settings.get("rlm.maxCalls")} maxDepth=${settings.get("rlm.maxDepth")}.`;
+	}
+	if (!arg || arg === "toggle") {
+		const enabled = !settings.get("rlm.enabled");
+		settings.override("rlm.enabled", enabled);
+		return `RLM ${enabled ? "enabled" : "disabled"} for this session.`;
+	}
+	if (arg === "on") {
+		settings.override("rlm.enabled", true);
+		return "RLM enabled for this session.";
+	}
+	if (arg === "off") {
+		settings.override("rlm.enabled", false);
+		return "RLM disabled for this session.";
+	}
+	return undefined;
+}
+
+
 /** Detailed, session-effective `/computer status` diagnostics. */
 function formatComputerUseStatus(session: AgentSession): string {
 	const enabled = session.settings.get("computer.enabled");
@@ -567,6 +591,34 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.setText("");
 		},
 	},
+	{
+		name: "rlm",
+		icon: "expand",
+		description: "Toggle the RLM prompt-as-variable context engine",
+		acpDescription: "Toggle RLM context engine",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Spill oversized tool results and expose the rlm tool" },
+			{ name: "off", description: "Use native compaction only" },
+			{ name: "status", description: "Show RLM engine status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			`RLM: ${runtime.ctx.session.settings.get("rlm.enabled") ? "on" : "off"}`,
+		handle: async (command, runtime) => {
+			const output = applyRlmCommand(runtime.session, command.args);
+			if (!output) return usage("Usage: /rlm [on|off|status]", runtime);
+			await runtime.output(output);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const output = applyRlmCommand(runtime.ctx.session, command.args);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(output ?? "Usage: /rlm [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+
 	{
 		name: "computer",
 		icon: "computer",

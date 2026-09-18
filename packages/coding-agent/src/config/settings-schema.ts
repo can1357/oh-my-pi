@@ -2568,6 +2568,59 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"rlm.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM context engine",
+			description:
+				"Spill oversized tool results out of the neural window and inspect them with peek/search/query. Default off (native compaction).",
+		},
+	},
+	"rlm.maxDepth": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM max depth",
+			description: "0 = peek/search plus non-recursive llm_query over a slice. Depth ≥ 1 is not implemented.",
+		},
+	},
+	"rlm.maxCalls": {
+		type: "number",
+		default: 32,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM max calls",
+			description: "Hard cap on rlm query subcalls per session store",
+		},
+	},
+	"rlm.maxTotalTokens": {
+		type: "number",
+		default: 1_000_000,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM max tokens",
+			description: "Hard cap on estimated tokens charged to rlm query",
+		},
+	},
+	"rlm.spillBytes": {
+		type: "number",
+		default: 20_480,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM spill bytes",
+			description: "Tool-result texts larger than this are stored as handles instead of entering the root prompt",
+		},
+	},
+
+
 	"compaction.midTurnEnabled": {
 		type: "boolean",
 		default: true,
