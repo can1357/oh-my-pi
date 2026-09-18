@@ -54,6 +54,14 @@ export interface ModelControlsHost {
 	resolveActiveEditMode(): EditMode;
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
+	/**
+	 * Apply `auth.startupOAuthAccount` for `provider`/`sessionId` if nothing is
+	 * active yet. Call BEFORE any `getApiKey`/credential-resolution preflight
+	 * for a provider a switch is about to land on -- once ranking resolves a
+	 * credential and makes it active, the pin can no longer override it (see
+	 * `AgentSession#applyStartupOAuthAccountPin`'s `#pendingStartupOAuthPins`).
+	 */
+	applyStartupOAuthAccountPin(provider: string, sessionId: string): void;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
 	magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean;
@@ -407,6 +415,13 @@ export class ModelControls {
 			if (apiKeysByProvider.has(provider)) {
 				apiKey = apiKeysByProvider.get(provider);
 			} else {
+				// Apply the startup default for THIS provider before resolving its
+				// key: automatic ranking would otherwise stick an account the
+				// moment nothing is active yet, and once active the pin can no
+				// longer override it (see `#cycleAvailableModel`'s identical guard).
+				// Every distinct provider among the scoped models goes through
+				// this filter before any of them is actually switched to.
+				this.#host.applyStartupOAuthAccountPin(provider, this.#host.sessionId());
 				apiKey = await this.#host.modelRegistry.getApiKeyForProvider(provider, this.#host.sessionId());
 				apiKeysByProvider.set(provider, apiKey);
 			}
@@ -459,6 +474,11 @@ export class ModelControls {
 		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
 		const nextModel = availableModels[nextIndex];
 
+		// Apply the target provider's startup default BEFORE resolving its API
+		// key: getApiKey ranks and stickies a credential the moment nothing is
+		// active yet for this session id, and once something is active the pin
+		// can no longer override it.
+		this.#host.applyStartupOAuthAccountPin(nextModel.provider, this.#host.sessionId());
 		const apiKey = await this.#host.modelRegistry.getApiKey(nextModel, this.#host.sessionId());
 		if (!apiKey) {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
@@ -624,6 +644,8 @@ export class ModelControls {
 					sessionId: this.#host.sessionId(),
 					signal: controller.signal,
 					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+					applyStartupOAuthAccountPin: (provider, sessionId) =>
+						this.#host.applyStartupOAuthAccountPin(provider, sessionId),
 					onUsage: usage => {
 						const entryId = this.#host.sessionManager.appendModelUsage(
 							{ purpose: "auto-thinking", ...usage },

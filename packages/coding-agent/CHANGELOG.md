@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `auth.startupOAuthAccount` and `omp auth accounts|pin|unpin <provider> [selector]` to pin a specific stored OAuth account per provider as the one a new session starts on. A rate limit on the pinned account still fails over to a sibling automatically, and a resumed session's own recorded account or a live `/session pin` always takes precedence over the configured default. Added `/switchaccount [account]` to switch a running session's OAuth account for the current provider without leaving the TUI ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
+
 ### Fixed
 
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.

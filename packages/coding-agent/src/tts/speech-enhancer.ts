@@ -40,6 +40,14 @@ export interface SpeechEnhancerDeps {
 	registry: ModelRegistry;
 	sessionId: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	/**
+	 * Apply `auth.startupOAuthAccount` for `(model.provider, sessionId)` before
+	 * resolving the rewrite model's API key. `@tiny` can resolve to a
+	 * different provider than the foreground model; without this, automatic
+	 * ranking can make a sibling account reserved as overflow-only sticky for
+	 * the primary session id under an unrelated role.
+	 */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 }
 
 function extractText(content: AssistantMessage["content"]): string {
@@ -78,6 +86,7 @@ export class SpeechEnhancer {
 				matchPreferences: getModelMatchPreferences(settings),
 			}).model;
 			if (!model) return null;
+			this.#deps.applyStartupOAuthAccountPin?.(model.provider, sessionId);
 			const apiKey = await registry.getApiKey(model, sessionId);
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.

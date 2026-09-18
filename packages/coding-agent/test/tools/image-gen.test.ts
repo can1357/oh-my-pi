@@ -338,6 +338,77 @@ describe("imageGenTool", () => {
 		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("codex-webp"));
 	});
 
+	it("applies the startup pin before resolving Codex subscription image credentials", async () => {
+		setImageProviderOrder(["openai-codex"]);
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-codex-1" } }),
+		).toString("base64");
+		const codexToken = `header.${payload}.signature`;
+		const sse = `data: ${JSON.stringify({
+			type: "response.completed",
+			response: {
+				output: [{ type: "image_generation_call", result: Buffer.from("codex-webp").toString("base64") }],
+				usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+			},
+		})}\n\n`;
+		const fetchMock: typeof fetch = (async () =>
+			new Response(sse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			})) as unknown as typeof fetch;
+
+		const codexModel = {
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			id: "gpt-5.5",
+			name: "GPT-5.5",
+			baseUrl: "https://chatgpt.com/backend-api",
+		} as Model;
+		const activeModel = { api: "anthropic-messages", provider: "anthropic", id: "claude-opus-4" } as Model;
+
+		const callOrder: string[] = [];
+		const applyStartupOAuthAccountPin = (provider: string, sessionId: string): void => {
+			expect(provider).toBe("openai-codex");
+			expect(sessionId).toBe("test-session");
+			callOrder.push("pin");
+		};
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				find: (provider: string, id: string) =>
+					provider === "openai-codex" && id === "gpt-5.5" ? codexModel : undefined,
+				getAll: () => [codexModel],
+				getApiKey: async () => codexToken,
+				getApiKeyForProvider: async (provider: string) => {
+					callOrder.push("getApiKeyForProvider");
+					return provider === "openai-codex" ? codexToken : undefined;
+				},
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => codexToken,
+			} as unknown as ModelRegistry,
+			model: activeModel,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+			applyStartupOAuthAccountPin,
+		};
+
+		const result = await imageGenTool.execute(
+			"call-codex-pin",
+			{ subject: "a neon skyline", aspect_ratio: "1:1" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(callOrder).toEqual(["pin", "getApiKeyForProvider"]);
+	});
+
 	it("falls back when an openai-codex API key lacks a subscription account claim", async () => {
 		const antigravityCredentials = JSON.stringify({ token: "test-antigravity-token", projectId: "test-project" });
 		const codexModel = {

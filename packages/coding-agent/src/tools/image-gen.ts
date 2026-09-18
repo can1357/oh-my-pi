@@ -777,11 +777,13 @@ async function findCodexSubscriptionImageCredentials(
 	modelRegistry: ModelRegistry | undefined,
 	activeModel: Model | undefined,
 	sessionId?: string,
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void,
 ): Promise<ImageApiKey | null> {
 	if (!modelRegistry) return null;
 	if (isOpenAIHostedImageModel(activeModel) && getOpenAIHostedImageProvider(activeModel) === "openai-codex") {
 		return null;
 	}
+	if (sessionId) applyStartupOAuthAccountPin?.("openai-codex", sessionId);
 	const token = await modelRegistry.getApiKeyForProvider("openai-codex", sessionId);
 	if (!token) return null;
 	const model = resolveDefaultCodexImageModel(modelRegistry);
@@ -837,12 +839,18 @@ async function findImageApiKey(
 	modelRegistry?: ModelRegistry,
 	activeModel?: Model,
 	sessionId?: string,
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void,
 ): Promise<ImageApiKey | null> {
 	switch (provider) {
 		case "openai":
 			return findOpenAIHostedImageCredentials(modelRegistry, activeModel, sessionId);
 		case "openai-codex":
-			return findCodexSubscriptionImageCredentials(modelRegistry, activeModel, sessionId);
+			return findCodexSubscriptionImageCredentials(
+				modelRegistry,
+				activeModel,
+				sessionId,
+				applyStartupOAuthAccountPin,
+			);
 		case "antigravity":
 			return modelRegistry ? findAntigravityCredentials(modelRegistry, sessionId) : null;
 		case "xai":
@@ -1320,7 +1328,13 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			let resolvedImageCache: InlineImageData[] | undefined;
 
 			for (const preferredProvider of providerOrder) {
-				const apiKey = await findImageApiKey(preferredProvider, ctx.modelRegistry, ctx.model, sessionId);
+				const apiKey = await findImageApiKey(
+					preferredProvider,
+					ctx.modelRegistry,
+					ctx.model,
+					sessionId,
+					ctx.applyStartupOAuthAccountPin,
+				);
 				if (!apiKey) continue;
 				foundCredentials = true;
 				if (!resolvedImageCache) {

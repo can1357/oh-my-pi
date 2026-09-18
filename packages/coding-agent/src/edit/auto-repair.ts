@@ -295,7 +295,12 @@ export async function attemptEditAutoRepair(options: {
 	if (!model) return undefined;
 	const sessionId = session.getSessionId?.() ?? undefined;
 	// Resolve the key eagerly so the session-sticky credential is recorded and
-	// an unauthenticated smol role bails before any region work.
+	// an unauthenticated smol role bails before any region work. Apply the
+	// configured startup pin first so a `smol` role landing on a different
+	// provider than the foreground model doesn't clobber `auth.startupOAuthAccount`
+	// via ordinary automatic ranking (mirrors every other candidate-preflight
+	// call site: classifier.ts, speech-enhancer.ts, model-controls.ts, ...).
+	if (sessionId) session.applyStartupOAuthAccountPin?.(model.provider, sessionId);
 	const apiKey = await registry.getApiKey(model, sessionId);
 	if (!apiKey) return undefined;
 

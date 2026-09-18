@@ -243,17 +243,29 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 		const cachePath = options.cachePath ?? getAuthBrokerSnapshotCachePath();
 		const ttlMs = resolveSnapshotTtlMs();
+		// Chained so concurrent onSnapshot deliveries (e.g. two SSE deltas
+		// arriving close together) persist in call order rather than
+		// completion order -- each write's encrypt/open/write/rename is async,
+		// so an older snapshot's write can otherwise finish and rename after a
+		// newer one, leaving a stale cache on disk. The delta dispatch already
+		// drops out-of-order events before invoking this callback (`if
+		// (event.generation < this.#generation) return;`), so call order here
+		// already matches generation order -- serializing is sufficient,
+		// no explicit "latest generation" tracking needed.
+		let writeQueue: Promise<void> = Promise.resolve();
 		const persist =
 			ttlMs > 0
 				? (snapshot: SnapshotResponse): void => {
-						void writeAuthBrokerSnapshotCache({
-							path: cachePath,
-							token: brokerConfig.token,
-							url: brokerConfig.url,
-							snapshot,
-						}).catch(error => {
-							logger.debug("auth-broker snapshot cache write failed", { error: String(error) });
-						});
+						writeQueue = writeQueue.then(() =>
+							writeAuthBrokerSnapshotCache({
+								path: cachePath,
+								token: brokerConfig.token,
+								url: brokerConfig.url,
+								snapshot,
+							}).catch(error => {
+								logger.debug("auth-broker snapshot cache write failed", { error: String(error) });
+							}),
+						);
 					}
 				: undefined;
 
@@ -289,13 +301,52 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		// the current generation within one RTT without blocking startup on a
 		// broker round trip. A token revoked since the cache was written surfaces
 		// through that background path exactly like a mid-session revocation.
+		//
+		// `storage` is assigned right after construction below and read back
+		// inside this closure on every later delivery (initial delivery races
+		// harmlessly with that assignment — `store`'s own constructor call to
+		// `#applySnapshot` runs synchronously before `RemoteAuthCredentialStore`
+		// returns, i.e. before `storage` exists, and the `reload()` right after
+		// construction already covers that first snapshot).
+		// oxlint-disable-next-line prefer-const -- captured by the onSnapshot closure before assignment
+		let storage: AuthStorage | undefined;
 		const store = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,
-			onSnapshot: persist,
+			onSnapshot: snapshot => {
+				persist?.(snapshot);
+				// A background delivery landing after this process' AuthStorage
+				// cache was last read (e.g. serving a stale-but-valid on-disk
+				// snapshot at startup while this refreshes underneath it, or a
+				// mid-session credential change on another process/device) must
+				// bump AuthStorage's own generation so callers holding an
+				// `onGenerationChanged` subscription — such as
+				// `AgentSession#applyStartupOAuthAccountPin`'s retry, which can
+				// have matched zero accounts against the earlier snapshot — get a
+				// chance to re-resolve. `store.listAuthCredentials()` already
+				// reads this delivery's data live; `reload()` is what makes
+				// `AuthStorage`'s cached view (and generation counter) catch up.
+				// `reload()` rethrows on store corruption; this runs from a
+				// background delivery for the life of the process, so the
+				// rejection must be observed here (like `persist` above) rather
+				// than surface as a process-fatal unhandled rejection.
+				//
+				// Every delivery is itself genuine external evidence, even when
+				// `reload()` finds the resulting content byte-identical to what
+				// was already cached (e.g. confirming a resumed-but-deleted
+				// account is still gone) — that case never bumps generation, so
+				// `notifyExternalRefresh()` signals it separately; see
+				// `AuthStorage.getRefreshAttempts`.
+				void storage
+					?.reload()
+					.then(() => storage?.notifyExternalRefresh())
+					.catch(error => {
+						logger.debug("auth-broker background snapshot reload failed", { error: String(error) });
+					});
+			},
 			accountPool,
 		});
-		const storage = new AuthStorage(store, {
+		storage = new AuthStorage(store, {
 			configValueResolver: options.configValueResolver,
 			sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}`,
 		});

@@ -204,6 +204,13 @@ export interface ToolSession {
 	getApiKey?: AgentOptions["getApiKey"];
 	/** Current session whose stored credential affinities should seed a child session. */
 	getCredentialSourceSessionId?: () => string | undefined;
+	/**
+	 * Apply `auth.startupOAuthAccount` for `(provider, sessionId)` before an
+	 * external one-shot credential consumer (e.g. a spawned subagent's
+	 * task-label title request) resolves its API key, in case that candidate
+	 * lands on a different provider than the foreground model.
+	 */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 	/** Skip subprocess-kernel availability checks and warmup */
 	skipPythonPreflight?: boolean;
 	/** Pre-loaded context files (AGENTS.md, etc) */

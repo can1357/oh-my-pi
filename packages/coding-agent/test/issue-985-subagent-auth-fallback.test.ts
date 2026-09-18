@@ -236,6 +236,32 @@ describe("issue #5325: sessionId forwarded to getApiKey for session-sticky OAuth
 		expect(result.authFallbackUsed).toBe(true);
 		expect(result.model?.provider).toBe("deepseek");
 	});
+	test("applies startup pins before primary and fallback credential probes", async () => {
+		const callOrder: string[] = [];
+		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
+			getAvailable: () => [parentModel, unauthedTaskModel],
+			getApiKey: async (model: Model<Api>) => {
+				callOrder.push(`key:${model.provider}`);
+				return model.provider === "deepseek" ? "sk-test" : undefined;
+			},
+		} as never;
+		const applyStartupOAuthAccountPin = (provider: string, sessionId: string): void => {
+			expect(sessionId).toBe("subagent-session-pin-order");
+			callOrder.push(`pin:${provider}`);
+		};
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["qwen3.6-plus-free"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+			undefined,
+			"subagent-session-pin-order",
+			applyStartupOAuthAccountPin,
+		);
+
+		expect(result.authFallbackUsed).toBe(true);
+		expect(callOrder).toEqual(["pin:opencode-zen", "key:opencode-zen", "pin:deepseek", "key:deepseek"]);
+	});
 	test("preserves the requested model warning when auth falls back", async () => {
 		const registry: ModelLookupRegistry & { getApiKey(model: Model<Api>): Promise<string | undefined> } = {
 			getAvailable: () => [parentModel, unauthedTaskModel],

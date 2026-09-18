@@ -53,6 +53,13 @@ export interface DescribeAttachedImagesDeps {
 	activeModelString?: string;
 	telemetryConfig?: AgentTelemetryConfig;
 	sessionId?: string;
+	/**
+	 * Apply the session's configured `auth.startupOAuthAccount` pin for the
+	 * resolved vision model's provider before resolving its credential — the
+	 * `@vision` role can land on a different provider than the foreground
+	 * text-only model this fallback serves.
+	 */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 	/** Test seam: overrides the underlying completeSimple call. */
 	completeImpl?: typeof completeSimple;
 }
@@ -177,6 +184,7 @@ export async function describeAttachedImagesForTextModel(
 ): Promise<TextContent[]> {
 	const localRoot = resolveLocalRoot(deps.localProtocolOptions);
 	const visionModel = resolveVisionModel(deps);
+	if (visionModel && deps.sessionId) deps.applyStartupOAuthAccountPin?.(visionModel.provider, deps.sessionId);
 	const apiKey = visionModel ? await deps.modelRegistry.getApiKey(visionModel, deps.sessionId) : undefined;
 	const canDescribe = Boolean(visionModel && apiKey);
 	const telemetry = resolveTelemetry(deps.telemetryConfig, deps.sessionId);

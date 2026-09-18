@@ -408,6 +408,8 @@ export interface ExecutorOptions {
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
+	/** Apply the parent session's `auth.startupOAuthAccount` pin before child-session auth preflight and labeling. */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -1031,6 +1033,8 @@ interface RunMonitorArgs {
 	modelRegistry?: ModelRegistry;
 	/** Parent settings for tiny-model label generation. */
 	settings?: Settings;
+	/** Forwarded from {@link ExecutorOptions.applyStartupOAuthAccountPin} to child-session auth preflight and labeling. */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
@@ -1455,7 +1459,14 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// failures just leave the label unset.
 	const labelSource = assignment?.trim();
 	if (!args.description && args.modelRegistry && args.settings && labelSource) {
-		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id, abortSignal)
+		generateTaskLabel(
+			labelSource,
+			args.modelRegistry,
+			args.settings,
+			id,
+			abortSignal,
+			args.applyStartupOAuthAccountPin,
+		)
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
 				progress.description = label;
@@ -3412,6 +3423,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		description: options.description,
 		modelRegistry: options.modelRegistry,
+		applyStartupOAuthAccountPin: options.applyStartupOAuthAccountPin,
 		settings,
 		modelOverride,
 		modelRole,
@@ -3537,6 +3549,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					settings,
 					id,
+					options.applyStartupOAuthAccountPin,
 				),
 			);
 			if (modelResolutionWarning) {

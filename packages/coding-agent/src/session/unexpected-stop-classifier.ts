@@ -37,6 +37,16 @@ export interface ClassifyUnexpectedStopDeps {
 	model?: Model;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	signal?: AbortSignal;
+	/**
+	 * Apply the resolved provider's configured `auth.startupOAuthAccount`
+	 * selector to `sessionId` before resolving its API key. The `tiny`/`smol`
+	 * role can resolve to a different provider than the session's active
+	 * model; without this, `getApiKey` falls through to automatic ranking and
+	 * makes an account sticky without ever recording a pending startup pin,
+	 * so the configured default is silently skipped once the session
+	 * switches to that provider.
+	 */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 }
 
 /** Detects terminal turns eligible for mechanical recovery or smart classification. */
@@ -75,6 +85,7 @@ export async function classifyUnexpectedStop(
 			sessionModel: deps.model,
 			sessionId: deps.sessionId,
 			metadataResolver: deps.metadataResolver,
+			applyStartupOAuthAccountPin: deps.applyStartupOAuthAccountPin,
 		});
 		const { answers } = await judge.judge(
 			{ state: { message: text }, questions: { stopped: UNEXPECTED_STOP_QUESTION } },

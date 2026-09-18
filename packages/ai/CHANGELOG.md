@@ -4,6 +4,9 @@
 ### Fixed
 
 - Fixed auth-broker client config resolution failing silently on Windows when reading the token file or `config.yml`; reads now use `node:fs` instead of `Bun.file`.
+- Fixed credential-generation subscribers observing a partial mutation: `AuthStorage` now resets invalid assignments before notifying them and applies a complete multi-provider reload before one generation transition ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
+- Fixed a resumed session's sticky OAuth/API-key account silently switching to a different one after the credential list was reordered or shrank mid-process (e.g. a sibling `/logout`, or an auth-broker snapshot update); the session now keeps using the same account it started with ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
+- Fixed a resumed session permanently ignoring its configured startup OAuth account after a background credential refresh confirmed a previously-missing account was still absent, instead of falling back to the configured default account as documented ([#11717](https://github.com/can1357/oh-my-pi/pull/11717) by [@JoshKirk800](https://github.com/JoshKirk800)).
 
 ## [18.2.5] - 2026-09-17
 
@@ -14,6 +17,7 @@
 ### Fixed
 
 - Fixed Anthropic prompt-cache breakpoints stalling when conversations include mid-conversation tool changes, preventing growing message tails from being unnecessarily re-billed as uncached input.
+- Fixed Anthropic prompt-cache breakpoints stalling on sessions with mid-conversation tool changes: the rolling tail no longer parks on tool-control messages that cannot carry `cache_control`, so the growing message tail keeps its breakpoint instead of being re-billed as uncached input ([#12318](https://github.com/can1357/oh-my-pi/issues/12318)).
 
 ## [18.2.4] - 2026-09-17
 

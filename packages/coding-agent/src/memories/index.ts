@@ -374,6 +374,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 			logger.debug("Phase1 skipped: no model available");
 			return;
 		}
+		session.applyStartupOAuthAccountPin(phase1Model.provider, session.sessionId);
 		const phase1ApiKey = await modelRegistry.getApiKey(phase1Model, session.sessionId);
 		if (!phase1ApiKey) {
 			logger.debug("Phase1 skipped: no API key for phase1 model", {
@@ -538,6 +539,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 			});
 			return;
 		}
+		session.applyStartupOAuthAccountPin(phase2Model.provider, session.sessionId);
 		const phase2ApiKey = await modelRegistry.getApiKey(phase2Model, session.sessionId);
 		if (!phase2ApiKey) {
 			markPhase2FailureWithFallback(db, {

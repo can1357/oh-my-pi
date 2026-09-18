@@ -296,7 +296,8 @@ async function executeCompletion(
 				},
 			]
 		: undefined;
-	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
+	const sessionId = session.getSessionId?.() ?? undefined;
+	const telemetry = resolveTelemetry(session.getTelemetry?.(), sessionId);
 	const systemPrompt = system ? [system] : ["You are a helpful assistant."];
 	// Each fallback that issues a model request consumes one retry attempt,
 	// mirroring session recovery. Keyless candidates are skipped without
@@ -313,7 +314,8 @@ async function executeCompletion(
 		try {
 			// Forward the session id so session-sticky OAuth credentials
 			// resolve (see #5325); without it a usable fallback looks keyless.
-			const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
+			if (sessionId) session.applyStartupOAuthAccountPin?.(model.provider, sessionId);
+			const apiKey = await registry.getApiKey(model, sessionId, { signal });
 			if (!apiKey) {
 				lastError = new ToolError(
 					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,

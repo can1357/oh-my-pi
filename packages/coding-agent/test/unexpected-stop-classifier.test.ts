@@ -148,6 +148,52 @@ describe("classifyUnexpectedStop", () => {
 		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 
+	it("applies the configured startup pin before resolving the classifier's credential", async () => {
+		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!baseModel) throw new Error("Expected bundled Claude Sonnet 4.5 model");
+		const settings = {
+			get(path: string) {
+				if (path === "providers.unexpectedStopModel") return "online";
+				return undefined;
+			},
+			getModelRole(role: string) {
+				return role === "smol" ? `${baseModel.provider}/${baseModel.id}` : undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const callOrder: string[] = [];
+		const getApiKey = vi.fn(async () => {
+			callOrder.push("getApiKey");
+			return "test-key";
+		});
+		const applyStartupOAuthAccountPin = vi.fn((_provider: string, _sessionId: string) => {
+			callOrder.push("pin");
+		});
+		const registry = {
+			authStorage: { hasAuth: () => false },
+			getAvailable: () => [baseModel],
+			getApiKey,
+			resolver: () => async () => "test-key",
+		} as never;
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "YES" }],
+		} as never);
+
+		const result = await classifyUnexpectedStop("I will continue with the next command.", {
+			settings,
+			registry,
+			sessionId: "primary-session-1",
+			applyStartupOAuthAccountPin,
+		});
+
+		expect(result).toBe(true);
+		expect(applyStartupOAuthAccountPin).toHaveBeenCalledWith(baseModel.provider, "primary-session-1");
+		expect(callOrder).toEqual(["pin", "getApiKey"]);
+	});
+
 	it("routes to TypeSafe when a credential exists and thresholds the yes-probability", async () => {
 		const settings = {
 			get(path: string) {

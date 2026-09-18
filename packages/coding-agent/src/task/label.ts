@@ -27,6 +27,7 @@ export async function generateTaskLabel(
 	settings: Settings,
 	sessionId?: string,
 	signal?: AbortSignal,
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void,
 ): Promise<string | null> {
 	const text = assignment.trim();
 	if (!text) return null;
@@ -40,6 +41,8 @@ export async function generateTaskLabel(
 			undefined,
 			TASK_LABEL_SYSTEM_PROMPT,
 			signal,
+			undefined,
+			applyStartupOAuthAccountPin,
 		);
 		if (!label || labelEchoesHandle(sessionId, label)) return null;
 		return label;

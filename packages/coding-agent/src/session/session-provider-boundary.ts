@@ -33,6 +33,7 @@ export interface SessionProviderBoundaryHost {
 	model(): Model | undefined;
 	sessionId(): string;
 	localProtocolOptions(): LocalProtocolOptions;
+	applyStartupOAuthAccountPin(provider: string, sessionId: string): void;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
 	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -246,6 +247,8 @@ export class SessionProviderBoundary {
 					activeModelString: formatModelString(model),
 					telemetryConfig: this.#host.agent.telemetry,
 					sessionId: this.#host.sessionId(),
+					applyStartupOAuthAccountPin: (provider, sessionId) =>
+						this.#host.applyStartupOAuthAccountPin(provider, sessionId),
 				},
 				signal,
 			);

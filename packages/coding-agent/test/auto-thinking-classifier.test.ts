@@ -792,4 +792,53 @@ describe("auto thinking classifier helpers", () => {
 		).rejects.toThrow();
 		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
+
+	it("applies the configured startup pin for each classifier candidate before resolving its credential", async () => {
+		const smol = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!smol) throw new Error("Expected bundled Claude Sonnet 4.6 model");
+		const target = buildLadderModel("mock-max", MAX_LADDER);
+		const settings = {
+			get(path: string) {
+				if (path === "providers.autoThinkingModel") return "online";
+				if (path === "providers.autoThinkingMaxEffort") return "xhigh";
+				return undefined;
+			},
+			getModelRole(role: string) {
+				return role === "smol" ? `${smol.provider}/${smol.id}` : undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const callOrder: string[] = [];
+		const getApiKey = vi.fn(async () => {
+			callOrder.push("getApiKey");
+			return "test-key";
+		});
+		const applyStartupOAuthAccountPin = vi.fn((_provider: string, _sessionId: string) => {
+			callOrder.push("pin");
+		});
+		const registry = {
+			authStorage: { hasAuth: () => false },
+			getAvailable: () => [smol],
+			getApiKey,
+			resolver: () => async () => "test-key",
+		} as never;
+		vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "medium" }],
+		} as never);
+
+		const effort = await classifyDifficulty("rename a helper", {
+			settings,
+			registry,
+			model: target,
+			sessionId: "primary-session-1",
+			applyStartupOAuthAccountPin,
+		});
+
+		expect(effort).toBe(Effort.Medium);
+		expect(applyStartupOAuthAccountPin).toHaveBeenCalledWith(smol.provider, "primary-session-1");
+		expect(callOrder).toEqual(["pin", "getApiKey"]);
+	});
 });

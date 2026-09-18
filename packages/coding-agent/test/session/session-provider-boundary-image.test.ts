@@ -42,6 +42,7 @@ function makeHost(active: Model<Api>, artifactsDir: string): SessionProviderBoun
 		model: () => active,
 		sessionId: () => "test-session",
 		localProtocolOptions: () => ({ getArtifactsDir: () => artifactsDir, getSessionId: () => "test-session" }),
+		applyStartupOAuthAccountPin: () => {},
 	} as unknown as SessionProviderBoundaryHost;
 }
 
@@ -70,5 +71,29 @@ describe("buildImageDescriptionNotice wire truth (#9697)", () => {
 			image,
 		]);
 		expect(silent).toBeUndefined();
+	});
+
+	it("applies the startup pin before the boundary resolves a fallback vision credential", async () => {
+		const image: ImageContent = { type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" };
+		const active = makeProxyModel("deepseek-v4-flash", { stripImageInput: true });
+		const vision = makeProxyModel("vision-model");
+		const callOrder: string[] = [];
+		const host = makeHost(active, testDir);
+		host.modelRegistry = {
+			getAvailable: () => [vision],
+			getApiKey: async () => {
+				callOrder.push("getApiKey");
+				return undefined;
+			},
+		} as never;
+		host.applyStartupOAuthAccountPin = (provider, sessionId) => {
+			expect(provider).toBe(vision.provider);
+			expect(sessionId).toBe("test-session");
+			callOrder.push("pin");
+		};
+
+		await new SessionProviderBoundary(host).buildImageDescriptionNotice([image]);
+
+		expect(callOrder).toEqual(["pin", "getApiKey"]);
 	});
 });

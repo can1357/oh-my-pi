@@ -84,6 +84,15 @@ export interface ClassifyDifficultyDeps {
 	signal?: AbortSignal;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	onUsage?: (usage: JudgmentUsage) => void;
+	/**
+	 * Apply a candidate provider's configured `auth.startupOAuthAccount`
+	 * selector to `sessionId` before resolving that candidate's API key. A
+	 * `tiny`/`smol` classifier candidate can resolve to a different provider
+	 * than the session's active model; without this, `getApiKey` falls
+	 * through to automatic ranking and can make a sibling account (reserved
+	 * as overflow-only for the active provider) sticky for this session.
+	 */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 }
 
 /**
@@ -115,6 +124,7 @@ export async function classifyDifficulty(
 		sessionId: deps.sessionId,
 		metadataResolver: deps.metadataResolver,
 		onUsage: deps.onUsage,
+		applyStartupOAuthAccountPin: deps.applyStartupOAuthAccountPin,
 	});
 	const state = { request: preprocessTinyMessage(promptText) };
 	const options = { signal: deps.signal };
