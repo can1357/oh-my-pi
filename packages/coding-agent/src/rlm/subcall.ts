@@ -103,7 +103,7 @@ export async function rlmSubcall(
 
 	const approxTokens = Math.ceil(prompt.length / 4);
 	try {
-		store.charge(approxTokens, 0);
+		store.beginCall(approxTokens);
 	} catch (error) {
 		const msg = error instanceof RlmBudgetError ? error.message : String(error);
 		store.note("subcall", msg, true);
@@ -119,23 +119,30 @@ export async function rlmSubcall(
 		};
 	}
 
+	const signal = store.createCallSignal();
 	try {
 		store.note("subcall", `depth=${depth} grants=${limited.length} task_bytes=${trimmedTask.length}`);
-		const raw = await complete(prompt);
+		const raw = await complete(prompt, { signal });
 		const text = typeof raw === "string" ? raw : raw.text;
-		const tokens = typeof raw === "string" ? undefined : raw.tokens;
-		const cost = typeof raw === "string" ? undefined : raw.cost;
-		if (typeof tokens === "number" && tokens > approxTokens) {
-			// Top-up actual usage above the estimate when provider reports it.
-			try {
-				store.charge(tokens - approxTokens, cost ?? 0);
-			} catch {
-				/* already counted estimate; fail-open on top-up */
-			}
-		} else if (typeof cost === "number" && cost > 0) {
-			store.budget.cost += cost;
+		const actualTokens = typeof raw === "string" ? approxTokens : (raw.tokens ?? approxTokens);
+		const actualCost = typeof raw === "string" ? 0 : (raw.cost ?? 0);
+		const reconciled = store.reconcileUsage({
+			estimatedTokens: approxTokens,
+			actualTokens,
+			actualCost,
+		});
+		if (reconciled.overBudget) {
+			store.note("subcall", "overBudget after completion", true);
+			return {
+				text: `${text}\n\n(rlm over-budget after completion; fail-open)`,
+				citation,
+				failOpen: true,
+				tokens: reconciled.tokens,
+				cost: reconciled.cost,
+				overBudget: true,
+			};
 		}
-		return { text, citation, tokens, cost };
+		return { text, citation, tokens: reconciled.tokens, cost: reconciled.cost };
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);
 		store.note("subcall", msg, true);

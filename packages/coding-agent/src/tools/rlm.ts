@@ -15,7 +15,8 @@ const rlmSchema = type({
 	"handles?": type("string").describe("comma/space-separated handles for subcall multi-hop grants"),
 	"start?": type("number").describe("peek/query/subcall start offset (primary handle)"),
 	"end?": type("number").describe("peek/query/subcall end offset (primary handle)"),
-	"pattern?": type("string").describe("search regex"),
+	"pattern?": type("string").describe("search needle (literal by default; set mode=regex for RegExp)"),
+	"mode?": type.enumerated("literal", "regex").describe("search mode; default literal"),
 	"question?": type("string").describe("query question"),
 	"task?": type("string").describe("subcall worker task (depth-1)"),
 	"limit?": type("number").describe("search hit cap"),
@@ -102,7 +103,8 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 						.text("pattern is required")
 						.done();
 				}
-				const hits = store.search(params.handle, params.pattern, params.limit ?? 8);
+				const mode = params.mode === "regex" ? "regex" : "literal";
+				const hits = store.search(params.handle, params.pattern, params.limit ?? 8, mode);
 				const text =
 					hits.length === 0
 						? "no matches"

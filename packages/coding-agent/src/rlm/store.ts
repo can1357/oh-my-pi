@@ -57,15 +57,38 @@ export interface RlmBudget {
 	startedAt: number;
 	cancelled: boolean;
 	cancelReason?: string;
+	/** True when provider usage exceeded a prior reservation (hard budget breached post-hoc). */
+	overBudget?: boolean;
 }
 
-/** Session-scoped original-byte store. Corpus never belongs in the root prompt. */
+export interface RlmUsageReconcile {
+	/** Tokens reserved at beginCall. */
+	estimatedTokens: number;
+	/** Provider-reported tokens when available. */
+	actualTokens?: number;
+	actualCost?: number;
+}
+
+export interface RlmReconcileResult {
+	tokens: number;
+	cost: number;
+	/** Reservation was raised to actual and breached a hard cap. */
+	overBudget: boolean;
+}
+
+/**
+ * Session-scoped original-byte store. Corpus never belongs in the root prompt.
+ * Owned by one AgentSession runtime id — never keyed by cwd alone.
+ */
 export class RlmStore {
 	#next = 1;
 	readonly records = new Map<string, RlmRecord>();
 	readonly budget: RlmBudget;
 	/** Honest partial trajectory for cancel / budget stops (RFC v1). */
 	readonly trajectory: RlmTrajectoryEntry[] = [];
+	#disposed = false;
+	/** In-flight provider calls aborted by cancel / wall-clock / dispose. */
+	readonly #inflight = new Set<AbortController>();
 
 	constructor(budget?: Partial<RlmBudget>) {
 		this.budget = {
@@ -80,10 +103,16 @@ export class RlmStore {
 			startedAt: budget?.startedAt ?? Date.now(),
 			cancelled: false,
 			cancelReason: undefined,
+			overBudget: false,
 		};
 	}
 
+	get disposed(): boolean {
+		return this.#disposed;
+	}
+
 	put(text: string, source?: string): RlmRecord {
+		this.#assertLive("put");
 		const id = String(this.#next++);
 		const record: RlmRecord = {
 			id,
@@ -115,10 +144,29 @@ export class RlmStore {
 		};
 	}
 
-	search(handle: string, pattern: string, limit = 8): RlmHit[] {
+	/**
+	 * Search spilled text. Default mode is **literal** (safe on large corpora).
+	 * `mode: "regex"` uses JS RegExp and remains opt-in / experimental.
+	 */
+	search(handle: string, pattern: string, limit = 8, mode: "literal" | "regex" = "literal"): RlmHit[] {
 		const record = this.require(handle);
-		const regex = new RegExp(pattern, "g");
 		const hits: RlmHit[] = [];
+		if (mode === "literal") {
+			let from = 0;
+			while (hits.length < limit) {
+				const index = record.text.indexOf(pattern, from);
+				if (index < 0) break;
+				const text = record.text.slice(index, Math.min(record.text.length, index + pattern.length + 80));
+				hits.push({
+					index,
+					text,
+					citation: `${formatHandle(record.id)}[${index}:${index + pattern.length}]`,
+				});
+				from = index + Math.max(1, pattern.length);
+			}
+			return hits;
+		}
+		const regex = new RegExp(pattern, "g");
 		let match: RegExpExecArray | null;
 		while ((match = regex.exec(record.text)) !== null && hits.length < limit) {
 			const index = match.index;
@@ -133,12 +181,25 @@ export class RlmStore {
 		return hits;
 	}
 
-	/** Operator / abort path: stop further subcalls; keep handles + trajectory. */
+	/** Operator / abort path: stop further subcalls and abort in-flight completers. */
 	cancel(reason = "cancelled"): void {
-		if (this.budget.cancelled) return;
+		if (this.budget.cancelled) {
+			this.#abortInflight();
+			return;
+		}
 		this.budget.cancelled = true;
 		this.budget.cancelReason = reason;
 		this.note("cancel", reason, true);
+		this.#abortInflight();
+	}
+
+	/** Drop corpus bodies and abort in-flight work. Idempotent. */
+	dispose(reason = "dispose"): void {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		this.cancel(reason);
+		this.records.clear();
+		this.note("dispose", reason, true);
 	}
 
 	note(op: string, detail: string, failOpen?: boolean): void {
@@ -146,34 +207,89 @@ export class RlmStore {
 	}
 
 	/**
-	 * Charge a subcall. Throws {@link RlmBudgetError} when mechanical budget is exhausted,
-	 * cancelled, or wall-clock exceeded.
+	 * @deprecated Prefer {@link beginCall} + {@link reconcileUsage}.
+	 * Still increments calls once and reserves tokens (legacy tests).
 	 */
 	charge(tokens: number, cost = 0): void {
-		if (this.budget.cancelled) {
-			throw new RlmBudgetError(`rlm cancelled: ${this.budget.cancelReason ?? "cancelled"}`);
+		this.beginCall(tokens);
+		if (cost > 0) {
+			const r = this.reconcileUsage({ estimatedTokens: tokens, actualTokens: tokens, actualCost: cost });
+			if (r.overBudget) throw new RlmBudgetError(`rlm maxCost ${this.budget.maxCost} exhausted`);
 		}
-		if (this.budget.wallClockMs > 0) {
-			const elapsed = Date.now() - this.budget.startedAt;
-			if (elapsed > this.budget.wallClockMs) {
-				throw new RlmBudgetError(`rlm wallClockMs ${this.budget.wallClockMs} exhausted (${elapsed}ms elapsed)`);
-			}
-		}
-		if (this.budget.calls >= this.budget.maxCalls) {
-			throw new RlmBudgetError(`rlm maxCalls ${this.budget.maxCalls} exhausted`);
-		}
+	}
+
+	/**
+	 * Reserve one model call. Increments `calls` exactly once.
+	 * Throws {@link RlmBudgetError} when cancelled, disposed, wall-clock, calls, or token cap blocks.
+	 */
+	beginCall(estimatedTokens: number): void {
+		this.#assertLive("beginCall");
+		this.#assertCallable();
+		const tokens = Math.max(0, Math.floor(estimatedTokens));
 		if (this.budget.tokens + tokens > this.budget.maxTotalTokens) {
 			throw new RlmBudgetError(`rlm maxTotalTokens ${this.budget.maxTotalTokens} exhausted`);
 		}
 		if (this.budget.maxCost > 0 && this.budget.cost >= this.budget.maxCost) {
 			throw new RlmBudgetError(`rlm maxCost ${this.budget.maxCost} exhausted`);
 		}
-		if (this.budget.maxCost > 0 && this.budget.cost + cost > this.budget.maxCost) {
-			throw new RlmBudgetError(`rlm maxCost ${this.budget.maxCost} exhausted`);
-		}
 		this.budget.calls += 1;
 		this.budget.tokens += tokens;
-		this.budget.cost += cost;
+	}
+
+	/**
+	 * Reconcile provider usage against the reservation from {@link beginCall}.
+	 * Does **not** increment `calls`. Records over-budget honestly when actual exceeds caps.
+	 */
+	reconcileUsage(usage: RlmUsageReconcile): RlmReconcileResult {
+		const estimated = Math.max(0, Math.floor(usage.estimatedTokens));
+		const actualTokens =
+			usage.actualTokens === undefined ? estimated : Math.max(0, Math.floor(usage.actualTokens));
+		const actualCost = usage.actualCost === undefined ? 0 : Math.max(0, usage.actualCost);
+		const delta = actualTokens - estimated;
+		if (delta !== 0) this.budget.tokens += delta;
+		this.budget.cost += actualCost;
+
+		let overBudget = false;
+		if (this.budget.tokens > this.budget.maxTotalTokens) overBudget = true;
+		if (this.budget.maxCost > 0 && this.budget.cost > this.budget.maxCost) overBudget = true;
+		if (overBudget) {
+			this.budget.overBudget = true;
+			this.note(
+				"budget",
+				`overBudget tokens=${this.budget.tokens}/${this.budget.maxTotalTokens} cost=${this.budget.cost}/${this.budget.maxCost}`,
+				true,
+			);
+		}
+		return { tokens: actualTokens, cost: actualCost, overBudget };
+	}
+
+	/**
+	 * AbortSignal for one completer invocation: cancelled with store cancel/dispose
+	 * and when wallClockMs remaining elapses.
+	 */
+	createCallSignal(): AbortSignal {
+		const ctrl = new AbortController();
+		if (this.#disposed || this.budget.cancelled) {
+			ctrl.abort(new DOMException(this.budget.cancelReason ?? "rlm cancelled", "AbortError"));
+			return ctrl.signal;
+		}
+		this.#inflight.add(ctrl);
+		const clear = () => this.#inflight.delete(ctrl);
+		ctrl.signal.addEventListener("abort", clear, { once: true });
+
+		if (this.budget.wallClockMs > 0) {
+			const remaining = this.budget.wallClockMs - (Date.now() - this.budget.startedAt);
+			if (remaining <= 0) {
+				ctrl.abort(new DOMException("rlm wallClockMs exhausted", "AbortError"));
+			} else {
+				const t = setTimeout(() => {
+					this.note("wallclock", `deadline after ${this.budget.wallClockMs}ms`, true);
+					ctrl.abort(new DOMException("rlm wallClockMs exhausted", "AbortError"));
+				}, remaining);
+				ctrl.signal.addEventListener("abort", () => clearTimeout(t), { once: true });
+			}
+		}
+		return ctrl.signal;
 	}
 
 	status(): string {
@@ -188,14 +304,41 @@ export class RlmStore {
 			parts.push(`wallMs=${Date.now() - this.budget.startedAt}/${this.budget.wallClockMs}`);
 		}
 		if (this.budget.cancelled) parts.push(`cancelled=${this.budget.cancelReason ?? "yes"}`);
+		if (this.budget.overBudget) parts.push("overBudget");
+		if (this.#disposed) parts.push("disposed");
 		parts.push(`trajectory=${this.trajectory.length}`);
 		return parts.join(" ");
 	}
 
-
 	/** Compact-safe: never clears records. Compaction of root chat must call nothing here. */
 	assertSurvivesCompaction(): void {
 		// Marker for tests / reviewers — store is independent of message branch.
+	}
+
+	#assertLive(op: string): void {
+		if (this.#disposed) throw new RlmBudgetError(`rlm store disposed (${op})`);
+	}
+
+	#assertCallable(): void {
+		if (this.budget.cancelled) {
+			throw new RlmBudgetError(`rlm cancelled: ${this.budget.cancelReason ?? "cancelled"}`);
+		}
+		if (this.budget.wallClockMs > 0) {
+			const elapsed = Date.now() - this.budget.startedAt;
+			if (elapsed > this.budget.wallClockMs) {
+				throw new RlmBudgetError(`rlm wallClockMs ${this.budget.wallClockMs} exhausted (${elapsed}ms elapsed)`);
+			}
+		}
+		if (this.budget.calls >= this.budget.maxCalls) {
+			throw new RlmBudgetError(`rlm maxCalls ${this.budget.maxCalls} exhausted`);
+		}
+	}
+
+	#abortInflight(): void {
+		for (const ctrl of this.#inflight) {
+			ctrl.abort(new DOMException(this.budget.cancelReason ?? "rlm cancelled", "AbortError"));
+		}
+		this.#inflight.clear();
 	}
 
 	private require(handle: string): RlmRecord {

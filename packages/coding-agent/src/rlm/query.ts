@@ -1,7 +1,19 @@
 import { RlmBudgetError, type RlmStore } from "./store";
 
+export interface RlmCompleterOptions {
+	/** Abort in-flight provider work (store cancel / wall-clock / session dispose). */
+	signal?: AbortSignal;
+}
+
+/**
+ * Host-injected isolated completion. Must NOT inherit root transcript history.
+ * Prefer `runEphemeralTurn({ isolated: true, history: [], signal })`.
+ */
 export interface RlmCompleter {
-	(prompt: string): Promise<{ text: string; tokens?: number; cost?: number } | string>;
+	(
+		prompt: string,
+		options?: RlmCompleterOptions,
+	): Promise<{ text: string; tokens?: number; cost?: number } | string>;
 }
 
 export interface RlmQueryResult {
@@ -11,6 +23,7 @@ export interface RlmQueryResult {
 	/** Tokens charged for this call (estimate or provider). */
 	tokens?: number;
 	cost?: number;
+	overBudget?: boolean;
 }
 
 const QUERY_SLICE = 8_192;
@@ -20,8 +33,8 @@ const QUERY_SLICE = 8_192;
  * the slice + question, never the full record. Missing completer / budget miss /
  * cancel / wall-clock fail open (honest error text, no throw into the agent loop).
  *
- * Hosts should inject `ToolSession.rlmComplete` from the model registry so usage
- * accounting flows through the same stack as the root model (or `rlm.subModel`).
+ * Hosts must inject an **isolated** completer (`ToolSession.rlmComplete`) so the
+ * provider request cannot inherit the root conversation history.
  */
 export async function rlmQuery(
 	store: RlmStore,
@@ -44,7 +57,7 @@ export async function rlmQuery(
 	const approxTokens = Math.ceil(prompt.length / 4);
 
 	try {
-		store.charge(approxTokens, 0);
+		store.beginCall(approxTokens);
 	} catch (error) {
 		if (error instanceof RlmBudgetError) {
 			store.note("query", error.message, true);
@@ -62,31 +75,30 @@ export async function rlmQuery(
 		};
 	}
 
+	const signal = store.createCallSignal();
 	try {
-		const raw = await complete(prompt);
+		const raw = await complete(prompt, { signal });
 		const text = typeof raw === "string" ? raw : raw.text;
-		const tokens = typeof raw === "string" ? approxTokens : (raw.tokens ?? approxTokens);
-		const cost = typeof raw === "string" ? 0 : (raw.cost ?? 0);
-		if (cost > 0) {
-			// Second charge leg for provider-reported cost only (tokens already charged).
-			try {
-				if (store.budget.maxCost > 0 && store.budget.cost + cost > store.budget.maxCost) {
-					store.note("query", `maxCost would exceed after completion`, true);
-					return {
-						text: `rlm maxCost ${store.budget.maxCost} exhausted after completion (fail-open)`,
-						citation: peek.citation,
-						failOpen: true,
-						tokens,
-						cost,
-					};
-				}
-				store.budget.cost += cost;
-			} catch {
-				/* ignore */
-			}
+		const actualTokens = typeof raw === "string" ? approxTokens : (raw.tokens ?? approxTokens);
+		const actualCost = typeof raw === "string" ? 0 : (raw.cost ?? 0);
+		const reconciled = store.reconcileUsage({
+			estimatedTokens: approxTokens,
+			actualTokens,
+			actualCost,
+		});
+		if (reconciled.overBudget) {
+			store.note("query", "overBudget after completion", true);
+			return {
+				text: `${text}\n\n(rlm over-budget after completion; fail-open)`,
+				citation: peek.citation,
+				failOpen: true,
+				tokens: reconciled.tokens,
+				cost: reconciled.cost,
+				overBudget: true,
+			};
 		}
-		store.note("query", `ok tokens~${tokens} cost=${cost}`);
-		return { text, citation: peek.citation, tokens, cost };
+		store.note("query", `ok tokens=${reconciled.tokens} cost=${reconciled.cost}`);
+		return { text, citation: peek.citation, tokens: reconciled.tokens, cost: reconciled.cost };
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);
 		store.note("query", msg, true);
@@ -96,8 +108,10 @@ export async function rlmQuery(
 
 export function promptContainsCorpus(prompt: string, corpus: string): boolean {
 	if (corpus.length <= QUERY_SLICE) return prompt.includes(corpus);
-	const mid = corpus.slice(Math.floor(corpus.length / 2) - 32, Math.floor(corpus.length / 2) + 32);
-	return prompt.includes(mid);
+	// Large corpus: check midpoint window presence as a strong signal.
+	const mid = Math.floor(corpus.length / 2);
+	const window = corpus.slice(Math.max(0, mid - 64), mid + 64);
+	return prompt.includes(window);
 }
 
 export { QUERY_SLICE };
