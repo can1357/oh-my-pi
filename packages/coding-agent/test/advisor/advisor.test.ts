@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import {
 	buildOpenAiNativeHistory,
 	createCompactionSummaryMessage,
@@ -1780,7 +1780,6 @@ describe("advisor", () => {
 			// it stayed in #pending for the next drain iteration.
 			expect(runtime.backlog).toBeGreaterThan(0);
 		});
-
 
 		it("tags in-progress turns with [in progress] heading", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
@@ -6011,7 +6010,6 @@ describe("advisor", () => {
 		it("preserves nested automatic continuations while queued primary updates run first", async () => {
 			const primary = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
 			const calls: string[] = [];
-			let runtime: AdvisorRuntime;
 			const agent: AdvisorAgent = {
 				prompt: async input => {
 					calls.push(`prompt:${promptText(input)}`);
@@ -6024,7 +6022,7 @@ describe("advisor", () => {
 				state: { messages: [] },
 			};
 			let settled = 0;
-			runtime = new AdvisorRuntime(agent, {
+			const runtime: AdvisorRuntime = new AdvisorRuntime(agent, {
 				snapshotMessages: () => primary,
 				onTurnSettled: () => {
 					settled++;

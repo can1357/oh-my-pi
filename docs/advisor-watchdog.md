@@ -7,6 +7,8 @@ An advisor does not approve actions or mutate primary session state directly. It
 ## Implementation files
 
 - [`src/advisor/runtime.ts`](../packages/coding-agent/src/advisor/runtime.ts)
+- [`src/advisor/context-maintenance.ts`](../packages/coding-agent/src/advisor/context-maintenance.ts)
+- [`src/session/context-maintenance.ts`](../packages/coding-agent/src/session/context-maintenance.ts)
 - [`src/advisor/advise-tool.ts`](../packages/coding-agent/src/advisor/advise-tool.ts)
 - [`src/advisor/emission-guard.ts`](../packages/coding-agent/src/advisor/emission-guard.ts)
 - [`src/advisor/watchdog.ts`](../packages/coding-agent/src/advisor/watchdog.ts)
@@ -78,12 +80,11 @@ Advisor messages already injected into the primary transcript are filtered out b
 
 When the primary transcript is rewritten, the advisor runtime is reset:
 
-- compaction
+- primary-session compaction
 - session switch/resume
 - branch/fork style history replacement
-- context-maintenance re-prime when the advisor's own context cannot fit
 
-Reset clears the advisor's private in-memory transcript and rewinds its cursor. The next advisor update replays the current bounded primary transcript instead of continuing from stale pre-rewrite context.
+These resets clear the advisor's working history and rewind its primary-history cursor. The next update replays the current bounded primary transcript instead of continuing from stale context. Changed delivered prefixes, quarantine recovery, and disable/rebuild also retain their explicit reset behavior. The advisor's own compaction is not a reset: successful maintenance rewrites its working history, while unsuccessful maintenance leaves that history intact.
 
 When the advisor is enabled mid-session, the cursor seeds to the current primary transcript length. That avoids replaying the whole old conversation on the first enabled turn.
 
@@ -148,7 +149,7 @@ Each advisor has its own `AdvisorEmissionGuard` (`src/advisor/emission-guard.ts`
 
 Acknowledgments distinguish acceptance, conditional deferral, duplicates, noise, and budget suppression. Acceptance means the host accepted the note for primary delivery, not that the primary model consumed it. Deferred acceptance warns that a higher-severity finding from the same review may displace the note. A rejected note receives no delivery promise; the advisor should not rephrase rejected findings to evade the guard.
 
-The guard's full state — dedupe history and per-update gate — clears on every advisor reset (compaction, session switch, `/new`), so a re-primed reviewer can re-raise issues it already raised against the rewritten transcript.
+The guard's full state — dedupe history and per-update gate — clears on explicit advisor resets, including primary compaction, session switch, and `/new`. The advisor's own maintenance does not clear this state.
 
 ## Bounded catch-up with `advisor.syncBacklog`
 
@@ -176,7 +177,9 @@ Practical interpretation:
 - `1` is the closest mode to synchronous review: after each queued advisor delta, the primary waits up to 30 seconds for backlog to return to zero.
 - `3` and `5` allow more advisor lag before the primary pauses.
 
-Advisor failures do not permanently stall the primary. The host first attempts its credential/fallback recovery. Retriable failures are attempted up to three times before that backlog is dropped; three dropped-backlog cycles halt the runtime until an explicit reset, and a permanent request rejection can halt it after one cycle. A quota/usage-limit failure pauses the advisor with its batch retained until `/advisor` rebuilds it, configuration is reloaded, a new session starts, or the process restarts. Catch-up waiters are released as soon as an advisor is failing.
+Advisor failures do not permanently stall the primary. Eligible hard payload failures first receive the shared safe configured-model fallback opportunity. Shared context maintenance then owns overflow, payload, and incomplete-output recovery. Only failures outside that handling enter ordinary advisor credential/quota/transport recovery; a terminal context outcome settles that review without disabling later primary updates.
+
+Ordinary retriable failures are attempted up to three times before that backlog is dropped; three dropped-backlog cycles halt the runtime until an explicit reset, and a permanent request rejection can halt it after one cycle. A quota/usage-limit failure pauses the advisor with its batch retained until `/advisor` rebuilds it, configuration is reloaded, a new session starts, or the process restarts. Catch-up waiters are released as soon as an advisor is failing.
 
 Unsafe Advisor output follows a separate quarantine path rather than that
 three-attempt request-retry policy. Before tool dispatch, the runtime
@@ -308,19 +311,21 @@ An advised subagent session builds its own advisor subsystem with the same setti
 
 ## Cost and context behavior
 
-Advisor usage is separate model usage. `/advisor status` reports advisor token counts and cost from the advisor agent's own transcript.
+Advisor usage remains separate model usage. `/advisor status` reports its own context occupancy, token usage, and cost.
 
-The advisor has its own append-only context. Before each advisor prompt, `AgentSession` estimates incoming tokens and may maintain advisor context:
+Advisors use the same [automatic maintenance controller](./compaction.md#shared-maintenance-owners) as main and task sessions:
 
-1. try model-level context promotion when enabled and a larger compatible model is available
-2. if promotion cannot fit enough context, compact the advisor's own message history
-3. for readable history, re-prime from the current bounded primary transcript if compaction has no candidates or still cannot fit
+- Before a review, size the actual provider-bound batch together with the advisor's system prompt and tool schemas
+- Between model/tool rounds, check completed tool results before the next request; another primary update is not required
+- After successful or failed turns, apply shared maintenance and context-recovery rules
 
-Native compaction replaces advisor history only when the active model can replay its provider and Responses API format. A foreign native-enabled summarizer uses portable text summarization for readable history instead. Once the advisor holds native history, incompatible summarizers, retry fallbacks, cooldown restorations, and context promotions are skipped. Maintenance failure preserves that history rather than re-priming it away; normal advisor request-failure handling still applies.
+Thresholds use the advisor's current model window. Existing `compaction` settings control method order, mid-turn checks, speculative preparation, and continuation. The default order is `remote → snapcompact → handoff → shake → soft`; availability depends on model capabilities and history. Snapcompact requires image support, native methods require a compatible endpoint, and portable text summaries require readable history.
 
-Replay compatibility does not require new native compaction to be enabled. Same-provider Responses models can receive existing native history during fallback, cooldown restoration, or promotion even when their own compaction endpoint is disabled. Creating a new native result still requires `remote` in `compaction.methodOrder` and an eligible writer; a separate compatible writer can maintain a reader whose native endpoint is disabled.
+Native payloads can only be replayed by compatible provider/API paths. Portable summarizers can use readable history recovered from the working journal, but never an opaque placeholder. Replay-incompatible retry fallbacks, cooldown restorations, and promotions are skipped. Replay compatibility does not require new native compaction to be enabled: a compatible Responses reader can reuse existing history while its own compaction endpoint is disabled.
 
-The advisor's live context is in-memory and append-only; it is retained while the session runs so `/advisor dump` can inspect it, and is independently promoted/compacted/re-primed (above). It is not a replacement for the primary persisted transcript.
+Each advisor has an authoritative in-memory working journal for messages, compaction metadata, replay boundaries, and archive references. `/advisor dump` inspects the current working context. Successful rewrites update that journal and the active tool-loop context together. Ordinary retry preserves committed rewrites and completed tools without delivering the same primary update again.
+
+Failed maintenance is not a reason to re-prime or clear the advisor. An active tool chain may continue; shared progress guards suppress repeated ineffective attempts until a usable boundary appears. Scheduled continuations still follow existing limits and queue priorities. This behavior does not impose a hard context-growth or spending cap.
 
 ## Transcript persistence and observability
 
@@ -337,6 +342,14 @@ Why a file:
 - **Usage attribution.** `omp stats` scans each session folder recursively, so advisor assistant turns (with their usage/cost) are attributed to the same project/session like any other subagent. Advisor "session update" prompts are persisted as `synthetic`, agent-attributed user messages so they never inflate user-message metrics.
 - **Observability.** [Agent Hub](./agent-hub.md) discovers legacy and named `__advisor*.jsonl` files on open and shows each as a read-only `advisor`-kind transcript under its owning session.
 
-The file follows session switches: on `/new`, resume/switch, and branch the recorder reopens at the new session's path on the next advisor turn; before a `/delete` deletes the old artifacts dir the recorder feed is detached and drained so a queued write cannot recreate the deleted file. The on-disk log is append-only and independent of the in-memory context — re-primes and compaction never truncate it.
+The file follows session switches: on `/new`, resume/switch, and branch the recorder reopens at the new session's path on the next advisor turn; before a `/delete` deletes the old artifacts dir the recorder feed is detached and drained so a queued write cannot recreate the deleted file. The on-disk log is append-only and separate from authoritative working history: compaction, checkpoint restoration, and explicit resets never truncate completed diagnostic records.
+
+Maintenance uses versioned `advisor-context-maintenance` custom entries in this same JSONL format. Records identify the advisor and working-history generation, run/attempt, trigger and phase, actual method and candidate, owner model/window/threshold, and continuation decision. Starts, attempt outcomes, committed rewrites, completion or discard, promotion, checkpoint restoration, and explicit resets remain distinguishable. A prepared speculative summary is not an applied rewrite.
+
+A `commit` with `applied` means the working journal and live history were installed. A later callback failure may produce a failed completion with `historyChanged: true`; failed completion alone does not mean rollback.
+
+Before/after token measurements include their source; unmeasured opaque-native occupancy stays unknown rather than appearing as measured savings. Readable rewritten history uses a local estimate until fresh provider usage is available. Boundary references explicitly name working-journal entry IDs, not entries in the diagnostic file. Records omit full histories and opaque provider payloads.
+
+The recorder captures the owning file before asynchronous maintenance so late outcomes cannot move to a new parent session. Owned maintenance, including superseded speculative calls, drains before the recorder closes; closed recording handles reject late writes. Diagnostic writes are best-effort and do not block working-history persistence or change fallback, continuation, or request count. Custom entries do not enter model context or count as billed assistant turns. Existing message usage and cost restoration remain unchanged; missing side-call usage is not inferred from token reduction.
 
 The advisor is never a peer. The `advisor`-kind registry ref is excluded from every agent-facing surface — the `hub` peer roster and broadcast targets, the subagent peer prompt, and the `history://` index/lookup/completions — and cannot be messaged (`hub` send and collab chat refuse it) or [revived or killed from Agent Hub](./agent-hub.md#persisted-agents-and-advisors) or collab. It is not addressable as a peer, regardless of what tools it has been granted.

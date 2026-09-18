@@ -3,6 +3,7 @@ export type { AdvisorConfig, AdvisorConfigScope, WatchdogConfigDoc } from "@oh-m
 export * from "./config";
 export * from "./emission-guard";
 export * from "./loop-guard";
+export * from "./maintenance-types";
 export * from "./runtime";
 export * from "./transcript-recorder";
 export * from "./watchdog";

@@ -6,7 +6,13 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
 import { fingerprintMessage } from "./message-fingerprint";
-
+import {
+	ADVISOR_CONTEXT_MAINTENANCE_CUSTOM_TYPE,
+	type AdvisorMaintenanceEvent,
+	type AdvisorMaintenanceEventSink,
+	advisorMaintenanceReason,
+	advisorMaintenanceSafeError,
+} from "./maintenance-types";
 /**
  * Reserved transcript stem for advisor session files. Chosen so it cannot
  * collide with a task subagent's `<id>.jsonl` (task ids are reserved against
@@ -16,7 +22,10 @@ export const ADVISOR_TRANSCRIPT_STEM = "__advisor";
 export const ADVISOR_TRANSCRIPT_FILENAME = `${ADVISOR_TRANSCRIPT_STEM}.jsonl`;
 
 const JSONL_SUFFIX = ".jsonl";
-
+interface AdvisorTranscriptTarget {
+	readonly file: string;
+	readonly cwd: string;
+}
 /**
  * Transcript filename for an advisor: `__advisor.jsonl` for the legacy/default
  * advisor (empty slug), `__advisor.<slug>.jsonl` for a named advisor. The `.`
@@ -172,6 +181,9 @@ export class AdvisorTranscriptRecorder {
 	#filename: string;
 	/** Serializes the async open/close against synchronous appends so records land in order. */
 	#queue: Promise<void>;
+	/** Terminal lifecycle guard: retained maintenance sinks cannot resurrect a closed writer. */
+	#maintenanceEpoch = 0;
+	#closed = false;
 	/**
 	 * Ordered fingerprints of user "session update" deltas persisted since the
 	 * last committed advisor turn. The advisor re-delivers the identical batch on
@@ -280,6 +292,33 @@ export class AdvisorTranscriptRecorder {
 	}
 
 	/**
+	 * Persist one maintenance diagnostic without treating it as a billed message.
+	 * For a run that may outlive its parent session, prefer
+	 * {@link captureMaintenanceSink} at the run boundary.
+	 */
+	recordMaintenance(event: AdvisorMaintenanceEvent): void {
+		if (this.#closed) return;
+		const target = this.#resolveTarget();
+		if (target) this.#recordMaintenanceAt(event, target);
+	}
+
+	/**
+	 * Capture an optional synchronous controller sink at maintenance run start.
+	 * Every later attempt/outcome sent through this closure retains that run's
+	 * original transcript target, even after a session transition. Enqueuing is
+	 * synchronous and diagnostic I/O remains serialized and best-effort.
+	 */
+	captureMaintenanceSink(): AdvisorMaintenanceEventSink | undefined {
+		if (this.#closed) return undefined;
+		const target = this.#resolveTarget();
+		if (!target) return undefined;
+		const epoch = this.#maintenanceEpoch;
+		return event => {
+			if (epoch === this.#maintenanceEpoch) this.#recordMaintenanceAt(event, target);
+		};
+	}
+
+	/**
 	 * Mark the start of one advisor delivery attempt. Rewinds the replay cursor so
 	 * a retry that re-sends the same batch matches this turn's window positionally
 	 * and is skipped, while the window itself (persisted-since-commit) is retained.
@@ -321,6 +360,53 @@ export class AdvisorTranscriptRecorder {
 		this.#replayCursor = 0;
 	}
 
+	#resolveTarget(): AdvisorTranscriptTarget | undefined {
+		const sessionFile = this.resolveSessionFile();
+		if (!sessionFile?.endsWith(JSONL_SUFFIX)) return undefined;
+		return {
+			file: path.join(sessionFile.slice(0, -JSONL_SUFFIX.length), this.#filename),
+			cwd: this.resolveCwd(),
+		};
+	}
+
+	#recordMaintenanceAt(event: AdvisorMaintenanceEvent, target: AdvisorTranscriptTarget): void {
+		if (this.#closed) {
+			logger.debug("dropped advisor maintenance diagnostic after recorder close", { runId: event.runId });
+			return;
+		}
+		const snapshot: AdvisorMaintenanceEvent = {
+			...event,
+			candidateModel: event.candidateModel ? { ...event.candidateModel } : null,
+			ownerModel: { ...event.ownerModel },
+			before: { ...event.before },
+			after: { ...event.after },
+			continuation: { ...event.continuation },
+			reason: event.reason === null ? null : advisorMaintenanceReason(event.reason),
+			error:
+				event.error === null
+					? null
+					: {
+							name: event.error.name === null ? null : advisorMaintenanceReason(event.error.name),
+							message: advisorMaintenanceReason(event.error.message),
+						},
+		};
+		this.#enqueueMaintenance(async () => {
+			if (target.file !== this.#file) {
+				await this.#closeManager();
+				this.#manager = await SessionManager.open(target.file, undefined, undefined, {
+					initialCwd: target.cwd,
+					suppressBreadcrumb: true,
+				});
+				this.#file = target.file;
+			}
+			const manager = this.#manager;
+			manager?.appendCustomEntry(ADVISOR_CONTEXT_MAINTENANCE_CUSTOM_TYPE, snapshot);
+			// Custom-only maintenance transcripts have no billed assistant message
+			// to cross SessionManager's lazy materialization gate.
+			if (manager) await manager.ensureOnDisk();
+		});
+	}
+
 	/** Flush pending writes (best-effort). */
 	flush(): Promise<void> {
 		return this.#enqueueResult(async () => {
@@ -330,7 +416,14 @@ export class AdvisorTranscriptRecorder {
 
 	/** Flush and close the writer, releasing the session file. */
 	close(): Promise<void> {
+		this.#closed = true;
+		this.#maintenanceEpoch++;
 		return this.#enqueueResult(() => this.#closeManager());
+	}
+
+	/** Admit new diagnostics after a preserving transition; old captured sinks stay invalid. */
+	resume(): void {
+		this.#closed = false;
 	}
 
 	async #closeManager(): Promise<void> {
@@ -348,6 +441,14 @@ export class AdvisorTranscriptRecorder {
 	#enqueue(work: () => Promise<void>): void {
 		this.#queue = this.#queue.then(work, work).catch(err => {
 			logger.debug("advisor transcript record failed", { err: String(err) });
+		});
+	}
+
+	#enqueueMaintenance(work: () => Promise<void>): void {
+		this.#queue = this.#queue.then(work, work).catch(error => {
+			logger.warn("advisor maintenance diagnostic record failed", {
+				error: advisorMaintenanceSafeError(error).message,
+			});
 		});
 	}
 

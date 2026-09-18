@@ -2011,9 +2011,7 @@ describe("AgentSession retry fallback", () => {
 			await session.prompt("review after primary cooldown expires");
 			await session.waitForIdle();
 
-			expect(requestedModels.slice(restorationStart)).toEqual([
-				compatible ? primarySelector : fallbackSelector,
-			]);
+			expect(requestedModels.slice(restorationStart)).toEqual([compatible ? primarySelector : fallbackSelector]);
 			expect(advisor.state.model.id).toBe(compatible ? primary.id : fallback.id);
 			const wire = JSON.stringify(
 				buildParams(

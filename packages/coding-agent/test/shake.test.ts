@@ -251,9 +251,9 @@ describe("AgentSession shake", () => {
 			await sessionManager.flush();
 			const restored = await SessionManager.open(sessionManager.getSessionFile()!);
 			try {
-				expect(restored.buildSessionContext().messages.find(message => message.role === "toolResult")?.content).toEqual([
-					{ type: "text", text: originalText },
-				]);
+				expect(
+					restored.buildSessionContext().messages.find(message => message.role === "toolResult")?.content,
+				).toEqual([{ type: "text", text: originalText }]);
 			} finally {
 				await restored.close();
 			}

@@ -3,8 +3,14 @@
 ## [Unreleased]
 ### Fixed
 
+- Fixed long advisor reviews skipping context maintenance between tool rounds; advisors now share main-session maintenance and preserve history across failed attempts.
+- Fixed Anthropic native compaction invalidating retained reasoning when entry and message timestamps differ.
 - Fixed memory recall blocks carrying a minute-resolution `Current time` stamp that dirtied the cached system prompt on every refresh; recall rows already carry dates, so the stamp is removed.
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
+
+### Added
+
+- Added advisor transcript records for context-maintenance attempts, applied rewrites, cancellation, checkpoint restoration, and resets.
 
 ## [18.2.5] - 2026-09-17
 

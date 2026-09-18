@@ -6,7 +6,11 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
-import { calculatePromptTokens } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	calculatePromptTokens,
+	isTranscriptUsageAnchor,
+	resolveThresholdTokens,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -18,7 +22,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
@@ -42,16 +46,19 @@ import {
 import { invalidateConvertToLlmArrayCache } from "../session/messages";
 import type { CompactionEntry } from "../session/session-entries";
 import { SessionHandoff } from "../session/session-handoff";
-import {
-	SessionManager,
-	type SessionManagerJournalSnapshot,
-} from "../session/session-manager";
+import { SessionManager, type SessionManagerJournalSnapshot } from "../session/session-manager";
 import { SessionStatsTracker } from "../session/session-stats";
 import { sameMessageContent, sessionMessagePersistenceKey } from "../session/turn-persistence";
-import type {
-	AdvisorContinuationMode,
-	AdvisorHistoryCheckpoint,
-	AdvisorTurnDisposition,
+import {
+	ADVISOR_CONTEXT_MAINTENANCE_VERSION,
+	type AdvisorContinuationMode,
+	type AdvisorHistoryCheckpoint,
+	type AdvisorMaintenanceEvent,
+	type AdvisorMaintenanceEventSink,
+	type AdvisorTurnDisposition,
+	advisorMaintenanceReason,
+	advisorMaintenanceSafeError,
+	createAdvisorMaintenanceRunId,
 } from "./maintenance-types";
 
 interface StoredCheckpoint {
@@ -92,6 +99,7 @@ export interface AdvisorContextMaintenanceOptions {
 	readonly continueReview: (mode: AdvisorContinuationMode) => Promise<void>;
 	readonly isDisposed: () => boolean;
 	readonly onHistoryRewrite?: (reason: string, entry?: CompactionEntry) => void;
+	readonly captureMaintenanceSink?: () => AdvisorMaintenanceEventSink | undefined;
 }
 
 /** Production owner adapter binding shared maintenance to one advisor generation. */
@@ -106,8 +114,10 @@ export class AdvisorContextMaintenance {
 	#checkpointSequence = 0;
 	#checkpoints = new Map<string, StoredCheckpoint>();
 	#persistedMessages = new Map<string, AgentMessage[]>();
+	#activeOperations = new Set<Promise<unknown>>();
 	#attemptSequence = 0;
 	#scheduledTasks = new Set<AbortController>();
+	#scheduledTaskCompletions = new Set<Promise<void>>();
 	#attemptMessages: AttemptMessage[] = [];
 	#promptResetPending = true;
 	#settledSignal: AbortSignal | undefined;
@@ -203,18 +213,35 @@ export class AdvisorContextMaintenance {
 			baseSystemPrompt: () => this.#options.agent.state.systemPrompt,
 			goalModeState: () => undefined,
 			planReferencePath: () => "",
-			nonMessageTokenSource: () => ({ systemPrompt: this.#options.agent.state.systemPrompt, agent: this.#options.agent }),
+			nonMessageTokenSource: () => ({
+				systemPrompt: this.#options.agent.state.systemPrompt,
+				agent: this.#options.agent,
+			}),
 			hasExperimentalContextRolloverTools: () => false,
 			takeExperimentalContextRolloverRequest: () => false,
 			queueExperimentalContextNotesReminder: () => {},
 			memoryBackendSession: () => undefined,
+			captureMaintenanceDiagnosticTarget: this.#options.captureMaintenanceSink
+				? () => {
+						const sink = this.#options.captureMaintenanceSink?.();
+						return sink
+							? { sink, advisorId: this.#options.name, advisorGeneration: this.#generation }
+							: undefined;
+					}
+				: undefined,
 			emitSessionEvent: async (_event: AgentSessionEvent) => {},
 			emitNotice: this.#options.emitNotice,
 			schedulePostPromptTask: (task, scheduleOptions) => {
 				const generation = scheduleOptions?.generation ?? this.#generation;
 				const controller = new AbortController();
+				const settled = Promise.withResolvers<void>();
+				let started = false;
+				const completion = settled.promise;
 				this.#scheduledTasks.add(controller);
+				this.#scheduledTaskCompletions.add(completion);
 				const run = async () => {
+					if (started) return;
+					started = true;
 					try {
 						if (!this.#isCurrent(generation)) {
 							scheduleOptions?.onSkip?.("stale-generation");
@@ -222,10 +249,17 @@ export class AdvisorContextMaintenance {
 						}
 						await task(controller.signal);
 						if (!this.#isCurrent(generation)) scheduleOptions?.onSkip?.("stale-generation");
+					} catch (error) {
+						logger.warn("advisor scheduled maintenance failed", {
+							error: advisorMaintenanceSafeError(error).message,
+						});
 					} finally {
 						this.#scheduledTasks.delete(controller);
+						this.#scheduledTaskCompletions.delete(completion);
+						settled.resolve();
 					}
 				};
+				controller.signal.addEventListener("abort", () => void run(), { once: true });
 				if ((scheduleOptions?.delayMs ?? 0) > 0) setTimeout(() => void run(), scheduleOptions?.delayMs);
 				else queueMicrotask(() => void run());
 			},
@@ -290,8 +324,77 @@ export class AdvisorContextMaintenance {
 		return new ContextMaintenance(host);
 	}
 
+	#recordLifecycleDiagnostic(
+		kind: "checkpoint" | "reset",
+		status: "applied" | "skipped",
+		reason: string,
+		checkpointId: string | null = null,
+	): void {
+		const sink = this.#options.captureMaintenanceSink?.();
+		if (!sink) return;
+		const model = this.#options.model();
+		const contextWindow = model.contextWindow ?? 0;
+		const breakdown = this.#stats.getContextBreakdown({ contextWindow });
+		const branch = this.#journal.getBranch();
+		const boundary = branch.findLastIndex(entry => entry.type === "compaction");
+		const providerAnchor = branch
+			.slice(boundary + 1)
+			.some(entry => entry.type === "message" && isTranscriptUsageAnchor(entry.message));
+		const compaction = branch[boundary];
+		const opaqueNative =
+			!providerAnchor &&
+			compaction?.type === "compaction" &&
+			isRecord(compaction.preserveData?.openaiRemoteCompaction);
+		const measurement: AdvisorMaintenanceEvent["before"] =
+			!opaqueNative && breakdown && Number.isFinite(breakdown.usedTokens)
+				? {
+						value: Math.max(0, Math.floor(breakdown.usedTokens)),
+						source: breakdown.anchored && providerAnchor ? "provider" : "estimated",
+					}
+				: { value: null, source: "unknown" };
+		const event: AdvisorMaintenanceEvent = {
+			version: ADVISOR_CONTEXT_MAINTENANCE_VERSION,
+			kind,
+			status,
+			runId: createAdvisorMaintenanceRunId(),
+			attemptId: null,
+			advisorId: this.#options.name,
+			advisorGeneration: this.#generation,
+			phase: "lifecycle",
+			trigger: "lifecycle",
+			method: null,
+			candidateModel: null,
+			ownerModel: { provider: model.provider, id: model.id },
+			ownerContextWindow: contextWindow,
+			ownerThreshold:
+				contextWindow > 0
+					? resolveThresholdTokens(contextWindow, this.#options.settings.getGroup("compaction"))
+					: 0,
+			before: kind === "reset" ? measurement : { value: null, source: "unknown" },
+			after: kind === "checkpoint" ? measurement : { value: null, source: "unknown" },
+			historyChanged: status === "applied",
+			continuation: { decision: "none", mode: null },
+			workingJournalBoundaryEntryId: null,
+			workingJournalCheckpointId: checkpointId,
+			reason: advisorMaintenanceReason(reason),
+			error: null,
+		};
+		try {
+			sink(event);
+		} catch (error) {
+			logger.warn("advisor lifecycle diagnostic sink failed", {
+				error: advisorMaintenanceSafeError(error).message,
+			});
+		}
+	}
+
 	#isCurrent(generation: number): boolean {
-		return !this.#disposed && generation === this.#generation && !this.#options.isDisposed() && !this.#settledSignal?.aborted;
+		return (
+			!this.#disposed &&
+			generation === this.#generation &&
+			!this.#options.isDisposed() &&
+			!this.#settledSignal?.aborted
+		);
 	}
 
 	#invalidateProviderState(): void {
@@ -431,25 +534,27 @@ export class AdvisorContextMaintenance {
 	messagesSince(checkpoint: AdvisorHistoryCheckpoint): readonly AgentMessage[] {
 		const stored = this.#checkpoints.get(checkpoint.id);
 		if (!stored) return [];
-		return this.#attemptMessages
-			.filter(event => event.sequence > stored.ledgerSequence)
-			.map(event => event.message);
+		return this.#attemptMessages.filter(event => event.sequence > stored.ledgerSequence).map(event => event.message);
 	}
 
 	hasCommittedRewrite(checkpoint: AdvisorHistoryCheckpoint): boolean {
 		return checkpoint.generation === this.#generation && checkpoint.rewriteVersion !== this.#rewriteVersion;
 	}
 
-	async restoreCheckpoint(checkpoint: AdvisorHistoryCheckpoint, _reason: string): Promise<void> {
+	async restoreCheckpoint(checkpoint: AdvisorHistoryCheckpoint, reason: string): Promise<void> {
 		const stored = this.#checkpoints.get(checkpoint.id);
 		if (!stored || checkpoint.generation !== this.#generation || this.hasCommittedRewrite(checkpoint)) return;
 		this.#journal.restoreJournalSnapshot(stored.journal);
-		const restored = deobfuscateSessionContext(this.#journal.buildSessionContext(), this.#options.obfuscator).messages;
+		const restored = deobfuscateSessionContext(
+			this.#journal.buildSessionContext(),
+			this.#options.obfuscator,
+		).messages;
 		this.#options.agent.replaceMessages(restored);
 		this.#closeProviderSessions();
 		this.#reindexPersistedKeys();
 		this.#options.agent.state.error = undefined;
 		this.#checkpoints.delete(checkpoint.id);
+		this.#recordLifecycleDiagnostic("checkpoint", "applied", reason, checkpoint.id);
 	}
 
 	async discardFailedAttempt(checkpoint: AdvisorHistoryCheckpoint): Promise<void> {
@@ -460,7 +565,17 @@ export class AdvisorContextMaintenance {
 		this.#options.agent.state.error = undefined;
 	}
 
-	async maintainBeforePrompt(incoming: AgentMessage[], signal: AbortSignal): Promise<void> {
+	#trackOperation<T>(operation: Promise<T>): Promise<T> {
+		this.#activeOperations.add(operation);
+		void operation.finally(() => this.#activeOperations.delete(operation)).catch(() => {});
+		return operation;
+	}
+
+	maintainBeforePrompt(incoming: AgentMessage[], signal: AbortSignal): Promise<void> {
+		return this.#trackOperation(this.#maintainBeforePrompt(incoming, signal));
+	}
+
+	async #maintainBeforePrompt(incoming: AgentMessage[], signal: AbortSignal): Promise<void> {
 		if (this.#promptResetPending) {
 			this.#controller.resetForNewPrompt();
 			this.#promptResetPending = false;
@@ -492,7 +607,15 @@ export class AdvisorContextMaintenance {
 		});
 	}
 
-	async maintainMidRun(
+	maintainMidRun(
+		activeMessages: AgentMessage[],
+		signal: AbortSignal | undefined,
+		context: AgentTurnEndContext | undefined,
+	): Promise<boolean> {
+		return this.#trackOperation(this.#maintainMidRun(activeMessages, signal, context));
+	}
+
+	async #maintainMidRun(
 		activeMessages: AgentMessage[],
 		signal: AbortSignal | undefined,
 		context: AgentTurnEndContext | undefined,
@@ -504,7 +627,15 @@ export class AdvisorContextMaintenance {
 		return true;
 	}
 
-	async settle(checkpoint: AdvisorHistoryCheckpoint, signal: AbortSignal, error?: unknown): Promise<AdvisorTurnDisposition> {
+	settle(checkpoint: AdvisorHistoryCheckpoint, signal: AbortSignal, error?: unknown): Promise<AdvisorTurnDisposition> {
+		return this.#trackOperation(this.#settle(checkpoint, signal, error));
+	}
+
+	async #settle(
+		checkpoint: AdvisorHistoryCheckpoint,
+		signal: AbortSignal,
+		error?: unknown,
+	): Promise<AdvisorTurnDisposition> {
 		const stats = this.#stats;
 		this.#settledSignal = signal;
 		const onAbort = () => {
@@ -557,14 +688,14 @@ export class AdvisorContextMaintenance {
 				const leftKey = sessionMessagePersistenceKey(left);
 				const rightKey = sessionMessagePersistenceKey(right);
 				return (
-					(leftKey !== undefined && leftKey === rightKey) || left.timestamp === right.timestamp
-				) && sameMessageContent(left, right);
+					((leftKey !== undefined && leftKey === rightKey) || left.timestamp === right.timestamp) &&
+					sameMessageContent(left, right)
+				);
 			},
 			withBranchTransition: operation => operation(),
 			isCurrent: () => !signal?.aborted && this.#isCurrent(generation),
 		};
 	}
-
 	#removeFailedAssistant(message: AssistantMessage): void {
 		removeFailedAssistantFromActiveContext(this.#recoveryHost(), message);
 		this.#invalidateProviderState();
@@ -605,18 +736,24 @@ export class AdvisorContextMaintenance {
 		}
 	}
 	async pauseAndDrain(): Promise<void> {
+		const scheduled = [...this.#scheduledTaskCompletions];
 		for (const controller of this.#scheduledTasks) controller.abort("advisor session transition");
-		this.#scheduledTasks.clear();
-		const speculation = this.#controller.speculationCompletion;
+		const speculation = this.#controller.speculationDrainCompletion;
 		const cleanup = this.#controller.abortCompaction(new Error("advisor session transition"));
 		this.#controller.cancelSpeculation();
 		this.#handoff.abortHandoff(new Error("advisor session transition"));
-		await Promise.allSettled([cleanup, speculation].filter((value): value is Promise<void> => value !== undefined));
+		await Promise.allSettled([
+			...this.#activeOperations,
+			...scheduled,
+			...[cleanup, speculation].filter((value): value is Promise<void> => value !== undefined),
+		]);
 	}
 
-
-	reset(_reason?: string): void {
+	reset(reason = "advisor-context-reset"): void {
+		this.#recordLifecycleDiagnostic("reset", "applied", reason);
 		this.#generation++;
+		const speculation = this.#controller.speculationDrainCompletion;
+		if (speculation) this.#trackOperation(speculation);
 		void this.#controller.abortCompaction(new Error("advisor context reset"));
 		this.#controller.cancelSpeculation();
 		this.#handoff.abortHandoff(new Error("advisor context reset"));
@@ -633,14 +770,21 @@ export class AdvisorContextMaintenance {
 		this.#controller = this.#createController();
 	}
 
-	dispose(): void {
-		for (const controller of this.#scheduledTasks) controller.abort("advisor context disposed");
-		this.#scheduledTasks.clear();
+	async dispose(): Promise<void> {
+		this.#recordLifecycleDiagnostic("reset", "applied", "advisor-context-disposed");
 		this.#disposed = true;
-		this.#generation++;
-		void this.#controller.abortCompaction(new Error("advisor context disposed"));
+		const scheduled = [...this.#scheduledTaskCompletions];
+		for (const controller of this.#scheduledTasks) controller.abort("advisor context disposed");
+		const speculation = this.#controller.speculationDrainCompletion;
+		const cleanup = this.#controller.abortCompaction(new Error("advisor context disposed"));
 		this.#controller.cancelSpeculation();
 		this.#handoff.abortHandoff(new Error("advisor context disposed"));
+		await Promise.allSettled([
+			...this.#activeOperations,
+			...scheduled,
+			...[cleanup, speculation].filter((value): value is Promise<void> => value !== undefined),
+		]);
+		this.#generation++;
 		this.#checkpoints.clear();
 		this.#closeProviderSessions();
 		this.#attemptMessages = [];
