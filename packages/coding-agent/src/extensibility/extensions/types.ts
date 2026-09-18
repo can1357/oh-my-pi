@@ -468,6 +468,13 @@ export interface ExtensionContext {
 	ui: ExtensionUIContext;
 	/** Current run mode. Use `"tui"` to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
+	/**
+	 * Stable registry identity of the agent that owns this context.
+	 * Present for agent sessions; standalone ExtensionRunner hosts may omit it.
+	 */
+	agentId?: string;
+	/** Stable registry identity of the spawning agent, when this is a subagent session. */
+	parentAgentId?: string;
 	/** Get current context usage for the active model. */
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */

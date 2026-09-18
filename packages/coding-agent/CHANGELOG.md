@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Extension handler contexts now expose stable `agentId` and `parentAgentId` lineage, allowing parent-loaded policy hooks to authorize subagent tool calls without prompt-carried credentials.
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes
