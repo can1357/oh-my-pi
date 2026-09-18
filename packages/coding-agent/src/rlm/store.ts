@@ -43,6 +43,22 @@ export interface RlmTrajectoryEntry {
 	failOpen?: boolean;
 }
 
+/** Personal-use / experiment counters (session-local, inspect via status). */
+export interface RlmMetrics {
+	spills: number;
+	bytesSpilled: number;
+	/** Bytes returned into model/tool context via peek, view grants, or rlm:// read. */
+	bytesReintroduced: number;
+	peeks: number;
+	searches: number;
+	queries: number;
+	subcalls: number;
+	failOpen: number;
+	/** Ordinary read/grep resolves of rlm://. */
+	resourceResolves: number;
+}
+
+
 export interface RlmBudget {
 	maxDepth: number;
 	maxCalls: number;
@@ -86,6 +102,18 @@ export class RlmStore {
 	readonly budget: RlmBudget;
 	/** Honest partial trajectory for cancel / budget stops (RFC v1). */
 	readonly trajectory: RlmTrajectoryEntry[] = [];
+	readonly metrics: RlmMetrics = {
+		spills: 0,
+		bytesSpilled: 0,
+		bytesReintroduced: 0,
+		peeks: 0,
+		searches: 0,
+		queries: 0,
+		subcalls: 0,
+		failOpen: 0,
+		resourceResolves: 0,
+	};
+
 	#disposed = false;
 	/** In-flight provider calls aborted by cancel / wall-clock / dispose. */
 	readonly #inflight = new Set<AbortController>();
@@ -122,8 +150,11 @@ export class RlmStore {
 			text,
 		};
 		this.records.set(id, record);
+		this.metrics.spills += 1;
+		this.metrics.bytesSpilled += record.bytes;
 		this.note("put", `handle=rlm://h/${id} bytes=${record.bytes}${source ? ` source=${source}` : ""}`);
 		return record;
+
 	}
 
 	get(handle: string): RlmRecord | undefined {
@@ -135,6 +166,8 @@ export class RlmStore {
 		const from = Math.max(0, start);
 		const to = Math.min(record.text.length, end ?? record.text.length);
 		const text = record.text.slice(from, to);
+		this.metrics.peeks += 1;
+		this.metrics.bytesReintroduced += Buffer.byteLength(text, "utf8");
 		return {
 			handle: formatHandle(record.id),
 			start: from,
@@ -144,6 +177,7 @@ export class RlmStore {
 		};
 	}
 
+
 	/**
 	 * Search spilled text. Default mode is **literal** (safe on large corpora).
 	 * `mode: "regex"` uses JS RegExp and remains opt-in / experimental.
@@ -151,6 +185,7 @@ export class RlmStore {
 	search(handle: string, pattern: string, limit = 8, mode: "literal" | "regex" = "literal"): RlmHit[] {
 		const record = this.require(handle);
 		const hits: RlmHit[] = [];
+		this.metrics.searches += 1;
 		if (mode === "literal") {
 			let from = 0;
 			while (hits.length < limit) {
@@ -181,6 +216,7 @@ export class RlmStore {
 		return hits;
 	}
 
+
 	/** Operator / abort path: stop further subcalls and abort in-flight completers. */
 	cancel(reason = "cancelled"): void {
 		if (this.budget.cancelled) {
@@ -203,8 +239,10 @@ export class RlmStore {
 	}
 
 	note(op: string, detail: string, failOpen?: boolean): void {
+		if (failOpen) this.metrics.failOpen += 1;
 		this.trajectory.push({ ts: Date.now(), op, detail, failOpen });
 	}
+
 
 	/**
 	 * @deprecated Prefer {@link beginCall} + {@link reconcileUsage}.
@@ -293,11 +331,21 @@ export class RlmStore {
 	}
 
 	status(): string {
+		const m = this.metrics;
 		const parts = [
 			`handles=${this.records.size}`,
 			`calls=${this.budget.calls}/${this.budget.maxCalls}`,
 			`tokens=${this.budget.tokens}/${this.budget.maxTotalTokens}`,
 			`maxDepth=${this.budget.maxDepth}`,
+			`spills=${m.spills}`,
+			`bytes_spilled=${m.bytesSpilled}`,
+			`bytes_reintro=${m.bytesReintroduced}`,
+			`peeks=${m.peeks}`,
+			`searches=${m.searches}`,
+			`queries=${m.queries}`,
+			`subcalls=${m.subcalls}`,
+			`fail_open=${m.failOpen}`,
+			`rlm_reads=${m.resourceResolves}`,
 		];
 		if (this.budget.maxCost > 0) parts.push(`cost=${this.budget.cost.toFixed(4)}/${this.budget.maxCost}`);
 		if (this.budget.wallClockMs > 0) {
@@ -309,6 +357,7 @@ export class RlmStore {
 		parts.push(`trajectory=${this.trajectory.length}`);
 		return parts.join(" ");
 	}
+
 
 	/** Compact-safe: never clears records. Compaction of root chat must call nothing here. */
 	assertSurvivesCompaction(): void {
@@ -370,11 +419,12 @@ export function stubFor(record: RlmRecord): RlmStub {
 	const preview = tail && record.text.length > PREVIEW_CHARS * 2 ? `${head}\n…\n${tail}` : head;
 	const stub = [
 		`[rlm spilled handle=${handle} bytes=${record.bytes} sha256=${record.sha256}${record.source ? ` source=${record.source}` : ""}]`,
-		"Full payload is NOT in this message. Use the rlm tool (peek/search/query) on the handle.",
+		"Full payload is NOT in this message. Use read/grep on the handle, or rlm peek/search/select/query.",
 		preview,
 	].join("\n");
 	return { handle, bytes: record.bytes, sha256: record.sha256, preview, stub };
 }
+
 
 /** Spill text larger than `spillBytes`; otherwise return the original. */
 export function maybeSpill(store: RlmStore, text: string, spillBytes: number, source?: string): string {

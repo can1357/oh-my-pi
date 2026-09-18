@@ -91,12 +91,14 @@ const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 	memory: true,
 	omp: true,
 	pr: true,
+	rlm: true,
 	rule: true,
 	security: true,
 	skill: true,
 	ssh: true,
 	vault: true,
 };
+
 // Schemes whose resource URIs are server-defined and may legitimately end
 // with selector-shaped tails (e.g. `:raw`, `:conflicts`, `:1-50`, `/:raw`).
 // `McpProtocolHandler` resolves by exact URI match (`r.uri === uri`), so

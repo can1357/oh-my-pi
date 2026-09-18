@@ -2777,6 +2777,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			localProtocolOptions: this.session.localProtocolOptions,
 			skills: this.session.skills,
 			rules: this.session.activeRules,
+			getRlmStore: () => {
+				const store = this.session.rlmStore;
+				return store && !store.disposed ? store : null;
+			},
 			xd: {
 				read: async name => {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
@@ -2787,6 +2791,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				},
 			},
 		});
+
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
 
 		// If extraction was used, return directly (no pagination)

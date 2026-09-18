@@ -10,6 +10,7 @@ export {
 export type {
 	RlmBudget,
 	RlmHit,
+	RlmMetrics,
 	RlmPeek,
 	RlmRecord,
 	RlmReconcileResult,
@@ -17,8 +18,28 @@ export type {
 	RlmTrajectoryEntry,
 	RlmUsageReconcile,
 } from "./store";
+
 export { promptContainsCorpus, QUERY_SLICE, rlmQuery, workerContextContains } from "./query";
-export type { RlmBrokerResult, RlmCompleter, RlmCompleterOptions, RlmQueryResult, RlmWorkerMessage } from "./query";
+export type {
+	RlmBrokerResult,
+	RlmCompleter,
+	RlmCompleterOptions,
+	RlmQueryArgs,
+	RlmQueryResult,
+	RlmWorkerMessage,
+} from "./query";
+
+export {
+	mergeRanges,
+	parseGrantRanges,
+	selectGrantsFromSearch,
+} from "./select-grants";
+export type {
+	RlmGrantSelectPolicy,
+	RlmGrantSelectResult,
+	RlmSelectedHit,
+} from "./select-grants";
+
 export { parseRlmGrants, rlmSubcall } from "./subcall";
 export type { RlmGrant } from "./view";
 export {

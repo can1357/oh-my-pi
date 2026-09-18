@@ -88,9 +88,11 @@ export async function rlmSubcall(
 		return { text: "rlm subcall: empty view (fail-open)", citation: "", failOpen: true };
 	}
 
+	store.metrics.subcalls += 1;
 	store.note("subcall", `depth=${depth} grants=${view.grants.length} task_bytes=${trimmedTask.length}`);
 	const worker = buildSubcallWorkerContext(view, trimmedTask, depth);
 	const result = await executeLeasedCompletion(runtime, worker, complete, "subcall");
+
 	if (!result.failOpen) {
 		store.note("subcall", `ok lease=${result.lease?.id ?? "?"} tokens=${result.tokens ?? 0}`);
 	}

@@ -5,9 +5,11 @@
 export const RLM_RUNTIME_GUIDE =
 	"RLM context engine is on for this session. Oversized tool results may appear as " +
 	"`rlm://h/<id>` stubs (preview only). Full original bytes are NOT in the root prompt — " +
-	"use the `rlm` tool (peek / search / query / subcall / status) on the handle. " +
+	"use ordinary `read` / `grep` on `rlm://h/<id>`, or the `rlm` tool (peek / search / select / query / subcall / status). " +
+	"Before query/subcall: search or select ranges so the worker sees relevant slices — do not assume the first 8KiB. " +
 	"`subcall` is depth-1 only when rlm.maxDepth≥1: grant one or more handles + task; worker cannot recurse. " +
 	"Cite handles and byte offsets when answering from spilled corpus. On budget or cancel, RLM fail-opens; do not hang.";
+
 
 const GUIDE_MARKER = "RLM context engine is on for this session";
 
