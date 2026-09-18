@@ -4184,7 +4184,7 @@ export function coreWeaveModelManagerOptions(
 // 15.75 Meta Model API
 // ---------------------------------------------------------------------------
 
-const META_MODEL_API_BASE_URL = getDefaultModelDiscoveryBaseUrl("meta")!;
+export const META_MODEL_API_BASE_URL = getDefaultModelDiscoveryBaseUrl("meta")!;
 const META_MUSE_MODEL_BY_ID: Partial<Record<string, ModelSpec<"openai-responses">>> = Object.fromEntries(
 	seedModels<"openai-responses">("meta").map(model => [model.id, model]),
 );

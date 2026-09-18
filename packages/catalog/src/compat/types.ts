@@ -267,6 +267,12 @@ export interface CompiledHostedDefault {
 	model: string;
 }
 
+/** Chat-provider → generate_image backend. Unlisted providers do not bias auto order. */
+export interface CompiledImageProvider {
+	provider: string;
+	backend: string;
+}
+
 /** One API-routing alternative within an `api-routes` node. */
 export interface CompiledApiRoute {
 	api: string;
@@ -326,6 +332,9 @@ export interface CompiledBehavior {
 	cursorParameters: CompiledCursorParameter[];
 	quotaTiers: CompiledQuotaRule[];
 	hostedDefaults: CompiledHostedDefault[];
+	imageProviders: CompiledImageProvider[];
+	/** Image backends whose generate_image model comes from the active credential. */
+	credentialImageModels: string[];
 	apiRoutes: CompiledApiRoutes[];
 	modelLimits: CompiledModelLimits[];
 	excludeDiscoveryModes: CompiledExcludeDiscoveryModes[];

@@ -32,6 +32,15 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"nous",
 ]);
 
+// Hosted image-generation defaults (`<backend>-image`) are referenced from
+// behavior.hostedDefaults and resolved at runtime via hostedDefaultModel
+// (packages/coding-agent/src/tools/image-gen.ts), so they are derived from
+// the KDL policy instead of being hard-coded: a new backend needs no test
+// edit, and this allowlist cannot bless a backend that lacks its default.
+for (const entry of rules.behavior.hostedDefaults) {
+	if (entry.provider.endsWith("-image")) RUNTIME_ONLY_PROVIDERS.add(entry.provider);
+}
+
 function collectReferencedProviders(): Map<string, string> {
 	const referenced = new Map<string, string>();
 	for (const rule of rules.cascade.rules) {
@@ -61,6 +70,7 @@ function collectReferencedProviders(): Map<string, string> {
 		behavior.modelOperations,
 		behavior.quotaTiers,
 		behavior.hostedDefaults,
+		behavior.imageProviders,
 		behavior.apiRoutes,
 		behavior.modelLimits,
 		behavior.excludeDiscoveryModes,
@@ -104,6 +114,22 @@ describe("compat rules conformance", () => {
 				// Provider-scoped family selectors must name a family of SOME class.
 				const known = rules.taxonomy.classes.some(cls => cls.families.some(f => f.id === rule.family));
 				if (!known) offenders.push(`family ${rule.family} (${rule.source})`);
+			}
+		}
+		expect(offenders).toEqual([]);
+	});
+
+	test("every image-provider backend has a hosted default or credential model", () => {
+		// generate_image resolves credential-listed backends from the active
+		// credential and every other backend via hostedDefaultModel(`${backend}-image`),
+		// which throws without one. Both halves come from the KDL policy, so a
+		// new backend cannot be blessed without declaring its model source.
+		const credential = new Set(rules.behavior.credentialImageModels);
+		const defaults = new Set(rules.behavior.hostedDefaults.map(entry => entry.provider));
+		const offenders: string[] = [];
+		for (const entry of rules.behavior.imageProviders) {
+			if (!credential.has(entry.backend) && !defaults.has(`${entry.backend}-image`)) {
+				offenders.push(entry.backend);
 			}
 		}
 		expect(offenders).toEqual([]);

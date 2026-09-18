@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added hosted image-model defaults to the compat policy for the model-less `generate_image` backends (`meta-image` → `muse-image-1.0`, plus Gemini, Antigravity, OpenRouter, xAI, and DeepInfra), with credential-run backends declared in the same policy.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

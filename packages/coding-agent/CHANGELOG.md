@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added Meta Model API as an image generation and editing provider (`meta`, defaulting to Muse Image 1.0 via `MODEL_API_KEY` or `META_API_KEY`).
 ### Fixed
 
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.

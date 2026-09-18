@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { fetchAntigravityImageModel } from "@oh-my-pi/pi-catalog/discovery/antigravity";
+import { setHeaderIfAbsent } from "@oh-my-pi/pi-ai/providers/inference-headers";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -21,6 +22,8 @@ import {
 	OPENAI_HEADERS,
 	URL_PATHS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
+import { hostedDefaultModel, imageProviderFor, isCredentialImageModel } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { META_MODEL_API_BASE_URL } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import {
 	$env,
@@ -41,11 +44,6 @@ import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "te
 import { AUTO_IMAGE_PROVIDER_ORDER, type ImageProvider, isImageProviderId } from "./image-providers";
 import { resolveReadPath } from "./path-utils";
 
-const DEFAULT_MODEL = "gemini-3-pro-image-preview";
-const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-image-preview";
-const DEFAULT_ANTIGRAVITY_MODEL = "gemini-3-pro-image";
-const DEFAULT_XAI_IMAGE_MODEL = "grok-imagine-image";
-const DEFAULT_DEEPINFRA_IMAGE_MODEL = "black-forest-labs/FLUX-2-pro";
 const DEEPINFRA_IMAGES_URL = "https://api.deepinfra.com/v1/openai/images/generations";
 const IMAGE_TIMEOUT = 3 * 60 * 1000; // 3 minutes
 const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
@@ -482,14 +480,27 @@ async function postImageEndpointRequest(options: {
 		options.apiKey,
 		async key => {
 			const configuredHeaders = await options.resolveHeaders?.();
+			const headers: Record<string, string> = { ...configuredHeaders };
+			// Caller-supplied headers under any casing (e.g. a Meta-compatible
+			// proxy via providers.meta.headers) win over the generated
+			// defaults, matching resolveOpenAIRequestSetup. Forcing the
+			// defaults as object keys would duplicate a caller field spelled
+			// with different casing (fetch coalesces the pair into one
+			// comma-joined value).
+			// A keyless provider (`auth: none`) resolves to the `N/A`
+			// sentinel rather than a real key; like
+			// resolveOpenAIRequestSetup, send no generated Authorization
+			// then — a proxy that authenticates via its own headers would
+			// reject the bogus bearer. An explicitly configured
+			// Authorization header still flows through either way.
+			if (isAuthenticated(key)) {
+				setHeaderIfAbsent(headers, "Authorization", `Bearer ${key}`);
+			}
+			setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
+			setHeaderIfAbsent(headers, "Content-Type", "application/json");
 			const resp = await options.fetchImpl(options.url, {
 				method: "POST",
-				headers: {
-					...configuredHeaders,
-					Authorization: `Bearer ${key}`,
-					"Content-Type": "application/json",
-					"User-Agent": USER_AGENT,
-				},
+				headers,
 				body: JSON.stringify(options.body),
 				signal: options.signal,
 			});
@@ -647,8 +658,8 @@ interface AntigravityImageTarget {
  * behind `bearer`, memoized per bearer. `withAuth` can rotate to a sibling
  * account mid-request; each account carries its own image roster, so the target
  * MUST be resolved for the credential actually in hand, not the initial one.
- * Falls back to {@link DEFAULT_ANTIGRAVITY_MODEL} and the default endpoint order
- * when discovery is unavailable.
+ * Falls back to the `antigravity-image` hosted default and the default
+ * endpoint order when discovery is unavailable.
  */
 async function resolveAntigravityImageTarget(
 	bearer: string,
@@ -674,7 +685,7 @@ async function resolveAntigravityImageTarget(
 				// fallbacks so generation retries (429/5xx/network) still fail over.
 				endpoints: [advertised.endpoint, ...endpoints.filter(endpoint => endpoint !== advertised.endpoint)],
 			}
-		: { model: DEFAULT_ANTIGRAVITY_MODEL, endpoints };
+		: { model: resolveHostedImageModel("antigravity"), endpoints };
 	cache.set(bearer, target);
 	return target;
 }
@@ -718,6 +729,34 @@ async function findDeepInfraImageCredentials(
 	const apiKey = getEnvApiKey("deepinfra");
 	if (apiKey) return { provider: "deepinfra", apiKey };
 	return null;
+}
+async function findMetaImageCredentials(
+	modelRegistry?: ModelRegistry,
+	sessionId?: string,
+): Promise<ImageApiKey | null> {
+	if (modelRegistry) {
+		// AuthStorage.getApiKey already falls back to env keys, so this covers MODEL_API_KEY too.
+		const apiKey = await modelRegistry.getApiKeyForProvider("meta", sessionId);
+		if (apiKey) return { provider: "meta", apiKey: modelRegistry.resolver("meta", { sessionId }) };
+		return null;
+	}
+	const apiKey = getEnvApiKey("meta");
+	if (apiKey) return { provider: "meta", apiKey };
+	return null;
+}
+function resolveHostedImageModel(provider: ImageProvider): string {
+	const defaultModel = hostedDefaultModel(`${provider}-image`);
+	if (defaultModel) return defaultModel;
+	throw new Error(`Missing hosted-default policy for ${provider}-image`);
+}
+
+function resolveMetaImageBaseUrl(modelRegistry?: ModelRegistry): string {
+	const providerBaseUrl = modelRegistry?.getProviderBaseUrl("meta");
+	if (providerBaseUrl) {
+		const normalized = providerBaseUrl.replace(/\/+$/, "");
+		if (normalized !== META_MODEL_API_BASE_URL) return normalized;
+	}
+	return ($env.META_BASE_URL || META_MODEL_API_BASE_URL).replace(/\/+$/, "");
 }
 
 async function findGeminiImageCredentials(
@@ -794,24 +833,9 @@ async function findCodexSubscriptionImageCredentials(
 }
 
 function activeImageProvider(model: Model | undefined): Exclude<ImageProviderPreference, "auto"> | null {
-	switch (model?.provider) {
-		case "openai":
-		case "openai-codex":
-			return "openai";
-		case "google-antigravity":
-			return "antigravity";
-		case "xai":
-		case "xai-oauth":
-			return "xai";
-		case "openrouter":
-			return "openrouter";
-		case "deepinfra":
-			return "deepinfra";
-		case "google":
-			return "gemini";
-		default:
-			return null;
-	}
+	if (!model?.provider) return null;
+	const backend = imageProviderFor(model.provider);
+	return isImageProviderId(backend) ? backend : null;
 }
 
 function imageProviderOrder(activeModel: Model | undefined, requested?: ImageProviderPreference): ImageProvider[] {
@@ -851,6 +875,8 @@ async function findImageApiKey(
 			return findOpenRouterImageCredentials(modelRegistry, sessionId);
 		case "deepinfra":
 			return findDeepInfraImageCredentials(modelRegistry, sessionId);
+		case "meta":
+			return findMetaImageCredentials(modelRegistry, sessionId);
 		case "gemini":
 			return findGeminiImageCredentials(modelRegistry, sessionId);
 	}
@@ -1335,23 +1361,13 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 				const provider = apiKey.provider;
 				try {
-					let model: string;
-					if (provider === "openai" || provider === "openai-codex") {
-						model = apiKey.model?.id ?? "gpt";
-					} else if (provider === "antigravity") {
-						// The real model is resolved per credential inside withAuth (a
-						// rotated sibling account may advertise a different roster); this
-						// seed only hints credential resolution and the fallback path.
-						model = DEFAULT_ANTIGRAVITY_MODEL;
-					} else if (provider === "openrouter") {
-						model = DEFAULT_OPENROUTER_MODEL;
-					} else if (provider === "xai") {
-						model = DEFAULT_XAI_IMAGE_MODEL;
-					} else if (provider === "deepinfra") {
-						model = DEFAULT_DEEPINFRA_IMAGE_MODEL;
-					} else {
-						model = DEFAULT_MODEL;
-					}
+					// Credential-listed backends run on the session's model; every
+					// other backend resolves its `<backend>-image` hosted default.
+					// The antigravity seed only hints credential resolution: the
+					// real target is resolved per credential inside withAuth.
+					const model = isCredentialImageModel(provider)
+						? (apiKey.model?.id ?? "gpt")
+						: resolveHostedImageModel(provider);
 					const resolvedModel = provider === "openrouter" ? resolveOpenRouterModel(model) : model;
 					if (
 						params.aspect_ratio &&
@@ -1714,7 +1730,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					if (provider === "deepinfra") {
 						// Text-to-image only: images/generations has no reference-image
 						// input, so an edit request falls through to an edit-capable
-						// provider (openai/openrouter/gemini) later in the order.
+						// provider (openai/openrouter/gemini/meta) later in the order.
 						if (resolvedImages.length > 0) {
 							editUnsupportedProvider ??= provider;
 							continue;
@@ -1740,6 +1756,44 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 								return requestModel
 									? ctx.modelRegistry!.resolveModelHeaders(requestModel, requestSignal)
 									: ctx.modelRegistry!.getProviderHeaders("deepinfra");
+							},
+							fetchImpl,
+							signal: requestSignal,
+						});
+						const inlineImages = await collectImageEndpointImages(rawText, fetchImpl, requestSignal);
+						return buildImageEndpointResult(provider, resolvedModel, inlineImages);
+					}
+					if (provider === "meta") {
+						const prompt = assemblePrompt(params);
+						const size = resolveOpenAIImageSize(params.aspect_ratio, params.image_size);
+						const isEdit = resolvedImages.length > 0;
+						const requestBody = isEdit
+							? {
+									model: resolvedModel,
+									prompt,
+									images: resolvedImages.map(image => ({ image_url: toDataUrl(image) })),
+									n: 1,
+									response_format: "b64_json" as const,
+									...(size ? { size } : {}),
+								}
+							: {
+									model: resolvedModel,
+									prompt,
+									n: 1,
+									response_format: "b64_json" as const,
+									...(size ? { size } : {}),
+								};
+
+						const rawText = await postImageEndpointRequest({
+							label: "Meta",
+							url: `${resolveMetaImageBaseUrl(ctx.modelRegistry)}${isEdit ? "/images/edits" : "/images/generations"}`,
+							body: requestBody,
+							apiKey: apiKey.apiKey,
+							resolveHeaders: () => {
+								const requestModel = ctx.modelRegistry!.find("meta", resolvedModel);
+								return requestModel
+									? ctx.modelRegistry!.resolveModelHeaders(requestModel, requestSignal)
+									: ctx.modelRegistry!.getProviderHeaders("meta");
 							},
 							fetchImpl,
 							signal: requestSignal,
@@ -1859,7 +1913,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			if (!foundCredentials) {
 				throw new Error(
-					"No image API credentials found. Connect a Codex (ChatGPT) subscription, use a GPT Responses/Codex model with OpenAI credentials, log in with google-antigravity or xAI Grok OAuth, or set OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY, or DEEPINFRA_API_KEY.",
+					"No image API credentials found. Connect a Codex (ChatGPT) subscription, use a GPT Responses/Codex model with OpenAI credentials, log in with google-antigravity or xAI Grok OAuth, or set OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, GOOGLE_API_KEY, DEEPINFRA_API_KEY, MODEL_API_KEY, or META_API_KEY.",
 				);
 			}
 
@@ -1869,7 +1923,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			if (failures.length === 0 && editUnsupportedProvider) {
 				throw new Error(
-					`${editUnsupportedProvider} image generation is text-to-image only and cannot edit input images. Configure an edit-capable provider (openai, openai-codex, antigravity, xai, openrouter, gemini) or retry without input images.`,
+					`${editUnsupportedProvider} image generation is text-to-image only and cannot edit input images. Configure an edit-capable provider (openai, openai-codex, antigravity, xai, openrouter, gemini, meta) or retry without input images.`,
 				);
 			}
 
