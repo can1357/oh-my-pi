@@ -157,6 +157,14 @@ export interface AgentSessionConfig {
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
+	/**
+	 * How tool-surface drift maintains the system prompt. `"auto"` (default)
+	 * rebuilds the prompt on every applied tool-signature change; `"frozen"`
+	 * rebuilds only on the first application so the prompt stays byte-stable
+	 * and provider prefix caches survive tool-set churn on long sessions.
+	 * Explicit `forcePromptRefresh` calls still rebuild under both policies.
+	 */
+	toolsPromptPolicy?: "auto" | "frozen";
 	/** Models to cycle through with Ctrl+P (from --models flag). */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */

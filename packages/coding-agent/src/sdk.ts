@@ -673,6 +673,14 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
+	/**
+	 * How tool-surface drift maintains the system prompt. `"auto"` (default)
+	 * rebuilds the prompt on every applied tool-signature change; `"frozen"`
+	 * rebuilds only on the first application so the prompt stays byte-stable
+	 * and provider prefix caches survive tool-set churn on long sessions.
+	 * Explicit `forcePromptRefresh` calls still rebuild under both policies.
+	 */
+	toolsPromptPolicy?: "auto" | "frozen";
 }
 
 /** Result from createAgentSession */
@@ -3862,6 +3870,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			extensionPaths,
 			disableExtensionDiscovery: options.disableExtensionDiscovery,
 			autoApprove: options.autoApprove,
+			toolsPromptPolicy: options.toolsPromptPolicy,
 			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).

@@ -1675,6 +1675,7 @@ export class AgentSession {
 		};
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
+			toolsPromptPolicy: config.toolsPromptPolicy,
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,

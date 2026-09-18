@@ -74,6 +74,18 @@ export interface SessionToolsHost {
 
 interface SessionToolsOptions {
 	autoApprove?: boolean;
+	/**
+	 * How tool-surface drift maintains the system prompt. `"auto"` (default)
+	 * rebuilds the prompt whenever the applied tool signature changes, keeping
+	 * the roster section in sync at the cost of busting the provider prefix
+	 * cache. `"frozen"` rebuilds only on the first application — later drift
+	 * keeps the prompt byte-stable (the tool surface itself still updates via
+	 * `agent.setTools`; roster changes surface through the tool-roster notice),
+	 * trading prompt freshness for prefix-cache stability on long sessions
+	 * with dynamic tool sets. An explicit `forcePromptRefresh` rebuilds under
+	 * both policies.
+	 */
+	toolsPromptPolicy?: "auto" | "frozen";
 	toolRegistry?: Map<string, AgentTool>;
 	createVibeTools?: () => AgentTool[];
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
@@ -222,6 +234,7 @@ interface XdevMountNoticeProjection {
 export class SessionTools {
 	readonly #host: SessionToolsHost;
 	#autoApprove: boolean;
+	#toolsPromptPolicy: "auto" | "frozen";
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
@@ -320,6 +333,7 @@ export class SessionTools {
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
 		this.#host = host;
 		this.#autoApprove = options.autoApprove === true;
+		this.#toolsPromptPolicy = options.toolsPromptPolicy ?? "auto";
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createVibeTools = options.createVibeTools;
 		this.#createThinkTool = options.createThinkTool;
@@ -1081,8 +1095,9 @@ export class SessionTools {
 					!forcePromptRefresh &&
 					signature !== this.#lastAppliedToolSignature &&
 					this.#lastAppliedToolSignature !== undefined &&
-					this.#host.model()?.thinking?.prefixBinding === true &&
-					this.#host.agent.state.messages.some(message => message.role === "assistant");
+					(this.#toolsPromptPolicy === "frozen" ||
+						(this.#host.model()?.thinking?.prefixBinding === true &&
+							this.#host.agent.state.messages.some(message => message.role === "assistant")));
 				if (freezeImplicitPromptRefresh) {
 					frozenSignature = signature;
 				} else if (forcePromptRefresh || signature !== this.#lastAppliedToolSignature) {
