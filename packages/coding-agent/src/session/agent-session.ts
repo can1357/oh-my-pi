@@ -88,6 +88,11 @@ import {
 	type RlmSessionAccounting,
 } from "../rlm/accounting";
 import { getRlmRuntime, rlmEnabled } from "../rlm/session";
+import {
+	createTokenomicsBridge,
+	deriveContextPolicy,
+	type OmpTokenomicsBridge,
+} from "../rlm/tokenomics-bridge";
 
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
@@ -581,6 +586,8 @@ export class AgentSession {
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
 	editStore?: EditStore;
+	/** Session-scoped Tokenomics emitter (JSONL). Fail-open; OMP_TOKENOMICS=0 disables. */
+	#tokenomics: OmpTokenomicsBridge | undefined;
 
 	/** Materializes this session's live extension-root policy per discovery call. */
 	readonly #extensionRoots: () => EffectiveExtensionRoots;
@@ -1305,6 +1312,14 @@ export class AgentSession {
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		try {
+			this.#tokenomics = createTokenomicsBridge({
+				sessionId: this.sessionManager.getSessionId(),
+				contextPolicy: deriveContextPolicy(this.settings),
+			});
+		} catch {
+			this.#tokenomics = undefined;
+		}
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#extensionRoots =
@@ -3352,6 +3367,20 @@ export class AgentSession {
 					},
 					costUsd: assistantMsg.usage.cost.total,
 				});
+				// Tokenomics: root incremental model call (provider-reported only).
+				void this.#tokenomics
+					?.emitModelCall({
+						role: "root",
+						name: "omp.root",
+						provider: assistantMsg.provider,
+						model: assistantMsg.model,
+						usage: assistantMsg.usage,
+						status: assistantMsg.stopReason === "error" ? "error" : assistantMsg.stopReason === "aborted" ? "cancelled" : "ok",
+						durationMs: assistantMsg.duration,
+						ttftMs: assistantMsg.ttft,
+						costUsd: assistantMsg.usage.cost.total,
+					})
+					.catch(() => {});
 				// Persist which account served this turn so a resumed process can
 				// re-pin it and keep the provider's account-scoped prompt cache
 				// warm (broker-mode sticky routing is process-local).
@@ -9338,6 +9367,24 @@ export class AgentSession {
 			} catch {
 				// fail-open: accounting prefers ledger when model_usage missing
 			}
+			void this.#tokenomics
+				?.emitModelCall({
+					role: "rlm_worker",
+					name: purpose.startsWith("rlm") ? `omp.${purpose}` : "omp.rlm_worker",
+					provider: model.provider,
+					model: model.id,
+					usage,
+					status:
+						result.assistantMessage.stopReason === "error"
+							? "error"
+							: result.assistantMessage.stopReason === "aborted"
+								? "cancelled"
+								: "ok",
+					durationMs: result.assistantMessage.duration,
+					ttftMs: result.assistantMessage.ttft,
+					costUsd: usage.cost?.total,
+				})
+				.catch(() => {});
 		}
 		return result;
 	}
@@ -9388,16 +9435,69 @@ export class AgentSession {
 		});
 	}
 
-	/** Append one experiment JSONL row under ~/.omp/rlm-experiments. */
-	exportRlmExperimentRecord(options?: {
+	/** Append one experiment JSONL row under ~/.omp/rlm-experiments (+ Tokenomics flush). */
+	async exportRlmExperimentRecord(options?: {
 		taskId?: string;
 		evidenceQuality?: EvidenceQualityLabel;
 		durationMs?: number;
 		dir?: string;
-	}): { accounting: RlmSessionAccounting; jsonlPath: string; snapshotPath?: string } {
+	}): Promise<{
+		accounting: RlmSessionAccounting;
+		jsonlPath: string;
+		snapshotPath?: string;
+		tokenomicsLine?: string;
+		tokenomicsPath?: string;
+	}> {
 		const accounting = this.getRlmSessionAccounting(options);
 		const paths = exportRlmExperimentRecord(accounting, { dir: options?.dir });
-		return { accounting, ...paths };
+		let tokenomicsLine: string | undefined;
+		let tokenomicsPath: string | undefined;
+		const bridge = this.#tokenomics;
+		if (bridge) {
+			try {
+				const flushed = await bridge.flushTask({
+					metrics: {
+						spills: accounting.ops.spills,
+						bytesSpilled: accounting.ops.bytesSpilled,
+						bytesReintroduced: accounting.ops.bytesReintroduced,
+						searches: accounting.ops.searches,
+						queries: accounting.ops.queries,
+						subcalls: accounting.ops.subcalls,
+						grantsSelected: accounting.ops.grantsSelected,
+						workerCallsAvoided: accounting.ops.workerCallsAvoided,
+						workerCalls: accounting.ops.workerCalls,
+						peeks: accounting.ops.peeks,
+						grantedBytes: accounting.ops.bytesReintroduced,
+					},
+					sessionRaw: accounting.sessionRaw
+						? {
+								input: accounting.sessionRaw.input,
+								output: accounting.sessionRaw.output,
+								cacheRead: accounting.sessionRaw.cacheRead,
+								cacheWrite: accounting.sessionRaw.cacheWrite,
+								totalTokens: accounting.sessionRaw.total,
+								cost: accounting.sessionRaw.cost,
+							}
+						: undefined,
+					evidenceQuality: options?.evidenceQuality,
+					executionCompleted: !options?.evidenceQuality,
+				});
+				tokenomicsLine = flushed.line;
+			} catch {
+				tokenomicsLine = bridge.formatStatusLine();
+			}
+			tokenomicsPath = bridge.jsonlPath;
+		}
+		return { accounting, ...paths, tokenomicsLine, tokenomicsPath };
+	}
+
+	/** Tokenomics status one-liner (trace totals via SDK summarizeTrace). */
+	getTokenomicsStatusLine(): string {
+		return this.#tokenomics?.formatStatusLine() ?? "tokenomics: off";
+	}
+
+	getTokenomicsBridge(): OmpTokenomicsBridge | undefined {
+		return this.#tokenomics;
 	}
 
 	/**

@@ -85,6 +85,12 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 			} catch (err) {
 				lines.push(`accounting_unavailable: ${err instanceof Error ? err.message : String(err)}`);
 			}
+			try {
+				const tok = (this.session as { getTokenomicsStatusLine?: () => string }).getTokenomicsStatusLine?.();
+				if (tok) lines.push(tok);
+			} catch {
+				/* fail-open */
+			}
 			return toolResult<RlmToolDetails>({ op: "status" }).text(lines.join("\n")).done();
 		}
 		if (params.op === "export") {
@@ -100,10 +106,37 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 					rlmEnabled: true,
 				},
 			});
+			const sess = this.session as {
+				exportRlmExperimentRecord?: (o?: {
+					evidenceQuality?: never;
+				}) => Promise<{
+					accounting: typeof accounting;
+					jsonlPath: string;
+					snapshotPath?: string;
+					tokenomicsLine?: string;
+					tokenomicsPath?: string;
+				}>;
+				getTokenomicsStatusLine?: () => string;
+			};
+			// Prefer session export (flushes Tokenomics) when available
+			if (typeof sess.exportRlmExperimentRecord === "function") {
+				const full = await sess.exportRlmExperimentRecord({});
+				const lines = [
+					formatRlmAccountingSummary(full.accounting),
+					`jsonl=${full.jsonlPath}${full.snapshotPath ? `\nsnapshot=${full.snapshotPath}` : ""}`,
+				];
+				if (full.tokenomicsLine) lines.push(full.tokenomicsLine);
+				if (full.tokenomicsPath) lines.push(`tokenomics_jsonl=${full.tokenomicsPath}`);
+				return toolResult<RlmToolDetails>({ op: "export" }).text(lines.join("\n")).done();
+			}
 			const paths = exportRlmExperimentRecord(accounting);
-			return toolResult<RlmToolDetails>({ op: "export" })
-				.text(`${formatRlmAccountingSummary(accounting)}\njsonl=${paths.jsonlPath}${paths.snapshotPath ? `\nsnapshot=${paths.snapshotPath}` : ""}`)
-				.done();
+			const lines = [
+				formatRlmAccountingSummary(accounting),
+				`jsonl=${paths.jsonlPath}${paths.snapshotPath ? `\nsnapshot=${paths.snapshotPath}` : ""}`,
+			];
+			const tok = sess.getTokenomicsStatusLine?.();
+			if (tok) lines.push(tok);
+			return toolResult<RlmToolDetails>({ op: "export" }).text(lines.join("\n")).done();
 		}
 
 		if (params.op === "subcall") {

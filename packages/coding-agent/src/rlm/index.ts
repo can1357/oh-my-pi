@@ -102,3 +102,10 @@ export type {
 	RlmSessionAccounting,
 	TokenBucket,
 } from "./accounting";
+
+export {
+	OmpTokenomicsBridge,
+	createTokenomicsBridge,
+	deriveContextPolicy,
+} from "./tokenomics-bridge";
+export type { ContextPolicy, ModelCallEmit, TokenomicsBridgeOptions } from "./tokenomics-bridge";
