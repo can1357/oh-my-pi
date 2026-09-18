@@ -6,17 +6,18 @@ Data-driven scorecard for the prompt-as-variable spill engine (`src/rlm/`).
 
 | arm | meaning |
 |-----|---------|
-| `off` | Native path: full tool bodies stay in root context |
-| `on`  | RLM spill: oversized tool text → `rlm://h/<id>` stubs |
+| `off` | Full tool bodies stay in root context |
+| `on`  | RLM spill: oversized tool text → `rlm://h/<id>` stubs + store |
+| `shake` | Head/tail truncate to `spillBytes` — midpoint needles lost, no store |
 
 ## Metrics
 
 | id | definition |
 |----|------------|
-| M1 | `1 - rootCorpusBytes/originalBytes` on treatment |
-| M2 | context-token drop on vs off (`Tokenizer.countTokens`) |
+| M1 | `1 - rootCorpusBytes/originalBytes` on RLM arm |
+| M2 | context-token drop RLM vs full (`Tokenizer.countTokens`) |
 | C3 | no planted needle inside spilled stubs |
-| M5 | needle recoverable via `RlmStore.search` |
+| M5 | needle recoverable (`RlmStore.search` on; shake: present in truncated body) |
 
 ## Run
 
@@ -24,17 +25,13 @@ Data-driven scorecard for the prompt-as-variable spill engine (`src/rlm/`).
 cd packages/coding-agent
 bun evals/rlm/orchestrate.ts
 bun evals/rlm/report.ts          # exit 1 on gate failure
-```
-
-Live mid-session toggle (RPC, not this harness):
-
-```bash
-# see plan: /rlm on → dumpTools includes rlm
+bun test test/rlm-context-engine.test.ts test/rlm-v1-acceptance.test.ts
 ```
 
 ## Gates (`workloads.json`)
 
-- M1 ≥ 90% body reduction on fat workloads
-- M2 ≥ 30% context token drop (W1/W2/W3)
+- M1 ≥ 90% body reduction on fat workloads (RLM)
+- M2 ≥ 30% context token drop vs full (W1/W2/W3)
 - C3 needle never in stub
 - M5 search recovers needle when on
+- shake arm present; RLM not 2× worse tokens than shake; RLM keeps M5 when shake drops midpoint

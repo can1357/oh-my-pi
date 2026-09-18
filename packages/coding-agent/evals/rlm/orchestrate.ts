@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 /**
- * Offline RLM A/B orchestrator (arms: off | on).
+ * Offline RLM A/B orchestrator (arms: off | on | shake).
+
  *
  * Measures root-prompt corpus bytes and tokenizer-estimated context after a
  * fixed fat-read workload. No provider calls — mock tool results only.
@@ -44,7 +45,18 @@ type Workload = {
 	needles: Array<{ id: string; offsetHint?: number }>;
 };
 
-type Arm = "off" | "on";
+type Arm = "off" | "on" | "shake";
+
+/** Native shake-style truncation: head/tail only — midpoint needles are lost. */
+function shakeTruncate(text: string, budgetBytes: number): string {
+	const bytes = Buffer.byteLength(text, "utf8");
+	if (bytes <= budgetBytes) return text;
+	const half = Math.max(64, Math.floor(budgetBytes / 2));
+	const head = text.slice(0, half);
+	const tail = text.slice(-half);
+	return `${head}\n…[shake truncated ${bytes} bytes]…\n${tail}`;
+}
+
 
 type Cell = {
 	ts: number;
@@ -131,22 +143,27 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 		for (const n of file.needles) allNeedles.add(n);
 		originalBytes += Buffer.byteLength(file.text, "utf8");
 
-		const tool = wrapToolWithRlmSpill(
-			{
-				name: "read",
-				execute: async () => ({
-					content: [{ type: "text" as const, text: file.text }],
-					details: {},
-				}),
-			} as unknown as AgentTool,
-			store,
-			spillBytes,
-			{ enabled: () => arm === "on" },
-		);
+		let text: string;
+		if (arm === "shake") {
+			text = shakeTruncate(file.text, spillBytes);
+		} else {
+			const tool = wrapToolWithRlmSpill(
+				{
+					name: "read",
+					execute: async () => ({
+						content: [{ type: "text" as const, text: file.text }],
+						details: {},
+					}),
+				} as unknown as AgentTool,
+				store,
+				spillBytes,
+				{ enabled: () => arm === "on" },
+			);
+			const result = await tool.execute(`call-${file.name}`, {});
+			const textPart = result.content.find(part => part.type === "text");
+			text = textPart && textPart.type === "text" ? textPart.text : "";
+		}
 
-		const result = await tool.execute(`call-${file.name}`, {});
-		const textPart = result.content.find(part => part.type === "text");
-		const text = textPart && textPart.type === "text" ? textPart.text : "";
 		rootTexts.push(text);
 		rootCorpusBytes += Buffer.byteLength(text, "utf8");
 		if (text.includes("[rlm spilled") || text.includes("rlm://h/")) {
@@ -157,16 +174,14 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 			for (const n of allNeedles) {
 				if (text.includes(n)) needleInStub = true;
 			}
-		} else {
-			for (const n of file.needles) {
-				// full body may contain needle when arm=off — not a C3 fail
-			}
 		}
 	}
 
-	// M5: recover first needle via search when spilled
-	let needleRecoverable = arm === "off" ? true : allNeedles.size === 0;
-	if (arm === "on" && handles.length > 0 && allNeedles.size > 0) {
+	// M5: recover first needle — rlm search when on; shake has no store (midpoint lost).
+	let needleRecoverable = allNeedles.size === 0;
+	if (arm === "off") {
+		needleRecoverable = true;
+	} else if (arm === "on" && handles.length > 0 && allNeedles.size > 0) {
 		const target = [...allNeedles][0]!;
 		let ok = false;
 		for (const handle of handles) {
@@ -177,12 +192,14 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 			}
 		}
 		needleRecoverable = ok;
+	} else if (arm === "shake") {
+		const blob = rootTexts.join("\n");
+		needleRecoverable = [...allNeedles].every(n => blob.includes(n));
 	}
 
 	const contextBlob = rootTexts.join("\n");
 	const contextTokens = estTokens(contextBlob, tokenizer);
 	const M1_reduction = originalBytes === 0 ? 1 : 1 - rootCorpusBytes / originalBytes;
-
 
 	return {
 		ts: Date.now(),
@@ -197,16 +214,18 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 		needleInStub: arm === "on" ? needleInStub : false,
 		needleRecoverable,
 		M1_reduction,
-		pass_C3: arm === "off" ? true : !needleInStub,
+		pass_C3: arm === "on" ? !needleInStub : true,
 		pass_M5: needleRecoverable,
 	};
 }
+
 
 async function main(): Promise<void> {
 	fs.mkdirSync(path.dirname(RESULTS), { recursive: true });
 	if (fs.existsSync(RESULTS)) fs.unlinkSync(RESULTS);
 
-	const arms: Arm[] = ["off", "on"];
+	const arms: Arm[] = ["off", "on", "shake"];
+
 	for (const workload of WORKLOADS.workloads) {
 		if (workload.id === "W0-smoke") {
 			// smoke is live-RPC only; record a placeholder
