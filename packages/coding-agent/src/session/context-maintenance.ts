@@ -14,6 +14,7 @@ import {
 	AGGRESSIVE_SHAKE_CONFIG,
 	AUTO_HANDOFF_THRESHOLD_FOCUS,
 	applyShakeRegions,
+	canReplayRemoteCompaction,
 	CompactionCancelledError,
 	type CompactionDetails,
 	type CompactionPreparation,
@@ -111,6 +112,7 @@ export type CompactionCheckResult = Readonly<{
 	continuationScheduled: boolean;
 	automaticContinuationBlocked?: boolean;
 	historyRewritten?: boolean;
+	contextRecovery?: boolean;
 }>;
 
 /** Shared no-op result for dispatcher paths that perform no maintenance. */
@@ -131,6 +133,10 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	continuationScheduled: false,
 	automaticContinuationBlocked: true,
 };
+
+function contextRecoveryResult(result: CompactionCheckResult): CompactionCheckResult {
+	return result.contextRecovery === true ? result : { ...result, contextRecovery: true };
+}
 
 /**
  * Consecutive `response.incomplete` (length-stop) recoveries that produce no
@@ -167,7 +173,7 @@ function isCompactionMethodUsable(
 	excludeMedia = false,
 ): boolean {
 	return candidate === "remote"
-		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate))
+		? canUseRemoteCompaction(model, resolveMethodSettings(settings, candidate)) || model?.compactionModel !== undefined
 		: candidate === "snapcompact"
 			? !excludeMedia && model?.input.includes("image") === true
 			: candidate === "handoff"
@@ -436,6 +442,7 @@ export interface ContextMaintenanceHost {
 	obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
+	onHistoryRewrite?(reason: string, entry?: CompactionEntry): void;
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
 	resetAdvisorRuntimes(reason?: string): void;
@@ -615,8 +622,58 @@ export class ContextMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
+	#snapshotEntries(entries: readonly SessionEntry[]): Map<SessionEntry, SessionEntry> {
+		return new Map(entries.map(entry => [entry, structuredClone(entry)]));
+	}
+	#restoreEntrySnapshots(snapshots: ReadonlyMap<SessionEntry, SessionEntry>): void {
+		for (const [entry, snapshot] of snapshots) {
+			for (const key of Object.keys(entry)) {
+				if (!Object.hasOwn(snapshot, key)) Reflect.deleteProperty(entry, key);
+			}
+			if (entry.type === "message" && snapshot.type === "message") {
+				const liveMessage = entry.message;
+				for (const key of Object.keys(liveMessage)) {
+					if (!Object.hasOwn(snapshot.message, key)) Reflect.deleteProperty(liveMessage, key);
+				}
+				Object.assign(liveMessage, snapshot.message);
+				Object.assign(entry, snapshot);
+				entry.message = liveMessage;
+			} else {
+				Object.assign(entry, snapshot);
+			}
+		}
+	}
+
+
+	async #rollbackEntrySnapshots(
+		snapshots: ReadonlyMap<SessionEntry, SessionEntry>,
+		restoreLiveContext = true,
+		expectedGeneration?: number,
+	): Promise<void> {
+		this.#restoreEntrySnapshots(snapshots);
+		try {
+			await this.#host.sessionManager.rewriteEntries();
+		} catch (error) {
+			logger.warn("Failed to persist context-maintenance rollback", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		if (
+			restoreLiveContext &&
+			(expectedGeneration === undefined || this.#host.promptGeneration() === expectedGeneration) &&
+			!this.#host.isDisposed()
+		) {
+			this.#host.agent.replaceMessages(this.#host.buildDisplaySessionContext().messages);
+		}
+	}
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+		const generation = this.#host.promptGeneration();
 		const branchEntries = this.#host.sessionManager.getBranch();
+		const entrySnapshots = this.#snapshotEntries(
+			branchEntries.filter(
+				entry => entry.type === "custom_message" || (entry.type === "message" && entry.message.role === "toolResult"),
+			),
+		);
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
 			branchEntries,
@@ -636,9 +693,23 @@ export class ContextMaintenance {
 			return undefined;
 		}
 
-		await this.#host.sessionManager.rewriteEntries();
+		if (this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+			this.#restoreEntrySnapshots(entrySnapshots);
+			return undefined;
+		}
+		try {
+			await this.#host.sessionManager.rewriteEntries();
+			if (this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+				await this.#rollbackEntrySnapshots(entrySnapshots, false);
+				return undefined;
+			}
+		} catch (error) {
+			await this.#rollbackEntrySnapshots(entrySnapshots, true, generation);
+			throw error;
+		}
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.onHistoryRewrite?.("prune-tool-outputs");
 		this.#host.resetAdvisorRuntimes("prune-tool-outputs");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
@@ -662,6 +733,12 @@ export class ContextMaintenance {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranch();
+		const generation = this.#host.promptGeneration();
+		const entrySnapshots = this.#snapshotEntries(
+			branchEntries.filter(
+				entry => entry.type === "custom_message" || (entry.type === "message" && entry.message.role === "toolResult"),
+			),
+		);
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
 			branchEntries,
@@ -682,9 +759,23 @@ export class ContextMaintenance {
 			return undefined;
 		}
 
-		await this.#host.sessionManager.rewriteEntries();
+		if (this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+			this.#restoreEntrySnapshots(entrySnapshots);
+			return undefined;
+		}
+		try {
+			await this.#host.sessionManager.rewriteEntries();
+		} catch (error) {
+			await this.#rollbackEntrySnapshots(entrySnapshots, true, generation);
+			throw error;
+		}
 		const sessionContext = this.#host.buildDisplaySessionContext();
+		if (this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+			await this.#rollbackEntrySnapshots(entrySnapshots, false);
+			return undefined;
+		}
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.onHistoryRewrite?.("prune-stale-tool-results");
 		this.#host.resetAdvisorRuntimes("prune-stale-tool-results");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
@@ -703,8 +794,10 @@ export class ContextMaintenance {
 	 * No-op when the branch carries no images; returns `{ removed: 0 }` and
 	 * skips the disk rewrite.
 	 */
-	async dropImages(): Promise<{ removed: number }> {
+	async dropImages(options: { signal?: AbortSignal; isCurrent?: () => boolean } = {}): Promise<{ removed: number }> {
+		const generation = this.#host.promptGeneration();
 		const branchEntries = this.#host.sessionManager.getBranch();
+		const entrySnapshots = this.#snapshotEntries(branchEntries);
 		let removed = 0;
 		for (const entry of branchEntries) {
 			if (entry.type === "message") {
@@ -715,27 +808,44 @@ export class ContextMaintenance {
 				const kept: typeof entry.content = [];
 				let dropped = 0;
 				for (const part of entry.content) {
-					if (part.type === "image") {
-						dropped++;
-					} else {
-						kept.push(part);
-					}
+					if (part.type === "image") dropped++;
+					else kept.push(part);
 				}
 				if (dropped > 0) {
-					if (kept.length === 0) {
-						kept.push({ type: "text", text: "[image removed]" });
-					}
+					if (kept.length === 0) kept.push({ type: "text", text: "[image removed]" });
 					entry.content = kept;
 					removed += dropped;
 				}
 			}
 		}
-		if (removed === 0) {
+		if (removed === 0) return { removed: 0 };
+		if (
+			options.signal?.aborted ||
+			options.isCurrent?.() === false ||
+			this.#host.isDisposed() ||
+			this.#host.promptGeneration() !== generation
+		) {
+			this.#restoreEntrySnapshots(entrySnapshots);
 			return { removed: 0 };
 		}
-		await this.#host.sessionManager.rewriteEntries();
+		try {
+			await this.#host.sessionManager.rewriteEntries();
+			if (
+				options.signal?.aborted ||
+				options.isCurrent?.() === false ||
+				this.#host.isDisposed() ||
+				this.#host.promptGeneration() !== generation
+			) {
+				await this.#rollbackEntrySnapshots(entrySnapshots, false);
+				return { removed: 0 };
+			}
+		} catch (error) {
+			await this.#rollbackEntrySnapshots(entrySnapshots, true, generation);
+			throw error;
+		}
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.onHistoryRewrite?.("drop-images");
 		this.#host.resetAdvisorRuntimes("drop-images");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return { removed };
@@ -766,12 +876,14 @@ export class ContextMaintenance {
 		} = {},
 	): Promise<ShakeResult> {
 		if (mode === "images") {
-			const { removed } = await this.#host.dropImages();
+			const { removed } = await this.dropImages({ signal: opts.signal, isCurrent: opts.isCurrent });
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
 		}
 
 		if (mode === "thinking") {
+			const generation = this.#host.promptGeneration();
 			const branchEntries = this.#host.sessionManager.getBranch();
+			const entrySnapshots = this.#snapshotEntries(branchEntries);
 			let removed = 0;
 			for (const entry of branchEntries) {
 				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
@@ -781,7 +893,6 @@ export class ContextMaintenance {
 				);
 				const dropped = message.content.length - kept.length;
 				if (dropped === 0) continue;
-				// Provider serializers omit empty assistant turns, so don't invent model-authored text.
 				message.content = kept;
 				invalidateMessageCache(message);
 				removed += dropped;
@@ -789,26 +900,54 @@ export class ContextMaintenance {
 			if (removed === 0) {
 				return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: 0, tokensFreed: 0 };
 			}
-			await this.#host.sessionManager.rewriteEntries();
+			try {
+				if (
+					opts.signal?.aborted ||
+					opts.isCurrent?.() === false ||
+					this.#host.isDisposed() ||
+					this.#host.promptGeneration() !== generation
+				)
+					throw new CompactionCancelledError();
+				await this.#host.sessionManager.rewriteEntries();
+				if (
+					opts.signal?.aborted ||
+					opts.isCurrent?.() === false ||
+					this.#host.isDisposed() ||
+					this.#host.promptGeneration() !== generation
+				)
+					throw new CompactionCancelledError();
+			} catch (error) {
+				const stale =
+					opts.signal?.aborted ||
+					opts.isCurrent?.() === false ||
+					this.#host.isDisposed() ||
+					this.#host.promptGeneration() !== generation;
+				await this.#rollbackEntrySnapshots(entrySnapshots, !stale, generation);
+				throw error;
+			}
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
+			this.#host.onHistoryRewrite?.("shake");
 			this.#host.resetAdvisorRuntimes("shake");
 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
 		}
 
+		const generation = this.#host.promptGeneration();
 		const assertCurrent = () => {
-			if (opts.signal?.aborted || opts.isCurrent?.() === false) throw new CompactionCancelledError();
+			if (
+				opts.signal?.aborted ||
+				opts.isCurrent?.() === false ||
+				this.#host.isDisposed() ||
+				this.#host.promptGeneration() !== generation
+			)
+				throw new CompactionCancelledError();
 		};
 		assertCurrent();
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
-			// Skip entries summarized away by the latest compaction — shaking them
-			// only churns persisted history with no prompt/cache effect. The cut is
-			// unconditional on the wire (see `buildSessionContext`), so a compaction
-			// the active model cannot replay still hides its prefix from the prompt.
 			keepBoundaryId: latestCompaction?.firstKeptEntryId,
 		});
 		let regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
@@ -816,7 +955,6 @@ export class ContextMaintenance {
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
-
 		let reservedArtifact: { id?: string; path?: string } = {};
 		try {
 			reservedArtifact = await this.#host.sessionManager.allocateArtifactPath("shake");
@@ -906,14 +1044,19 @@ export class ContextMaintenance {
 		try {
 			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 			await this.#host.sessionManager.rewriteEntries();
+			assertCurrent();
 		} catch (error) {
-			for (const [entry, snapshot] of entrySnapshots) Object.assign(entry, snapshot);
-			const sessionContext = this.#host.buildDisplaySessionContext();
-			this.#host.agent.replaceMessages(sessionContext.messages);
+			const stale =
+				opts.signal?.aborted ||
+				opts.isCurrent?.() === false ||
+				this.#host.isDisposed() ||
+				this.#host.promptGeneration() !== generation;
+			await this.#rollbackEntrySnapshots(entrySnapshots, !stale, generation);
 			throw error;
 		}
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.onHistoryRewrite?.("shake");
 		this.#host.resetAdvisorRuntimes("shake");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 
@@ -1392,6 +1535,7 @@ export class ContextMaintenance {
 				});
 			}
 
+			this.#assertCompactionReplayCompatible(preserveData);
 			markCommitted();
 			await this.#commitCompactionEntry({
 				summary,
@@ -1559,6 +1703,7 @@ export class ContextMaintenance {
 		// the entry and then awaits post-append bookkeeping and the `session_compact`
 		// hook, and a rejection there must still count as committed for the
 		// interrupted-turn resume.
+		this.#assertCompactionReplayCompatible(result.preserveData);
 		onCommitted();
 		await this.#commitCompactionEntry({
 			...result,
@@ -1928,6 +2073,8 @@ export class ContextMaintenance {
 		this.cancelSpeculation();
 		const model = this.#model;
 		if (!model) throw new Error("No model selected for handoff");
+		const generation = this.#host.promptGeneration();
+		const leafId = this.#host.sessionManager.getLeafId();
 		const entries = this.#host.sessionManager.getBranch();
 		const messageCount = entries.filter(e => e.type === "message").length;
 		if (messageCount < 2) throw new Error("Nothing to hand off (no messages yet)");
@@ -1941,6 +2088,14 @@ export class ContextMaintenance {
 		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
 		const result = await this.#host.generateHandoffDocument(customInstructions, options);
 		if (!result) return undefined;
+		if (
+			this.#host.isDisposed() ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.sessionManager.getLeafId() !== leafId ||
+			!modelsAreEqual(this.#model, model)
+		) {
+			return undefined;
+		}
 		const { summary, details } = handoffSummaryFromDocument(result.document, preparation);
 		await this.#commitCompactionEntry({
 			summary,
@@ -2259,6 +2414,15 @@ export class ContextMaintenance {
 		return run.armed;
 	}
 
+	/** Reject opaque provider-native history before any journal or live-context mutation. */
+	#assertCompactionReplayCompatible(preserveData: Record<string, unknown> | undefined): void {
+		const model = this.#model;
+		if (!model || canReplayRemoteCompaction(preserveData, model)) return;
+		throw new Error(
+			`Compaction result cannot be replayed by the active model ${model.provider}/${model.id}.`,
+		);
+	}
+
 	/**
 	 * Append a compaction entry and run the shared post-commit sequence:
 	 * rebuild the display context, swap live agent messages, re-anchor stats,
@@ -2279,6 +2443,7 @@ export class ContextMaintenance {
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
 	}): Promise<CompactionEntry | undefined> {
+		this.#assertCompactionReplayCompatible(args.preserveData);
 		const entryId = this.#host.sessionManager.appendCompaction(
 			args.summary,
 			args.shortSummary,
@@ -2314,6 +2479,7 @@ export class ContextMaintenance {
 		const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.id === entryId) as
 			| CompactionEntry
 			| undefined;
+		this.#host.onHistoryRewrite?.(args.advisorResetReason, savedCompactionEntry);
 		if (this.#host.extensionRunner && savedCompactionEntry) {
 			const compactEmit = this.#host.extensionRunner.emit({
 				type: "session_compact",
@@ -2402,7 +2568,7 @@ export class ContextMaintenance {
 		return tokens;
 	}
 
-	async runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
+	async runPrePromptCompactionIfNeeded(messages: AgentMessage[], signal?: AbortSignal): Promise<void> {
 		const model = this.#model;
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
@@ -2440,13 +2606,16 @@ export class ContextMaintenance {
 		// the history at all. The post-turn threshold path already promotes before
 		// compacting; without this, the pre-prompt path would pre-empt promotion and
 		// compact (snapcompact/summary) a session that should have just been promoted.
-		if (await this.#promoteContextModel()) {
-			logger.debug("Pre-prompt context promotion avoided compaction", {
-				contextTokens,
-				contextWindow,
-				model: `${model.provider}/${model.id}`,
-			});
-			return;
+		if (await this.#promoteContextModel(signal)) {
+			const promotedWindow = this.#model?.contextWindow ?? 0;
+			if (promotedWindow > 0 && !shouldCompact(contextTokens, promotedWindow, compactionSettings)) {
+				logger.debug("Pre-prompt context promotion avoided compaction", {
+					contextTokens,
+					contextWindow: promotedWindow,
+					model: `${model.provider}/${model.id}`,
+				});
+				return;
+			}
 		}
 
 		logger.debug("Pre-prompt context maintenance triggered by pending prompt size", {
@@ -2460,6 +2629,7 @@ export class ContextMaintenance {
 			pendingContextTokens: this.#tokenizer.countMessages(messages, { excludeEncryptedReasoning: true }),
 			preparedContextTokens: this.#estimateStoredContextTokens(),
 			phase: "pre_turn",
+			signal,
 		});
 	}
 
@@ -2486,6 +2656,11 @@ export class ContextMaintenance {
 		)
 			return;
 
+		const generation = this.#host.promptGeneration();
+		const isCurrent = () =>
+			!signal?.aborted &&
+			!this.#host.isDisposed() &&
+			this.#host.promptGeneration() === generation;
 		const model = this.#model;
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
@@ -2508,20 +2683,22 @@ export class ContextMaintenance {
 			if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
 			// An abort or disposal that raced the awaited persistence barrier must
 			// not commit a boundary the interrupted turn never observed.
-			if (signal?.aborted || this.#host.isDisposed()) return;
+			if (!isCurrent()) return;
 			const result = await this.runAutoCompaction("threshold", false, false, false, {
 				autoContinue: false,
 				suppressContinuation: true,
 				phase: "mid_turn",
 				detachPostCommit: true,
+				signal,
 				explicitNewContextRequest: true,
 			});
 
+			if (!isCurrent()) return;
 			if (result.automaticContinuationBlocked) {
 				this.#midTurnCompactionDeadEnds.add(activeMessages);
 				this.#midTurnDeadEndPendingPrePrompt = true;
 			}
-			if (signal?.aborted) return;
+			if (!isCurrent()) return;
 			const compactedMessages = this.#host.agent.state.messages;
 			if (compactedMessages !== activeMessages) {
 				activeMessages.splice(0, activeMessages.length, ...compactedMessages);
@@ -2542,7 +2719,11 @@ export class ContextMaintenance {
 		// request or tool running.
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
-		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
+		const trackedContextTokens = this.#host.getContextBreakdown({ contextWindow })?.usedTokens ?? 0;
+		const contextTokens = compactionContextTokens(
+			billedContextTokens,
+			Math.max(storedContextTokens, trackedContextTokens),
+		);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
 			return;
@@ -2559,6 +2740,7 @@ export class ContextMaintenance {
 		}
 
 		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
+		if (!isCurrent()) return;
 		if (this.#midTurnCompactionDeadEnds.has(activeMessages)) {
 			// A prior boundary already ran the dead-end rescue and could not reduce
 			// this turn. Re-running the rescue and re-emitting its warning on every
@@ -2586,14 +2768,18 @@ export class ContextMaintenance {
 		// crosses the threshold compacts the history (and can hit the no-progress
 		// dead-end on a single oversized turn) on a model that should have just
 		// been promoted to a larger window instead.
-		if (await this.#promoteContextModel()) {
-			logger.debug("Mid-run context promotion avoided compaction", {
-				contextTokens,
-				contextWindow,
-				from: `${model?.provider}/${model?.id}`,
-			});
-			return;
+		if (await this.#promoteContextModel(signal)) {
+			const promotedWindow = this.#model?.contextWindow ?? 0;
+			if (promotedWindow > 0 && !shouldCompact(contextTokens, promotedWindow, compactionSettings)) {
+				logger.debug("Mid-run context promotion avoided compaction", {
+					contextTokens,
+					contextWindow: promotedWindow,
+					from: `${model?.provider}/${model?.id}`,
+				});
+				return;
+			}
 		}
+		if (!isCurrent()) return;
 
 		const messagesBefore = activeMessages.length;
 		const result = await this.runAutoCompaction("threshold", false, false, false, {
@@ -2602,13 +2788,15 @@ export class ContextMaintenance {
 			triggerContextTokens: contextTokens,
 			phase: "mid_turn",
 			detachPostCommit: true,
+			signal,
 		});
+		if (!isCurrent()) return;
 		if (result.automaticContinuationBlocked) {
 			this.#midTurnCompactionDeadEnds.add(activeMessages);
 			this.#midTurnDeadEndPendingPrePrompt = true;
 		}
 
-		if (signal?.aborted) return;
+		if (!isCurrent()) return;
 		const compactedMessages = this.#host.agent.state.messages;
 		if (compactedMessages !== activeMessages) {
 			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
@@ -2659,6 +2847,8 @@ export class ContextMaintenance {
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		const generation = this.#host.promptGeneration();
+		const isCurrent = () =>
+			!this.#host.isDisposed() && this.#host.promptGeneration() === generation;
 		// A turn that produced actionable output means the incomplete-recovery loop
 		// broke through: clear the counter so a later isolated `length` stop starts
 		// fresh rather than inheriting a stale count from an earlier loop.
@@ -2770,7 +2960,7 @@ export class ContextMaintenance {
 				storedTokens,
 				contextWindow,
 			});
-			return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+			return contextRecoveryResult(COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION);
 		}
 		const overflowEvidence =
 			sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow);
@@ -2779,15 +2969,17 @@ export class ContextMaintenance {
 
 			// Try context promotion first - switch to a larger model and retry without compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
+			if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
 				// Retry on the promoted (larger) model without compacting
 				this.#host.scheduleAgentContinue({
 					source: "context-promotion-overflow",
 					delayMs: 100,
 					generation,
 				});
-				return COMPACTION_CHECK_CONTINUATION;
+				return contextRecoveryResult(COMPACTION_CHECK_CONTINUATION);
 			}
 
 			// No promotion target available fall through to compaction
@@ -2798,6 +2990,7 @@ export class ContextMaintenance {
 					allowDefer,
 					{ autoContinue, excludeMediaMethods: excludeMediaForPayloadRejection },
 				);
+				if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
 				// A statically usable method (per `hasUsableCompactionMethod`) can still
 				// reclaim nothing at runtime — e.g. `methodOrder: ["shake"]` with no
 				// heavy/droppable content on a plain text history — or `runAutoCompaction`
@@ -2831,7 +3024,7 @@ export class ContextMaintenance {
 						// `runAutoCompaction` already blocked and emitted its own notice for
 						// this outcome (e.g. its own compaction dead end) — only the cleanup
 						// above was missing; forward its result unchanged (#11482).
-						return compactionResult;
+						return contextRecoveryResult(compactionResult);
 					}
 					// Same usage-backed/byte-shaped notice selection as the sibling
 					// "no compaction available" dead end below: a payload rejection
@@ -2853,9 +3046,9 @@ export class ContextMaintenance {
 						storedTokens,
 						contextWindow,
 					});
-					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+					return contextRecoveryResult(COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION);
 				}
-				return compactionResult;
+				return contextRecoveryResult(compactionResult);
 			}
 			if (payloadRejection) {
 				this.#host.emitNotice(
@@ -2872,9 +3065,9 @@ export class ContextMaintenance {
 					storedTokens,
 					contextWindow,
 				});
-				return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				return contextRecoveryResult(COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION);
 			}
-			return COMPACTION_CHECK_NONE;
+			return contextRecoveryResult(COMPACTION_CHECK_NONE);
 		}
 		// A context promotion can land while the failing call is already in
 		// flight (or on a run whose loop predates the switch): the overflow
@@ -2910,6 +3103,7 @@ export class ContextMaintenance {
 			) {
 				this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
 				logger.debug("Overflow on pre-promotion model; retrying on promoted model", {
 					failed: `${assistantMessage.provider}/${assistantMessage.model}`,
 					current: `${this.#model.provider}/${this.#model.id}`,
@@ -2919,7 +3113,7 @@ export class ContextMaintenance {
 					delayMs: 100,
 					generation,
 				});
-				return COMPACTION_CHECK_CONTINUATION;
+				return contextRecoveryResult(COMPACTION_CHECK_CONTINUATION);
 			}
 		}
 
@@ -2936,8 +3130,10 @@ export class ContextMaintenance {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 
 			const promoted = await this.#tryContextPromotion(assistantMessage);
+			if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
 				this.#incompleteRecoveryAttempts = 0;
 				logger.debug("Context promotion triggered by response.incomplete (length stop)", {
 					from: `${assistantMessage.provider}/${assistantMessage.model}`,
@@ -2947,7 +3143,7 @@ export class ContextMaintenance {
 					delayMs: 100,
 					generation,
 				});
-				return COMPACTION_CHECK_CONTINUATION;
+				return contextRecoveryResult(COMPACTION_CHECK_CONTINUATION);
 			}
 
 			const incompleteCompactionSettings = this.#host.settings.getGroup("compaction");
@@ -2967,18 +3163,20 @@ export class ContextMaintenance {
 					const attempts = this.#incompleteRecoveryAttempts;
 					this.#incompleteRecoveryAttempts = 0;
 					const droppedEntryId = await this.#host.dropPersistedAssistantTurn(assistantMessage);
+					if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
 					// Reparenting the live branch is insufficient when this terminal path
 					// appends no successor: on restart, the loader selects the last physical
 					// journal entry and revives the discarded length turn. Persist the branch
 					// marker/rewrite before blocking further continuation.
 					if (droppedEntryId) await this.#host.sessionManager.discardEntryDurably(droppedEntryId);
+					if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
 					const finalError = `Compaction recovery gave up after ${attempts} consecutive empty \`length\` responses from ${assistantMessage.provider}/${assistantMessage.model}; the model produced no output. Try switching models or raising the model's max output tokens.`;
 					logger.warn("response.incomplete recovery cap reached; halting retries", {
 						model: `${assistantMessage.provider}/${assistantMessage.model}`,
 						attempts,
 					});
 					this.#host.emitNotice("error", finalError, "compaction");
-					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+					return contextRecoveryResult(COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION);
 				}
 				this.#incompleteRecoveryAttempts++;
 				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
@@ -2986,17 +3184,24 @@ export class ContextMaintenance {
 					methods: resolveCompactionMethodOrder(incompleteCompactionSettings.methodOrder),
 					attempt: this.#incompleteRecoveryAttempts,
 				});
-				return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
-					autoContinue,
-					triggerContextTokens: calculateContextTokens(assistantMessage.usage),
-				});
+				const result = await this.#host.runRecoveryCompactionWithRollback(
+					"incomplete",
+					assistantMessage,
+					allowDefer,
+					{
+						autoContinue,
+						triggerContextTokens: calculateContextTokens(assistantMessage.usage),
+					},
+				);
+				if (!isCurrent()) return contextRecoveryResult(COMPACTION_CHECK_NONE);
+				return contextRecoveryResult(result);
 			}
 			// Neither promotion nor compaction is available — surface the dead-end so
 			// the user understands why the turn yielded with nothing.
 			logger.warn("response.incomplete with no recovery path (promotion + compaction both unavailable)", {
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
-			return COMPACTION_CHECK_NONE;
+			return contextRecoveryResult(COMPACTION_CHECK_NONE);
 		}
 
 		// Stale-result pass runs every turn, before any threshold gating: it is
@@ -3005,6 +3210,7 @@ export class ContextMaintenance {
 		const supersedeResult = this.#usesExperimentalContextManagement()
 			? undefined
 			: await this.#pruneStaleToolResults();
+		if (!isCurrent()) return COMPACTION_CHECK_NONE;
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (
@@ -3017,6 +3223,7 @@ export class ContextMaintenance {
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
 		const pruneResult = this.#usesExperimentalContextManagement() ? undefined : await this.#pruneToolOutputs();
+		if (!isCurrent()) return COMPACTION_CHECK_NONE;
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,
@@ -3080,9 +3287,16 @@ export class ContextMaintenance {
 				});
 				return COMPACTION_CHECK_NONE;
 			}
-			// Try promotion first — if a larger model is available, switch instead of compacting
+			// Try promotion first. A larger model avoids compaction only when the
+			// admitted context actually fits below that model's threshold.
 			const promoted = await this.#tryContextPromotion(assistantMessage);
-			if (!promoted) {
+			if (!isCurrent()) return COMPACTION_CHECK_NONE;
+			const promotedWindow = promoted ? (this.#model?.contextWindow ?? 0) : 0;
+			if (
+				!promoted ||
+				promotedWindow <= 0 ||
+				shouldCompact(postMaintenanceContextTokens, promotedWindow, compactionSettings)
+			) {
 				return await this.runAutoCompaction("threshold", false, false, allowDefer, {
 					autoContinue,
 					triggerContextTokens: postMaintenanceContextTokens,
@@ -3092,7 +3306,7 @@ export class ContextMaintenance {
 			}
 			logger.debug("Auto-compaction threshold satisfied but context promotion took over", {
 				contextTokens,
-				contextWindow,
+				contextWindow: promotedWindow,
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
 		} else {
@@ -3123,18 +3337,37 @@ export class ContextMaintenance {
 	 * ({@link #tryContextPromotion}) and the pre-prompt threshold path
 	 * ({@link runPrePromptCompactionIfNeeded}).
 	 */
-	async #promoteContextModel(): Promise<boolean> {
+	async #promoteContextModel(signal?: AbortSignal): Promise<boolean> {
 		const promotionSettings = this.#host.settings.getGroup("contextPromotion");
 		if (!promotionSettings.enabled) return false;
+		const generation = this.#host.promptGeneration();
 		const currentModel = this.#model;
 		if (!currentModel) return false;
 		const contextWindow = currentModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
-		const targetModel = await this.resolveContextPromotionTarget(currentModel, contextWindow);
-		if (!targetModel) return false;
+		const targetModel = await this.resolveContextPromotionTarget(currentModel, contextWindow, signal);
+		if (
+			!targetModel ||
+			signal?.aborted ||
+			this.#host.isDisposed() ||
+			this.#host.promptGeneration() !== generation ||
+			!modelsAreEqual(this.#model, currentModel)
+		) {
+			return false;
+		}
 
 		try {
 			await this.#host.setModelTemporary(targetModel, undefined, { ephemeral: true });
+			if (
+				signal?.aborted ||
+				this.#host.isDisposed() ||
+				this.#host.promptGeneration() !== generation
+			) {
+				if (modelsAreEqual(this.#model, targetModel)) {
+					await this.#host.setModelTemporary(currentModel, undefined, { ephemeral: true });
+				}
+				return false;
+			}
 			logger.debug("Context promotion switched model on overflow", {
 				from: `${currentModel.provider}/${currentModel.id}`,
 				to: `${targetModel.provider}/${targetModel.id}`,
@@ -3162,6 +3395,8 @@ export class ContextMaintenance {
 		if (!candidate) return undefined;
 		if (modelsAreEqual(candidate, currentModel)) return undefined;
 		if (candidate.contextWindow == null || candidate.contextWindow <= contextWindow) return undefined;
+		const latestCompaction = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+		if (!canReplayRemoteCompaction(latestCompaction?.preserveData, candidate)) return undefined;
 		const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal });
 		if (!apiKey) return undefined;
 		return candidate;
@@ -3856,6 +4091,8 @@ export class ContextMaintenance {
 		signal: AbortSignal,
 	): Promise<snapcompact.CompactionResult | undefined> {
 		if (signal.aborted) return undefined;
+		const generation = this.#host.promptGeneration();
+		const leafId = this.#host.sessionManager.getLeafId();
 		// Re-rendering frames needs a vision-capable model, same gate as the
 		// snapcompact method.
 		if (!this.#model?.input.includes("image")) return undefined;
@@ -3924,7 +4161,13 @@ export class ContextMaintenance {
 			});
 			return undefined;
 		}
-		if (signal.aborted) return undefined;
+		if (
+			signal.aborted ||
+			this.#host.isDisposed() ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.sessionManager.getLeafId() !== leafId
+		)
+			return undefined;
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
 		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
 
@@ -3962,6 +4205,7 @@ export class ContextMaintenance {
 		const rebuiltEntry = this.#host.sessionManager.getEntries().find(e => e.id === rebuiltEntryId) as
 			| CompactionEntry
 			| undefined;
+		this.#host.onHistoryRewrite?.("compaction-rescue", rebuiltEntry);
 		if (this.#host.extensionRunner && rebuiltEntry) {
 			await this.#host.extensionRunner.emit({
 				type: "session_compact",
@@ -4004,6 +4248,8 @@ export class ContextMaintenance {
 			terminalTextAnswer?: boolean;
 			/** Mid-turn: splice history then return; do not await UI/extension fan-out. */
 			detachPostCommit?: boolean;
+			/** Owner turn cancellation, distinct from the controller's supersession signal. */
+			signal?: AbortSignal;
 			/** Index to resume from after an earlier preferred method failed. */
 			methodIndex?: number;
 			/** A preceding shake already rewrote history before this fallback attempt. */
@@ -4093,6 +4339,7 @@ export class ContextMaintenance {
 				options.triggerContextTokens,
 				suppressContinuation,
 				options.detachPostCommit === true,
+				options.signal,
 			);
 			if (outcome !== "fallback") return outcome;
 			return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
@@ -4188,6 +4435,7 @@ export class ContextMaintenance {
 					fallbackFromShake,
 					detachPostCommit: options.detachPostCommit === true,
 					autoCompactionSignal,
+					ownerSignal: options.signal,
 					onCommitted: () => {
 						compactionCommitted = true;
 					},
@@ -4615,6 +4863,23 @@ export class ContextMaintenance {
 								shouldUseProviderNativeCompaction(candidate, effectiveSettings)
 						: undefined,
 				);
+				if (candidates.length === 0) {
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: false,
+							willRetry: false,
+							errorMessage: "Remote compaction has no eligible model; trying the next preferred method.",
+						},
+						options.detachPostCommit === true,
+					);
+					return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
+						...options,
+						methodIndex: methodIndex + 1,
+					});
+				}
 				const retrySettings = this.#host.settings.getGroup("retry");
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
 				let compactResult: CompactionResult | undefined;
@@ -4632,6 +4897,13 @@ export class ContextMaintenance {
 					const candidate = candidates[candidateIndex];
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
 					const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+					if (
+						autoCompactionSignal.aborted ||
+						this.#host.isDisposed() ||
+						this.#host.promptGeneration() !== generation
+					) {
+						return COMPACTION_CHECK_NONE;
+					}
 					if (!apiKey) continue;
 					if (
 						nativeCompactionFailure &&
@@ -4640,12 +4912,22 @@ export class ContextMaintenance {
 					) {
 						throw nativeCompactionFailure.error;
 					}
+					const candidatePreparation =
+						method === "remote" && shouldUseProviderNativeCompaction(candidate, effectiveSettings)
+							? (prepareCompaction(
+									pathEntriesForCompaction,
+									effectiveSettings,
+									candidate,
+									this.#tokenizer,
+								) ?? preparation)
+							: preparation;
+
 
 					let attempt = 0;
 					while (true) {
 						try {
 							compactResult = await compact(
-								this.#host.obfuscatePreparationForProvider(preparation),
+								this.#host.obfuscatePreparationForProvider(candidatePreparation),
 								candidate,
 								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 								undefined,
@@ -4676,6 +4958,13 @@ export class ContextMaintenance {
 									oneshotRetry: false,
 								},
 							);
+							if (
+								autoCompactionSignal.aborted ||
+								this.#host.isDisposed() ||
+								this.#host.promptGeneration() !== generation
+							) {
+								return COMPACTION_CHECK_NONE;
+							}
 							break;
 						} catch (error) {
 							if (autoCompactionSignal.aborted) {
@@ -4811,12 +5100,17 @@ export class ContextMaintenance {
 				fallbackFromShake,
 				detachPostCommit: options.detachPostCommit === true,
 				autoCompactionSignal,
+				ownerSignal: options.signal,
 				onCommitted: () => {
 					compactionCommitted = true;
 				},
 			});
 		} catch (error) {
-			if (autoCompactionSignal.aborted) {
+			if (
+				autoCompactionSignal.aborted ||
+				this.#host.isDisposed() ||
+				this.#host.promptGeneration() !== generation
+			) {
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",
@@ -4904,10 +5198,21 @@ export class ContextMaintenance {
 		fallbackFromShake: boolean;
 		detachPostCommit: boolean;
 		autoCompactionSignal: AbortSignal;
+		ownerSignal: AbortSignal | undefined;
 		onCommitted: () => void;
 	}): Promise<CompactionCheckResult> {
-		const { action, reason, willRetry, detachPostCommit, autoCompactionSignal } = args;
-		if (autoCompactionSignal.aborted) {
+		const { action, reason, willRetry, detachPostCommit, autoCompactionSignal, ownerSignal } = args;
+		const isCurrent = () =>
+			!autoCompactionSignal.aborted &&
+			!ownerSignal?.aborted &&
+			!this.#host.isDisposed() &&
+			this.#host.promptGeneration() === args.generation;
+		if (
+			autoCompactionSignal.aborted ||
+			ownerSignal?.aborted ||
+			this.#host.isDisposed() ||
+			this.#host.promptGeneration() !== args.generation
+		) {
 			await this.#emitLifecycleEvent(
 				{
 					type: "auto_compaction_end",
@@ -4920,6 +5225,7 @@ export class ContextMaintenance {
 			);
 			return COMPACTION_CHECK_NONE;
 		}
+		this.#assertCompactionReplayCompatible(args.preserveData);
 
 		args.onCommitted();
 		const savedCompactionEntry = await this.#commitCompactionEntry({
@@ -4936,6 +5242,7 @@ export class ContextMaintenance {
 			advisorResetReason: "auto-compaction",
 			detachExtensionEmit: detachPostCommit,
 		});
+		if (!isCurrent()) return COMPACTION_CHECK_NONE;
 
 		const result: CompactionResult = {
 			summary: args.summary,
@@ -4997,6 +5304,7 @@ export class ContextMaintenance {
 					skipElide: args.fallbackFromShake,
 					hasProgress: () => this.#compactionCreatedRetryFit(),
 				});
+				if (!isCurrent()) return COMPACTION_CHECK_NONE;
 			}
 			if (!retryFits) {
 				noProgressDeadEnd = true;
@@ -5015,6 +5323,7 @@ export class ContextMaintenance {
 					skipElide: args.fallbackFromShake,
 					hasProgress: () => this.#compactionCreatedHeadroom(),
 				});
+				if (!isCurrent()) return COMPACTION_CHECK_NONE;
 			}
 			if (!hasHeadroom) {
 				noProgressDeadEnd = true;
@@ -5033,6 +5342,7 @@ export class ContextMaintenance {
 			if (stampEntry) {
 				stampEntry.warning = deadEndWarning;
 				await this.#host.sessionManager.rewriteEntries();
+				if (!isCurrent()) return COMPACTION_CHECK_NONE;
 			}
 		}
 
@@ -5040,8 +5350,10 @@ export class ContextMaintenance {
 			{ type: "auto_compaction_end", action, result, aborted: false, willRetry },
 			detachPostCommit,
 		);
+		if (!isCurrent()) return COMPACTION_CHECK_NONE;
 
 		if (retryFits) {
+			if (!isCurrent()) return COMPACTION_CHECK_NONE;
 			this.#host.scheduleAgentContinue({
 				source: "compaction-retry",
 				delayMs: 100,
@@ -5049,6 +5361,7 @@ export class ContextMaintenance {
 			});
 			continuationScheduled = true;
 		} else {
+			if (!isCurrent()) return COMPACTION_CHECK_NONE;
 			continuationScheduled = this.#host.scheduleCompactionContinuation({
 				generation: args.generation,
 				autoContinue: hasHeadroom && args.shouldAutoContinue,
@@ -5082,16 +5395,22 @@ export class ContextMaintenance {
 		triggerContextTokens?: number,
 		suppressContinuation = false,
 		detachPostCommit = false,
+		ownerSignal?: AbortSignal,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
 		this.#autoCompactionAbortController?.abort();
 		const controller = new AbortController();
 		this.#autoCompactionAbortController = controller;
-		const signal = controller.signal;
+		const signal = ownerSignal ? AbortSignal.any([controller.signal, ownerSignal]) : controller.signal;
+		const isCurrent = () =>
+			!signal.aborted &&
+			!this.#host.isDisposed() &&
+			this.#host.promptGeneration() === generation;
 		try {
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
+			if (!isCurrent()) return COMPACTION_CHECK_NONE;
 			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
-			if (signal.aborted) {
+			if (!isCurrent()) {
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",
@@ -5156,6 +5475,7 @@ export class ContextMaintenance {
 					},
 					detachPostCommit,
 				);
+				if (!isCurrent()) return COMPACTION_CHECK_NONE;
 				return "fallback";
 			}
 			await this.#emitLifecycleEvent(
@@ -5169,6 +5489,7 @@ export class ContextMaintenance {
 				},
 				detachPostCommit,
 			);
+			if (!isCurrent()) return COMPACTION_CHECK_NONE;
 
 			let continuationScheduled = false;
 			if (willRetry) {
@@ -5184,6 +5505,7 @@ export class ContextMaintenance {
 						(reason === "incomplete" && lastAssistant.stopReason === "length");
 					if (shouldDrop) this.#host.agent.replaceMessages(messages.slice(0, -1));
 				}
+				if (!isCurrent()) return COMPACTION_CHECK_NONE;
 				this.#host.scheduleAgentContinue({
 					source: "shake-retry",
 					delayMs: 100,
@@ -5191,6 +5513,7 @@ export class ContextMaintenance {
 				});
 				continuationScheduled = true;
 			} else {
+				if (!isCurrent()) return COMPACTION_CHECK_NONE;
 				continuationScheduled = this.#host.scheduleCompactionContinuation({
 					generation,
 					autoContinue: reason !== "idle" && autoContinue,

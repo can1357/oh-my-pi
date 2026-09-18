@@ -106,9 +106,8 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(advisor.streamFn).not.toBe(advisorStreamFn);
 		expect(advisor.streamFn).not.toBe(streamSimple);
 
-		// Shared transport / fast-mode state map keeps Codex websockets and
-		// Anthropic fast-mode fallbacks consistent across the two agents.
-		expect(advisor.providerSessionState).toBe(session.providerSessionState);
+		// Advisor history rewrites must invalidate only its own transport.
+		expect(advisor.providerSessionState).not.toBe(session.providerSessionState);
 
 		// The advisor's session identity is its own provider-facing UUIDv7
 		// (issue #5040), distinct from the parent's. Without a pinned parent
@@ -177,7 +176,7 @@ describe("AgentSession advisor provider-options parity", () => {
 		// is its own provider-facing UUIDv7 session id (issue #5040).
 		expect(opts.sessionId).toBe(advisor.sessionId);
 		expect(opts.promptCacheKey).toBe(advisor.sessionId);
-		expect(opts.providerSessionState).toBe(session.providerSessionState);
+		expect(opts.providerSessionState).toBe(advisor.providerSessionState);
 		expect(opts.preferWebsockets).toBe(true);
 	});
 

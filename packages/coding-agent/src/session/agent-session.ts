@@ -4194,6 +4194,7 @@ export class AgentSession {
 	#localProtocolOptions(): LocalProtocolOptions {
 		return {
 			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getArtifactContent: id => this.sessionManager.getArtifactContent(id),
 			getSessionId: () => this.sessionManager.getSessionId(),
 		};
 	}

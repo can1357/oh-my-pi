@@ -1996,6 +1996,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		const localProtocolOptions = options.localProtocolOptions ?? {
 			getArtifactsDir,
+			getArtifactContent: (id: string) => sessionManager.getArtifactContent(id),
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 		};
 		if (options.localProtocolOptions && !options.parentTaskPrefix) {
