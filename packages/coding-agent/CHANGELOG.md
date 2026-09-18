@@ -18,6 +18,10 @@
 - Added Stencil account support to `/login`. `omp stream` uses a signed-in Stencil account or `STENCIL_API_KEY` for channel ownership and authentication. Sensitive environment, dotenv, `secrets.yml`, credential-shaped, and configured pattern-matching values are redacted before screen data is transmitted.
 - Added faster keyless web search fallback by prioritizing the default keyless Parallel provider ahead of Perplexity.
 
+### Added
+
+- Added `examples/extensions/typesafe-jev.ts`: a `before_agent_start` hook that asks TypeSafe Jev which installed skill (if any) to read, then appends a per-turn `<skill_relevance>` line. Jev is not a chat model; copy the file to `~/.omp/agent/extensions/` and use `/login typesafe` or `TYPESAFE_API_KEY`. Fail-open on missing key, timeout, or HTTP error.
+
 ### Changed
 
 - Improved parent IRC message prompts to make interruption handling more reliable.
