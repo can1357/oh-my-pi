@@ -9,6 +9,10 @@
 - Added five STT models to OpenRouter provider
 - Added support for TTS and STT API capabilities in OpenRouter provider
 
+### Fixed
+
+- Fixed CoreWeave and GMI Cloud retaining bundled models absent from successful discovery responses, and fresh authoritative caches re-adding removed models during cache-only refreshes.
+
 ## [18.2.7] - 2026-09-21
 
 ### Added

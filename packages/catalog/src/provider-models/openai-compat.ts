@@ -14,7 +14,7 @@ import {
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
-import { providerEntries, seedModels } from "../compat/providers";
+import { providerEntries, providerEntry, seedModels } from "../compat/providers";
 import { billingVariantPlain, classifyModel, discoveryVocabulary } from "../compat/taxonomy";
 import {
 	DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
@@ -803,10 +803,12 @@ function createOpenAICompatibleModelManagerOptions<TApi extends Api>(
 	const baseUrl = options.config?.baseUrl ?? options.defaultBaseUrl;
 	const references = createBundledReferenceMap<TApi>(options.providerId);
 	const filterModel = options.filterModel;
+	const dynamicModelsAuthoritative =
+		options.dynamicModelsAuthoritative ?? providerEntry(options.providerId)?.dynamicModelsAuthoritative;
 	return {
 		providerId: options.providerId,
 		...(options.cacheProviderId && { cacheProviderId: options.cacheProviderId }),
-		...(options.dynamicModelsAuthoritative && { dynamicModelsAuthoritative: true }),
+		...(dynamicModelsAuthoritative && { dynamicModelsAuthoritative: true }),
 		...(options.dropCachedModelIdsOnStaticMismatch && {
 			dropCachedModelIdsOnStaticMismatch: options.dropCachedModelIdsOnStaticMismatch,
 		}),
