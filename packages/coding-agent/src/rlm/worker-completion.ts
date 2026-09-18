@@ -19,6 +19,7 @@ export interface RlmWorkerCompletionHost {
 	getSessionId?: () => string | undefined;
 	getTelemetry?: () => unknown;
 	getActiveModel?: () => Model<Api> | undefined;
+	getThinkingLevel?: () => string | undefined;
 }
 
 export interface RlmWorkerCompletionOptions {
@@ -106,8 +107,7 @@ export async function runRlmWorkerCompletion(
 	const sessionId = host.getSessionId?.();
 	const apiKey = await registry.getApiKey(model, sessionId, { signal: options?.signal });
 	if (!apiKey) throw new Error(`rlm worker: no API key for ${model.provider}/${model.id}`);
-
-	const thinkingLevel = host.settings.get("thinkingLevel") as string | undefined;
+	const thinkingLevel = host.getThinkingLevel?.();
 	const telemetry = resolveTelemetry(host.getTelemetry?.() as never, sessionId);
 
 	const response: AssistantMessage = await instrumentedCompleteSimple(

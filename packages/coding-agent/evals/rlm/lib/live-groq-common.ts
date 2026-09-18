@@ -83,11 +83,10 @@ export interface LiveGroqHost {
 }
 
 export function requireGroqApiKey(): void {
-	if (!process.env.GROQ_API_KEY?.trim()) {
-		throw new Error(
-			"GROQ_API_KEY is required for live Groq evals. Export it and re-run live-groq-orchestrate.ts",
-		);
-	}
+	if (process.env.GROQ_API_KEY?.trim()) return;
+	throw new Error(
+		"GROQ_API_KEY is required for live Groq evals. Run via ~/.omp/bin/omp-with-secrets (BWS) or export GROQ_API_KEY.",
+	);
 }
 
 export async function createLiveGroqHost(options?: {
@@ -102,7 +101,6 @@ export async function createLiveGroqHost(options?: {
 		"rlm.subModel": process.env.RLM_GROQ_SUBMODEL ?? DEFAULT_GROQ_MODEL,
 		"rlm.workerMode": "evidence-packet",
 		"context.engine": "rlm",
-		thinkingLevel: reasoning,
 	});
 	const auth = await AuthStorage.create();
 	const modelRegistry = new ModelRegistry(auth, undefined, { settings });
@@ -165,6 +163,7 @@ export function createEvidenceCompleter(host: LiveGroqHost): RlmCompleter {
 				settings: host.settings,
 				modelRegistry: host.modelRegistry,
 				getSessionId: () => host.tokenomics.traceId,
+				getThinkingLevel: () => host.reasoning,
 			},
 			prompt,
 			{
@@ -207,6 +206,7 @@ export function createProseCompleter(host: LiveGroqHost): RlmCompleter {
 				settings: host.settings,
 				modelRegistry: host.modelRegistry,
 				getSessionId: () => host.tokenomics.traceId,
+				getThinkingLevel: () => host.reasoning,
 			},
 			prompt,
 			{

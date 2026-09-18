@@ -2,8 +2,8 @@
 /**
  * Live Groq RLM P0 validation — production path smoke, cache probe, C vs D.
  *
- *   export GROQ_API_KEY=...
- *   bun evals/rlm/live-groq-orchestrate.ts
+ *   ~/.omp/bin/omp-with-secrets bun evals/rlm/live-groq-orchestrate.ts
+ *   # or: export GROQ_API_KEY=... && bun evals/rlm/live-groq-orchestrate.ts
  *   bun evals/rlm/live-groq-report.ts
  *
  * Optional:
@@ -161,12 +161,11 @@ async function runCvD(
 	host: Awaited<ReturnType<typeof createLiveGroqHost>>,
 	fixture: LiveFixture,
 ): Promise<{ c: Row; d: Row }> {
-	const runtimeC = buildRuntime();
-	const runtimeD = buildRuntime();
-	const { handle: hC } = spillFixture(runtimeC, fixture);
-	const { handle: hD } = spillFixture(runtimeD, fixture);
-	const selC = selectGrantsForFixture(runtimeC.store, hC, fixture);
-	const selD = selectGrantsForFixture(runtimeD.store, hD, fixture);
+	const runtime = buildRuntime();
+	const { handle } = spillFixture(runtime, fixture);
+	const selection = selectGrantsForFixture(runtime.store, handle, fixture);
+	const grants = selection.grants;
+	const grantedBytes = selection.grantedBytes;
 	const prose = createProseCompleter(host);
 	const evidence = createEvidenceCompleter(host);
 	let cUsage: ReturnType<typeof workerUsageFromResult> | null = null;
@@ -183,34 +182,35 @@ async function runCvD(
 	};
 
 	const tC0 = performance.now();
-	const cResult = await rlmQuery(runtimeC, {
-		handle: hC,
+	const cResult = await rlmQuery(runtime, {
+		handle,
 		question: fixture.question,
-		grants: selC.grants,
+		grants,
 		complete: proseTrack,
 	});
 	const cMs = performance.now() - tC0;
 
 	const tD0 = performance.now();
-	const dResult = await rlmEvidenceQuery(runtimeD, {
-		handle: hD,
+	const dResult = await rlmEvidenceQuery(runtime, {
+		handle,
 		question: fixture.question,
-		grants: selD.grants,
+		grants,
 		complete: evidenceTrack,
 	});
 	const dMs = performance.now() - tD0;
 
 	const packet = dResult.packet ?? parsePacketFromResult(undefined, dResult.text);
-	const citations = packet ? validateCitations(runtimeD.store, hD, packet) : { validCount: 0, invalidCount: 0, wrongCitation: true };
-	const grantedBytes = selC.grantedBytes;
+	const citations = packet
+		? validateCitations(runtime.store, handle, packet)
+		: { validCount: 0, invalidCount: 0, wrongCitation: true };
 	const dPacketBytes = packet ? evidencePacketByteSize(packet) : Buffer.byteLength(dResult.text, "utf8");
 	const cAnswerBytes = Buffer.byteLength(cResult.text, "utf8");
-
 
 	const cRow: Row = {
 		phase: "c_vs_d",
 		arm: "C-prose",
 		fixture: fixture.id,
+		grantsFrozen: true,
 		grantedBytes,
 		grantedTokensEst: estimateTokens(grantedBytes),
 		answerBytes: cAnswerBytes,
@@ -231,8 +231,9 @@ async function runCvD(
 		phase: "c_vs_d",
 		arm: "D-packet",
 		fixture: fixture.id,
-		grantedBytes: selD.grantedBytes,
-		grantedTokensEst: estimateTokens(selD.grantedBytes),
+		grantsFrozen: true,
+		grantedBytes,
+		grantedTokensEst: estimateTokens(grantedBytes),
 		packetBytes: dPacketBytes,
 		rootTokensEst: estimateTokens(dPacketBytes),
 		compressionRatio: compressionRatio(grantedBytes, dPacketBytes),
@@ -299,6 +300,10 @@ async function main(): Promise<void> {
 		host.close();
 	}
 
-	console.log(`\nwrote ${OUT}`);
+	console.log(`wrote ${OUT}`);
 }
-await main();
+
+main().catch(err => {
+	console.error(err);
+	process.exit(1);
+});
