@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- gpt-oss models (any provider building chat-completions compat) now resolve `compat.disableParallelToolCalls: true` so the host returns one tool call per assistant turn, matching Harmony's single-call `commentary` message contract. Non-gpt-oss models, and entries that set the compat field explicitly, keep the previous behavior.
+- gpt-oss models now resolve `compat.streamMarkupHealingPattern: "harmony"`, so leaked Harmony control-token markup (`<|channel|>analysis`, `commentary to=functions.…`) inside `content` is recovered as thinking/tool-call events instead of visible text.
+
 ## [16.4.21] - 2026-09-16
 
 ### Changed

@@ -7,7 +7,7 @@
  * provider-facing compatibility wrapper and model/provider gating.
  */
 
-import { isDeepseekModelIdOrName } from "@pk-nerdsaver-ai/pi-catalog/identity";
+import { isDeepseekModelIdOrName, isOpenAIGptOssModelId } from "@pk-nerdsaver-ai/pi-catalog/identity";
 
 import { createInbandScanner } from "../dialect/factory";
 import { ThinkingInbandScanner } from "../dialect/thinking";
@@ -23,7 +23,7 @@ export interface HealedToolCall {
 	readonly arguments: string;
 }
 
-export type StreamMarkupHealingPattern = "kimi" | "dsml" | "thinking";
+export type StreamMarkupHealingPattern = "kimi" | "dsml" | "thinking" | "harmony";
 
 export interface StreamMarkupHealingOptions {
 	readonly pattern: StreamMarkupHealingPattern;
@@ -55,7 +55,9 @@ export class StreamMarkupHealing {
 				? createInbandScanner("kimi")
 				: options.pattern === "dsml"
 					? createInbandScanner("xml", { xmlTagset: "dsml" })
-					: new ThinkingInbandScanner();
+					: options.pattern === "harmony"
+						? createInbandScanner("harmony")
+						: new ThinkingInbandScanner();
 	}
 
 	get pattern(): StreamMarkupHealingPattern {
@@ -212,12 +214,18 @@ export function modelMayLeakThinkingTags(provider: string, modelId: string): boo
 	return /minimax/i.test(provider) || /minimax/i.test(modelId);
 }
 
+/** Cheap model gate for leaked Harmony control-token markup. */
+export function modelMayLeakHarmonyToolCalls(modelId: string): boolean {
+	return isOpenAIGptOssModelId(modelId);
+}
+
 export function getStreamMarkupHealingPattern(
 	provider: string,
 	modelId: string,
 	options?: { readonly parseThinkingTags?: boolean },
 ): StreamMarkupHealingPattern | undefined {
 	if (options?.parseThinkingTags || modelMayLeakThinkingTags(provider, modelId)) return "thinking";
+	if (modelMayLeakHarmonyToolCalls(modelId)) return "harmony";
 	if (modelMayLeakKimiToolCalls(provider, modelId)) return "kimi";
 	if (modelMayLeakDsmlToolCalls(provider, modelId)) return "dsml";
 	return undefined;

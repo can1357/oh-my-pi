@@ -157,7 +157,7 @@ export type OpenAIReasoningDisableMode =
 	| "qwen-template-false"
 	| "juice-zero-developer-message";
 
-export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "thinking";
+export type OpenAIStreamMarkupHealingPattern = "kimi" | "dsml" | "thinking" | "harmony";
 
 /**
  * Compatibility settings for openai-completions API.
@@ -261,6 +261,14 @@ export interface OpenAICompat {
 	 * (llama.cpp rejects named tool_choice).
 	 */
 	supportsNamedToolChoice?: boolean;
+	/**
+	 * Serialize `parallel_tool_calls: false` on chat-completions requests so the
+	 * host returns one tool call per assistant turn. Harmony — the format
+	 * gpt-oss models are trained on — has no parallel-call wrapper: each call is
+	 * its own `commentary` message ending in `<|call|>`, and the host resumes by
+	 * feeding the result back. Default: auto-detected (gpt-oss family).
+	 */
+	disableParallelToolCalls?: boolean;
 	/**
 	 * Drop reasoning fields (`reasoning_effort`, OpenRouter `reasoning`) for
 	 * the request when `tool_choice` forces a tool call. Mirrors the Anthropic

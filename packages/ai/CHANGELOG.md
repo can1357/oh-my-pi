@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Chat-completions requests for gpt-oss models now serialize `parallel_tool_calls: false` whenever tools are offered, so the turn carries a single tool call the way Harmony encodes it.
+- Leaked Harmony control-token markup in streaming `content` is now healed for the gpt-oss family: `analysis` becomes a thinking block, `commentary to=functions.<name>` becomes a structured tool call (promoting `finish_reason: stop` to a tool-use turn), and other channels stay visible text.
+
 ### Fixed
 
 - Alibaba Coding Plan `401` validation failures now also point Token Plan subscribers to the `alibaba-token-plan` provider, instead of only warning them away from Token Plan keys.

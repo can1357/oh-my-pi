@@ -18,6 +18,7 @@ import {
 	isKimiK26ModelId,
 	isKimiModelId,
 	isMimoModelIdOrName,
+	isOpenAIGptOssModelId,
 	isQwenModelId,
 	modelFamilyToken,
 } from "../identity/family";
@@ -111,6 +112,7 @@ function detectStreamMarkupHealingPattern(
 	if (isDeepseekModelIdOrName(modelId) && DSML_HEALING_PROVIDERS.has(provider)) {
 		return "dsml";
 	}
+	if (isOpenAIGptOssModelId(modelId)) return "harmony";
 	return undefined;
 }
 
@@ -404,6 +406,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsToolChoice: !isDirectDeepseekReasoning,
 		supportsForcedToolChoice: true,
 		supportsNamedToolChoice: provider !== "llama.cpp",
+		// gpt-oss was trained on Harmony, which has no parallel-call wrapper:
+		// one `commentary` message per call. Ask the host for sequential calls.
+		disableParallelToolCalls: isOpenAIGptOssModelId(spec.id),
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
 		requiresAssistantAfterToolResult: isMistral,

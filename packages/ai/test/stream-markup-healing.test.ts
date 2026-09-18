@@ -153,7 +153,8 @@ describe("StreamMarkupHealing pattern selection", () => {
 		);
 		expect(getStreamMarkupHealingPattern("opencode-zen", "minimax-m3")).toBe("thinking");
 		expect(getStreamMarkupHealingPattern("nanogpt", "deepseek/deepseek-v4-pro")).toBe("dsml");
-		expect(getStreamMarkupHealingPattern("ollama-cloud", "gpt-oss:120b")).toBeUndefined();
+		// gpt-oss is the Harmony family: its control tokens can leak through any surface.
+		expect(getStreamMarkupHealingPattern("ollama-cloud", "gpt-oss:120b")).toBe("harmony");
 		expect(getStreamMarkupHealingPattern("openai", "deepseek-v4-pro")).toBeUndefined();
 	});
 });

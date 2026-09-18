@@ -1439,6 +1439,9 @@ function buildParams(
 		params.tools = builtTools.tools;
 		toolStrictMode = builtTools.toolStrictMode;
 		strictToolsApplied = builtTools.strictToolsApplied;
+		if (initialCompat.disableParallelToolCalls) {
+			params.parallel_tool_calls = false;
+		}
 	} else if (context.tools === undefined && hasToolHistory(context.messages)) {
 		// Anthropic (via LiteLLM/proxy) requires the `tools` param when the conversation
 		// contains tool_calls/tool_results, even when no tools are offered this turn.

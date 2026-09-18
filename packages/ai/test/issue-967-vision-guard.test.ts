@@ -43,6 +43,7 @@ const compat: ResolvedOpenAICompat = {
 	supportsToolChoice: true,
 	supportsForcedToolChoice: true,
 	supportsNamedToolChoice: true,
+	disableParallelToolCalls: false,
 	disableReasoningOnForcedToolChoice: false,
 	disableReasoningOnToolChoice: false,
 	maxTokensField: "max_completion_tokens",
