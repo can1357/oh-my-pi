@@ -2444,12 +2444,18 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it.each([
-		["a timeout after streaming a complete unexecuted write tool call", "The operation timed out.", ["complete"]],
-		["a Codex body-read error with incomplete args", CODEX_BODY_READ_ERROR, ["partial"]],
-		["a Codex body-read error with a completed unexecuted call", CODEX_BODY_READ_ERROR, ["complete"]],
-		["a Codex body-read error with toolcall_end after partial args", CODEX_BODY_READ_ERROR, ["partial-ended"]],
-		["a Codex body-read error with a complete+partial batch", CODEX_BODY_READ_ERROR, ["complete", "partial"]],
-	] as const)("auto-retries %s", async (_scenario, errorMessage, callStates) => {
+		[
+			"a timeout after streaming a complete unexecuted write tool call",
+			"The operation timed out.",
+			["complete"],
+			false,
+		],
+		["a Codex body-read error with incomplete args", CODEX_BODY_READ_ERROR, ["partial"], false],
+		["a Codex body-read error with a completed unexecuted call", CODEX_BODY_READ_ERROR, ["complete"], false],
+		["a Codex body-read error with toolcall_end after partial args", CODEX_BODY_READ_ERROR, ["partial-ended"], false],
+		["a Codex body-read error with a complete+partial batch", CODEX_BODY_READ_ERROR, ["complete", "partial"], false],
+		["a Bun socket close after visible text", "The socket connection was closed unexpectedly", ["complete"], true],
+	] as const)("auto-retries %s", async (_scenario, errorMessage, callStates, withVisibleText) => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -2495,24 +2501,35 @@ describe("AgentSession retry delay cap", () => {
 				streamCalls += 1;
 				if (streamCalls > 1) {
 					if (streamCalls === 2) {
-						resumedWithSafeHistory = oldCalls.every((toolCall, index) => {
-							if (callStates[index] === "partial") {
-								return !context.messages.some(
-									message =>
-										message.role === "assistant" &&
-										message.content.some(block => block.type === "toolCall" && block.id === toolCall.id),
-								);
-							}
-							return context.messages.some(
+						const hasVisibleText =
+							!withVisibleText ||
+							context.messages.some(
 								message =>
-									message.role === "toolResult" &&
-									message.toolCallId === toolCall.id &&
-									typeof message.details === "object" &&
-									message.details !== null &&
-									"executed" in message.details &&
-									message.details.executed === false,
+									message.role === "assistant" &&
+									message.content.some(
+										block => block.type === "text" && block.text === "partial visible report",
+									),
 							);
-						});
+						resumedWithSafeHistory =
+							hasVisibleText &&
+							oldCalls.every((toolCall, index) => {
+								if (callStates[index] === "partial") {
+									return !context.messages.some(
+										message =>
+											message.role === "assistant" &&
+											message.content.some(block => block.type === "toolCall" && block.id === toolCall.id),
+									);
+								}
+								return context.messages.some(
+									message =>
+										message.role === "toolResult" &&
+										message.toolCallId === toolCall.id &&
+										typeof message.details === "object" &&
+										message.details !== null &&
+										"executed" in message.details &&
+										message.details.executed === false,
+								);
+							});
 					}
 					const recoveryModel = createMockModel({
 						id: requestedModel.id,
@@ -2542,8 +2559,15 @@ describe("AgentSession retry delay cap", () => {
 						timestamp: Date.now(),
 					};
 					stream.push({ type: "start", partial });
-					for (const [contentIndex, toolCall] of oldCalls.entries()) {
+					if (withVisibleText) {
+						const visibleText: TextContent = { type: "text", text: "partial visible report" };
+						partial.content.push(visibleText);
+						stream.push({ type: "text_start", contentIndex: 0, partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: visibleText.text, partial });
+					}
+					for (const [toolIndex, toolCall] of oldCalls.entries()) {
 						partial.content.push(toolCall);
+						const contentIndex = withVisibleText ? toolIndex + 1 : toolIndex;
 						stream.push({ type: "toolcall_start", contentIndex, partial });
 						stream.push({
 							type: "toolcall_delta",
@@ -2551,7 +2575,7 @@ describe("AgentSession retry delay cap", () => {
 							delta: toolCall[kStreamingPartialJson] ?? JSON.stringify(toolCall.arguments),
 							partial,
 						});
-						if (callStates[contentIndex] !== "partial") {
+						if (callStates[toolIndex] !== "partial") {
 							stream.push({ type: "toolcall_end", contentIndex, toolCall, partial });
 						}
 					}
@@ -2605,6 +2629,224 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 
+	it("does not execute a completed tool again during preserved continuation", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "completed-write-1",
+			name: "write",
+			arguments: { path: "report.md", content: "complete report" },
+		};
+		const mock = createMockModel();
+		let streamCalls = 0;
+		let executeCount = 0;
+		let sawRealToolResult = false;
+		const countingTool: AgentTool = {
+			name: "write",
+			label: "Count writes",
+			description: "Counts completed tool calls",
+			parameters: type({ path: "string", content: "string" }),
+			execute: async id => {
+				executeCount += 1;
+				return { content: [{ type: "text", text: `completed ${id}` }] };
+			},
+		};
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [countingTool],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				streamCalls += 1;
+				if (streamCalls === 2) {
+					const result = context.messages.find(
+						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
+					);
+					sawRealToolResult = result?.role === "toolResult" && result.isError === false;
+				}
+				mock.push(
+					streamCalls === 1
+						? { content: [toolCall] }
+						: streamCalls === 2
+							? {
+									content: [{ type: "text", text: "partial after completed tool" }],
+									stopReason: "error",
+									errorMessage: "Socket is closed",
+								}
+							: { content: ["recovered after completed tool"] },
+				);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("Write the report");
+		await session.waitForIdle();
+
+		expect(streamCalls).toBe(3);
+		expect(executeCount).toBe(1);
+		expect(sawRealToolResult).toBe(true);
+		expect(lastAssistant(session).content).toContainEqual({
+			type: "text",
+			text: "recovered after completed tool",
+		});
+		const persistedContinuation = sessionManager
+			.getBranch()
+			.some(
+				entry =>
+					entry.type === "message" &&
+					entry.message.role === "developer" &&
+					Array.isArray(entry.message.content) &&
+					entry.message.content.some(block => block.type === "text" && block.text.includes("Continue.")),
+			);
+		expect(persistedContinuation).toBe(true);
+		expect(
+			sessionManager
+				.buildSessionContext()
+				.messages.some(
+					message =>
+						message.role === "developer" &&
+						Array.isArray(message.content) &&
+						message.content.some(block => block.type === "text" && block.text.includes("Continue.")),
+				),
+		).toBe(true);
+	});
+
+	it("caps repeated committed-text stream failures at retry.maxRetries", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+
+		const mock = createMockModel({
+			handler: () => ({
+				content: [{ type: "text", text: "partial report" }],
+				stopReason: "error",
+				errorMessage: "Socket is closed",
+			}),
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		mockSchedulerWaitWithClock();
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Write the report");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0]).toMatchObject({ attempt: 1, maxAttempts: 1 });
+		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: false, attempt: 1 }));
+		expect(lastAssistant(session).errorMessage).toBe("Retry budget exhausted after 1 retry: Socket is closed");
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("cleans up a queued preserved continuation when the retry is aborted", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "text", text: "partial report" }],
+					stopReason: "error",
+					errorMessage: "Socket is closed",
+				},
+			],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+		});
+		const waitSpy = mockSchedulerWaitWithClock();
+		let sawQueuedContinuation = false;
+		waitSpy.mockImplementation(async (delayMs, options) => {
+			if (delayMs === 1) {
+				sawQueuedContinuation = agent.peekFollowUpQueue().some(message => message.role === "developer");
+				session?.abortRetry();
+			}
+			options?.signal?.throwIfAborted();
+		});
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Write the report");
+		await session.waitForIdle();
+
+		expect(sawQueuedContinuation).toBe(true);
+		expect(agent.peekFollowUpQueue().some(message => message.role === "developer")).toBe(false);
+		expect(
+			sessionManager.getBranch().some(entry => entry.type === "message" && entry.message.role === "developer"),
+		).toBe(false);
+		expect(mock.calls).toHaveLength(1);
+		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: false, attempt: 1 }));
+		expect(session.isRetrying).toBe(false);
+	});
 	it.each([
 		[
 			"OpenAI-completions stall",
@@ -3242,6 +3484,7 @@ describe("AgentSession retry delay cap", () => {
 		}
 
 		let streamCalls = 0;
+		let resumedWithPartialText = false;
 		const agent = new Agent({
 			getApiKey: model => `${model.provider}-test-key`,
 			initialState: {
@@ -3250,8 +3493,15 @@ describe("AgentSession retry delay cap", () => {
 				tools: [],
 				messages: [],
 			},
-			streamFn: requestedModel => {
+			streamFn: (requestedModel, context) => {
 				streamCalls += 1;
+				if (streamCalls > 1) {
+					resumedWithPartialText = context.messages.some(
+						message =>
+							message.role === "assistant" &&
+							JSON.stringify(message.content).includes("partial buffered answer"),
+					);
+				}
 				const stream = new AssistantMessageEventStream();
 				queueMicrotask(() => {
 					const partial: AssistantMessage = {
@@ -3337,11 +3587,12 @@ describe("AgentSession retry delay cap", () => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
 		});
 
-		session.setTextOutputCommitted(false);
+		session.setTextOutputCommitted(true);
 		await session.prompt("Trigger partial socket close");
 		await session.waitForIdle();
 
 		expect(streamCalls).toBe(2);
+		expect(resumedWithPartialText).toBe(true);
 		expect(retryStartEvents).toHaveLength(1);
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });

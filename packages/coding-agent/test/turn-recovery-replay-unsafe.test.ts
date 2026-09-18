@@ -431,6 +431,30 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const message = makeMessage([{ type: "text", text: "   \n\n  " }], model);
 		expect(recovery.isRetryableError(message)).toBe(true);
 	});
+	it.each([
+		[
+			"context-overflow/transient",
+			500,
+			"prompt is too long for requested model; internal server error",
+			AIError.Flag.ContextOverflow,
+		],
+		["auth/transient", 401, "401 authentication server error", AIError.Flag.AuthFailed],
+	] as const)(
+		"vetoes committed-text continuation for mixed %s errors",
+		(_label, errorStatus, errorMessage, expectedFlag) => {
+			const message = {
+				...makeMessage([{ type: "text", text: "Already shown to the user" }], model),
+				errorStatus,
+				errorMessage,
+			} as AssistantMessage;
+			message.errorId = AIError.classifyMessage(message);
+			expect(AIError.is(message.errorId, expectedFlag)).toBe(true);
+			expect(AIError.is(message.errorId, AIError.Flag.Transient)).toBe(true);
+			const recovery = new TurnRecovery(createHost(model, modelRegistry));
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+		},
+	);
 
 	it("keeps the tool-call case replay-unsafe (no regression)", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
@@ -718,18 +742,18 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
 		});
 
-		it("does not retry when the tool call produced a real result", () => {
+		it("preserves a completed tool result for continuation without replay", () => {
 			const message = transportError([toolCall("call-1")]);
 			const recovery = recoveryForTransport(message, [realResult("call-1")]);
 			expect(recovery.isRetryableError(message)).toBe(false);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
 		});
 
-		it("does not retry when a synthetic result is followed by a real result for the same call", () => {
+		it("preserves a settled real result after a synthetic result without replay", () => {
 			const message = transportError([toolCall("call-1")]);
 			const recovery = recoveryForTransport(message, [syntheticResult("call-1"), realResult("call-1")]);
 			expect(recovery.isRetryableError(message)).toBe(false);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
 		});
 
 		it("does not retry when only some tool calls went unexecuted", () => {
@@ -741,6 +765,13 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		it("does not retry when the turn also committed visible text", () => {
 			const message = transportError([{ type: "text", text: "Connecting..." }, toolCall("call-1")]);
 			expect(recoveryForTransport(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
+		});
+
+		it("preserves committed text for an exact socket-close continuation", () => {
+			const message = transportError([{ type: "text", text: "Connecting..." }]);
+			const recovery = recoveryForTransport(message, []);
+			expect(recovery.isRetryableError(message)).toBe(false);
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
 		});
 
 		it("does not retry when the tool call has no result at all", () => {
@@ -840,11 +871,11 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 				"Codex error event: peer closed connection without sending complete message body (incomplete chunked read) (code=api_error)",
 			],
 		])("%s recovery", (_label, errorMessage) => {
-			it("preserves the replay veto with committed text", () => {
+			it("preserves committed text for continuation", () => {
 				const message = pythonResetMessage([{ type: "text", text: "Partial answer." }], errorMessage);
 				const recovery = recoveryForReset(message, []);
 				expect(recovery.isRetryableError(message)).toBe(false);
-				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+				expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
 			});
 
 			it("continues completed tools through preserved-turn recovery", () => {
@@ -963,7 +994,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recoveryForClose(message, []).classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
 		});
 
-		it("does not continue an unrelated provider error", () => {
+		it("continues a transient provider error", () => {
 			const message = gatewayMessage(
 				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],
 				"Provider returned 500 boom",
@@ -978,7 +1009,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 					timestamp: Date.now(),
 				},
 			]);
-			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBeUndefined();
+			expect(recovery.classifyResolvedInterruptedToolTurn(message)).toBe("stream-stall");
 		});
 	});
 
