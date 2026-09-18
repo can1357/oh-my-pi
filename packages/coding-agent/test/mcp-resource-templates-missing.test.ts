@@ -16,6 +16,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { listResourceTemplates } from "../src/mcp/client";
+import { MCPTransportError } from "../src/mcp/errors";
 import { MCPManager } from "../src/mcp/manager";
 import type { MCPServerConnection, MCPStdioServerConfig, MCPTransport } from "../src/mcp/types";
 import { RESOURCE_URIS } from "./fixtures/resources-no-templates-mcp";
@@ -68,6 +69,31 @@ describe("listResourceTemplates -32601 handling", () => {
 
 		await expect(listResourceTemplates(connection)).rejects.toThrow("-32603");
 		// Not cached: a transient failure must be retryable.
+		expect(connection.resourceTemplates).toBeUndefined();
+	});
+
+	it("rethrows a transport failure that quotes the server's stderr mentioning -32601", async () => {
+		// #11923 quotes the child's stderr in transport failure messages, so the
+		// "method not found" test has to read the structured failure rather than
+		// the message text: a stdio server that logs a -32601 while dying is a
+		// crashed server, not a server that deliberately answered -32601.
+		const connection = makeResourceConnection(
+			mockTransport(async () => {
+				throw new MCPTransportError({
+					transport: "stdio",
+					stage: "receive",
+					failure: "eof",
+					message:
+						"MCP subprocess exited with code 1 before responding\nServer stderr (tail):\n" +
+						"listen error: -32601 method not found in router table",
+					retryable: true,
+					code: 1,
+				});
+			}),
+		);
+
+		await expect(listResourceTemplates(connection)).rejects.toThrow("MCP subprocess exited with code 1");
+		// Not cached: that is a transport fault, not an unimplemented method.
 		expect(connection.resourceTemplates).toBeUndefined();
 	});
 });

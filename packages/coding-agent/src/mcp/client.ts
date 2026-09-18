@@ -6,6 +6,7 @@
 import * as path from "node:path";
 import * as url from "node:url";
 import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { MCPTransportError } from "./errors";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
 import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
@@ -319,6 +320,11 @@ export async function listResources(
 
 /** True when an error is a JSON-RPC "method not found" (-32601) response. */
 function isMethodNotFoundError(error: unknown): boolean {
+	// A transport failure is classified structurally, never by message text: the
+	// message now quotes the server's own stderr (#11923), and a server that logs
+	// "-32601" or "method not found" on its way down must not be mistaken for a
+	// server that deliberately answered -32601.
+	if (error instanceof MCPTransportError) return error.failure === "json_rpc" && error.code === -32601;
 	const message = error instanceof Error ? error.message : String(error);
 	return message.includes("-32601") || /method not found/i.test(message);
 }

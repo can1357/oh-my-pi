@@ -960,3 +960,124 @@ describe("StdioTransport.close", () => {
 		5000,
 	);
 });
+
+// ---------------------------------------------------------------------------
+// StdioTransport stderr diagnostics — a stdio server that refuses to start
+// explains itself on stderr one line before it dies, and that line used to be
+// decoded and discarded. Contracts defended here:
+//
+//   1. The server's own explanation is quoted in the failure the caller sees,
+//      below the classified transport message (#11923).
+//   2. Stderr stays diagnostic context: a healthy server's logging is never
+//      treated as an error signal.
+//   3. What is quoted is a bounded, credential-redacted *tail*, so a chatty or
+//      careless server cannot flood the error surface or leak a secret.
+// ---------------------------------------------------------------------------
+
+describe("StdioTransport stderr diagnostics", () => {
+	let transport: StdioTransport | undefined;
+
+	afterEach(async () => {
+		await transport?.close().catch(() => {});
+		transport = undefined;
+	});
+
+	it("quotes the server's own stderr when it exits before responding", async () => {
+		transport = new StdioTransport({
+			type: "stdio",
+			command: "bun",
+			args: [
+				"-e",
+				[
+					"process.stdin.once('data', () => {",
+					"  process.stderr.write('error: project identity not found\\n', () => process.exit(1));",
+					"});",
+					"process.stdin.resume();",
+				].join("\n"),
+			],
+			timeout: 1_000,
+		});
+		await transport.connect();
+
+		const error = await transport.request("tools/list").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+
+		expect(error).toMatchObject({ transport: "stdio", failure: "eof" });
+		// The classified summary stays first; the server's own explanation lands
+		// below it, which is the whole point of surfacing it.
+		expect(error.message).toContain("MCP subprocess");
+		expect(error.message).toContain("error: project identity not found");
+		expect(error.message.indexOf("MCP subprocess")).toBeLessThan(
+			error.message.indexOf("error: project identity not found"),
+		);
+	});
+
+	it("keeps a healthy server's stderr out of the error path", async () => {
+		transport = new StdioTransport({
+			type: "stdio",
+			command: "bun",
+			args: [
+				"-e",
+				[
+					"process.stderr.write('warn: optional dependency missing\\n');",
+					"process.stdin.on('data', data => {",
+					"  for (const line of String(data).split('\\n')) {",
+					"    if (!line.trim()) continue;",
+					"    const request = JSON.parse(line);",
+					"    console.log(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: { ok: true } }));",
+					"  }",
+					"});",
+					"process.stdin.resume();",
+				].join("\n"),
+			],
+			timeout: 5_000,
+		});
+		const errors: Error[] = [];
+		transport.onError = error => errors.push(error);
+		await transport.connect();
+
+		await expect(transport.request("tools/list")).resolves.toEqual({ ok: true });
+		expect(errors).toEqual([]);
+		expect(transport.connected).toBe(true);
+	});
+
+	it("quotes only a bounded, redacted tail of a chatty server's stderr", async () => {
+		transport = new StdioTransport({
+			type: "stdio",
+			command: "bun",
+			args: [
+				"-e",
+				[
+					"process.stdin.once('data', () => {",
+					"  const filler = 'x'.repeat(999) + '\\n';",
+					"  const written = ['HEAD-MARKER\\n', ...Array.from({ length: 40 }, () => filler), 'token=super-secret-value\\n', 'final: disk quota exceeded\\n'].join('');",
+					"  process.stderr.write(written, () => process.exit(2));",
+					"});",
+					"process.stdin.resume();",
+				].join("\n"),
+			],
+			timeout: 1_000,
+		});
+		await transport.connect();
+
+		const error = await transport.request("tools/list").then(
+			() => undefined,
+			reason => reason,
+		);
+		if (!(error instanceof MCPTransportError)) throw error;
+
+		expect(error).toMatchObject({ transport: "stdio", failure: "eof" });
+		// What is quoted comes from the end of the stream, where a crash explains
+		// itself: the message ends with the server's last line even though this
+		// fixture wrote 40 KB — a head-first quote within the same message bound
+		// would end inside the oldest retained filler instead.
+		expect(error.message.endsWith("final: disk quota exceeded")).toBe(true);
+		// The head of the stream is never quoted, however much the server wrote.
+		expect(error.message).not.toContain("HEAD-MARKER");
+		expect(error.message).toContain("token=[redacted]");
+		expect(error.message).not.toContain("super-secret-value");
+	});
+});

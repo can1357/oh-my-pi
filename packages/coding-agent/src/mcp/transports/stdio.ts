@@ -7,6 +7,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { TailBuffer } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { getProjectDir, readJsonl } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { hostHasInheritableConsole } from "../../eval/py/spawn-options";
@@ -20,7 +21,13 @@ import type {
 	MCPTransport,
 } from "../../mcp/types";
 import { toJsonRpcError } from "../../mcp/types";
-import { createMCPJsonRpcError, MCPTransportError, normalizeMCPTransportError } from "../errors";
+import {
+	appendStderrDetail,
+	createMCPJsonRpcError,
+	MCPTransportError,
+	normalizeMCPTransportError,
+	sanitizeStderrDetail,
+} from "../errors";
 import { RequestIdAllocator } from "../request-id";
 import { isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "../timeout";
 
@@ -410,6 +417,21 @@ export function writeFrame(stdin: FrameSink, frame: string): boolean {
 const TERM_GRACE_MS = 1000;
 /** Grace window to observe SIGKILL taking effect before `close()` gives up and returns. */
 const KILL_GRACE_MS = 500;
+/**
+ * Stderr retained per stdio server. Matches the 32 KB tail the shared process
+ * helper keeps (`NonZeroExitError.MAX_TRACE` in `@oh-my-pi/pi-utils/ptree`), so
+ * a dying server's explanation is retained the same way it is for every other
+ * child OMP spawns.
+ */
+const STDIO_STDERR_TAIL_BYTES = 32 * 1024;
+/**
+ * Grace window for the stderr drain to settle before a failure message is
+ * composed. A server that explains itself and dies writes stderr immediately
+ * before the exit that closes stdout, so the read loop must not compose the
+ * message before the drain has seen that line — yet a live server that merely
+ * closed stdout must not stall the rejection either.
+ */
+const STDERR_DRAIN_GRACE_MS = 100;
 
 /**
  * The subset of `Subprocess` that termination needs. Decoupled from the
@@ -551,6 +573,16 @@ export class StdioTransport implements MCPTransport {
 	>();
 	#connected = false;
 	#readLoop: Promise<void> | null = null;
+	/** Fire-and-forget drain of the child's stderr into {@link #stderrTail}. */
+	#stderrLoop: Promise<void> | null = null;
+	/**
+	 * Bounded tail of what the server wrote to stderr. Quoted only when the
+	 * server fails (#11923) — routine logging stays invisible, as the MCP spec's
+	 * "stderr is not an error signal" rule asks. Reset per `connect()` so a
+	 * transport that is connected again never quotes the previous child's
+	 * output as the new child's reason for dying.
+	 */
+	#stderrTail = new TailBuffer(STDIO_STDERR_TAIL_BYTES);
 	/**
 	 * Set from `resolveStdioSpawnCommand()`'s `detached` flag in `connect()`.
 	 * Gates process-group signaling in `close()` — only a transport that
@@ -611,12 +643,15 @@ export class StdioTransport implements MCPTransport {
 		this.#detached = spawnCommand.detached;
 
 		this.#connected = true;
+		this.#stderrTail = new TailBuffer(STDIO_STDERR_TAIL_BYTES);
+
+		// Drain stderr before stdout: a server that refuses to start explains why
+		// there, one line before it dies, and the read loop quotes the captured
+		// tail when stdout ends before a response.
+		this.#stderrLoop = this.#startStderrLoop();
 
 		// Start reading stdout
 		this.#readLoop = this.#startReadLoop();
-
-		// Log stderr for debugging
-		this.#startStderrLoop();
 	}
 
 	async #startReadLoop(): Promise<void> {
@@ -641,21 +676,46 @@ export class StdioTransport implements MCPTransport {
 			}
 		} finally {
 			if (this.#connected && closeError === undefined) {
+				// The child's own explanation of why it died is on stderr, written
+				// immediately before the exit that closed stdout. Quote it below the
+				// classified message rather than reporting an opaque close: this is
+				// the same evidence every other OMP child quotes on failure, and it
+				// is the difference between an actionable failure and a "MCP is
+				// broken" reading. The pending requests rejected by `#handleClose`
+				// (tool calls included) carry this same error object.
+				const stderr = await this.#collectStderrTail();
 				const exitCode = this.#process?.exitCode;
 				closeError = new MCPTransportError({
 					transport: "stdio",
 					stage: "receive",
 					failure: "eof",
-					message:
+					message: appendStderrDetail(
 						exitCode === null || exitCode === undefined
 							? "MCP subprocess closed stdout before responding"
 							: `MCP subprocess exited with code ${exitCode} before responding`,
+						stderr,
+					),
 					retryable: true,
 					code: exitCode ?? undefined,
 				});
 			}
 			this.#handleClose(closeError);
 		}
+	}
+
+	/**
+	 * Wait (bounded) for the stderr drain to settle, then return what the server
+	 * wrote: redacted and size-bounded, or `undefined` when it wrote nothing.
+	 *
+	 * The wait is bounded because a server that merely closed stdout while still
+	 * alive would otherwise stall the pending rejections behind a pipe that may
+	 * never reach EOF.
+	 */
+	async #collectStderrTail(): Promise<string | undefined> {
+		if (this.#stderrLoop) {
+			await Promise.race([this.#stderrLoop.catch(() => {}), Bun.sleep(STDERR_DRAIN_GRACE_MS)]);
+		}
+		return sanitizeStderrDetail(this.#stderrTail.text());
 	}
 
 	async #startStderrLoop(): Promise<void> {
@@ -668,16 +728,17 @@ export class StdioTransport implements MCPTransport {
 			while (this.#connected) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				// Log stderr but don't treat as error - servers use it for logging
-				const text = decoder.decode(value, { stream: true });
-				if (text.trim()) {
-					// Could expose via onStderr callback if needed
-					// For now, silent - MCP spec says clients MAY capture/ignore
-				}
+				// Capture, never fail: servers use stderr for logging, so it is
+				// diagnostic context for the failure paths above, not an error
+				// signal of its own (MCP spec: clients MAY capture/ignore it).
+				this.#stderrTail.append(decoder.decode(value, { stream: true }));
 			}
 		} catch {
 			// Ignore stderr read errors
 		} finally {
+			// Flush the decoder's pending bytes: without this the final bytes of
+			// the explanation can be lost to a trailing multi-byte character.
+			this.#stderrTail.append(decoder.decode());
 			reader.releaseLock();
 		}
 	}
@@ -950,6 +1011,13 @@ export class StdioTransport implements MCPTransport {
 			// Do not block/await the read loop as it can hang indefinitely in some environments
 			this.#readLoop.catch(() => {});
 			this.#readLoop = null;
+		}
+
+		if (this.#stderrLoop) {
+			// The drain exits on the next `#connected` check; it is never awaited
+			// here for the same reason as the read loop.
+			this.#stderrLoop.catch(() => {});
+			this.#stderrLoop = null;
 		}
 	}
 }

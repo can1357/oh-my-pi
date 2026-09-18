@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stdio MCP servers that die before completing the handshake reporting an opaque connection error; the failure now quotes the server's own stderr tail ([#11923](https://github.com/can1357/oh-my-pi/issues/11923); [#12476](https://github.com/can1357/oh-my-pi/pull/12476) by [@MertSoylu](https://github.com/MertSoylu)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
