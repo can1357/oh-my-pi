@@ -7,10 +7,20 @@ export {
 	stubContainsFullPayload,
 	stubFor,
 } from "./store";
-export type { RlmBudget, RlmHit, RlmPeek, RlmRecord, RlmStub, RlmTrajectoryEntry } from "./store";
+export type {
+	RlmBudget,
+	RlmHit,
+	RlmPeek,
+	RlmRecord,
+	RlmReconcileResult,
+	RlmStub,
+	RlmTrajectoryEntry,
+	RlmUsageReconcile,
+} from "./store";
 export { promptContainsCorpus, QUERY_SLICE, rlmQuery } from "./query";
-export type { RlmCompleter, RlmQueryResult } from "./query";
+export type { RlmCompleter, RlmCompleterOptions, RlmQueryResult } from "./query";
 export {
+	disposeRlmStore,
 	getContextEngine,
 	getRlmStore,
 	resetRlmStoresForTest,
@@ -21,6 +31,6 @@ export {
 	rlmSubModel,
 	systemPromptWithRlmGuide,
 } from "./session";
-export type { ContextEngine } from "./session";
+export type { ContextEngine, RlmSessionHost } from "./session";
 export { appendRlmRuntimeGuide, RLM_RUNTIME_GUIDE, rlmGuideIsAppendOnly } from "./guide";
 export { wrapToolWithRlmSpill } from "./wrap";

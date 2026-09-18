@@ -12,7 +12,8 @@ const rlmSchema = type({
 	"handle?": type("string").describe("rlm://h/<id> from a spilled stub"),
 	"start?": type("number").describe("peek/query start offset"),
 	"end?": type("number").describe("peek/query end offset"),
-	"pattern?": type("string").describe("search regex"),
+	"pattern?": type("string").describe("search needle (literal by default; set mode=regex for RegExp)"),
+	"mode?": type.enumerated("literal", "regex").describe("search mode; default literal"),
 	"question?": type("string").describe("query question"),
 	"limit?": type("number").describe("search hit cap"),
 	"+": "reject",
@@ -71,7 +72,8 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 						.text("pattern is required")
 						.done();
 				}
-				const hits = store.search(params.handle, params.pattern, params.limit ?? 8);
+				const mode = params.mode === "regex" ? "regex" : "literal";
+				const hits = store.search(params.handle, params.pattern, params.limit ?? 8, mode);
 				const text =
 					hits.length === 0
 						? "no matches"

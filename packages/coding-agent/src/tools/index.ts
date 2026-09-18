@@ -206,10 +206,18 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
-	/** Optional RLM depth-0 completer; host wires model-registry usage. Absent → query fail-open. */
+	/**
+	 * Isolated RLM completer (query/subcall). Must not inherit root history.
+	 * Host passes AbortSignal from the store wall-clock/cancel lease.
+	 */
 	rlmComplete?: (
 		prompt: string,
+		options?: { signal?: AbortSignal },
 	) => Promise<string | { text: string; tokens?: number; cost?: number }>;
+	/** Session-owned RLM spill store (preferred over process-global map). */
+	rlmStore?: import("../rlm/store").RlmStore;
+	/** Stable RLM runtime id — never cwd. */
+	getRlmRuntimeId?: () => string | null;
 
 	/** Current session whose stored credential affinities should seed a child session. */
 	getCredentialSourceSessionId?: () => string | undefined;
