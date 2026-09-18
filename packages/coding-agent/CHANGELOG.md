@@ -48,6 +48,10 @@
 
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
 
+### Changed
+
+- On Windows package installs, `omp update` now stages the native addon before updating so normal launches can load directly from `node_modules` ([#4385](https://github.com/can1357/oh-my-pi/issues/4385)).
+
 ## [18.2.3] - 2026-09-17
 
 ### Breaking Changes

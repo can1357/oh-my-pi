@@ -15,8 +15,10 @@ try {
  * lightweight CLI runner from pi-utils.
  */
 import type * as WorkerThreads from "node:worker_threads";
+import { parseArgs } from "node:util";
 import type { MessagePort } from "node:worker_threads";
 import type { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
+import { enableNativeAddonStaging } from "@oh-my-pi/pi-natives/loader";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import type * as Postmortem from "@oh-my-pi/pi-utils/postmortem";
 import {
@@ -461,6 +463,27 @@ async function runTinyWorker(): Promise<void> {
 	await startTinyWorkerFromEnvironment();
 }
 
+/**
+ * Whether an `update` dispatch is check-only and never replaces the package.
+ * Uses `node:util.parseArgs` with only the `--check`/`-c` flag declared and
+ * `strict: false`, so it tolerates every other update flag (--force, --canary,
+ * …) while still resolving `--check`, `-c`, and short clusters like `-fc`.
+ * The `Boolean(values.check)` coercion mirrors the update command's own
+ * `Command.parse()` flag coercion (utils/cli.ts), so both see the same truth
+ * for `--check=true`/`--check=false` edge cases. Must run before `run()` →
+ * `loadEntry()` → `import("./commands/update")`, whose theme import loads
+ * natives, so the update command's own `this.parse()` is not yet available.
+ */
+function isCheckOnlyUpdateDispatch(args: string[]): boolean {
+	const { values } = parseArgs({
+		args,
+		options: { check: { type: "boolean", short: "c" } },
+		allowPositionals: true,
+		strict: false,
+	});
+	return Boolean(values.check);
+}
+
 /** Run the CLI with the given argv (no `process.argv` prefix). */
 export async function runCli(argv: string[]): Promise<void> {
 	let resolvedArgv = argv;
@@ -583,6 +606,16 @@ export async function runCli(argv: string[]): Promise<void> {
 			process.stderr.write(`error: ${resolved.error}\n`);
 			process.exitCode = 1;
 			return;
+		}
+		// Opt into Windows native-addon staging only when actually dispatching the
+		// update command — not when completions/help batch-load every command's
+		// loader (#11377). Must precede `run()` → `loadEntry()` →
+		// `import("./commands/update")`, whose theme import loads natives.
+		// `--check` performs no installation, so it stays on the installed addon:
+		// the staged loader refuses to fall back to it, and a missing or corrupt
+		// cache must not fail a read-only check.
+		if (resolved.argv[0] === "update" && !isCheckOnlyUpdateDispatch(resolved.argv.slice(1))) {
+			enableNativeAddonStaging();
 		}
 		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
 	} finally {
