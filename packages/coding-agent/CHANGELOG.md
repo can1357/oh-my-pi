@@ -672,6 +672,12 @@
 - A malformed project `.claude/settings.json` now produces a warning instead of being silently ignored ([#11570](https://github.com/can1357/oh-my-pi/issues/11570)).
 - Reduced memory usage during long responses while thinking is hidden ([#11632](https://github.com/can1357/oh-my-pi/pull/11632) by [@redsolver](https://github.com/redsolver)).
 
+### Fixed
+
+- Codex auto-redeem now asks for explicit consent before spending the final saved rate-limit reset, even when auto-redeem is set to `yes` ([#11200](https://github.com/can1357/oh-my-pi/issues/11200)).
+- A blocked-turn redeem now waits for an in-flight salvage sweep first, so the two passes cannot plan on the same stale snapshot and double-spend the final credit.
+- The headless final-credit warning names the accounts that actually hold a final credit instead of the batch head, and records a dedup key per final account.
+- A `yes`-mode spend planned on a non-final balance re-prompts when the bank drains to its last reset before redemption.
 ## [18.1.17] - 2026-09-10
 
 ### Added
