@@ -582,7 +582,7 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 			sessionOptions?.settings?.get("tier.openai"),
 			sessionOptions?.settings?.get("tier.anthropic"),
 			sessionOptions?.settings?.get("tier.google"),
-		]).toEqual(["flex", "none", "flex"]);
+		]).toEqual(["flex", "provider", "flex"]);
 	});
 
 	it("lets an unsupported concrete override beat the global tier without crossing families", async () => {

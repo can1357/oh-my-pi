@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Doubleword as a built-in provider (`DOUBLEWORD_API_KEY`, `/login`). Requests use the Responses API and default to async `flex`; `/fast` switches a turn to realtime ([#12020](https://github.com/can1357/oh-my-pi/pull/12020) by [@audreyt](https://github.com/audreyt)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

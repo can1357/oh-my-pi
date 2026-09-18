@@ -2146,6 +2146,9 @@ describe("ExtensionRunner", () => {
 			expectTypeOf<"scale">().toExtend<ExtensionServiceTier<"openai">>();
 			expectTypeOf<"flex">().toExtend<ExtensionServiceTier<"google">>();
 			expectTypeOf<"priority">().toExtend<ExtensionServiceTier<"anthropic">>();
+			expectTypeOf<"none">().toExtend<ExtensionServiceTier<"openai">>();
+			expectTypeOf<"none">().toExtend<ExtensionServiceTier<"google">>();
+			expectTypeOf<"none">().toExtend<ExtensionServiceTier<"anthropic">>();
 			expectTypeOf<"scale">().not.toExtend<ExtensionServiceTier<"google">>();
 			expectTypeOf<"flex">().not.toExtend<ExtensionServiceTier<"anthropic">>();
 		});
@@ -2230,6 +2233,73 @@ describe("ExtensionRunner", () => {
 			expect(errors).toHaveLength(2);
 			expect(errors[0]).toContain('Invalid service tier "scale" for family "anthropic"');
 			expect(errors[1]).toContain('Invalid service tier "priority" for family "bogus"');
+		});
+
+		it("lets extensions set and round-trip the none omit sentinel", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("session_start", () => {
+						pi.setServiceTier("openai", "none");
+						pi.appendEntry("service-tier-snapshot", pi.getServiceTiers());
+					});
+				}
+			`;
+			const explicitExtensionPath = path.join(tempDir.path(), "service-tier-none.ts");
+			await Bun.write(explicitExtensionPath, extCode);
+			const result = await loadTestExtensions([explicitExtensionPath]);
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const serviceTiers = { openai: "none" as const };
+			const snapshots: unknown[] = [];
+			const setCalls: Array<[string, unknown]> = [];
+			const errors: string[] = [];
+			runner.onError(error => {
+				errors.push(error.error);
+			});
+			runner.initialize(
+				{
+					sendMessage: () => {},
+					sendUserMessage: () => {},
+					appendEntry: (_customType, data) => {
+						snapshots.push(data);
+					},
+					setLabel: () => {},
+					getActiveTools: () => [],
+					getAllTools: () => [],
+					setActiveTools: async () => {},
+					getCommands: () => [],
+					setModel: async () => false,
+					getThinkingLevel: () => undefined,
+					setThinkingLevel: () => {},
+					getServiceTiers: () => serviceTiers,
+					setServiceTier: (family, tier) => {
+						setCalls.push([family, tier]);
+					},
+					getSessionName: () => undefined,
+					setSessionName: async () => {},
+				},
+				{
+					getModel: () => undefined,
+					isIdle: () => true,
+					abort: () => {},
+					hasPendingMessages: () => false,
+					shutdown: () => {},
+					getContextUsage: () => undefined,
+					compact: async () => {},
+					getSystemPrompt: () => [],
+				},
+			);
+
+			await runner.emit({ type: "session_start" });
+
+			expect(setCalls).toEqual([["openai", "none"]]);
+			expect(snapshots).toEqual([{ openai: "none" }]);
+			expect(errors).toEqual([]);
 		});
 	});
 

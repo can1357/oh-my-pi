@@ -424,8 +424,8 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
 	thinkingLevelCeiling?: Effort;
-	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
-	openAIServiceTier?: ServiceTier | null;
+	/** OpenAI service-tier override for this session. `null` leaves the family entry absent — the model's own `defaultServiceTier` applies when its rule declares one; `"none"` explicitly omits `service_tier`. */
+	openAIServiceTier?: ServiceTier | "none" | null;
 	/**
 	 * Per-family service tiers for this session, replacing the `tier.*` settings
 	 * and any persisted tier history. Called once the initial model is final —

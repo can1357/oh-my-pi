@@ -115,9 +115,10 @@ describe("shouldSendServiceTier", () => {
 		expect(shouldSendServiceTier("priority", "anthropic")).toBe(false);
 	});
 
-	it("returns false for unset tiers", () => {
+	it("returns false for unset tiers and the omit sentinel", () => {
 		expect(shouldSendServiceTier(undefined, "openai")).toBe(false);
 		expect(shouldSendServiceTier(null, "openai")).toBe(false);
+		expect(shouldSendServiceTier("none", "openai")).toBe(false);
 	});
 });
 
@@ -183,5 +184,11 @@ describe("coerceServiceTierByFamily", () => {
 			google: "flex",
 		});
 		expect(coerceServiceTierByFamily({ openai: "bogus" })).toBeUndefined();
+	});
+
+	it("preserves the none omit sentinel in a per-family map", () => {
+		expect(coerceServiceTierByFamily({ openai: "none", anthropic: "bogus" })).toEqual({
+			openai: "none",
+		});
 	});
 });

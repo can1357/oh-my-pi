@@ -704,7 +704,7 @@ export function startChatSpan(
 		model,
 		parent: options.parent,
 		stepNumber: options.stepNumber,
-		attributes: buildChatRequestAttributes(options.stepNumber, options.request, model.provider),
+		attributes: buildChatRequestAttributes(options.stepNumber, options.request, model),
 	});
 	if (span) {
 		telemetry?.collector.beginChat(span, {
@@ -730,7 +730,7 @@ export interface ChatRequestSnapshot {
 	readonly presencePenalty?: number;
 	readonly stopSequences?: readonly string[];
 	readonly seed?: number;
-	readonly serviceTier?: ServiceTier;
+	readonly serviceTier?: ServiceTier | "none";
 	readonly reasoningEffort?: string;
 	readonly toolChoice?: ToolChoice;
 	readonly tools?: readonly { readonly name: string }[];
@@ -738,7 +738,7 @@ export interface ChatRequestSnapshot {
 	readonly messages?: readonly Message[];
 }
 
-function buildChatRequestAttributes(stepNumber: number, request: ChatRequestSnapshot, provider: string): Attributes {
+function buildChatRequestAttributes(stepNumber: number, request: ChatRequestSnapshot, model: Model): Attributes {
 	const attrs: Attributes = {
 		[PiGenAIAttr.AgentStepNumber]: stepNumber,
 		[GenAIAttr.OutputType]: "text",
@@ -754,7 +754,7 @@ function buildChatRequestAttributes(stepNumber: number, request: ChatRequestSnap
 	if (request.stopSequences && request.stopSequences.length > 0) {
 		attrs[GenAIAttr.RequestStopSequences] = [...request.stopSequences];
 	}
-	if (request.serviceTier && shouldSendServiceTier(request.serviceTier, provider)) {
+	if (request.serviceTier && request.serviceTier !== "none" && shouldSendServiceTier(request.serviceTier, model)) {
 		attrs[OpenAIAttr.RequestServiceTier] = request.serviceTier;
 	}
 	if (request.reasoningEffort) attrs[PiGenAIAttr.RequestReasoningEffort] = request.reasoningEffort;
@@ -1119,7 +1119,7 @@ export async function finishChatSpan(
 	message: AssistantMessage,
 	options: {
 		readonly stepNumber: number;
-		readonly serviceTier?: ServiceTier;
+		readonly serviceTier?: ServiceTier | "none";
 		readonly responseHeaders?: Readonly<Record<string, string>>;
 		readonly baseUrl?: string;
 	},
@@ -1128,12 +1128,15 @@ export async function finishChatSpan(
 	applyChatResponseAttributes(span, message);
 	applyUsageAttributes(span, message.usage);
 	applyGatewayAttributes(span, options.responseHeaders, options.baseUrl);
-	const cost = applyCostEstimate(telemetry, span, message, options.serviceTier, options.stepNumber);
+	// `"none"` is the explicit omit sentinel — the wire field was suppressed, so
+	// the cost estimator and usage snapshot see the same absence it produced.
+	const serviceTier = options.serviceTier === "none" ? undefined : options.serviceTier;
+	const cost = applyCostEstimate(telemetry, span, message, serviceTier, options.stepNumber);
 	if (telemetry) {
 		await emitChatUsage(telemetry, span, {
 			model: message.model,
 			provider: message.provider,
-			serviceTier: options.serviceTier,
+			serviceTier,
 			stepNumber: options.stepNumber,
 			usage: message.usage,
 			applied: cost,
@@ -1560,7 +1563,7 @@ export interface ManualChatTelemetryOptions {
 	readonly model: Model;
 	readonly usage?: Usage;
 	readonly finishReason?: StopReason;
-	readonly serviceTier?: ServiceTier;
+	readonly serviceTier?: ServiceTier | "none";
 	readonly stepNumber?: number;
 	readonly responseId?: string;
 	readonly responseModel?: string;
@@ -1594,17 +1597,18 @@ export async function recordManualChatTelemetry(
 	applyUsageAttributes(span, options.usage);
 	applyGatewayAttributes(span, options.responseHeaders, options.model.baseUrl);
 	if (telemetry) {
+		const serviceTier = options.serviceTier === "none" ? undefined : options.serviceTier;
 		const applied = applyCostEstimateForUsage(telemetry, span, {
 			model: options.responseModel ?? options.model.id,
 			provider: options.model.provider,
-			serviceTier: options.serviceTier,
+			serviceTier,
 			stepNumber: options.stepNumber,
 			usage: options.usage,
 		});
 		await emitChatUsage(telemetry, span, {
 			model: options.responseModel ?? options.model.id,
 			provider: options.model.provider,
-			serviceTier: options.serviceTier,
+			serviceTier,
 			stepNumber: options.stepNumber,
 			usage: options.usage,
 			applied,

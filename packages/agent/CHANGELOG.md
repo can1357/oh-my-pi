@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Chat telemetry, usage events, and cost estimates now reflect a model's `defaultServiceTier` (e.g. Doubleword's async `flex`) when no tier is configured, matching what is actually sent on the wire ([#12020](https://github.com/can1357/oh-my-pi/pull/12020) by [@audreyt](https://github.com/audreyt)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed

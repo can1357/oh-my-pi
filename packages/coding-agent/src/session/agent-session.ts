@@ -8586,8 +8586,8 @@ export class AgentSession {
 		return this.#models.isFastModeActive();
 	}
 
-	/** Sets or clears one model family's live service tier. */
-	setServiceTierFamily(family: ServiceTierFamily, tier: ServiceTier | undefined): void {
+	/** Sets, explicitly omits (`"none"`), or clears one model family's live service tier. */
+	setServiceTierFamily(family: ServiceTierFamily, tier: ServiceTier | "none" | undefined): void {
 		this.#models.setServiceTierFamily(family, tier);
 	}
 

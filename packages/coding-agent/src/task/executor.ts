@@ -990,9 +990,9 @@ export function createSubagentSettings(
 	// the snapshot so createAgentSession's tier.* reads pick it up.
 	const inheritedTiers = inheritedSubagentServiceTiers(baseSettings, inheritedServiceTier);
 	const subagentTiers = resolveSubagentServiceTier(baseSettings.get("tier.subagent"), inheritedTiers);
-	snapshot["tier.openai"] = subagentTiers.openai ?? "none";
-	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "none";
-	snapshot["tier.google"] = subagentTiers.google ?? "none";
+	snapshot["tier.openai"] = subagentTiers.openai ?? "provider";
+	snapshot["tier.anthropic"] = subagentTiers.anthropic ?? "provider";
+	snapshot["tier.google"] = subagentTiers.google ?? "provider";
 	return Settings.isolated(
 		{
 			...snapshot,

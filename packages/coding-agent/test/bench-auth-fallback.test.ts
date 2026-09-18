@@ -476,7 +476,7 @@ describe("bench service tier", () => {
 	it("sends the configured serviceTier setting when no flag is passed", async () => {
 		const { wire, summary } = await captureServiceTier({ setting: "flex" });
 		expect(wire).toBe("flex");
-		expect(summary).toEqual({ openai: "flex" });
+		expect(summary).toEqual({ openai: "flex", anthropic: "none", google: "none" });
 	});
 
 	it("lets an explicit --service-tier override the configured setting", async () => {
@@ -485,10 +485,12 @@ describe("bench service tier", () => {
 		expect(summary).toEqual({ openai: "priority", anthropic: "priority", google: "priority" });
 	});
 
-	it("omits service_tier when the setting is none and no flag is passed", async () => {
+	it("marks service_tier for omission when the setting is none and no flag is passed", async () => {
 		const { wire, summary } = await captureServiceTier({ setting: "none" });
-		expect(wire).toBeUndefined();
-		expect(summary).toEqual({});
+		// "none" is the explicit omit sentinel — the provider layer drops it
+		// before the wire, so the request carries no service_tier.
+		expect(wire).toBe("none");
+		expect(summary).toEqual({ openai: "none", anthropic: "none", google: "none" });
 	});
 
 	it("omits service_tier when neither flag nor settings are present", async () => {

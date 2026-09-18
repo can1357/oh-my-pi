@@ -25,7 +25,7 @@ import {
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
-import { resolveModelReference } from "../identity/reference";
+import { inheritReferenceThinking, resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig } from "../types";
@@ -44,6 +44,7 @@ import {
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
+import { DOUBLEWORD_API_BASE_URL, normalizeDoublewordBaseUrl } from "../wire/doubleword";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
 import { getDefaultModelDiscoveryBaseUrl, resolveModelCacheProviderId } from "./cache-provider-id";
 import { getClinePassModelMetadata } from "./cline-pass";
@@ -7119,5 +7120,89 @@ export function charmHyperModelManagerOptions(
 				},
 				fetch: config?.fetch,
 			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Doubleword
+// ---------------------------------------------------------------------------
+
+/** Canonical Doubleword inference endpoint (`/v1` surface included). */
+export const DOUBLEWORD_BASE_URL = DOUBLEWORD_API_BASE_URL;
+
+/** Discovery configuration for the Doubleword model manager. */
+export interface DoublewordModelManagerConfig {
+	/** Doubleword API key (`sk-…`); discovery is omitted without one. */
+	apiKey?: string;
+	/** Endpoint override for a self-hosted proxy; normalized onto `/v1`. */
+	baseUrl?: string;
+	/** Fetch implementation for discovery (tests). */
+	fetch?: FetchImpl;
+}
+
+/**
+ * Doubleword's inference API. Routed over Responses rather than chat
+ * completions because only `/v1/responses` honours `service_tier`: the
+ * chat-completions surface accepts the field and echoes `service_tier: null`,
+ * serving every request at the realtime rate, which would silently bill the
+ * async tier as realtime.
+ *
+ * `/v1/models` carries no metadata beyond the id, so intrinsic capabilities
+ * (context window, output cap, modalities, reasoning flag) come from the
+ * bundled reference for the same upstream id — Doubleword serves open-weights
+ * models other providers in the catalog also host. Thinking ladders are
+ * deliberately not borrowed: the reference belongs to another host, whose
+ * effort vocabulary the Responses encoder would otherwise mistranslate.
+ * Pricing stays local-unknown: the roster advertises no tariff, and per-tier
+ * rates differ from every other host of the same weights.
+ */
+export function doublewordModelManagerOptions(
+	config?: DoublewordModelManagerConfig,
+): ModelManagerOptions<"openai-responses"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeDoublewordBaseUrl(config?.baseUrl);
+	return {
+		providerId: "doubleword",
+		cacheProviderId: resolveModelCacheProviderId("doubleword", { baseUrl }),
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () => {
+				// Resolved lazily: walking the reference index is only worth
+				// paying for when discovery actually runs.
+				const canonicalReferences = getBundledModelReferenceIndex();
+				return fetchOpenAICompatibleModels({
+					api: "openai-responses",
+					provider: "doubleword",
+					baseUrl,
+					apiKey,
+					filterModel: (_entry, model) => !isExcludedModel("doubleword", model.id),
+					mapModel: (entry, defaults) => {
+						const canonical = resolveModelReference(defaults.id, canonicalReferences);
+						if (!canonical) return { ...defaults, name: toModelName(entry.name, defaults.name) };
+						const contextWindow = canonical.contextWindow ?? defaults.contextWindow;
+						const maxTokens =
+							canonical.maxTokens != null && contextWindow != null
+								? Math.min(canonical.maxTokens, contextWindow)
+								: (canonical.maxTokens ?? defaults.maxTokens);
+						// Thinking stays host-neutral: the canonical reference comes
+						// from another provider's bundled entry, whose `effortMap`
+						// and wire routing encode that host's vocabulary. Inheriting
+						// it would mistranslate Doubleword's Responses reasoning
+						// levels, so only a same-provider reference contributes.
+						const thinking = inheritReferenceThinking(undefined, canonical, "doubleword");
+						return {
+							...defaults,
+							name: toModelName(entry.name, canonical.name ?? defaults.name),
+							reasoning: canonical.reasoning,
+							input: canonical.input,
+							...(thinking && { thinking }),
+							contextWindow,
+							maxTokens,
+						};
+					},
+					fetch: config?.fetch,
+				});
+			},
+		}),
 	};
 }

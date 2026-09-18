@@ -52,6 +52,8 @@ export function streamOpenAIAnthropicShim(
 	// The resolver form of `apiKey` is resolved upstream in `streamSimple`;
 	// this shim only ever receives a static bearer string.
 	const apiKey = typeof options?.apiKey === "string" ? options.apiKey : undefined;
+	// `"none"` is the explicit omit sentinel — provider options only carry wire tiers.
+	const serviceTier = options?.serviceTier === "none" ? undefined : options?.serviceTier;
 
 	(async () => {
 		try {
@@ -107,7 +109,7 @@ export function streamOpenAIAnthropicShim(
 					thinkingBudgetTokens: thinkingBudget,
 					reasoning: config.anthropicThinkingMode ? reasoningEffort : undefined,
 					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
-					serviceTier: options?.serviceTier,
+					serviceTier,
 				});
 
 				for await (const event of innerStream) {
@@ -145,7 +147,7 @@ export function streamOpenAIAnthropicShim(
 					fetch: options?.fetch,
 					reasoning: reasoningEffort,
 					toolChoice: options?.toolChoice,
-					serviceTier: options?.serviceTier,
+					serviceTier,
 					disableReasoning: options?.disableReasoning,
 				});
 

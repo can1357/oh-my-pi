@@ -30,6 +30,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// User-configured models.yml provider pointing at
 	// https://inference-api.nousresearch.com/v1 (NousResearch inference API).
 	"nous",
+	// Public gateway discovery via doublewordModelManagerOptions: every row
+	// comes from the live /v1/models snapshot; no bundled rows are frozen
+	// into models.json (same shape as charm-hyper).
+	"doubleword",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {

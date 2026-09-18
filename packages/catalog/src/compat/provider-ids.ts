@@ -22,6 +22,7 @@ export type KnownProvider =
 	| "deepinfra"
 	| "deepseek"
 	| "devin"
+	| "doubleword"
 	| "firepass"
 	| "fireworks"
 	| "github-copilot"

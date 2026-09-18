@@ -285,6 +285,7 @@ describe("ModelRegistry", () => {
 		let anthropicAuthHeader: ModelRegistry;
 		let mixGoogleCustom: ModelRegistry;
 		let openaiProxy: ModelRegistry;
+		let doublewordProxy: ModelRegistry;
 		let xaiModelScopedHeaders: ModelRegistry;
 		let otherXaiModelId: string;
 		beforeAll(() => {
@@ -321,6 +322,9 @@ describe("ModelRegistry", () => {
 			openaiProxy = readonlyRegistry({
 				providers: { openai: overrideConfig("https://openai-proxy.example.com/v1") },
 			});
+			doublewordProxy = readonlyRegistry({
+				providers: { doubleword: overrideConfig("https://dw-proxy.example.com") },
+			});
 			const otherXaiModel = sharedBuiltin
 				.getAll()
 				.find(model => model.provider === "xai" && model.id !== "grok-4.3");
@@ -351,6 +355,12 @@ describe("ModelRegistry", () => {
 			for (const model of anthropicModels) {
 				expect(model.baseUrl).toBe("https://my-proxy.example.com/v1");
 			}
+		});
+
+		test("doubleword baseUrl override is normalized onto /v1 like discovery", () => {
+			// Discovery normalizes through the shared helper; the stored override
+			// must agree or inference lands on `<base>/responses`.
+			expect(doublewordProxy.getProviderBaseUrl("doubleword")).toBe("https://dw-proxy.example.com/v1");
 		});
 
 		test("overriding headers merges with model headers", async () => {

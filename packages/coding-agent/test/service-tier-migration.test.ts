@@ -66,18 +66,18 @@ describe("serviceTier → tier.* settings migration", () => {
 	it("scopes openai-only/claude-only to a single family", async () => {
 		const openai = await loadWith({ serviceTier: "openai-only" });
 		expect(openai.get("tier.openai")).toBe("priority");
-		expect(openai.get("tier.anthropic")).toBe("none");
-		expect(openai.get("tier.google")).toBe("none");
+		expect(openai.get("tier.anthropic")).toBe("provider");
+		expect(openai.get("tier.google")).toBe("provider");
 
 		const claude = await loadWith({ serviceTier: "claude-only" });
 		expect(claude.get("tier.anthropic")).toBe("priority");
-		expect(claude.get("tier.openai")).toBe("none");
+		expect(claude.get("tier.openai")).toBe("provider");
 	});
 
 	it("maps plain OpenAI tiers onto the OpenAI family", async () => {
 		const settings = await loadWith({ serviceTier: "flex" });
 		expect(settings.get("tier.openai")).toBe("flex");
-		expect(settings.get("tier.anthropic")).toBe("none");
+		expect(settings.get("tier.anthropic")).toBe("provider");
 	});
 
 	it("carries subagent/advisor over and drops scoped sentinels", async () => {
@@ -91,7 +91,7 @@ describe("serviceTier → tier.* settings migration", () => {
 
 	it("leaves a fresh config on the per-family defaults", async () => {
 		const settings = await loadWith({});
-		expect(settings.get("tier.openai")).toBe("none");
+		expect(settings.get("tier.openai")).toBe("provider");
 		expect(settings.get("tier.subagent")).toBe("inherit");
 		expect(settings.get("tier.advisor")).toBe("none");
 	});
@@ -102,7 +102,7 @@ describe("task.agentServiceTierOverrides", () => {
 		const parentTiers: ServiceTierByFamily = { openai: "priority", anthropic: "priority", google: "flex" };
 
 		expect(resolveAgentServiceTierOverride("inherit", openAIModel, parentTiers)).toEqual(parentTiers);
-		expect(resolveAgentServiceTierOverride("none", openAIModel, parentTiers)).toEqual({});
+		expect(resolveAgentServiceTierOverride("none", openAIModel, parentTiers)).toEqual({ openai: "none" });
 		expect(resolveAgentServiceTierOverride("auto", openAIModel, parentTiers)).toEqual({ openai: "auto" });
 		expect(resolveAgentServiceTierOverride("default", openAIModel, parentTiers)).toEqual({ openai: "default" });
 		expect(resolveAgentServiceTierOverride("flex", openAIModel, parentTiers)).toEqual({ openai: "flex" });
@@ -117,7 +117,7 @@ describe("task.agentServiceTierOverrides", () => {
 				overrides: { "task.agentServiceTierOverrides": { scout: "turbo" } },
 			}),
 		).rejects.toThrow(
-			"Invalid service tier for task.agentServiceTierOverrides.scout: turbo. Expected one of: inherit, none, auto, default, flex, scale, priority.",
+			"Invalid service tier for task.agentServiceTierOverrides.scout: turbo. Expected one of: inherit, provider, none, auto, default, flex, scale, priority.",
 		);
 	});
 
@@ -151,7 +151,11 @@ describe("task.agentServiceTierOverrides", () => {
 		const inherited: ServiceTierByFamily = { openai: "flex" };
 		expect(resolveAgentServiceTierOverride("priority", undefined, inherited)).toEqual({});
 		expect(resolveAgentServiceTierOverride("scale", undefined, inherited)).toEqual({});
-		expect(resolveAgentServiceTierOverride("none", undefined, inherited)).toEqual({});
+		expect(resolveAgentServiceTierOverride("none", undefined, inherited)).toEqual({
+			openai: "none",
+			anthropic: "none",
+			google: "none",
+		});
 		expect(resolveAgentServiceTierOverride("inherit", undefined, inherited)).toEqual(inherited);
 	});
 });
