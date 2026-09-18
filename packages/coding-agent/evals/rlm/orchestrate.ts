@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Offline RLM A/B orchestrator (arms: off | on | shake).
-
+ * Offline RLM A/B orchestrator (arms: off | on | shake | soft | snapcompact).
  *
  * Measures root-prompt corpus bytes and tokenizer-estimated context after a
  * fixed fat-read workload. No provider calls — mock tool results only.
@@ -14,12 +13,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import {
-	getRlmStore,
-	resetRlmStoresForTest,
-	wrapToolWithRlmSpill,
-} from "../../src/rlm";
-
+import { getRlmStore, resetRlmStoresForTest, wrapToolWithRlmSpill } from "../../src/rlm";
 import { Settings } from "../../src/config/settings";
 import type { ToolSession } from "../../src/tools";
 
@@ -45,7 +39,7 @@ type Workload = {
 	needles: Array<{ id: string; offsetHint?: number }>;
 };
 
-type Arm = "off" | "on" | "shake";
+type Arm = "off" | "on" | "shake" | "soft" | "snapcompact";
 
 /** Native shake-style truncation: head/tail only — midpoint needles are lost. */
 function shakeTruncate(text: string, budgetBytes: number): string {
@@ -57,6 +51,18 @@ function shakeTruncate(text: string, budgetBytes: number): string {
 	return `${head}\n…[shake truncated ${bytes} bytes]…\n${tail}`;
 }
 
+/** Soft compaction mock: one-line summary — citations lost. */
+function softSummarize(text: string, name: string): string {
+	const bytes = Buffer.byteLength(text, "utf8");
+	return `[soft summary] ${name}: ${bytes} bytes of tool output discarded; no citations.`;
+}
+
+/** Snapcompact mock: short head + media/hash placeholder — midpoint lost. */
+function snapcompactStub(text: string, name: string): string {
+	const bytes = Buffer.byteLength(text, "utf8");
+	const head = text.slice(0, 120);
+	return `${head}\n…[snapcompact kept head; stripped ${bytes} bytes / frames for ${name}]…`;
+}
 
 type Cell = {
 	ts: number;
@@ -89,12 +95,10 @@ function buildCorpus(spec: FileSpec): { text: string; needles: string[] } {
 		const pad = Math.max(0, spec.bytes - n.length);
 		const left = Math.floor(pad / 2);
 		const right = pad - left;
-		// Midpoint plant keeps the needle out of the stub preview window (first ~240 chars).
 		return { text: `${"x".repeat(left)}${n}${"y".repeat(right)}`, needles };
 	}
 	return { text: "s".repeat(spec.bytes), needles: [] };
 }
-
 
 function expandFiles(specs: FileSpec[]): Array<{ name: string; text: string; needles: string[] }> {
 	const out: Array<{ name: string; text: string; needles: string[] }> = [];
@@ -122,6 +126,7 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 	resetRlmStoresForTest();
 	const settings = Settings.isolated({
 		"rlm.enabled": arm === "on",
+		"context.engine": arm === "on" ? "rlm" : "native",
 		"rlm.spillBytes": WORKLOADS.spillBytes,
 	});
 	const session = { cwd: `/tmp/rlm-eval-${arm}-${workload.id}`, settings } as ToolSession;
@@ -146,6 +151,10 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 		let text: string;
 		if (arm === "shake") {
 			text = shakeTruncate(file.text, spillBytes);
+		} else if (arm === "soft") {
+			text = softSummarize(file.text, file.name);
+		} else if (arm === "snapcompact") {
+			text = snapcompactStub(file.text, file.name);
 		} else {
 			const tool = wrapToolWithRlmSpill(
 				{
@@ -177,7 +186,6 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 		}
 	}
 
-	// M5: recover first needle — rlm search when on; shake has no store (midpoint lost).
 	let needleRecoverable = allNeedles.size === 0;
 	if (arm === "off") {
 		needleRecoverable = true;
@@ -192,7 +200,7 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 			}
 		}
 		needleRecoverable = ok;
-	} else if (arm === "shake") {
+	} else if (arm === "shake" || arm === "soft" || arm === "snapcompact") {
 		const blob = rootTexts.join("\n");
 		needleRecoverable = [...allNeedles].every(n => blob.includes(n));
 	}
@@ -219,16 +227,13 @@ async function runCell(arm: Arm, workload: Workload): Promise<Cell> {
 	};
 }
 
-
 async function main(): Promise<void> {
 	fs.mkdirSync(path.dirname(RESULTS), { recursive: true });
 	if (fs.existsSync(RESULTS)) fs.unlinkSync(RESULTS);
 
-	const arms: Arm[] = ["off", "on", "shake"];
-
+	const arms: Arm[] = ["off", "on", "shake", "soft", "snapcompact"];
 	for (const workload of WORKLOADS.workloads) {
 		if (workload.id === "W0-smoke") {
-			// smoke is live-RPC only; record a placeholder
 			for (const arm of arms) {
 				appendJsonl({
 					ts: Date.now(),

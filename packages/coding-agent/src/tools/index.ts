@@ -206,8 +206,11 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
-	/** Optional RLM depth-0 completer; tests inject a stub. Absent → query fail-open. */
-	rlmComplete?: (prompt: string) => Promise<string>;
+	/** Optional RLM depth-0 completer; host wires model-registry usage. Absent → query fail-open. */
+	rlmComplete?: (
+		prompt: string,
+	) => Promise<string | { text: string; tokens?: number; cost?: number }>;
+
 	/** Current session whose stored credential affinities should seed a child session. */
 	getCredentialSourceSessionId?: () => string | undefined;
 	/** Skip subprocess-kernel availability checks and warmup */

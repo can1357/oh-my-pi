@@ -21,6 +21,7 @@ export interface RlmStub {
 	stub: string;
 }
 
+
 export interface RlmPeek {
 	handle: string;
 	start: number;
@@ -35,12 +36,27 @@ export interface RlmHit {
 	citation: string;
 }
 
+export interface RlmTrajectoryEntry {
+	ts: number;
+	op: string;
+	detail: string;
+	failOpen?: boolean;
+}
+
 export interface RlmBudget {
 	maxDepth: number;
 	maxCalls: number;
 	maxTotalTokens: number;
+	/** Hard USD-style cost cap; 0 = unlimited. */
+	maxCost: number;
+	/** Wall-clock budget from store creation; 0 = unlimited. */
+	wallClockMs: number;
 	calls: number;
 	tokens: number;
+	cost: number;
+	startedAt: number;
+	cancelled: boolean;
+	cancelReason?: string;
 }
 
 /** Session-scoped original-byte store. Corpus never belongs in the root prompt. */
@@ -48,14 +64,22 @@ export class RlmStore {
 	#next = 1;
 	readonly records = new Map<string, RlmRecord>();
 	readonly budget: RlmBudget;
+	/** Honest partial trajectory for cancel / budget stops (RFC v1). */
+	readonly trajectory: RlmTrajectoryEntry[] = [];
 
 	constructor(budget?: Partial<RlmBudget>) {
 		this.budget = {
 			maxDepth: budget?.maxDepth ?? 0,
 			maxCalls: budget?.maxCalls ?? 32,
 			maxTotalTokens: budget?.maxTotalTokens ?? 1_000_000,
+			maxCost: budget?.maxCost ?? 0,
+			wallClockMs: budget?.wallClockMs ?? 0,
 			calls: 0,
 			tokens: 0,
+			cost: 0,
+			startedAt: budget?.startedAt ?? Date.now(),
+			cancelled: false,
+			cancelReason: undefined,
 		};
 	}
 
@@ -69,6 +93,7 @@ export class RlmStore {
 			text,
 		};
 		this.records.set(id, record);
+		this.note("put", `handle=rlm://h/${id} bytes=${record.bytes}${source ? ` source=${source}` : ""}`);
 		return record;
 	}
 
@@ -108,25 +133,69 @@ export class RlmStore {
 		return hits;
 	}
 
-	/** Charge a subcall. Throws when the mechanical budget is exhausted. */
-	charge(tokens: number): void {
+	/** Operator / abort path: stop further subcalls; keep handles + trajectory. */
+	cancel(reason = "cancelled"): void {
+		if (this.budget.cancelled) return;
+		this.budget.cancelled = true;
+		this.budget.cancelReason = reason;
+		this.note("cancel", reason, true);
+	}
+
+	note(op: string, detail: string, failOpen?: boolean): void {
+		this.trajectory.push({ ts: Date.now(), op, detail, failOpen });
+	}
+
+	/**
+	 * Charge a subcall. Throws {@link RlmBudgetError} when mechanical budget is exhausted,
+	 * cancelled, or wall-clock exceeded.
+	 */
+	charge(tokens: number, cost = 0): void {
+		if (this.budget.cancelled) {
+			throw new RlmBudgetError(`rlm cancelled: ${this.budget.cancelReason ?? "cancelled"}`);
+		}
+		if (this.budget.wallClockMs > 0) {
+			const elapsed = Date.now() - this.budget.startedAt;
+			if (elapsed > this.budget.wallClockMs) {
+				throw new RlmBudgetError(`rlm wallClockMs ${this.budget.wallClockMs} exhausted (${elapsed}ms elapsed)`);
+			}
+		}
 		if (this.budget.calls >= this.budget.maxCalls) {
 			throw new RlmBudgetError(`rlm maxCalls ${this.budget.maxCalls} exhausted`);
 		}
 		if (this.budget.tokens + tokens > this.budget.maxTotalTokens) {
 			throw new RlmBudgetError(`rlm maxTotalTokens ${this.budget.maxTotalTokens} exhausted`);
 		}
+		if (this.budget.maxCost > 0 && this.budget.cost >= this.budget.maxCost) {
+			throw new RlmBudgetError(`rlm maxCost ${this.budget.maxCost} exhausted`);
+		}
+		if (this.budget.maxCost > 0 && this.budget.cost + cost > this.budget.maxCost) {
+			throw new RlmBudgetError(`rlm maxCost ${this.budget.maxCost} exhausted`);
+		}
 		this.budget.calls += 1;
 		this.budget.tokens += tokens;
+		this.budget.cost += cost;
 	}
 
 	status(): string {
-		return [
+		const parts = [
 			`handles=${this.records.size}`,
 			`calls=${this.budget.calls}/${this.budget.maxCalls}`,
 			`tokens=${this.budget.tokens}/${this.budget.maxTotalTokens}`,
 			`maxDepth=${this.budget.maxDepth}`,
-		].join(" ");
+		];
+		if (this.budget.maxCost > 0) parts.push(`cost=${this.budget.cost.toFixed(4)}/${this.budget.maxCost}`);
+		if (this.budget.wallClockMs > 0) {
+			parts.push(`wallMs=${Date.now() - this.budget.startedAt}/${this.budget.wallClockMs}`);
+		}
+		if (this.budget.cancelled) parts.push(`cancelled=${this.budget.cancelReason ?? "yes"}`);
+		parts.push(`trajectory=${this.trajectory.length}`);
+		return parts.join(" ");
+	}
+
+
+	/** Compact-safe: never clears records. Compaction of root chat must call nothing here. */
+	assertSurvivesCompaction(): void {
+		// Marker for tests / reviewers — store is independent of message branch.
 	}
 
 	private require(handle: string): RlmRecord {

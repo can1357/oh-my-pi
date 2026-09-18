@@ -2568,6 +2568,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"context.engine": {
+		type: "string",
+		default: "native",
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "Context engine",
+			description:
+				"native = default compaction ladder. rlm = opt-in prompt-as-variable spill engine (same as rlm.enabled). Never compose both engines on one provider request for the same corpus.",
+		},
+	},
 	"rlm.enabled": {
 		type: "boolean",
 		default: false,
@@ -2576,7 +2587,7 @@ export const SETTINGS_SCHEMA = {
 			group: "RLM",
 			label: "RLM context engine",
 			description:
-				"Spill oversized tool results out of the neural window and inspect them with peek/search/query. Default off (native compaction).",
+				"Spill oversized tool results out of the neural window and inspect them with peek/search/query. Default off (native compaction). Also enabled when context.engine is rlm.",
 		},
 	},
 	"rlm.maxDepth": {
@@ -2609,6 +2620,26 @@ export const SETTINGS_SCHEMA = {
 			description: "Hard cap on estimated tokens charged to rlm query",
 		},
 	},
+	"rlm.maxCost": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM max cost",
+			description: "Hard USD-style cost cap for rlm query subcalls. 0 = unlimited.",
+		},
+	},
+	"rlm.wallClockMs": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM wall clock (ms)",
+			description: "Wall-clock budget for the session RLM store from first use. 0 = unlimited.",
+		},
+	},
 	"rlm.spillBytes": {
 		type: "number",
 		default: 20_480,
@@ -2619,6 +2650,17 @@ export const SETTINGS_SCHEMA = {
 			description: "Tool-result texts larger than this are stored as handles instead of entering the root prompt",
 		},
 	},
+	"rlm.subModel": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM sub-model",
+			description: "Optional model id for depth-0 llm_query. Empty = active session model (via rlmComplete).",
+		},
+	},
+
 
 
 	"compaction.midTurnEnabled": {

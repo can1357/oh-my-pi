@@ -5,10 +5,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import { convertToLlm } from "../src/session/messages";
 import {
+	appendRlmRuntimeGuide,
+	getContextEngine,
 	getRlmStore,
 	maybeSpill,
 	promptContainsCorpus,
 	resetRlmStoresForTest,
+	rlmEnabled,
+	rlmGuideIsAppendOnly,
+	rlmIsExclusiveEngine,
 	rlmQuery,
 	RlmStore,
 	wrapToolWithRlmSpill,
@@ -16,6 +21,7 @@ import {
 import { RlmTool } from "../src/tools/rlm";
 import type { ToolSession } from "../src/tools";
 import { Settings } from "../src/config/settings";
+
 
 const NEEDLE = "UNIQUE_ACCEPTANCE_NEEDLE_7c2e";
 
@@ -231,3 +237,92 @@ describe("RFC v1: compaction must not drop handles or reinject corpus", () => {
 		expect(store.search("rlm://h/1", NEEDLE).length).toBeGreaterThan(0);
 	});
 });
+
+describe("RFC v1: context.engine exclusive routing", () => {
+	test("context.engine rlm enables without rlm.enabled", () => {
+		const settings = Settings.isolated({ "context.engine": "rlm", "rlm.enabled": false });
+		const session = { settings } as { settings: Settings };
+		expect(getContextEngine(session)).toBe("rlm");
+		expect(rlmEnabled(session)).toBe(true);
+		expect(rlmIsExclusiveEngine(session)).toBe(true);
+	});
+
+	test("native default disables rlm", () => {
+		const settings = Settings.isolated({});
+		const session = { settings } as { settings: Settings };
+		expect(getContextEngine(session)).toBe("native");
+		expect(rlmEnabled(session)).toBe(false);
+	});
+});
+
+describe("RFC v1: runtime guide is append-only", () => {
+	test("append does not mutate base segments", () => {
+		const base = Object.freeze(["You are a coding agent.", "Be concise."]);
+		const next = appendRlmRuntimeGuide(base, true);
+		expect(rlmGuideIsAppendOnly(base, next)).toBe(true);
+		expect(base).toEqual(["You are a coding agent.", "Be concise."]);
+		expect(next[next.length - 1]?.includes("RLM context engine is on")).toBe(true);
+		const off = appendRlmRuntimeGuide(base, false);
+		expect(off).toEqual([...base]);
+	});
+});
+
+describe("RFC v1: cancel and wall-clock / cost budgets", () => {
+	test("cancel fail-opens subsequent query and keeps trajectory", async () => {
+		const store = new RlmStore({ maxCalls: 32 });
+		store.put(fatCorpus(40_000));
+		store.cancel("user-abort");
+		const result = await rlmQuery(store, "rlm://h/1", "q?", async () => "should-not-run");
+		expect(result.failOpen).toBe(true);
+		expect(result.text.includes("cancelled")).toBe(true);
+		expect(store.trajectory.some(e => e.op === "cancel")).toBe(true);
+		expect(store.get("rlm://h/1")).toBeDefined();
+	});
+
+	test("maxCost exhaustion fail-opens", async () => {
+		const store = new RlmStore({ maxCalls: 32, maxTotalTokens: 1_000_000, maxCost: 0.0001 });
+		store.put(fatCorpus(40_000));
+		// Pre-fill cost near cap
+		store.budget.cost = 0.0001;
+		const result = await rlmQuery(store, "rlm://h/1", "q?", async () => "ok");
+		expect(result.failOpen).toBe(true);
+		expect(result.text.includes("maxCost")).toBe(true);
+	});
+
+	test("wallClockMs exhaustion fail-opens", async () => {
+		const store = new RlmStore({
+			maxCalls: 32,
+			maxTotalTokens: 1_000_000,
+			wallClockMs: 1,
+			startedAt: Date.now() - 50,
+		});
+		store.put(fatCorpus(40_000));
+		const result = await rlmQuery(store, "rlm://h/1", "q?", async () => "ok");
+		expect(result.failOpen).toBe(true);
+		expect(result.text.includes("wallClockMs")).toBe(true);
+	});
+
+	test("completer can report usage cost on success path", async () => {
+		const store = new RlmStore({ maxCalls: 8, maxTotalTokens: 1_000_000, maxCost: 1 });
+		store.put(fatCorpus(40_000));
+		const result = await rlmQuery(store, "rlm://h/1", "q?", async () => ({
+			text: "from-registry",
+			tokens: 12,
+			cost: 0.01,
+		}));
+		expect(result.failOpen).toBeUndefined();
+		expect(result.text).toBe("from-registry");
+		expect(store.budget.cost).toBeGreaterThanOrEqual(0.01);
+	});
+});
+
+describe("RFC v1: compaction never clears store API", () => {
+	test("resetRlmStoresForTest is the only clear path; compact must not import it", async () => {
+		const maintenance = await Bun.file(
+			new URL("../src/session/session-maintenance.ts", import.meta.url).pathname,
+		).text();
+		expect(maintenance.includes("resetRlmStoresForTest")).toBe(false);
+		expect(maintenance.includes("from \"../rlm\"") || maintenance.includes("from '../rlm'")).toBe(false);
+	});
+});
+

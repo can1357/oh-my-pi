@@ -103,22 +103,27 @@ async function applyRlmCommand(session: AgentSession, args: string): Promise<str
 	const arg = args.trim().toLowerCase();
 	const settings = session.settings;
 	if (arg === "status") {
-		const on = settings.get("rlm.enabled") ? "on" : "off";
+		const on = settings.get("rlm.enabled") || settings.get("context.engine") === "rlm" ? "on" : "off";
 		const hasTool = session.getEnabledToolNames().includes("rlm");
-		return `RLM is ${on}. tool=${hasTool ? "active" : "inactive"} spillBytes=${settings.get("rlm.spillBytes")} maxCalls=${settings.get("rlm.maxCalls")} maxDepth=${settings.get("rlm.maxDepth")}.`;
+		const engine = settings.get("context.engine") ?? "native";
+		return `RLM is ${on}. engine=${engine} tool=${hasTool ? "active" : "inactive"} spillBytes=${settings.get("rlm.spillBytes")} maxCalls=${settings.get("rlm.maxCalls")} maxDepth=${settings.get("rlm.maxDepth")} maxCost=${settings.get("rlm.maxCost")} wallClockMs=${settings.get("rlm.wallClockMs")}.`;
 	}
 	if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
 		const enabled = arg === "on" ? true : arg === "off" ? false : !settings.get("rlm.enabled");
 		settings.override("rlm.enabled", enabled);
+		// Keep context.engine in sync for exclusive routing readers.
+		settings.override("context.engine", enabled ? "rlm" : "native");
 		const installed = await session.setRlmToolEnabled(enabled);
 		if (enabled && !installed) {
 			settings.override("rlm.enabled", false);
+			settings.override("context.engine", "native");
 			return "RLM could not install the rlm tool in this session.";
 		}
-		return `RLM ${enabled ? "enabled" : "disabled"} for this session.`;
+		return `RLM ${enabled ? "enabled" : "disabled"} for this session (context.engine=${enabled ? "rlm" : "native"}).`;
 	}
 	return undefined;
 }
+
 
 
 

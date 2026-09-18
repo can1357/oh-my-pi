@@ -1962,7 +1962,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this undefined so tools and session job snapshots refuse async work
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
+			/** Depth-0 llm_query via session side channel + usage accounting (RFC #12400). */
+			rlmComplete: async (prompt: string) => {
+				if (!session) {
+					return { text: "rlm query unavailable: session not ready (fail-open)" };
+				}
+				try {
+					const { replyText, assistantMessage } = await session.runEphemeralTurn({
+						promptText: prompt,
+						conversationKey: "rlm-query",
+					});
+					const usage = assistantMessage.usage;
+					return {
+						text: replyText,
+						tokens: usage?.totalTokens,
+						cost: usage?.cost?.total,
+					};
+				} catch (error) {
+					const msg = error instanceof Error ? error.message : String(error);
+					return { text: `${msg} (fail-open)` };
+				}
+			},
 		};
+
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {

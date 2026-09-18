@@ -1766,16 +1766,21 @@ export class SessionTools {
 		promptText: string,
 		isCurrent: () => boolean,
 	): Promise<SystemPromptPreparation> {
+		const { systemPromptWithRlmGuide } = await import("../rlm/session");
+		const withGuide = (base: string[]) => systemPromptWithRlmGuide(base, this.#host);
+
 		const backend = await resolveMemoryBackend(this.#host.settings);
-		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
+		if (!isCurrent() || !backend.beforeAgentStartPrompt) {
+			return { systemPrompt: withGuide(this.#baseSystemPrompt) };
+		}
 
 		try {
 			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
-			if (!isCurrent() || !memory) return { systemPrompt: this.#baseSystemPrompt };
+			if (!isCurrent() || !memory) return { systemPrompt: withGuide(this.#baseSystemPrompt) };
 			const injected = memory.context;
 			if (!injected) {
 				return {
-					systemPrompt: this.#baseSystemPrompt,
+					systemPrompt: withGuide(this.#baseSystemPrompt),
 					commit: () => isCurrent() && memory.commit(),
 				};
 			}
@@ -1789,21 +1794,21 @@ export class SessionTools {
 					error: String(refreshErr),
 				});
 			}
-			if (!isCurrent()) return { systemPrompt: this.#baseSystemPrompt };
+			if (!isCurrent()) return { systemPrompt: withGuide(this.#baseSystemPrompt) };
 
 			const preparedBase = refreshed?.systemPrompt ?? this.#baseSystemPrompt;
-			const stablePrompt = [...preparedBase, injected];
+			// Memory inject + RLM guide both append after the stable base; base segments unchanged.
+			const stablePrompt = withGuide([...preparedBase, injected]);
 			return {
 				systemPrompt: stablePrompt,
 				commit: () => {
 					if (!isCurrent() || !memory.commit()) return false;
 					refreshed?.commit?.();
-					// A handler may have refreshed tools or policy. Promote the recall onto
-					// that winning base, never replace it with the preparation's snapshot.
 					const currentBase = this.#baseSystemPrompt;
 					this.#host.captureMemoryPromotionSnapshot(currentBase);
-					this.#baseSystemPrompt = currentBase === preparedBase ? stablePrompt : [...currentBase, injected];
-					this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
+					// Keep base storage free of the RLM guide so prompt-cache identity stays stable.
+					this.#baseSystemPrompt = currentBase === preparedBase ? [...preparedBase, injected] : [...currentBase, injected];
+					this.#applyAgentSystemPrompt(withGuide(this.#baseSystemPrompt));
 					return true;
 				},
 			};
@@ -1812,9 +1817,10 @@ export class SessionTools {
 				backend: backend.id,
 				error: String(err),
 			});
-			return { systemPrompt: this.#baseSystemPrompt };
+			return { systemPrompt: withGuide(this.#baseSystemPrompt) };
 		}
 	}
+
 
 	/**
 	 * Compose a stable signature for the inputs that `rebuildSystemPrompt` reads.

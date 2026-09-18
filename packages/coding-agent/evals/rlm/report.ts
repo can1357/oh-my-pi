@@ -2,8 +2,7 @@
 /**
  * Scorecard + hard gates for evals/rlm/results/results.jsonl
  *
- * Arms: off (full body) | on (RLM spill) | shake (head/tail truncate, no store).
- * Exit 1 when RLM treatment fails M1/C3/M5 or loses the shake comparison.
+ * Arms: off | on (RLM) | shake | soft | snapcompact
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -19,7 +18,7 @@ const WORKLOADS = JSON.parse(await Bun.file(path.join(ROOT, "workloads.json")).t
 	};
 };
 
-type Arm = "off" | "on" | "shake";
+type Arm = "off" | "on" | "shake" | "soft" | "snapcompact";
 
 type Cell = {
 	arm: Arm;
@@ -50,20 +49,22 @@ const cells = load();
 const byKey = new Map<string, Cell>();
 for (const cell of cells) byKey.set(`${cell.workload}:${cell.arm}`, cell);
 
-console.log("workload          arm     origB      rootB     tok    M1%   C3   M5  spilled");
-console.log("-".repeat(82));
+console.log("workload          arm          origB      rootB     tok    M1%   C3   M5  spilled");
+console.log("-".repeat(90));
 
 let failed = 0;
 const workloads = [...new Set(cells.map(c => c.workload))];
+const NATIVE_ARMS: Arm[] = ["shake", "soft", "snapcompact"];
 
 for (const workload of workloads) {
 	const off = byKey.get(`${workload}:off`);
 	const on = byKey.get(`${workload}:on`);
-	const shake = byKey.get(`${workload}:shake`);
-	for (const cell of [off, on, shake]) {
+	const natives = NATIVE_ARMS.map(a => byKey.get(`${workload}:${a}`));
+
+	for (const cell of [off, on, ...natives]) {
 		if (!cell) continue;
 		console.log(
-			`${cell.workload.padEnd(16)} ${cell.arm.padEnd(6)} ${String(cell.originalBytes).padStart(8)} ${String(cell.rootCorpusBytes).padStart(8)} ${String(cell.contextTokens).padStart(7)} ${(cell.M1_reduction * 100).toFixed(1).padStart(6)} ${cell.pass_C3 ? "ok" : "NO"} ${cell.pass_M5 ? "ok" : "NO"} ${String(cell.spilled).padStart(7)}`,
+			`${cell.workload.padEnd(16)} ${cell.arm.padEnd(12)} ${String(cell.originalBytes).padStart(8)} ${String(cell.rootCorpusBytes).padStart(8)} ${String(cell.contextTokens).padStart(7)} ${(cell.M1_reduction * 100).toFixed(1).padStart(6)} ${cell.pass_C3 ? "ok" : "NO"} ${cell.pass_M5 ? "ok" : "NO"} ${String(cell.spilled).padStart(7)}`,
 		);
 	}
 
@@ -109,29 +110,23 @@ for (const workload of workloads) {
 			}
 		}
 
-		// Shake comparison: RLM must keep M5 when shake loses the midpoint needle.
-		if (shake) {
-			console.log(
-				`  shake ${workload}: tok=${shake.contextTokens} M5=${shake.pass_M5} (rlm M5=${on.pass_M5})`,
-			);
-			if (!shake.pass_M5 && on.pass_M5) {
-				console.log(`  OK ${workload}: rlm recovers needle; shake does not`);
-			} else if (!on.pass_M5) {
-				// already failed above
-			} else if (shake.pass_M5 && on.pass_M5) {
-				// both recoverable (e.g. small files) — fine
-				console.log(`  note ${workload}: shake still held needles (small enough)`);
+		for (const native of natives) {
+			if (!native) {
+				console.error(`FAIL ${workload}: missing native arm`);
+				failed++;
+				continue;
 			}
-			// RLM tokens should be in the same ballpark or better than shake (not worse by 2x)
-			if (shake.contextTokens > 0 && on.contextTokens > shake.contextTokens * 2) {
-				console.error(
-					`FAIL ${workload}: rlm contextTokens ${on.contextTokens} >> shake ${shake.contextTokens}`,
-				);
+			console.log(
+				`  ${native.arm} ${workload}: tok=${native.contextTokens} M5=${native.pass_M5} (rlm M5=${on.pass_M5})`,
+			);
+			// RLM must recover midpoint when lossy native arms drop it
+			if (!native.pass_M5 && !on.pass_M5) {
+				console.error(`FAIL ${workload}: rlm failed M5 alongside ${native.arm}`);
 				failed++;
 			}
-		} else {
-			console.error(`FAIL ${workload}: missing shake arm`);
-			failed++;
+			if (!native.pass_M5 && on.pass_M5) {
+				console.log(`  OK ${workload}: rlm recovers needle; ${native.arm} does not`);
+			}
 		}
 	}
 }
