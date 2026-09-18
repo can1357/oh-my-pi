@@ -981,11 +981,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 // Internal Helpers
 
-function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
+function createCustomToolContext(ctx: ExtensionContext, settings?: Settings): CustomToolContext {
 	return {
 		sessionManager: ctx.sessionManager,
 		modelRegistry: ctx.modelRegistry,
 		model: ctx.model,
+		settings,
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
@@ -1032,7 +1033,7 @@ function registerEvalCleanup(): void {
 	postmortem.register("python-cleanup", disposeAllKernelSessions);
 }
 
-export function customToolToDefinition(tool: CustomTool, sourcePath?: string): ToolDefinition {
+export function customToolToDefinition(tool: CustomTool, sourcePath?: string, settings?: Settings): ToolDefinition {
 	const definition: ToolDefinition & { [TOOL_DEFINITION_MARKER]: true } = {
 		name: tool.name,
 		label: tool.label,
@@ -1054,8 +1055,10 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 		legacyName: tool.legacyName,
 		sourcePath,
 		execute: (toolCallId, params, signal, onUpdate, ctx) =>
-			tool.execute(toolCallId, params, onUpdate, createCustomToolContext(ctx), signal),
-		onSession: tool.onSession ? (event, ctx) => tool.onSession?.(event, createCustomToolContext(ctx)) : undefined,
+			tool.execute(toolCallId, params, onUpdate, createCustomToolContext(ctx, settings), signal),
+		onSession: tool.onSession
+			? (event, ctx) => tool.onSession?.(event, createCustomToolContext(ctx, settings))
+			: undefined,
 		renderCall: tool.renderCall,
 		renderResult: tool.renderResult
 			? (result, options, theme): Component => {
@@ -1073,18 +1076,22 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 	return definition;
 }
 
-function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyMap<string, string>): ExtensionFactory {
+function createCustomToolsExtension(
+	tools: CustomTool[],
+	sourcePaths?: ReadonlyMap<string, string>,
+	settings?: Settings,
+): ExtensionFactory {
 	const uniqueTools = deduplicateMCPToolsByName(tools);
 	return api => {
 		for (const tool of uniqueTools) {
-			api.registerTool(customToolToDefinition(tool, sourcePaths?.get(tool.name)));
+			api.registerTool(customToolToDefinition(tool, sourcePaths?.get(tool.name), settings));
 		}
 
 		const runOnSession = async (event: CustomToolSessionEvent, ctx: ExtensionContext) => {
 			for (const tool of uniqueTools) {
 				if (!tool.onSession) continue;
 				try {
-					await tool.onSession(event, createCustomToolContext(ctx));
+					await tool.onSession(event, createCustomToolContext(ctx, settings));
 				} catch (err) {
 					logger.warn("Custom tool onSession error", { tool: tool.name, error: String(err) });
 				}
@@ -2171,7 +2178,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			inlineExtensions.push(...(options.extensions ?? []));
 			inlineExtensions.push(createAutoresearchExtension);
 			if (customTools.length > 0) {
-				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths));
+				inlineExtensions.push(createCustomToolsExtension(customTools, customToolSourcePaths, settings));
 			}
 		}
 		// Forward the path list (NOT the loaded tools) to subagents so they
@@ -2904,7 +2911,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const allCustomTools = [
 			...registeredTools,
 			...sdkCustomTools.map(tool => {
-				const definition = isCustomTool(tool) ? customToolToDefinition(tool) : tool;
+				const definition = isCustomTool(tool) ? customToolToDefinition(tool, undefined, settings) : tool;
 				return { definition, extensionPath: "<sdk>", sourceInfo: extensionToolSourceInfo(definition, "<sdk>") };
 			}),
 		];

@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -42,8 +42,7 @@ describe("generate_image tool gating", () => {
 	});
 
 	function startupShortcuts() {
-		// These tests vary only tool registration and activation. Bypass unrelated
-		// filesystem discovery and workspace walking on every SDK session startup.
+		// Bypass unrelated filesystem discovery and workspace walking on startup.
 		return {
 			skills: [],
 			contextFiles: [],
@@ -140,6 +139,87 @@ describe("generate_image tool gating", () => {
 			"generate_image",
 		]);
 		expect(names).toContain("generate_image");
+	});
+
+	it("uses the session's OpenRouter image model through the registered tool", async () => {
+		const imageModel = "test/sdk-image-model";
+		const chatModel = getBundledModel("openai", "gpt-4o-mini");
+		const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+		const requests: Array<{ url: string; method: string }> = [];
+		const generatedImagePaths: string[] = [];
+		const availableSpy = spyOn(modelRegistry, "getAvailableForProviders").mockReturnValue([chatModel]);
+		const configuredAuthSpy = spyOn(modelRegistry, "hasConfiguredAuth").mockReturnValue(false);
+		const apiKeySpy = spyOn(modelRegistry, "getApiKey").mockResolvedValue(undefined);
+		const providerKeySpy = spyOn(modelRegistry, "getApiKeyForProvider").mockImplementation(async provider =>
+			provider === "openrouter" ? "test-openrouter-key" : undefined,
+		);
+		const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			requests.push({ url, method });
+			if (url === `https://openrouter.ai/api/v1/images/models/${imageModel}/endpoints` && method === "GET") {
+				return Response.json({
+					id: imageModel,
+					endpoints: [{ provider_tag: "test", supported_parameters: {} }],
+				});
+			}
+			if (url === "https://openrouter.ai/api/v1/images" && method === "POST") {
+				expect(JSON.parse(String(init?.body)).model).toBe(imageModel);
+				return Response.json({ data: [{ b64_json: pngBase64, media_type: "image/png" }] });
+			}
+			throw new Error(`Unexpected request: ${method} ${url}`);
+		}) as typeof fetch);
+
+		try {
+			const { session } = await createAgentSession({
+				...startupShortcuts(),
+				cwd: registryDir,
+				agentDir: registryDir,
+				modelRegistry,
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({
+					"plan.enabled": false,
+					"generate_image.enabled": true,
+					"providers.imageOpenRouterModel": imageModel,
+				}),
+				model: chatModel,
+				disableExtensionDiscovery: true,
+				toolNames: ["generate_image"],
+			});
+			sessions.push(session);
+			const tool = session.getToolByName("generate_image");
+			expect(tool).toBeDefined();
+			const result = await tool!.execute("sdk-openrouter-image", {
+				subject: "A red circle on white",
+				provider: "openrouter",
+			});
+			const details = result.details as {
+				provider: string;
+				model: string;
+				imagePaths: string[];
+				images: Array<{ mimeType: string }>;
+			};
+			generatedImagePaths.push(...details.imagePaths);
+			expect(requests).toEqual([
+				{ url: `https://openrouter.ai/api/v1/images/models/${imageModel}/endpoints`, method: "GET" },
+				{ url: "https://openrouter.ai/api/v1/images", method: "POST" },
+			]);
+			expect(details.provider).toBe("openrouter");
+			expect(details.model).toBe(imageModel);
+			expect(details.imagePaths).toHaveLength(1);
+			expect(details.images[0]?.mimeType).toBe("image/png");
+			expect(path.extname(details.imagePaths[0])).toBe(".png");
+			expect(await Bun.file(details.imagePaths[0]).bytes()).toEqual(
+				new Uint8Array(Buffer.from(pngBase64, "base64")),
+			);
+		} finally {
+			fetchSpy.mockRestore();
+			providerKeySpy.mockRestore();
+			apiKeySpy.mockRestore();
+			configuredAuthSpy.mockRestore();
+			availableSpy.mockRestore();
+			for (const imagePath of generatedImagePaths) removeSyncWithRetries(imagePath);
+		}
 	});
 
 	it("exposes generate_image as an xd:// device (not top-level) in a default session", async () => {

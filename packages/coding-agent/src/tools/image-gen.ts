@@ -25,6 +25,7 @@ import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-header
 import {
 	$env,
 	isEnoent,
+	isRecord,
 	parseImageMetadata,
 	prompt,
 	ptree,
@@ -112,6 +113,9 @@ export const imageGenSchema = type({
 	"image_size?": imageSizeSchema,
 	"input?": inputImageSchema.array().describe("input images"),
 	"provider?": imageProviderSchema,
+	"model?": type("string").describe(
+		"OpenRouter image model ID. Selects OpenRouter and overrides providers.imageOpenRouterModel.",
+	),
 });
 export type ImageGenParams = typeof imageGenSchema.infer;
 export type GeminiResponseModality = typeof responseModalitySchema.infer;
@@ -271,27 +275,19 @@ interface OpenAIHostedImageResult {
 	usage?: OpenAIResponsesUsage;
 }
 
-interface OpenRouterImageUrl {
-	url: string;
+type OpenRouterImageCapability =
+	| { type: "enum"; values: string[] }
+	| { type: "range"; min: number; max: number }
+	| { type: "boolean" };
+
+interface OpenRouterImageEndpoint {
+	provider_tag: string | null;
+	supported_parameters: Record<string, OpenRouterImageCapability>;
 }
 
-interface OpenRouterContentPart {
-	type: "text" | "image_url";
-	text?: string;
-	image_url?: OpenRouterImageUrl;
-}
-
-interface OpenRouterMessage {
-	content?: string | OpenRouterContentPart[];
-	images?: Array<string | { image_url?: OpenRouterImageUrl }>;
-}
-
-interface OpenRouterChoice {
-	message?: OpenRouterMessage;
-}
-
-interface OpenRouterResponse {
-	choices?: OpenRouterChoice[];
+interface OpenRouterImageEndpoints {
+	id: string;
+	endpoints: OpenRouterImageEndpoint[];
 }
 
 interface AntigravityRequest {
@@ -386,10 +382,6 @@ function normalizeDataUrl(data: string): { data: string; mimeType?: string } {
 	return { data: match[2] ?? "", mimeType: match[1] };
 }
 
-function resolveOpenRouterModel(model: string): string {
-	return model.includes("/") ? model : `google/${model}`;
-}
-
 function toDataUrl(image: InlineImageData): string {
 	return `data:${image.mimeType};base64,${image.data}`;
 }
@@ -425,54 +417,117 @@ async function loadImageFromUrl(
 	return { data: buffer.toBase64(), mimeType: contentType };
 }
 
-function collectOpenRouterResponseText(message: OpenRouterMessage | undefined): string | undefined {
-	if (!message) return undefined;
-	if (typeof message.content === "string") {
-		const trimmed = message.content.trim();
-		return trimmed.length > 0 ? trimmed : undefined;
+function resolveOpenRouterImageRouting(
+	rawText: string,
+	model: string,
+	aspectRatio: ImageGenParams["aspect_ratio"],
+	referenceCount: number,
+): { only: string[] } | undefined {
+	const invalidMetadata = () => new Error(`OpenRouter image model "${model}" returned invalid capability metadata.`);
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(rawText);
+	} catch {
+		throw invalidMetadata();
 	}
-	if (Array.isArray(message.content)) {
-		const texts = message.content
-			.filter(part => part.type === "text")
-			.map(part => part.text)
-			.filter((text): text is string => Boolean(text));
-		const combined = texts.join("\n").trim();
-		return combined.length > 0 ? combined : undefined;
+	if (!isRecord(parsed) || typeof parsed.id !== "string" || !Array.isArray(parsed.endpoints)) {
+		throw invalidMetadata();
 	}
-	return undefined;
-}
-
-function extractOpenRouterImageUrls(message: OpenRouterMessage | undefined): string[] {
-	const urls: string[] = [];
-	if (!message) return urls;
-	for (const image of message.images ?? []) {
-		if (typeof image === "string") {
-			urls.push(image);
-			continue;
+	for (const endpoint of parsed.endpoints) {
+		if (
+			!isRecord(endpoint) ||
+			!(endpoint.provider_tag === null || typeof endpoint.provider_tag === "string") ||
+			!isRecord(endpoint.supported_parameters)
+		) {
+			throw invalidMetadata();
 		}
-		if (image.image_url?.url) {
-			urls.push(image.image_url.url);
-		}
-	}
-	if (Array.isArray(message.content)) {
-		for (const part of message.content) {
-			if (part.type === "image_url" && part.image_url?.url) {
-				urls.push(part.image_url.url);
+		for (const parameter of ["aspect_ratio", "input_references"]) {
+			const capability = endpoint.supported_parameters[parameter];
+			if (capability === undefined) continue;
+			if (!isRecord(capability)) throw invalidMetadata();
+			if (capability.type === "boolean") continue;
+			if (
+				parameter === "aspect_ratio" &&
+				capability.type === "enum" &&
+				Array.isArray(capability.values) &&
+				capability.values.every(value => typeof value === "string")
+			) {
+				continue;
 			}
+			if (
+				parameter === "input_references" &&
+				capability.type === "range" &&
+				typeof capability.min === "number" &&
+				typeof capability.max === "number" &&
+				Number.isInteger(capability.min) &&
+				Number.isInteger(capability.max) &&
+				capability.min >= 0 &&
+				capability.max >= capability.min
+			) {
+				continue;
+			}
+			throw invalidMetadata();
 		}
 	}
-	return urls;
+	const { endpoints } = parsed as unknown as OpenRouterImageEndpoints;
+	if (endpoints.length === 0) {
+		throw new Error(`OpenRouter image model "${model}" has no available image endpoints.`);
+	}
+	const qualifies = endpoints.map(endpoint => {
+		const ratio = endpoint.supported_parameters.aspect_ratio;
+		const references = endpoint.supported_parameters.input_references;
+		const acceptsRatio =
+			!aspectRatio || ratio?.type === "boolean" || (ratio?.type === "enum" && ratio.values.includes(aspectRatio));
+		const acceptsReferences =
+			references?.type === "boolean" ||
+			(references?.type === "range"
+				? referenceCount >= references.min && referenceCount <= references.max
+				: referenceCount === 0);
+		return acceptsRatio && acceptsReferences && referenceCount <= 16;
+	});
+	if (!qualifies.some(Boolean)) {
+		const advertised = endpoints.map(endpoint => {
+			const ratio = endpoint.supported_parameters.aspect_ratio;
+			const references = endpoint.supported_parameters.input_references;
+			const ratioValues =
+				ratio?.type === "enum" ? ratio.values.join(", ") : ratio?.type === "boolean" ? "any" : "none";
+			const referenceBounds =
+				references?.type === "range"
+					? `${references.min}..${references.max}`
+					: references?.type === "boolean"
+						? "0..16"
+						: "0";
+			return `${endpoint.provider_tag ?? "untagged"}: aspect_ratio [${ratioValues}], input_references ${referenceBounds}`;
+		});
+		const constraints = [
+			...(aspectRatio ? [`aspect_ratio=${aspectRatio}`] : []),
+			`input_references=${referenceCount} (API maximum 16)`,
+			`advertised ${advertised.join("; ")}`,
+		].join("; ");
+		throw new Error(`OpenRouter image model "${model}" cannot satisfy the requested options: ${constraints}.`);
+	}
+	if (qualifies.every(Boolean)) return undefined;
+	const rejectedTags = new Set<string>();
+	const tags = new Set<string>();
+	for (const [index, endpoint] of endpoints.entries()) {
+		if (!endpoint.provider_tag) continue;
+		(qualifies[index] ? tags : rejectedTags).add(endpoint.provider_tag);
+	}
+	for (const tag of rejectedTags) tags.delete(tag);
+	if (tags.size === 0) {
+		throw new Error(
+			`OpenRouter image model "${model}" cannot restrict routing to endpoints that support the requested options.`,
+		);
+	}
+	return { only: [...tags] };
 }
 
-/**
- * Shared POST for OpenAI-style image endpoints (xAI, DeepInfra): bearer auth,
- * JSON body, and error mapping for both `{error: {message}}` and `{detail}`
- * error envelopes. Returns the raw response text.
- */
-async function postImageEndpointRequest(options: {
+/** Authenticated JSON requests shared by image generation and capability discovery. */
+async function requestImageEndpoint(options: {
 	label: string;
 	url: string;
-	body: unknown;
+	body?: unknown;
+	method?: "GET" | "POST";
 	apiKey: ApiKey;
 	resolveHeaders?: () => Promise<Record<string, string> | undefined>;
 	fetchImpl: FetchImpl;
@@ -483,14 +538,14 @@ async function postImageEndpointRequest(options: {
 		async key => {
 			const configuredHeaders = await options.resolveHeaders?.();
 			const resp = await options.fetchImpl(options.url, {
-				method: "POST",
+				method: options.method ?? "POST",
 				headers: {
 					...configuredHeaders,
 					Authorization: `Bearer ${key}`,
 					"Content-Type": "application/json",
 					"User-Agent": USER_AGENT,
 				},
-				body: JSON.stringify(options.body),
+				body: options.method === "GET" ? undefined : JSON.stringify(options.body),
 				signal: options.signal,
 			});
 			const rawText = await resp.text();
@@ -522,15 +577,36 @@ async function collectImageEndpointImages(
 	fetchImpl: FetchImpl,
 	signal: AbortSignal | undefined,
 ): Promise<InlineImageData[]> {
-	const data = JSON.parse(rawText) as { data?: Array<{ b64_json?: string | null; url?: string | null }> };
+	const data = JSON.parse(rawText) as {
+		data?: Array<{ b64_json?: string | null; url?: string | null; media_type?: string | null }>;
+	};
+	if (!isRecord(data) || (data.data !== undefined && !Array.isArray(data.data))) {
+		throw new Error("Image endpoint returned invalid image data.");
+	}
 	const inlineImages: InlineImageData[] = [];
 	for (const entry of data.data ?? []) {
+		if (
+			!isRecord(entry) ||
+			(entry.b64_json != null && typeof entry.b64_json !== "string") ||
+			(entry.url != null && typeof entry.url !== "string") ||
+			(entry.media_type != null && typeof entry.media_type !== "string")
+		) {
+			throw new Error("Image endpoint returned invalid image data.");
+		}
+		const declaredType = entry.media_type?.trim();
+		if (declaredType && !/^image\/[^\s/;]+$/.test(declaredType)) {
+			throw new Error(`Image endpoint returned a non-image media type: ${declaredType}.`);
+		}
 		if (entry.b64_json) {
 			const bytes = Buffer.from(entry.b64_json, "base64");
-			const mimeType = parseImageMetadata(bytes)?.mimeType ?? "image/png";
+			const mimeType = declaredType || parseImageMetadata(bytes)?.mimeType || "image/png";
 			inlineImages.push({ data: entry.b64_json, mimeType });
 		} else if (entry.url) {
-			inlineImages.push(await loadImageFromUrl(entry.url, fetchImpl, signal));
+			const image = await loadImageFromUrl(entry.url, fetchImpl, signal);
+			if (declaredType) image.mimeType = declaredType;
+			inlineImages.push(image);
+		} else {
+			throw new Error("Image endpoint returned an entry without image data.");
 		}
 	}
 	return inlineImages;
@@ -579,11 +655,16 @@ export function setImageProviderOrder(providers: readonly string[]): void {
 	configuredImageProviderOrder = providers.filter(isImageProviderId);
 }
 function assertImageAspectRatioSupported(provider: ImageProvider, aspectRatio: ImageGenParams["aspect_ratio"]): void {
-	if (!aspectRatio || provider === "xai" || COMMON_IMAGE_ASPECT_RATIO_SET.has(aspectRatio)) {
+	if (
+		!aspectRatio ||
+		provider === "xai" ||
+		provider === "openrouter" ||
+		COMMON_IMAGE_ASPECT_RATIO_SET.has(aspectRatio)
+	) {
 		return;
 	}
 	throw new Error(
-		`Aspect ratio ${aspectRatio} is only supported by xAI image generation. Set providers.image to xai or use one of ${COMMON_IMAGE_ASPECT_RATIOS.join(", ")}.`,
+		`Aspect ratio ${aspectRatio} requires xAI or a supporting OpenRouter image model. Select one of those providers or use one of ${COMMON_IMAGE_ASPECT_RATIOS.join(", ")}.`,
 	);
 }
 
@@ -903,6 +984,7 @@ function getExtensionForMime(mimeType: string): string {
 		"image/jpeg": "jpg",
 		"image/gif": "gif",
 		"image/webp": "webp",
+		"image/svg+xml": "svg",
 	};
 	return map[mimeType] ?? "png";
 }
@@ -1308,8 +1390,20 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 	parameters: imageGenSchema,
 	async execute(_toolCallId, params, _onUpdate, ctx, signal) {
 		return untilAborted(signal, async () => {
+			const configuredModel = (ctx.settings ?? settings).get("providers.imageOpenRouterModel")?.trim();
+			const requestedModel = params.model?.trim();
+			if (params.model !== undefined && !requestedModel) {
+				throw new Error("model must be a non-empty OpenRouter image model ID.");
+			}
+			if (requestedModel && params.provider && params.provider !== "auto" && params.provider !== "openrouter") {
+				throw new Error(`model selects OpenRouter and cannot be combined with provider "${params.provider}".`);
+			}
+			const openRouterModel = requestedModel || configuredModel || DEFAULT_OPENROUTER_MODEL;
+			const explicitOpenRouterModel = Boolean(requestedModel || configuredModel);
 			const sessionId = ctx.sessionManager.getSessionId();
-			const providerOrder = imageProviderOrder(ctx.model, params.provider);
+			const providerOrder: ImageProvider[] = requestedModel
+				? ["openrouter"]
+				: imageProviderOrder(ctx.model, params.provider);
 			const cwd = ctx.sessionManager.getCwd();
 			const requestSignal = ptree.combineSignals(signal, IMAGE_TIMEOUT);
 			const fetchImpl = ctx.fetch ?? fetch;
@@ -1321,7 +1415,14 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 			for (const preferredProvider of providerOrder) {
 				const apiKey = await findImageApiKey(preferredProvider, ctx.modelRegistry, ctx.model, sessionId);
-				if (!apiKey) continue;
+				if (!apiKey) {
+					if (preferredProvider === "openrouter" && explicitOpenRouterModel) {
+						throw new Error(
+							`No OpenRouter credentials for image model "${openRouterModel}". Log in to OpenRouter or set OPENROUTER_API_KEY.`,
+						);
+					}
+					continue;
+				}
 				foundCredentials = true;
 				if (!resolvedImageCache) {
 					resolvedImageCache = [];
@@ -1344,7 +1445,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						// seed only hints credential resolution and the fallback path.
 						model = DEFAULT_ANTIGRAVITY_MODEL;
 					} else if (provider === "openrouter") {
-						model = DEFAULT_OPENROUTER_MODEL;
+						model = openRouterModel;
 					} else if (provider === "xai") {
 						model = DEFAULT_XAI_IMAGE_MODEL;
 					} else if (provider === "deepinfra") {
@@ -1352,10 +1453,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					} else {
 						model = DEFAULT_MODEL;
 					}
-					const resolvedModel = provider === "openrouter" ? resolveOpenRouterModel(model) : model;
+					const resolvedModel = model;
 					if (
 						params.aspect_ratio &&
 						provider !== "xai" &&
+						provider !== "openrouter" &&
 						!COMMON_IMAGE_ASPECT_RATIO_SET.has(params.aspect_ratio)
 					) {
 						unsupportedAspectRatioProvider ??= provider;
@@ -1602,7 +1704,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 							baseUrl: xaiCreds.baseURL,
 						});
 
-						const xaiRawText = await postImageEndpointRequest({
+						const xaiRawText = await requestImageEndpoint({
 							label: "xAI",
 							url: `${xaiCreds.baseURL}${xaiEndpoint}`,
 							body: xaiBody,
@@ -1621,94 +1723,51 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					}
 
 					if (provider === "openrouter") {
-						const prompt = assemblePrompt(params);
-						const contentParts: OpenRouterContentPart[] = [{ type: "text", text: prompt }];
-						for (const image of resolvedImages) {
-							contentParts.push({ type: "image_url", image_url: { url: toDataUrl(image) } });
-						}
-
-						const requestBody = {
-							model: resolvedModel,
-							messages: [{ role: "user" as const, content: contentParts }],
-						};
-
-						const rawText = await withAuth(
-							apiKey.apiKey,
-							async key => {
-								const requestModel = ctx.modelRegistry!.find("openrouter", resolvedModel);
+						const requestOptions = {
+							label: `OpenRouter (${model})`,
+							apiKey: apiKey.apiKey,
+							resolveHeaders: async () => {
+								const requestModel = ctx.modelRegistry?.find("openrouter", model);
 								const configuredHeaders = requestModel
-									? await ctx.modelRegistry!.resolveModelHeaders(requestModel, requestSignal)
-									: await ctx.modelRegistry!.getProviderHeaders("openrouter");
-								const resp = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
-									method: "POST",
-									headers: {
-										...configuredHeaders,
-										...getOpenRouterHeaders(),
-										"Content-Type": "application/json",
-										Authorization: `Bearer ${key}`,
-									},
-									body: JSON.stringify(requestBody),
-									signal: requestSignal,
-								});
-								const text = await resp.text();
-								if (!resp.ok) {
-									let message = text;
-									try {
-										const parsed = JSON.parse(text) as { error?: { message?: string } };
-										message = parsed.error?.message ?? message;
-									} catch {
-										// Keep raw text.
-									}
-									throw new ProviderHttpError(
-										`OpenRouter image request failed (${resp.status}): ${message}`,
-										resp.status,
-										{ headers: resp.headers },
-									);
-								}
-								return text;
+									? await ctx.modelRegistry.resolveModelHeaders(requestModel, requestSignal)
+									: await ctx.modelRegistry?.getProviderHeaders("openrouter");
+								return { ...configuredHeaders, ...getOpenRouterHeaders() };
 							},
-							{ signal: requestSignal },
-						);
-
-						const data = JSON.parse(rawText) as OpenRouterResponse;
-						const message = data.choices?.[0]?.message;
-						const responseText = collectOpenRouterResponseText(message);
-						const imageUrls = extractOpenRouterImageUrls(message);
-						const inlineImages: InlineImageData[] = [];
-						for (const imageUrl of imageUrls) {
-							inlineImages.push(await loadImageFromUrl(imageUrl, fetchImpl, requestSignal));
-						}
-
-						if (inlineImages.length === 0) {
-							const messageText = responseText ? `\n\n${responseText}` : "";
-							return {
-								content: [{ type: "text", text: `No image data returned.${messageText}` }],
-								details: {
-									provider,
-									model: resolvedModel,
-									imageCount: 0,
-									imagePaths: [],
-									images: [],
-									responseText,
-								},
-							};
-						}
-
-						const imagePaths = await saveImagesToTemp(inlineImages);
-
-						return {
-							content: [
-								{ type: "text", text: buildResponseSummary(provider, resolvedModel, imagePaths, responseText) },
-							],
-							details: {
-								provider,
-								model: resolvedModel,
-								imageCount: inlineImages.length,
-								imagePaths,
-								images: inlineImages,
-								responseText,
-							},
+							fetchImpl,
+							signal: requestSignal,
 						};
+						const metadata = await requestImageEndpoint({
+							...requestOptions,
+							method: "GET",
+							url: `https://openrouter.ai/api/v1/images/models/${model.split("/").map(encodeURIComponent).join("/")}/endpoints`,
+						});
+						const routing = resolveOpenRouterImageRouting(
+							metadata,
+							model,
+							params.aspect_ratio,
+							resolvedImages.length,
+						);
+						const rawText = await requestImageEndpoint({
+							...requestOptions,
+							url: "https://openrouter.ai/api/v1/images",
+							body: {
+								model,
+								prompt: assemblePrompt(params),
+								...(params.aspect_ratio ? { aspect_ratio: params.aspect_ratio } : {}),
+								...(params.image_size ? { size: params.image_size } : {}),
+								...(resolvedImages.length > 0
+									? {
+											input_references: resolvedImages.map(image => ({
+												type: "image_url",
+												image_url: { url: toDataUrl(image) },
+											})),
+										}
+									: {}),
+								...(routing ? { provider: routing } : {}),
+							},
+						});
+						const images = await collectImageEndpointImages(rawText, fetchImpl, requestSignal);
+						return buildImageEndpointResult("openrouter", model, images);
 					}
 
 					if (provider === "deepinfra") {
@@ -1730,7 +1789,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 							...(size ? { size } : {}),
 						};
 
-						const rawText = await postImageEndpointRequest({
+						const rawText = await requestImageEndpoint({
 							label: "DeepInfra",
 							url: DEEPINFRA_IMAGES_URL,
 							body: requestBody,
@@ -1850,7 +1909,11 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						},
 					};
 				} catch (error) {
-					if (!(error instanceof ProviderHttpError) || requestSignal?.aborted) {
+					if (
+						!(error instanceof ProviderHttpError) ||
+						requestSignal?.aborted ||
+						(provider === "openrouter" && explicitOpenRouterModel)
+					) {
 						throw error;
 					}
 					failures.push({ provider, error });

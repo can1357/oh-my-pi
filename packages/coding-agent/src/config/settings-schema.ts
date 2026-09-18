@@ -5496,6 +5496,16 @@ export const SETTINGS_SCHEMA = {
 			ordered: true,
 		},
 	},
+	"providers.imageOpenRouterModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "OpenRouter image model",
+			description: "Default OpenRouter image model ID. Per-call model overrides this setting.",
+		},
+	},
 	"providers.fireworksTier": {
 		type: "enum",
 		values: ["standard", "priority"] as const,

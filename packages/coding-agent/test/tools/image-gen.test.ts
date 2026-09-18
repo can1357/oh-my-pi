@@ -1,12 +1,14 @@
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { ReadonlySessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	getImageGenTools,
 	getImageGenToolsWithRegistry,
 	imageGenTool,
+	type ImageGenParams,
 	setImageProviderOrder,
 } from "@oh-my-pi/pi-coding-agent/tools/image-gen";
 import { removeWithRetries, USER_AGENT } from "@oh-my-pi/pi-utils";
@@ -30,6 +32,7 @@ afterEach(() => {
 function createAntigravityXAIContext(model: Model | undefined, fetchMock: typeof fetch): CustomToolContext {
 	const antigravityCredentials = JSON.stringify({ token: "test-antigravity-token", projectId: "test-project" });
 	return {
+		settings: Settings.isolated({}),
 		fetch: fetchMock,
 		sessionManager: {
 			getCwd: () => "/tmp",
@@ -61,7 +64,706 @@ function createAntigravityXAIContext(model: Model | undefined, fetchMock: typeof
 	};
 }
 
+const OPENROUTER_IMAGE_MODEL = "openai/gpt-image-2.5-flare";
+const RED_1X1_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+const PNG_REFERENCE = { data: RED_1X1_PNG_BASE64, mime_type: "image/png" };
+
+interface ImageApiRequest {
+	url: string;
+	method: string;
+	body?: Record<string, unknown>;
+}
+
+function createOpenRouterImageContext(
+	options: {
+		model?: string;
+		settings?: Settings;
+		credentials?: boolean;
+		metadata?: unknown;
+		discoveryResponse?: () => Response;
+		imageResponse?: () => Response;
+	} = {},
+): { ctx: CustomToolContext; requests: ImageApiRequest[]; credentialReads: string[] } {
+	const model = options.model ?? OPENROUTER_IMAGE_MODEL;
+	const discoveryUrl = `https://openrouter.ai/api/v1/images/models/${model.split("/").map(encodeURIComponent).join("/")}/endpoints`;
+	const requests: ImageApiRequest[] = [];
+	const credentialReads: string[] = [];
+	const ctx: CustomToolContext = {
+		fetch: (async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			requests.push({
+				url,
+				method,
+				body: init?.body === undefined ? undefined : (JSON.parse(String(init.body)) as Record<string, unknown>),
+			});
+			if (url === discoveryUrl && method === "GET") {
+				expect(init?.body).toBeUndefined();
+				return (
+					options.discoveryResponse?.() ??
+					Response.json(
+						options.metadata === undefined
+							? { id: model, endpoints: [{ provider_tag: "openai", supported_parameters: {} }] }
+							: options.metadata,
+					)
+				);
+			}
+			if (url === "https://openrouter.ai/api/v1/images" && method === "POST") {
+				return options.imageResponse?.() ?? Response.json({ data: [] });
+			}
+			if (url === "https://api.x.ai/v1/images/generations" && method === "POST") {
+				return Response.json({ data: [] });
+			}
+			throw new Error(`Unexpected image request: ${method} ${url}`);
+		}) as typeof fetch,
+		settings: options.settings ?? Settings.isolated({}),
+		sessionManager: {
+			getCwd: () => "/tmp",
+			getSessionId: () => "test-openrouter-images",
+		} as unknown as ReadonlySessionManager,
+		modelRegistry: {
+			getApiKey: async () => undefined,
+			getApiKeyForProvider: async (provider: string) => {
+				credentialReads.push(provider);
+				if (provider === "openrouter" && options.credentials !== false) return "test-openrouter-key";
+				if (provider === "xai-oauth") return "test-xai-key";
+				return undefined;
+			},
+			getProviderBaseUrl: () => undefined,
+			find: () => undefined,
+			getProviderHeaders: async () => undefined,
+			resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
+			getAll: () => [],
+			authStorage: {
+				hasNonEnvCredential: (provider: string) => provider === "xai-oauth",
+				rotateSessionCredential: async () => false,
+			},
+			resolver: (provider: string) => async () =>
+				provider === "openrouter" ? "test-openrouter-key" : "test-xai-key",
+		} as unknown as ModelRegistry,
+		model: undefined,
+		isIdle: () => true,
+		hasQueuedMessages: () => false,
+		abort: () => {},
+	};
+	return { ctx, requests, credentialReads };
+}
+
 describe("imageGenTool", () => {
+	it("dispatches a per-call OpenRouter model instead of the active chat provider", async () => {
+		const requests: string[] = [];
+		const ctx = createAntigravityXAIContext(
+			{ api: "openai-completions", provider: "xai", id: "grok-4" } as Model,
+			(async (input, init) => {
+				const url = String(input);
+				requests.push(url);
+				if (url.endsWith("/endpoints")) {
+					return Response.json({
+						id: "openai/gpt-image-2.5-flare",
+						endpoints: [{ provider_tag: "openai", supported_parameters: {} }],
+					});
+				}
+				expect(url).toBe("https://openrouter.ai/api/v1/images");
+				expect(JSON.parse(String(init?.body)).model).toBe("openai/gpt-image-2.5-flare");
+				return Response.json({ data: [] });
+			}) as typeof fetch,
+		);
+		ctx.settings = Settings.isolated({ "providers.imageOpenRouterModel": "configured/model-a" });
+		ctx.modelRegistry.getApiKeyForProvider = async provider =>
+			provider === "openrouter" || provider === "xai-oauth" ? "test-key" : undefined;
+		const params = { subject: "a red circle", model: "openai/gpt-image-2.5-flare" };
+		const result = await imageGenTool.execute("override-model", params, undefined, ctx);
+		expect(result.details?.provider).toBe("openrouter");
+		expect(result.details?.model).toBe(params.model);
+		expect(requests).toEqual([
+			"https://openrouter.ai/api/v1/images/models/openai/gpt-image-2.5-flare/endpoints",
+			"https://openrouter.ai/api/v1/images",
+		]);
+	});
+
+	describe("OpenRouter image models", () => {
+		it.each([
+			{
+				name: "blank model",
+				params: { model: " \t\n " },
+				error: /model.*non-empty.*OpenRouter/,
+			},
+			{
+				name: "model with a conflicting provider",
+				params: { model: OPENROUTER_IMAGE_MODEL, provider: "xai" as const },
+				error: /model.*OpenRouter.*provider "xai"/,
+			},
+		])("rejects $name before credentials or input access", async ({ params, error }) => {
+			const { ctx, requests, credentialReads } = createOpenRouterImageContext();
+			await expect(
+				imageGenTool.execute(
+					"invalid-model",
+					{
+						subject: "a cat",
+						...params,
+						input: [
+							{
+								get path(): string {
+									throw new Error("Input image accessed before model validation");
+								},
+							},
+						],
+					},
+					undefined,
+					ctx,
+				),
+			).rejects.toThrow(error);
+			expect(credentialReads).toEqual([]);
+			expect(requests).toEqual([]);
+		});
+
+		it("uses the existing default after the configured model is cleared", async () => {
+			const model = "google/gemini-3-pro-image-preview";
+			const { ctx, requests } = createOpenRouterImageContext({
+				model,
+				settings: Settings.isolated({ "providers.imageOpenRouterModel": " \t " }),
+			});
+			await imageGenTool.execute("cleared-model", { subject: "a cat", provider: "openrouter" }, undefined, ctx);
+			expect(requests.at(-1)?.body?.model).toBe(model);
+		});
+
+		it("trims literal model IDs without adding a vendor prefix", async () => {
+			const model = "unqualified-model:preview";
+			const { ctx, requests } = createOpenRouterImageContext({ model });
+			await imageGenTool.execute(
+				"literal-model",
+				{ subject: "a cat", model: ` \t${model} `, provider: "auto" },
+				undefined,
+				ctx,
+			);
+			expect(requests.map(request => request.url)).toEqual([
+				"https://openrouter.ai/api/v1/images/models/unqualified-model%3Apreview/endpoints",
+				"https://openrouter.ai/api/v1/images",
+			]);
+			expect(requests.at(-1)?.body?.model).toBe(model);
+		});
+
+		it("keeps an explicit provider ahead of the configured OpenRouter model", async () => {
+			setImageProviderOrder(["openrouter", "xai"]);
+			const { ctx, requests } = createOpenRouterImageContext({
+				settings: Settings.isolated({ "providers.imageOpenRouterModel": OPENROUTER_IMAGE_MODEL }),
+			});
+			const result = await imageGenTool.execute(
+				"other-provider",
+				{ subject: "a cat", provider: "xai" },
+				undefined,
+				ctx,
+			);
+			expect(requests.map(request => request.url)).toEqual(["https://api.x.ai/v1/images/generations"]);
+			expect(result.details?.provider).toBe("xai");
+		});
+
+		it("generates a WebP and sends its saved bytes back as an edit reference", async () => {
+			const bytes = await new Bun.Image(Buffer.from(RED_1X1_PNG_BASE64, "base64"))
+				.resize(3, 2, { filter: "nearest" })
+				.webp({ quality: 90 })
+				.bytes();
+			const imageData = Buffer.from(bytes).toString("base64");
+			const { ctx, requests } = createOpenRouterImageContext({
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [
+						{
+							provider_tag: "bounded",
+							supported_parameters: {
+								aspect_ratio: { type: "enum", values: ["3:2"] },
+								input_references: { type: "range", min: 0, max: 16 },
+							},
+						},
+						{
+							provider_tag: "unbounded",
+							supported_parameters: {
+								aspect_ratio: { type: "boolean" },
+								input_references: { type: "boolean" },
+							},
+						},
+					],
+				},
+				imageResponse: () => Response.json({ data: [{ b64_json: imageData }] }),
+			});
+			const params: ImageGenParams = {
+				subject: "a red rectangle",
+				model: OPENROUTER_IMAGE_MODEL,
+				provider: "openrouter",
+				aspect_ratio: "3:2",
+			};
+			const generated = await imageGenTool.execute("generate-webp", params, undefined, ctx);
+			generatedImagePaths.push(...(generated.details?.imagePaths ?? []));
+			const savedPath = generated.details?.imagePaths[0];
+			if (!savedPath) throw new Error("Expected generated WebP path");
+			expect(generated.details?.images[0]?.mimeType).toBe("image/webp");
+			expect(savedPath.endsWith(".webp")).toBe(true);
+			expect<Uint8Array>(await Bun.file(savedPath).bytes()).toEqual(bytes);
+
+			const changes = "Make the red rectangle blue";
+			const edited = await imageGenTool.execute(
+				"edit-webp",
+				{ ...params, input: [{ path: savedPath }], changes: [changes] },
+				undefined,
+				ctx,
+			);
+			generatedImagePaths.push(...(edited.details?.imagePaths ?? []));
+			expect(requests.map(request => request.method)).toEqual(["GET", "POST", "GET", "POST"]);
+			const generationBody = requests[1]?.body;
+			expect(generationBody).toMatchObject({ model: OPENROUTER_IMAGE_MODEL, aspect_ratio: "3:2" });
+			expect(generationBody).not.toHaveProperty("input_references");
+			expect(generationBody).not.toHaveProperty("provider");
+			const editBody = requests[3]?.body;
+			expect(editBody).toMatchObject({
+				model: OPENROUTER_IMAGE_MODEL,
+				aspect_ratio: "3:2",
+				input_references: [{ type: "image_url", image_url: { url: `data:image/webp;base64,${imageData}` } }],
+			});
+			expect(editBody?.prompt).toContain(changes);
+			expect(editBody).not.toHaveProperty("messages");
+			expect(editBody).not.toHaveProperty("provider");
+		});
+
+		for (const source of ["per-call", "configured"] as const) {
+			it(`does not replace a ${source} model when OpenRouter credentials are missing`, async () => {
+				setImageProviderOrder(["openrouter", "xai"]);
+				const { ctx, requests } = createOpenRouterImageContext({
+					credentials: false,
+					settings: Settings.isolated(
+						source === "configured" ? { "providers.imageOpenRouterModel": ` ${OPENROUTER_IMAGE_MODEL} ` } : {},
+					),
+				});
+				await expect(
+					imageGenTool.execute(
+						"missing-credentials",
+						{ subject: "a cat", ...(source === "per-call" ? { model: OPENROUTER_IMAGE_MODEL } : {}) },
+						undefined,
+						ctx,
+					),
+				).rejects.toThrow(/OpenRouter credentials.*"openai\/gpt-image-2\.5-flare"/);
+				expect(requests).toEqual([]);
+			});
+
+			it(`does not replace a ${source} model after discovery fails`, async () => {
+				setImageProviderOrder(["openrouter", "xai"]);
+				const { ctx, requests } = createOpenRouterImageContext({
+					settings: Settings.isolated(
+						source === "configured" ? { "providers.imageOpenRouterModel": OPENROUTER_IMAGE_MODEL } : {},
+					),
+					discoveryResponse: () =>
+						Response.json({ error: { message: "image model was removed" } }, { status: 404 }),
+				});
+				await expect(
+					imageGenTool.execute(
+						"failed-discovery",
+						{ subject: "a cat", ...(source === "per-call" ? { model: OPENROUTER_IMAGE_MODEL } : {}) },
+						undefined,
+						ctx,
+					),
+				).rejects.toThrow(/OpenRouter.*openai\/gpt-image-2\.5-flare.*404.*image model was removed/);
+				expect(requests.map(request => request.method)).toEqual(["GET"]);
+			});
+
+			it(`does not replace a ${source} model after generation fails`, async () => {
+				setImageProviderOrder(["openrouter", "xai"]);
+				const { ctx, requests } = createOpenRouterImageContext({
+					settings: Settings.isolated(
+						source === "configured" ? { "providers.imageOpenRouterModel": OPENROUTER_IMAGE_MODEL } : {},
+					),
+					imageResponse: () => Response.json({ error: { message: "image provider is offline" } }, { status: 503 }),
+				});
+				await expect(
+					imageGenTool.execute(
+						"failed-generation",
+						{ subject: "a cat", ...(source === "per-call" ? { model: OPENROUTER_IMAGE_MODEL } : {}) },
+						undefined,
+						ctx,
+					),
+				).rejects.toThrow(/OpenRouter.*openai\/gpt-image-2\.5-flare.*503.*image provider is offline/);
+				expect(requests.map(request => request.method)).toEqual(["GET", "POST"]);
+			});
+		}
+
+		it("keeps HTTP fallback when no OpenRouter model is selected", async () => {
+			setImageProviderOrder(["openrouter", "xai"]);
+			const { ctx, requests } = createOpenRouterImageContext({
+				model: "google/gemini-3-pro-image-preview",
+				imageResponse: () => Response.json({ error: { message: "image provider is offline" } }, { status: 503 }),
+			});
+			const result = await imageGenTool.execute("automatic-fallback", { subject: "a cat" }, undefined, ctx);
+			expect(requests.map(request => request.url)).toEqual([
+				"https://openrouter.ai/api/v1/images/models/google/gemini-3-pro-image-preview/endpoints",
+				"https://openrouter.ai/api/v1/images",
+				"https://api.x.ai/v1/images/generations",
+			]);
+			expect(result.details?.provider).toBe("xai");
+		});
+
+		const unsupportedRequests: Array<{
+			name: string;
+			endpoints: unknown[];
+			params: Partial<ImageGenParams>;
+			diagnostics: Array<string | RegExp>;
+		}> = [
+			{
+				name: "references on a text-only endpoint",
+				endpoints: [{ provider_tag: "text-only", supported_parameters: {} }],
+				params: { input: [PNG_REFERENCE] },
+				diagnostics: ["input_references=1", "input_references 0"],
+			},
+			{
+				name: "a reference count above the endpoint limit",
+				endpoints: [
+					{
+						provider_tag: "one-reference",
+						supported_parameters: { input_references: { type: "range", min: 0, max: 1 } },
+					},
+				],
+				params: { input: [PNG_REFERENCE, PNG_REFERENCE] },
+				diagnostics: ["input_references=2", "0..1"],
+			},
+			{
+				name: "a reference count above the Image API limit",
+				endpoints: [{ provider_tag: "unbounded", supported_parameters: { input_references: { type: "boolean" } } }],
+				params: { input: Array.from({ length: 17 }, () => PNG_REFERENCE) },
+				diagnostics: ["input_references=17", /maximum.*16/],
+			},
+			{
+				name: "zero references on an edit-only endpoint",
+				endpoints: [
+					{
+						provider_tag: "edit-only",
+						supported_parameters: { input_references: { type: "range", min: 1, max: 2 } },
+					},
+				],
+				params: {},
+				diagnostics: ["input_references=0", "1..2"],
+			},
+			{
+				name: "an unadvertised aspect ratio",
+				endpoints: [{ provider_tag: "no-ratio", supported_parameters: {} }],
+				params: { aspect_ratio: "16:9" },
+				diagnostics: ["aspect_ratio=16:9", "aspect_ratio [none]"],
+			},
+			{
+				name: "an aspect ratio outside the advertised values",
+				endpoints: [
+					{
+						provider_tag: "square",
+						supported_parameters: { aspect_ratio: { type: "enum", values: ["1:1"] } },
+					},
+				],
+				params: { aspect_ratio: "16:9" },
+				diagnostics: ["aspect_ratio=16:9", "1:1"],
+			},
+			{
+				name: "options that no single endpoint supports together",
+				endpoints: [
+					{
+						provider_tag: "wide-generation",
+						supported_parameters: {
+							aspect_ratio: { type: "enum", values: ["16:9"] },
+							input_references: { type: "range", min: 0, max: 0 },
+						},
+					},
+					{
+						provider_tag: "square-edit",
+						supported_parameters: {
+							aspect_ratio: { type: "enum", values: ["1:1"] },
+							input_references: { type: "range", min: 0, max: 16 },
+						},
+					},
+				],
+				params: { aspect_ratio: "16:9", input: [PNG_REFERENCE] },
+				diagnostics: ["aspect_ratio=16:9", "input_references=1", "1:1", "0..0"],
+			},
+		];
+
+		it.each(unsupportedRequests)("rejects $name before generation", async ({ endpoints, params, diagnostics }) => {
+			const { ctx, requests } = createOpenRouterImageContext({
+				metadata: { id: OPENROUTER_IMAGE_MODEL, endpoints },
+			});
+			const execution = imageGenTool.execute(
+				"unsupported-options",
+				{ subject: "a cat", model: OPENROUTER_IMAGE_MODEL, ...params },
+				undefined,
+				ctx,
+			);
+			await expect(execution).rejects.toThrow(/OpenRouter.*openai\/gpt-image-2\.5-flare.*cannot satisfy/);
+			for (const diagnostic of diagnostics) {
+				await expect(execution).rejects.toThrow(diagnostic);
+			}
+			expect(requests.map(request => request.method)).toEqual(["GET"]);
+		});
+
+		it("reports a model with no available image endpoints", async () => {
+			const { ctx, requests } = createOpenRouterImageContext({
+				metadata: { id: OPENROUTER_IMAGE_MODEL, endpoints: [] },
+			});
+			await expect(
+				imageGenTool.execute("no-endpoints", { subject: "a cat", model: OPENROUTER_IMAGE_MODEL }, undefined, ctx),
+			).rejects.toThrow(/openai\/gpt-image-2\.5-flare.*no available image endpoints/);
+			expect(requests.map(request => request.method)).toEqual(["GET"]);
+		});
+
+		it("restricts routing to endpoints that support every requested option", async () => {
+			const { ctx, requests } = createOpenRouterImageContext({
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [
+						{
+							provider_tag: "eligible",
+							supported_parameters: {
+								aspect_ratio: { type: "enum", values: ["16:9"] },
+								input_references: { type: "range", min: 1, max: 1 },
+							},
+						},
+						{
+							provider_tag: "text-only",
+							supported_parameters: { aspect_ratio: { type: "enum", values: ["16:9"] } },
+						},
+					],
+				},
+			});
+			await imageGenTool.execute(
+				"eligible-routing",
+				{ subject: "a cat", model: OPENROUTER_IMAGE_MODEL, aspect_ratio: "16:9", input: [PNG_REFERENCE] },
+				undefined,
+				ctx,
+			);
+			expect(requests.at(-1)?.body?.provider).toEqual({ only: ["eligible"] });
+		});
+
+		it("deduplicates routing tags and excludes tags shared with rejected endpoints", async () => {
+			const { ctx, requests } = createOpenRouterImageContext({
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [
+						{ provider_tag: "shared", supported_parameters: { aspect_ratio: { type: "boolean" } } },
+						{ provider_tag: "eligible", supported_parameters: { aspect_ratio: { type: "boolean" } } },
+						{ provider_tag: "eligible", supported_parameters: { aspect_ratio: { type: "boolean" } } },
+						{
+							provider_tag: "shared",
+							supported_parameters: { aspect_ratio: { type: "enum", values: ["1:1"] } },
+						},
+					],
+				},
+			});
+			await imageGenTool.execute(
+				"exclusive-routing",
+				{ subject: "a cat", model: OPENROUTER_IMAGE_MODEL, aspect_ratio: "16:9" },
+				undefined,
+				ctx,
+			);
+			expect(requests.at(-1)?.body?.provider).toEqual({ only: ["eligible"] });
+		});
+
+		it.each([
+			{ name: "untagged", tag: null },
+			{ name: "shared-tag", tag: "incompatible" },
+		])("rejects routing when only a $name endpoint qualifies", async ({ tag }) => {
+			const { ctx, requests } = createOpenRouterImageContext({
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [
+						{ provider_tag: tag, supported_parameters: { aspect_ratio: { type: "boolean" } } },
+						{
+							provider_tag: "incompatible",
+							supported_parameters: { aspect_ratio: { type: "enum", values: ["1:1"] } },
+						},
+					],
+				},
+			});
+			await expect(
+				imageGenTool.execute(
+					"unrestricted-routing",
+					{ subject: "a cat", model: OPENROUTER_IMAGE_MODEL, aspect_ratio: "16:9" },
+					undefined,
+					ctx,
+				),
+			).rejects.toThrow(/cannot restrict routing.*requested options/);
+			expect(requests.map(request => request.method)).toEqual(["GET"]);
+		});
+
+		it.each([
+			{ name: "missing endpoint list", metadata: { id: OPENROUTER_IMAGE_MODEL } },
+			{ name: "non-array endpoint list", metadata: { id: OPENROUTER_IMAGE_MODEL, endpoints: {} } },
+			{
+				name: "invalid supported-parameter map",
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [{ provider_tag: "openai", supported_parameters: [] }],
+				},
+			},
+			{
+				name: "non-string aspect ratio enum",
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [
+						{
+							provider_tag: "openai",
+							supported_parameters: { aspect_ratio: { type: "enum", values: ["1:1", 2] } },
+						},
+					],
+				},
+			},
+			{
+				name: "range descriptor for an aspect ratio",
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [
+						{
+							provider_tag: "openai",
+							supported_parameters: { aspect_ratio: { type: "range", min: 0, max: 16 } },
+						},
+					],
+				},
+			},
+			{
+				name: "enum descriptor for a reference count",
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [
+						{
+							provider_tag: "openai",
+							supported_parameters: { input_references: { type: "enum", values: ["0", "1"] } },
+						},
+					],
+				},
+			},
+			{
+				name: "reversed reference-count bounds",
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [
+						{
+							provider_tag: "openai",
+							supported_parameters: { input_references: { type: "range", min: 2, max: 1 } },
+						},
+					],
+				},
+			},
+		])("rejects capability metadata with a $name", async ({ metadata }) => {
+			const { ctx, requests } = createOpenRouterImageContext({ metadata });
+			await expect(
+				imageGenTool.execute(
+					"invalid-capabilities",
+					{ subject: "a cat", model: OPENROUTER_IMAGE_MODEL, aspect_ratio: "1:1", input: [PNG_REFERENCE] },
+					undefined,
+					ctx,
+				),
+			).rejects.toThrow(/openai\/gpt-image-2\.5-flare.*invalid capability metadata/);
+			expect(requests.map(request => request.method)).toEqual(["GET"]);
+		});
+
+		it("forwards image_size without requiring a size capability", async () => {
+			const { ctx, requests } = createOpenRouterImageContext();
+			await imageGenTool.execute(
+				"explicit-size",
+				{ subject: "a cat", model: OPENROUTER_IMAGE_MODEL, image_size: "1536x1024" },
+				undefined,
+				ctx,
+			);
+			expect(requests.at(-1)?.body).toEqual({
+				model: OPENROUTER_IMAGE_MODEL,
+				prompt: expect.any(String),
+				size: "1536x1024",
+			});
+		});
+
+		it("preserves explicit dimensions and exposes an upstream ratio conflict", async () => {
+			const { ctx, requests } = createOpenRouterImageContext({
+				metadata: {
+					id: OPENROUTER_IMAGE_MODEL,
+					endpoints: [{ provider_tag: "openai", supported_parameters: { aspect_ratio: { type: "boolean" } } }],
+				},
+				imageResponse: () =>
+					Response.json({ error: { message: "size conflicts with aspect_ratio" } }, { status: 400 }),
+			});
+			await expect(
+				imageGenTool.execute(
+					"dimension-conflict",
+					{
+						subject: "a cat",
+						model: OPENROUTER_IMAGE_MODEL,
+						image_size: "1536x1024",
+						aspect_ratio: "1:1",
+					},
+					undefined,
+					ctx,
+				),
+			).rejects.toThrow(/openai\/gpt-image-2\.5-flare.*400.*size conflicts with aspect_ratio/);
+			expect(requests.map(request => request.method)).toEqual(["GET", "POST"]);
+			expect(requests.at(-1)?.body).toMatchObject({ size: "1536x1024", aspect_ratio: "1:1" });
+		});
+
+		it("saves declared SVG output without changing its bytes", async () => {
+			const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><path d="M0 0h1v1H0z"/></svg>';
+			const { ctx } = createOpenRouterImageContext({
+				imageResponse: () =>
+					Response.json({
+						data: [{ b64_json: Buffer.from(svg).toString("base64"), media_type: "image/svg+xml" }],
+					}),
+			});
+			const result = await imageGenTool.execute(
+				"generate-svg",
+				{ subject: "a black square", model: OPENROUTER_IMAGE_MODEL },
+				undefined,
+				ctx,
+			);
+			generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+			const savedPath = result.details?.imagePaths[0];
+			if (!savedPath) throw new Error("Expected generated SVG path");
+			expect(result.details?.images[0]?.mimeType).toBe("image/svg+xml");
+			expect(savedPath.endsWith(".svg")).toBe(true);
+			expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from(svg));
+		});
+
+		it.each([
+			{ name: "malformed JSON", response: () => new Response("{") },
+			{ name: "non-array data", response: () => Response.json({ data: "not-an-image-array" }) },
+			{ name: "null data", response: () => Response.json({ data: null }) },
+			{ name: "a non-object entry", response: () => Response.json({ data: [null] }) },
+			{ name: "non-string base64 data", response: () => Response.json({ data: [{ b64_json: 123 }] }) },
+			{
+				name: "a non-image media type",
+				response: () => Response.json({ data: [{ b64_json: RED_1X1_PNG_BASE64, media_type: "text/plain" }] }),
+			},
+		])("rejects image responses containing $name without fallback", async ({ response }) => {
+			const { ctx, requests } = createOpenRouterImageContext({ imageResponse: response });
+			await expect(
+				imageGenTool.execute(
+					"malformed-image-response",
+					{ subject: "a cat", model: OPENROUTER_IMAGE_MODEL },
+					undefined,
+					ctx,
+				),
+			).rejects.toThrow();
+			expect(requests.map(request => `${request.method} ${request.url}`)).toEqual([
+				"GET https://openrouter.ai/api/v1/images/models/openai/gpt-image-2.5-flare/endpoints",
+				"POST https://openrouter.ai/api/v1/images",
+			]);
+		});
+
+		it("preserves the zero-image result for a valid empty data array", async () => {
+			const { ctx } = createOpenRouterImageContext();
+			const result = await imageGenTool.execute(
+				"empty-images",
+				{ subject: "a cat", model: OPENROUTER_IMAGE_MODEL },
+				undefined,
+				ctx,
+			);
+			expect(result.details).toMatchObject({
+				provider: "openrouter",
+				model: OPENROUTER_IMAGE_MODEL,
+				imageCount: 0,
+				imagePaths: [],
+				images: [],
+			});
+		});
+	});
+
 	it("registers without resolving image provider credentials", async () => {
 		const modelRegistry = {
 			getApiKey: async () => {
@@ -79,6 +781,7 @@ describe("imageGenTool", () => {
 	it("resolves image provider credentials on execution", async () => {
 		setImageProviderOrder(["antigravity"]);
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: async () => new Response(null),
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -132,6 +835,7 @@ describe("imageGenTool", () => {
 			baseUrl: "https://api.openai.com/v1",
 		} as Model;
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -201,6 +905,7 @@ describe("imageGenTool", () => {
 			baseUrl: "https://api.openai.com/v1",
 		} as Model;
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -294,6 +999,7 @@ describe("imageGenTool", () => {
 		} as Model;
 
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -373,6 +1079,7 @@ describe("imageGenTool", () => {
 			);
 		}) as unknown as typeof fetch;
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -422,6 +1129,7 @@ describe("imageGenTool", () => {
 		}) as unknown as typeof fetch;
 
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -501,6 +1209,7 @@ describe("imageGenTool", () => {
 			name: "Claude",
 		} as Model;
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -584,6 +1293,7 @@ describe("imageGenTool", () => {
 			baseUrl: "https://example-proxy.invalid/backend-api",
 		} as Model;
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -634,6 +1344,7 @@ describe("imageGenTool", () => {
 		}) as unknown as typeof fetch;
 
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -733,6 +1444,7 @@ describe("imageGenTool", () => {
 			baseUrl: "https://api.openai.com/v1",
 		} as Model;
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -951,6 +1663,7 @@ describe("imageGenTool", () => {
 			throw new Error(`Unexpected provider request: ${url}`);
 		}) as unknown as typeof fetch;
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -1039,6 +1752,7 @@ describe("imageGenTool", () => {
 			baseUrl: "https://generativelanguage.googleapis.com",
 		} as Model;
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -1097,6 +1811,7 @@ describe("imageGenTool", () => {
 		}) as unknown as typeof fetch;
 
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",
@@ -1152,6 +1867,7 @@ describe("imageGenTool", () => {
 		}) as unknown as typeof fetch;
 
 		const ctx: CustomToolContext = {
+			settings: Settings.isolated({}),
 			fetch: fetchMock,
 			sessionManager: {
 				getCwd: () => "/tmp",

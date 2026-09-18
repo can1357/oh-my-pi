@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OpenRouter image-model defaults and per-call overrides for image generation and editing, with capability checks and no replacement of explicitly selected models ([#12457](https://github.com/can1357/oh-my-pi/issues/12457), [#12467](https://github.com/can1357/oh-my-pi/pull/12467) by [@azais-corentin](https://github.com/azais-corentin)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
