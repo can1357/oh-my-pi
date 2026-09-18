@@ -35,3 +35,16 @@ bun test test/rlm-context-engine.test.ts test/rlm-v1-acceptance.test.ts
 - C3 needle never in stub
 - M5 search recovers needle when on
 - shake arm present; RLM not 2× worse tokens than shake; RLM keeps M5 when shake drops midpoint
+
+## Live vLLM (GPU)
+
+When a tools-capable OpenAI-compatible server is up (default `http://127.0.0.1:8000`):
+
+```bash
+VLLM_MODEL=Qwen/Qwen2.5-1.5B-Instruct bun evals/rlm/live-vllm-harness.ts
+# writes results/live-vllm.jsonl (gitignored)
+```
+
+Measures: spill stub + root payload drop, `RlmStore.search` needle (M5), live `rlmQuery` TTFT/tokens via streaming chat completions (`cost=$0` local).
+
+Agent multi-turn RPC (`live-slm-bench.ts`) is optional; small SLMs often fail bash/eval schemas — the harness is the load-bearing live gate.
