@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added an experimental, default-off Jev compaction booster that uses TypeSafe relevance judgments before automatic and idle compaction, persists recoverable tool-history reductions, and falls back to the configured compaction methods.
+- Added an experimental, default-off Jev compaction booster that uses TypeSafe relevance judgments before automatic and idle compaction, persists recoverable tool-history reductions, and falls back to the configured compaction methods ([#12397](https://github.com/can1357/oh-my-pi/pull/12397) by [@prickly-dingus](https://github.com/prickly-dingus)).
 
 ## [18.2.5] - 2026-09-17
 

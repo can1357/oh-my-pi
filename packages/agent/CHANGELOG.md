@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added durable projection of omitted native tool-call/result pairs across model context, token counting, compaction, and branch summaries while retaining the original journal history.
+- Added durable projection of omitted native tool-call/result pairs across model context, token counting, compaction, and branch summaries while retaining the original journal history ([#12397](https://github.com/can1357/oh-my-pi/pull/12397) by [@prickly-dingus](https://github.com/prickly-dingus)).
 
 ## [18.2.5] - 2026-09-17
 
