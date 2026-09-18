@@ -301,7 +301,11 @@ describe("SYSTEM.md prompt assembly", () => {
 			const text = rebuilt.systemPrompt.join("\n\n");
 			expect(text.match(/<fusion-token-savings>/g)).toHaveLength(1);
 			expect(text.match(/<bulk-work-delegation>/g)).toHaveLength(1);
-			expect(rebuilt.systemPrompt.at(-1)?.trim()).toBe(savingsBlock);
+			// Mode policy lands in the terminal tail once every copied source is stripped:
+			// the canonical savings block, then the Fusion I/O block that closes the prompt.
+			const policyTail = rebuilt.systemPrompt.slice(-2).map(block => block.trim());
+			expect(policyTail[0]).toBe(savingsBlock);
+			expect(policyTail[1]).toMatch(/^<bulk-work-delegation>[\s\S]*<\/bulk-work-delegation>$/);
 			for (const source of ["append", "context", "rule", ...(custom ? ["custom"] : [])]) {
 				expect(text.match(new RegExp(`<test-${source}-source />`, "g"))).toHaveLength(1);
 			}
