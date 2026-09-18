@@ -1853,6 +1853,30 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"retry.refusalFallbackRevertPolicy": {
+		type: "enum",
+		values: ["default", "after-success"] as const,
+		default: "default",
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Refusal Fallback Revert Policy",
+			description:
+				"When to return to the previous model after a classifier refusal or provider-classified content block. Credential rotation still takes precedence; other failures use the regular fallback policy.",
+			options: [
+				{
+					value: "default",
+					label: "Default",
+					description: "Keep the existing restoration policy for each error category",
+				},
+				{
+					value: "after-success",
+					label: "After success",
+					description: "Restore after one successful fallback response, before the next model call",
+				},
+			],
+		},
+	},
 
 	"providers.anthropic.serverSideFallback": {
 		type: "boolean",
