@@ -485,7 +485,19 @@ export function buildSessionContext(
 			const firstRetained =
 				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
 				path[compactionIdx + 1];
-			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
+			const retainedTimestamp =
+				firstRetained?.type === "message" ? firstRetained.message.timestamp : firstRetained?.timestamp;
+			let retainedAt =
+				typeof retainedTimestamp === "number" ? retainedTimestamp : new Date(retainedTimestamp ?? "").getTime();
+			for (const prior of path.slice(0, compactionIdx)) {
+				if (prior.type !== "compaction" || getAnthropicCompactionPayload(prior.preserveData) === undefined) continue;
+				const priorFirstKept = path.find(entry => entry.id === prior.firstKeptEntryId);
+				const priorTimestamp =
+					priorFirstKept?.type === "message" ? priorFirstKept.message.timestamp : priorFirstKept?.timestamp;
+				const priorRetainedAt =
+					typeof priorTimestamp === "number" ? priorTimestamp : new Date(priorTimestamp ?? "").getTime();
+				if (Number.isFinite(priorRetainedAt)) retainedAt = Math.min(retainedAt, priorRetainedAt);
+			}
 			if (Number.isFinite(retainedAt)) {
 				summaryTimestamp = new Date(retainedAt - 1).toISOString();
 			}

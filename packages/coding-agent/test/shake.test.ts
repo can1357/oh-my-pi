@@ -225,6 +225,40 @@ describe("AgentSession shake", () => {
 			expect(mixedResult.content.some(block => block.type === "image")).toBe(false);
 		});
 
+		it("restores tool content and provider occupancy when a shake journal write fails", async () => {
+			const originalText = "X".repeat(20_000);
+			seedHeavyToolResult(originalText);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: recentProtectedTail("done") }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			vi.spyOn(sessionManager, "rewriteEntries").mockRejectedValueOnce(new Error("journal write failed"));
+
+			await expect(session.shake("elide")).rejects.toThrow("journal write failed");
+
+			expect(branchToolResults()[0].content).toEqual([{ type: "text", text: originalText }]);
+			expect(session.agent.state.messages.find(message => message.role === "toolResult")?.content).toEqual([
+				{ type: "text", text: originalText },
+			]);
+			// Failed elision must not leave a token-saving correction on the usage anchor.
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			await sessionManager.flush();
+			const restored = await SessionManager.open(sessionManager.getSessionFile()!);
+			try {
+				expect(restored.buildSessionContext().messages.find(message => message.role === "toolResult")?.content).toEqual([
+					{ type: "text", text: originalText },
+				]);
+			} finally {
+				await restored.close();
+			}
+		});
+
 		it("updates provider-anchored context usage immediately after rewriting prompt history", async () => {
 			seedHeavyToolResult("X".repeat(20_000));
 			sessionManager.appendMessage({

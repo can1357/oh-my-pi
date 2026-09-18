@@ -1,4 +1,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type {
+	AdvisorContinuationMode,
+	AdvisorHistoryCheckpoint,
+	AdvisorTurnDisposition,
+} from "./maintenance-types";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
@@ -26,13 +31,18 @@ import { fingerprintMessage } from "./message-fingerprint";
 export interface AdvisorAgent {
 	prompt(input: string | AgentMessage[]): Promise<void>;
 	abort(reason?: unknown): void;
-	reset(): void;
-	/**
-	 * Drop messages appended past `count`. Called after a failed `prompt()` so a
-	 * retry doesn't replay the failed user batch + synthetic assistant-error
-	 * turn `Agent.#runLoop` records on its internal state.
-	 */
-	rollbackTo?(count: number): void;
+	reset(reason?: string): void;
+	/** Capture the working-history transaction immediately before a core prompt. */
+	checkpoint?(): AdvisorHistoryCheckpoint;
+	/** Restore a no-rewrite attempt. Production adapters restore journal and live history together. */
+	restoreCheckpoint?(checkpoint: AdvisorHistoryCheckpoint, reason: string): Promise<void> | void;
+	/** Finalized messages belonging to this attempt, surviving in-place history rewrites. */
+	messagesSince?(checkpoint: AdvisorHistoryCheckpoint): readonly AgentMessage[];
+	hasCommittedRewrite?(checkpoint: AdvisorHistoryCheckpoint): boolean;
+	/** Remove only the failed assistant attempt while retaining committed rewrites and tool progress. */
+	discardFailedAttempt?(checkpoint: AdvisorHistoryCheckpoint): Promise<void> | void;
+	/** Continue the current logical review without submitting its primary batch again. */
+	continue?(mode: AdvisorContinuationMode): Promise<void>;
 	readonly state: { messages: AgentMessage[]; error?: string };
 }
 
@@ -42,18 +52,11 @@ export interface AdvisorRuntimeHost {
 	/** Redact primary transcript bytes before they reach the advisor model. */
 	obfuscator?: SecretObfuscator;
 	/**
-	 * Pre-prompt context maintenance for the advisor's own append-only context.
-	 * Promotes the advisor model to a larger sibling when its context nears the
-	 * window (mirroring the primary's promote-first policy) and resolves `true`
-	 * when the advisor must clear its own context before sending the current
-	 * incremental update. The cursor stays at the current primary position: this
-	 * recovery path must never replay the full primary transcript.
-	 *
-	 * Takes the pending update as a message rather than a token count: sizing it
-	 * needs the advisor model's tokenizer, which the host owns.
-	 * Optional: hosts that omit it get no proactive maintenance.
+	 * Admit the exact finalized, rendered messages that will be submitted for
+	 * this advisor update. Maintenance may rewrite working history, but failure
+	 * never asks the runtime to clear context.
 	 */
-	maintainContext?(incoming: AgentMessage, signal: AbortSignal): Promise<boolean>;
+	maintainContext?(incoming: AgentMessage[], signal: AbortSignal): Promise<void>;
 	/**
 	 * Called immediately before each `agent.prompt(batch)` cycle. Lets the host
 	 * clear per-update advisor state and apply the in-progress delivery policy.
@@ -75,6 +78,15 @@ export interface AdvisorRuntimeHost {
 		failedMessages: readonly AgentMessage[],
 		signal: AbortSignal,
 	): Promise<boolean | undefined> | boolean | undefined;
+	/**
+	 * Shared post-turn context/fallback arbitration. Called exactly once after
+	 * every core prompt or continuation, including successful turns.
+	 */
+	onTurnSettled?(
+		checkpoint: AdvisorHistoryCheckpoint,
+		signal: AbortSignal,
+		error?: unknown,
+	): Promise<AdvisorTurnDisposition> | AdvisorTurnDisposition;
 	/** Called after a successful advisor turn so the host can finish fallback lifecycle reporting. */
 	onTurnSuccess?(): Promise<void> | void;
 	/** Called when a failed batch is permanently dropped so replay-only state can be discarded. */
@@ -114,6 +126,21 @@ export class AdvisorOutputQuarantinedError extends Error {
 		this.name = "AdvisorOutputQuarantinedError";
 	}
 }
+class AdvisorSharedTerminalError extends Error {
+	constructor(readonly terminalError: unknown) {
+		super(terminalError instanceof Error ? terminalError.message : "Advisor context recovery ended");
+	}
+}
+
+class AdvisorOrdinaryTurnError extends Error {
+	constructor(
+		readonly turnError: unknown,
+		readonly checkpoint: AdvisorHistoryCheckpoint,
+	) {
+		super(turnError instanceof Error ? turnError.message : String(turnError));
+	}
+}
+
 
 interface AdvisorOutputHazard {
 	label: string;
@@ -227,7 +254,6 @@ interface PendingDelta {
 	turns: number;
 	/** Whether the primary was mid-turn (willContinue:true) when this delta was rendered. */
 	wip: boolean;
-	overflowRecovery?: boolean;
 }
 
 interface CatchupWaiter {
@@ -239,6 +265,12 @@ interface CatchupWaiter {
 interface DeliveredMessage {
 	message: AgentMessage;
 	fingerprint: bigint | undefined;
+}
+interface OwnedContinuation {
+	mode: AdvisorContinuationMode;
+	checkpoint: AdvisorHistoryCheckpoint;
+	epoch: number;
+	finalTurns: number;
 }
 
 export class AdvisorRuntime {
@@ -270,8 +302,12 @@ export class AdvisorRuntime {
 	#pending: PendingDelta[] = [];
 	#busy = false;
 	#sessionTransitionPaused = false;
+	/** Entire facade drain, including settled hooks and owned continuations. */
+	#drainInFlight: Promise<void> | undefined;
 	#promptInFlight: Promise<void> | undefined;
 	#iterationAbort: AbortController | undefined;
+	#ownedContinuation: OwnedContinuation | undefined;
+	#deferredContinuations: OwnedContinuation[] = [];
 	#backlog = 0;
 	#consecutiveFailures = 0;
 	#failureNotified = false;
@@ -316,6 +352,7 @@ export class AdvisorRuntime {
 	 *  the in-flight advisor prompt, so the stale batch is dropped instead of
 	 *  being retried/requeued into the post-reset conversation. */
 	#epoch = 0;
+	#checkpointSequence = 0;
 	disposed = false;
 	/** Quota/rate-limit pause state. When `true`, the advisor stops processing
 	 *  turns and drops new deltas until an explicit {@link reset} clears it
@@ -357,8 +394,16 @@ export class AdvisorRuntime {
 			this.disposed ||
 			this.#quotaExhausted ||
 			this.#halted ||
-			(this.#hasReviewed && !this.#busy && this.#backlog === 0 && this.#pending.length === 0)
+			(this.#hasReviewed &&
+				!this.#busy &&
+				this.#backlog === 0 &&
+				this.#pending.length === 0 &&
+				this.#ownedContinuation === undefined)
 		);
+	}
+	/** Queued primary updates take priority over optional automatic continuation. */
+	get hasPendingUpdates(): boolean {
+		return this.#pending.length > 0;
 	}
 
 	/**
@@ -376,7 +421,7 @@ export class AdvisorRuntime {
 		const all = messages ?? this.host.snapshotMessages();
 		this.#latestMessages = all;
 		const wip = opts?.willContinue ?? false;
-		let rendered: Omit<PendingDelta, "turns" | "overflowRecovery"> | null = null;
+		let rendered: Omit<PendingDelta, "turns"> | null = null;
 		// #renderDelta advances the cursor/prefix/dedup state before formatting
 		// can throw; snapshot them so a formatter bug loses NOTHING — the next
 		// turn re-renders this delta (a prefix change mid-render self-heals via
@@ -402,7 +447,7 @@ export class AdvisorRuntime {
 			this.#pending.push({ ...rendered, turns: 1 });
 			this.#backlog++;
 			this.#notifyWaiters();
-			void this.#drain();
+			this.#startDrain();
 		}
 	}
 
@@ -449,6 +494,8 @@ export class AdvisorRuntime {
 
 	dispose(): void {
 		this.#iterationAbort?.abort("advisor disposed");
+		this.#ownedContinuation = undefined;
+		this.#deferredContinuations = [];
 		this.disposed = true;
 		this.#epoch++;
 		this.#pending = [];
@@ -469,11 +516,11 @@ export class AdvisorRuntime {
 		this.#renderRevision++;
 	}
 
-	#clearAdvisorContextAtCurrentCursor(): void {
+	#clearAdvisorContextAtCurrentCursor(reason?: string): void {
 		this.#consecutiveFailures = 0;
 		this.#clearSeenContext();
 		try {
-			this.agent.reset();
+			this.agent.reset(reason);
 		} catch {}
 		try {
 			this.agent.abort("advisor reset");
@@ -490,9 +537,11 @@ export class AdvisorRuntime {
 			});
 		}
 		this.#lastCount = 0;
+		this.#ownedContinuation = undefined;
+		this.#deferredContinuations = [];
 		this.#deliveredPrefix = [];
 		this.#pending = [];
-		this.#clearAdvisorContextAtCurrentCursor();
+		this.#clearAdvisorContextAtCurrentCursor(reason);
 		if (clearBacklog) {
 			this.#backlog = 0;
 		}
@@ -520,7 +569,7 @@ export class AdvisorRuntime {
 		});
 	}
 
-	/** Stop new advisor work and wait only for the active prompt's recorder-visible events. */
+	/** Stop new advisor work and wait for the whole owned facade transaction. */
 	pauseForSessionTransition(): Promise<void> {
 		if (!this.#sessionTransitionPaused) {
 			this.#sessionTransitionPaused = true;
@@ -530,19 +579,14 @@ export class AdvisorRuntime {
 				this.agent.abort("advisor session transition");
 			} catch {}
 		}
-		return (
-			this.#promptInFlight?.then(
-				() => {},
-				() => {},
-			) ?? Promise.resolve()
-		);
+		return this.#drainInFlight ?? Promise.resolve();
 	}
 
 	/** Continue queued work after a session transition rolls back or preserves the conversation. */
 	resumeAfterSessionTransition(): void {
 		if (!this.#sessionTransitionPaused) return;
 		this.#sessionTransitionPaused = false;
-		if (!this.#quotaExhausted && !this.#halted) void this.#drain();
+		if (!this.#quotaExhausted && !this.#halted) this.#startDrain();
 	}
 
 	/**
@@ -558,6 +602,8 @@ export class AdvisorRuntime {
 		// pinned at the instructions/tools boundary) to a concrete path instead of
 		// inferring it from payload markers after the fact.
 		this.#iterationAbort?.abort("advisor reset");
+		this.#ownedContinuation = undefined;
+		this.#deferredContinuations = [];
 		this.#epoch++;
 		this.#sessionTransitionPaused = false;
 		this.#quotaExhausted = false;
@@ -587,6 +633,8 @@ export class AdvisorRuntime {
 			fingerprint: fingerprintMessage(message),
 		}));
 		this.#pending = [];
+		this.#ownedContinuation = undefined;
+		this.#deferredContinuations = [];
 		this.#backlog = 0;
 		this.#consecutiveFailures = 0;
 		this.#failing = false;
@@ -785,7 +833,7 @@ export class AdvisorRuntime {
 		return `${mdHead}\n\n---\n\n[in progress — more steps follow]`;
 	}
 
-	#renderDelta(messages?: AgentMessage[], wip = false): Omit<PendingDelta, "turns" | "overflowRecovery"> | null {
+	#renderDelta(messages?: AgentMessage[], wip = false): Omit<PendingDelta, "turns"> | null {
 		const all = messages ?? this.#latestMessages ?? this.host.snapshotMessages();
 		let prefixChanged = all.length < this.#lastCount;
 		for (let i = 0; !prefixChanged && i < this.#lastCount; i++) {
@@ -875,14 +923,6 @@ export class AdvisorRuntime {
 		}
 	}
 
-	/**
-	 * Drop the user batch + synthetic assistant-error turn `Agent.#runLoop`
-	 * appended for a failed prompt so a retry replays a clean baseline and the
-	 * dropped-after-3 path never leaks orphan failures into the next successful
-	 * run. Prefers the agent's own `rollbackTo` (which also re-syncs its
-	 * append-only context); falls back to truncating `state.messages` for tests
-	 * that hand-roll a minimal facade.
-	 */
 	#restoreSeenContextInFlight(): void {
 		if (!this.#seenContextInFlight) return;
 		this.#seenContext.clear();
@@ -890,165 +930,122 @@ export class AdvisorRuntime {
 		this.#seenContextInFlight = undefined;
 	}
 
-	#rollbackFailedTurn(snapshot: number): void {
-		// Restore the primary-context dedup map to its pre-batch state: the
-		// failed turn never reached the advisor, so first-time context collapsed
-		// to "(unchanged…)" by this batch's #prepareBatch must expand again on
-		// the retry/requeue pass.
-		this.#restoreSeenContextInFlight();
-		const messages = this.agent.state.messages;
-		if (messages.length <= snapshot) return;
-		try {
-			if (this.agent.rollbackTo) {
-				this.agent.rollbackTo(snapshot);
-				return;
+	#captureCheckpoint(): AdvisorHistoryCheckpoint {
+		return (
+			this.agent.checkpoint?.() ?? {
+				id: `runtime-${this.#epoch}-${++this.#checkpointSequence}`,
+				generation: this.#epoch,
+				rewriteVersion: 0,
+				messages: this.agent.state.messages.slice(),
 			}
-			messages.length = snapshot;
-		} catch (err) {
-			logger.debug("advisor rollback failed", { err: String(err) });
+		);
+	}
+
+	#messagesSince(checkpoint: AdvisorHistoryCheckpoint): readonly AgentMessage[] {
+		if (this.agent.messagesSince) return this.agent.messagesSince(checkpoint);
+		const baseline = new Set(checkpoint.messages);
+		return this.agent.state.messages.filter(message => !baseline.has(message));
+	}
+
+	#hasCommittedRewrite(checkpoint: AdvisorHistoryCheckpoint): boolean {
+		return this.agent.hasCommittedRewrite?.(checkpoint) ?? false;
+	}
+
+	async #discardFailedAttempt(checkpoint: AdvisorHistoryCheckpoint): Promise<void> {
+		if (this.agent.discardFailedAttempt) {
+			await this.agent.discardFailedAttempt(checkpoint);
+			return;
 		}
+		const baseline = new Set(checkpoint.messages);
+		const retained = this.agent.state.messages.filter(message => baseline.has(message));
+		this.agent.state.messages.splice(0, this.agent.state.messages.length, ...retained);
+	}
+
+	async #restoreCheckpoint(checkpoint: AdvisorHistoryCheckpoint, reason: string): Promise<void> {
+		this.#restoreSeenContextInFlight();
+		if (this.agent.restoreCheckpoint) {
+			await this.agent.restoreCheckpoint(checkpoint, reason);
+			return;
+		}
+		await this.#discardFailedAttempt(checkpoint);
 	}
 
 	/**
-	 * Collect the popped deltas into one batch, running `maintainContext` for
-	 * correct token budgeting. Loops until the pending queue is stable (no new
-	 * deltas arrived during a maintenance check) or the round cap is reached.
-	 * Every `await` inside the loop has an epoch guard so a reset/dispose
-	 * mid-await cannot leak a stale batch into the post-reset conversation.
-	 *
-	 * When maintenance requests recovery, only the advisor Agent/log is reset
-	 * (at the current primary cursor) and the already-collected raw batch is
-	 * re-rendered — older, already-delivered primary transcript is never
-	 * replayed.
-	 *
-	 * The coalescing loop is capped at {@link MAX_COALESCE_ROUNDS} iterations so
-	 * a pathologically fast primary combined with a slow `maintainContext` cannot
-	 * stall dispatch indefinitely — any items still in `#pending` after the cap
-	 * are left for the next drain iteration. Overflow-recovery batches skip
-	 * coalescing entirely: they retry exactly the bounded batch that overflowed.
-	 *
-	 * Returns `null` when the epoch was invalidated — caller should `continue`.
+	 * Coalesce a bounded primary update and admit the exact finalized rendered
+	 * messages before dispatch. A maintenance failure is advisory: it neither
+	 * resets working history nor changes the primary delivery cursor.
 	 */
 	async #collectAndMaintainBatch(
 		epoch: number,
 		initial: PendingDelta[],
-		recoveringOverflow: boolean,
 		signal: AbortSignal,
 	): Promise<{
-		batch: string | null;
+		promptInput: AgentMessage[];
 		rawMessages: AgentMessage[];
-		preparedMessages: AgentMessage[];
 		finalTurns: number;
 		wip: boolean;
-		resetContext: boolean;
 	} | null> {
-		let batchText = initial.map(b => b.text).join("\n\n");
-		let rawMessages = initial.flatMap(b => b.rawMessages);
-		let turns = initial.reduce((sum, b) => sum + b.turns, 0);
-		// Track WIP state of the most recent delta — forwarded to the re-render
-		// so a willContinue:true turn keeps its [in progress] heading. Also
-		// returned to #drain so the retry-requeue path preserves it on failed turns.
+		let batchText = initial.map(item => item.text).join("\n\n");
+		let rawMessages = initial.flatMap(item => item.rawMessages);
+		let turns = initial.reduce((sum, item) => sum + item.turns, 0);
 		let wip = initial.at(-1)?.wip ?? false;
+		const seenBeforeAdmission = [...this.#seenContext];
 
 		for (let round = 0; round < MAX_COALESCE_ROUNDS; round++) {
-			if (this.#sessionTransitionPaused) break;
-			if (this.host.maintainContext) {
-				let shouldResetContext = false;
+			if (this.#sessionTransitionPaused) {
+				if (this.#epoch === epoch) {
+					this.#restoreSeenContextInFlight();
+					this.#pending.unshift(...initial);
+				}
+				return null;
+			}
+			this.#seenContext.clear();
+			for (const [key, value] of seenBeforeAdmission) this.#seenContext.set(key, value);
+			this.#seenContextInFlight = seenBeforeAdmission;
+
+			const { batch, preparedMessages } = this.#prepareBatch(rawMessages, wip, batchText);
+			const splitMessages = this.#formatRawDeltaMessageChunks(preparedMessages, wip);
+			const promptInput =
+				splitMessages ??
+				(batch
+					? ([{ role: "user", content: batch, timestamp: Date.now() }] as AgentMessage[])
+					: []);
+
+			if (this.host.maintainContext && promptInput.length > 0) {
 				try {
-					shouldResetContext = await this.host.maintainContext(
-						{ role: "user", content: batchText, timestamp: Date.now() },
-						signal,
-					);
+					await this.host.maintainContext(promptInput, signal);
 				} catch (err) {
 					logger.debug("advisor context maintenance failed", { err: String(err) });
 				}
-				// Epoch guard — a reset/dispose during the maintainContext await
-				// invalidates this batch.
 				if (this.#epoch !== epoch) return null;
-				// Maintenance can commit unseen native plaintext or a snapshot predating
-				// concurrent collisions. Collect before scrubbing and refresh both queues
-				// before another round can send history or the popped batch to compaction.
-				const obfuscator = this.host.obfuscator;
-				if (obfuscator?.hasSecrets()) {
-					if (scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues)) {
-						this.#refreshPendingSecretPrefixes(obfuscator);
-					}
-					batchText = obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(batchText, this.#advisorRegexSecretValues);
-				}
+			}
 
-				if (shouldResetContext) {
-					// Once coalescing has begun (round > 0), deltas that arrived during
-					// this await are part of the coalescing window: tally them so
-					// finalTurns stays accurate for backlog accounting and their raw
-					// messages join the bounded re-render. On the initial round the
-					// popped batch stays bounded exactly as dispatched — later arrivals
-					// remain queued and ship as their own subsequent batch.
-					if (round > 0) {
-						const lateItems = this.#pending.splice(0);
-						initial.push(...lateItems);
-						turns += lateItems.reduce((sum, b) => sum + b.turns, 0);
-						if (lateItems.length > 0) {
-							wip = lateItems.at(-1)!.wip;
-							rawMessages = rawMessages.concat(lateItems.flatMap(b => b.rawMessages));
-						}
-					}
-					// Reset only the advisor Agent/log. The primary cursor, backlog,
-					// waiters, latest snapshot, and epoch stay untouched. Re-render only
-					// this already-popped raw batch so active plan/reference bodies are
-					// restored without replaying any older primary transcript.
-					logger.debug("advisor context reset", {
-						reason: "context-maintenance",
-						lastCount: this.#lastCount,
-						pending: this.#pending.length,
-						backlog: this.#backlog,
-					});
-					this.#clearAdvisorContextAtCurrentCursor();
-					const { batch: rerendered, preparedMessages } = this.#prepareBatch(rawMessages, wip, batchText);
-					return {
-						batch: rerendered ?? (batchText || null),
-						rawMessages,
-						preparedMessages,
-						finalTurns: turns,
-						wip,
-						resetContext: true,
-					};
+			const obfuscator = this.host.obfuscator;
+			if (obfuscator?.hasSecrets()) {
+				if (scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues)) {
+					this.#refreshPendingSecretPrefixes(obfuscator);
 				}
 			}
 
-			// Overflow-recovery batches retry exactly the bounded batch that
-			// overflowed; pending updates stay queued behind them.
-			if (recoveringOverflow) break;
-
-			// On the final round stop here — any late arrivals would ship without
-			// a subsequent maintainContext budget check. Leave them in #pending for
-			// the next drain iteration where they will be properly budgeted.
-			if (round === MAX_COALESCE_ROUNDS - 1) break;
-
-			// Coalesce any deltas that arrived while we were awaiting maintenance.
-			// If none arrived the batch is stable and we're done; otherwise merge,
-			// update WIP state, and re-check the maintenance budget.
+			if (round === MAX_COALESCE_ROUNDS - 1) {
+				return { promptInput, rawMessages, finalTurns: turns, wip };
+			}
 			const late = this.#pending.splice(0);
-			if (late.length === 0) break;
+			if (late.length === 0) {
+				return { promptInput, rawMessages, finalTurns: turns, wip };
+			}
+
+			this.#seenContext.clear();
+			for (const [key, value] of seenBeforeAdmission) this.#seenContext.set(key, value);
+			this.#seenContextInFlight = seenBeforeAdmission;
 			initial.push(...late);
-			batchText = [batchText, ...late.map(b => b.text)].join("\n\n");
-			rawMessages = rawMessages.concat(late.flatMap(b => b.rawMessages));
-			turns += late.reduce((sum, b) => sum + b.turns, 0);
+			batchText = [batchText, ...late.map(item => item.text)].join("\n\n");
+			rawMessages = rawMessages.concat(late.flatMap(item => item.rawMessages));
+			turns += late.reduce((sum, item) => sum + item.turns, 0);
 			wip = late.at(-1)!.wip;
 		}
 
-		// Prepare the deduped view AFTER coalescing (rawMessages is complete by
-		// now): filters advisor custom messages and collapses re-injected
-		// primary-context to "(unchanged…)". BOTH the single-block text and the
-		// multi-message split derive from this exact list so they never diverge.
-		const { batch: preparedBatch, preparedMessages } = this.#prepareBatch(rawMessages, wip, batchText);
-		return {
-			batch: preparedBatch ?? (batchText || null),
-			rawMessages,
-			preparedMessages,
-			finalTurns: turns,
-			wip,
-			resetContext: false,
-		};
+		return null;
 	}
 
 	/**
@@ -1079,11 +1076,10 @@ export class AdvisorRuntime {
 		return { batch: batch ?? fallback, preparedMessages };
 	}
 
-	#terminalAssistantFailure(snapshot: number): AssistantMessage | undefined {
-		const messages = this.agent.state.messages;
-		for (let i = messages.length - 1; i >= snapshot; i--) {
+	#terminalAssistantFailure(messages: readonly AgentMessage[]): AssistantMessage | undefined {
+		for (let i = messages.length - 1; i >= 0; i--) {
 			const message = messages[i];
-			if (message.role === "assistant" && message.stopReason === "error") return message;
+			if (message?.role === "assistant" && message.stopReason === "error") return message;
 		}
 		return undefined;
 	}
@@ -1105,21 +1101,241 @@ export class AdvisorRuntime {
 		}
 	}
 
+	#queueOwnedContinuation(continuation: OwnedContinuation): void {
+		if (!this.#ownedContinuation) {
+			this.#ownedContinuation = continuation;
+			return;
+		}
+		if (continuation.mode === "retry") {
+			this.#deferredContinuations.unshift(this.#ownedContinuation);
+			this.#ownedContinuation = continuation;
+			return;
+		}
+		this.#deferredContinuations.push(continuation);
+	}
+
+	async #runOwnedContinuation(
+		mode: AdvisorContinuationMode,
+		checkpoint: AdvisorHistoryCheckpoint,
+		epoch: number,
+		signal: AbortSignal,
+	): Promise<"completed" | "deferred"> {
+		let nextMode = mode;
+		let currentCheckpoint = checkpoint;
+		for (;;) {
+			let core: Promise<void> | undefined;
+			let turnError: unknown;
+			try {
+				core = this.agent.continue?.(nextMode);
+				if (!core) throw new Error("Advisor continuation is unavailable");
+				this.#promptInFlight = core;
+				await core;
+				const promptError = this.agent.state.error;
+				turnError = promptError
+					? new Error(promptError)
+					: getAdvisorTurnError(this.#messagesSince(currentCheckpoint));
+			} catch (err) {
+				turnError = err;
+			} finally {
+				if (core && this.#promptInFlight === core) this.#promptInFlight = undefined;
+			}
+
+			let disposition: AdvisorTurnDisposition = { kind: "not-applicable" };
+			if (this.host.onTurnSettled) {
+				try {
+					disposition = await Promise.resolve(
+						this.host.onTurnSettled(currentCheckpoint, signal, turnError),
+					);
+				} catch (settledError) {
+					throw new AdvisorSharedTerminalError(settledError);
+				}
+			}
+			if (this.#epoch !== epoch) return "deferred";
+			if (signal.aborted && (turnError !== undefined || disposition.kind === "continue")) {
+				if (turnError !== undefined) {
+					await this.#discardFailedAttempt(currentCheckpoint);
+					if (this.#epoch !== epoch) return "deferred";
+				}
+				if (this.#ownedContinuation?.epoch === epoch) {
+					this.#ownedContinuation = {
+						...this.#ownedContinuation,
+						mode: disposition.kind === "continue" ? disposition.mode : "retry",
+						checkpoint: this.#captureCheckpoint(),
+					};
+				}
+				throw signal.reason ?? new Error("Advisor continuation paused");
+			}
+			if (disposition.kind === "continue") {
+				if (turnError !== undefined) {
+					await this.#discardFailedAttempt(currentCheckpoint);
+					if (this.#epoch !== epoch) return "deferred";
+				}
+				nextMode = disposition.mode;
+				currentCheckpoint = this.#captureCheckpoint();
+				if (nextMode === "auto" && this.#pending.length > 0) {
+					if (this.#ownedContinuation?.epoch === epoch) {
+						this.#ownedContinuation.mode = nextMode;
+						this.#ownedContinuation.checkpoint = currentCheckpoint;
+					}
+					return "deferred";
+				}
+				continue;
+			}
+			if (disposition.kind === "terminal") {
+				throw new AdvisorSharedTerminalError(
+					disposition.error ?? turnError ?? new Error("Advisor context recovery ended"),
+				);
+			}
+			if (turnError !== undefined) throw new AdvisorOrdinaryTurnError(turnError, currentCheckpoint);
+			return "completed";
+		}
+	}
+
+	#startDrain(): void {
+		if (this.#drainInFlight || this.#sessionTransitionPaused || this.disposed) return;
+		const drain = Promise.resolve().then(() => this.#drain());
+		this.#drainInFlight = drain;
+		void drain.finally(() => {
+			if (this.#drainInFlight !== drain) return;
+			this.#drainInFlight = undefined;
+			if (
+				!this.disposed &&
+				!this.#sessionTransitionPaused &&
+				!this.#quotaExhausted &&
+				!this.#halted &&
+				(this.#pending.length > 0 || this.#ownedContinuation !== undefined)
+			) {
+				this.#startDrain();
+			}
+		});
+	}
+
 	async #drain(): Promise<void> {
 		if (this.#busy || this.#sessionTransitionPaused) return;
 		this.#busy = true;
 		try {
 			this.#syncModelIdentity();
-			while (!this.disposed && !this.#sessionTransitionPaused && this.#pending.length) {
-				this.#syncModelIdentity();
-				let popped: PendingDelta[];
-				if (this.#pending[0]?.overflowRecovery) {
-					const recovery = this.#pending.shift();
-					if (!recovery) continue;
-					popped = [recovery];
-				} else {
-					popped = this.#pending.splice(0);
+			while (
+				!this.disposed &&
+				!this.#sessionTransitionPaused &&
+				!this.#quotaExhausted &&
+				!this.#halted &&
+				(this.#pending.length > 0 || this.#ownedContinuation !== undefined)
+			) {
+				const owned = this.#ownedContinuation;
+				if (owned && (owned.mode === "retry" || this.#pending.length === 0)) {
+					const iterationAbort = new AbortController();
+					this.#iterationAbort = iterationAbort;
+					owned.checkpoint = this.#captureCheckpoint();
+					try {
+						const continuationResult = await this.#runOwnedContinuation(
+							owned.mode,
+							owned.checkpoint,
+							owned.epoch,
+							iterationAbort.signal,
+						);
+						if (continuationResult === "deferred") continue;
+						if (this.#epoch !== owned.epoch) continue;
+						this.#ownedContinuation = this.#deferredContinuations.shift();
+						this.#hasReviewed = true;
+						this.#failing = false;
+						this.#consecutiveFailures = 0;
+						this.#failureNotified = false;
+						this.#backlog = Math.max(0, this.#backlog - owned.finalTurns);
+						this.#notifyWaiters();
+						try {
+							await Promise.resolve(this.host.onTurnSuccess?.());
+						} catch (hookErr) {
+							logger.debug("advisor onTurnSuccess hook failed", { err: String(hookErr) });
+						}
+					} catch (err) {
+						if (this.#epoch !== owned.epoch) continue;
+						if (this.#sessionTransitionPaused) continue;
+						if (err instanceof AdvisorSharedTerminalError) {
+							this.#ownedContinuation = this.#deferredContinuations.shift();
+							this.#notifyFailureOnce(err.terminalError);
+							this.#notifyTurnAbandoned();
+							this.#backlog = Math.max(0, this.#backlog - owned.finalTurns);
+							this.#notifyWaiters();
+							continue;
+						}
+						const ordinary = err instanceof AdvisorOrdinaryTurnError ? err : undefined;
+						const turnError = ordinary?.turnError ?? err;
+						const attemptCheckpoint = ordinary?.checkpoint ?? owned.checkpoint;
+						const failedMessages = this.#messagesSince(attemptCheckpoint);
+						await this.#discardFailedAttempt(attemptCheckpoint);
+						if (this.#epoch !== owned.epoch) continue;
+						let recovered = false;
+						try {
+							recovered =
+								(await Promise.resolve(
+									this.host.onTurnError?.(turnError, failedMessages, iterationAbort.signal),
+								)) === true;
+						} catch (hookErr) {
+							logger.debug("advisor onTurnError hook failed", { err: String(hookErr) });
+						}
+						if (this.#epoch !== owned.epoch || this.#sessionTransitionPaused) continue;
+						if (recovered) {
+							owned.mode = "retry";
+							owned.checkpoint = this.#captureCheckpoint();
+							continue;
+						}
+						if (AIError.isUsageLimit(turnError)) {
+							this.#quotaExhausted = true;
+							owned.mode = "retry";
+							owned.checkpoint = this.#captureCheckpoint();
+							this.#wakeAllWaiters();
+							this.host.notifyQuotaExhausted?.();
+							break;
+						}
+						if (turnError instanceof AdvisorOutputQuarantinedError) {
+							this.#consecutiveQuarantines++;
+							if (this.#consecutiveQuarantines < MAX_QUARANTINE_RETRIES) {
+								const rePrime = this.#latestMessages;
+								this.#resetAdvisorContext(true, !rePrime, "quarantine-recovery");
+								if (rePrime) this.onTurnEnd(rePrime);
+								continue;
+							}
+							this.#consecutiveQuarantines = 0;
+						}
+						const terminalFailure = this.#terminalAssistantFailure(failedMessages);
+						const terminalFailureId =
+							terminalFailure === undefined ? undefined : AIError.classifyMessage(terminalFailure);
+						const rawErrorId = AIError.classify(turnError);
+						const classifierRefusal =
+							(terminalFailure !== undefined && isClassifierRefusal(terminalFailure)) ||
+							(!AIError.is(rawErrorId, AIError.Flag.AccountPolicy) &&
+								AIError.is(rawErrorId, AIError.Flag.ContentBlocked));
+						const retriable = terminalFailureId === undefined || AIError.retriable(terminalFailureId);
+						if (!classifierRefusal && retriable) {
+							this.#consecutiveFailures++;
+							if (this.#consecutiveFailures < 3) {
+								owned.mode = "retry";
+								owned.checkpoint = this.#captureCheckpoint();
+								if (this.retryDelayMs <= 0) {
+									await Bun.sleep(0);
+								} else {
+									try {
+										await raceWithSignal(Bun.sleep(this.retryDelayMs), iterationAbort.signal);
+									} catch (sleepError) {
+										if (!iterationAbort.signal.aborted) throw sleepError;
+									}
+								}
+								continue;
+							}
+							this.#consecutiveFailures = 0;
+							this.#noteDroppedBacklog(turnError);
+						}
+						this.#ownedContinuation = this.#deferredContinuations.shift();
+						this.#notifyFailureOnce(turnError);
+						this.#notifyTurnAbandoned();
+						this.#backlog = Math.max(0, this.#backlog - owned.finalTurns);
+						this.#notifyWaiters();
+					}
+					continue;
 				}
+				this.#syncModelIdentity();
+				const popped = this.#pending.splice(0);
 				const iterationAbort = new AbortController();
 				this.#iterationAbort = iterationAbort;
 				const epoch = this.#epoch;
@@ -1131,13 +1347,8 @@ export class AdvisorRuntime {
 					delta.text = this.#formatRawDelta(delta.rawMessages, delta.wip, false) ?? delta.text;
 					delta.renderRevision = this.#renderRevision;
 				}
-				const recoveringOverflow = popped.some(delta => delta.overflowRecovery === true);
-				const result = await this.#collectAndMaintainBatch(
-					epoch,
-					popped,
-					recoveringOverflow,
-					iterationAbort.signal,
-				);
+				const result = await this.#collectAndMaintainBatch(epoch, popped, iterationAbort.signal);
+				if (this.#epoch !== epoch) continue;
 
 				// Epoch was invalidated during batch collection; restart the loop.
 				if (result === null) continue;
@@ -1147,54 +1358,90 @@ export class AdvisorRuntime {
 					continue;
 				}
 
-				const { batch, rawMessages, preparedMessages, finalTurns, wip, resetContext } = result;
+				const { promptInput, rawMessages, finalTurns, wip } = result;
 
-				if (this.disposed || batch === null) {
+				if (this.disposed || promptInput.length === 0) {
 					this.#backlog = Math.max(0, this.#backlog - finalTurns);
 					this.#notifyWaiters();
 					continue;
 				}
 
 				let success = false;
-				// Capture the advisor's message count BEFORE the prompt so a failure can
-				// roll back the user batch + synthetic assistant-error turn Agent.#runLoop
-				// appends to internal state. Without this, a retry would replay the failed
-				// batch on top of stale turns and the dropped-after-3 path would leak
-				// orphan failures into the next successful run's context.
-				const messageSnapshot = this.agent.state.messages.length;
-				const contextWasFresh = resetContext || recoveringOverflow || messageSnapshot === 0;
+				let checkpoint = this.#captureCheckpoint();
+				let reviewHasCommittedRewrite = false;
+				let deferredContinuation = false;
+				let sharedTerminal = false;
+				let continuationMode: AdvisorContinuationMode | undefined;
 				try {
 					this.host.beginAdvisorUpdate?.(wip);
-					// Candidate 4 (multi-message split): deliver the Session update as
-					// multiple user messages so the provider prompt cache can
-					// incrementally hit each appended message (cache_read grows with
-					// the session instead of staying pinned at the instructions/tools
-					// boundary). Falls back to the single-block string when the chunk
-					// renderer cannot split (e.g. empty delta). The split is
-					// byte-equivalent to the old single-block render (equivalence
-					// tested), so the advisor sees identical context.
-					const splitMessages = this.#formatRawDeltaMessageChunks(preparedMessages, wip);
-					const promptInput: string | AgentMessage[] = splitMessages ?? batch;
-					const prompt = this.agent.prompt(promptInput);
-					this.#promptInFlight = prompt;
-					try {
-						await prompt;
-					} finally {
-						if (this.#promptInFlight === prompt) this.#promptInFlight = undefined;
+					for (;;) {
+						let turnError: unknown;
+						try {
+							const core = continuationMode
+								? this.agent.continue?.(continuationMode)
+								: this.agent.prompt(promptInput);
+							if (!core) throw new Error("Advisor continuation is unavailable");
+							this.#promptInFlight = core;
+							try {
+								await core;
+							} finally {
+								if (this.#promptInFlight === core) this.#promptInFlight = undefined;
+							}
+							const promptError = this.agent.state.error;
+							if (promptError) {
+								turnError = new Error(promptError);
+							} else {
+								turnError = getAdvisorTurnError(this.#messagesSince(checkpoint));
+							}
+						} catch (err) {
+							turnError = err;
+						}
+
+						let disposition: AdvisorTurnDisposition = { kind: "not-applicable" };
+						if (this.host.onTurnSettled) {
+							try {
+								disposition = await Promise.resolve(
+									this.host.onTurnSettled(checkpoint, iterationAbort.signal, turnError),
+								);
+							} catch (settledError) {
+								sharedTerminal = true;
+								throw settledError;
+							}
+						}
+						if (this.#epoch !== epoch) break;
+						reviewHasCommittedRewrite ||= this.#hasCommittedRewrite(checkpoint);
+
+						if (disposition.kind === "continue") {
+							if (turnError !== undefined) await this.#discardFailedAttempt(checkpoint);
+							if (this.#epoch !== epoch) break;
+							const nextCheckpoint = this.#captureCheckpoint();
+							if (
+								iterationAbort.signal.aborted ||
+								(disposition.mode === "auto" && this.#pending.length > 0)
+							) {
+								this.#queueOwnedContinuation({
+									mode: disposition.mode,
+									checkpoint: nextCheckpoint,
+									epoch,
+									finalTurns,
+								});
+								deferredContinuation = true;
+								break;
+							}
+							continuationMode = disposition.mode;
+							checkpoint = nextCheckpoint;
+							continue;
+						}
+						if (disposition.kind === "terminal") {
+							sharedTerminal = true;
+							throw disposition.error ?? turnError ?? new Error("Advisor context recovery ended");
+						}
+						if (turnError !== undefined) throw turnError;
+						success = true;
+						break;
 					}
-					// Agent.#runLoop catches provider/stream failures internally and
-					// resolves prompt() cleanly with stopReason: "error". Treat that
-					// as a failed turn so endpoint rejections trip the retry path.
-					const promptError = this.agent.state.error;
-					if (promptError) throw new Error(promptError);
-					// A content-less stop is a deliberate silent review — the documented
-					// verifier behavior ("prefer silence when the agent is on track") — and
-					// completes the turn. Sessions can legitimately have nothing to advise
-					// on for any number of consecutive turns, so silence is never warned
-					// about (#5216 did, spamming "Advisor unavailable" at quiet models).
-					const turnError = getAdvisorTurnError(this.agent.state.messages.slice(messageSnapshot));
-					if (turnError) throw turnError;
-					success = true;
+					if (deferredContinuation) continue;
+					if (this.#epoch !== epoch) continue;
 					this.#seenContextInFlight = undefined;
 					this.#hasReviewed = true;
 					this.#failing = false;
@@ -1205,28 +1452,43 @@ export class AdvisorRuntime {
 					this.#refusalModelsTried.clear();
 					if (this.host.onTurnSuccess) {
 						try {
-							await raceWithSignal(Promise.resolve(this.host.onTurnSuccess()), iterationAbort.signal);
+							await Promise.resolve(this.host.onTurnSuccess());
 						} catch (hookErr) {
 							logger.debug("advisor onTurnSuccess hook failed", { err: String(hookErr) });
 						}
 					}
 				} catch (err) {
+					// A reset invalidates the attempt before any history restoration.
+					if (this.#epoch !== epoch) continue;
+					reviewHasCommittedRewrite ||= this.#hasCommittedRewrite(checkpoint);
 					if (this.#sessionTransitionPaused) {
-						this.#rollbackFailedTurn(messageSnapshot);
-						this.#pending.unshift(...popped);
+						if (reviewHasCommittedRewrite || continuationMode !== undefined) {
+							await this.#discardFailedAttempt(checkpoint);
+							if (this.#epoch !== epoch) continue;
+							this.#queueOwnedContinuation({
+								mode: "retry",
+								checkpoint: this.#captureCheckpoint(),
+								epoch,
+								finalTurns,
+							});
+						} else {
+							await this.#restoreCheckpoint(checkpoint, "session-transition");
+							if (this.#epoch !== epoch) continue;
+							this.#pending.unshift(...popped);
+						}
 						continue;
 					}
-					// reset()/dispose() aborts the in-flight prompt; treat it as a
-					// reset, not a transient failure — drop the stale batch.
-					if (this.#epoch !== epoch) continue;
-					// Release any parked primary-agent waiters IMMEDIATELY — before
-					// the async onTurnError hook or any retry sleep — and refuse new
-					// parks until a turn succeeds. A failing advisor must never hold
-					// the primary on the catch-up gate.
+					if (sharedTerminal) {
+						this.#notifyFailureOnce(err);
+						this.#notifyTurnAbandoned();
+						this.#backlog = Math.max(0, this.#backlog - finalTurns);
+						this.#notifyWaiters();
+						continue;
+					}
 					this.#failing = true;
 					this.#wakeAllWaiters();
-					const failedMessages = this.agent.state.messages.slice(messageSnapshot);
-					const terminalFailure = this.#terminalAssistantFailure(messageSnapshot);
+					const failedMessages = this.#messagesSince(checkpoint);
+					const terminalFailure = this.#terminalAssistantFailure(failedMessages);
 					const rawErrorId = AIError.classify(err);
 					const terminalFailureId =
 						terminalFailure === undefined ? undefined : AIError.classifyMessage(terminalFailure);
@@ -1234,19 +1496,18 @@ export class AdvisorRuntime {
 						(terminalFailure !== undefined && isClassifierRefusal(terminalFailure)) ||
 						(!AIError.is(rawErrorId, AIError.Flag.AccountPolicy) &&
 							AIError.is(rawErrorId, AIError.Flag.ContentBlocked));
-					const contextOverflow =
-						(terminalFailureId !== undefined && AIError.is(terminalFailureId, AIError.Flag.ContextOverflow)) ||
-						AIError.is(rawErrorId, AIError.Flag.ContextOverflow);
-					// A terminal provider failure that is neither retriable nor an
-					// overflow (e.g. a blocked prompt) will fail identically on every
-					// retry — classify it before rollback so the batch is dropped after
-					// one attempt instead of burning the 3-attempt budget (#5468).
 					const terminalFailureRetriable =
-						terminalFailureId === undefined ||
-						AIError.retriable(terminalFailureId) ||
-						AIError.is(terminalFailureId, AIError.Flag.ContextOverflow);
-					this.#rollbackFailedTurn(messageSnapshot);
+						terminalFailureId === undefined || AIError.retriable(terminalFailureId);
+					const ownsContinuation = reviewHasCommittedRewrite || continuationMode !== undefined;
+					if (ownsContinuation) {
+						await this.#discardFailedAttempt(checkpoint);
+						if (this.#epoch !== epoch) continue;
+					} else {
+						await this.#restoreCheckpoint(checkpoint, "ordinary-turn-failure");
+						if (this.#epoch !== epoch) continue;
+					}
 					logger.debug("advisor turn failed", { err: String(err) });
+					const retryText = this.#formatRawDelta(rawMessages, wip, false) ?? "";
 					if (classifierRefusal) {
 						if (this.#includeThinking) {
 							this.#includeThinking = false;
@@ -1256,14 +1517,22 @@ export class AdvisorRuntime {
 							// "(unchanged — still in effect)" on the retry.
 							const strippedBatch = this.#formatRawDelta(rawMessages, wip, false);
 							if (strippedBatch) {
-								this.#pending.unshift({
-									text: strippedBatch,
-									rawMessages,
-									renderRevision: this.#renderRevision,
-									turns: finalTurns,
-									wip,
-									overflowRecovery: recoveringOverflow || undefined,
-								});
+								if (ownsContinuation) {
+									this.#queueOwnedContinuation({
+										mode: "retry",
+										checkpoint: this.#captureCheckpoint(),
+										epoch,
+										finalTurns,
+									});
+								} else {
+									this.#pending.unshift({
+										text: strippedBatch,
+										rawMessages,
+										renderRevision: this.#renderRevision,
+										turns: finalTurns,
+										wip,
+									});
+								}
 								logger.debug("advisor refusal recovered by stripping primary reasoning");
 								continue;
 							}
@@ -1280,9 +1549,8 @@ export class AdvisorRuntime {
 							if (!this.#refusalModelsTried.has(refusalModel)) {
 								this.#refusalModelsTried.add(refusalModel);
 								refusalRecovered =
-									(await raceWithSignal(
-										Promise.resolve(this.host.onTurnError?.(err, failedMessages, iterationAbort.signal)),
-										iterationAbort.signal,
+									(await Promise.resolve(
+										this.host.onTurnError?.(err, failedMessages, iterationAbort.signal),
 									)) === true;
 							} else {
 								logger.debug("advisor refusal chain exhausted", { model: refusalModel });
@@ -1292,20 +1560,37 @@ export class AdvisorRuntime {
 						}
 						if (this.#epoch !== epoch) continue;
 						if (this.#sessionTransitionPaused) {
-							this.#pending.unshift(...popped);
+							if (ownsContinuation) {
+								this.#queueOwnedContinuation({
+									mode: "retry",
+									checkpoint: this.#captureCheckpoint(),
+									epoch,
+									finalTurns,
+								});
+							} else {
+								this.#pending.unshift(...popped);
+							}
 							continue;
 						}
 						if (refusalRecovered) {
 							this.#consecutiveFailures = 0;
 							this.#failureNotified = false;
-							this.#pending.unshift({
-								text: batch,
-								rawMessages,
-								renderRevision: this.#renderRevision,
-								turns: finalTurns,
-								wip,
-								overflowRecovery: recoveringOverflow || undefined,
-							});
+							if (ownsContinuation) {
+								this.#queueOwnedContinuation({
+									mode: "retry",
+									checkpoint: this.#captureCheckpoint(),
+									epoch,
+									finalTurns,
+								});
+							} else {
+								this.#pending.unshift({
+									text: retryText,
+									rawMessages,
+									renderRevision: this.#renderRevision,
+									turns: finalTurns,
+									wip,
+								});
+							}
 							logger.debug("advisor refusal recovered by model fallback");
 							continue;
 						}
@@ -1322,15 +1607,24 @@ export class AdvisorRuntime {
 					let recovered = false;
 					try {
 						recovered =
-							(await raceWithSignal(
-								Promise.resolve(this.host.onTurnError?.(err, failedMessages, iterationAbort.signal)),
-								iterationAbort.signal,
+							(await Promise.resolve(
+								this.host.onTurnError?.(err, failedMessages, iterationAbort.signal),
 							)) === true;
 					} catch (hookErr) {
 						logger.debug("advisor onTurnError hook failed", { err: String(hookErr) });
 					}
+					if (this.#epoch !== epoch) continue;
 					if (this.#sessionTransitionPaused) {
-						this.#pending.unshift(...popped);
+						if (ownsContinuation) {
+							this.#queueOwnedContinuation({
+								mode: "retry",
+								checkpoint: this.#captureCheckpoint(),
+								epoch,
+								finalTurns,
+							});
+						} else {
+							this.#pending.unshift(...popped);
+						}
 						continue;
 					}
 					if (err instanceof AdvisorOutputQuarantinedError) {
@@ -1355,19 +1649,25 @@ export class AdvisorRuntime {
 						if (rePrime) this.onTurnEnd(rePrime);
 						continue;
 					}
-					// Epoch guard after the async error hook.
-					if (this.#epoch !== epoch) continue;
 					if (recovered) {
 						this.#consecutiveFailures = 0;
 						this.#failureNotified = false;
-						this.#pending.unshift({
-							text: batch,
-							rawMessages,
-							renderRevision: this.#renderRevision,
-							turns: finalTurns,
-							wip,
-							overflowRecovery: recoveringOverflow || undefined,
-						});
+						if (ownsContinuation) {
+							this.#queueOwnedContinuation({
+								mode: "retry",
+								checkpoint: this.#captureCheckpoint(),
+								epoch,
+								finalTurns,
+							});
+						} else {
+							this.#pending.unshift({
+								text: retryText,
+								rawMessages,
+								renderRevision: this.#renderRevision,
+								turns: finalTurns,
+								wip,
+							});
+						}
 						continue;
 					}
 					if (AIError.isUsageLimit(err)) {
@@ -1380,14 +1680,22 @@ export class AdvisorRuntime {
 						this.#consecutiveFailures = 0;
 						this.#failureNotified = false;
 						this.#clearSeenContext();
-						this.#pending.unshift({
-							text: batch,
-							rawMessages,
-							renderRevision: this.#renderRevision,
-							turns: finalTurns,
-							wip,
-							overflowRecovery: recoveringOverflow || undefined,
-						});
+						if (ownsContinuation) {
+							this.#queueOwnedContinuation({
+								mode: "retry",
+								checkpoint: this.#captureCheckpoint(),
+								epoch,
+								finalTurns,
+							});
+						} else {
+							this.#pending.unshift({
+								text: retryText,
+								rawMessages,
+								renderRevision: this.#renderRevision,
+								turns: finalTurns,
+								wip,
+							});
+						}
 						this.#wakeAllWaiters();
 						try {
 							this.host.notifyQuotaExhausted?.();
@@ -1406,33 +1714,6 @@ export class AdvisorRuntime {
 						this.#clearSeenContext();
 						this.#noteDroppedBacklog(err);
 						success = true;
-					} else if (contextOverflow) {
-						this.#clearAdvisorContextAtCurrentCursor();
-						if (contextWasFresh) {
-							// The bounded update cannot fit even with no advisor history. Drop
-							// only this batch after its one fresh-context retry; pending and later
-							// deltas remain eligible so one oversized update cannot disable the advisor.
-							logger.warn("advisor update overflowed a fresh context; dropping bounded batch");
-							this.#notifyFailureOnce(err);
-							this.#notifyTurnAbandoned();
-							success = true;
-						} else {
-							// Retry once against the fresh advisor context, using only the same
-							// bounded raw batch. Pending updates remain queued behind it.
-							// Same double-fold guard as the refusal branch: #prepareBatch
-							// re-dedups on retry, so this preview render must not mutate
-							// #seenContext.
-							const recoveryBatch = this.#formatRawDelta(rawMessages, wip, false) ?? batch;
-							this.#pending.unshift({
-								text: recoveryBatch,
-								rawMessages,
-								renderRevision: this.#renderRevision,
-								turns: finalTurns,
-								wip,
-								overflowRecovery: true,
-							});
-							logger.debug("advisor context overflow recovered at current primary cursor");
-						}
 					} else {
 						this.#consecutiveFailures++;
 						if (this.#consecutiveFailures >= 3) {
@@ -1446,14 +1727,22 @@ export class AdvisorRuntime {
 							this.#noteDroppedBacklog(err);
 							success = true;
 						} else {
-							this.#pending.unshift({
-								text: batch,
-								rawMessages,
-								renderRevision: this.#renderRevision,
-								turns: finalTurns,
-								wip,
-								overflowRecovery: recoveringOverflow || undefined,
-							});
+							if (ownsContinuation) {
+								this.#queueOwnedContinuation({
+									mode: "retry",
+									checkpoint: this.#captureCheckpoint(),
+									epoch,
+									finalTurns,
+								});
+							} else {
+								this.#pending.unshift({
+									text: retryText,
+									rawMessages,
+									renderRevision: this.#renderRevision,
+									turns: finalTurns,
+									wip,
+								});
+							}
 							if (this.retryDelayMs <= 0) {
 								await Bun.sleep(0);
 							} else {

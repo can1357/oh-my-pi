@@ -63,7 +63,18 @@ import {
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
-import { getLatestCompactionEntry } from "./session-context";
+import {
+	findSafeRetryFallbackCandidate,
+	hasReplayUnsafeOutput,
+	isHardErrorFallbackEligible,
+	type RetryFallbackSafetyHost,
+} from "./retry-fallback-safety";
+import {
+	type ContextRecoveryHost,
+	dropFailedAssistantTurn,
+	removeFailedAssistantFromActiveContext,
+	runContextRecoveryTransaction,
+} from "./context-recovery";
 import { EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -333,6 +344,42 @@ export class TurnRecovery {
 			this.#markFallbackRouted();
 		}
 		this.#validateRetryFallbackChains();
+	}
+	#contextRecoveryHost(generation: number, respectAbort = false): ContextRecoveryHost {
+		return {
+			agent: this.#host.agent,
+			sessionManager: this.#host.sessionManager,
+			waitForMessagePersistence: message => this.#host.waitForSessionMessagePersistence(message),
+			persistedAssistantEntryId: message => this.#host.persistedAssistantEntryId(message),
+			sameAssistantMessage: (left, right) => this.#isSameAssistantMessage(left, right),
+			withBranchTransition: operation => this.#host.withBashBranchTransition(operation),
+			isCurrent: () =>
+				this.#host.promptGeneration() === generation &&
+				!this.#host.isDisposed() &&
+				(!respectAbort || !this.#host.abortInProgress()),
+		};
+	}
+
+	#retryFallbackSafetyHost(isCurrent: () => boolean = () => true): RetryFallbackSafetyHost {
+		return {
+			settings: this.#host.settings,
+			modelRegistry: this.#host.modelRegistry,
+			model: () => this.#host.model(),
+			thinkingLevel: () => this.#host.thinkingLevel(),
+			thinkingLevelCeiling: () => this.#host.thinkingLevelCeiling(),
+			sessionId: () => this.#host.sessionId(),
+			textOutputCommitted: () => this.#host.textOutputCommitted(),
+			contextFitsModel: (model, excludedMessage) => this.#host.contextFitsModel(model, excludedMessage),
+			retryFallbackChainKeys: currentSelector => this.retryFallbackChainKeys(currentSelector),
+			findRetryFallbackCandidates: (role, currentSelector, options) =>
+				this.findRetryFallbackCandidates(role, currentSelector, undefined, options),
+			isRetryFallbackSelectorSuppressed: selector => this.isRetryFallbackSelectorSuppressed(selector),
+			latestAssistantMessage: excluding =>
+				this.#host.agent.state.messages.findLast(
+					(message): message is AssistantMessage => message.role === "assistant" && message !== excluding,
+				),
+			isCurrent,
+		};
 	}
 
 	/** Current automatic retry attempt. */
@@ -1002,23 +1049,11 @@ export class TurnRecovery {
 		assistantMessage: AssistantMessage,
 		reason = "assistant-context-cleanup",
 	): void {
-		const messages = this.#host.agent.state.messages;
-		const lastMessage = messages[messages.length - 1];
-		const lastAssistant: AssistantMessage | undefined = lastMessage?.role === "assistant" ? lastMessage : undefined;
-		if (lastAssistant !== undefined && this.#isSameAssistantMessage(lastAssistant, assistantMessage)) {
-			this.#host.agent.replaceMessages(messages.slice(0, -1));
-			return;
-		}
-		// A miss means the failed turn is still in active context (or was never
-		// there); log just enough to explain why the identity check failed.
-		logger.debug("agent active context assistant removal missed", {
+		removeFailedAssistantFromActiveContext(
+			this.#contextRecoveryHost(this.#host.promptGeneration()),
+			assistantMessage,
 			reason,
-			lastRole: lastMessage?.role,
-			candidateTimestamp: assistantMessage.timestamp,
-			lastTimestamp: lastAssistant?.timestamp,
-			candidateStopReason: assistantMessage.stopReason,
-			lastStopReason: lastAssistant?.stopReason,
-		});
+		);
 	}
 
 	/**
@@ -1031,8 +1066,10 @@ export class TurnRecovery {
 	 * (and the user-visible transcript line) in place.
 	 */
 	async #dropPersistedAssistantTurn(assistantMessage: AssistantMessage): Promise<string | undefined> {
-		await this.#host.waitForSessionMessagePersistence(assistantMessage);
-		return this.discardAssistantTurn(assistantMessage);
+		return dropFailedAssistantTurn(
+			this.#contextRecoveryHost(this.#host.promptGeneration()),
+			assistantMessage,
+		);
 	}
 
 	/**
@@ -1067,31 +1104,21 @@ export class TurnRecovery {
 		allowDefer: boolean,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<RecoveryCompactionResult> {
-		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-		await this.dropPersistedAssistantTurn(assistantMessage);
-		const result = await this.#host.runAutoCompaction(reason, true, false, allowDefer, {
-			autoContinue: options.autoContinue,
-			triggerContextTokens: options.triggerContextTokens,
-			phase: "mid_turn",
-			excludeMediaMethods: options.excludeMediaMethods,
-		});
-		const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-		if (result.historyRewritten !== true && compactionEntryAfter === compactionEntryBefore) {
-			this.#restoreFailedAssistantTurn(assistantMessage);
-		}
-		return result;
-	}
-
-	#restoreFailedAssistantTurn(assistantMessage: AssistantMessage): void {
-		if (!isEmptyErrorTurn(assistantMessage)) this.#host.sessionManager.appendMessage(assistantMessage);
-		const lastMessage = this.#host.agent.state.messages.at(-1);
-		if (
-			lastMessage?.role === "assistant" &&
-			this.#isSameAssistantMessage(lastMessage as AssistantMessage, assistantMessage)
-		) {
-			return;
-		}
-		this.#host.agent.appendMessage(assistantMessage);
+		const generation = this.#host.promptGeneration();
+		const transaction = await runContextRecoveryTransaction(
+			this.#contextRecoveryHost(generation, true),
+			assistantMessage,
+			() =>
+				this.#host.runAutoCompaction(reason, true, false, allowDefer, {
+					autoContinue: options.autoContinue,
+					triggerContextTokens: options.triggerContextTokens,
+					phase: "mid_turn",
+					excludeMediaMethods: options.excludeMediaMethods,
+				}),
+		);
+		return transaction.kind === "complete"
+			? transaction.result
+			: { deferredHandoff: false, continuationScheduled: false };
 	}
 
 	#discardAcceptedTerminalEmptyStop(assistantMessage: AssistantMessage): void {
@@ -1463,13 +1490,7 @@ export class TurnRecovery {
 	 * so replaying the turn can duplicate user-visible output or work.
 	 */
 	#hasReplayUnsafeOutput(message: AssistantMessage): boolean {
-		return message.content.some(
-			block =>
-				block.type === "toolCall" ||
-				block.type === "image" ||
-				block.type === "anthropicServerTool" ||
-				(block.type === "text" && this.#host.textOutputCommitted() && block.text.trim().length > 0),
-		);
+		return hasReplayUnsafeOutput(message, this.#host.textOutputCommitted());
 	}
 
 	/**
@@ -1842,7 +1863,7 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal },
+		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; isCurrent?: () => boolean },
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -1855,7 +1876,7 @@ export class TurnRecovery {
 		if (!apiKey) {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
-		if (options?.signal?.aborted) return false;
+		if (options?.signal?.aborted || options?.isCurrent?.() === false) return false;
 
 		// Capture the configured selector (auto-aware) so a fallback chain preserves
 		// `auto` instead of collapsing it to the level it resolved to this turn.
@@ -1885,17 +1906,31 @@ export class TurnRecovery {
 		this.#markFallbackRouted();
 		if (this.#activeRetryFallback) this.#activeRetryFallback.served = false;
 		await this.#host.setModelWithProviderSessionReset(candidate);
-		if (options?.signal?.aborted) {
+		const staleAfterSwap = options?.signal?.aborted || options?.isCurrent?.() === false;
+		if (staleAfterSwap) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
 			if (previousModel && this.#host.model() === candidate) {
+				const candidateEditMode = this.#host.resolveActiveEditMode();
 				await this.#host.setModelWithProviderSessionReset(previousModel);
+				await this.#host.syncAfterModelChange(candidateEditMode);
 			}
 			return false;
 		}
 		if (this.#host.model() !== candidate) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
+			return false;
+		}
+		await this.#host.syncAfterModelChange(previousEditMode);
+		if (options?.signal?.aborted || options?.isCurrent?.() === false) {
+			this.#fallbackRoutedFor = routedBeforeSwap;
+			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
+			if (previousModel && this.#host.model() === candidate) {
+				const candidateEditMode = this.#host.resolveActiveEditMode();
+				await this.#host.setModelWithProviderSessionReset(previousModel);
+				await this.#host.syncAfterModelChange(candidateEditMode);
+			}
 			return false;
 		}
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
@@ -1913,13 +1948,13 @@ export class TurnRecovery {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 		}
-		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
 			to: selector.raw,
 			role,
 		});
+		if (options?.signal?.aborted || options?.isCurrent?.() === false) return false;
 		return true;
 	}
 
@@ -1933,53 +1968,25 @@ export class TurnRecovery {
 			wrapAround?: boolean;
 		},
 	): Promise<boolean> {
-		const ceiling = this.#host.thinkingLevelCeiling();
-		const latestAssistant = options?.preserveFailedTurn
-			? failedMessage
-			: this.#host.agent.state.messages.findLast(
-					(message): message is AssistantMessage => message.role === "assistant" && message !== failedMessage,
-				);
-		for (const role of this.retryFallbackChainKeys(currentSelector)) {
-			for (const selector of this.findRetryFallbackCandidates(role, currentSelector, undefined, options)) {
-				if (this.isRetryFallbackSelectorSuppressed(selector)) continue;
-				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
-				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
-				if (!candidate) continue;
-				if (options?.excludeProvider === candidate.provider) continue;
-				// Anthropic signatures and redacted blocks are model-bound, while the
-				// latest assistant response must remain byte-identical. A same-provider
-				// model switch can satisfy neither constraint, so keep retrying the
-				// source model or consider a later cross-provider candidate whose
-				// message transform can safely demote the foreign thinking.
-				if (
-					candidate.api === "anthropic-messages" &&
-					latestAssistant?.api === "anthropic-messages" &&
-					latestAssistant.provider === candidate.provider &&
-					latestAssistant.model !== candidate.id &&
-					latestAssistant.content.some(
-						block =>
-							(block.type === "thinking" && Boolean(block.thinkingSignature?.trim())) ||
-							block.type === "redactedThinking",
-					)
-				) {
-					continue;
-				}
-				// A candidate whose effort floor exceeds the per-spawn ceiling would be
-				// clamped UP past the cap by its model floor — skip it entirely.
-				if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
-				// Skip a candidate whose window cannot hold the retry context. The
-				// failed assistant is excluded only when retry removes it; preserved
-				// unexecuted-tool turns remain part of the request (issue #8065).
-				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
-					continue;
-				}
-				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
-				if (!apiKey) continue;
-				return this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
-			}
-		}
-
-		return false;
+		const generation = this.#host.promptGeneration();
+		const currentModel = this.#host.model();
+		const ownsGeneration = () =>
+			this.#host.promptGeneration() === generation &&
+			!this.#host.isDisposed() &&
+			!this.#host.abortInProgress();
+		const isCurrent = () => ownsGeneration() && this.#host.model() === currentModel;
+		const candidate = await findSafeRetryFallbackCandidate(
+			this.#retryFallbackSafetyHost(isCurrent),
+			currentSelector,
+			failedMessage,
+			options,
+		);
+		if (!candidate || !isCurrent()) return false;
+		return this.applyRetryFallbackCandidate(candidate.role, candidate.selector, currentSelector, {
+			...options,
+			apiKey: candidate.apiKey,
+			isCurrent: ownsGeneration,
+		});
 	}
 
 	/** The active model when it is a Fireworks Fast (`-fast`) variant, else undefined. */
@@ -2030,33 +2037,7 @@ export class TurnRecovery {
 	 * `pinFallback`), and turns that already emitted replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error") return false;
-		if (this.#isUsagePreflightBlocked(message)) return false;
-		const model = this.#host.model();
-		if (!model) return false;
-		const immutableAnthropicThinkingError =
-			model.api === "anthropic-messages" &&
-			(message.errorStatus === 400 ||
-				message.errorId === 400 ||
-				message.errorMessage?.startsWith("400 ") === true) &&
-			IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN.test(message.errorMessage ?? "");
-		if (immutableAnthropicThinkingError) return false;
-		const retrySettings = this.#host.settings.getGroup("retry");
-		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
-		if (this.isClassifierRefusal(message)) return false;
-		const id = this.#classifyRetryMessage(message);
-		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
-		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
-		const contextWindow = model.contextWindow ?? 0;
-		const textAmbiguousOverflow = AIError.isTextAmbiguousContextOverflow(id, message, contextWindow);
-		if (!textAmbiguousOverflow && AIError.isContextOverflow(message, contextWindow)) {
-			return false;
-		}
-		if (this.#hasReplayUnsafeOutput(message)) return false;
-		const currentSelector = formatRetryFallbackSelector(model, this.#host.thinkingLevel());
-		return this.retryFallbackChainKeys(currentSelector).some(
-			role => this.findRetryFallbackCandidates(role, currentSelector).length > 0,
-		);
+		return isHardErrorFallbackEligible(this.#retryFallbackSafetyHost(), message);
 	}
 
 	/**

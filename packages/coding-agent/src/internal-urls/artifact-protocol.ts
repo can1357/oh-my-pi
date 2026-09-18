@@ -24,7 +24,7 @@ export interface ResolvedArtifactFile {
 	size: number;
 }
 
-function parseArtifactId(url: InternalUrl): string {
+export function parseArtifactId(url: InternalUrl): string {
 	const id = url.rawHost || url.hostname;
 	if (!id) {
 		throw new Error("artifact:// URL requires a numeric ID: artifact://0");
@@ -100,6 +100,20 @@ export class ArtifactProtocolHandler implements ProtocolHandler {
 	readonly immutable = true;
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		const id = parseArtifactId(url);
+		const inMemory = await context?.localProtocolOptions?.getArtifactContent?.(id);
+		if (inMemory !== undefined) {
+			const size = Buffer.byteLength(inMemory);
+			if (context?.pathOnly) {
+				return { url: url.href, content: "", contentType: "text/plain", size };
+			}
+			if (size > MAX_INLINE_ARTIFACT_BYTES) {
+				throw new Error(
+					`Artifact ${id} is ${size} bytes; full internal resolution is blocked. Use read selectors such as artifact://${id}:1-3000 or artifact://${id}:raw:1-3000.`,
+				);
+			}
+			return { url: url.href, content: inMemory, contentType: "text/plain", size };
+		}
 		const artifact = await resolveArtifactFile(url, context);
 
 		// Path-only callers (search/grep, bash URL expansion) never touch the

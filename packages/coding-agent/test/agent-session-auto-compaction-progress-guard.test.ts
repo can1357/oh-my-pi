@@ -11,6 +11,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { ContextMaintenance } from "@oh-my-pi/pi-coding-agent/session/context-maintenance";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { INCOMPLETE_RECOVERY_MAX_RETRIES } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
@@ -1671,7 +1672,7 @@ describe("AgentSession auto-compaction progress guard", () => {
 			blocksDropped: 0,
 			tokensFreed: 0,
 		});
-		const dropSpy = vi.spyOn(session, "dropImages").mockImplementation(async () => {
+		const dropSpy = vi.spyOn(ContextMaintenance.prototype, "dropImages").mockImplementation(async () => {
 			imagesDropped = true;
 			return { removed: 2 };
 		});

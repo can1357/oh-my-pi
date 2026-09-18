@@ -12,6 +12,8 @@ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, Ur
 export interface LocalProtocolOptions {
 	getArtifactsDir?: () => string | null;
 	getSessionId?: () => string | null;
+	/** Resolve artifacts retained by a non-persistent session. */
+	getArtifactContent?: (id: string) => Promise<string | undefined>;
 }
 
 function parseLocalUrl(input: string): InternalUrl {

@@ -2,8 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { AdvisorContextMaintenance } from "@oh-my-pi/pi-coding-agent/advisor/context-maintenance";
 import {
 	type Api,
 	type AssistantMessage,
@@ -111,7 +111,7 @@ function emptyUsage(): AssistantMessage["usage"] {
 	};
 }
 
-function advisorNativeSummary(provider: string) {
+function seedAdvisorNativeHistory(advisor: Agent, provider: string): void {
 	const compactionItem = { type: "compaction", encrypted_content: "native-advisor-transition-state" };
 	const replacementHistory = [
 		{
@@ -121,13 +121,41 @@ function advisorNativeSummary(provider: string) {
 		},
 		compactionItem,
 	];
-	return {
-		...createCompactionSummaryMessage("Native advisor history", 100_000, new Date().toISOString(), {
-			providerPayload: { type: "openaiResponsesHistory", provider, items: replacementHistory },
-		}),
-		preserveData: { openaiRemoteCompaction: { provider, replacementHistory, compactionItem } },
-		advisorUsageAnchorStartIndex: 1,
+	const preserveData = { openaiRemoteCompaction: { provider, replacementHistory, compactionItem } };
+	const before: AgentMessage = {
+		role: "user",
+		content: "raw advisor history before native compaction",
+		timestamp: Date.now() - 2_000,
 	};
+	const retained: AgentMessage = {
+		role: "user",
+		content: "retained advisor history after native compaction",
+		timestamp: Date.now() - 1_000,
+	};
+	advisor.replaceMessages([]);
+	const original = AdvisorContextMaintenance.prototype.maintainBeforePrompt;
+	const admissionSpy = vi
+		.spyOn(AdvisorContextMaintenance.prototype, "maintainBeforePrompt")
+		.mockImplementation(async function (
+			this: AdvisorContextMaintenance,
+			incoming: AgentMessage[],
+			signal: AbortSignal,
+		) {
+			admissionSpy.mockRestore();
+			this.recordFinalized(before);
+			const replayBoundary = this.journal.getBranch().findLast(entry => entry.type === "message");
+			if (!replayBoundary) throw new Error("Expected native replay boundary");
+			this.recordFinalized(retained);
+			const firstKept = this.journal.getBranch().findLast(entry => entry.type === "message");
+			if (!firstKept) throw new Error("Expected native retained boundary");
+			this.journal.appendCompaction("Native advisor history", undefined, firstKept.id, 100_000, {
+				method: "remote",
+				preserveData,
+				providerReplayThroughEntryId: replayBoundary.id,
+			});
+			advisor.replaceMessages(this.journal.buildSessionContext().messages);
+			await original.call(this, incoming, signal);
+		});
 }
 
 /** A stream that terminates with a `ThinkingLoop`-flagged error, exactly as the
@@ -1892,7 +1920,7 @@ describe("AgentSession retry fallback", () => {
 			});
 			session.setAdvisorEnabled(true);
 			const advisor = session.getAdvisorAgent()!;
-			advisor.replaceMessages([advisorNativeSummary(primary.provider)]);
+			seedAdvisorNativeHistory(advisor, primary.provider);
 
 			await session.prompt("review with native history through a provider outage");
 			await recovered.promise;
@@ -1971,15 +1999,19 @@ describe("AgentSession retry fallback", () => {
 			await recovered.promise;
 			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
 			const advisor = session.getAdvisorAgent()!;
-			advisor.replaceMessages([advisorNativeSummary(fallback.provider)]);
+			seedAdvisorNativeHistory(advisor, fallback.provider);
+			mainMock.push({ content: ["Primary complete after native admission"] });
+			await session.prompt("admit native fallback history before cooldown expiry");
+			await session.waitForIdle();
+			expect(requestedModels.at(-1)).toBe(fallbackSelector);
+			const restorationStart = requestedModels.length;
+			mainMock.push({ content: ["Primary complete after cooldown"] });
 			vi.spyOn(Date, "now").mockReturnValue(Date.now() + 2_000);
 
 			await session.prompt("review after primary cooldown expires");
 			await session.waitForIdle();
 
-			expect(requestedModels).toEqual([
-				primarySelector,
-				fallbackSelector,
+			expect(requestedModels.slice(restorationStart)).toEqual([
 				compatible ? primarySelector : fallbackSelector,
 			]);
 			expect(advisor.state.model.id).toBe(compatible ? primary.id : fallback.id);
@@ -2293,6 +2325,7 @@ describe("AgentSession retry fallback", () => {
 		session.setAdvisorEnabled(true);
 
 		const credentialStarted = Promise.withResolvers<void>();
+		const credentialAborted = Promise.withResolvers<void>();
 		const releaseCredential = Promise.withResolvers<void>();
 		const credentialReturned = Promise.withResolvers<void>();
 		let credentialSignal: AbortSignal | undefined;
@@ -2300,18 +2333,20 @@ describe("AgentSession retry fallback", () => {
 			if (model.provider === advisorFallback.provider && model.id === advisorFallback.id) {
 				credentialSignal = options?.signal;
 				credentialStarted.resolve();
+				credentialSignal?.addEventListener("abort", () => credentialAborted.resolve(), { once: true });
 				await releaseCredential.promise;
 				credentialReturned.resolve();
 			}
 			return `${model.provider}-test-key`;
 		});
 
-		await session.prompt("Trigger advisor fallback");
+		const prompt = session.prompt("Trigger advisor fallback");
 		await credentialStarted.promise;
-		await session.newSession();
+		const transition = session.newSession();
+		await credentialAborted.promise;
+		expect(credentialSignal?.aborted).toBe(true);
 		releaseCredential.resolve();
-		await credentialReturned.promise;
-		await Bun.sleep(0);
+		await Promise.all([transition, credentialReturned.promise, prompt]);
 
 		expect(credentialSignal?.aborted).toBe(true);
 		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
