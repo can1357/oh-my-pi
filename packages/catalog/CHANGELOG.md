@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed CoreWeave and GMI Cloud retaining bundled models absent from successful discovery responses, and fresh authoritative caches re-adding removed models during cache-only refreshes.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
