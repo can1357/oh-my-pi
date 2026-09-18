@@ -584,6 +584,20 @@ function dropAnthropicStrictTools(params: MessageCreateParamsStreaming): void {
 	}
 }
 
+/**
+ * Merge `AnthropicCompat.extraBody` into the `/v1/messages` params, mirroring
+ * `applyOpenAIExtraBody` on the OpenAI surfaces. Applied after the request
+ * builder so configured keys win over builder-generated fields of the same
+ * name.
+ */
+function applyAnthropicExtraBody(
+	params: MessageCreateParamsStreaming,
+	extraBody: Record<string, unknown> | undefined,
+): void {
+	if (!extraBody) return;
+	Object.assign(params, extraBody);
+}
+
 function getCacheControl(
 	model: Model<"anthropic-messages">,
 	cacheRetention: CacheRetention | undefined,
@@ -4794,6 +4808,7 @@ function buildParams(
 	disableThinkingIfToolChoiceForced(params, model);
 	ensureMaxTokensForThinking(params, maxOutputTokens);
 	applyPromptCaching(params, cacheControl);
+	applyAnthropicExtraBody(params, model.compat.extraBody);
 
 	return params;
 }

@@ -783,6 +783,7 @@ function resolveOpenAIResponsesPolicy(
 		streamIdleTimeoutMs: isLocalServingBackend
 			? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
 			: spec.compat?.streamIdleTimeoutMs,
+		extraBody: spec.compat?.extraBody,
 	};
 	applyWireAxes(compat, axes.wire, api);
 	applyCompatOverrides(compat, spec.compat);
@@ -880,6 +881,7 @@ function resolveAnthropicPolicy(
 		stripImageInput: false,
 		thinkingLoopGuard: undefined,
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
+		extraBody: spec.compat?.extraBody,
 	};
 	applyWireAxes(compat, axes.wire, "anthropic-messages");
 	applyCompatOverrides(compat, spec.compat);

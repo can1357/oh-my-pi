@@ -608,6 +608,13 @@ export interface AnthropicCompat {
 	stripImageInput?: boolean;
 	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
 	thinkingLoopGuard?: "gemini" | "deepseek" | "xai";
+	/**
+	 * Extra fields merged into the `/v1/messages` request body, mirroring
+	 * `OpenAICompat.extraBody`. Use for Anthropic-compatible proxies that need
+	 * routing hints or provider-specific body keys. Applied after the request
+	 * builder, so these keys win over builder-generated fields of the same name.
+	 */
+	extraBody?: Record<string, unknown>;
 }
 
 /**
@@ -763,6 +770,13 @@ export interface ResolvedOpenAISharedCompat {
 	rejectRootObjectUnion: boolean;
 	/** Retry without strict tools when the host rejects a strict grammar as too large (OpenRouter-Anthropic compiled-grammar overflow). */
 	retryWithoutStrictOnGrammarError: boolean;
+	/**
+	 * Extra fields merged into the request body, shared by the chat-completions
+	 * and Responses surfaces (`applyOpenAIExtraBody`). Use for gateway routing
+	 * hints or provider-specific body keys; applied after the request builder,
+	 * so these keys win over builder-generated fields of the same name.
+	 */
+	extraBody?: OpenAICompat["extraBody"];
 }
 
 /**
@@ -839,7 +853,6 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 		>
 	> & {
 		vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
-		extraBody?: OpenAICompat["extraBody"];
 		cacheControlFormat?: OpenAICompat["cacheControlFormat"];
 		thinkingKeep?: OpenAICompat["thinkingKeep"];
 		streamIdleTimeoutMs?: number;
@@ -905,7 +918,9 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 export type ResolvedOpenRouterCompat = ResolvedOpenAICompat & ResolvedOpenAIResponsesCompat;
 
 /** Fully-resolved anthropic-messages compat view (same contract as `ResolvedOpenAICompat`). */
-export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdleTimeoutMs" | "thinkingLoopGuard">> & {
+export type ResolvedAnthropicCompat = Required<
+	Omit<AnthropicCompat, "streamIdleTimeoutMs" | "thinkingLoopGuard" | "extraBody">
+> & {
 	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
 	thinkingLoopGuard?: AnthropicCompat["thinkingLoopGuard"];
 	/**
@@ -914,6 +929,8 @@ export type ResolvedAnthropicCompat = Required<Omit<AnthropicCompat, "streamIdle
 	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then 300s.
 	 */
 	streamIdleTimeoutMs?: number;
+	/** Extra request-body fields from `AnthropicCompat.extraBody`. */
+	extraBody?: AnthropicCompat["extraBody"];
 	/**
 	 * The configured endpoint is the official first-party Anthropic API
 	 * (https + exact `api.anthropic.com` host; a missing baseUrl counts as
