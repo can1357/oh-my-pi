@@ -1,3 +1,4 @@
+import { ADVISOR_SYNC_BACKLOG_MODES } from "../advisor/config";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
@@ -385,14 +386,14 @@ export const SETTINGS_SCHEMA = {
 	},
 	"advisor.syncBacklog": {
 		type: "enum",
-		values: ["off", "1", "3", "5"] as const,
+		values: ADVISOR_SYNC_BACKLOG_MODES,
 		default: "off",
 		ui: {
 			tab: "model",
 			group: "Advisor",
 			label: "Advisor Sync Backlog",
 			description:
-				"Pause the main agent for up to 30 seconds if the advisor falls behind by this many turns. Off disables catch-up delays.",
+				"Pause main agent until advisor backlog falls below threshold. Numeric values cap wait at 30 seconds; strict waits for all scheduled reviews without a wall-clock cap. Off disables catch-up delays. Abort, failure, and disposal release waits.",
 			condition: "advisorEnabled",
 		},
 	},
@@ -406,12 +407,48 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"After an advisor concern or blocker interrupts, route further concerns/blockers non-interruptingly for this many primary turns.",
 			options: [
-				{ value: "0", label: "0 turns", description: "Allow every concern/blocker to interrupt." },
-				{ value: "1", label: "1 turn" },
-				{ value: "2", label: "2 turns" },
-				{ value: "3", label: "3 turns", description: "Default." },
-				{ value: "4", label: "4 turns" },
-				{ value: "5", label: "5 turns" },
+				{ value: "0", label: "0 steps", description: "Allow every concern/blocker to interrupt." },
+				{ value: "1", label: "1 step" },
+				{ value: "2", label: "2 steps" },
+				{ value: "3", label: "3 steps", description: "Default." },
+				{ value: "4", label: "4 steps" },
+				{ value: "5", label: "5 steps" },
+			],
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.reviewMode": {
+		type: "enum",
+		values: ["turn", "agent-end"] as const,
+		default: "turn",
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Review Mode",
+			description:
+				"Default advisor cadence when no WATCHDOG.yml roster is present. turn reviews every primary turn; agent-end reviews only final yields.",
+			options: [
+				{ value: "turn", label: "Every turn", description: "Review every primary update (tool-call round)." },
+				{ value: "agent-end", label: "Agent end", description: "Review only at final yields (once per run)." },
+			],
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.reviewInterval": {
+		type: "number",
+		default: 1,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Review Interval",
+			description:
+				"Review every Nth eligible primary update. 1 = every update. Skipped updates accumulate into the next scheduled review.",
+			options: [
+				{ value: "1", label: "Every eligible update", description: "Default." },
+				{ value: "2", label: "Every 2nd" },
+				{ value: "3", label: "Every 3rd" },
+				{ value: "5", label: "Every 5th" },
+				{ value: "10", label: "Every 10th" },
 			],
 			condition: "advisorEnabled",
 		},
@@ -429,7 +466,7 @@ export const SETTINGS_SCHEMA = {
 				{ value: "1", label: "1 note", description: "Anti-flood (strict)." },
 				{ value: "2", label: "2 notes" },
 				{ value: "3", label: "3 notes" },
-				{ value: "4", label: "4 notes", description: "Default." },
+				{ value: "4", label: "4 notes", description: "Frontier reasoning models. Default." },
 				{ value: "5", label: "5 notes" },
 			],
 			condition: "advisorEnabled",

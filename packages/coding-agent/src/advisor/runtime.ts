@@ -410,18 +410,20 @@ export class AdvisorRuntime {
 	 * Wait until the advisor backlog falls below `threshold`.
 	 *
 	 * Returns `false` when the deadline, abort signal, or a runtime failure releases
-	 * the waiter before the requested backlog was drained.
+	 * the waiter before the requested backlog was drained. An omitted `maxMs` waits
+	 * without a wall-clock deadline; abort, failure, and disposal still release it.
 	 */
-	waitForCatchup(maxMs: number, threshold: number, signal?: AbortSignal): Promise<boolean> {
+	waitForCatchup(maxMs: number | undefined, threshold: number, signal?: AbortSignal): Promise<boolean> {
 		if (
 			this.disposed ||
 			signal?.aborted ||
 			this.#backlog < threshold ||
 			this.#quotaExhausted ||
 			this.#halted ||
+			this.#sessionTransitionPaused ||
 			// An advisor mid-failure/retry must NEVER gate the primary agent:
-			// its backlog cannot drain until the retry cycle resolves, and the
-			// primary would otherwise park for the full catch-up budget.
+			// its backlog cannot drain until the retry cycle resolves, and
+			// the primary would otherwise park for the full catch-up budget.
 			this.#failing
 		)
 			return Promise.resolve(this.#backlog < threshold);
@@ -429,16 +431,16 @@ export class AdvisorRuntime {
 		const finish = (caughtUp: boolean): void => {
 			const idx = this.#waiters.indexOf(waiter);
 			if (idx >= 0) this.#waiters.splice(idx, 1);
-			clearTimeout(waiter.timer);
+			if (waiter.timer !== undefined) {
+				clearTimeout(waiter.timer);
+				waiter.timer = undefined;
+			}
 			signal?.removeEventListener("abort", abort);
 			resolve(caughtUp);
 		};
 		const abort = (): void => finish(false);
-		const waiter = {
-			threshold,
-			finish,
-			timer: setTimeout(abort, maxMs),
-		};
+		const waiter: CatchupWaiter = { threshold, finish };
+		if (maxMs !== undefined) waiter.timer = setTimeout(abort, maxMs);
 		this.#waiters.push(waiter);
 		signal?.addEventListener("abort", abort, { once: true });
 		if (signal?.aborted) {
