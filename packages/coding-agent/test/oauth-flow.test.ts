@@ -139,6 +139,43 @@ describe("mcp oauth flow", () => {
 		expect(new URL(url).searchParams.get("client_id")).toBeNull();
 	});
 
+	it("uses Figma's catalog-compatible DCR identity and fixed callback by default", async () => {
+		let registrationPayload: Record<string, unknown> | null = null;
+		const registrationUrl = "https://api.figma.com:443/v1/oauth/mcp/register/";
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://www.figma.com/oauth/mcp/",
+				tokenUrl: "https://api.figma.com/v1/oauth/token",
+				registrationUrl,
+				scopes: "mcp:connect",
+				fetch: async (input, init) => {
+					expect(String(input)).toBe(registrationUrl);
+					registrationPayload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+					return new Response(
+						JSON.stringify({ client_id: "registered-client-id", client_secret: "registered-client-secret" }),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				},
+			},
+			{},
+		);
+
+		expect(flow.redirectUri).toBe("http://127.0.0.1:51160/");
+		expect(flow.preferredPort).toBe(51160);
+		expect(flow.allowPortFallback).toBe(false);
+
+		const { url } = await flow.generateAuthUrl("test-state", flow.redirectUri!);
+		expect(registrationPayload).toEqual(
+			expect.objectContaining({
+				client_name: "GitHub Copilot CLI",
+				redirect_uris: ["http://127.0.0.1:51160/"],
+				scope: "mcp:connect",
+			}),
+		);
+		expect(new URL(url).searchParams.get("redirect_uri")).toBe("http://127.0.0.1:51160/");
+		expect(new URL(url).searchParams.get("client_id")).toBe("registered-client-id");
+	});
+
 	it("includes discovered scopes in dynamic client registration", async () => {
 		let registrationPayload: Record<string, unknown> | null = null;
 		const scopes = "openid profile email offline_access";

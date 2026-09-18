@@ -217,8 +217,43 @@ function staticClientIdFromConfig(config: MCPOAuthConfig): string | undefined {
 	}
 }
 
+interface ClientOverride {
+	matches: (url: URL) => boolean;
+	clientName: string;
+	redirectUri: string;
+}
+
+const CLIENT_OVERRIDES: readonly ClientOverride[] = [
+	{
+		matches: url =>
+			url.protocol === "https:" &&
+			(url.port === "" || url.port === "443") &&
+			((url.hostname === "api.figma.com" && url.pathname.replace(/\/+$/, "") === "/v1/oauth/mcp/register") ||
+				(url.hostname === "www.figma.com" && url.pathname.replace(/\/+$/, "") === "/oauth/mcp")),
+		clientName: "GitHub Copilot CLI",
+		redirectUri: "http://127.0.0.1:51160/",
+	},
+];
+
+function findClientOverride(value: string | undefined): ClientOverride | undefined {
+	if (!value) return undefined;
+	try {
+		const url = new URL(value);
+		return CLIENT_OVERRIDES.find(entry => entry.matches(url));
+	} catch {
+		return undefined;
+	}
+}
+
 function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOptions {
-	const redirectUri = resolveRedirectUri(config.redirectUri);
+	const override =
+		!staticClientIdFromConfig(config) &&
+		config.redirectUri === undefined &&
+		config.callbackPort === undefined &&
+		config.callbackPath === undefined
+			? (findClientOverride(config.registrationUrl) ?? findClientOverride(config.authorizationUrl))
+			: undefined;
+	const redirectUri = resolveRedirectUri(override?.redirectUri ?? config.redirectUri);
 	validateRedirectConfig(config, redirectUri);
 	// When a client_id is already pinned (config-supplied or embedded in the
 	// authorization URL), it was registered against a specific redirect URI.
@@ -231,7 +266,7 @@ function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOption
 	// the provider issues a client_id tied to *that* URI, so the random-port
 	// fallback remains safe for first-install DCR flows whose preferred port
 	// happens to be occupied.
-	const allowPortFallback = staticClientIdFromConfig(config) === undefined;
+	const allowPortFallback = !override && staticClientIdFromConfig(config) === undefined;
 	return {
 		preferredPort: resolveCallbackPort(config.callbackPort, redirectUri),
 		callbackPath: resolveCallbackPath(config.callbackPath, redirectUri),
@@ -614,7 +649,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 
 		try {
 			const registrationBody: Record<string, unknown> = {
-				client_name: "oh-my-pi",
+				client_name: findClientOverride(registrationEndpoint)?.clientName ?? "oh-my-pi",
 				redirect_uris: [redirectUri],
 				grant_types: ["authorization_code", "refresh_token"],
 				response_types: ["code"],
