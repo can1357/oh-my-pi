@@ -5,11 +5,7 @@ import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { startDaemonBrokerFromEnvironment, type DaemonBrokerStartOptions } from "../../src/launch/broker";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
-import {
-	DAEMON_IDLE_GRACE_ENV,
-	DAEMON_PROJECT_DIR_ENV,
-	DAEMON_RUNTIME_DIR_ENV,
-} from "../../src/launch/protocol";
+import { DAEMON_IDLE_GRACE_ENV, DAEMON_PROJECT_DIR_ENV, DAEMON_RUNTIME_DIR_ENV } from "../../src/launch/protocol";
 import type { DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
 import { displayExitReason, MAX_EXIT_REASON_LENGTH, normalizeExitReason } from "../../src/launch/exit-reason";
 

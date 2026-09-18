@@ -1043,7 +1043,6 @@ function registerCompletionSink(
 	};
 }
 
-
 const KEY_INPUT: Record<string, string> = {
 	ENTER: "\r",
 	TAB: "\t",
@@ -1055,7 +1054,6 @@ const KEY_INPUT: Record<string, string> = {
 	RIGHT: "\u001b[C",
 	LEFT: "\u001b[D",
 };
-
 
 /** Monitoring needs a live broker connection to the process; detached daemons have none, so name the alternatives. */
 const DETACHED_MONITOR_ERROR =
@@ -1574,14 +1572,3 @@ export async function executeLaunch(
 		throw error;
 	}
 }
-
-
-
-
-
-
-
-
-
-
-

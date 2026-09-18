@@ -459,7 +459,6 @@ function formatTimeoutClampNotice(
 	return `Timeout clamped to ${effectiveTimeoutSec}s (requested ${requestedTimeoutSec}s; ${limit}).`;
 }
 
-
 /**
  * Bash tool implementation.
  *
