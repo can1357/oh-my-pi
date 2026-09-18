@@ -264,8 +264,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// Cold-start fast path: when a fresh, authoritative cache exists, the network
 	// fetch is skipped, AND the static catalog slice is byte-identical to what
 	// was merged in last time, the cache row IS the authoritative merge result.
-	// Additive caches still need same-id rows stripped because an older binary
-	// may have written the snapshot before additive semantics were enabled.
+	// Additive shared-catalog caches need same-id rows stripped, but authoritative
+	// endpoint caches must not regain bundled IDs absent from the endpoint.
 	if (
 		!shouldFetchFromNetwork &&
 		cache?.fresh &&
@@ -273,12 +273,14 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cacheFingerprintMatches &&
 		!cacheHasUnresolvedHeaders
 	) {
-		const cacheContribution = additiveStaticModelIds
-			? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
-			: restoredCache.models;
-		const cachedModels = additiveStaticModelIds
-			? mergeCatalogMetrics(mergeDynamicModels(staticModels, cacheContribution), restoredCache.models)
-			: restoredCache.models;
+		const cacheContribution =
+			additiveStaticModelIds && !dynamicModelsAuthoritative
+				? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
+				: restoredCache.models;
+		const cachedModels =
+			additiveStaticModelIds && !dynamicModelsAuthoritative
+				? mergeCatalogMetrics(mergeDynamicModels(staticModels, cacheContribution), restoredCache.models)
+				: restoredCache.models;
 		const source: ModelResolutionSource = cacheContribution.length > 0 ? "cache" : "bundled";
 		return {
 			models: collapseBuiltVariants(cachedModels),
