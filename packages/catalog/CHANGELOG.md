@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `max` thinking-effort tier to the standard Muse Spark 1.3 SKU on reseller hosts and Command Code, with the ladder owned by the class lineage.
+
+### Fixed
+
+- Existing model caches no longer hide Muse Spark 1.3's new `max` thinking effort after upgrading.
+- Vercel's Muse Spark Anthropic route retains its supported thinking ladder instead of offering a duplicate `max` budget.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
