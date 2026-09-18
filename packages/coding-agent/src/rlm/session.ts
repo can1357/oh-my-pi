@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { RLM_DEFAULT_SPILL_BYTES, RlmStore } from "./store";
+import { RlmRuntime } from "./runtime";
 import { appendRlmRuntimeGuide } from "./guide";
 
 /**
- * Host surface for RLM store binding. Prefer stable runtime ids over cwd.
- * `rlmStore` is the session-owned instance when the host attaches one.
+ * Host surface for RLM runtime binding. Prefer stable runtime ids over cwd.
  */
 export interface RlmSessionHost {
 	cwd: string;
@@ -12,9 +12,10 @@ export interface RlmSessionHost {
 		get(path: string): unknown;
 	};
 	sessionManager?: { getSessionId?: () => string | undefined };
-	/** Session-owned store when present (preferred over process map). */
+	/** Session-owned store when present (legacy attach). */
 	rlmStore?: RlmStore;
-	/** Stable id for this agent runtime (eval kernel owner, agent id, etc.). */
+	/** Session-owned full runtime (RFC v3 preferred). */
+	rlmRuntime?: RlmRuntime;
 	getRlmRuntimeId?: () => string | null | undefined;
 	getEvalKernelOwnerId?: () => string | null | undefined;
 	getAgentId?: () => string | null | undefined;
@@ -22,15 +23,14 @@ export interface RlmSessionHost {
 }
 
 /** Process registry keyed only by true runtime ids — never cwd. */
-const stores = new Map<string, RlmStore>();
+const runtimes = new Map<string, RlmRuntime>();
 /** Ephemeral runtime ids for hosts that lack every other identity (tests). */
 const ephemeralIds = new WeakMap<object, string>();
 
 export type ContextEngine = "native" | "rlm";
 
 /**
- * Resolve a stable runtime key. **Never** falls back to `cwd` alone (would collide
- * concurrent agents in the same directory).
+ * Resolve a stable runtime key. **Never** falls back to `cwd` alone.
  */
 export function rlmSessionKey(session: RlmSessionHost): string {
 	const candidates = [
@@ -43,7 +43,6 @@ export function rlmSessionKey(session: RlmSessionHost): string {
 	for (const c of candidates) {
 		if (typeof c === "string" && c.length > 0) return `rlm:${c}`;
 	}
-	// Last resort: per-object ephemeral UUID (tests / incomplete hosts).
 	let id = ephemeralIds.get(session as object);
 	if (!id) {
 		id = `ephemeral:${randomUUID()}`;
@@ -58,26 +57,18 @@ export function getContextEngine(session: Pick<RlmSessionHost, "settings">): Con
 	return "native";
 }
 
-/**
- * RLM is opt-in via `rlm.enabled` and/or `context.engine: rlm`.
- * Native remains default.
- */
 export function rlmEnabled(session: Pick<RlmSessionHost, "settings">): boolean {
 	if (session.settings.get("rlm.enabled") === true) return true;
 	return getContextEngine(session) === "rlm";
 }
 
-/**
- * RFC exclusive routing: RLM and native compaction engines must not fight over
- * the same corpus on one provider request. Root-chat compaction may still run
- * (stubs are small); the store is never cleared by compaction.
- */
 export function rlmIsExclusiveEngine(session: Pick<RlmSessionHost, "settings">): boolean {
 	return getContextEngine(session) === "rlm" || session.settings.get("rlm.enabled") === true;
 }
 
-function createStoreFromSettings(session: RlmSessionHost): RlmStore {
-	return new RlmStore({
+function createRuntimeFromSettings(session: RlmSessionHost): RlmRuntime {
+	return new RlmRuntime({
+		ownerId: rlmSessionKey(session),
 		maxDepth: Number(session.settings.get("rlm.maxDepth") ?? 0),
 		maxCalls: Number(session.settings.get("rlm.maxCalls") ?? 32),
 		maxTotalTokens: Number(session.settings.get("rlm.maxTotalTokens") ?? 1_000_000),
@@ -86,54 +77,75 @@ function createStoreFromSettings(session: RlmSessionHost): RlmStore {
 	});
 }
 
-/**
- * Return the session-owned RLM store. Prefers `session.rlmStore` when set;
- * otherwise creates one and attaches it to the host when the field is writable.
- */
-export function getRlmStore(session: RlmSessionHost): RlmStore {
-	if (session.rlmStore && !session.rlmStore.disposed) {
-		return session.rlmStore;
-	}
-	const key = rlmSessionKey(session);
-	let store = stores.get(key);
-	if (!store || store.disposed) {
-		store = createStoreFromSettings(session);
-		stores.set(key, store);
-	}
-	// Attach for direct session ownership when the host object allows it.
+function attachRuntime(session: RlmSessionHost, runtime: RlmRuntime): void {
 	try {
-		(session as { rlmStore?: RlmStore }).rlmStore = store;
+		(session as { rlmRuntime?: RlmRuntime }).rlmRuntime = runtime;
+		(session as { rlmStore?: RlmStore }).rlmStore = runtime.store;
 	} catch {
 		/* frozen host */
 	}
-	return store;
 }
 
-/** Dispose the store for this session (AgentSession.dispose path). */
+/**
+ * Return the session-owned {@link RlmRuntime}. Creates and attaches when missing.
+ */
+export function getRlmRuntime(session: RlmSessionHost): RlmRuntime {
+	if (session.rlmRuntime && !session.rlmRuntime.disposed) {
+		return session.rlmRuntime;
+	}
+	if (session.rlmStore && !session.rlmStore.disposed) {
+		const runtime = RlmRuntime.fromStore(session.rlmStore, rlmSessionKey(session));
+		attachRuntime(session, runtime);
+		runtimes.set(rlmSessionKey(session), runtime);
+		return runtime;
+	}
+	const key = rlmSessionKey(session);
+	let runtime = runtimes.get(key);
+	if (!runtime || runtime.disposed) {
+		runtime = createRuntimeFromSettings(session);
+		runtimes.set(key, runtime);
+	}
+	attachRuntime(session, runtime);
+	return runtime;
+}
+
+/** Back-compat: store accessor delegates to runtime. */
+export function getRlmStore(session: RlmSessionHost): RlmStore {
+	return getRlmRuntime(session).store;
+}
+
+/** Dispose runtime + store for this session (AgentSession.dispose path). */
 export function disposeRlmStore(session: RlmSessionHost): void {
-	const attached = session.rlmStore;
+	disposeRlmRuntime(session);
+}
+
+export function disposeRlmRuntime(session: RlmSessionHost): void {
+	const key = rlmSessionKey(session);
+	const attached = session.rlmRuntime;
 	if (attached) {
 		attached.dispose("session-dispose");
 		try {
+			(session as { rlmRuntime?: RlmRuntime }).rlmRuntime = undefined;
 			(session as { rlmStore?: RlmStore }).rlmStore = undefined;
 		} catch {
 			/* */
 		}
 	}
-	const key = rlmSessionKey(session);
-	const mapped = stores.get(key);
+	const mapped = runtimes.get(key);
 	if (mapped) {
 		if (!mapped.disposed) mapped.dispose("session-dispose");
-		stores.delete(key);
+		runtimes.delete(key);
+	} else if (session.rlmStore && !session.rlmStore.disposed) {
+		session.rlmStore.dispose("session-dispose");
 	}
 }
 
 /** Test-only. Production compaction must never call this. */
 export function resetRlmStoresForTest(): void {
-	for (const store of stores.values()) {
-		if (!store.disposed) store.dispose("test-reset");
+	for (const runtime of runtimes.values()) {
+		if (!runtime.disposed) runtime.dispose("test-reset");
 	}
-	stores.clear();
+	runtimes.clear();
 }
 
 export function rlmSpillBytes(session: RlmSessionHost): number {
@@ -141,7 +153,6 @@ export function rlmSpillBytes(session: RlmSessionHost): number {
 	return typeof value === "number" ? value : RLM_DEFAULT_SPILL_BYTES;
 }
 
-/** Append-only runtime guide; base system prompt array is not rewritten in place. */
 export function systemPromptWithRlmGuide(
 	base: readonly string[],
 	session: Pick<RlmSessionHost, "settings">,
@@ -149,16 +160,11 @@ export function systemPromptWithRlmGuide(
 	return appendRlmRuntimeGuide(base, rlmEnabled(session));
 }
 
-/**
- * Optional sub-model id for query/subcall. null → session active model
- * (wired by host via `ToolSession.rlmComplete`).
- */
 export function rlmSubModel(session: Pick<RlmSessionHost, "settings">): string | null {
 	const value = session.settings.get("rlm.subModel");
 	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-/** When true, hosts may inject read-only RLM helpers into the session kernel. */
 export function rlmKernelBindEnabled(session: Pick<RlmSessionHost, "settings">): boolean {
 	return session.settings.get("rlm.kernelBind") === true;
 }

@@ -1967,26 +1967,33 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this undefined so tools and session job snapshots refuse async work
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
-			/** Isolated depth-0/1 llm_query: empty history, no root transcript, AbortSignal. */
-			rlmComplete: async (prompt: string, options?: { signal?: AbortSignal }) => {
+			/** Isolated RLM completer via runIsolatedCompletion (RFC v3 membrane). */
+			rlmComplete: async (
+				prompt: string,
+				options?: {
+					signal?: AbortSignal;
+					deadlineAt?: number;
+					purpose?: string;
+					workerMessages?: readonly { role: string; content: string }[];
+				},
+			) => {
 				if (!session) {
 					return { text: "rlm query unavailable: session not ready (fail-open)" };
 				}
 				try {
-					const { replyText, assistantMessage } = await session.runEphemeralTurn({
+					const { replyText, assistantMessage } = await session.runIsolatedCompletion({
+						purpose: options?.purpose ?? "rlm",
 						promptText: prompt,
-						// Isolated worker: never inherit this.messages / streaming root assistant.
-						history: [],
-						isolated: true,
-						// Unique key per call so provider routing cannot share lineage across workers.
-						conversationKey: `rlm:${Snowflake.next()}`,
 						signal: options?.signal,
+						conversationKey: `rlm:${Snowflake.next()}`,
 					});
 					const usage = assistantMessage.usage;
 					return {
 						text: replyText,
 						tokens: usage?.totalTokens,
 						cost: usage?.cost?.total,
+						inputTokens: usage?.input,
+						outputTokens: usage?.output,
 					};
 				} catch (error) {
 					const msg = error instanceof Error ? error.message : String(error);

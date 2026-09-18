@@ -9286,11 +9286,31 @@ export class AgentSession {
 	}
 
 	/**
-	 * Run a single ephemeral side-channel turn against this session's current
-	 * model + system prompt + history. The main turn's tool catalog is sent
-	 * to preserve the prompt cache, but the model is reminded not to call
-	 * tools and any tool calls are discarded. The side request
-	 * does not block on, or interfere with, any in-flight main turn. The
+	 * RFC v3 isolated completion path for RLM workers.
+	 * Never copies root transcript or streaming root assistant.
+	 * Prefer this over plain `runEphemeralTurn` for RLM leases.
+	 */
+	async runIsolatedCompletion(args: {
+		purpose?: string;
+		promptText: string;
+		signal?: AbortSignal;
+		conversationKey?: string;
+		onTextDelta?: (delta: string) => void;
+	}): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
+		return this.runEphemeralTurn({
+			promptText: args.promptText,
+			history: [],
+			isolated: true,
+			conversationKey: args.conversationKey ?? `rlm:${args.purpose ?? "worker"}:${Snowflake.next()}`,
+			signal: args.signal,
+			onTextDelta: args.onTextDelta,
+			dedupeReply: false,
+		});
+	}
+
+	/**
+	 * Run a one-shot side-channel completion against a detached snapshot of the
+	 * current conversation. The main agent turn is NOT interrupted, and the
 	 * session's history and persisted state are NOT modified by this call.
 	 *
 	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share

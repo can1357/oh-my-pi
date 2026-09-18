@@ -182,19 +182,17 @@ describe("RLM membrane — isolated snapshot contract", () => {
 		expect(leaked.map(m => m.text).join("\n").includes("ROOT_SECRET_NEVER_IN_WORKER")).toBe(true);
 	});
 
-	test("sdk rlmComplete wires isolated:true and unique conversationKey (source contract)", async () => {
-		// Guard against accidental rewrite of the host wiring.
+	test("sdk rlmComplete wires runIsolatedCompletion (source contract)", async () => {
 		const sdk = await Bun.file(new URL("../src/sdk.ts", import.meta.url)).text();
-		expect(sdk.includes("isolated: true")).toBe(true);
-		expect(sdk.includes("history: []")).toBe(true);
+		expect(sdk.includes("runIsolatedCompletion")).toBe(true);
 		expect(sdk.includes("conversationKey: `rlm:${Snowflake.next()}`")).toBe(true);
 		expect(sdk.includes("disposeRlmStore(toolSession)")).toBe(true);
 		expect(sdk.includes("getRlmRuntimeId: () => evalKernelOwnerId")).toBe(true);
 
 		const session = await Bun.file(new URL("../src/session/agent-session.ts", import.meta.url)).text();
+		expect(session.includes("async runIsolatedCompletion")).toBe(true);
 		expect(session.includes("isolated?: boolean")).toBe(true);
 		expect(session.includes("args.isolated === true")).toBe(true);
-		// Isolated path must not start from this.messages when isolated.
 		expect(session.includes("if (!isolated)")).toBe(true);
 		expect(session.includes("messages.push(...this.messages)")).toBe(true);
 	});

@@ -208,14 +208,23 @@ export interface ToolSession {
 	getApiKey?: AgentOptions["getApiKey"];
 	/**
 	 * Isolated RLM completer (query/subcall). Must not inherit root history.
-	 * Host passes AbortSignal from the store wall-clock/cancel lease.
+	 * Host forwards lease AbortSignal + optional worker message firewall payload.
 	 */
 	rlmComplete?: (
 		prompt: string,
-		options?: { signal?: AbortSignal },
-	) => Promise<string | { text: string; tokens?: number; cost?: number }>;
-	/** Session-owned RLM spill store (preferred over process-global map). */
+		options?: {
+			signal?: AbortSignal;
+			deadlineAt?: number;
+			purpose?: string;
+			workerMessages?: readonly { role: string; content: string }[];
+		},
+	) => Promise<
+		string | { text: string; tokens?: number; cost?: number; inputTokens?: number; outputTokens?: number }
+	>;
+	/** Session-owned RLM spill store (legacy attach). */
 	rlmStore?: import("../rlm/store").RlmStore;
+	/** Session-owned RLM runtime (RFC v3). */
+	rlmRuntime?: import("../rlm/runtime").RlmRuntime;
 	/** Stable RLM runtime id — never cwd. */
 	getRlmRuntimeId?: () => string | null;
 

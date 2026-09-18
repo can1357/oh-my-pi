@@ -2,7 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { rlmQuery } from "../rlm/query";
-import { getRlmStore, rlmEnabled } from "../rlm/session";
+import { getRlmRuntime, rlmEnabled } from "../rlm/session";
 import { parseRlmGrants, rlmSubcall } from "../rlm/subcall";
 import type { ToolSession } from ".";
 import { toolResult } from "./tool-result";
@@ -53,9 +53,10 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 	}
 
 	async execute(_toolCallId: string, params: RlmParams): Promise<AgentToolResult<RlmToolDetails>> {
-		const store = getRlmStore(this.session);
+		const runtime = getRlmRuntime(this.session);
+		const store = runtime.store;
 		if (params.op === "status") {
-			return toolResult<RlmToolDetails>({ op: "status" }).text(store.status()).done();
+			return toolResult<RlmToolDetails>({ op: "status" }).text(runtime.status()).done();
 		}
 
 		if (params.op === "subcall") {
@@ -73,7 +74,7 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 					.text("task (or question) is required for subcall")
 					.done();
 			}
-			const result = await rlmSubcall(store, grants, task, this.session.rlmComplete, 1);
+			const result = await rlmSubcall(runtime, grants, task, this.session.rlmComplete, 1);
 			return toolResult<RlmToolDetails>({
 				op: "subcall",
 				handle: grants[0]?.handle,
@@ -118,7 +119,7 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 					.done();
 			}
 			const result = await rlmQuery(
-				store,
+				runtime,
 				params.handle,
 				params.question,
 				this.session.rlmComplete,

@@ -17,15 +17,41 @@ export type {
 	RlmTrajectoryEntry,
 	RlmUsageReconcile,
 } from "./store";
-export { promptContainsCorpus, QUERY_SLICE, rlmQuery } from "./query";
-export type { RlmCompleter, RlmCompleterOptions, RlmQueryResult } from "./query";
+export { promptContainsCorpus, QUERY_SLICE, rlmQuery, workerContextContains } from "./query";
+export type { RlmBrokerResult, RlmCompleter, RlmCompleterOptions, RlmQueryResult, RlmWorkerMessage } from "./query";
 export { parseRlmGrants, rlmSubcall } from "./subcall";
-export type { RlmGrant } from "./subcall";
+export type { RlmGrant } from "./view";
+export {
+	buildQueryWorkerContext,
+	buildSubcallWorkerContext,
+	executeLeasedCompletion,
+	RLM_WORKER_SYSTEM,
+} from "./broker";
+export type { RlmTrajectoryRecord, RlmWorkerContext } from "./broker";
+export { RlmLedger } from "./ledger";
+export type {
+	RlmLease,
+	RlmLeaseStatus,
+	RlmLedgerBegin,
+	RlmLedgerReconcileResult,
+	RlmLedgerUsage,
+} from "./ledger";
+export { RlmRuntime } from "./runtime";
+export type { RlmRuntimeOptions } from "./runtime";
+export {
+	formatViewExcerpts,
+	resolveRlmView,
+	RLM_VIEW_SLICE,
+	viewCitations,
+} from "./view";
+export type { RlmResolvedGrant, RlmView } from "./view";
 export { createRlmKernelBind, rlmHandleMeta, rlmKernelPrelude } from "./kernel-bind";
 export { createRlmPrelude } from "./prelude";
 export {
+	disposeRlmRuntime,
 	disposeRlmStore,
 	getContextEngine,
+	getRlmRuntime,
 	getRlmStore,
 	resetRlmStoresForTest,
 	rlmEnabled,

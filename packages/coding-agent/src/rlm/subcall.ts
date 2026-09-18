@@ -1,33 +1,34 @@
-import { RlmBudgetError, type RlmStore } from "./store";
-import { QUERY_SLICE, type RlmCompleter, type RlmQueryResult } from "./query";
+import {
+	buildSubcallWorkerContext,
+	executeLeasedCompletion,
+} from "./broker";
+import type { RlmCompleter, RlmQueryResult } from "./query";
+import { QUERY_SLICE } from "./query";
+import { RlmRuntime } from "./runtime";
+import type { RlmStore } from "./store";
+import { resolveRlmView, type RlmGrant } from "./view";
 
-/** One granted slice into a spilled handle for a depth-1 worker. */
-export interface RlmGrant {
-	handle: string;
-	start?: number;
-	end?: number;
-}
+export type { RlmGrant };
 
 const MAX_GRANTS = 8;
 const PER_GRANT_SLICE = QUERY_SLICE;
 
 /**
- * RFC v2 depth-1 subcall (implementation pick **A2**: single nested ephemeral
- * completion over granted slices — not a third agent runtime, not recursive).
- *
- * - `maxDepth < 1` → fail-open (v1 preserved).
- * - `depth > maxDepth` → fail-open (blocks depth ≥ 2 when maxDepth is 1).
- * - Completer sees only granted peeks (capped), never full ungranted records.
- * - Worker has no tool loop here, so it cannot spawn depth-2 via `rlm subcall`.
+ * RFC v2 depth-1 subcall, provisioned through the v3 membrane:
+ * resolve RlmView → lease → isolated completion → reconcile.
  */
 export async function rlmSubcall(
-	store: RlmStore,
+	storeOrRuntime: RlmStore | RlmRuntime,
 	grants: RlmGrant[],
 	task: string,
 	complete?: RlmCompleter,
 	depth = 1,
 ): Promise<RlmQueryResult> {
+	const runtime =
+		storeOrRuntime instanceof RlmRuntime ? storeOrRuntime : RlmRuntime.fromStore(storeOrRuntime);
+	const store = runtime.store;
 	const trimmedTask = task.trim();
+
 	if (!trimmedTask) {
 		store.note("subcall", "empty task", true);
 		return {
@@ -73,81 +74,37 @@ export async function rlmSubcall(
 		};
 	}
 
-	const limited = grants.slice(0, MAX_GRANTS);
-	const excerpts: string[] = [];
-	const citations: string[] = [];
-
-	for (const grant of limited) {
-		try {
-			const peek = store.peek(grant.handle, grant.start ?? 0, grant.end);
-			const text =
-				peek.text.length > PER_GRANT_SLICE ? peek.text.slice(0, PER_GRANT_SLICE) : peek.text;
-			excerpts.push(`### ${peek.citation}\n${text}`);
-			citations.push(peek.citation);
-		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			store.note("subcall", msg, true);
-			return {
-				text: `${msg} (fail-open)`,
-				citation: "",
-				failOpen: true,
-			};
-		}
-	}
-
-	const citation = citations.join("; ");
-	const prompt =
-		`You are a depth-${depth} RLM worker. Answer ONLY from the granted excerpts. ` +
-		`Cite the handle ranges you use. You cannot call tools or spawn further subcalls.\n\n` +
-		`Granted excerpts:\n${excerpts.join("\n\n")}\n\nTask:\n${trimmedTask}`;
-
-	const approxTokens = Math.ceil(prompt.length / 4);
+	let view;
 	try {
-		store.beginCall(approxTokens);
-	} catch (error) {
-		const msg = error instanceof RlmBudgetError ? error.message : String(error);
-		store.note("subcall", msg, true);
-		return { text: `${msg} (fail-open)`, citation, failOpen: true };
-	}
-
-	if (!complete) {
-		store.note("subcall", "no completer", true);
-		return {
-			text: "rlm subcall: no completer bound (fail-open)",
-			citation,
-			failOpen: true,
-		};
-	}
-
-	const signal = store.createCallSignal();
-	try {
-		store.note("subcall", `depth=${depth} grants=${limited.length} task_bytes=${trimmedTask.length}`);
-		const raw = await complete(prompt, { signal });
-		const text = typeof raw === "string" ? raw : raw.text;
-		const actualTokens = typeof raw === "string" ? approxTokens : (raw.tokens ?? approxTokens);
-		const actualCost = typeof raw === "string" ? 0 : (raw.cost ?? 0);
-		const reconciled = store.reconcileUsage({
-			estimatedTokens: approxTokens,
-			actualTokens,
-			actualCost,
-		});
-		if (reconciled.overBudget) {
-			store.note("subcall", "overBudget after completion", true);
-			return {
-				text: `${text}\n\n(rlm over-budget after completion; fail-open)`,
-				citation,
-				failOpen: true,
-				tokens: reconciled.tokens,
-				cost: reconciled.cost,
-				overBudget: true,
-			};
-		}
-		return { text, citation, tokens: reconciled.tokens, cost: reconciled.cost };
+		view = resolveRlmView(store, grants, { maxGrants: MAX_GRANTS, perGrantSlice: PER_GRANT_SLICE });
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);
 		store.note("subcall", msg, true);
-		return { text: `${msg} (fail-open)`, citation, failOpen: true };
+		return { text: `${msg} (fail-open)`, citation: "", failOpen: true };
 	}
+
+	if (!view.grants.length) {
+		store.note("subcall", "empty view", true);
+		return { text: "rlm subcall: empty view (fail-open)", citation: "", failOpen: true };
+	}
+
+	store.note("subcall", `depth=${depth} grants=${view.grants.length} task_bytes=${trimmedTask.length}`);
+	const worker = buildSubcallWorkerContext(view, trimmedTask, depth);
+	const result = await executeLeasedCompletion(runtime, worker, complete, "subcall");
+	if (!result.failOpen) {
+		store.note("subcall", `ok lease=${result.lease?.id ?? "?"} tokens=${result.tokens ?? 0}`);
+	}
+	return {
+		text: result.text,
+		citation: result.citation,
+		failOpen: result.failOpen,
+		tokens: result.tokens,
+		cost: result.cost,
+		overBudget: result.overBudget,
+		context: result.context,
+		leaseId: result.lease?.id,
+		aborted: result.aborted,
+	};
 }
 
 /** Parse `handle` and optional comma-separated `handles` into grants. */
