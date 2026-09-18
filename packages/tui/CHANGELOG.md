@@ -7,6 +7,10 @@
 - `/btw` answers can show a steering prompt as a block behind a pink rail (a toned card in Tern) that `Alt+I` (`app.btw.inject`, remappable) sends to the main session; once sent it turns green with `➤` on each line, without moving ([#17618](https://github.com/can1357/oh-my-pi/pull/17618) by [@apullin](https://github.com/apullin))
 - Added `singleLine` and `finiteWidth` to `utils` for row-confined text and cell widths
 
+### Fixed
+
+- Fixed the Git TUI's word wrap splitting words across rows: wrapped rows now break at whitespace and at vim's break characters, and a word is split only when it is wider than a row ([#12472](https://github.com/can1357/oh-my-pi/pull/12472) by [@aleister1102](https://github.com/aleister1102)).
+
 ## [18.15.0] - 2026-11-01
 
 ### Breaking Changes
