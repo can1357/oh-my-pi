@@ -4,7 +4,7 @@
 ### Fixed
 
 - Fixed auth-broker client config resolution failing silently on Windows when reading the token file or `config.yml`; reads now use `node:fs` instead of `Bun.file`.
-- Fixed Kimi Code quota probing skipping API-key credentials (`KIMI_API_KEY` without an OAuth login), so `omp usage` now reports the plan windows for key-only setups.
+- Fixed Kimi Code quota probing skipping API-key credentials (`KIMI_API_KEY` without an OAuth login), so `omp usage` now reports the plan windows for key-only setups ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano)).
 
 ## [18.2.5] - 2026-09-17
 
