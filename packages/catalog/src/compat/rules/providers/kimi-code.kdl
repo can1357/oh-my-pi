@@ -2,9 +2,11 @@
 
 provider "kimi-code" {
 	default-model "kimi-for-coding"
-	discovery label="Kimi Code" {
-		env "KIMI_API_KEY"
-	}
+	// KIMI_API_KEY must sit on the provider (not inside discovery) so
+	// `getEnvApiKey("kimi-code")` resolves it for chat auth and usage probing;
+	// discovery still inherits it via the provider-envVars fallback.
+	env "KIMI_API_KEY"
+	discovery label="Kimi Code"
 
 	class "kimi" {
 		// Replaces the native Kimi provider thinking-format branch.
