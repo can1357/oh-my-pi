@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { normalizeModelPatternList, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	artifactsDirsFromRegistry,
@@ -14,6 +16,7 @@ import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import {
 	buildStructuredSubagentRecoveryHint,
+	invalidModelSelectorReason,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
 	StructuredSubagentError,
@@ -31,6 +34,20 @@ const AGENT: AgentDefinition = {
 	tools: ["read", "write", "ast_grep"],
 	output: { type: "object", properties: { agent: { type: "boolean" } } },
 };
+
+/** One catalog entry so a populated registry can reject an unmatchable selector. */
+const MODEL = buildModel({
+	id: "claude-sonnet-4-5",
+	name: "Claude Sonnet 4.5",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	reasoning: false,
+	baseUrl: "https://api.anthropic.com",
+	input: ["text"],
+	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+	contextWindow: 200000,
+	maxTokens: 8192,
+});
 
 function session(
 	options: {
@@ -381,6 +398,82 @@ describe("structured subagent primitive", () => {
 
 		expect(policy.modelRole).toBe("definition");
 		expect(policy.modelOverride).toEqual(["openai/gpt-4o"]);
+	});
+
+	it("rejects an ambiguous per-call selector instead of resolving it as the default role", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "default" })),
+		).rejects.toThrow(/"@default"/);
+		// The rule applies per pattern, not to the joined chain.
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: childSession, model: "openai/gpt-4o,default" })),
+		).rejects.toThrow(/"@default"/);
+	});
+
+	it("fails a per-call selector that expands to nothing rather than silently demoting it", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { empty: "", definition: "openai/gpt-4o" } });
+
+		await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@empty" }))).rejects.toThrow(
+			/No available model matches `model`/,
+		);
+	});
+
+	it("fails a per-call selector that matches no available model", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = session({ modelRoles: { definition: "openai/gpt-4o" } });
+		const registry = { getAvailable: () => [MODEL] } as unknown as ToolSession["modelRegistry"];
+		const withRegistry = { ...childSession, modelRegistry: registry } as ToolSession;
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: withRegistry, model: "openai/does-not-exist" })),
+		).rejects.toThrow(/No available model matches `model`/);
+
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: withRegistry, model: "anthropic/claude-sonnet-4-5" }),
+		);
+		expect(policy.modelOverride).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	it("inherits the parent's active model for `@default`, not the configured default role", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = {
+			...session({ modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" } }),
+			getActiveModelString: () => "zai/glm-5.2:high",
+			getModelString: () => "openai/gpt-4o",
+		} as ToolSession;
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: childSession, model: "@default" }));
+
+		expect(policy.modelOverride).toEqual(["zai/glm-5.2:high"]);
+		// The request still outranks the agent definition; it just resolves to inheritance.
+		expect(policy.modelRole).toBeUndefined();
+	});
+
+	it("admits mixed inherited requests when configured role candidates are unavailable", async () => {
+		mockDiscovery({ ...AGENT, model: ["@definition"] });
+		const childSession = {
+			...session({
+				modelRoles: { default: "openai/gpt-4o", smol: "openai/gpt-4o", definition: "openai/gpt-4o" },
+			}),
+			getActiveModelString: () => "anthropic/claude-sonnet-4-5",
+			getModelString: () => "openai/gpt-4o",
+			modelRegistry: { getAvailable: () => [MODEL] },
+		} as ToolSession;
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: childSession, model: "@default:high,@smol" }),
+		);
+		const selected = resolveModelOverride(
+			normalizeModelPatternList(policy.modelOverride),
+			{ getAvailable: () => [MODEL] },
+			childSession.settings,
+		);
+
+		expect(selected.model).toBe(MODEL);
+		expect(policy.modelRole).toBeUndefined();
 	});
 
 	it("falls through an empty configured override to the agent definition role", async () => {
@@ -838,4 +931,28 @@ describe("structured subagent primitive", () => {
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+});
+
+describe("per-call selector syntax", () => {
+	it("rejects a comma-only selector instead of treating it as no selector", () => {
+		expect(invalidModelSelectorReason(" , ", "The call")).toMatch(/invalid .*model/);
+	});
+
+	for (const model of [
+		"anthropic/claude-sonnet-4-5:heigh",
+		["anthropic/claude-sonnet-4-5:heigh", "anthropic/claude-sonnet-4-5"],
+		"@default,anthropic/claude-sonnet-4-5:heigh",
+	]) {
+		it(`rejects an invalid thinking suffix instead of silently dropping it: ${JSON.stringify(model)}`, async () => {
+			mockDiscovery();
+			const childSession = {
+				...session(),
+				getActiveModelString: () => "anthropic/claude-sonnet-4-5",
+				modelRegistry: { getAvailable: () => [MODEL] },
+			} as ToolSession;
+			await expect(resolveEffectiveSubagentPolicy(request({ session: childSession, model }))).rejects.toThrow(
+				/Invalid thinking suffix/,
+			);
+		});
+	}
 });

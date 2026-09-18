@@ -32,6 +32,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{#if effortEnabled}}  - `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
+  - `model`: Model selector or ordered non-empty selector array for this spawn only: `provider/model[:level]`, a role alias that expands `modelRoles` (`@smol`, `@task`), or `@default` (= `*`) to inherit the parent's live model. Overrides the agent's own model preference; configured fallbacks remain available. In a batch, put it on each item, never the batch container. Omit it unless a specific model is needed.
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
@@ -51,6 +52,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{#if effortEnabled}}- `effort`: Scale w/ complexity of this task: `"lo"`|`"med"`|`"hi"`
 {{/if}}
+- `model`: Model selector or ordered non-empty selector array for this spawn only: `provider/model[:level]`, a role alias that expands `modelRoles` (`@smol`, `@task`), or `@default` (= `*`) to inherit the parent's live model. Overrides the agent's own model preference; configured fallbacks remain available. In a batch, put it on each item, never the batch container. Omit it unless a specific model is needed.
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}

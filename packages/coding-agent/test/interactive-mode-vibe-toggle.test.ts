@@ -1,3 +1,4 @@
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 /**
  * Contracts: /vibe mode toggle on InteractiveMode.
  *
@@ -653,6 +654,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 
 	it("passes the session's active model into vibe rehydration on resume", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
+		session.setThinkingLevel(Effort.High);
 		await mode.handleVibeModeCommand();
 		await session.sessionManager.ensureOnDisk();
 		const sessionFile = session.sessionFile;
@@ -671,9 +673,9 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(await session.switchSession(sessionFile)).toBe(true);
 
 		// Rehydration must resolve workers against the reopened session's active
-		// model (so the `good`/pi/task worker tracks it), not the settings default.
+		// model (so the `good`/pi/task worker tracks it), including its selected effort, not the settings default.
 		expect(rehydrateCalled).toBe(true);
-		expect(activeModelDuringRehydrate).toBe(`${expectedModel.provider}/${expectedModel.id}`);
+		expect(activeModelDuringRehydrate).toBe(`${expectedModel.provider}/${expectedModel.id}:high`);
 	});
 
 	it("suspends the old scope without tombstones when switching to another vibe parent", async () => {

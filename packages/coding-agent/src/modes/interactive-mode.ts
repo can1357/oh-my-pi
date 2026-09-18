@@ -1,3 +1,4 @@
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 /**
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
@@ -62,7 +63,7 @@ import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -3356,7 +3357,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// (same as the spawn-path ToolSession), not the settings default. This is
 			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's
 			// pi/task inheritance tracks the reopened session's model.
-			getActiveModelString: () => (this.session.model ? formatModelString(this.session.model) : undefined),
+			getActiveModelString: () =>
+				this.session.model
+					? formatModelSelectorValue(formatModelStringWithRouting(this.session.model), this.session.thinkingLevel)
+					: undefined,
 		};
 	}
 

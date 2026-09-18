@@ -102,3 +102,28 @@ describe("task spawn validation", () => {
 		expect(text).toContain("Missing `task`");
 	});
 });
+
+describe("per-call model schema boundaries", () => {
+	for (const isolationEnabled of [false, true]) {
+		for (const effortEnabled of [false, true]) {
+			it(`rejects batch-container model (isolation=${isolationEnabled}, effort=${effortEnabled})`, () => {
+				const schema = getTaskSchema({ isolationEnabled, effortEnabled, batchEnabled: true });
+				const result = schema({ context: "Shared context", model: "p/requested", tasks: [{ task: "Do work" }] });
+				expect(result instanceof type.errors).toBe(true);
+			});
+		}
+	}
+
+	it("accepts ordered model arrays on both flat calls and batch items", () => {
+		const models = ["p/preferred:high", "p/alternative"];
+		const flat = taskSchema({ task: "Do work", model: models });
+		expect(flat instanceof type.errors).toBe(false);
+		if (flat instanceof type.errors) throw new Error(flat.summary);
+		expect(flat.model).toEqual(models);
+		const batch = getTaskSchema({ isolationEnabled: false, batchEnabled: true })({
+			context: "Shared context",
+			tasks: [{ task: "Do work", model: models }],
+		});
+		expect(batch instanceof type.errors).toBe(false);
+	});
+});

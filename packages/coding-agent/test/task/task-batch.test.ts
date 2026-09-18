@@ -706,3 +706,20 @@ describe("task.batch spawning", () => {
 		expect(last?.progress?.find(p => p.id === "First")?.status).toBe("completed");
 	});
 });
+
+describe("batch model placement", () => {
+	afterEach(() => vi.restoreAllMocks());
+	it("rejects a top-level model before dispatch even when wire validation is bypassed", async () => {
+		mockDiscovery();
+		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(makeResult("Unexpected"));
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": true, "async.enabled": false } }));
+		const result = await tool.execute("batch-model", {
+			context: "Shared context",
+			model: "p/requested",
+			tasks: [{ task: "Do work" }],
+		});
+		expect(getFirstText(result)).toMatch(/model.*tasks|model.*item/i);
+		expect(result.isError).toBe(true);
+		expect(run).not.toHaveBeenCalled();
+	});
+});

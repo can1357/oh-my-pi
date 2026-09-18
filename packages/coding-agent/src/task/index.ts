@@ -51,7 +51,12 @@ import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
 import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
-import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
+import {
+	invalidModelSelectorReason,
+	resolveEffectiveSubagentPolicy,
+	runStructuredSubagent,
+	StructuredSubagentError,
+} from "./structured-subagent";
 
 function renderSubagentUserPrompt(assignment: string): string {
 	return prompt.render(subagentUserPromptTemplate, {
@@ -167,6 +172,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 	return {
+		isError: true,
 		content: [{ type: "text", text }],
 		details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 	};
@@ -178,6 +184,10 @@ function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
  * `schema` remains an eval-only alias and is rejected.
  */
 function validateShapeParams(batchEnabled: boolean, params: TaskParams): string | undefined {
+	if (params.tasks !== undefined && Object.hasOwn(params, "model")) {
+		return "Put each model selector on its tasks[] item, not on the batch container.";
+	}
+
 	if (Object.hasOwn(params, "schema")) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
 	}
@@ -222,8 +232,11 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
 				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
 			}
-			const effortError = validateEffort(item.effort, `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`);
+			const label = `Task ${i + 1}${item.name ? ` (\`${item.name}\`)` : ""}`;
+			const effortError = validateEffort(item.effort, label);
 			if (effortError) return effortError;
+			const modelError = invalidModelSelectorReason(item.model, label);
+			if (modelError) return modelError;
 		}
 		const seen = new Map<string, string>();
 		for (const item of tasks) {
@@ -246,7 +259,7 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 			? "Missing `tasks`. Provide a `tasks` array (one subagent per item) with a shared `context`."
 			: "Missing `task`. Provide complete, self-contained instructions for the agent.";
 	}
-	return validateEffort(params.effort, "The call");
+	return validateEffort(params.effort, "The call") ?? invalidModelSelectorReason(params.model, "The call");
 }
 
 /**
@@ -264,6 +277,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("tools" in params) item.tools = params.tools;
 	if ("effort" in params) item.effort = params.effort;
+	if ("model" in params) item.model = params.model;
 	if ("isolated" in params) item.isolated = params.isolated;
 	return [item];
 }
@@ -286,6 +300,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
 	if ("effort" in item) spawn.effort = item.effort;
+	if ("model" in item) spawn.model = item.model;
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
@@ -652,6 +667,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
+			...(params.model !== undefined ? { model: params.model } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
@@ -1479,6 +1495,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
+				...(params.model !== undefined ? { model: params.model } : {}),
 				...(params.tools?.length
 					? {
 							customTools: createEvalCustomTools(

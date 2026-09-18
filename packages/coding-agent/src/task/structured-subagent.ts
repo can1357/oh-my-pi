@@ -8,7 +8,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import {
+	modelSelectionInheritsSessionModel,
+	normalizeModelPatternList,
+	resolveAgentModelSelection,
+	resolveConfiguredModelPatterns,
+	resolveModelOverride,
+} from "../config/model-resolver";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -256,6 +262,33 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 }
 
 /**
+ * Reason a per-spawn `model` selector cannot mean anything useful, or
+ * `undefined` when it is usable. The literal `"default"` is singled out
+ * because it reads as "leave the agent's model alone" while resolving as the
+ * `default` role — the ambiguity that got the previous per-call override
+ * removed (#6438). `@default` states the inherit intent explicitly.
+ * Shared so task, eval `agent()` and `workpool()` reject malformed input
+ * identically before dispatch.
+ */
+export function invalidModelSelectorReason(model: unknown, label: string): string | undefined {
+	if (model === undefined) return undefined;
+	const values: unknown[] = Array.isArray(model) ? model : [model];
+	const patterns: string[] = [];
+	const invalid = `${label} has an invalid \`model\` value ${JSON.stringify(model)}. Use a selector or a non-empty array of selectors such as "openai/gpt-5.4:high" or "@smol".`;
+	for (const value of values) {
+		if (typeof value !== "string") return invalid;
+		const normalized = normalizeModelPatternList(value);
+		if (normalized.length === 0) return invalid;
+		patterns.push(...normalized);
+	}
+	if (patterns.length === 0) return invalid;
+	if (patterns.some(pattern => ["default", "inherit"].includes(pattern.toLowerCase()))) {
+		return `${label} has an ambiguous \`model\` value ${JSON.stringify(model)}. Use "@default" to inherit the parent session's model, or name a model explicitly.`;
+	}
+	return undefined;
+}
+
+/**
  * Resolve every policy shared by task and eval before allocating artifacts or
  * dispatching work. Callers translate {@link StructuredSubagentError} into
  * their own wire-level error surface.
@@ -318,6 +351,64 @@ export async function resolveEffectiveSubagentPolicy(
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	// A per-call `model` is chosen by a model mid-turn, not read from a config
+	// file the user can re-check: reject an ambiguous or unmatchable selector
+	// here instead of letting the spawn die downstream on the generic
+	// "No model selected." credential error. Emptiness is decided by the
+	// resolver's own normalization, not a local predicate, so the set of
+	// values treated as "no selector" (internal callers pass one through the
+	// same slot) is exactly the set the resolver ignores — otherwise the
+	// checks below would validate whichever lower-precedence source won.
+	const requestPatterns = normalizeModelPatternList(request.model);
+	if (requestPatterns.length > 0) {
+		const { settings, modelRegistry } = request.session;
+		// A cold registry (discovery races startup) must never reject a valid
+		// selector; only syntax and empty expansions are judged without one.
+		const warmRegistry = modelRegistry && modelRegistry.getAvailable().length > 0 ? modelRegistry : undefined;
+		for (const pattern of requestPatterns) {
+			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
+			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
+			// `@default` asks for the parent's live model, not a pattern to look up.
+			if (!warmRegistry || modelSelectionInheritsSessionModel(pattern)) continue;
+			// Validate every concrete candidate, even beside @default or another
+			// usable candidate: a successful alternative must not hide a typo'd
+			// suffix that the resolver would otherwise recover from with a warning.
+			for (const candidate of resolveConfiguredModelPatterns(pattern, settings)) {
+				const strict = resolveModelOverride([candidate], warmRegistry, settings, {
+					allowInvalidThinkingSelectorFallback: false,
+				});
+				if (strict.model) continue;
+				const recovered = resolveModelOverride([candidate], warmRegistry, settings);
+				if (recovered.model && recovered.warning) {
+					throw new StructuredSubagentError(
+						"preflight",
+						`Invalid thinking suffix in model selector ${JSON.stringify(candidate)}. Use a supported thinking level or a literal model ID.`,
+					);
+				}
+			}
+		}
+		// With `@default` in the selection the resolver already answered with the
+		// inherited model the parent is running; there is nothing left to match.
+		if (!modelSelectionInheritsSessionModel(request.model)) {
+			// Role-expand the request's own patterns: `modelOverride` may come
+			// from a lower-precedence source, and blaming `model` for its
+			// failure misleads. An empty expansion is a config/shape failure no
+			// amount of discovery can fix, so it is rejected even on a cold registry.
+			const resolvedRequest = resolveConfiguredModelPatterns(request.model, settings);
+			const unmatched =
+				resolvedRequest.length === 0 ||
+				(warmRegistry !== undefined &&
+					!resolveModelOverride(resolvedRequest, warmRegistry, settings, {
+						allowInvalidThinkingSelectorFallback: false,
+					}).model);
+			if (unmatched) {
+				throw new StructuredSubagentError(
+					"preflight",
+					`No available model matches \`model\`: ${JSON.stringify(request.model)}. Run \`omp models find <query> --json\` and use a listed \`selector\`, or omit \`model\` to use the agent's own.`,
+				);
+			}
+		}
+	}
 	const isolationEnabled = request.session.settings.get("task.isolation.enabled");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
