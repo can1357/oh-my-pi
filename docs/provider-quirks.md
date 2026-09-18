@@ -1413,7 +1413,7 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/mini
 
 - **Auth keys**: Uses `MINIMAX_API_KEY` (`minimax`), `MINIMAX_CODE_API_KEY` (`minimax-code`), and `MINIMAX_CODE_CN_API_KEY` (`minimax-code-cn`) declared in `packages/catalog/src/compat/rules/providers/minimax.kdl`.
 - **Token Plan login**: Declared in `packages/catalog/src/compat/rules/auth/minimax-code.kdl` and `minimax-code-cn.kdl` as `login "api-key"` rules (`packages/ai/src/registry/engine/api-key.ts`), driving prompts linking to `https://platform.minimax.io/subscribe/token-plan` (international) and `https://platform.minimaxi.com/subscribe/token-plan` (China) and validating the key with a `MiniMax-M3` Anthropic Messages request (`validate "anthropic-messages"`).
-- **Usage quota**: `minimaxCodeUsageProvider` in `packages/ai/src/usage/minimax-code.ts` polls `GET /v1/token_plan/remains` at the host root of the configured `minimax-code` base URL (default `https://api.minimax.io`; trailing `/v1`, `/anthropic`, and `/anthropic/v1` suffixes are stripped), parsing rolling interval and weekly usage windows per plan bucket into remaining percentages for `omp usage`. Only the international provider is registered; `minimax-code-cn` has no usage provider.
+- **Usage quota**: `minimaxCodeUsageProvider` / `minimaxCodeCnUsageProvider` in `packages/ai/src/usage/minimax-code.ts` poll `GET /v1/token_plan/remains` at the host root of the configured base URL (default `https://api.minimax.io` for `minimax-code`, `https://api.minimaxi.com` for `minimax-code-cn`; trailing `/v1`, `/anthropic`, and `/anthropic/v1` suffixes are stripped), parsing rolling interval and weekly usage windows per plan bucket into remaining percentages for `omp usage`.
 
 ### Catalog model handling
 
@@ -1459,7 +1459,7 @@ MiniMax Token Plan (China) provides access to MiniMax models for mainland China 
 
 - **API Key & Interactive Login**: Authenticates via `MINIMAX_CODE_CN_API_KEY` (`packages/catalog/src/compat/rules/providers/minimax-code-cn.kdl`). Interactive login declared in `packages/catalog/src/compat/rules/auth/minimax-code-cn.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) points to `https://platform.minimaxi.com/subscribe/token-plan` and validates the pasted key with a `MiniMax-M3` Anthropic Messages request against `https://api.minimaxi.com/anthropic`.
 - **Endpoints & Host Detection**: API requests target `https://api.minimaxi.com/anthropic` (lightning rows: `https://api.minimaxi.com/v1`) (`packages/catalog/src/models.json`). `urlMarkers` includes `api.minimaxi.com` under the `minimax` host classification in `packages/catalog/src/hosts.ts`.
-- **Usage Telemetry Availability**: Unlike `minimax-code` (which fetches quota remaining percentages from `https://api.minimax.io/v1/token_plan/remains` via `minimaxCodeUsageProvider` in `packages/ai/src/usage/minimax-code.ts`), `minimax-code-cn` has no usage provider registered (`storage.usageProviderFor("minimax-code-cn")` returns `undefined` in `packages/ai/src/auth-storage.ts` and `test/minimax-token-plan-usage.test.ts`), so usage telemetry is disabled for China regional accounts.
+- **Usage Telemetry**: `minimaxCodeCnUsageProvider` (`packages/ai/src/usage/minimax-code.ts`, registered in `packages/ai/src/usage/registry.ts`) fetches quota remaining percentages from `https://api.minimaxi.com/v1/token_plan/remains` — the same wire contract as international `minimax-code`, served by the China host (#12448).
 
 ### Catalog model handling
 
@@ -2430,6 +2430,8 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/zhip
 - **Credentials & API Base**: Authenticates via `ZHIPU_API_KEY` (`packages/catalog/src/compat/rules/providers/zhipu-coding-plan.kdl` line 541) with API base URL `https://open.bigmodel.cn/api/coding/paas/v4` and dashboard URL `https://bigmodel.cn/coding-plan/personal/overview` (`packages/catalog/src/compat/rules/auth/zhipu-coding-plan.kdl`).
 - **API Key Login & Validation**: Declared in `packages/catalog/src/compat/rules/auth/zhipu-coding-plan.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) with key format `<id>.<secret>`, validating against `glm-5.1` at `https://open.bigmodel.cn/api/coding/paas/v4`. Host detection is wired via `hosts.ts` (`zhipu`, urlMarker `open.bigmodel.cn`, `packages/catalog/src/hosts.ts`).
 - **Chinese-Language 429 Quota Classification**: `CN_QUOTA_EXHAUSTED_PATTERN` in `packages/ai/src/error/rate-limit.ts` (`/使用.{0,30}?上限|(?:额度|配额)已?(?:用|耗)(?:完|尽)|限额.{0,30}重置|余额不足/`) classifies Zhipu's 429 quota exhaustion responses (`"429 已达到 5 小时的使用上限。您的限额将在 ... 重置。"`) as `QUOTA_EXHAUSTED`, triggering credential rotation instead of transient backoff.
+
+- **Usage quota**: `zhipuCodingPlanUsageProvider` (`packages/ai/src/usage/zai.ts`, registered in `packages/ai/src/usage/registry.ts`) reuses the Z.AI quota fetcher (`fetchZaiUsage`) against `https://open.bigmodel.cn/api/monitor/usage/quota/limit` (direct key authorization, same `zai:` limit-id prefixes ranked by `zaiRankingStrategy`), surfacing monthly request and 5-hour token windows for `omp usage` (#12448).
 
 ### Catalog model handling
 
