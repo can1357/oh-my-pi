@@ -23,6 +23,10 @@
 - Improved subagent task labels and plan filenames to use concise, action-oriented descriptions.
 - Updated CLI byte sizes to use decimal KB units and made duration displays coarser and easier to read.
 
+### Added
+
+- RPC clients can subscribe to completed child messages and progress with the `messages` subagent subscription level ([#11751](https://github.com/can1357/oh-my-pi/pull/11751) by [@numman-ali](https://github.com/numman-ali)).
+
 ### Fixed
 
 - Fixed `edit` auto-repair waiting up to 60 seconds when the `smol` model does not respond; it now times out after 20 seconds and reports repair start and timeout details.
