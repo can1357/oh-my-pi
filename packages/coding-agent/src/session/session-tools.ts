@@ -78,6 +78,9 @@ interface SessionToolsOptions {
 	createVibeTools?: () => AgentTool[];
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
 	createThinkTool?: () => Promise<AgentTool | null>;
+	/** Creates the `rlm` tool when `/rlm on` flips mid-session. */
+	createRlmTool?: () => Promise<AgentTool | null>;
+
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
@@ -225,7 +228,9 @@ export class SessionTools {
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
+	#createRlmTool: SessionToolsOptions["createRlmTool"];
 	#installedVibeToolNames = new Set<string>();
+
 	#builtInToolNames: Set<string>;
 	#rpcHostToolNames = new Set<string>();
 	#mcpManagerToolNames = new Set<string>();
@@ -323,8 +328,10 @@ export class SessionTools {
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createVibeTools = options.createVibeTools;
 		this.#createThinkTool = options.createThinkTool;
+		this.#createRlmTool = options.createRlmTool;
 		this.#builtInToolNames = new Set(options.builtInToolNames ?? []);
 		this.#mcpManagerToolNames = new Set(options.mcpManagerToolNames ?? []);
+
 		if (options.mcpManagerToolNames === undefined) {
 			for (const name of this.#toolRegistry.keys()) {
 				if (isMCPToolName(name)) this.#mcpManagerToolNames.add(name);
@@ -1629,6 +1636,7 @@ export class SessionTools {
 		return this.#setThinkToolActive(enabled && supportsExternalThinking(this.#host.model()));
 	}
 
+
 	/** Reconciles the external scratchpad after the active model changes. */
 	reconcileThinkTool(): Promise<boolean> {
 		return this.#setThinkToolActive(
@@ -1654,6 +1662,34 @@ export class SessionTools {
 			}
 			if (!active.includes("think")) {
 				await this.#applyActiveToolsByName([...active, "think"]);
+			}
+			return true;
+		});
+	}
+
+	/**
+	 * Session-scoped enable/disable for the `rlm` tool.
+	 * Spill itself is gated at execute time via `rlm.enabled`; this only installs
+	 * the inspection tool and refreshes the model-visible contract.
+	 */
+	setRlmToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.runToolRegistryMutation(async () => {
+			const active = this.getEnabledToolNames();
+			if (!enabled) {
+				if (active.includes("rlm")) {
+					await this.#applyActiveToolsByName(active.filter(name => name !== "rlm"));
+				}
+				return true;
+			}
+			if (!this.#toolRegistry.has("rlm")) {
+				const tool = await this.#createRlmTool?.();
+				if (tool?.name !== "rlm") return false;
+				const wrapped = this.#wrapRuntimeTool(tool);
+				this.#toolRegistry.set(wrapped.name, wrapped);
+				this.#builtInToolNames.add(wrapped.name);
+			}
+			if (!active.includes("rlm")) {
+				await this.#applyActiveToolsByName([...active, "rlm"]);
 			}
 			return true;
 		});

@@ -21,14 +21,24 @@ function spillContent(
 	});
 }
 
+export type RlmSpillOptions = {
+	/** Runtime gate so `/rlm on` can arm spill without rebuilding every tool. Default: always on. */
+	enabled?: () => boolean;
+	/** Resolve spill threshold at execute time. Default: fixed `spillBytes` arg. */
+	spillBytes?: () => number;
+};
+
 /** Spill oversized text results. Fail-open: original result if spill throws. */
 export function wrapToolWithRlmSpill<T extends AgentTool<any, any, any>>(
 	tool: T,
 	store: RlmStore,
 	spillBytes: number,
+	options?: RlmSpillOptions,
 ): T {
 	if (tool.name === RLM_TOOL_NAME) return tool;
 	const original = tool.execute.bind(tool);
+	const isEnabled = options?.enabled ?? (() => true);
+	const resolveSpillBytes = options?.spillBytes ?? (() => spillBytes);
 	tool.execute = (async (
 		toolCallId: string,
 		params: unknown,
@@ -37,10 +47,11 @@ export function wrapToolWithRlmSpill<T extends AgentTool<any, any, any>>(
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<unknown>> => {
 		const result = await original(toolCallId, params, signal, onUpdate, context);
+		if (!isEnabled()) return result;
 		try {
 			return {
 				...result,
-				content: spillContent(store, result.content, spillBytes, tool.name),
+				content: spillContent(store, result.content, resolveSpillBytes(), tool.name),
 			};
 		} catch {
 			return result;

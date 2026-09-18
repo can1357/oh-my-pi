@@ -1678,6 +1678,8 @@ export class AgentSession {
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,
+			createRlmTool: config.createRlmTool,
+
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -5558,6 +5560,12 @@ export class AgentSession {
 	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.#tools.setThinkToolEnabled(enabled);
 	}
+
+	/** Installs or removes the `rlm` tool when the session toggle flips. */
+	setRlmToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#tools.setRlmToolEnabled(enabled);
+	}
+
 
 	/** Cancels the local rollout-memory startup owned by this session. */
 	cancelLocalMemoryStartup(): void {

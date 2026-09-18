@@ -99,28 +99,28 @@ function applyExtendedContextCommand(settings: Settings, args: string): string |
 	return undefined;
 }
 
-function applyRlmCommand(session: AgentSession, args: string): string | undefined {
+async function applyRlmCommand(session: AgentSession, args: string): Promise<string | undefined> {
 	const arg = args.trim().toLowerCase();
 	const settings = session.settings;
 	if (arg === "status") {
 		const on = settings.get("rlm.enabled") ? "on" : "off";
-		return `RLM is ${on}. spillBytes=${settings.get("rlm.spillBytes")} maxCalls=${settings.get("rlm.maxCalls")} maxDepth=${settings.get("rlm.maxDepth")}.`;
+		const hasTool = session.getEnabledToolNames().includes("rlm");
+		return `RLM is ${on}. tool=${hasTool ? "active" : "inactive"} spillBytes=${settings.get("rlm.spillBytes")} maxCalls=${settings.get("rlm.maxCalls")} maxDepth=${settings.get("rlm.maxDepth")}.`;
 	}
-	if (!arg || arg === "toggle") {
-		const enabled = !settings.get("rlm.enabled");
+	if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
+		const enabled = arg === "on" ? true : arg === "off" ? false : !settings.get("rlm.enabled");
 		settings.override("rlm.enabled", enabled);
+		const installed = await session.setRlmToolEnabled(enabled);
+		if (enabled && !installed) {
+			settings.override("rlm.enabled", false);
+			return "RLM could not install the rlm tool in this session.";
+		}
 		return `RLM ${enabled ? "enabled" : "disabled"} for this session.`;
-	}
-	if (arg === "on") {
-		settings.override("rlm.enabled", true);
-		return "RLM enabled for this session.";
-	}
-	if (arg === "off") {
-		settings.override("rlm.enabled", false);
-		return "RLM disabled for this session.";
 	}
 	return undefined;
 }
+
+
 
 
 /** Detailed, session-effective `/computer status` diagnostics. */
@@ -606,17 +606,18 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		getTuiAutocompleteDescription: runtime =>
 			`RLM: ${runtime.ctx.session.settings.get("rlm.enabled") ? "on" : "off"}`,
 		handle: async (command, runtime) => {
-			const output = applyRlmCommand(runtime.session, command.args);
+			const output = await applyRlmCommand(runtime.session, command.args);
 			if (!output) return usage("Usage: /rlm [on|off|status]", runtime);
 			await runtime.output(output);
 			return commandConsumed();
 		},
-		handleTui: (command, runtime) => {
-			const output = applyRlmCommand(runtime.ctx.session, command.args);
+		handleTui: async (command, runtime) => {
+			const output = await applyRlmCommand(runtime.ctx.session, command.args);
 			refreshStatusLine(runtime.ctx);
 			runtime.ctx.showStatus(output ?? "Usage: /rlm [on|off|status]");
 			runtime.ctx.editor.setText("");
 		},
+
 	},
 
 	{

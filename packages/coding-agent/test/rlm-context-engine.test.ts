@@ -112,6 +112,47 @@ describe("RLM tool wrap", () => {
 		expect(text && text.type === "text" ? text.text.includes("[rlm spilled") : false).toBe(true);
 		expect(text && text.type === "text" ? text.text.includes(NEEDLE) : true).toBe(false);
 	});
+
+	test("runtime enabled gate can arm spill without rewrap", async () => {
+		const store = new RlmStore();
+		const corpus = bigCorpus();
+		let enabled = false;
+		const tool = wrapToolWithRlmSpill(
+			{
+				name: "read",
+				execute: async () => ({
+					content: [{ type: "text" as const, text: corpus }],
+					details: {},
+				}),
+			} as unknown as AgentTool,
+			store,
+			100,
+			{ enabled: () => enabled },
+		);
+
+		const off = await tool.execute("a", {});
+		const offText = off.content.find(part => part.type === "text");
+		expect(offText && offText.type === "text" ? offText.text.includes(NEEDLE) : false).toBe(true);
+
+		enabled = true;
+		const on = await tool.execute("b", {});
+		const onText = on.content.find(part => part.type === "text");
+		expect(onText && onText.type === "text" ? onText.text.includes("[rlm spilled") : false).toBe(true);
+		expect(onText && onText.type === "text" ? onText.text.includes(NEEDLE) : true).toBe(false);
+	});
+
+	test("createTools includes rlm only when enabled", async () => {
+		const { createTools } = await import("../src/tools");
+		const offSettings = Settings.isolated({ "rlm.enabled": false });
+		const offSession = { cwd: "/tmp/rlm-off", settings: offSettings } as ToolSession;
+		const offTools = await createTools(offSession);
+		expect(offTools.some(tool => tool.name === "rlm")).toBe(false);
+
+		const onSettings = Settings.isolated({ "rlm.enabled": true, "rlm.spillBytes": 100 });
+		const onSession = { cwd: "/tmp/rlm-on", settings: onSettings } as ToolSession;
+		const onTools = await createTools(onSession);
+		expect(onTools.some(tool => tool.name === "rlm")).toBe(true);
+	});
 });
 
 describe("RlmTool", () => {
@@ -125,14 +166,18 @@ describe("RlmTool", () => {
 		const session = { cwd: "/tmp/rlm-test", settings } as ToolSession;
 		const tool = RlmTool.createIf(session);
 		expect(tool).not.toBeNull();
-		const store = new RlmStore();
-		// bind via peek after putting through the session store used by the tool
 		const { getRlmStore } = await import("../src/rlm/session");
 		const live = getRlmStore(session);
 		live.put(bigCorpus(), "test");
 		const peek = await tool!.execute("t1", { op: "peek", handle: "rlm://h/1", start: 0, end: 12 });
 		const text = peek.content[0];
 		expect(text && text.type === "text" ? text.text.includes("rlm://h/1[0:12]") : false).toBe(true);
-		expect(store).toBeDefined();
+	});
+
+	test("constructor works even when setting is off (mid-session install)", () => {
+		const settings = Settings.isolated({ "rlm.enabled": false });
+		const tool = new RlmTool({ cwd: "/tmp", settings } as ToolSession);
+		expect(tool.name).toBe("rlm");
 	});
 });
+

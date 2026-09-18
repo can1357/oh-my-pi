@@ -852,11 +852,18 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		else session.isToolActive = name => finalActiveNames.has(name);
 	}
 
-	if (rlmEnabled(session)) {
+	// Always wrap so `/rlm on` can arm spill without rebuilding the registry.
+	{
 		const store = getRlmStore(session);
 		const spillBytes = rlmSpillBytes(session);
-		tools = tools.map(tool => wrapToolWithRlmSpill(tool, store, spillBytes));
+		tools = tools.map(tool =>
+			wrapToolWithRlmSpill(tool, store, spillBytes, {
+				enabled: () => rlmEnabled(session),
+				spillBytes: () => rlmSpillBytes(session),
+			}),
+		);
 	}
+
 	return tools;
 }
 
