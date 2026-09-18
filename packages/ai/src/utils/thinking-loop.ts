@@ -96,6 +96,26 @@ const LEX_STALL_NOVELTY_FLOOR = 0.2;
  *  the real reasoning-summarizer loop sustains far longer runs (10+). */
 const LEX_STALL_MIN_RUN = 8;
 
+/** Structural punctuation that dominates tables / JSON / code but is rare in
+ *  prose. Used to score a segment's prose-likeness. */
+const STRUCTURAL_PUNCT = /[|{}[\]"`:;,/=<>#]/u;
+/** A JSON record field prefixed by the record/field delimiter (`{` or `,`).
+ *  Requiring that structure keeps prose mentions such as `"status":` from
+ *  masquerading as record fields. Global flag: collected with matchAll, never
+ *  used with the stateful test(). */
+const JSON_KEY_FIELD = /(?:^|[{,])\s*"(?:\\.|[^"\\\n])*"\s*:/gm;
+/** Minimum fraction of prose characters (Unicode letters + whitespace, versus
+ *  structural punctuation) a segment must reach to feed the near-duplicate and
+ *  lexical-stall heuristics. Homogeneous structured output — a markdown table of
+ *  ids/URLs, a JSON array of same-shape rows — scores far below this (~0.7–0.8)
+ *  because its varying data is numeric (dropped by {@link normalizeSegment}) and
+ *  its skeleton is punctuation; those rows are legitimate answer content, not a
+ *  reasoning loop, so they are exempted. Reasoning prose in any script (Unicode
+ *  letters count, so CJK stays prose) scores ~0.95+. Calibrated to sit between
+ *  the two clusters with margin (issue #11129). Exact suffix-cycle detection is
+ *  unaffected — a verbatim structured loop is still caught. */
+const SEGMENT_MIN_PROSE_RATIO = 0.85;
+
 /** A concrete reference the model is actually reasoning about: a code span, a
  *  file extension / dotted member, a multi-segment path, or a snake/camel/Pascal
  *  identifier. A segment that introduces a NEW one resets the lexical-stall run —
@@ -227,6 +247,19 @@ export class ThinkingLoopDetector {
 		const segment = raw.replace(/^[ \t]*#{1,6}[ \t].*$/gm, "").replace(/^[ \t]*\*{2,3}.+?\*{2,3}[ \t]*$/gm, "");
 		const normalized = normalizeSegment(segment);
 		if (normalized.length < SEGMENT_MIN_NORM_CHARS) return null;
+
+		// Homogeneous structured output (markdown table, JSON array, code) is
+		// legitimate answer content, not a reasoning loop, yet consecutive rows
+		// normalize to near-identical trigrams (their varying data is numeric,
+		// which normalizeSegment drops) and would falsely trip the cluster path.
+		// Exempt it two ways: by shape (JSON/table recognized regardless of key
+		// length) and by a low prose ratio (punctuation-heavy data generally). A
+		// NEW output block also breaks any in-progress prose stall. Verbatim
+		// structured loops are still caught by the exact suffix-cycle detector.
+		if (isStructuredSegment(segment) || proseRatio(segment) < SEGMENT_MIN_PROSE_RATIO) {
+			this.#lexStallRun = 0;
+			return null;
+		}
 
 		// (a) Near-duplicate trigram cluster: the same paragraph reused with
 		// cosmetic wording drift (high word-trigram overlap).
@@ -552,6 +585,52 @@ function normalizeSegment(segment: string): string {
 		.filter(token => /[a-z]/.test(token))
 		.join(" ")
 		.trim();
+}
+
+/** Fraction of a segment's classified characters that are prose (Unicode letters
+ *  or whitespace) rather than structural punctuation ({@link STRUCTURAL_PUNCT}).
+ *  Digits and other characters are ignored so that data identifiers (numeric ids,
+ *  hex) tilt the score toward neither side. Returns 1 for a segment with no
+ *  classified characters. Used to spare tables / JSON / code from the reasoning
+ *  heuristics (see {@link SEGMENT_MIN_PROSE_RATIO}). */
+function proseRatio(segment: string): number {
+	let prose = 0;
+	let structural = 0;
+	for (const ch of segment) {
+		if (/\s/.test(ch) || /\p{L}/u.test(ch)) prose++;
+		else if (STRUCTURAL_PUNCT.test(ch)) structural++;
+	}
+	const denom = prose + structural;
+	return denom === 0 ? 1 : prose / denom;
+}
+
+/** True when a segment is structured data — a JSON value/record or a markdown
+ *  table — rather than reasoning prose, recognized by shape so it holds even
+ *  when long descriptive key names push {@link proseRatio} above its threshold
+ *  (issue #11132 review). Complements the prose-ratio check, which catches other
+ *  punctuation-heavy data (CSV, code). */
+function isStructuredSegment(segment: string): boolean {
+	const trimmed = segment.trim();
+	// A complete JSON object/array value.
+	if (/^[{[]/.test(trimmed) && /[}\]]$/.test(trimmed)) return true;
+	// A force-flushed partial record: at least two delimiter-prefixed fields whose
+	// syntax dominates the chunk. Incidental inline JSON inside a prose paragraph
+	// leaves most of the segment outside these matches and must remain analyzable.
+	let fields = 0;
+	let fieldChars = 0;
+	for (const match of segment.matchAll(JSON_KEY_FIELD)) {
+		fields++;
+		fieldChars += match[0].length;
+	}
+	if (fields >= 2 && fieldChars * 2 >= trimmed.length) return true;
+	// Markdown table: most non-blank lines are multi-column pipe rows.
+	const lines = segment.split("\n").filter(line => line.trim() !== "");
+	if (lines.length >= 2) {
+		let pipeRows = 0;
+		for (const line of lines) if ((line.match(/\|/g)?.length ?? 0) >= 2) pipeRows++;
+		if (pipeRows >= Math.ceil(lines.length * 0.6)) return true;
+	}
+	return false;
 }
 
 /** Word-trigram shingle set of a normalized segment. */
