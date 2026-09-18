@@ -1,6 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { Message } from "@oh-my-pi/pi-ai";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -11,8 +10,6 @@ function buildContext(): InteractiveModeContext {
 	return {
 		chatContainer,
 		transcriptMessageComponents: new WeakMap(),
-		getUserMessageText: (message: Message) =>
-			message.role === "user" && typeof message.content === "string" ? message.content : "",
 		viewSession: {
 			extensionRunner: undefined,
 			sessionManager: { putBlobSync: () => "unused" },

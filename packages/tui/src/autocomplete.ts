@@ -137,11 +137,8 @@ function buildCompletionValue(
 	return `${openQuote}${path}${closeQuote}`;
 }
 
-/**
- * Check if query is a subsequence of target (fuzzy match).
- * "wig" matches "skill:wig" because w-i-g appear in order.
- */
-function fuzzyMatch(query: string, target: string): boolean {
+/** Ranked-tier subsequence match ("wig" ~ "skill:wig"); distinct from fuzzy.ts's word-local engine. */
+export function subsequenceMatch(query: string, target: string): boolean {
 	if (query.length === 0) return true;
 	if (query.length > target.length) return false;
 
@@ -152,11 +149,8 @@ function fuzzyMatch(query: string, target: string): boolean {
 	return qi === query.length;
 }
 
-/**
- * Score a fuzzy match. Higher = better match.
- * Prioritizes: exact match > starts-with > contains > subsequence
- */
-function fuzzyScore(query: string, target: string): number {
+/** Ranked-tier subsequence score (100/80/60/40−gaps·5); higher is better, 0 is no match. */
+export function subsequenceScore(query: string, target: string): number {
 	if (query.length === 0) return 1;
 	if (target === query) return 100;
 	if (target.startsWith(query)) return 80;
@@ -309,7 +303,7 @@ export function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string):
 	// name first (e.g. `/set` → `setup` above `settings`), silently changing the
 	// command that the sync-completion path applies on Enter.
 	if (lowerTarget.startsWith(lowerPrefix)) return 900;
-	return fuzzyMatch(lowerPrefix, lowerTarget) ? fuzzyScore(lowerPrefix, lowerTarget) : 0;
+	return subsequenceMatch(lowerPrefix, lowerTarget) ? subsequenceScore(lowerPrefix, lowerTarget) : 0;
 }
 
 function buildSlashCommandCompletions(
@@ -356,7 +350,9 @@ function buildSlashCommandCompletions(
 							: scoreCommandTextMatch(lowerPrefix, name.toLowerCase());
 				const lowerDesc = staticDesc.toLowerCase();
 				const descScore =
-					lowerDesc && fuzzyMatch(lowerPrefix, lowerDesc) ? fuzzyScore(lowerPrefix, lowerDesc) * 0.5 : 0;
+					lowerDesc && subsequenceMatch(lowerPrefix, lowerDesc)
+						? subsequenceScore(lowerPrefix, lowerDesc) * 0.5
+						: 0;
 				const primaryScore = Math.max(nameScore, descScore);
 				if (primaryScore > 0) {
 					const fullDesc = resolveFullDesc();
@@ -1125,7 +1121,7 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				if (/(^|\/)\.git(\/|$)/.test(normalized)) {
 					return false;
 				}
-				return lowerQuery.length === 0 || fuzzyMatch(lowerQuery, normalized.toLowerCase());
+				return lowerQuery.length === 0 || subsequenceMatch(lowerQuery, normalized.toLowerCase());
 			});
 			// `fuzzyFind` is already capped via `maxResults` in
 			// `buildAutocompleteFuzzyDiscoveryProfile`; no extra slice here.

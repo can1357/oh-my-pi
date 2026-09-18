@@ -111,9 +111,9 @@ export class SessionStatsTracker {
 	/** Returns aggregate message, token, and cost statistics for the session. */
 	getSessionStats(): SessionStats {
 		const state = this.#host.agent.state;
-		const userMessages = state.messages.filter(message => message.role === "user").length;
-		const assistantMessages = state.messages.filter(message => message.role === "assistant").length;
-		const toolResults = state.messages.filter(message => message.role === "toolResult").length;
+		let userMessages = 0;
+		let assistantMessages = 0;
+		let toolResults = 0;
 		let toolCalls = 0;
 		let totalInput = 0;
 		let totalOutput = 0;
@@ -146,21 +146,26 @@ export class SessionStatsTracker {
 			}
 		};
 		for (const message of state.messages) {
-			if (message.role === "assistant") {
-				const assistant = message;
-				toolCalls += assistant.content.filter(content => content.type === "toolCall").length;
-				// Persisted and imported transcripts can predate usage metadata despite the current message type.
-				const usage = assistant.usage;
-				if (!usage) continue;
-				addUsage(usage);
-				if (assistant.upstreamModel !== undefined) {
-					routedModels[assistant.upstreamModel] = (routedModels[assistant.upstreamModel] ?? 0) + 1;
+			if (message.role === "user") {
+				userMessages++;
+			} else if (message.role === "toolResult") {
+				toolResults++;
+				if (message.toolName === "task") {
+					const usage = taskToolUsage(message.details);
+					if (usage) addUsage(usage);
 				}
-			}
-			if (message.role === "toolResult" && message.toolName === "task") {
-				const usage = taskToolUsage(message.details);
+			} else if (message.role === "assistant") {
+				assistantMessages++;
+				for (const content of message.content) {
+					if (content.type === "toolCall") toolCalls++;
+				}
+				// Persisted and imported transcripts can predate usage metadata despite the current message type.
+				const usage = message.usage;
 				if (!usage) continue;
 				addUsage(usage);
+				if (message.upstreamModel !== undefined) {
+					routedModels[message.upstreamModel] = (routedModels[message.upstreamModel] ?? 0) + 1;
+				}
 			}
 		}
 		for (const entry of activeModelUsageEntries(this.#host.sessionManager.getBranch())) addUsage(entry.usage);

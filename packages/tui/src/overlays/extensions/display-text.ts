@@ -14,11 +14,14 @@ export function sanitizeDisplayText(text: string): string {
 	return replaceTabs(sanitizeText(text));
 }
 
+/** Collapse newlines to spaces so a hostile title cannot inject extra TUI rows (no trimming). */
+export function sanitizeDisplaySingleLine(text: string): string {
+	return sanitizeDisplayText(text).replace(/[\r\n]+/g, " ");
+}
+
 /** Collapse newlines so a hostile title cannot inject extra TUI rows. */
 export function sanitizeDisplayLine(text: string): string {
-	return sanitizeDisplayText(text)
-		.replace(/[\r\n]+/g, " ")
-		.trim();
+	return sanitizeDisplaySingleLine(text).trim();
 }
 
 /** Like {@link sanitizeDisplayText}, dropping empty results. */

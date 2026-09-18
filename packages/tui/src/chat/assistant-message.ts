@@ -10,7 +10,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
-import { resolveImageOptions } from "../render/render-utils";
+import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
 import { convertImageToPng } from "./image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
@@ -30,7 +30,6 @@ import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome
  */
 const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
-const EMPTY_LINK_TARGETS: ReadonlyMap<string, string> = new Map();
 
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
@@ -250,8 +249,14 @@ export class AssistantMessageComponent extends Container {
 	#stableParts: readonly StablePart[] = [];
 	#nextStableRowId = 0;
 	#transcriptStableRows: TranscriptStableRow[] = [];
-	/** Keep the previous and current render, not every cumulative published prefix. */
-	#stableRenderCache = new LRUCache<string, readonly string[]>({ max: 2 });
+	/**
+	 * Rendered rows per published snapshot index and width. The container asks
+	 * for several different counts in one frame (emitted, offered end,
+	 * projected, pressure-loop +1s); a 2-entry LRU thrashes across those and
+	 * re-renders the whole prefix per miss. Sized generously so the live prefix
+	 * stays cached; cleared on reset/finalize like before.
+	 */
+	#stableRenderCache = new LRUCache<string, readonly string[]>({ max: 64 });
 	/** Provider-reported tokens in the live thinking block — reasoning tokens when
 	 *  the provider streams them, else total output — shown dimmed beside the
 	 *  speed badge. 0 when no thinking is streaming. */

@@ -20,7 +20,7 @@ import type { SgrMouseEvent } from "../mouse";
 import { replaceTabs, truncateToWidth, visibleWidth } from "../utils";
 import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
-import { thinkingLevelGlyph as sharedThinkingLevelGlyph } from "../render/render-utils";
+import { thinkingLevelGlyph } from "../render/render-utils";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
@@ -460,11 +460,6 @@ export function rankModelItems(
 	return matches;
 }
 
-/** Compact glyph for a configured thinking level using the active theme. */
-export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
-	return sharedThinkingLevelGlyph(level, theme);
-}
-
 /**
  * A slim role chip: `● default ◉` — solid dot for configured assignments,
  * hollow for auto-selected fallbacks, thinking glyph attached when set.
@@ -480,7 +475,7 @@ export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
 export function formatRoleChip(role: string, assignment: RoleAssignment, settings: ModelBrowserSource): string {
 	const info = settings.getRoleInfo(role);
 	const label = (info.tag ?? info.name ?? role).toLowerCase();
-	const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
+	const glyph = thinkingLevelGlyph(assignment.thinkingLevel, theme);
 	const suffix = glyph ? ` ${theme.fg("dim", glyph)}` : "";
 	if (assignment.autoSelected) {
 		return theme.fg("dim", `${theme.status.shadowed} ${label}`) + suffix;

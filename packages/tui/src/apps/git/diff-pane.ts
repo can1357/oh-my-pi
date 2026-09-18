@@ -17,11 +17,12 @@ import type { DiffStreamResult, HighlightStream } from "@oh-my-pi/pi-natives";
 import { diffWords, structuredPatchHunks } from "@oh-my-pi/pi-natives";
 import { Image, type ImageBudget } from "../../components/image";
 import { clampScrollOffset, scrollOffsetForRow, viewportRange } from "../../components/scroll-viewport";
-import { replaceTabs, sliceWithWidth, truncateToWidth, visibleWidth } from "../../utils";
-import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
+import { centerLine, sliceWithWidth, truncateToWidth, visibleWidth } from "../../utils";
+import { formatBytes } from "@oh-my-pi/pi-utils";
+import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
 import { getLanguageFromPath } from "../../lang-from-path";
 import { createHighlightStream, theme } from "../../theme/theme";
-import { bgAnsi, canvasHex, fgAnsi, mixHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
+import { bgAnsiHex, canvasHex, fgAnsiHex, mixHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
 import { DIFF_CONTEXT_LINES, type FileAssetSide, type FileStreamUpdate } from "./state";
 
 /** Column ranges (inclusive start, exclusive end) carrying intraline emphasis. */
@@ -90,18 +91,6 @@ export type HunkAction = "stage" | "unstage" | "discard";
 const HIGHLIGHT_BATCH_LINES = 32;
 /** Cap on intraline word-diff pairs per document. */
 const INTRALINE_PAIR_LIMIT = 1_500;
-
-/**
- * Turn one raw source line into a terminal-safe display string: strip C0/C1
- * control bytes (via {@link sanitizeText}) then expand tabs. Windows worktree
- * files use CRLF, so lines split on `\n` retain a trailing `\r`; emitting that
- * raw carriage return snaps the cursor to column 0 mid-row and corrupts the
- * render (issue #9734). The line has no `\n` (already split), so nothing else
- * is affected.
- */
-function displayLine(line: string): string {
-	return replaceTabs(sanitizeText(line));
-}
 
 function intralineMarks(oldLine: string, newLine: string): { old: MarkRanges; new: MarkRanges } {
 	const oldRanges: [number, number][] = [];
@@ -210,8 +199,8 @@ export function buildDiffDocument(
 		ignoreFormatting && dot >= 0 ? (IMPORT_LANG_BY_EXT[filePath.slice(dot + 1).toLowerCase()] ?? null) : null;
 	const oldLines = oldRaw.length === 0 ? [] : oldRaw.replace(/\n$/, "").split("\n");
 	const newLines = newRaw.length === 0 ? [] : newRaw.replace(/\n$/, "").split("\n");
-	const oldPlain = oldLines.map(displayLine);
-	const newPlain = newLines.map(displayLine);
+	const oldPlain = oldLines.map(sanitizeDisplayText);
+	const newPlain = newLines.map(sanitizeDisplayText);
 
 	// Alignment basis: raw lines, or trimmed lines when ignoring whitespace.
 	// Line numbers stay 1:1 with the raw text either way.
@@ -521,12 +510,12 @@ function palette(): DiffPalette {
 	const key = `${added}\u0000${removed}\u0000${accent}\u0000${dark}\u0000${canvas}\u0000${text}`;
 	if (paletteCache?.key === key) return paletteCache.palette;
 	const built: DiffPalette = {
-		addSoft: bgAnsi(mixHex(canvas, added, dark ? 0.18 : 0.24)),
-		addStrong: bgAnsi(mixHex(canvas, added, dark ? 0.42 : 0.48)),
-		delSoft: bgAnsi(mixHex(canvas, removed, dark ? 0.18 : 0.24)),
-		delStrong: bgAnsi(mixHex(canvas, removed, dark ? 0.42 : 0.48)),
-		fillAdd: bgAnsi(mixHex(canvas, added, 0.07)),
-		fillDel: bgAnsi(mixHex(canvas, removed, 0.07)),
+		addSoft: bgAnsiHex(mixHex(canvas, added, dark ? 0.18 : 0.24)),
+		addStrong: bgAnsiHex(mixHex(canvas, added, dark ? 0.42 : 0.48)),
+		delSoft: bgAnsiHex(mixHex(canvas, removed, dark ? 0.18 : 0.24)),
+		delStrong: bgAnsiHex(mixHex(canvas, removed, dark ? 0.42 : 0.48)),
+		fillAdd: bgAnsiHex(mixHex(canvas, added, 0.07)),
+		fillDel: bgAnsiHex(mixHex(canvas, removed, 0.07)),
 		mapAdd: added,
 		mapDel: removed,
 		mapChange: mixHex(added, removed, 0.5),
@@ -656,8 +645,8 @@ export class DiffPane {
 	updateStream(update: FileStreamUpdate): void {
 		const streaming = this.#streaming;
 		if (!streaming) return;
-		const oldLines = update.oldLines.map(displayLine);
-		const newLines = update.newLines.map(displayLine);
+		const oldLines = update.oldLines.map(sanitizeDisplayText);
+		const newLines = update.newLines.map(sanitizeDisplayText);
 		streaming.oldLines.splice(update.oldLineOffset, streaming.oldLines.length - update.oldLineOffset, ...oldLines);
 		streaming.newLines.splice(update.newLineOffset, streaming.newLines.length - update.newLineOffset, ...newLines);
 		for (const line of oldLines) streaming.maxLineWidth = Math.max(streaming.maxLineWidth, line.length);
@@ -1048,7 +1037,9 @@ export class DiffPane {
 			const lines: string[] = [];
 			for (let i = 0; i < height; i++) {
 				lines.push(
-					i === Math.floor(height / 2) ? truncateToWidth(centerText(theme.fg("dim", message), width), width) : "",
+					i === Math.floor(height / 2)
+						? truncateToWidth(centerLine(theme.fg("dim", message), width).trimEnd(), width)
+						: "",
 				);
 			}
 			return lines;
@@ -1093,11 +1084,11 @@ export class DiffPane {
 		for (let index = 0; index < height; index++) {
 			const leftSource =
 				index === 0
-					? centerText(theme.bold(this.#assetTitle("Before", asset.old)), leftWidth)
+					? centerLine(theme.bold(this.#assetTitle("Before", asset.old)), leftWidth).trimEnd()
 					: (oldLines[index - 1] ?? "");
 			const rightSource =
 				index === 0
-					? centerText(theme.bold(this.#assetTitle("After", asset.new)), rightWidth)
+					? centerLine(theme.bold(this.#assetTitle("After", asset.new)), rightWidth).trimEnd()
 					: (newLines[index - 1] ?? "");
 			const left = truncateToWidth(leftSource, leftWidth);
 			const right = truncateToWidth(rightSource, rightWidth);
@@ -1154,7 +1145,7 @@ export class DiffPane {
 					];
 					break;
 			}
-			content = details.map(detail => centerText(theme.fg("dim", detail), width));
+			content = details.map(detail => centerLine(theme.fg("dim", detail), width).trimEnd());
 		}
 		const top = Math.max(0, Math.floor((height - content.length) / 2));
 		return Array.from({ length: height }, (_, index) => content[index - top] ?? "");
@@ -1199,7 +1190,7 @@ export class DiffPane {
 		const total = this.#total();
 		if (total === 0) {
 			return Array.from({ length: height }, (_, index) =>
-				index === Math.floor(height / 2) ? centerText(theme.fg("dim", "Streaming file…"), width) : "",
+				index === Math.floor(height / 2) ? centerLine(theme.fg("dim", "Streaming file…"), width).trimEnd() : "",
 			);
 		}
 		this.#clampScroll();
@@ -1342,9 +1333,9 @@ export class DiffPane {
 		const isDel = side === "old" && row.kind !== "context";
 		const isAdd = side === "new" && row.kind !== "context";
 		const gutterText = isDel
-			? `${fgAnsi(colors.gutterDel) + oldLabel + " ".repeat(gutter + 1)}\x1b[0m`
+			? `${fgAnsiHex(colors.gutterDel) + oldLabel + " ".repeat(gutter + 1)}\x1b[0m`
 			: isAdd
-				? `${" ".repeat(gutter)}${fgAnsi(colors.gutterAdd)}${newLabel}\x1b[0m `
+				? `${" ".repeat(gutter)}${fgAnsiHex(colors.gutterAdd)}${newLabel}\x1b[0m `
 				: theme.fg("dim", `${oldLabel}${newLabel} `);
 		const text = this.#displayText(row, side);
 		const marks = side === "old" ? row.oldMarks : row.newMarks;
@@ -1384,7 +1375,7 @@ export class DiffPane {
 		if (present && first) {
 			const label = String(num).padStart(gutter);
 			gutterText = changed
-				? `${fgAnsi(side === "old" ? colors.gutterDel : colors.gutterAdd) + label}\x1b[0m`
+				? `${fgAnsiHex(side === "old" ? colors.gutterDel : colors.gutterAdd) + label}\x1b[0m`
 				: theme.fg("dim", label);
 		} else {
 			gutterText = " ".repeat(gutter);
@@ -1483,8 +1474,8 @@ export class DiffPane {
 			if (topColor === null && bottomColor === null) {
 				lines.push(" ");
 			} else {
-				const fg = fgAnsi(topColor ?? bottomColor ?? "#000000");
-				const bg = bottomColor ? bgAnsi(bottomColor) : "";
+				const fg = fgAnsiHex(topColor ?? bottomColor ?? "#000000");
+				const bg = bottomColor ? bgAnsiHex(bottomColor) : "";
 				lines.push(`${fg}${bg}▀\x1b[0m`);
 			}
 		}
@@ -1518,9 +1509,4 @@ function visualKind(visual: Visual): RowKind | "hunk" | null {
 		default:
 			return null;
 	}
-}
-
-function centerText(text: string, width: number): string {
-	const pad = Math.max(0, Math.floor((width - visibleWidth(text)) / 2));
-	return " ".repeat(pad) + text;
 }

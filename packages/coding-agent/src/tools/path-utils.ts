@@ -73,6 +73,15 @@ function fileExists(filePath: string): boolean {
 	}
 }
 
+async function fileExistsAsync(filePath: string): Promise<boolean> {
+	try {
+		await fs.promises.access(filePath, fs.constants.F_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 function normalizeAtPrefix(filePath: string): string {
 	if (!filePath.startsWith("@")) return filePath;
 
@@ -1125,6 +1134,57 @@ export async function partitionExistingPaths(
 		else missing.push(entry.item);
 	}
 	return { valid, missing };
+}
+
+/**
+ * Async variant of {@link resolveReadPath} for async tool paths: identical
+ * variant order and winner semantics, but non-blocking probes. The sync
+ * variant stays for genuinely synchronous contexts (renderers, ACP mapper).
+ *
+ * The macOS-only filename variants (NFD storage, curly quotes, AM/PM narrow
+ * spaces) run on every platform, exactly like the sync resolver: a file
+ * copied from macOS keeps its NFD/curly bytes wherever it lands, so the
+ * normalization must not be darwin-gated. The wins here are non-blocking
+ * probes, not fewer probes.
+ */
+export async function resolveReadPathAsync(filePath: string, cwd: string): Promise<string> {
+	const resolved = resolveToCwd(filePath, cwd);
+	const shellEscapedVariant = tryShellEscapedPath(resolved);
+	const baseCandidates = shellEscapedVariant !== resolved ? [resolved, shellEscapedVariant] : [resolved];
+
+	for (const baseCandidate of baseCandidates) {
+		if (await fileExistsAsync(baseCandidate)) {
+			return baseCandidate;
+		}
+	}
+
+	for (const baseCandidate of baseCandidates) {
+		// Try macOS AM/PM variant (narrow no-break space before AM/PM)
+		const amPmVariant = tryMacOSScreenshotPath(baseCandidate);
+		if (amPmVariant !== baseCandidate && (await fileExistsAsync(amPmVariant))) {
+			return amPmVariant;
+		}
+
+		// Try NFD variant (macOS stores filenames in NFD form)
+		const nfdVariant = tryNFDVariant(baseCandidate);
+		if (nfdVariant !== baseCandidate && (await fileExistsAsync(nfdVariant))) {
+			return nfdVariant;
+		}
+
+		// Try curly quote variant (macOS uses U+2019 in screenshot names)
+		const curlyVariant = tryCurlyQuoteVariant(baseCandidate);
+		if (curlyVariant !== baseCandidate && (await fileExistsAsync(curlyVariant))) {
+			return curlyVariant;
+		}
+
+		// Try combined NFD + curly quote (for French macOS screenshots like "Capture d'écran")
+		const nfdCurlyVariant = tryCurlyQuoteVariant(nfdVariant);
+		if (nfdCurlyVariant !== baseCandidate && (await fileExistsAsync(nfdCurlyVariant))) {
+			return nfdCurlyVariant;
+		}
+	}
+
+	return resolved;
 }
 
 export function resolveReadPath(filePath: string, cwd: string): string {

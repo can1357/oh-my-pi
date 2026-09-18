@@ -438,6 +438,12 @@ function oauthCodeLogin(node: KdlNodeView): CompiledOAuthCodeLogin {
 			case "client-secret":
 				login.clientSecret = authValue(child);
 				break;
+			case "base-url":
+				login.baseUrl = authValue(child);
+				break;
+			case "auth-url":
+				login.authUrl = authValue(child);
+				break;
 			case "authorize-url":
 				login.authorizeUrl = authValue(child);
 				break;

@@ -38,21 +38,36 @@ export class AmbiguousOverlapError extends Error {
 /**
  * Anchored `*`-wildcard match; both sides must be pre-lowercased. `*` spans
  * any substring; non-wildcard text stays anchored in order.
+ *
+ * Rule-owned patterns are static after index build, so the split is memoized
+ * per pattern string; derived/live patterns share the same bounded cache.
  */
-export function globMatch(pattern: string, value: string): boolean {
+const globSegmentsCache = new Map<string, readonly string[]>();
+const GLOB_SEGMENTS_MAX = 4096;
+
+function globSegments(pattern: string): readonly string[] {
+	const cached = globSegmentsCache.get(pattern);
+	if (cached !== undefined) return cached;
 	const segments = pattern.split("*");
+	if (globSegmentsCache.size >= GLOB_SEGMENTS_MAX) globSegmentsCache.clear();
+	globSegmentsCache.set(pattern, segments);
+	return segments;
+}
+
+export function globMatch(pattern: string, value: string): boolean {
+	const segments = globSegments(pattern);
 	if (segments.length === 1) return value === pattern;
-	const head = segments[0];
+	const head = segments[0] ?? "";
 	if (!value.startsWith(head)) return false;
 	let remainder = value.slice(head.length);
 	for (let i = 1; i < segments.length - 1; i++) {
-		const segment = segments[i];
+		const segment = segments[i] ?? "";
 		if (!segment) continue;
 		const found = remainder.indexOf(segment);
 		if (found === -1) return false;
 		remainder = remainder.slice(found + segment.length);
 	}
-	const last = segments[segments.length - 1];
+	const last = segments[segments.length - 1] ?? "";
 	return last === "" || remainder.endsWith(last);
 }
 

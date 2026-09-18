@@ -50,6 +50,7 @@ function createCtx(activeMs: number): SegmentContext {
 		vibeMode: null,
 		vim: null,
 		collab: null,
+		stream: null,
 		usageStats: {
 			input: 0,
 			output: 0,

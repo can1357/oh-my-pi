@@ -31,6 +31,7 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 		vibeMode: null,
 		vim: null,
 		collab: null,
+		stream: null,
 		usageStats: {
 			input: 0,
 			output: 0,
@@ -59,6 +60,19 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 		usage: null,
 	};
 }
+
+describe("status line stream segment", () => {
+	it("renders the live viewer badge only while attached", () => {
+		const ctx = createModelContext(false);
+		ctx.stream = { viewers: 7 };
+		expect(renderSegment("stream", ctx)).toEqual({
+			content: theme.fg("thinkingHigh", "● LIVE 7"),
+			visible: true,
+		});
+		ctx.stream = null;
+		expect(renderSegment("stream", ctx)).toEqual({ content: "", visible: false });
+	});
+});
 
 describe("status line model segment advisor badge", () => {
 	it("appends a success-colored advisor symbol when all advisors run", () => {

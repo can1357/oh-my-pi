@@ -323,6 +323,13 @@ async function mkdirAllowingFallback(directory: string): Promise<void> {
 	}
 }
 
+/** Memoized native inspection, tagged onto the streamed args object it describes. */
+const kInspection = Symbol("edit.inspection");
+
+interface InspectedArgs {
+	[kInspection]?: { mode: EditMode; inspection: EditInspection };
+}
+
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 	if (left.byteLength !== right.byteLength) return false;
 	for (let index = 0; index < left.byteLength; index++) {
@@ -563,12 +570,24 @@ export class EditTool implements AgentTool<TInput> {
 		return result;
 	}
 
+	/**
+	 * TTSR asks `matcherPaths` and `matcherEntries` (and approval asks again)
+	 * for the same streamed args object on every delta, and the native inspect
+	 * re-parses the whole payload each time; the result is tagged onto the args
+	 * so repeat lookups for one object pay once.
+	 */
 	#inspect(args: unknown): EditInspection {
+		const tagged = typeof args === "object" && args !== null ? (args as InspectedArgs) : undefined;
+		const cached = tagged?.[kInspection];
+		if (cached?.mode === this.mode) return cached.inspection;
+		let inspection: EditInspection;
 		try {
-			return editInspect(this.mode, JSON.stringify(args ?? {}));
+			inspection = editInspect(this.mode, JSON.stringify(args ?? {}));
 		} catch {
-			return { paths: [], entries: [], fileOps: [] };
+			inspection = { paths: [], entries: [], fileOps: [] };
 		}
+		if (tagged) tagged[kInspection] = { mode: this.mode, inspection };
+		return inspection;
 	}
 
 	#policy(rawInput: boolean): EditPolicy {

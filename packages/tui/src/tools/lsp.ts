@@ -16,7 +16,10 @@ import {
 	formatExpandHint,
 	formatMoreItems,
 	formatStatusIcon,
+	type ParsedDiagnostic,
+	parseDiagnosticMessage,
 	replaceTabs,
+	sanitizeDiagnosticDisplayText,
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -324,7 +327,7 @@ function renderHover(
 // Diagnostics Rendering
 // =============================================================================
 
-function formatDiagnosticLocation(file: string, line: string | number, col: string | number, theme: Theme): string {
+function formatDiagnosticLocation(file: string, line: number, col: number, theme: Theme): string {
 	const lang = getLanguageFromPath(file);
 	const icon = theme.fg("muted", theme.getLangIcon(lang));
 	return `${icon} ${file}:${line}:${col}`;
@@ -357,7 +360,7 @@ function renderDiagnostics(
 
 	const diagLines = lines.filter(l => l.includes(theme.status.error) || /:\d+:\d+/.test(l));
 	const parsedDiagnostics = diagLines
-		.map(line => parseDiagnosticLine(line))
+		.map(line => parseDiagnosticMessage(line.trim()))
 		.filter((diag): diag is ParsedDiagnostic => diag !== null);
 	const fallbackDiagnostics: RawDiagnostic[] = diagLines.map(line => ({
 		raw: sanitizeDiagnosticDisplayText(line.trim()),
@@ -376,15 +379,16 @@ function renderDiagnostics(
 				continue;
 			}
 			const severityColor = severityToColor(item.severity);
-			const location = formatDiagnosticLocation(item.file, item.line, item.col, theme);
+			const location = formatDiagnosticLocation(item.filePath, item.line, item.col, theme);
 			output += `\n ${theme.fg("dim", branch)} ${theme.fg(severityColor, location)} ${theme.fg(
 				"dim",
 				`[${item.severity}]`,
 			)}`;
-			if (item.message) {
+			const message = formatDiagnosticMessage(item);
+			if (message) {
 				output += `\n ${theme.fg("dim", detailPrefix)}${theme.fg(
 					"muted",
-					truncateToWidth(item.message, TRUNCATE_LENGTHS.LINE),
+					truncateToWidth(message, TRUNCATE_LENGTHS.LINE),
 				)}`;
 			}
 		}
@@ -407,9 +411,10 @@ function renderDiagnostics(
 			continue;
 		}
 		const severityColor = severityToColor(item.severity);
-		const location = formatDiagnosticLocation(item.file, item.line, item.col, theme);
-		const message = item.message
-			? ` ${theme.fg("muted", truncateToWidth(item.message, TRUNCATE_LENGTHS.CONTENT))}`
+		const location = formatDiagnosticLocation(item.filePath, item.line, item.col, theme);
+		const diagnosticMessage = formatDiagnosticMessage(item);
+		const message = diagnosticMessage
+			? ` ${theme.fg("muted", truncateToWidth(diagnosticMessage, TRUNCATE_LENGTHS.CONTENT))}`
 			: "";
 		output += `\n ${theme.fg("dim", branch)} ${theme.fg(severityColor, location)}${message}`;
 	}
@@ -663,38 +668,19 @@ function renderGeneric(text: string, lines: string[], expanded: boolean, theme: 
 // Parsing Helpers
 // =============================================================================
 
-interface ParsedDiagnostic {
-	file: string;
-	line: string;
-	col: string;
-	severity: string;
-	message: string;
-}
-
 interface RawDiagnostic {
 	raw: string;
 }
 
 type DiagnosticItem = ParsedDiagnostic | RawDiagnostic;
 
-function sanitizeDiagnosticDisplayText(text: string): string {
-	return replaceTabs(text);
+function formatDiagnosticMessage(diagnostic: ParsedDiagnostic): string {
+	const source = diagnostic.source ? `[${diagnostic.source}] ` : "";
+	const code = diagnostic.code ? ` (${diagnostic.code})` : "";
+	return `${source}${diagnostic.message}${code}`;
 }
 
-function parseDiagnosticLine(line: string): ParsedDiagnostic | null {
-	const match = line.trim().match(/^(.*):(\d+):(\d+)\s+\[(\w+)\]\s*(.*)$/);
-	if (!match) return null;
-	const [, file, lineNum, colNum, severity, message] = match;
-	return {
-		file: sanitizeDiagnosticDisplayText(file),
-		line: lineNum,
-		col: colNum,
-		severity: severity.toLowerCase(),
-		message: sanitizeDiagnosticDisplayText(message),
-	};
-}
-
-function severityToColor(severity: string): "error" | "warning" | "accent" | "dim" {
+function severityToColor(severity: ParsedDiagnostic["severity"]): "error" | "warning" | "accent" | "dim" {
 	switch (severity) {
 		case "error":
 			return "error";

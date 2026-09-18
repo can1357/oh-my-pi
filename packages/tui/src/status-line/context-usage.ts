@@ -142,7 +142,8 @@ export interface NonMessageTokenSource {
 	readonly skills?: readonly ContextSkill[];
 }
 
-const EMPTY_STRING_PARTS: string[] = [];
+/** Shared empty system-prompt part list, avoiding an allocation per render. */
+export const EMPTY_STRING_PARTS: string[] = [];
 const EMPTY_TOOLS: readonly ContextTool[] = [];
 const EMPTY_SKILLS: readonly ContextSkill[] = [];
 

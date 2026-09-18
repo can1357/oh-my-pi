@@ -2,18 +2,11 @@
  * Simple text input component for hooks.
  */
 import { Spacer, type TUI } from "../index";
-import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../keybinding-matchers";
 import { CountdownTimer } from "../chrome/countdown-timer";
+import { formTheme } from "../chrome/form-theme";
 import { OverlayPanel } from "../chrome/overlay-box";
-import { Form, TextFormField, type FormFieldTheme } from "../components/form";
-
-const formTheme: FormFieldTheme = {
-	label: text => theme.bold(theme.fg("accent", text)),
-	description: text => theme.fg("muted", text),
-	error: text => theme.fg("error", text),
-	hint: text => theme.fg("dim", text),
-};
+import { Form, TextFormField } from "../components/form";
 
 export interface HookInputOptions {
 	tui?: TUI;

@@ -58,6 +58,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Notifications",
 		"Speech",
 		"Collab",
+		"Stream",
 		"Magic Keywords",
 		"Startup & Updates",
 		"Power",
@@ -133,7 +134,8 @@ export interface SettingsHost {
 	validateProviderLimits(value: unknown): Record<string, number>;
 }
 
-export type SettingValue = boolean | string;
+/** Primitive value displayed by a settings control. */
+export type SettingsDisplayValue = boolean | string;
 
 interface BaseSettingDef {
 	path: string;

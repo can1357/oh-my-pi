@@ -231,6 +231,22 @@ describe("TranscriptContainer", () => {
 		expect(transcript.renderViewport(80, 1, frame)).toEqual(["later partial"]);
 	});
 
+	it("counts multi-row snapshot prefixes by rendered rows, not snapshot count", () => {
+		// One snapshot rendering to 4 physical rows: the old min(rows, count)
+		// memo returned 1 row for count=1 and the container redrew retired
+		// content into the live region. The per-(width,count) memo returns
+		// the real rendered length.
+		const transcript = new TranscriptContainer();
+		const block = new ReflowingAppendBlock();
+		transcript.addChild(block);
+		// Prime the container through a live-count pass at width 2: one
+		// snapshot -> 4 physical rows.
+		transcript.liveRowCount(2);
+		transcript.liveRowCount(2);
+		const viewport = transcript.renderViewport(2, 10, frame);
+		expect(viewport.length).toBeGreaterThan(1);
+	});
+
 	it("retires only the un-emitted final suffix", () => {
 		const transcript = new TranscriptContainer();
 		const block = new AppendBlock(["one", "two", "partial"], ["one", "two"]);
