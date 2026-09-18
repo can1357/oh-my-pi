@@ -6,15 +6,10 @@ Use ONLY for one binary or a short fact pipeline (`wc -l`, `sort | uniq -c`, `di
 <instruction>
 - Use `cwd`, not `cd`; use `env` for multiline/quote-heavy values.
 - `pty: true` only for terminal interaction (`sudo`, `ssh`).
-<<<<<<< HEAD
 - Order-dependent commands use `&&` in one call; independent calls may run concurrently.
 {{#if hasSkills}}- Skill instructions resolve as `skill://<name>`; other internal URIs auto-resolve to paths.
 {{else}}- Internal URIs auto-resolve to paths.
 {{/if}}
-=======
-- Order-dependent commands: one call with `&&`; independent calls may run concurrently.
-- Internal URIs (`skill://`, `agent://`, …) resolve to paths.
->>>>>>> 27f1bbb7a9 (docs(coding-agent): consolidate asynchronous progress policy)
 {{#if hasShellBuiltins}}- aux utils available: mkdir, wc, sort, comm, diff, uniq, base64, cmp, md5sum, sha{1,224,256,384,512}sum, b2sum, basename, dirname, readlink, realpath, touch, stat, date, mktemp, seq, yes, printenv, truncate, tac, nproc, uname, whoami, hostname, which, ps, pgrep, pkill, pidwait, top, cut, tee, tr, paste, sed, xargs, jq, rm, mv, ln, ts, sponge, ifne, isutf8, combine{{#unless isWindows}}, errno{{/unless}}{{/if}}
 {{#if asyncEnabled}}- `async: "auto"` (finite commands): inline for {{asyncAutoInlineGraceMs}} ms, then the same process promotes to a background job. `timeout` ≤ grace + 1 s → stays inline. Tune: `bash.asyncAuto.inlineGraceMs` (`0` = promote at once). At the job cap: auto runs inline with a notice; `true` errors.
 - `async: true`: background at once (known long-running).
