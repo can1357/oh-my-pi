@@ -118,4 +118,23 @@ describe("native file-lock ownership", () => {
 		const final = JSON.parse(text) as { counter: number };
 		expect(final.counter).toBe(N);
 	}, 30_000);
+
+	test("withFileLock abort rejects without waiting out retries", async () => {
+		const root = await mkRoot();
+		const target = path.join(root, "abort.json");
+		const holder = tryAcquireLock(getLockPath(target));
+		if (!holder) throw new Error("holder failed to acquire");
+		try {
+			const controller = new AbortController();
+			const pending = withFileLock(target, async () => "never", {
+				retries: 8,
+				retryDelayMs: 30_000,
+				signal: controller.signal,
+			});
+			controller.abort();
+			await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		} finally {
+			holder.release();
+		}
+	}, 2_000);
 });
