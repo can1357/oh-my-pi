@@ -68,6 +68,9 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 	defaultConvertToLlm,
+	latestToolHistoryRewriteAt,
+	projectToolHistoryMessage,
+	withToolHistoryRewriteAnchor,
 } from "./messages";
 import {
 	buildOpenAiNativeHistory,
@@ -1395,14 +1398,19 @@ export function prepareCompaction(
 	// Keep original IDs beside the converted messages so estimation, cutting,
 	// and all three output regions share one sequence without journal metadata.
 	const compactionEntries: SessionEntry[] = [];
-	const compactionMessages: AgentMessage[] = [];
+	let compactionMessages: AgentMessage[] = [];
+	const sourceMessages: AgentMessage[] = [];
 	for (let i = boundaryStart; i < pathEntries.length; i++) {
 		const entry = pathEntries[i];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
+		sourceMessages.push(message);
+		const projected = projectToolHistoryMessage(message);
+		if (!projected) continue;
 		compactionEntries.push(entry);
-		compactionMessages.push(message);
+		compactionMessages.push(projected);
 	}
+	compactionMessages = withToolHistoryRewriteAnchor(compactionMessages, latestToolHistoryRewriteAt(sourceMessages));
 
 	const lastUsage = getLastAssistantUsage(pathEntries);
 	const tokensBefore = lastUsage ? calculateContextTokens(lastUsage) : 0;

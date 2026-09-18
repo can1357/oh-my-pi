@@ -611,6 +611,89 @@ describe("Agent", () => {
 		expect(agent.state.messages[agent.state.messages.length - 1].role).toBe("assistant");
 	});
 
+	it("projects omitted tool pairs at the provider boundary without mutating live history", async () => {
+		const historyUser = createUserMessage("inspect both files");
+		const historyAssistant = createAssistantMessage(
+			[
+				{ type: "text", text: "before" },
+				{
+					type: "toolCall",
+					id: "drop",
+					name: "read",
+					arguments: { path: "secret.txt" },
+					contextOmitted: true,
+				},
+				{ type: "text", text: "between" },
+				{ type: "toolCall", id: "keep", name: "read", arguments: { path: "keep.txt" } },
+				{ type: "text", text: "after" },
+			],
+			"toolUse",
+		);
+		const omittedResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "drop",
+			toolName: "read",
+			content: [{ type: "text", text: "retained secret output" }],
+			isError: false,
+			contextOmitted: true,
+			prunedAt: 500,
+			timestamp: 300,
+		};
+		const keptResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "keep",
+			toolName: "read",
+			content: [{ type: "text", text: "kept output" }],
+			isError: false,
+			timestamp: 400,
+		};
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const agent = new Agent({
+			initialState: {
+				model: mock.model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [historyUser, historyAssistant, omittedResult, keptResult],
+			},
+			streamFn: mock.stream,
+		});
+
+		await agent.prompt("continue");
+
+		expect(mock.calls).toHaveLength(1);
+		const outgoing = mock.calls[0].context.messages;
+		expect(outgoing.map(message => message.role)).toEqual(["user", "assistant", "toolResult", "user"]);
+		expect(outgoing[0]).toMatchObject({
+			role: "user",
+			content: "inspect both files",
+			historyRewriteAt: 500,
+		});
+		const outgoingAssistant = outgoing[1];
+		if (outgoingAssistant?.role !== "assistant") throw new Error("Expected projected assistant history");
+		expect(outgoingAssistant.content).toEqual([
+			{ type: "text", text: "before" },
+			{ type: "text", text: "between" },
+			{ type: "toolCall", id: "keep", name: "read", arguments: { path: "keep.txt" } },
+			{ type: "text", text: "after" },
+		]);
+		expect(outgoing[2]).toMatchObject({
+			role: "toolResult",
+			toolCallId: "keep",
+			content: [{ type: "text", text: "kept output" }],
+		});
+
+		expect(historyUser.historyRewriteAt).toBeUndefined();
+		expect(historyAssistant.content).toContainEqual({
+			type: "toolCall",
+			id: "drop",
+			name: "read",
+			arguments: { path: "secret.txt" },
+			contextOmitted: true,
+		});
+		expect(omittedResult.content).toEqual([{ type: "text", text: "retained secret output" }]);
+		expect(agent.state.messages.slice(0, 4)).toEqual([historyUser, historyAssistant, omittedResult, keptResult]);
+	});
+
 	it("keeps Anthropic refusal errors out of the next provider context", async () => {
 		const mock = createMockModel({
 			responses: [

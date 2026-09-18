@@ -1,5 +1,7 @@
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { SETTING_TABS, type SettingsDisplayEntry, type SettingsHost } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { getJevBoosterUnavailableReason } from "../session/jev-compaction";
+import type { ModelRegistry } from "./model-registry";
 import {
 	normalizeProviderMaxInFlightRequests,
 	Settings,
@@ -92,7 +94,7 @@ const CONDITIONS: Record<string, () => boolean> = {
 };
 
 /** Adapt the application schema and settings store to the terminal overlay. */
-export function createSettingsHost(): SettingsHost {
+export function createSettingsHost(registry?: ModelRegistry): SettingsHost {
 	const entries: SettingsDisplayEntry[] = [];
 	for (const tab of SETTING_TABS) {
 		for (const path of getPathsForTab(tab)) {
@@ -105,6 +107,10 @@ export function createSettingsHost(): SettingsHost {
 				enumValues: getEnumValues(path),
 				credential: isCredential(path),
 				condition: ui?.condition ? CONDITIONS[ui.condition] : undefined,
+				unavailableReason:
+					path === "compaction.boosterEnabled"
+						? () => getJevBoosterUnavailableReason(settings, registry)
+						: undefined,
 			});
 		}
 	}

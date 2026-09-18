@@ -1952,6 +1952,7 @@ export class AgentSession {
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
+			obfuscateJsonForProvider: value => this.#providerBoundary.obfuscateJsonRecord(value),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
 			resetCodexProviderAfterCompaction: compaction => this.#resetCodexProviderAfterCompaction(compaction),

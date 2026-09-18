@@ -495,6 +495,13 @@ Common event types:
 - `todo_reminder`, `todo_auto_clear`
 - `irc_message`, `notice`, `goal_updated`
 
+For compaction lifecycle consumers, `action` is one of `context-full`, `remote`,
+`handoff`, `shake`, `snapcompact`, or `prune`. `prune` is the experimental Jev
+pre-pass rather than summary compaction: its `auto_compaction_end` event has no
+`result` field on the JSON wire, and it does not produce a `session_compact`
+event. Clients that treated `action` as a closed enum or required `result` must
+accept this shape.
+
 Extension runner errors are emitted separately as:
 
 ```json

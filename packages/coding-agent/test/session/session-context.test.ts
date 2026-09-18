@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { type CompactionSummaryMessage, INTERRUPTED_THINKING_MESSAGE_TYPE } from "../../src/session/messages";
 import { buildSessionContext, type StrippedToolCallsMarker } from "../../src/session/session-context";
@@ -380,5 +380,106 @@ describe("buildSessionContext failed replay tails", () => {
 		);
 
 		expect(context.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
+	});
+});
+
+describe("buildSessionContext tool-history omission", () => {
+	it("projects marked pairs only for model context and anchors the rewrite on a copied user", () => {
+		const userMessage: AgentMessage = { role: "user", content: "retain this constraint", timestamp: 1 };
+		const omittedResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "drop",
+			toolName: "read",
+			content: [{ type: "text", text: "full journal body" }],
+			isError: false,
+			contextOmitted: true,
+			prunedAt: 500,
+			timestamp: 4,
+		};
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "user",
+				parentId: null,
+				timestamp,
+				message: userMessage,
+			},
+			{
+				type: "message",
+				id: "assistant",
+				parentId: "user",
+				timestamp,
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "retained assistant text" },
+						{ type: "toolCall", id: "keep", name: "read", arguments: { path: "keep.txt" } },
+						{
+							type: "toolCall",
+							id: "drop",
+							name: "read",
+							arguments: { path: "drop.txt" },
+							contextOmitted: true,
+						},
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: assistantUsage,
+					stopReason: "toolUse",
+					timestamp: 2,
+				} satisfies AssistantMessage,
+			},
+			{
+				type: "message",
+				id: "keep-result",
+				parentId: "assistant",
+				timestamp,
+				message: {
+					role: "toolResult",
+					toolCallId: "keep",
+					toolName: "read",
+					content: [{ type: "text", text: "kept result" }],
+					isError: false,
+					timestamp: 3,
+				},
+			},
+			{
+				type: "message",
+				id: "drop-result",
+				parentId: "keep-result",
+				timestamp,
+				message: omittedResult,
+			},
+		];
+
+		const context = buildSessionContext(entries);
+		expect(context.messages.some(message => message.role === "toolResult" && message.toolCallId === "drop")).toBe(
+			false,
+		);
+		expect(
+			context.messages.flatMap(message =>
+				message.role === "assistant"
+					? message.content.flatMap(block => (block.type === "toolCall" ? [block.id] : []))
+					: [],
+			),
+		).toEqual(["keep"]);
+		const anchoredUser = context.messages.find(message => message.role === "user");
+		expect(anchoredUser?.role === "user" ? anchoredUser.historyRewriteAt : undefined).toBe(500);
+		expect(anchoredUser).not.toBe(userMessage);
+		expect(userMessage.role === "user" ? userMessage.historyRewriteAt : undefined).toBeUndefined();
+
+		const transcript = buildSessionContext(entries, undefined, undefined, { transcript: true });
+		expect(transcript.messages.some(message => message.role === "toolResult" && message.toolCallId === "drop")).toBe(
+			true,
+		);
+		expect(
+			transcript.messages.flatMap(message =>
+				message.role === "assistant"
+					? message.content.flatMap(block => (block.type === "toolCall" ? [block.id] : []))
+					: [],
+			),
+		).toEqual(["keep", "drop"]);
+		expect(omittedResult.content).toEqual([{ type: "text", text: "full journal body" }]);
 	});
 });

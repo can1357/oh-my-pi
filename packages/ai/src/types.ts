@@ -874,6 +874,8 @@ export interface ToolCall {
 	[kStreamingPartialJson]?: string;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
 	intent?: string; // Harness-level intent metadata extracted from traced tool arguments
+	/** Omit this call block from model context while retaining it in persisted history. */
+	contextOmitted?: true;
 	/**
 	 * Verbatim in-band syntax block that produced this synthetic `ptc_*` call.
 	 * Present only for owned prompt/tool-call formats; provider-native calls omit it.
@@ -1091,8 +1093,10 @@ export interface ToolResultMessage<TDetails = unknown> {
 	isError: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
-	/** Timestamp when output was pruned (ms since epoch). Undefined if unpruned. */
+	/** Timestamp when context was reduced or omitted (ms since epoch). Undefined if untouched. */
 	prunedAt?: number;
+	/** Omit this result from model context while retaining it in persisted history. */
+	contextOmitted?: true;
 	/** Provider-native metadata required to faithfully replay this result. */
 	providerMetadata?: ToolResultProviderMetadata;
 	/**

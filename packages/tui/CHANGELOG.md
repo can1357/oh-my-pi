@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Settings rows can remain visible, focusable, and searchable while unavailable, with enabled boolean preferences still allowed to switch off.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

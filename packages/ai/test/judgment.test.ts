@@ -199,6 +199,46 @@ describe("TypeSafeJudge", () => {
 		);
 	}
 
+	async function expectAbortInterruptsBackoff(kind: "rate-limit" | "transport"): Promise<void> {
+		const controller = new AbortController();
+		const firstAttempt = Promise.withResolvers<void>();
+		let calls = 0;
+		const judge = new TypeSafeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				calls++;
+				if (calls > 1) return answered();
+				firstAttempt.resolve();
+				if (kind === "rate-limit") {
+					return new Response("busy", { status: 429, headers: { "retry-after-ms": "2000" } });
+				}
+				throw new Error("socket closed");
+			},
+		});
+		let settled = false;
+		let rejection: unknown;
+		const pending = judge.judge(request, { signal: controller.signal });
+		void pending.then(
+			() => {
+				settled = true;
+			},
+			error => {
+				settled = true;
+				rejection = error;
+			},
+		);
+
+		await firstAttempt.promise;
+		for (let i = 0; i < 20; i++) await Promise.resolve();
+		expect(settled).toBe(false);
+		controller.abort();
+		for (let i = 0; i < 1000 && !settled; i++) await Promise.resolve();
+
+		expect(settled).toBe(true);
+		expect(rejection).toMatchObject({ name: "AbortError" });
+		expect(calls).toBe(1);
+	}
+
 	it("posts the request verbatim with a bearer key and maps the typed answer and usage", async () => {
 		const calls: { url: string; init: RequestInit | undefined }[] = [];
 		const judge = new TypeSafeJudge({
@@ -245,6 +285,14 @@ describe("TypeSafeJudge", () => {
 
 		expect(result.answers.urgent.noul).toBe(0.92);
 		expect(keys).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
+	});
+
+	it("interrupts a Retry-After rate-limit backoff when the caller aborts", async () => {
+		await expectAbortInterruptsBackoff("rate-limit");
+	});
+
+	it("interrupts a transport-error backoff when the caller aborts", async () => {
+		await expectAbortInterruptsBackoff("transport");
 	});
 
 	it("surfaces validation errors without retrying and rejects answers of the wrong type", async () => {

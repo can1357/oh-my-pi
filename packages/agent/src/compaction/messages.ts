@@ -1,9 +1,11 @@
 import type {
+	AssistantMessage,
 	ImageContent,
 	Message,
 	MessageAttribution,
 	ProviderPayload,
 	TextContent,
+	ToolCall,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -78,6 +80,91 @@ declare module "../types" {
 	}
 }
 export type ConvertToLlm = (messages: AgentMessage[]) => Message[];
+
+/**
+ * Remove selected native tool calls from an assistant turn and normalize
+ * provider-bound reasoning on the rewritten turn. Opaque reasoning is tied to
+ * the original turn shape, so a changed turn drops encrypted reasoning and
+ * clears signatures while preserving visible thinking.
+ */
+export function normalizeAssistantAfterToolRemoval(
+	message: AssistantMessage,
+	remove: (call: ToolCall) => boolean,
+	keepEmpty = false,
+): AssistantMessage | undefined {
+	let removedCalls: Set<ToolCall> | undefined;
+	for (const block of message.content) {
+		if (block.type !== "toolCall" || !remove(block)) continue;
+		removedCalls ??= new Set<ToolCall>();
+		removedCalls.add(block);
+	}
+	if (!removedCalls) return message;
+	const callsToRemove = removedCalls;
+
+	const content = message.content
+		.filter(block => !(block.type === "toolCall" && callsToRemove.has(block)) && block.type !== "redactedThinking")
+		.map(block =>
+			block.type === "thinking" && block.thinkingSignature ? { ...block, thinkingSignature: undefined } : block,
+		);
+	if (content.length === 0 && !keepEmpty) return undefined;
+	return { ...message, content };
+}
+
+/**
+ * Project persisted native tool-history omission markers into model context.
+ * Unchanged messages retain identity; journal objects are never mutated.
+ */
+export function projectToolHistoryMessage(message: AgentMessage): AgentMessage | undefined {
+	if (message.role === "toolResult" && message.contextOmitted === true) return undefined;
+	if (message.role !== "assistant") return message;
+	return normalizeAssistantAfterToolRemoval(message, call => call.contextOmitted === true);
+}
+
+/** Newest persisted tool-result rewrite timestamp in a message sequence. */
+export function latestToolHistoryRewriteAt(messages: readonly AgentMessage[]): number | undefined {
+	let latest: number | undefined;
+	for (const message of messages) {
+		if (message.role !== "toolResult" || message.prunedAt === undefined || !Number.isFinite(message.prunedAt)) {
+			continue;
+		}
+		latest = latest === undefined ? message.prunedAt : Math.max(latest, message.prunedAt);
+	}
+	return latest;
+}
+
+/**
+ * Carry a persisted rewrite timestamp on a copy of the first surviving user
+ * message. The source message and journal remain untouched.
+ */
+export function withToolHistoryRewriteAnchor(
+	messages: readonly AgentMessage[],
+	latestRewriteAt: number | undefined,
+): AgentMessage[] {
+	const output = [...messages];
+	if (latestRewriteAt === undefined) return output;
+	const firstUserIndex = output.findIndex(message => message.role === "user");
+	if (firstUserIndex < 0) return output;
+	const firstUser = output[firstUserIndex];
+	if (firstUser.role !== "user") return output;
+	output[firstUserIndex] = {
+		...firstUser,
+		historyRewriteAt: Math.max(firstUser.historyRewriteAt ?? 0, latestRewriteAt),
+	};
+	return output;
+}
+
+/**
+ * Project a message sequence and carry the newest persisted rewrite timestamp
+ * on a copy of its first surviving user message.
+ */
+export function projectToolHistoryMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+	const projected: AgentMessage[] = [];
+	for (const message of messages) {
+		const output = projectToolHistoryMessage(message);
+		if (output !== undefined) projected.push(output);
+	}
+	return withToolHistoryRewriteAnchor(projected, latestToolHistoryRewriteAt(messages));
+}
 
 function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | ImageContent)[] {
 	if (message.prunedAt === undefined) {
@@ -201,6 +288,9 @@ function isCoreCompactionMessage(message: AgentMessage): message is AgentMessage
  * snapcompact frames once silently fell off the provider request.
  */
 export function convertMessageToLlm(message: AgentMessage): Message | undefined {
+	const projected = projectToolHistoryMessage(message);
+	if (projected === undefined) return undefined;
+	message = projected;
 	if (isCoreCompactionMessage(message)) {
 		switch (message.role) {
 			case "custom":
@@ -279,5 +369,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
  * core LLM roles and the compaction messages owned by this package.
  */
 export function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
-	return messages.map(convertMessageToLlm).filter(message => message !== undefined);
+	return projectToolHistoryMessages(messages)
+		.map(convertMessageToLlm)
+		.filter(message => message !== undefined);
 }

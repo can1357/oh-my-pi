@@ -1,6 +1,11 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	getAnthropicCompactionPayload,
+	isTurnStartEntry,
+	normalizeAssistantAfterToolRemoval,
+	projectToolHistoryMessages,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	coerceServiceTierByFamily,
 	type OpenAIResponsesHistoryPayload,
@@ -614,6 +619,11 @@ export function buildSessionContext(
 		}
 	}
 
+	if (!options?.transcript) {
+		const projected = projectToolHistoryMessages(messages);
+		messages.splice(0, messages.length, ...projected);
+	}
+
 	// Strip dangling tool_use blocks — a tool_use with no matching tool_result on the
 	// resolved leaf→root path — from ANY assistant turn, not just the trailing one.
 	// This happens whenever the leaf (or a branch point) lands such that an assistant
@@ -651,29 +661,22 @@ export function buildSessionContext(
 				if (block.type === "toolCall" && !pairedToolResultIds.has(block.id)) strippedToolCalls++;
 			}
 			if (strippedToolCalls === 0) continue;
-			const normalized = message.content
-				.filter(
-					block =>
-						!(block.type === "toolCall" && !pairedToolResultIds.has(block.id)) &&
-						block.type !== "redactedThinking",
-				)
-				.map(block =>
-					block.type === "thinking" && block.thinkingSignature
-						? { ...block, thinkingSignature: undefined }
-						: block,
-				);
-			if (normalized.length === 0 && !options?.transcript) {
+			const normalized = normalizeAssistantAfterToolRemoval(
+				message,
+				call => !pairedToolResultIds.has(call.id),
+				options?.transcript === true,
+			);
+			if (!normalized) {
 				messages.splice(i, 1);
-			} else {
-				const rewritten = { ...message, content: normalized };
-				if (options?.transcript) {
-					// Display transcript: keep the turn (even content-less) and mark
-					// how many calls were dropped so the TUI renders a placeholder
-					// row instead of silently erasing the turn's activity.
-					(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
-				}
-				messages[i] = rewritten;
+				continue;
 			}
+			if (options?.transcript) {
+				// Display transcript: keep the turn (even content-less) and mark
+				// how many calls were dropped so the TUI renders a placeholder
+				// row instead of silently erasing the turn's activity.
+				(normalized as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
+			}
+			messages[i] = normalized;
 		}
 	}
 

@@ -348,7 +348,7 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 		const uselessResult = toolResult !== undefined && toolResult.useless === true && toolResult.isError !== true;
 		if (!uselessResult && accumulatedAfter[i] < config.protectTokens) continue;
 		if (toolResult) {
-			if (toolResult.prunedAt !== undefined) continue;
+			if (toolResult.contextOmitted === true || toolResult.prunedAt !== undefined) continue;
 			if (isProtectedToolResult(toolResult, toolCallsById.get(toolResult.toolCallId), config.protectedTools))
 				continue;
 			const text = toolResultText(toolResult, tokenizer);

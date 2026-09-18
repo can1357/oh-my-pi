@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added durable projection of omitted native tool-call/result pairs across model context, token counting, compaction, and branch summaries while retaining the original journal history.
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed

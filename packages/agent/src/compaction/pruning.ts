@@ -192,7 +192,7 @@ function collectSupersededResults(
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
-		if (!message || message.prunedAt !== undefined) continue;
+		if (!message || message.contextOmitted === true || message.prunedAt !== undefined) continue;
 		const toolCall = toolCallsById.get(message.toolCallId);
 		if (!toolCall) continue;
 		if (isProtectedToolResult(message, toolCall, protectedTools)) continue;
@@ -230,7 +230,14 @@ function collectUselessResults(
 	for (let i = 0; i < entries.length; i++) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
-		if (message?.useless !== true || message.prunedAt !== undefined || message.isError === true) continue;
+		if (
+			message?.useless !== true ||
+			message.contextOmitted === true ||
+			message.prunedAt !== undefined ||
+			message.isError === true
+		) {
+			continue;
+		}
 		if (exclude.has(message)) continue;
 		if (isProtectedToolResult(message, toolCallsById.get(message.toolCallId), protectedTools)) continue;
 		const tokens = tokenizer.countMessage(message as AgentMessage);
@@ -350,6 +357,7 @@ export function pruneToolOutputs(
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
 		if (!message) continue;
+		if (message.contextOmitted === true) continue;
 
 		const tokens = tokenizer.countMessage(message as AgentMessage);
 		const isProtected = isProtectedToolResult(message, toolCallsById.get(message.toolCallId), config.protectedTools);

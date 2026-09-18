@@ -2130,7 +2130,9 @@ export class EventController {
 						? "Auto-shake"
 						: event.action === "snapcompact"
 							? "Auto-snapcompact"
-							: "Auto context-full maintenance";
+							: event.action === "prune"
+								? "Auto Jev pruning"
+								: "Auto context-full maintenance";
 		this.ctx.autoCompactionLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
@@ -2155,6 +2157,7 @@ export class EventController {
 		const isRemoteAction = event.action === "remote";
 		const isShakeAction = event.action === "shake";
 		const isSnapcompactAction = event.action === "snapcompact";
+		const isPruneAction = event.action === "prune";
 		if (event.aborted) {
 			this.ctx.showStatus(
 				isHandoffAction
@@ -2165,9 +2168,11 @@ export class EventController {
 							? "Auto-shake cancelled"
 							: isSnapcompactAction
 								? "Auto-snapcompact cancelled"
-								: "Auto context-full maintenance cancelled",
+								: isPruneAction
+									? "Auto Jev pruning cancelled"
+									: "Auto context-full maintenance cancelled",
 			);
-		} else if (isShakeAction) {
+		} else if (isShakeAction || isPruneAction) {
 			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
 			// The fallback path (`errorMessage` set, `skipped` false) means shake reclaimed
 			// some tokens before deciding the threshold still wasn't cleared — rebuild so
@@ -2184,7 +2189,7 @@ export class EventController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
-				this.ctx.showStatus("Auto-shake completed");
+				this.ctx.showStatus(isPruneAction ? "Auto Jev pruning completed" : "Auto-shake completed");
 			}
 		} else if (event.result) {
 			this.ctx.lastAssistantUsage = undefined;

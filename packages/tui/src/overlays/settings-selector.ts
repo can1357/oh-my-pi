@@ -891,12 +891,14 @@ export class SettingsSelectorComponent implements Component {
 		}
 
 		const currentValue = this.#getCurrentValue(def);
+		const unavailableReason = def.unavailableReason?.();
 		const item = {
 			id: def.path,
 			label: def.label,
-			description: def.description,
+			description: unavailableReason ? `${def.description}\n${unavailableReason}` : def.description,
 			warning: def.warning,
 			changed: this.#isChanged(def, currentValue),
+			disabled: def.type === "boolean" && currentValue === false && unavailableReason !== undefined,
 		};
 
 		switch (def.type) {

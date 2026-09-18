@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added persisted `contextOmitted` metadata for tool calls and results so hosts can exclude selected pairs from model context without deleting transcript data.
+
+### Fixed
+
+- Fixed delayed cancellation and deadline expiry during TypeSafe judgment retry backoff.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

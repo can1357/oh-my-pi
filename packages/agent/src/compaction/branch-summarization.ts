@@ -18,6 +18,9 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 	defaultConvertToLlm,
+	latestToolHistoryRewriteAt,
+	projectToolHistoryMessage,
+	withToolHistoryRewriteAnchor,
 } from "./messages";
 import branchSummaryPrompt from "./prompts/branch-summary.md" with { type: "text" };
 import branchSummaryPreamble from "./prompts/branch-summary-preamble.md" with { type: "text" };
@@ -175,7 +178,7 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 			if (entry.message.role === "toolResult" && entry.message.useless === true && entry.message.isError !== true) {
 				return undefined;
 			}
-			return entry.message;
+			return projectToolHistoryMessage(entry.message);
 
 		case "custom_message":
 			return createCustomMessage(
@@ -289,7 +292,12 @@ export function prepareBranchEntries(
 		totalTokens += tokens;
 	}
 
-	return { messages, fileOps, totalTokens };
+	const persistedMessages = entries.flatMap(entry => (entry.type === "message" ? [entry.message] : []));
+	return {
+		messages: withToolHistoryRewriteAnchor(messages, latestToolHistoryRewriteAt(persistedMessages)),
+		fileOps,
+		totalTokens,
+	};
 }
 
 // ============================================================================

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an experimental, default-off Jev compaction booster that uses TypeSafe relevance judgments before automatic and idle compaction, persists recoverable tool-history reductions, and falls back to the configured compaction methods.
+
 ## [18.2.5] - 2026-09-17
 
 ### Breaking Changes
