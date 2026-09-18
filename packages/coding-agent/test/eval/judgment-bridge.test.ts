@@ -29,7 +29,7 @@ function makeSession(opts: { typesafe?: boolean } = {}): ToolSession {
 	settings.setModelRole("smol", "p/smol");
 	const modelRegistry = {
 		authStorage: {
-			hasAuth: (provider: string) => Boolean(opts.typesafe) && provider === "jev" || provider === "typesafe",
+			hasAuth: (provider: string) => (Boolean(opts.typesafe) && provider === "jev") || provider === "typesafe",
 			resolver: () => async () => "ts-key",
 		},
 		getAvailable: () => [SMOL],

@@ -348,7 +348,10 @@ describe("auto thinking classifier helpers", () => {
 		const target = buildLadderModel("mock-max", MAX_LADDER);
 		const settings = Settings.isolated({ "providers.autoThinkingModel": "qwen3-1.7b" });
 		const registry = {
-			authStorage: { hasAuth: (provider: string) => provider === "jev" || provider === "typesafe", resolver: () => "ts-key" },
+			authStorage: {
+				hasAuth: (provider: string) => provider === "jev" || provider === "typesafe",
+				resolver: () => "ts-key",
+			},
 			getAvailable: () => [],
 		} as never;
 		const localMock = vi.spyOn(tinyModelClient, "complete");
@@ -407,7 +410,10 @@ describe("auto thinking classifier helpers", () => {
 			},
 		} as never;
 		const registry = {
-			authStorage: { hasAuth: (provider: string) => provider === "jev" || provider === "typesafe", resolver: () => "ts-key" },
+			authStorage: {
+				hasAuth: (provider: string) => provider === "jev" || provider === "typesafe",
+				resolver: () => "ts-key",
+			},
 			getAvailable: () => [],
 			getApiKey: async () => "test-key",
 			resolver: () => async () => "test-key",
@@ -451,7 +457,10 @@ describe("auto thinking classifier helpers", () => {
 			},
 		} as never;
 		const registry = {
-			authStorage: { hasAuth: (provider: string) => provider === "jev" || provider === "typesafe", resolver: () => "bad-ts-key" },
+			authStorage: {
+				hasAuth: (provider: string) => provider === "jev" || provider === "typesafe",
+				resolver: () => "bad-ts-key",
+			},
 			getAvailable: () => [tiny, smol, defaultModel],
 			getApiKey: async () => "test-key",
 			resolver: () => async () => "test-key",

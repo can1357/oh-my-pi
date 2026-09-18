@@ -25,8 +25,7 @@ function fakeJudge(
 			const answers =
 				"which" in answersByStage
 					? (answersByStage as Record<string, unknown>)
-					: ((answersByStage as Record<string, Record<string, unknown>>)[calls === 1 ? "wide" : "rerank"] ??
-						{});
+					: ((answersByStage as Record<string, Record<string, unknown>>)[calls === 1 ? "wide" : "rerank"] ?? {});
 			return {
 				api: "jev",
 				provider: "jev",
