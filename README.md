@@ -386,6 +386,8 @@ modelRoles:
 
 Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs/providers).
 
+Transient transport or server failures can continue after partial text or settled tool results without replaying completed tool calls. Continuation uses `retry.enabled`, `retry.maxRetries`, and the existing backoff settings.
+
 ## Twenty-three backends. _One tool the agent already knows_.
 
 `web_search` is built in, not bolted on. `auto` walks a twenty-three-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.

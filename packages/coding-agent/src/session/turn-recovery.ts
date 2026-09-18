@@ -23,6 +23,7 @@ import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
+import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 import { logger, prompt, sleepLong } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveModelOverride } from "../config/model-resolver";
@@ -31,6 +32,7 @@ import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
+import manualContinuePrompt from "../prompts/system/manual-continue.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
@@ -207,6 +209,7 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		onSkip?: (reason: string) => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -275,6 +278,10 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#retryAbortRequested = false;
+	#retryAbortPromptSequence: number | undefined;
+	#retryAbortPromptGeneration: number | undefined;
+	#retrySagaId = 0;
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
@@ -1378,61 +1385,65 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Classify a reasonless abort, idle stream stall, HTTP/2 stream reset, or
-	 * premature stream close whose emitted tool calls all have results. The failed
-	 * assistant/tool-result pair stays in context so continuation cannot replay
-	 * completed side effects; synthetic results tell the next turn that an
-	 * unexecuted call must be reissued.
+	 * Continue interrupted turns while retaining committed text or settled tool results.
+	 * Text-only tails use a hidden queued continuation. Unresolved calls and
+	 * provider-managed side effects remain excluded.
 	 */
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
 		const id = this.#classifyRetryMessage(message);
 		const genericAbort =
 			message.errorMessage === "Request was aborted" || message.errorMessage === "Request was aborted.";
+		const lifecycleSafe =
+			!this.#host.abortInProgress() && !this.#host.isDisposed() && !this.#host.streamingEditAbortTriggered();
 		const reasonlessAbort =
 			(message.stopReason === "aborted" || message.stopReason === "error") &&
-			!this.#host.abortInProgress() &&
-			!this.#host.isDisposed() &&
-			!this.#host.streamingEditAbortTriggered() &&
+			lifecycleSafe &&
 			((message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) || genericAbort);
 		const errorMessage = message.errorMessage ?? "";
-		const streamStall =
-			message.stopReason === "error" && STREAM_STALL_ERROR_RE.test(errorMessage) && AIError.retriable(id);
-		const transportReset =
+		const transportFailure =
 			message.stopReason === "error" &&
-			(HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
+			lifecycleSafe &&
+			AIError.retriable(id) &&
+			!this.isClassifierRefusal(message) &&
+			!AIError.is(id, AIError.Flag.StaleResponsesItem) &&
+			!AIError.is(id, AIError.Flag.MalformedFunctionCall) &&
+			!AIError.isContextOverflow(message, this.#host.model()?.contextWindow ?? 0) &&
+			!AIError.is(id, AIError.Flag.UsageLimit) &&
+			!AIError.is(id, AIError.Flag.AuthFailed) &&
+			!AIError.is(id, AIError.Flag.AccountPolicy) &&
+			(STREAM_STALL_ERROR_RE.test(errorMessage) ||
+				HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
 				AIError.PYTHON_HTTP2_STREAM_RESET_PATTERN.test(errorMessage) ||
-				AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage)) &&
-			AIError.retriable(id) &&
-			!this.#host.abortInProgress() &&
-			!this.#host.isDisposed() &&
-			!this.#host.streamingEditAbortTriggered();
-		// A premature gateway close (no finish_reason/terminal event) is the same
-		// transport-failure class as the stall/reset cases: mid-generation death.
-		// Preserved-turn continuation lets the retry resume after the partial
-		// output instead of surfacing the error or replaying rendered content.
-		const prematureClose =
-			message.stopReason === "error" &&
-			PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage) &&
-			AIError.retriable(id) &&
-			!this.#host.abortInProgress() &&
-			!this.#host.isDisposed() &&
-			!this.#host.streamingEditAbortTriggered();
-		if (!reasonlessAbort && !streamStall && !transportReset && !prematureClose) return undefined;
+				AIError.PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN.test(errorMessage) ||
+				PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage) ||
+				isUnexpectedSocketCloseMessage(errorMessage) ||
+				AIError.is(id, AIError.Flag.Transient) ||
+				AIError.is(id, AIError.Flag.ProviderFinishError));
+		if (!reasonlessAbort && !transportFailure) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
-		// Idle stall and HTTP/2 RST both close the Cursor Connect stream:
-		// the lazy watchdog aborts the request signal, and cursor.ts then
-		// calls `h2Request.close()`. There is no in-flight server exec to
-		// race, so unmarked MCP/todo blocks can continue once every emitted
-		// call has a matching result. A reasonless abort ends the turn and
-		// the agent loop pairs leftover calls with `executed: false`.
+		// Images and provider-managed server tools do not carry a settled-result
+		// proof like ordinary tool calls, so never preserve those turns here.
+		if (message.content.some(block => block.type === "image" || block.type === "anthropicServerTool"))
+			return undefined;
+
 		const resolvedToolCallIds: string[] = [];
 		for (const block of message.content) {
-			if (block.type !== "toolCall") continue;
-			resolvedToolCallIds.push(block.id);
+			if (block.type === "toolCall") resolvedToolCallIds.push(block.id);
 		}
-		if (resolvedToolCallIds.length === 0) return undefined;
+		if (resolvedToolCallIds.length === 0) {
+			// A replay-safe thinking/empty turn is owned by the ordinary retry path.
+			// Only committed visible text requires preserved-turn continuation.
+			return transportFailure &&
+				message.content.some(
+					block => block.type === "text" && this.#host.textOutputCommitted() && hasNonWhitespace(block.text),
+				)
+				? "stream-stall"
+				: undefined;
+		}
 
+		// Every emitted call must have a result before continuation. Synthetic
+		// results identify calls that never executed.
 		const messages = this.#host.agent.state.messages;
 		let assistantIndex = -1;
 		for (let i = messages.length - 1; i >= 0; i--) {
@@ -1469,6 +1480,40 @@ export class TurnRecovery {
 				block.type === "image" ||
 				block.type === "anthropicServerTool" ||
 				(block.type === "text" && this.#host.textOutputCommitted() && block.text.trim().length > 0),
+		);
+	}
+
+	/** Queue a hidden continuation only when the preserved failed assistant is still the active tail. */
+	#appendPreservedTurnContinuation(message: AssistantMessage): AgentMessage | undefined {
+		if (
+			this.#host.abortInProgress() ||
+			this.#host.isDisposed() ||
+			message.content.some(block => block.type === "toolCall") ||
+			!message.content.some(
+				block => block.type === "text" && this.#host.textOutputCommitted() && hasNonWhitespace(block.text),
+			)
+		)
+			return undefined;
+		const last = this.#host.agent.state.messages.at(-1);
+		if (last?.role !== "assistant" || !this.#isSameAssistantMessage(last, message)) return undefined;
+		const continuation: AgentMessage = {
+			role: "developer",
+			content: [{ type: "text", text: manualContinuePrompt }],
+			attribution: "agent",
+			synthetic: true,
+			timestamp: Date.now(),
+		};
+		this.#host.agent.followUp(continuation);
+		return continuation;
+	}
+
+	/** Remove a queued continuation without touching newer follow-up messages. */
+	#removePreservedTurnContinuation(continuation: AgentMessage): void {
+		const followUps = this.#host.agent.peekFollowUpQueue();
+		if (!followUps.some(message => message === continuation)) return;
+		this.#host.agent.replaceQueues(
+			[...this.#host.agent.peekSteeringQueue()],
+			followUps.filter(message => message !== continuation),
 		);
 	}
 
@@ -2184,6 +2229,23 @@ export class TurnRecovery {
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
+		const promptSequence = this.#host.promptSequence();
+		if (
+			this.#retryAbortRequested &&
+			this.#retryAbortPromptGeneration === generation &&
+			this.#retryAbortPromptSequence === promptSequence
+		)
+			return false;
+		if (this.#retryAttempt === 0 || this.#retryAbortRequested) {
+			if (this.#retryAttempt === 0) this.resolveRetry();
+			this.#retryAttempt = 0;
+			this.#clearPendingRetryErrors();
+			this.#retryAbortRequested = false;
+			this.#retryAbortPromptGeneration = undefined;
+			this.#retryAbortPromptSequence = undefined;
+			this.#retrySagaId++;
+		}
+		const retrySagaId = this.#retrySagaId;
 		this.#retryAttempt++;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
@@ -2521,6 +2583,21 @@ export class TurnRecovery {
 			errorMessage,
 			errorId: message.errorId,
 		});
+		if (this.#retrySagaId !== retrySagaId || this.#retryAttempt === 0) return false;
+		if (this.#retryAbortRequested) {
+			const attempt = this.#retryAttempt;
+			this.#retryAttempt = 0;
+			await this.#host.emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Retry cancelled",
+			});
+			if (this.#retrySagaId !== retrySagaId) return false;
+			this.#clearPendingRetryErrors();
+			this.resolveRetry();
+			return false;
+		}
 
 		// Resolved stream-stall tools and proven-unexecuted malformed/refused
 		// calls keep their assistant/result pair. Continuation then sees explicit
@@ -2547,6 +2624,10 @@ export class TurnRecovery {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;
 			}
+			if (this.#retrySagaId !== retrySagaId) {
+				this.#retryAbortController = undefined;
+				return false;
+			}
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
@@ -2565,18 +2646,23 @@ export class TurnRecovery {
 			this.#retryAbortController = undefined;
 		}
 
+		if (this.#retrySagaId !== retrySagaId || this.#retryAttempt === 0) return false;
+
 		// The identity-keyed removal above can miss when a context rebuild
 		// recreated the failed turn's message object between settle and retry
 		// (fresh identity, same failed tail — issue #5382). Agent.continue()
 		// rejects any assistant tail, so a missed removal fails the scheduled
 		// retry locally before a provider request is ever made. Re-check the
-		// tail after the backoff (covering rebuilds during the sleep too) and
-		// strip a still-failed assistant tail by position. Never when preserving
-		// the failed turn — the kept turn ends in synthetic tool results that
-		// continue() accepts — and never once a newer prompt owns the session.
+		// tail after the backoff and strip only replayed failed assistant tails.
+		// Settled tool-result tails are valid continuation input. Text-only preserved
+		// tails receive a queued developer continuation.
 		if (!preserveFailedTurn && this.#host.promptGeneration() === generation) {
 			this.#stripFailedAssistantTail();
 		}
+		const preservedContinuation =
+			preserveFailedTurn && this.#host.promptGeneration() === generation
+				? this.#appendPreservedTurnContinuation(message)
+				: undefined;
 
 		// Retry via continue() outside the agent_end event callback chain. A
 		// continuation that still fails locally must close the retry saga —
@@ -2586,11 +2672,33 @@ export class TurnRecovery {
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
-			shouldContinue: () => this.#retryAttempt > 0,
-			onError: error => void this.#failRetryAfterLocalContinueError(message, error),
+			shouldContinue: () =>
+				this.#retrySagaId === retrySagaId && this.#retryAttempt > 0 && !this.#retryAbortRequested,
+			onSkip: () => {
+				if (preservedContinuation) this.#removePreservedTurnContinuation(preservedContinuation);
+				void this.#finishSkippedRetry(retrySagaId);
+			},
+			onError: error => {
+				if (preservedContinuation) this.#removePreservedTurnContinuation(preservedContinuation);
+				void this.#failRetryAfterLocalContinueError(message, error, retrySagaId);
+			},
 		});
 
 		return true;
+	}
+	/** Close a retry whose scheduled continuation was invalidated before it started. */
+	async #finishSkippedRetry(retrySagaId: number): Promise<void> {
+		if (this.#retrySagaId !== retrySagaId || this.#retryAttempt === 0) return;
+		const attempt = this.#retryAttempt;
+		this.#retryAttempt = 0;
+		this.#clearPendingRetryErrors();
+		this.resolveRetry();
+		await this.#host.emitSessionEvent({
+			type: "auto_retry_end",
+			success: false,
+			attempt,
+			finalError: "Retry cancelled",
+		});
 	}
 
 	/**
@@ -2619,18 +2727,24 @@ export class TurnRecovery {
 	 * closing `auto_retry_end` so subscribers stop showing retry progress, and
 	 * resolve the retry promise so the in-flight prompt() unwinds (issue #5382).
 	 */
-	async #failRetryAfterLocalContinueError(message: AssistantMessage, error: unknown): Promise<void> {
-		if (this.#retryAttempt === 0) return;
+	async #failRetryAfterLocalContinueError(
+		message: AssistantMessage,
+		error: unknown,
+		retrySagaId: number,
+	): Promise<void> {
+		if (this.#retrySagaId !== retrySagaId || this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		const localError = error instanceof Error ? error.message : String(error);
 		await this.persistTerminalEmptyErrorTurn(message);
+		if (this.#retrySagaId !== retrySagaId) return;
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
 			attempt,
 			finalError: `Retry continuation failed locally: ${localError}. Original error: ${message.errorMessage ?? "Unknown error"}`,
 		});
+		if (this.#retrySagaId !== retrySagaId) return;
 		this.#clearPendingRetryErrors();
 		this.resolveRetry();
 	}
@@ -2663,13 +2777,12 @@ export class TurnRecovery {
 			"agent",
 		);
 	}
-
-	/**
-	 * Cancel in-progress retry.
-	 */
 	abortRetry(): void {
+		this.#retryAbortRequested = true;
+		this.#retryAbortPromptGeneration = this.#host.promptGeneration();
+		this.#retryAbortPromptSequence = this.#host.promptSequence();
 		this.#retryAbortController?.abort();
-		// Note: _retryAttempt is reset in the catch block of _autoRetry
+		// The active backoff or scheduled continuation resets the attempt count.
 		this.resolveRetry();
 	}
 

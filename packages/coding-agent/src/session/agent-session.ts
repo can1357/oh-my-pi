@@ -3890,6 +3890,12 @@ export class AgentSession {
 			for (;;) {
 				try {
 					await this.agent.continue(signal);
+					if (signal.aborted || this.#isDisposed) {
+						return { status: "skipped", reason: "session-unavailable" };
+					}
+					if (request.options.generation !== undefined && this.#promptGeneration !== request.options.generation) {
+						return { status: "skipped", reason: "stale-generation" };
+					}
 					return { status: "completed" };
 				} catch (error) {
 					if (!(error instanceof AgentBusyError)) throw error;

@@ -62,7 +62,7 @@ Current retryable categories include:
 
 The normalized classifier recognizes the transient categories above from structured flags/status and provider-aware text patterns. Classifier refusals remain a separate typed `stopDetails` decision.
 
-Beyond `isRetryableError(...)`, empty generic aborts may enter the same retry engine when no user, dispose, or streaming-edit-guard abort is in progress. An interrupted turn whose tool calls already have matching results can also be continued safely: the failed assistant/tool-result sequence is preserved so completed side effects are not replayed. Resolved stream stalls and HTTP/2 stream resets (`NGHTTP2_INTERNAL_ERROR`, `NGHTTP2_REFUSED_STREAM`, `HTTP2StreamReset`) use the same preserve-and-continue path. Cursor idle-stall recovery continues after every emitted tool call has a result; the Connect stream is already closed by the idle abort. An HTTP/2 RST is the same: the stream is already dead.
+Beyond `isRetryableError(...)`, empty generic aborts may enter the same retry engine when no user, dispose, or streaming-edit-guard abort is in progress. A transient transport or server failure with committed text or fully resolved tool calls can use preserved-turn continuation. The failed assistant and its tool results stay in context, so the runtime does not replay completed tool calls. A text-only failed tail receives the existing hidden developer continuation through the normal follow-up queue and persistence path. Cancellation removes a continuation that has not run. Images, provider-managed server tools, unresolved tool calls, and usage limits remain excluded. This path uses the existing retry settings, backoff, cancellation, and attempt limit.
 
 Retry state is owned by `TurnRecovery`:
 
@@ -80,7 +80,7 @@ Flow (`#handleRetryableError`):
 6. When allowed, consult configured model fallback chains. A switch uses delay `0`; classifier refusals only continue when a fallback is applied.
 7. If the current model's retry budget is exhausted, stop unless a fallback model was found. A fallback receives a fresh retry budget.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping.
-9. Emit `auto_retry_start`, record the recoverable error, and remove the failed assistant from active context unless this is a resolved interrupted tool turn.
+9. Emit `auto_retry_start`, record the recoverable error, and remove the failed assistant from active context unless recovery preserves its partial text or resolved tool results.
 10. Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
 
 ### What resets retry counters

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed transient model errors stopping after partial text or settled tool results. Recovery now preserves the failed turn and continues within the existing retry limit.
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
