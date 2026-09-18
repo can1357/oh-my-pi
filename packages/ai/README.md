@@ -564,6 +564,8 @@ if (message.stopReason === "error" || message.stopReason === "aborted") {
 }
 ```
 
+DNS resolver errors reported as `getaddrinfo ENOTFOUND` or `getaddrinfo EAI_AGAIN` remain retryable after request-level retries finish. A terminal HTTP client status still prevents retry.
+
 ### Aborting Requests
 
 The abort signal allows you to cancel in-progress requests. Aborted requests have `stopReason === 'aborted'`:

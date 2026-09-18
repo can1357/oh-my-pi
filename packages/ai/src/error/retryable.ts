@@ -1,6 +1,7 @@
 import { isRetryableError, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
 import {
 	CODEX_HTTP_BODY_READ_ERROR_PATTERN,
+	isDnsResolutionErrorText,
 	isRetryableStreamEnvelopeError,
 	isTransientStreamDropError,
 	isTransientStreamParseError,
@@ -52,6 +53,7 @@ export function isProviderRetryableError(error: unknown): boolean {
 	if (
 		isUnexpectedSocketCloseMessage(msg) ||
 		isTransientTransportMessage(msg) ||
+		isDnsResolutionErrorText(error.message) ||
 		TRANSIENT_TRANSPORT_PATTERN.test(msg) ||
 		CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(msg) ||
 		PROVIDER_TRANSIENT_EXTRA_PATTERN.test(msg) ||

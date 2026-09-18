@@ -51,6 +51,46 @@ describe("error-id classification", () => {
 		}
 	});
 
+	it("classifies standard DNS resolver failures as transient on live and persisted paths", () => {
+		for (const errorMessage of [
+			"getaddrinfo ENOTFOUND bedrock-mantle.us-west-2.api.aws",
+			"getaddrinfo EAI_AGAIN bedrock-runtime.us-east-1.amazonaws.com",
+		]) {
+			const error = new Error(errorMessage);
+			const liveId = AIError.classify(error);
+			expect(AIError.is(liveId, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(liveId)).toBe(true);
+			expect(AIError.isProviderRetryableError(error)).toBe(true);
+
+			const persisted = message({ errorMessage });
+			const persistedId = AIError.classifyMessage(persisted);
+			expect(AIError.is(persistedId, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(persistedId)).toBe(true);
+		}
+	});
+
+	it("keeps terminal client statuses and unrelated not-found diagnostics non-retryable", () => {
+		for (const errorStatus of [400, 401, 403, 404, 424]) {
+			const errorMessage = "getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com";
+			const persistedId = AIError.classifyMessage(message({ errorStatus, errorMessage }));
+			expect(AIError.is(persistedId, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(persistedId)).toBe(false);
+			expect(AIError.isProviderRetryableError(new AIError.ProviderHttpError(errorMessage, errorStatus))).toBe(false);
+		}
+
+		for (const errorMessage of [
+			"getaddrinfo ENOENT example.invalid",
+			"getaddrinfo ENOTFOUNDish example.invalid",
+			"ENOTFOUND example.invalid",
+			"resource not found",
+		]) {
+			const id = AIError.classify(new Error(errorMessage));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+			expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(false);
+		}
+	});
+
 	it.each([
 		"Transport error reading Codex response body: error decoding response body",
 		"Anthropic stream error (api_error): Transport error reading Codex response body: error decoding response body",
