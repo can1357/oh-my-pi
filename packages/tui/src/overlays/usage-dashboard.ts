@@ -78,7 +78,7 @@ function aggregateStatus(limits: readonly { status?: UsageLimit["status"] }[]): 
 	return "unknown";
 }
 
-/** Fraction below which a window counts as untouched (renders as 100% free). */
+/** Fraction below which a window counts as untouched (collapses the card into the untouched line). */
 const IDLE_FRACTION = 0.005;
 /**
  * Compact duration tag for a window (`7d`, `1d`, `5h`, `mo`), preferring the
@@ -289,7 +289,9 @@ export function formatActivityErrorDetail(error: string, homeDir = os.homedir())
 	return text.replace(/\.+$/, "");
 }
 
-const CARD_MIN_WIDTH = 32;
+// 24 fixed bar/pct/reset chrome + 16-char label budget: the narrowest card a
+// full window label fits (smaller floors re-truncate labels, pinned by test).
+const CARD_MIN_WIDTH = 40;
 const CARD_GUTTER = 3;
 const CARD_MAX_WINDOWS = 4;
 
@@ -303,6 +305,13 @@ export class UsageDashboardComponent implements Component {
 	#activityError: string | null = null;
 	#syncing = true;
 	#detailCache: { width: number; lines: string[] } | null = null;
+	#overviewCache: {
+		width: number;
+		syncing: boolean;
+		activity: DailyActivityPoint[] | null;
+		day: string;
+		lines: string[];
+	} | null = null;
 	#lastViewportRows = 10;
 	#closed = false;
 	readonly #panel: OverlayPanel;
@@ -346,6 +355,7 @@ export class UsageDashboardComponent implements Component {
 
 	invalidate(): void {
 		this.#detailCache = null;
+		this.#overviewCache = null;
 		this.#panel.invalidate();
 	}
 
@@ -401,13 +411,11 @@ export class UsageDashboardComponent implements Component {
 		// Fixed columns across every row of the card so bars all start and end
 		// at the same x: label | bar | pct | reset. The reset column sizes to
 		// the card's widest countdown instead of flexing per row.
-		const resetWidth = visibleWindows.reduce(
-			(max, window) => Math.max(max, window.resetMs !== undefined ? formatDuration(window.resetMs).length : 0),
-			0,
-		);
+		const resets = visibleWindows.map(window => (window.resetMs !== undefined ? formatDuration(window.resetMs) : ""));
+		const resetWidth = resets.reduce((max, text) => Math.max(max, text.length), 0);
 		const labelWidth = Math.min(16, Math.max(6, width - 24));
 		const barWidth = Math.max(5, width - 2 - labelWidth - 1 - 5 - (resetWidth > 0 ? resetWidth + 1 : 0));
-		for (const window of visibleWindows) {
+		for (const [index, window] of visibleWindows.entries()) {
 			const tagPlain = window.windowTag
 				? truncateToWidth(window.windowTag, Math.max(2, Math.floor(labelWidth / 2) - 1))
 				: "";
@@ -421,9 +429,9 @@ export class UsageDashboardComponent implements Component {
 				lines.push(truncateToWidth(`  ${label} ${text}`, width));
 				continue;
 			}
-			const freePct = Math.max(0, Math.round((1 - window.fraction) * 100));
-			const pctText = theme.fg(this.#statusColor(window.status), `${freePct}%`.padStart(5));
-			const resetPlain = window.resetMs !== undefined ? formatDuration(window.resetMs) : "";
+			const usedPct = Math.max(0, Math.round(window.fraction * 100));
+			const pctText = theme.fg(this.#statusColor(window.status), `${usedPct}%`.padStart(5));
+			const resetPlain = resets[index] ?? "";
 			const resetText = resetWidth > 0 ? ` ${theme.fg("dim", resetPlain.padStart(resetWidth))}` : "";
 			lines.push(`  ${label} ${this.#miniBar(window.fraction, window.status, barWidth)}${pctText}${resetText}`);
 		}
@@ -438,6 +446,7 @@ export class UsageDashboardComponent implements Component {
 		const columns = Math.max(1, Math.floor((innerWidth + CARD_GUTTER) / (CARD_MIN_WIDTH + CARD_GUTTER)));
 		const cardWidth = Math.floor((innerWidth - (columns - 1) * CARD_GUTTER) / columns);
 		const lines: string[] = [];
+		const gutter = " ".repeat(CARD_GUTTER);
 		for (let start = 0; start < active.length; start += columns) {
 			const rowCards = active.slice(start, start + columns).map(card => this.#renderCardLines(card, cardWidth));
 			const height = Math.max(...rowCards.map(card => card.length));
@@ -446,7 +455,7 @@ export class UsageDashboardComponent implements Component {
 					const line = card[lineIdx] ?? "";
 					return line + " ".repeat(Math.max(0, cardWidth - visibleWidth(line)));
 				});
-				lines.push(segments.join(" ".repeat(CARD_GUTTER)).trimEnd());
+				lines.push(segments.join(gutter).trimEnd());
 			}
 			if (start + columns < active.length) lines.push("");
 		}
@@ -541,10 +550,25 @@ export class UsageDashboardComponent implements Component {
 	// ---------------------------------------------------------------------------
 
 	#overviewLines(innerWidth: number): string[] {
+		// Cache keyed like #detailCache, plus the inputs the overview adds: the
+		// activity array reference (replaced on load), the syncing flag, and the
+		// local day (the heatmap's `today` grid reflows at midnight).
+		const day = localIso(new Date());
+		const cached = this.#overviewCache;
+		if (
+			cached &&
+			cached.width === innerWidth &&
+			cached.syncing === this.#syncing &&
+			cached.activity === this.#activity &&
+			cached.day === day
+		) {
+			return cached.lines;
+		}
 		const lines: string[] = [];
 		lines.push(...this.#renderCardsGrid(innerWidth));
 		lines.push("");
 		lines.push(...this.#renderHeatmap(innerWidth));
+		this.#overviewCache = { width: innerWidth, syncing: this.#syncing, activity: this.#activity, day, lines };
 		return lines;
 	}
 

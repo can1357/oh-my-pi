@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Widened the `/usage` dashboard's provider cards (40-column floor) so window labels no longer truncate when several providers share a row ([#12459](https://github.com/can1357/oh-my-pi/pull/12459) by [@abcfy2](https://github.com/abcfy2)).
+
+### Fixed
+
+- Fixed `/usage` dashboard card percentages reading as remaining while bars filled by usage, so an exhausted window no longer shows "0%" ([#12459](https://github.com/can1357/oh-my-pi/pull/12459) by [@abcfy2](https://github.com/abcfy2)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
