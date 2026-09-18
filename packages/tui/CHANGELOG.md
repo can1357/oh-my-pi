@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed sluggish streaming and status updates when unchanged inline SIXEL images remain in the transcript.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
