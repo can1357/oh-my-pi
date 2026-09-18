@@ -251,6 +251,7 @@
 ### Changed
 
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
+- Extension handler contexts now expose stable `agentId` and `parentAgentId` lineage, allowing parent-loaded policy hooks to authorize subagent tool calls without prompt-carried credentials.
 
 ## [18.2.3] - 2026-09-17
 

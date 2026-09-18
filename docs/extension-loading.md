@@ -259,6 +259,9 @@ ambient extension discovery. Extension tools cannot widen the restricted tool
 set or replace built-ins, including through late registration. New extension
 paths, loaded parent-bound instances, and additional inline factories remain
 excluded.
+Rebound policy hooks receive the child's `ctx.agentId` and
+`ctx.parentAgentId`, allowing them to correlate a gated tool call with the
+approved dispatch lineage without putting a credential in the child prompt.
 
 Revived children inherit the current owning session's extension roots and
 prepared factories, not extension authority from a saved transcript. Cold
