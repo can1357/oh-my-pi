@@ -5,7 +5,7 @@
  * Priority: 80 (tool-specific, below builtin but above shared standards)
  */
 import * as path from "node:path";
-import { hasFsCode, tryParseJson } from "@oh-my-pi/pi-utils";
+import { hasFsCode, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
@@ -14,21 +14,25 @@ import { type ExtensionModule, extensionModuleCapability } from "../capability/e
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Rule, ruleCapability } from "../capability/rule";
 import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
 import { type CustomTool, toolCapability } from "../capability/tool";
-import type { LoadContext, LoadResult } from "../capability/types";
+import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { settings } from "../config/settings";
 import {
 	calculateDepth,
 	createSourceMeta,
 	discoverExtensionModulePaths,
+	discoverRuleFromMarkdown,
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
+	isAlwaysApplyGlob,
 	loadFilesFromDir,
+	parseGlobList,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -179,6 +183,110 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 			_source: createSourceMeta(PROVIDER_ID, projectClaudeMd, "project"),
 		});
 	}
+
+	return { items, warnings };
+}
+
+// =============================================================================
+// Rules
+// =============================================================================
+
+function transformClaudeRule(
+	name: string,
+	content: string,
+	filePath: string,
+	source: SourceMeta,
+	rulesDir: string,
+): Rule | null {
+	const { frontmatter } = parseFrontmatter(content, { source: filePath });
+
+	// Name rules by their path relative to the rules dir so nested files with a
+	// shared basename stay distinct (flat files keep their basename). The `/`
+	// separators are preserved: a filename component can never contain `/`, so
+	// this is collision-free, and the rule:// resolver reads the full host+path.
+	const ruleName = path
+		.relative(rulesDir, filePath)
+		.split(path.sep)
+		.join("/")
+		.replace(/\.(md|mdc)$/, "");
+
+	const rule = discoverRuleFromMarkdown(name, content, filePath, source, { ruleName });
+	if (!rule) return null;
+
+	const paths = parseGlobList(frontmatter.paths);
+
+	// A file already carrying OMP scoping (globs, alwaysApply, or a TTSR
+	// condition) expresses its own semantics; leave it untouched so shared
+	// OMP-authored files are never overlaid with Claude `paths` normalization.
+	// `frontmatter.alwaysApply` presence (not its parsed boolean) distinguishes
+	// an explicit `alwaysApply: false` from an omitted field.
+	const hasOmpScoping =
+		rule.globs !== undefined ||
+		frontmatter.alwaysApply !== undefined ||
+		(rule.condition?.length ?? 0) > 0 ||
+		(rule.astCondition?.length ?? 0) > 0;
+
+	if (paths === undefined) {
+		// A pathless Claude rule applies unconditionally.
+		if (!hasOmpScoping) rule.alwaysApply = true;
+		return rule;
+	}
+
+	if (hasOmpScoping) return rule;
+
+	// Claude `paths` scoping maps onto OMP `globs`; catch-all globs mean every
+	// file, equivalent to always-apply (mirrors the GitHub `applyTo` provider).
+	if (paths.some(isAlwaysApplyGlob)) {
+		return { ...rule, alwaysApply: true, globs: undefined };
+	}
+
+	const description = rule.description ?? describeClaudeRule(paths);
+	return { ...rule, alwaysApply: false, globs: paths, description };
+}
+
+function describeClaudeRule(globs: string[]): string {
+	return `Claude rules for ${globs.join(", ")}`;
+}
+
+async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
+	const items: Rule[] = [];
+	const warnings: string[] = [];
+
+	const userBase = getUserClaude(ctx);
+	const userRulesDir = userBase ? path.join(userBase, "rules") : null;
+
+	// Project `.claude/rules` is cwd-scoped. When cwd is the user's home, it
+	// aliases ~/.claude/rules — skip it so a disabled Claude user source is not
+	// reloaded (and re-labeled) as "project" config (mirrors loadSkills skipping
+	// $HOME in its ancestor walk).
+	const projectRulesDir = ctx.cwd === ctx.home ? null : path.join(getProjectClaude(ctx), "rules");
+
+	const [projectResult, userResult] = await Promise.all([
+		projectRulesDir
+			? loadFilesFromDir<Rule>(ctx, projectRulesDir, PROVIDER_ID, "project", {
+					extensions: ["md", "mdc"],
+					recursive: true,
+					transform: (name, content, filePath, source) =>
+						transformClaudeRule(name, content, filePath, source, projectRulesDir),
+				})
+			: Promise.resolve({ items: [] as Rule[], warnings: [] as string[] }),
+		userRulesDir
+			? loadFilesFromDir<Rule>(ctx, userRulesDir, PROVIDER_ID, "user", {
+					extensions: ["md", "mdc"],
+					recursive: true,
+					transform: (name, content, filePath, source) =>
+						transformClaudeRule(name, content, filePath, source, userRulesDir),
+				})
+			: Promise.resolve({ items: [] as Rule[], warnings: [] as string[] }),
+	]);
+
+	// Project elements first so a same-named project rule wins the name-keyed
+	// dedup over a user rule (Claude Code: project rules override user rules).
+	items.push(...projectResult.items);
+	if (projectResult.warnings) warnings.push(...projectResult.warnings);
+
+	items.push(...userResult.items);
+	if (userResult.warnings) warnings.push(...userResult.warnings);
 
 	return { items, warnings };
 }
@@ -559,6 +667,14 @@ registerProvider<ContextFile>(contextFileCapability.id, {
 	description: "Load CLAUDE.md files from .claude/ directories",
 	priority: PRIORITY,
 	load: loadContextFiles,
+});
+
+registerProvider<Rule>(ruleCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load rules from .claude/rules/*.md and *.mdc",
+	priority: PRIORITY,
+	load: loadRules,
 });
 
 registerProvider<Skill>(skillCapability.id, {

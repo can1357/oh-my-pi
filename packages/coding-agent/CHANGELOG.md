@@ -25,6 +25,10 @@
 - Improved subagent task labels and plan filenames to use concise, action-oriented descriptions.
 - Updated CLI byte sizes to use decimal KB units and made duration displays coarser and easier to read.
 
+### Added
+
+- Load Claude Code rules from `.claude/rules/*.md` and `*.mdc` (project and opted-in `~/.claude`), sharing the same Markdown frontmatter as OMP rules.
+
 ### Fixed
 
 - Fixed `edit` auto-repair waiting up to 60 seconds when the `smol` model does not respond; it now times out after 20 seconds and reports repair start and timeout details.
