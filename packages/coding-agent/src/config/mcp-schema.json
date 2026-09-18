@@ -113,8 +113,20 @@
       "type": "object",
       "properties": {
         "enabled": {
-          "type": "boolean",
-          "description": "Whether OMP should try to connect this server."
+          "oneOf": [
+            { "type": "boolean" },
+            { "enum": ["true", "false", "1", "0"] },
+            { "type": "string", "pattern": "^\\$\\{[^}:]+(:-(true|false|1|0))?\\}$" }
+          ],
+          "description": "Whether OMP should try to connect this server. Accepts a boolean, one of the coercible string literals \"true\", \"false\", \"1\", \"0\" (parseMcpBooleanField), or a ${ENV_VAR} reference that expands to one of those."
+        },
+        "lazy": {
+          "oneOf": [
+            { "type": "boolean" },
+            { "enum": ["true", "false", "1", "0"] },
+            { "type": "string", "pattern": "^\\$\\{[^}:]+(:-(true|false|1|0))?\\}$" }
+          ],
+          "description": "Connect on first use instead of at startup. Startup serves the tool definitions cached from the last successful connect; the first tool invocation (or /mcp reconnect) establishes the connection. Accepts a boolean, one of the coercible string literals \"true\", \"false\", \"1\", \"0\" (parseMcpBooleanField), or a ${ENV_VAR} reference that expands to one of those."
         },
         "timeout": {
           "type": "number",
@@ -141,7 +153,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["command"],
           "properties": {
             "type": {
@@ -174,7 +185,8 @@
             "required": ["url"]
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "httpServer": {
       "allOf": [
@@ -183,7 +195,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -205,7 +216,8 @@
             "required": ["command"]
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "sseServer": {
       "allOf": [
@@ -214,7 +226,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -236,7 +247,8 @@
             "required": ["command"]
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "serverConfig": {
       "oneOf": [

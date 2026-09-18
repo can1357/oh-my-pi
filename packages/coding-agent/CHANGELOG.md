@@ -88,6 +88,10 @@
 - Runtime API-key overrides retain precedence over configured credentials.
 - Element handles returned by `tab.waitForSelector`, `tab.$`, and related selector helpers can now be passed as arguments to `tab.evaluate` inside `tab.run` instead of failing with "JSHandles can be evaluated only in the context they were created".
 
+### Added
+
+- Added `lazy: true` for MCP servers in `mcp.json`: the server is not spawned at session startup — its tools are served from the tool cache and the first invocation (or `/mcp reconnect`) connects on demand. Useful for servers whose launch has side effects, such as credential prompts or approval flows. ([#9793](https://github.com/can1357/oh-my-pi/pull/9793) by [@sjawhar](https://github.com/sjawhar))
+
 ## [18.2.2] - 2026-09-16
 
 ### Added

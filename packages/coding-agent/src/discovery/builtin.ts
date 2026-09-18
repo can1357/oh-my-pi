@@ -31,6 +31,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
@@ -112,23 +113,26 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		for (const [serverName, config] of Object.entries(expanded)) {
 			const serverConfig = config as Record<string, unknown>;
 
-			// Validate enabled: coerce string "true"/"false", warn on other types
+			// Validate enabled: coerce string "true"/"false"/"1"/"0", warn on other types
 			let enabled: boolean | undefined;
-			if (serverConfig.enabled === undefined || serverConfig.enabled === null) {
-				enabled = undefined;
-			} else if (typeof serverConfig.enabled === "boolean") {
-				enabled = serverConfig.enabled;
-			} else if (typeof serverConfig.enabled === "string") {
-				const lower = serverConfig.enabled.toLowerCase();
-				if (lower === "false" || lower === "0") enabled = false;
-				else if (lower === "true" || lower === "1") enabled = true;
-				else {
-					logger.warn(`MCP server "${serverName}": invalid enabled value "${serverConfig.enabled}", ignoring`);
-					enabled = undefined;
+			if (serverConfig.enabled !== undefined && serverConfig.enabled !== null) {
+				enabled = parseMcpBooleanField(serverConfig.enabled);
+				if (enabled === undefined) {
+					logger.warn(
+						`MCP server "${serverName}": invalid enabled value ${JSON.stringify(serverConfig.enabled)}, ignoring`,
+					);
 				}
-			} else {
-				logger.warn(`MCP server "${serverName}": invalid enabled type ${typeof serverConfig.enabled}, ignoring`);
-				enabled = undefined;
+			}
+
+			// Validate lazy: coerce string "true"/"false"/"1"/"0" like enabled, warn otherwise
+			let lazy: boolean | undefined;
+			if (serverConfig.lazy !== undefined && serverConfig.lazy !== null) {
+				lazy = parseMcpBooleanField(serverConfig.lazy);
+				if (lazy === undefined) {
+					logger.warn(
+						`MCP server "${serverName}": invalid lazy value ${JSON.stringify(serverConfig.lazy)}, ignoring`,
+					);
+				}
 			}
 
 			// Validate timeout: coerce numeric strings, warn on invalid
@@ -166,6 +170,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			result.push({
 				name: serverName,
 				enabled,
+				lazy,
 				timeout,
 				requestIdFormat,
 				command: serverConfig.command as string | undefined,
