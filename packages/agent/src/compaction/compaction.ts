@@ -69,7 +69,7 @@ import {
 	createCustomMessage,
 	defaultConvertToLlm,
 	latestToolHistoryRewriteAt,
-	projectToolHistoryMessage,
+	projectToolHistoryMessagesAligned,
 	withToolHistoryRewriteAnchor,
 } from "./messages";
 import {
@@ -1399,15 +1399,20 @@ export function prepareCompaction(
 	// and all three output regions share one sequence without journal metadata.
 	const compactionEntries: SessionEntry[] = [];
 	let compactionMessages: AgentMessage[] = [];
+	const sourceEntries: SessionEntry[] = [];
 	const sourceMessages: AgentMessage[] = [];
 	for (let i = boundaryStart; i < pathEntries.length; i++) {
 		const entry = pathEntries[i];
 		const message = getMessageFromEntry(entry);
 		if (!message) continue;
+		sourceEntries.push(entry);
 		sourceMessages.push(message);
-		const projected = projectToolHistoryMessage(message);
+	}
+	const projectedMessages = projectToolHistoryMessagesAligned(sourceMessages);
+	for (let i = 0; i < projectedMessages.length; i++) {
+		const projected = projectedMessages[i];
 		if (!projected) continue;
-		compactionEntries.push(entry);
+		compactionEntries.push(sourceEntries[i]);
 		compactionMessages.push(projected);
 	}
 	compactionMessages = withToolHistoryRewriteAnchor(compactionMessages, latestToolHistoryRewriteAt(sourceMessages));

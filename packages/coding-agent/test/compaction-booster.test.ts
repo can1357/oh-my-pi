@@ -784,6 +784,75 @@ describe("optional Jev compaction booster", () => {
 		expectBalancedPruneLifecycle(harness.events);
 	});
 
+	it("rejects a stale rewrite when durable rollback fails and preserves the successor", async () => {
+		const harness = await createHarness();
+		installTypeSafe({ kind: "answers", action: () => "drop_pair" });
+		const rewriteStarted = Promise.withResolvers<void>();
+		const releaseRewrite = Promise.withResolvers<void>();
+		const originalRewrite = harness.sessionManager.rewriteEntries.bind(harness.sessionManager);
+		vi.spyOn(harness.sessionManager, "rewriteEntries").mockImplementation(async () => {
+			rewriteStarted.resolve();
+			await releaseRewrite.promise;
+			await originalRewrite();
+		});
+		const recoveryFailure = new Error("injected stale rollback recovery failure");
+		const recoverPersistence = vi
+			.spyOn(harness.sessionManager, "recoverPersistenceFromCurrentState")
+			.mockRejectedValueOnce(recoveryFailure);
+
+		const run = harness.session.runIdleCompaction();
+		await rewriteStarted.promise;
+		await harness.session.resetSessionContext();
+		const successorId = harness.sessionManager.appendMessage({
+			role: "user",
+			content: "SUCCESSOR-MUST-SURVIVE-FAILED-ROLLBACK",
+			timestamp: Date.now(),
+		});
+		const successor: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "SUCCESSOR-MUST-SURVIVE-FAILED-ROLLBACK" }],
+			timestamp: Date.now(),
+		};
+		harness.session.agent.replaceMessages([successor]);
+		harness.session.agent.setModel({ ...harness.model, id: `${harness.model.id}-successor` });
+		releaseRewrite.resolve();
+
+		await expect(run).rejects.toBe(recoveryFailure);
+
+		expect(recoverPersistence).toHaveBeenCalledTimes(1);
+		expect(harness.session.agent.state.messages).toEqual([successor]);
+		expect(harness.sessionManager.getEntry(successorId)).toBeDefined();
+		const rawCall = harness.sessionManager.getEntry(harness.pairs[0]!.callEntry.id);
+		if (rawCall?.type !== "message" || rawCall.message.role !== "assistant") {
+			throw new Error("Expected the candidate tool-call entry");
+		}
+		const rawCallBlock = rawCall.message.content.find(
+			(block): block is AgentToolCall => block.type === "toolCall" && block.id === harness.pairs[0]!.callId,
+		);
+		if (!rawCallBlock) throw new Error("Expected the candidate tool call");
+		expect(rawCallBlock.contextOmitted).toBeUndefined();
+		expect(rawResult(harness.pairs[0]!).contextOmitted).toBeUndefined();
+		expect(rawResult(harness.pairs[0]!).prunedAt).toBeUndefined();
+		expect(harness.preparations).toHaveLength(0);
+		expect(harness.primary.calls).toHaveLength(0);
+
+		const sessionFile = harness.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected file-backed session");
+		const reopened = await SessionManager.open(sessionFile, harness.tempDir.path());
+		try {
+			expect(reopened.getEntry(successorId)).toBeDefined();
+			const persistedResult = reopened.getEntry(harness.pairs[0]!.resultEntry.id);
+			expect(
+				persistedResult?.type === "message" && persistedResult.message.role === "toolResult"
+					? persistedResult.message.contextOmitted
+					: undefined,
+			).toBe(true);
+		} finally {
+			await reopened.close();
+		}
+		expectBalancedPruneLifecycle(harness.events);
+	});
+
 	it("rolls live and persisted history back when the transactional rewrite fails", async () => {
 		const harness = await createHarness();
 		await harness.sessionManager.rewriteEntries();

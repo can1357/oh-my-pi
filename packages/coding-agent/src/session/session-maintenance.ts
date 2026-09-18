@@ -5065,6 +5065,7 @@ export class SessionMaintenance {
 		let lifecycleStarted = false;
 		let historyCommitted = false;
 		let lifecycleEnded = false;
+		let fatalPersistenceFailure: { error: unknown } | undefined;
 		const emitEnd = async (event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> => {
 			if (!lifecycleStarted || lifecycleEnded) return;
 			lifecycleEnded = true;
@@ -5388,7 +5389,6 @@ export class SessionMaintenance {
 				entry.message = proposed;
 				invalidateMessageCache(entry.message);
 			}
-			let staleRollbackFailed = false;
 			try {
 				this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 				await this.#host.sessionManager.rewriteEntries();
@@ -5398,7 +5398,7 @@ export class SessionMaintenance {
 						try {
 							await this.#host.sessionManager.recoverPersistenceFromCurrentState();
 						} catch (error) {
-							staleRollbackFailed = true;
+							fatalPersistenceFailure = { error };
 							throw error;
 						}
 					}
@@ -5406,7 +5406,7 @@ export class SessionMaintenance {
 				}
 			} catch (error) {
 				restoreEntrySnapshots();
-				if (staleRollbackFailed) throw error;
+				if (fatalPersistenceFailure !== undefined) throw fatalPersistenceFailure.error;
 				if (ownerIsCurrent()) {
 					const restoredContext = this.#host.buildDisplaySessionContext();
 					this.#host.agent.replaceMessages(restoredContext.messages);
@@ -5518,6 +5518,10 @@ export class SessionMaintenance {
 				},
 			};
 		} catch (error) {
+			if (fatalPersistenceFailure !== undefined) {
+				await discardStaleOwner();
+				throw fatalPersistenceFailure.error;
+			}
 			if (!ownerIsCurrent()) return await discardStaleOwner();
 			if (callerSignal.aborted) {
 				await emitEnd({

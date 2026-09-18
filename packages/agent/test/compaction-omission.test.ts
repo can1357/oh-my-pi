@@ -4,17 +4,22 @@ import {
 	AGGRESSIVE_SHAKE_CONFIG,
 	collectShakeRegions,
 	convertMessageToLlm,
+	defaultConvertToLlm,
 	DEFAULT_COMPACTION_SETTINGS,
 	DEFAULT_PRUNE_CONFIG,
 	invalidateMessageCache,
 	prepareBranchEntries,
 	prepareCompaction,
 	projectToolHistoryMessage,
+	projectToolHistoryMessages,
 	pruneToolOutputs,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
 import type { AssistantMessage, ImageContent, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
+import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const usage: Usage = {
 	input: 1,
@@ -31,6 +36,19 @@ const image: ImageContent = {
 	mimeType: "image/png",
 };
 
+const responsesModel = buildModel({
+	id: "gpt-5",
+	name: "GPT-5",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 400_000,
+	maxTokens: 128_000,
+});
+
 function assistant(content: AssistantMessage["content"], timestamp: number): AssistantMessage {
 	return {
 		role: "assistant",
@@ -41,6 +59,26 @@ function assistant(content: AssistantMessage["content"], timestamp: number): Ass
 		usage,
 		stopReason: "toolUse",
 		timestamp,
+	};
+}
+
+function nativeAssistant(
+	content: AssistantMessage["content"],
+	timestamp: number,
+	items: Array<Record<string, unknown>>,
+	incremental: boolean,
+): AssistantMessage {
+	return {
+		...assistant(content, timestamp),
+		api: "openai-responses",
+		provider: "openai",
+		model: "gpt-5",
+		providerPayload: {
+			type: "openaiResponsesHistory",
+			provider: "openai",
+			...(incremental ? { dt: true } : {}),
+			items,
+		},
 	};
 }
 
@@ -74,6 +112,22 @@ function messageEntry(id: string, parentId: string | null, message: AgentMessage
 function toolCallIds(message: AgentMessage | undefined): string[] {
 	if (message?.role !== "assistant") return [];
 	return message.content.flatMap(block => (block.type === "toolCall" ? [block.id] : []));
+}
+
+function nativeWireInputs(messages: AgentMessage[]): Array<Array<Record<string, unknown>>> {
+	const llmMessages = defaultConvertToLlm(messages);
+	return [
+		buildResponsesInput({
+			model: responsesModel,
+			context: { messages: llmMessages },
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: false,
+			nativeHistory: { replay: true, filterReasoning: false },
+			includeThinkingSignatures: true,
+			repairOrphanOutputs: true,
+		}) as unknown as Array<Record<string, unknown>>,
+		buildOpenAiNativeHistory(llmMessages, responsesModel),
+	];
 }
 
 describe("native tool-history omission projection", () => {
@@ -195,6 +249,265 @@ describe("native tool-history omission projection", () => {
 			}),
 		).toEqual([]);
 		expect(omitted.content).toEqual([{ type: "text", text: "large retained output ".repeat(2_000) }]);
+	});
+});
+
+describe("native tool-history omission wire replay", () => {
+	test("omitted delta calls stay absent from Responses and compaction wires", () => {
+		const nativeItems: Array<Record<string, unknown>> = [
+			{ type: "reasoning", id: "rs_batch", summary: [], encrypted_content: "rewritten-reasoning" },
+			{
+				type: "function_call",
+				id: "fc_call_drop",
+				call_id: "call_drop",
+				name: "read",
+				arguments: '{"path":"secret.txt"}',
+				status: "completed",
+			},
+			{
+				type: "function_call",
+				id: "fc_call_keep",
+				call_id: "call_keep",
+				name: "read",
+				arguments: '{"path":"safe.txt"}',
+				status: "completed",
+			},
+		];
+		const source = nativeAssistant(
+			[
+				{
+					type: "toolCall",
+					id: "call_drop|fc_call_drop",
+					name: "read",
+					arguments: { path: "secret.txt" },
+					contextOmitted: true,
+				},
+				{
+					type: "toolCall",
+					id: "call_keep|fc_call_keep",
+					name: "read",
+					arguments: { path: "safe.txt" },
+				},
+			],
+			20,
+			nativeItems,
+			true,
+		);
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "inspect files", timestamp: 10 },
+			source,
+			result("call_drop|fc_call_drop", "secret", 21, { contextOmitted: true, prunedAt: 500 }),
+			result("call_keep|fc_call_keep", "safe", 22),
+		];
+
+		for (const wire of nativeWireInputs(messages)) {
+			expect(wire.some(item => item.call_id === "call_drop")).toBe(false);
+			expect(wire.some(item => item.type === "reasoning")).toBe(false);
+			expect(wire.some(item => item.type === "function_call" && item.call_id === "call_keep")).toBe(true);
+			expect(wire.some(item => item.type === "function_call_output" && item.call_id === "call_keep")).toBe(true);
+		}
+		const rawNativeItems =
+			source.providerPayload?.type === "openaiResponsesHistory" ? source.providerPayload.items : [];
+		expect(rawNativeItems).toBe(nativeItems);
+		expect(nativeItems.some(item => item.call_id === "call_drop")).toBe(true);
+	});
+
+	test("later replacement snapshots remove earlier omitted pairs without losing unrelated native history", () => {
+		const replacementItems: Array<Record<string, unknown>> = [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "replacement input" }],
+			},
+			{ type: "reasoning", id: "rs_drop", summary: [], encrypted_content: "drop-reasoning" },
+			{
+				type: "function_call",
+				id: "fc_call_drop",
+				call_id: "call_drop",
+				name: "read",
+				arguments: "{}",
+			},
+			{ type: "reasoning", id: "rs_drop_after", summary: [], encrypted_content: "post-call-secret" },
+			{ type: "function_call_output", call_id: "call_drop", output: "drop-output" },
+			{ type: "compaction", encrypted_content: "opaque-compaction" },
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "retained input" }],
+			},
+			{ type: "reasoning", id: "rs_keep", summary: [], encrypted_content: "keep-reasoning" },
+			{
+				type: "function_call",
+				id: "fc_call_keep",
+				call_id: "call_keep",
+				name: "read",
+				arguments: "{}",
+			},
+			{ type: "function_call_output", call_id: "call_keep", output: "keep-output" },
+		];
+		const omitted = assistant(
+			[
+				{
+					type: "toolCall",
+					id: "call_drop|fc_call_drop",
+					name: "read",
+					arguments: {},
+					contextOmitted: true,
+				},
+			],
+			20,
+		);
+		const replacement = nativeAssistant(
+			[{ type: "text", text: "replacement fallback" }],
+			30,
+			replacementItems,
+			false,
+		);
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "inspect", timestamp: 10 },
+			omitted,
+			result("call_drop|fc_call_drop", "drop-output", 21, { contextOmitted: true, prunedAt: 500 }),
+			replacement,
+		];
+
+		for (const wire of nativeWireInputs(messages)) {
+			const serialized = JSON.stringify(wire);
+			expect(serialized).not.toContain("call_drop");
+			expect(serialized).not.toContain("drop-reasoning");
+			expect(serialized).not.toContain("post-call-secret");
+			expect(serialized).toContain("opaque-compaction");
+			expect(serialized).toContain("call_keep");
+			expect(serialized).toContain("keep-output");
+			expect(serialized).toContain("keep-reasoning");
+		}
+		const rawReplacementItems =
+			replacement.providerPayload?.type === "openaiResponsesHistory" ? replacement.providerPayload.items : [];
+		expect(rawReplacementItems).toBe(replacementItems);
+		expect(JSON.stringify(replacementItems)).toContain("call_drop");
+		expect(JSON.stringify(replacementItems)).toContain("post-call-secret");
+	});
+
+	test("empty rewritten turns retain safe full-replacement payload items", () => {
+		const replacementItems: Array<Record<string, unknown>> = [
+			{ type: "compaction", encrypted_content: "opaque-prior-history" },
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "retained prior input" }],
+			},
+			{ type: "reasoning", id: "rs_drop", summary: [], encrypted_content: "drop-reasoning" },
+			{
+				type: "function_call",
+				id: "fc_call_drop",
+				call_id: "call_drop",
+				name: "read",
+				arguments: "{}",
+			},
+		];
+		const source = nativeAssistant(
+			[
+				{
+					type: "toolCall",
+					id: "call_drop|fc_call_drop",
+					name: "read",
+					arguments: {},
+					contextOmitted: true,
+				},
+			],
+			20,
+			replacementItems,
+			false,
+		);
+
+		const [projected] = projectToolHistoryMessages([source]);
+		if (projected?.role !== "assistant") throw new Error("Expected native replacement carrier");
+		expect(projected.content).toEqual([]);
+		for (const wire of nativeWireInputs([source])) {
+			const serialized = JSON.stringify(wire);
+			expect(serialized).not.toContain("call_drop");
+			expect(serialized).not.toContain("drop-reasoning");
+			expect(serialized).toContain("opaque-prior-history");
+			expect(serialized).toContain("retained prior input");
+		}
+		expect(source.content).toHaveLength(1);
+		const rawReplacementItems =
+			source.providerPayload?.type === "openaiResponsesHistory" ? source.providerPayload.items : [];
+		expect(rawReplacementItems).toBe(replacementItems);
+	});
+
+	test("compaction preparation carries omission state into native serialization", () => {
+		const replacementItems: Array<Record<string, unknown>> = [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_text", text: "retained replacement input" }],
+			},
+			{ type: "reasoning", id: "rs_drop", summary: [], encrypted_content: "prepared-drop-reasoning" },
+			{
+				type: "function_call",
+				id: "fc_call_drop",
+				call_id: "call_drop",
+				name: "read",
+				arguments: "{}",
+			},
+			{ type: "function_call_output", call_id: "call_drop", output: "prepared-drop-output" },
+			{ type: "compaction", encrypted_content: "prepared-opaque-compaction" },
+		];
+		const omitted = assistant(
+			[
+				{
+					type: "toolCall",
+					id: "call_drop|fc_call_drop",
+					name: "read",
+					arguments: {},
+					contextOmitted: true,
+				},
+			],
+			20,
+		);
+		const replacement = nativeAssistant(
+			[{ type: "text", text: "replacement fallback" }],
+			30,
+			replacementItems,
+			false,
+		);
+		const entries: SessionEntry[] = [
+			messageEntry("old-user", null, {
+				role: "user",
+				content: `required constraint\n${"x".repeat(20_000)}`,
+				timestamp: 10,
+			}),
+			messageEntry("omitted-call", "old-user", omitted),
+			messageEntry(
+				"omitted-result",
+				"omitted-call",
+				result("call_drop|fc_call_drop", "prepared-drop-output", 21, {
+					contextOmitted: true,
+					prunedAt: 500,
+				}),
+			),
+			messageEntry("replacement", "omitted-result", replacement),
+			messageEntry("recent-user", "replacement", { role: "user", content: "continue", timestamp: 40 }),
+			messageEntry("recent-assistant", "recent-user", assistant([{ type: "text", text: "done" }], 50)),
+		];
+
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 8,
+		});
+		if (!preparation) throw new Error("Expected compaction preparation");
+		const prepared = [
+			...preparation.messagesToSummarize,
+			...preparation.turnPrefixMessages,
+			...preparation.recentMessages,
+		];
+		for (const wire of nativeWireInputs(prepared)) {
+			const serialized = JSON.stringify(wire);
+			expect(serialized).not.toContain("call_drop");
+			expect(serialized).not.toContain("prepared-drop-reasoning");
+			expect(serialized).toContain("prepared-opaque-compaction");
+		}
+		expect(JSON.stringify(replacementItems)).toContain("call_drop");
 	});
 });
 

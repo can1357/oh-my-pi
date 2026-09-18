@@ -239,16 +239,21 @@ The pass runs only on automatic/idle maintenance, with one 10-second deadline
 covering all judgment batches. Manual `/compact` modes and instructions are
 unchanged, though they operate on any context already reduced by an earlier
 pass. Missing credentials, scoring or validation errors, deadline expiry,
-persistence failure, or insufficient headroom continue through normal
-compaction; caller cancellation stops the attempt instead. While the preference
-is enabled, speculative compaction is canceled and bypassed so a summary cannot
-race a pruning decision.
+recoverable persistence failure, or insufficient headroom continue through normal
+compaction; caller cancellation stops the attempt instead. A failed durable
+rollback is surfaced as an error, not hidden as stale cancellation or advisory
+fallback. While the preference is enabled, speculative compaction is canceled
+and bypassed so a summary cannot race a pruning decision.
 
 Omission markers and artifact references persist across resume and later
 compaction. Older OMP versions do not understand the omission markers and may
 replay the original omitted pairs; they do not delete those journal rows.
 Turning the booster off prevents future decisions but does not restore shortened
 results or clear accepted omission markers.
+
+The shared model-context projection also removes omitted call/result pairs from
+native Responses deltas and later replacement snapshots, preserving unrelated
+native history and opaque compaction records.
 
 Automatic lifecycle observers receive `action: "prune"` for this phase.
 `auto_compaction_end` has no `result`, no `CompactionEntry` is created, and no
