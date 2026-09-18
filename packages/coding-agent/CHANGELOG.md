@@ -1,9 +1,20 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added `memory.backend: mnemon`, a native [Mnemon](https://github.com/mnemon-dev/mnemon) CLI backend against `~/.mnemon`. It occupies the same host slot as Mnemopi (`recall` / `retain`, `/memory stats`, first-turn silent recall, compaction context) without using the Mnemopi SQLite schema. Silent recall is high-score only. `/memory clear` is refused. `reflect` and `memory_edit` stay Mnemopi/Hindsight-only. Do not point `mnemopi.dbPath` at `~/.mnemon`.
+- Added host `link` for `memory.backend: mnemon` (`id1`/`id2`/`type`/`weight`, including `supersedes`). `retain` now returns the new insight id and link candidates so the graph loop can close without dropping to the CLI. `supersedes` falls back to `causal` on CLIs that reject the fifth edge type.
+- Added host `related` and `forget` for `memory.backend: mnemon`. `retain` now accepts `category`, `importance`, and `entities` instead of hardcoding `context`/`3`. `recall` accepts optional `limit`.
+
 ### Fixed
 
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
+- Fixed `/memory stats` crashing on `memory.backend: mnemon` (`undefined is not an object (evaluating 'this.status')`) when the TUI extracted the unbound hook.
+- Fixed `memory.backend: mnemon` host tools so `link` / `related` / `forget` mount and unmount on backend switch, `link` is write-tier, secret scans cover every persisted save field, and abort/timeout waits for the CLI child to exit.
+- Fixed an issue where explicitly passing an importance of `1` to mnemon was incorrectly scaled to `5`
+- Fixed `mnemon` executable resolution to fail loudly if an explicitly configured path does not exist, instead of silently falling back to a binary found on `PATH`
 
 ## [18.2.5] - 2026-09-17
 

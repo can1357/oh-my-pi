@@ -2,14 +2,9 @@
 
 Oh My Pi can use `@oh-my-pi/pi-mnemopi` as a local long-term memory backend.
 
+For the native Mnemon CLI against `~/.mnemon` instead, see [Mnemon memory backend](./mnemon-memory-backend.md). Do not point `mnemopi.dbPath` at that store.
+
 Set:
-
-```yaml
-memory:
-  backend: mnemopi
-```
-
-Example:
 
 ```yaml
 memory:
@@ -17,6 +12,7 @@ memory:
 mnemopi:
   scoping: per-project-tagged
 ```
+
 
 With this backend enabled, the coding agent:
 

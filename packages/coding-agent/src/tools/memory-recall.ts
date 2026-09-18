@@ -3,11 +3,13 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
+import { mnemonBackend } from "../mnemon/backend";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
 import type { ToolSession } from ".";
 
 const memoryRecallSchema = type({
 	query: type("string").describe("natural language search query"),
+	"limit?": type("number").describe("max results; mnemon only, default 10"),
 });
 
 export type MemoryRecallParams = typeof memoryRecallSchema.infer;
@@ -26,7 +28,7 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 
 	static createIf(session: ToolSession): MemoryRecallTool | null {
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		if (backend !== "hindsight" && backend !== "mnemopi" && backend !== "mnemon") return null;
 		if (backend === "hindsight" && !isHindsightConfigured(loadHindsightConfig(session.settings))) return null;
 		return new MemoryRecallTool(session);
 	}
@@ -34,6 +36,39 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 	async execute(_id: string, params: MemoryRecallParams, signal?: AbortSignal): Promise<AgentToolResult> {
 		return untilAborted(signal, async () => {
 			const backend = this.session.settings.get("memory.backend");
+			if (backend === "mnemon") {
+				const result = await mnemonBackend.search?.(
+					{
+						agentDir: this.session.settings.getAgentDir(),
+						cwd: this.session.settings.getCwd(),
+						session: this.session as never,
+					},
+					params.query,
+					{ signal, limit: params.limit },
+				);
+				if (!result || result.count === 0) {
+					return {
+						content: [{ type: "text", text: result?.message || "No relevant memories found." }],
+						details: {},
+						useless: true,
+					};
+				}
+				const formatted = result.items
+					.map(
+						item =>
+							`- (${item.source ?? "memory"}${item.score !== undefined ? `, ${item.score}` : ""}) ${item.id ? `${item.id}: ` : ""}${item.content}`,
+					)
+					.join("\n");
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Found ${result.count} relevant ${result.count === 1 ? "memory" : "memories"} (as of ${formatCurrentTime()} UTC):\n\n${formatted}`,
+						},
+					],
+					details: {},
+				};
+			}
 			if (backend === "mnemopi") {
 				const state = this.session.getMnemopiSessionState?.();
 				if (!state) {
