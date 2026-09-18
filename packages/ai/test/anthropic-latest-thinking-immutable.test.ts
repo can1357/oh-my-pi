@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { convertAnthropicMessages, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { AnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic-client";
 import type {
 	AssistantMessage,
@@ -8,6 +8,7 @@ import type {
 	Message,
 	Model,
 	ProviderSessionState,
+	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -49,6 +50,30 @@ const usage = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+
+function assistant(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: model.id,
+		usage,
+		stopReason: "toolUse",
+		timestamp: 0,
+	};
+}
+
+function toolResult(toolCallId: string): Message {
+	return {
+		role: "toolResult",
+		toolCallId,
+		toolName: "bash",
+		content: [{ type: "text", text: "ok" }],
+		isError: false,
+		timestamp: 0,
+	};
+}
 
 const EARLIER_SIGNATURE = "sig_turn_one_primary";
 const HANDOFF_PRIMARY_SIGNATURE = "sig_turn_two_primary_partial";
@@ -115,17 +140,31 @@ function createLatestThinkingRejection(): Error {
 interface WireBlock {
 	type: string;
 	signature?: string;
+	thinking?: string;
 	text?: string;
+	content?: string;
+	id?: string;
+	name?: string;
+	input?: Record<string, unknown>;
+	cache_control?: { type: string };
+	from?: { model: string };
+	to?: { model: string };
 }
 interface WireMessage {
 	role: string;
 	content: WireBlock[] | string;
 }
-function assistantMessages(params: unknown): WireBlock[][] {
+function wireMessages(params: unknown): WireMessage[] {
+	if (Array.isArray(params)) return params as WireMessage[];
 	if (!params || typeof params !== "object" || !("messages" in params)) return [];
 	const { messages } = params as { messages?: WireMessage[] };
-	if (!Array.isArray(messages)) return [];
-	return messages.filter(m => m.role === "assistant" && Array.isArray(m.content)).map(m => m.content as WireBlock[]);
+	return Array.isArray(messages) ? messages : [];
+}
+
+function assistantMessages(params: unknown): WireBlock[][] {
+	return wireMessages(params)
+		.filter(message => message.role === "assistant" && Array.isArray(message.content))
+		.map(message => message.content as WireBlock[]);
 }
 
 const successEvents = [
@@ -180,8 +219,16 @@ function readThinkingReplayDisabled(map: Map<string, ProviderSessionState>): boo
 	return undefined;
 }
 
-async function run(providerSessionState: Map<string, ProviderSessionState>) {
-	const stream = streamAnthropic(model, handoffContext, { apiKey: "sk-test", providerSessionState });
+async function run(
+	providerSessionState: Map<string, ProviderSessionState>,
+	context = handoffContext,
+	fallbacks?: Array<{ model: string }>,
+) {
+	const stream = streamAnthropic(model, context, {
+		apiKey: "sk-test",
+		providerSessionState,
+		...(fallbacks ? { fallbacks } : {}),
+	});
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of stream) events.push(event);
 	return stream.result();
@@ -227,6 +274,40 @@ describe("anthropic-messages latest assistant thinking rejected as modified", ()
 		expect(result.disabledFeatures ?? []).not.toContain("thinking-replay");
 	});
 
+	it("surfaces the immutable-latest 400 instead of resending an unchanged payload with no replayable thinking", async () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "fallback", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Primary plan.", thinkingSignature: "sig_primary" },
+					{
+						type: "fallback",
+						from: { model: "claude-fable-5-1" },
+						to: { model: "claude-opus-5" },
+					},
+					{ type: "text", text: "visible" },
+				]),
+				{ role: "user", content: "Continue.", timestamp: 0 },
+			],
+		};
+		const payloads: unknown[] = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			payloads.push(params);
+			return rejection() as never;
+		});
+
+		const result = await run(new Map(), context);
+
+		expect(payloads).toHaveLength(1);
+		expect(
+			assistantMessages(payloads[0])
+				.at(-1)
+				?.map(block => block.type),
+		).toEqual(["text"]);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("blocks in the latest assistant message cannot be modified");
+	});
+
 	it("escalates to dropping all replayed thinking when the rejection repeats", async () => {
 		const providerSessionState = new Map<string, ProviderSessionState>();
 		const payloads: unknown[] = [];
@@ -245,5 +326,341 @@ describe("anthropic-messages latest assistant thinking rejected as modified", ()
 		expect(earlier?.some(block => block.type === "thinking")).toBe(false);
 		expect(latest?.map(block => block.type)).toEqual(["text", "tool_use"]);
 		expect(readThinkingReplayDisabled(providerSessionState)).toBe(true);
+	});
+});
+
+describe("anthropic-messages proactive latest-thinking replay", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("avoids the immutable-latest 400 when a prefix-dropped thinking block would leave its sibling replayed", async () => {
+		const earlierDroppedSignature = "sig_earlier_dropped";
+		const earlierSurvivingSignature = "sig_earlier_survives";
+		const latestDroppedSignature = "sig_latest_dropped";
+		const latestSiblingSignature = "sig_latest_sibling";
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Inspect the project.", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Old dropped thought.", thinkingSignature: earlierDroppedSignature },
+					{
+						type: "thinking",
+						thinking: "Old surviving thought.",
+						thinkingSignature: earlierSurvivingSignature,
+					},
+					{ type: "toolCall", id: "toolu_earlier", name: "bash", arguments: { command: "ls" } },
+				]),
+				toolResult("toolu_earlier"),
+				assistant([
+					{ type: "thinking", thinking: "Latest dropped thought.", thinkingSignature: latestDroppedSignature },
+					{ type: "thinking", thinking: "Latest sibling thought.", thinkingSignature: latestSiblingSignature },
+					{ type: "text", text: "Reading the project." },
+					{ type: "toolCall", id: "toolu_latest", name: "bash", arguments: { command: "find ." } },
+				]),
+				toolResult("toolu_latest"),
+			],
+		};
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		providerSessionState.set(`anthropic-messages:${model.baseUrl}\u0000${model.id}`, {
+			close: () => {},
+			prefixDroppedThinkingBlocks: new Set([
+				`thinking:${earlierDroppedSignature}`,
+				`thinking:${latestDroppedSignature}`,
+			]),
+		} as ProviderSessionState);
+		const payloads: unknown[] = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			payloads.push(params);
+			return successRequest() as never;
+		});
+
+		const result = await run(providerSessionState, context);
+
+		expect(result.stopReason).toBe("stop");
+		expect(payloads).toHaveLength(1);
+		const [earlier, latest] = assistantMessages(payloads[0]);
+		expect(earlier?.filter(block => block.type === "thinking").map(block => block.signature)).toEqual([
+			earlierSurvivingSignature,
+		]);
+		expect(latest?.filter(block => block.type === "thinking" || block.type === "redacted_thinking")).toEqual([]);
+		expect(latest?.map(block => block.type)).toEqual(["text", "tool_use"]);
+	});
+
+	it("drops all thinking from the final emitted assistant when a source-latest thinking-only turn is omitted", async () => {
+		const keptSignature = "sig_keep";
+		const droppedSignature = "sig_drop";
+		const omittedLatestSignature = "sig_later";
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "first", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Kept thought.", thinkingSignature: keptSignature },
+					{ type: "thinking", thinking: "Dropped thought.", thinkingSignature: droppedSignature },
+					{ type: "text", text: "earlier visible" },
+				]),
+				{ role: "user", content: "next", timestamp: 0 },
+				assistant([
+					{
+						type: "thinking",
+						thinking: "Later dropped thought.",
+						thinkingSignature: omittedLatestSignature,
+					},
+				]),
+				{ role: "user", content: "Continue.", timestamp: 0 },
+			],
+		};
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		providerSessionState.set(`anthropic-messages:${model.baseUrl}\u0000${model.id}`, {
+			close: () => {},
+			prefixDroppedThinkingBlocks: new Set([`thinking:${droppedSignature}`, `thinking:${omittedLatestSignature}`]),
+		} as ProviderSessionState);
+		const payloads: unknown[] = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			payloads.push(params);
+			return successRequest() as never;
+		});
+
+		expect((await run(providerSessionState, context)).stopReason).toBe("stop");
+		expect(payloads).toHaveLength(1);
+		expect(assistantMessages(payloads[0]).at(-1)).toEqual([{ type: "text", text: "earlier visible" }]);
+	});
+
+	it("drops an emptied latest assistant before cleaning the newly final assistant", () => {
+		const earlierSignature = "sig_earlier_fallback";
+		const laterSignature = "sig_later_fallback";
+		const params = convertAnthropicMessages(
+			[
+				{ role: "user", content: "Start.", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Earlier reasoning.", thinkingSignature: earlierSignature },
+					{ type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+					{ type: "text", text: "Earlier visible text." },
+				]),
+				{ role: "user", content: "Next.", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Later reasoning.", thinkingSignature: laterSignature },
+					{ type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+				]),
+				{ role: "user", content: "Current request.", timestamp: 0 },
+			],
+			model,
+			false,
+		);
+
+		expect(wireMessages(params).map(message => message.role)).toEqual(["user", "assistant", "user", "user"]);
+		expect(assistantMessages(params)).toEqual([[{ type: "text", text: "Earlier visible text." }]]);
+	});
+
+	it("prevents an earlier turn losing its thinking when a compaction param is the real final assistant", () => {
+		const earlierSignature = "sig_before_compaction";
+		const params = convertAnthropicMessages(
+			[
+				{ role: "user", content: "Start.", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Preserve this reasoning.", thinkingSignature: earlierSignature },
+					{ type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+					{ type: "text", text: "Earlier visible text." },
+				]),
+				{
+					role: "user",
+					content: "Compaction summary.",
+					providerPayload: {
+						type: "anthropicCompaction",
+						provider: "anthropic",
+						content: "Native summary.",
+						signature: "sig_compaction",
+					},
+					timestamp: 0,
+				} satisfies UserMessage,
+				{ role: "user", content: "Current request.", timestamp: 0 },
+			],
+			model,
+			false,
+			{ replayCompaction: true },
+		);
+		const wire = wireMessages(params);
+
+		expect(wire.map(message => message.role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
+		expect(wire[1]).toEqual({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "Preserve this reasoning.", signature: earlierSignature },
+				{ type: "text", text: "Earlier visible text." },
+			],
+		});
+		expect(wire[2]).toEqual({ role: "user", content: "Continue." });
+		expect(wire[3]).toEqual({
+			role: "assistant",
+			content: [{ type: "compaction", content: "Native summary.", signature: "sig_compaction" }],
+		});
+		expect(wire[4]).toMatchObject({ role: "user", content: "Current request." });
+	});
+
+	it("removes folded thinking when a leading compaction summary absorbs a fallback-only assistant", () => {
+		const finalSignature = "sig_after_compaction";
+		const params = convertAnthropicMessages(
+			[
+				{
+					role: "user",
+					content: "Compaction summary.",
+					providerPayload: {
+						type: "anthropicCompaction",
+						provider: "anthropic",
+						content: "Native summary.",
+						signature: "sig_compaction",
+					},
+					timestamp: 0,
+				} satisfies UserMessage,
+				assistant([
+					{ type: "thinking", thinking: "Omit this rewritten reasoning.", thinkingSignature: finalSignature },
+					{ type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+				]),
+				{ role: "user", content: "Current request.", timestamp: 0 },
+			],
+			model,
+			false,
+			{ replayCompaction: true },
+		);
+
+		const wire = wireMessages(params);
+		expect(wire.map(message => message.role)).toEqual(["assistant", "user"]);
+		expect(wire[0]).toEqual({
+			role: "assistant",
+			content: [{ type: "compaction", content: "Native summary.", signature: "sig_compaction" }],
+		});
+		expect(wire[1]).toMatchObject({ role: "user", content: "Current request." });
+	});
+
+	it("removes only the final folded assistant's thinking after a middle compaction boundary", () => {
+		const earlierSignature = "sig_before_compaction";
+		const finalSignature = "sig_after_compaction";
+		const params = convertAnthropicMessages(
+			[
+				{ role: "user", content: "Start.", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Preserve this reasoning.", thinkingSignature: earlierSignature },
+					{ type: "text", text: "Earlier visible text." },
+				]),
+				{
+					role: "user",
+					content: "Compaction summary.",
+					providerPayload: {
+						type: "anthropicCompaction",
+						provider: "anthropic",
+						content: "Native summary.",
+						signature: "sig_compaction",
+					},
+					timestamp: 0,
+				} satisfies UserMessage,
+				assistant([
+					{ type: "thinking", thinking: "Omit this rewritten reasoning.", thinkingSignature: finalSignature },
+					{ type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+					{ type: "text", text: "Final visible text." },
+				]),
+				{ role: "user", content: "Current request.", timestamp: 0 },
+			],
+			model,
+			false,
+			{ replayCompaction: true },
+		);
+
+		const wire = wireMessages(params);
+		expect(wire.map(message => message.role)).toEqual(["user", "assistant", "user", "assistant", "user"]);
+		expect(wire[1]).toEqual({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "Preserve this reasoning.", signature: earlierSignature },
+				{ type: "text", text: "Earlier visible text." },
+			],
+		});
+		expect(wire[2]).toEqual({ role: "user", content: "Continue." });
+		expect(wire[3]).toEqual({
+			role: "assistant",
+			content: [
+				{ type: "compaction", content: "Native summary.", signature: "sig_compaction" },
+				{ type: "text", text: "Final visible text." },
+			],
+		});
+		expect(wire[4]).toMatchObject({ role: "user", content: "Current request." });
+	});
+
+	it("avoids the immutable-latest 400 when a request omits a fallback handoff marker", async () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Read the project.", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Primary plan.", thinkingSignature: "sig_primary" },
+					{ type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+					{ type: "thinking", thinking: "Fallback plan.", thinkingSignature: "sig_fallback" },
+					{ type: "text", text: "Reading the project." },
+					{ type: "toolCall", id: "toolu_fallback", name: "bash", arguments: { command: "find ." } },
+				]),
+				toolResult("toolu_fallback"),
+			],
+		};
+		const withoutFallbacks: unknown[] = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			withoutFallbacks.push(params);
+			return successRequest() as never;
+		});
+
+		expect((await run(new Map(), context)).stopReason).toBe("stop");
+		const withoutFallbackMarker = assistantMessages(withoutFallbacks[0]).at(-1);
+		expect(withoutFallbackMarker).toEqual([
+			{ type: "text", text: "Reading the project." },
+			{
+				type: "tool_use",
+				id: "toolu_fallback",
+				name: "bash",
+				input: { command: "find ." },
+				cache_control: { type: "ephemeral" },
+			},
+		]);
+
+		const withFallbacks: unknown[] = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			withFallbacks.push(params);
+			return successRequest() as never;
+		});
+
+		expect((await run(new Map(), context, [{ model: "claude-opus-5" }])).stopReason).toBe("stop");
+		expect(assistantMessages(withFallbacks[0]).at(-1)).toEqual([
+			{ type: "thinking", thinking: "Primary plan.", signature: "sig_primary" },
+			{ type: "fallback", from: { model: "claude-fable-5-1" }, to: { model: "claude-opus-5" } },
+			{ type: "thinking", thinking: "Fallback plan.", signature: "sig_fallback" },
+			{ type: "text", text: "Reading the project." },
+			{
+				type: "tool_use",
+				id: "toolu_fallback",
+				name: "bash",
+				input: { command: "find ." },
+				cache_control: { type: "ephemeral" },
+			},
+		]);
+	});
+
+	it("keeps an untouched latest assistant turn byte-identical on the wire", async () => {
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Read the project.", timestamp: 0 },
+				assistant([
+					{ type: "thinking", thinking: "Inspect first.", thinkingSignature: "sig_untouched" },
+					{ type: "text", text: "Reading the project." },
+					{ type: "toolCall", id: "toolu_untouched", name: "bash", arguments: { command: "find ." } },
+				]),
+				toolResult("toolu_untouched"),
+			],
+		};
+		const payloads: unknown[] = [];
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			payloads.push(params);
+			return successRequest() as never;
+		});
+
+		expect((await run(new Map(), context)).stopReason).toBe("stop");
+		expect(JSON.stringify(assistantMessages(payloads[0]).at(-1))).toBe(
+			'[{"type":"thinking","thinking":"Inspect first.","signature":"sig_untouched"},{"type":"text","text":"Reading the project."},{"type":"tool_use","id":"toolu_untouched","name":"bash","input":{"command":"find ."},"cache_control":{"type":"ephemeral"}}]',
+		);
 	});
 });

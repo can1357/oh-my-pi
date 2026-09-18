@@ -422,7 +422,7 @@ describe("anthropic assistant replay block ordering (tool_use partition)", () =>
 		]);
 	});
 
-	it("opt-out drops the fallback marker but still defers tool_use to the tail", () => {
+	it("opt-out drops the latest turn's thinking chain with its fallback marker and still defers tool_use", () => {
 		const params = convertAnthropicMessages(
 			[
 				assistant([
@@ -441,10 +441,10 @@ describe("anthropic assistant replay block ordering (tool_use partition)", () =>
 			],
 			fableModel,
 			false,
-			// serverSideFallbackEnabled omitted → fallback block dropped
+			// serverSideFallbackEnabled omitted → fallback marker and the
+			// latest turn's native thinking chain are dropped together
 		);
 		expect(assistantParam(params).content).toEqual([
-			{ type: "thinking", thinking: "plan", signature: "sig-1" },
 			{ type: "text", text: "before" },
 			{ type: "text", text: "after" },
 			{ type: "tool_use", id: "call_a", name: "read", input: {} },
