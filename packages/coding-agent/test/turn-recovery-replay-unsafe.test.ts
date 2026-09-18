@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { setImmediate } from "node:timers/promises";
 import type { AgentMessage, SyntheticToolResultDetails } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -8,6 +9,7 @@ import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	type RecoveryCompactionResult,
 	TurnRecovery,
@@ -127,6 +129,165 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	it("does not let a cancelled saga's late skip close a newer retry", async () => {
+		const host = createHost(model, modelRegistry);
+		host.sessionManager = SessionManager.inMemory();
+		let promptSequence = 0;
+		host.promptSequence = () => promptSequence;
+		host.settings.set("retry.enabled", true);
+		host.settings.set("retry.baseDelayMs", 0);
+		host.settings.set("retry.modelFallback", false);
+		const retryEndEvents: string[] = [];
+		host.emitSessionEvent = async event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event.type);
+		};
+		const scheduled: Array<Parameters<TurnRecoveryHost["scheduleAgentContinue"]>[0]> = [];
+		host.scheduleAgentContinue = options => scheduled.push(options);
+		const recovery = new TurnRecovery(host);
+		const first = makeMessage([{ type: "thinking", thinking: "partial" }], model);
+		first.errorMessage = "Socket is closed";
+		const firstHandled = await recovery.handleRetryableError(first);
+		expect(firstHandled).toBe(true);
+		expect(scheduled).toHaveLength(1);
+
+		recovery.abortRetry();
+		promptSequence++;
+		const second = makeMessage([{ type: "thinking", thinking: "partial again" }], model);
+		second.errorMessage = "Socket is closed";
+		const secondHandled = await recovery.handleRetryableError(second);
+		expect(secondHandled).toBe(true);
+		expect(scheduled).toHaveLength(2);
+		const activeRetry = recovery.retryPromise;
+		if (!activeRetry) throw new Error("Expected a retry promise for the newer saga");
+		let retrySettled = false;
+		activeRetry.then(() => {
+			retrySettled = true;
+		});
+
+		expect(scheduled[0].shouldContinue?.()).toBe(false);
+		scheduled[0].onSkip?.("aborted");
+		await Promise.resolve();
+		expect(retrySettled).toBe(false);
+		expect(retryEndEvents).toHaveLength(0);
+		expect(recovery.attempt).toBe(1);
+
+		scheduled[1].onSkip?.("aborted");
+		await Promise.resolve();
+		expect(retrySettled).toBe(true);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(recovery.attempt).toBe(0);
+	});
+
+	it("allows a retry after an internal abort advances generation without advancing prompt sequence", async () => {
+		const host = createHost(model, modelRegistry);
+		host.sessionManager = SessionManager.inMemory();
+		let promptGeneration = 0;
+		const promptSequence = 0;
+		host.promptGeneration = () => promptGeneration;
+		host.promptSequence = () => promptSequence;
+		host.settings.set("retry.enabled", true);
+		host.settings.set("retry.baseDelayMs", 0);
+		host.settings.set("retry.modelFallback", false);
+		const scheduled: Array<Parameters<TurnRecoveryHost["scheduleAgentContinue"]>[0]> = [];
+		host.scheduleAgentContinue = options => scheduled.push(options);
+		const recovery = new TurnRecovery(host);
+		const first = makeMessage([{ type: "thinking", thinking: "partial" }], model);
+		first.errorMessage = "Socket is closed";
+		expect(await recovery.handleRetryableError(first)).toBe(true);
+		expect(scheduled).toHaveLength(1);
+
+		recovery.abortRetry();
+		promptGeneration++;
+		const resumed = makeMessage([{ type: "thinking", thinking: "partial after compaction" }], model);
+		resumed.errorMessage = "Socket is closed";
+		expect(await recovery.handleRetryableError(resumed)).toBe(true);
+		expect(scheduled).toHaveLength(2);
+		expect(recovery.attempt).toBe(1);
+	});
+	it("closes a retry cancelled during auto_retry_start before backoff is created", async () => {
+		const host = createHost(model, modelRegistry);
+		host.sessionManager = SessionManager.inMemory();
+		host.settings.set("retry.enabled", true);
+		host.settings.set("retry.baseDelayMs", 0);
+		host.settings.set("retry.modelFallback", false);
+		const events: string[] = [];
+		const scheduled: Array<Parameters<TurnRecoveryHost["scheduleAgentContinue"]>[0]> = [];
+		const recovery = new TurnRecovery(host);
+		host.emitSessionEvent = async event => {
+			events.push(event.type);
+			if (event.type === "auto_retry_start") recovery.abortRetry();
+		};
+		host.scheduleAgentContinue = options => scheduled.push(options);
+		const message = makeMessage([{ type: "thinking", thinking: "partial" }], model);
+		message.errorMessage = "Socket is closed";
+
+		expect(await recovery.handleRetryableError(message)).toBe(false);
+		expect(events).toEqual(["auto_retry_start", "auto_retry_end"]);
+		expect(scheduled).toHaveLength(0);
+		expect(recovery.attempt).toBe(0);
+		expect(recovery.retryPromise).toBeUndefined();
+	});
+	it("keeps a newer retry pending while an old local failure finishes asynchronously", async () => {
+		const host = createHost(model, modelRegistry);
+		host.sessionManager = SessionManager.inMemory();
+		let promptSequence = 0;
+		host.promptSequence = () => promptSequence;
+		host.settings.set("retry.enabled", true);
+		host.settings.set("retry.baseDelayMs", 0);
+		host.settings.set("retry.modelFallback", false);
+		let blockPersistence = false;
+		const persistenceStarted = Promise.withResolvers<void>();
+		const releasePersistence = Promise.withResolvers<void>();
+		host.waitForSessionMessagePersistence = async () => {
+			if (!blockPersistence) return;
+			persistenceStarted.resolve();
+			await releasePersistence.promise;
+		};
+		const endStarted = Promise.withResolvers<void>();
+		const releaseEnd = Promise.withResolvers<void>();
+		host.emitSessionEvent = async event => {
+			if (event.type !== "auto_retry_end") return;
+			endStarted.resolve();
+			await releaseEnd.promise;
+		};
+		const scheduled: Array<Parameters<TurnRecoveryHost["scheduleAgentContinue"]>[0]> = [];
+		host.scheduleAgentContinue = options => scheduled.push(options);
+		const recovery = new TurnRecovery(host);
+		const first = makeMessage([{ type: "thinking", thinking: "partial" }], model);
+		first.errorMessage = "Socket is closed";
+		expect(await recovery.handleRetryableError(first)).toBe(true);
+		expect(scheduled).toHaveLength(1);
+
+		blockPersistence = true;
+		scheduled[0].onError?.(new Error("local continuation failure"));
+		await persistenceStarted.promise;
+		releasePersistence.resolve();
+		await endStarted.promise;
+
+		blockPersistence = false;
+		promptSequence++;
+		const second = makeMessage([{ type: "thinking", thinking: "partial again" }], model);
+		second.errorMessage = "Socket is closed";
+		expect(await recovery.handleRetryableError(second)).toBe(true);
+		expect(scheduled).toHaveLength(2);
+		const newerRetry = recovery.retryPromise;
+		if (!newerRetry) throw new Error("Expected a retry promise for the newer saga");
+		let newerRetrySettled = false;
+		newerRetry.then(() => {
+			newerRetrySettled = true;
+		});
+
+		releaseEnd.resolve();
+		await setImmediate();
+		expect(newerRetrySettled).toBe(false);
+		expect(recovery.attempt).toBe(1);
+
+		scheduled[1].onSkip?.("aborted");
+		await setImmediate();
+		expect(newerRetrySettled).toBe(true);
+		expect(recovery.attempt).toBe(0);
 	});
 
 	it("rolls back a usage fallback cancelled during model reconciliation", async () => {

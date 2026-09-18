@@ -279,6 +279,9 @@ export class TurnRecovery {
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
 	#retryAbortRequested = false;
+	#retryAbortPromptSequence: number | undefined;
+	#retryAbortPromptGeneration: number | undefined;
+	#retrySagaId = 0;
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
@@ -2226,7 +2229,23 @@ export class TurnRecovery {
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
-		if (this.#retryAttempt === 0) this.#retryAbortRequested = false;
+		const promptSequence = this.#host.promptSequence();
+		if (
+			this.#retryAbortRequested &&
+			this.#retryAbortPromptGeneration === generation &&
+			this.#retryAbortPromptSequence === promptSequence
+		)
+			return false;
+		if (this.#retryAttempt === 0 || this.#retryAbortRequested) {
+			if (this.#retryAttempt === 0) this.resolveRetry();
+			this.#retryAttempt = 0;
+			this.#clearPendingRetryErrors();
+			this.#retryAbortRequested = false;
+			this.#retryAbortPromptGeneration = undefined;
+			this.#retryAbortPromptSequence = undefined;
+			this.#retrySagaId++;
+		}
+		const retrySagaId = this.#retrySagaId;
 		this.#retryAttempt++;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
@@ -2564,6 +2583,21 @@ export class TurnRecovery {
 			errorMessage,
 			errorId: message.errorId,
 		});
+		if (this.#retrySagaId !== retrySagaId || this.#retryAttempt === 0) return false;
+		if (this.#retryAbortRequested) {
+			const attempt = this.#retryAttempt;
+			this.#retryAttempt = 0;
+			await this.#host.emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Retry cancelled",
+			});
+			if (this.#retrySagaId !== retrySagaId) return false;
+			this.#clearPendingRetryErrors();
+			this.resolveRetry();
+			return false;
+		}
 
 		// Resolved stream-stall tools and proven-unexecuted malformed/refused
 		// calls keep their assistant/result pair. Continuation then sees explicit
@@ -2590,6 +2624,10 @@ export class TurnRecovery {
 			if (this.#retryAbortController !== retryAbortController) {
 				return false;
 			}
+			if (this.#retrySagaId !== retrySagaId) {
+				this.#retryAbortController = undefined;
+				return false;
+			}
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
@@ -2607,6 +2645,8 @@ export class TurnRecovery {
 		if (this.#retryAbortController === retryAbortController) {
 			this.#retryAbortController = undefined;
 		}
+
+		if (this.#retrySagaId !== retrySagaId || this.#retryAttempt === 0) return false;
 
 		// The identity-keyed removal above can miss when a context rebuild
 		// recreated the failed turn's message object between settle and retry
@@ -2632,22 +2672,23 @@ export class TurnRecovery {
 			source: "automatic-retry",
 			delayMs: 1,
 			generation,
-			shouldContinue: () => this.#retryAttempt > 0 && !this.#retryAbortRequested,
+			shouldContinue: () =>
+				this.#retrySagaId === retrySagaId && this.#retryAttempt > 0 && !this.#retryAbortRequested,
 			onSkip: () => {
 				if (preservedContinuation) this.#removePreservedTurnContinuation(preservedContinuation);
-				void this.#finishSkippedRetry(generation);
+				void this.#finishSkippedRetry(retrySagaId);
 			},
 			onError: error => {
 				if (preservedContinuation) this.#removePreservedTurnContinuation(preservedContinuation);
-				void this.#failRetryAfterLocalContinueError(message, error);
+				void this.#failRetryAfterLocalContinueError(message, error, retrySagaId);
 			},
 		});
 
 		return true;
 	}
 	/** Close a retry whose scheduled continuation was invalidated before it started. */
-	async #finishSkippedRetry(generation: number): Promise<void> {
-		if (this.#host.promptGeneration() !== generation || this.#retryAttempt === 0) return;
+	async #finishSkippedRetry(retrySagaId: number): Promise<void> {
+		if (this.#retrySagaId !== retrySagaId || this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		this.#clearPendingRetryErrors();
@@ -2686,18 +2727,24 @@ export class TurnRecovery {
 	 * closing `auto_retry_end` so subscribers stop showing retry progress, and
 	 * resolve the retry promise so the in-flight prompt() unwinds (issue #5382).
 	 */
-	async #failRetryAfterLocalContinueError(message: AssistantMessage, error: unknown): Promise<void> {
-		if (this.#retryAttempt === 0) return;
+	async #failRetryAfterLocalContinueError(
+		message: AssistantMessage,
+		error: unknown,
+		retrySagaId: number,
+	): Promise<void> {
+		if (this.#retrySagaId !== retrySagaId || this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
 		this.#retryAttempt = 0;
 		const localError = error instanceof Error ? error.message : String(error);
 		await this.persistTerminalEmptyErrorTurn(message);
+		if (this.#retrySagaId !== retrySagaId) return;
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
 			attempt,
 			finalError: `Retry continuation failed locally: ${localError}. Original error: ${message.errorMessage ?? "Unknown error"}`,
 		});
+		if (this.#retrySagaId !== retrySagaId) return;
 		this.#clearPendingRetryErrors();
 		this.resolveRetry();
 	}
@@ -2732,6 +2779,8 @@ export class TurnRecovery {
 	}
 	abortRetry(): void {
 		this.#retryAbortRequested = true;
+		this.#retryAbortPromptGeneration = this.#host.promptGeneration();
+		this.#retryAbortPromptSequence = this.#host.promptSequence();
 		this.#retryAbortController?.abort();
 		// The active backoff or scheduled continuation resets the attempt count.
 		this.resolveRetry();

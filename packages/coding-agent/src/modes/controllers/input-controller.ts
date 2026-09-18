@@ -2028,7 +2028,18 @@ export class InputController {
 			if (attachedFromFileUrls) return true;
 			// No usable image-file URL (pure bitmap pasteboard: screenshots,
 			// browser copies, or a non-image Finder selection). Fall to the
-			// image representation.
+			// image representation. The text bridge starts alongside the image
+			// bridge: on Windows each is a cold powershell.exe spawn (~100ms+),
+			// so serial awaits stall an empty clipboard by their sum before
+			// "Clipboard is empty" can surface. Image precedence is preserved —
+			// a resolved text payload is discarded unused when an image is present.
+			const textPromise = this.clipboard.readText();
+			// Settle-mark the shared promise so a later image throw (which skips
+			// the text await below) can never surface as an unhandled rejection.
+			textPromise.then(
+				() => {},
+				() => {},
+			);
 			const image = await this.clipboard.readImage();
 			if (image) {
 				if (promptTarget) {
@@ -2049,7 +2060,7 @@ export class InputController {
 			// Hosts that pre-empt the terminal's own paste (VS Code's
 			// integrated terminal, Win+V clipboard history) deliver only
 			// this keypress, so a miss here must not dead-end.
-			const text = await this.clipboard.readText();
+			const text = await textPromise;
 			if (!text) {
 				this.ctx.showStatus("Clipboard is empty");
 				return false;

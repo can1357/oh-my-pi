@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type {
 	ApiKeyResolveContext,
 	AssistantMessage,
@@ -2784,69 +2784,102 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
-	it("cleans up a queued preserved continuation when the retry is aborted", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+	it.each([false, true])(
+		"cleans up a queued preserved continuation when the retry is aborted (user follow-up: %s)",
+		async includeUserFollowUp => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled Anthropic test model to exist");
 
-		const mock = createMockModel({
-			responses: [
-				{
-					content: [{ type: "text", text: "partial report" }],
-					stopReason: "error",
-					errorMessage: "Socket is closed",
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [{ type: "text", text: "partial report" }],
+						stopReason: "error",
+						errorMessage: "Socket is closed",
+					},
+				],
+			});
+			const agent = new Agent({
+				getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
 				},
-			],
-		});
-		const agent = new Agent({
-			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
-		});
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
-			"retry.modelFallback": false,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		const sessionManager = SessionManager.inMemory();
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings,
-			modelRegistry,
-		});
-		const waitSpy = mockSchedulerWaitWithClock();
-		let sawQueuedContinuation = false;
-		waitSpy.mockImplementation(async (delayMs, options) => {
-			if (delayMs === 1) {
-				sawQueuedContinuation = agent.peekFollowUpQueue().some(message => message.role === "developer");
-				session?.abortRetry();
+				streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": false,
+			});
+			settings.setModelRole("default", `${model.provider}/${model.id}`);
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings,
+				modelRegistry,
+			});
+			const waitSpy = mockSchedulerWaitWithClock();
+			let sawQueuedContinuation = false;
+			const queuedUserText = "queued user follow-up";
+			const queuedUserFollowUp: Parameters<Agent["followUp"]>[0] = {
+				role: "user",
+				content: [{ type: "text", text: queuedUserText }],
+				timestamp: Date.now(),
+			};
+			const isQueuedUserFollowUp = (message: AgentMessage): boolean =>
+				message.role === "user" &&
+				(typeof message.content === "string"
+					? message.content === queuedUserText
+					: message.content.some(block => block.type === "text" && block.text === queuedUserText));
+			let userFollowUpDelivered = 0;
+			const removeAgentObserver = agent.subscribe(event => {
+				if (event.type === "message_end" && isQueuedUserFollowUp(event.message)) userFollowUpDelivered++;
+			});
+			waitSpy.mockImplementation(async (delayMs, options) => {
+				if (delayMs === 1) {
+					sawQueuedContinuation = agent.peekFollowUpQueue().some(message => message.role === "developer");
+					if (includeUserFollowUp) agent.followUp(queuedUserFollowUp);
+					session?.abortRetry();
+				}
+				options?.signal?.throwIfAborted();
+			});
+			const retryEndEvents: AutoRetryEndEvent[] = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_end") retryEndEvents.push(event);
+			});
+
+			await session.prompt("Write the report");
+			await session.waitForIdle();
+
+			expect(sawQueuedContinuation).toBe(true);
+			expect(agent.peekFollowUpQueue().some(message => message.role === "developer")).toBe(false);
+			removeAgentObserver();
+			expect(
+				sessionManager.getBranch().some(entry => entry.type === "message" && entry.message.role === "developer"),
+			).toBe(false);
+			expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: false, attempt: 1 }));
+			expect(session.isRetrying).toBe(false);
+			if (!includeUserFollowUp) {
+				expect(userFollowUpDelivered).toBe(0);
+				expect(mock.calls).toHaveLength(1);
+				return;
 			}
-			options?.signal?.throwIfAborted();
-		});
-		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-		});
 
-		await session.prompt("Write the report");
-		await session.waitForIdle();
-
-		expect(sawQueuedContinuation).toBe(true);
-		expect(agent.peekFollowUpQueue().some(message => message.role === "developer")).toBe(false);
-		expect(
-			sessionManager.getBranch().some(entry => entry.type === "message" && entry.message.role === "developer"),
-		).toBe(false);
-		expect(mock.calls).toHaveLength(1);
-		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: false, attempt: 1 }));
-		expect(session.isRetrying).toBe(false);
-	});
+			expect(userFollowUpDelivered).toBe(1);
+			expect(mock.calls).toHaveLength(2);
+			const secondCall = mock.calls[1];
+			if (!secondCall) throw new Error("Expected the queued user follow-up model call");
+			expect(secondCall.context.messages.some(isQueuedUserFollowUp)).toBe(true);
+			expect(secondCall.context.messages.some(message => message.role === "developer" && message.synthetic)).toBe(
+				false,
+			);
+		},
+	);
 	it.each([
 		[
 			"OpenAI-completions stall",
