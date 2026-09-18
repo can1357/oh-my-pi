@@ -10,6 +10,7 @@
 ### Added
 
 - `ssh://` host listing, `ssh://` autocomplete and `/ssh list` now include the `Host` aliases from `~/.ssh/config` and `/etc/ssh/ssh_config` (following `Include`); `ssh.json` entries win on a name clash
+- Add a declarative YAML workload runner for ordered tasks and templated inputs. ([#12226](https://github.com/can1357/oh-my-pi/pull/12226) by [@Xytronix](https://github.com/Xytronix)).
 
 ### Fixed
 
