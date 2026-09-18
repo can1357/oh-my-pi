@@ -3,6 +3,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
+import { POLL_WAIT_LADDER_MS } from "../async/job-manager";
 import {
 	type BlobDestinationId,
 	type BlobDestinationMetadata,
@@ -4721,6 +4722,12 @@ export const SETTINGS_SCHEMA = {
 	"async.maxJobs": {
 		type: "number",
 		default: 100,
+	},
+
+	/** Consecutive hub job/message wait intervals; repeat the final interval. */
+	"async.waitBackoffMs": {
+		type: "array",
+		default: [...POLL_WAIT_LADDER_MS] as number[],
 	},
 
 	"irc.timeoutMs": {

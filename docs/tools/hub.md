@@ -62,6 +62,13 @@ Outcomes:
 
 Ladder bookkeeping (`nextPollWaitMs` / `recordPollWaitEnd`) runs only on paths that actually block; immediate returns leave the rung untouched.
 
+Set `async.waitBackoffMs` in `config.yml` to customize consecutive job/message wait
+windows. The default is `[5000, 10000, 30000, 60000, 300000]` milliseconds. The final
+interval repeats until a minute passes between waits, which resets the ladder.
+Use a nonempty list of integer intervals from 1 to 2147483647 milliseconds; invalid
+values produce a tool error. Completion, messages and steering still wake waits
+immediately. Named-process waits retain their separate `timeout` parameter.
+
 ## Outputs
 - Messaging and job results: single text block plus `details: CoordinationDetails` — `{ op, from?, to?, receipts?, waited?, inbox?, peers?, jobs?, cancelled?, agents? }`. Shapes are unchanged from the former tools except that job-op details now carry `op` (`"wait" | "cancel" | "jobs"`).
 - Process results: `details: LaunchToolDetails` — `{ op, daemon?, daemons?, cursor?, timedOut?, state?, terminalRows?, matched?, spec? }`, unchanged from the former `launch` tool (internally `ps` stores the broker op `list`).
