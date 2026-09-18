@@ -26,7 +26,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentSchemaMode } from "../task/types";
+import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
@@ -435,6 +435,13 @@ class SessionEntryIndex {
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
+	// Branch memo: getBranch() walks leaf-to-root per call (array + Set +
+	// reverse) on per-frame/per-turn paths. The branch only changes on
+	// insert/rebuild/setLeaf, so cache the array keyed on (leaf, generation).
+	// The array is shared read-only: no caller was found mutating it in place
+	// (reordering callers already .slice() first).
+	#generation = 0;
+	#branchCache: { leaf: string | null | undefined; generation: number; branch: SessionEntry[] } | undefined;
 
 	clear(): void {
 		this.#entriesById.clear();
@@ -442,6 +449,8 @@ class SessionEntryIndex {
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
+		this.#generation++;
+		this.#branchCache = undefined;
 	}
 
 	rebuild(entries: readonly SessionEntry[]): void {
@@ -452,6 +461,8 @@ class SessionEntryIndex {
 	insert(entry: SessionEntry): void {
 		this.#entriesById.set(entry.id, entry);
 		this.#leaf = entry.id;
+		this.#generation++;
+		this.#branchCache = undefined;
 
 		const bucket = this.#children.get(entry.parentId);
 		if (bucket) bucket.push(entry);
@@ -490,7 +501,10 @@ class SessionEntryIndex {
 	}
 
 	setLeaf(id: string | null): void {
+		if (this.#leaf === id) return;
 		this.#leaf = id;
+		this.#generation++;
+		this.#branchCache = undefined;
 	}
 
 	childrenOf(parentId: string): SessionEntry[] {
@@ -510,9 +524,26 @@ class SessionEntryIndex {
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
+		// Fast path: the default leaf branch is memoized. The cached array
+		// stays private — callers may sort/reverse/splice the result (the
+		// return type is SessionEntry[]), so hand out a copy. Explicit fromId
+		// walks (rare) bypass the cache.
+		if (
+			(id === undefined || id === this.#leaf) &&
+			this.#branchCache !== undefined &&
+			this.#branchCache.generation === this.#generation
+		) {
+			return [...this.#branchCache.branch];
+		}
+		const leaf = id === undefined ? this.#leaf : id;
 		const branch: SessionEntry[] = [];
+		// Per-path visited set: a corrupt cyclic parentId chain must stop at
+		// the FIRST repeated id (a bare depth cap of `size` still duplicates
+		// entries when unrelated entries inflate the index — e.g. a self-cycle
+		// plus one unrelated entry yields [entry, entry]). The Set lives only
+		// on the miss path; hits copy the memoized array below.
 		const seen = new Set<string>();
-		let cursor = id ? this.#entriesById.get(id) : undefined;
+		let cursor = leaf ? this.#entriesById.get(leaf) : undefined;
 
 		while (cursor && !seen.has(cursor.id)) {
 			seen.add(cursor.id);
@@ -520,6 +551,12 @@ class SessionEntryIndex {
 			cursor = cursor.parentId ? this.#entriesById.get(cursor.parentId) : undefined;
 		}
 		branch.reverse();
+		if (id === undefined || id === this.#leaf) {
+			// Store AND return separate copies: the miss-path caller gets a
+			// mutable array it may sort/reverse/splice, while the cache keeps
+			// a private pristine copy for future hits (which also copy).
+			this.#branchCache = { leaf, generation: this.#generation, branch: [...branch] };
+		}
 		return branch;
 	}
 

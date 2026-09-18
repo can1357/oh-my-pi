@@ -20,8 +20,10 @@ import { EventEmitter } from "events";
 import { isKittyProtocolActive } from "./keys";
 
 const ESC = "\x1b";
-const BRACKETED_PASTE_START = "\x1b[200~";
-const BRACKETED_PASTE_END = "\x1b[201~";
+/** Terminal bracketed-paste open marker wrapping pasted input. */
+export const BRACKETED_PASTE_START = "\x1b[200~";
+/** Terminal bracketed-paste close marker wrapping pasted input. */
+export const BRACKETED_PASTE_END = "\x1b[201~";
 // Paste-mode recovery bounds: a lost/corrupted end marker (ssh/tmux
 // truncation) must not hang input forever or grow memory unboundedly.
 const PASTE_INACTIVITY_TIMEOUT_MS = 1000;

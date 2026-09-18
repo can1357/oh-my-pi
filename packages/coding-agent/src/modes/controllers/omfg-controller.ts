@@ -3,8 +3,8 @@ import { CONFIG_DIR_NAME, prompt } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateCapabilityCache } from "../../capability";
 import type { Rule } from "../../capability/rule";
 import omfgUserPrompt from "../../prompts/system/omfg-user.md" with { type: "text" };
-import { shortenPath } from "../../tools/render-utils";
-import { OmfgPanelComponent } from "../components/omfg-panel";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { OmfgPanelComponent } from "@oh-my-pi/pi-tui/overlays/omfg-panel";
 import type { InteractiveModeContext } from "../types";
 import {
 	buildOmfgRuleForPath,

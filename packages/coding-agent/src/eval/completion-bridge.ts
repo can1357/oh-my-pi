@@ -31,14 +31,14 @@ import {
 import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	findRetryFallbackCandidates,
 	getRetryFallbackChains,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
-import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `completion()` helper across both runtimes. */
@@ -68,9 +68,12 @@ export interface EvalCompletionBridgeOptions {
 	emitStatus?: (event: JsStatusEvent) => void;
 }
 
+/** Terminal payload of a retained handle; `judge()` handles share the registry and report no tier. */
 export interface EvalCompletionResult {
 	text: string;
-	details: { model: string; tier: CompletionTier; structured: boolean };
+	/** Structured payload; when present the cell receives it in place of `text`. */
+	data?: unknown;
+	details: { model: string; tier?: CompletionTier; structured: boolean };
 }
 
 /** Handle returned immediately after an eval completion starts. */
@@ -400,7 +403,23 @@ export async function runEvalCompletion(
 		);
 	}
 
-	const id = `cmp-${Snowflake.next()}`;
+	return retainCompletionHandle("cmp", options, signal =>
+		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal),
+	);
+}
+
+/**
+ * Run `execute` in the background under a session-owned, cancellable handle
+ * and return its id immediately; `wait()`/`status()`/`cancel()` resolve it
+ * through {@link getCompletionHandle}. Settled entries are evicted after
+ * {@link COMPLETION_HANDLE_RETENTION_MS}.
+ */
+export function retainCompletionHandle(
+	prefix: string,
+	options: EvalCompletionBridgeOptions,
+	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
+): EvalCompletionHandleResult {
+	const id = `${prefix}-${Snowflake.next()}`;
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const controller = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
@@ -411,7 +430,7 @@ export async function runEvalCompletion(
 		settled: false,
 	};
 	completionHandles.set(id, entry);
-	entry.promise = executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal)
+	entry.promise = execute(signal)
 		.then(
 			result => {
 				entry.result = result;

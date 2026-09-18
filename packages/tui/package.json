@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-tui",
-  "version": "18.2.1",
+  "version": "18.2.6",
   "description": "Terminal User Interface library with differential rendering for efficient text-based applications",
   "homepage": "https://omp.sh",
   "author": "Stencil Labs, Inc.",
@@ -37,8 +37,14 @@
     "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
   },
   "dependencies": {
+    "@oh-my-pi/omptype": "catalog:",
+    "@oh-my-pi/pi-agent-core": "catalog:",
+    "@oh-my-pi/pi-ai": "catalog:",
+    "@oh-my-pi/pi-catalog": "catalog:",
     "@oh-my-pi/pi-natives": "catalog:",
-    "@oh-my-pi/pi-utils": "catalog:"
+    "@oh-my-pi/pi-utils": "catalog:",
+    "@oh-my-pi/pi-wire": "catalog:",
+    "@oh-my-pi/snapcompact": "catalog:"
   },
   "devDependencies": {
     "kitty-vt-wasm": "catalog:"
@@ -55,6 +61,34 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts"
+    },
+    "./theme": {
+      "types": "./src/theme/index.ts",
+      "import": "./src/theme/index.ts"
+    },
+    "./theme/defaults": {
+      "types": "./src/theme/defaults/index.ts",
+      "import": "./src/theme/defaults/index.ts"
+    },
+    "./theme/*": {
+      "types": "./src/theme/*.ts",
+      "import": "./src/theme/*.ts"
+    },
+    "./render": {
+      "types": "./src/render/index.ts",
+      "import": "./src/render/index.ts"
+    },
+    "./chrome": {
+      "types": "./src/chrome/index.ts",
+      "import": "./src/chrome/index.ts"
+    },
+    "./tools": {
+      "types": "./src/tools/index.ts",
+      "import": "./src/tools/index.ts"
+    },
+    "./status-line": {
+      "types": "./src/status-line/index.ts",
+      "import": "./src/status-line/index.ts"
     },
     "./*": {
       "types": "./src/*.ts",

@@ -1,22 +1,24 @@
 import { describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	dispatchResolutionDevice,
 	isPreviewResolutionToolCall,
 	isProposeToolCall,
 	type PlanProposalHandler,
-	PROPOSE_DEVICE_NAME,
 	PROPOSE_DEVICE_PATH,
-	REJECT_DEVICE_NAME,
 	REJECT_DEVICE_PATH,
-	RESOLVE_DEVICE_NAME,
 	RESOLVE_DEVICE_PATH,
 	resolutionDeviceUsage,
-	resolveRenderer,
 	writeDeviceDispatch,
 } from "@oh-my-pi/pi-coding-agent/tools/resolve";
+import {
+	PROPOSE_DEVICE_NAME,
+	REJECT_DEVICE_NAME,
+	RESOLVE_DEVICE_NAME,
+	resolveRenderer,
+} from "@oh-my-pi/pi-tui/tools/resolve";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 
 function createSession(

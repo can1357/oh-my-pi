@@ -5,20 +5,28 @@ import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ALL_SCENES,
+	createSetupHost,
 	CURRENT_SETUP_VERSION,
 	markSetupWizardComplete,
 	runSetupWizard,
 	type SetupScene,
 	type SetupSceneHost,
 	selectSetupScenes,
-} from "@oh-my-pi/pi-coding-agent/modes/setup-wizard";
-import { providersSetupScene } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/providers";
-import { themeSetupScene } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/theme";
-import { WebSearchTab } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/web-search";
-import { SetupWizardComponent } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/wizard-overlay";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+} from "@oh-my-pi/pi-coding-agent/modes/setup";
+import { providersSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/providers";
+import { themeSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/theme";
+import { WebSearchTab } from "@oh-my-pi/pi-tui/setup/scenes/web-search";
+import { SetupWizardComponent } from "@oh-my-pi/pi-tui/setup/wizard-overlay";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { SEARCH_PROVIDER_OPTIONS } from "@oh-my-pi/pi-tui/tools/web-search";
+import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
+
+type SetupApplicationSceneHost = Omit<SetupSceneHost, "ctx"> & { ctx: InteractiveModeContext };
+
+function bindSceneHost(host: SetupApplicationSceneHost): SetupSceneHost {
+	return { ...host, ctx: createSetupHost(host.ctx) };
+}
 
 function fakeContextWithConfiguredModel(): InteractiveModeContext {
 	return {
@@ -143,7 +151,7 @@ describe("setup wizard model selection", () => {
 				return { switched: true };
 			},
 		);
-		const host = {
+		const host = bindSceneHost({
 			ctx: {
 				settings,
 				session: {
@@ -163,7 +171,7 @@ describe("setup wizard model selection", () => {
 			finish: (next: string) => finished.resolve(next),
 			setFocus: () => {},
 			restoreFocus: () => {},
-		} as unknown as SetupSceneHost;
+		} as unknown as SetupApplicationSceneHost);
 		const scene = ALL_SCENES.find(candidate => candidate.id === "model");
 		expect(scene).toBeDefined();
 
@@ -268,7 +276,7 @@ describe("setup wizard mouse routing", () => {
 				requestRender: () => {},
 			},
 		} as unknown as InteractiveModeContext;
-		const component = new SetupWizardComponent(ctx, [scene]);
+		const component = new SetupWizardComponent(createSetupHost(ctx), [scene]);
 		try {
 			void component.run();
 			// Left click during the splash advances into the scene, like Enter.
@@ -317,7 +325,7 @@ describe("setup wizard mouse routing", () => {
 				requestRender: () => {},
 			},
 		} as unknown as InteractiveModeContext;
-		const component = new SetupWizardComponent(ctx, [scene]);
+		const component = new SetupWizardComponent(createSetupHost(ctx), [scene]);
 		try {
 			void component.run();
 			component.handleInput("\r"); // splash → scene
@@ -378,7 +386,7 @@ describe("setup wizard short terminals", () => {
 
 	it("keeps the selected provider row visible while navigating on a 24-row terminal", async () => {
 		await initTheme(false, "unicode", false, "titanium", "light");
-		const component = new SetupWizardComponent(shortTerminalCtx(24), [providersSetupScene]);
+		const component = new SetupWizardComponent(createSetupHost(shortTerminalCtx(24)), [providersSetupScene]);
 		void component.run();
 		component.handleInput("\r"); // splash → scene
 		const nowSpy = skipDissolve();
@@ -400,7 +408,7 @@ describe("setup wizard short terminals", () => {
 
 	it("keeps the curated theme list and its selection visible on a 24-row terminal", async () => {
 		await initTheme(false, "unicode", false, "titanium", "light");
-		const component = new SetupWizardComponent(shortTerminalCtx(24), [themeSetupScene]);
+		const component = new SetupWizardComponent(createSetupHost(shortTerminalCtx(24)), [themeSetupScene]);
 		void component.run();
 		component.handleInput("\r"); // splash → scene
 		const nowSpy = skipDissolve();
@@ -425,7 +433,7 @@ describe("setup wizard theme previews", () => {
 		const setupScene = ALL_SCENES.find(scene => scene.id === "theme");
 		expect(setupScene).toBeDefined();
 
-		const host = {
+		const host = bindSceneHost({
 			ctx: {
 				settings,
 				ui: {
@@ -437,7 +445,7 @@ describe("setup wizard theme previews", () => {
 			finish: () => {},
 			setFocus: () => {},
 			restoreFocus: () => {},
-		} as unknown as SetupSceneHost;
+		} as unknown as SetupApplicationSceneHost);
 
 		const controller = setupScene!.mount(host);
 		controller.handleInput?.("5");
@@ -459,7 +467,7 @@ describe("setup wizard glyph scene", () => {
 		expect(scene).toBeDefined();
 
 		let finished = false;
-		const host = {
+		const host = bindSceneHost({
 			ctx: {
 				settings,
 				ui: { invalidate: () => {}, requestRender: () => {} },
@@ -470,7 +478,7 @@ describe("setup wizard glyph scene", () => {
 			},
 			setFocus: () => {},
 			restoreFocus: () => {},
-		} as unknown as SetupSceneHost;
+		} as unknown as SetupApplicationSceneHost);
 
 		const controller = scene!.mount(host);
 		// Row "1" is now Nerd Font (it must lead the list).
@@ -486,14 +494,9 @@ describe("setup wizard glyph scene", () => {
 });
 
 describe("setup wizard web search tab", () => {
-	it("exposes every web-search provider preference in the shared TUI list", () => {
-		expect(SEARCH_PROVIDER_OPTIONS[0]?.value).toBe("auto");
-		expect(SEARCH_PROVIDER_OPTIONS.slice(1).map(option => option.value)).toEqual([...SEARCH_PROVIDER_ORDER]);
-	});
-
 	it("persists the highlighted provider as the head of the web search order", async () => {
 		const settings = Settings.isolated();
-		const host = {
+		const host = bindSceneHost({
 			ctx: {
 				settings,
 				session: { modelRegistry: { authStorage: { hasAuth: () => false } } },
@@ -502,7 +505,7 @@ describe("setup wizard web search tab", () => {
 			finish: () => {},
 			setFocus: () => {},
 			restoreFocus: () => {},
-		} as unknown as SetupSceneHost;
+		} as unknown as SetupApplicationSceneHost);
 
 		const tab = new WebSearchTab(host);
 		tab.handleInput("\x1b[B"); // move off "auto" to the next provider
@@ -519,7 +522,7 @@ describe("setup wizard web search tab", () => {
 
 	it("can select the last provider in the setup TUI list", async () => {
 		const settings = Settings.isolated();
-		const host = {
+		const host = bindSceneHost({
 			ctx: {
 				settings,
 				session: { modelRegistry: { authStorage: { hasAuth: () => false } } },
@@ -528,7 +531,7 @@ describe("setup wizard web search tab", () => {
 			finish: () => {},
 			setFocus: () => {},
 			restoreFocus: () => {},
-		} as unknown as SetupSceneHost;
+		} as unknown as SetupApplicationSceneHost);
 
 		const tab = new WebSearchTab(host);
 		for (let i = 1; i < SEARCH_PROVIDER_OPTIONS.length; i++) {

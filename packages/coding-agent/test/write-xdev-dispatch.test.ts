@@ -5,13 +5,15 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { requiresApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
-import { githubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/gh-renderer";
-import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import { WriteTool, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { githubToolRenderer } from "@oh-my-pi/pi-tui/tools/github";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import { type WriteRenderContext, writeToolRenderer } from "@oh-my-pi/pi-tui/tools/write";
+import type { XdevMountedRenderer } from "@oh-my-pi/pi-tui/tools/xdev";
 import {
 	listXdevTools,
 	resolveMountedXdevTool,
@@ -24,6 +26,13 @@ import {
 	xdevEntries,
 } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+
+/** Mirrors `ToolExecutionComponent#buildRenderContext`: mounted tools expose their render hooks to the write renderer. */
+function mountedRenderContext(xdev: XdevState): WriteRenderContext {
+	return {
+		resolveXdevMounted: name => resolveMountedXdevTool(xdev, name) as XdevMountedRenderer | undefined,
+	};
+}
 
 // xdev mounting is default-on: discoverable tools like ast_edit unmount into
 // xd://, and a plain `write xd://ast_edit` dispatches them. These guard the
@@ -395,7 +404,7 @@ describe("read and write route xd:// device URLs", () => {
 			{
 				expanded: false,
 				isPartial: false,
-				renderContext: { resolveXdevMounted: name => resolveMountedXdevTool(xdev, name) },
+				renderContext: mountedRenderContext(xdev),
 			},
 			uiTheme,
 			{ path: "xd://github", content },
@@ -433,7 +442,7 @@ describe("read and write route xd:// device URLs", () => {
 			{
 				expanded: false,
 				isPartial: false,
-				renderContext: { resolveXdevMounted: name => resolveMountedXdevTool(xdev, name) },
+				renderContext: mountedRenderContext(xdev),
 			},
 			uiTheme,
 			{ path: "xd://weather", content },

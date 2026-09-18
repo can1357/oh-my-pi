@@ -1,3 +1,4 @@
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { afterEach, beforeAll, describe, expect, type Mock, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -14,9 +15,9 @@ import {
 	ModelHubComponent,
 	type ModelHubOptions,
 	resetProviderAutoRefreshGuard,
-} from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
-import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+} from "@oh-my-pi/pi-tui/overlays/model-hub";
+import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 function normalize(lines: readonly string[]): string {
@@ -54,7 +55,7 @@ function installTestTheme(): void {
 
 interface RegistryOverrides {
 	refresh?: (mode: string) => Promise<void>;
-	refreshProvider?: (providerId: string, mode: string) => Promise<void>;
+	refreshProvider?: ModelRegistry["refreshProvider"];
 	getAvailable?: () => Model[];
 	getAll?: () => Model[];
 	getDiscoverableProviders?: () => string[];
@@ -127,7 +128,7 @@ function createHub(options: {
 	});
 	const hub = new ModelHubComponent(
 		ui,
-		settings,
+		createModelBrowserSource(settings),
 		registry,
 		options.scoped ? modelsFn().map(model => ({ model })) : [],
 		{
@@ -1406,7 +1407,7 @@ describe("ModelHub", () => {
 	describe("provider refresh lifecycle", () => {
 		test("auto-refreshes a provider once per process; F5 forces a re-fetch", async () => {
 			const model = makeModel("prov-a", "model-a");
-			const refreshProvider = vi.fn(async () => {});
+			const refreshProvider = vi.fn<ModelRegistry["refreshProvider"]>(async () => {});
 			const { hub } = createHub({
 				models: [model],
 				registry: { refreshProvider },
@@ -1420,6 +1421,7 @@ describe("ModelHub", () => {
 			await Bun.sleep(140);
 			expect(refreshProvider).toHaveBeenCalledTimes(1);
 			expect(refreshProvider).toHaveBeenCalledWith("prov-a", "online");
+			expect(refreshProvider.mock.calls[0]?.[2]).toBeUndefined();
 
 			hub.handleInput(UP); // back to All models
 			hub.handleInput(DOWN); // revisit prov-a
@@ -1430,6 +1432,75 @@ describe("ModelHub", () => {
 			hub.handleInput("\x1b[15~"); // F5
 			await Bun.sleep(140);
 			expect(refreshProvider).toHaveBeenCalledTimes(2);
+			expect(refreshProvider).toHaveBeenCalledWith("prov-a", "online", { refreshCommandCredentials: true });
+		});
+
+		test("F5 during the hover debounce upgrades the pending catalog refresh", async () => {
+			const model = makeModel("prov-a", "model-a");
+			const refreshProvider = vi.fn(async () => {});
+			const { hub } = createHub({
+				models: [model],
+				registry: { refreshProvider },
+			});
+			installTestTheme();
+
+			hub.handleInput(DOWN); // schedules catalog-only refresh
+			hub.handleInput("\x1b[15~"); // F5 before the 120ms debounce fires
+			await Bun.sleep(40);
+			expect(refreshProvider).toHaveBeenCalledTimes(1);
+			expect(refreshProvider).toHaveBeenCalledWith("prov-a", "online", { refreshCommandCredentials: true });
+			await Bun.sleep(140);
+			expect(refreshProvider).toHaveBeenCalledTimes(1);
+		});
+
+		test("F5 while a catalog refresh is in flight queues a credential re-mint", async () => {
+			const model = makeModel("prov-a", "model-a");
+			const gate = Promise.withResolvers<void>();
+			const refreshProvider = vi.fn<ModelRegistry["refreshProvider"]>(() => gate.promise);
+			const { hub } = createHub({
+				models: [model],
+				registry: { refreshProvider },
+			});
+			installTestTheme();
+
+			hub.handleInput(DOWN);
+			await Bun.sleep(140);
+			expect(refreshProvider).toHaveBeenCalledTimes(1);
+			expect(refreshProvider.mock.calls[0]?.[2]).toBeUndefined();
+
+			hub.handleInput("\x1b[15~");
+			expect(refreshProvider).toHaveBeenCalledTimes(1);
+
+			gate.resolve();
+			await Bun.sleep(0);
+			expect(refreshProvider).toHaveBeenCalledTimes(2);
+			expect(refreshProvider).toHaveBeenLastCalledWith("prov-a", "online", { refreshCommandCredentials: true });
+		});
+
+		test("F5 still re-mints credentials after navigating away mid-fetch", async () => {
+			const modelA = makeModel("prov-a", "model-a");
+			const modelB = makeModel("prov-b", "model-b");
+			const gate = Promise.withResolvers<void>();
+			const refreshProvider = vi.fn<ModelRegistry["refreshProvider"]>(() => gate.promise);
+			const { hub } = createHub({
+				models: [modelA, modelB],
+				registry: { refreshProvider },
+			});
+			installTestTheme();
+
+			hub.handleInput(DOWN); // All models → prov-a
+			await Bun.sleep(140);
+			expect(refreshProvider).toHaveBeenCalledTimes(1);
+			expect(refreshProvider.mock.calls[0]?.[2]).toBeUndefined();
+
+			hub.handleInput("\x1b[15~"); // queue credential refresh behind the in-flight catalog fetch
+			hub.handleInput(UP); // All models — must not drop the F5
+			expect(refreshProvider).toHaveBeenCalledTimes(1);
+
+			gate.resolve();
+			await Bun.sleep(0);
+			expect(refreshProvider).toHaveBeenCalledTimes(2);
+			expect(refreshProvider).toHaveBeenLastCalledWith("prov-a", "online", { refreshCommandCredentials: true });
 		});
 
 		test("shows a refreshing status while the provider fetch is in flight", async () => {

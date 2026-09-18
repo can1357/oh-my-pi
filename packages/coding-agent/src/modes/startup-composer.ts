@@ -1,16 +1,21 @@
 import { scheduler } from "node:timers/promises";
 import type { Terminal } from "@oh-my-pi/pi-tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import type { LspServerInfo, RecentSession } from "./components/welcome";
-import { COMPOSER_DEFAULTS, Composer, type ComposerPreferences, type ComposerWelcomeUpdate } from "./composer";
+import type { LspServerInfo, RecentSession } from "@oh-my-pi/pi-tui/prompt/welcome";
+import {
+	COMPOSER_DEFAULTS,
+	Composer,
+	type ComposerPreferences,
+	type ComposerWelcomeUpdate,
+} from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	type ComposerThemePreferences,
 	readComposerStartupCache,
 	writeComposerLspCache,
 	writeComposerRecentSessionsCache,
 	writeComposerUiCache,
-} from "./composer-cache";
-import { initThemeSync } from "./theme/theme";
+} from "@oh-my-pi/pi-tui/prompt/composer-cache";
+import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
 export interface PrepaintComposerOptions {
