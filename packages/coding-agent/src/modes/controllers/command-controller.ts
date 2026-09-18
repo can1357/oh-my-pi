@@ -40,6 +40,7 @@ import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/p
 import type { InteractiveModeContext } from "../../modes/types";
 import { renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { renderFullContextExplorer } from "../../context-flow/format";
 import { buildHotkeysMarkdown } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
@@ -681,6 +682,11 @@ export class CommandController {
 		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
+			return;
+		}
+		if (typeof this.ctx.session.getContextFlowSnapshot === "function") {
+			const flow = this.ctx.session.getContextFlowSnapshot(breakdown);
+			this.ctx.showContextExplorer(renderFullContextExplorer(breakdown, flow));
 			return;
 		}
 		const output = renderContextUsage(breakdown, theme);

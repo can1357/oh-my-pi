@@ -93,6 +93,17 @@ import {
 	deriveContextPolicy,
 	type OmpTokenomicsBridge,
 } from "../rlm/tokenomics-bridge";
+import {
+	buildContextFlowSnapshot,
+	getContextFlowRegistry,
+	type ContextFlowSnapshot,
+} from "../context-flow";
+import {
+	contextFlowBeginTurn,
+	contextFlowRecordModelCall,
+	contextFlowSeedResearchStack,
+} from "../context-flow/hooks";
+import { computeSessionContextBreakdown } from "./context-usage-runtime";
 
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
@@ -1320,6 +1331,7 @@ export class AgentSession {
 		} catch {
 			this.#tokenomics = undefined;
 		}
+		contextFlowSeedResearchStack(this);
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#extensionRoots =
@@ -3366,6 +3378,15 @@ export class AgentSession {
 						cacheWrite: assistantMsg.usage.cacheWrite,
 					},
 					costUsd: assistantMsg.usage.cost.total,
+				});
+				contextFlowRecordModelCall(this, {
+					component: "omp.root",
+					role: "root",
+					provider: assistantMsg.provider,
+					model: assistantMsg.model,
+					usage: assistantMsg.usage,
+					durationMs: assistantMsg.duration,
+					visibility: "root",
 				});
 				// Tokenomics: root incremental model call (provider-reported only).
 				void this.#tokenomics
@@ -7840,6 +7861,8 @@ export class AgentSession {
 			return;
 		}
 
+		contextFlowBeginTurn(this, text.slice(0, 80));
+
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template
 		// expansion. prompt() awaits manual-compaction cleanup and (on the non-streaming path)
 		// image normalization/vision description before dispatching, so a stream can start in
@@ -9499,6 +9522,32 @@ export class AgentSession {
 	getTokenomicsBridge(): OmpTokenomicsBridge | undefined {
 		return this.#tokenomics;
 	}
+
+	getContextOffloadSummary(): { externalBytes: number; reintroducedTokens: number } | null {
+		const snap = getContextFlowRegistry(this).snapshot().offload;
+		if (!snap.active && snap.externalBytes <= 0) return null;
+		return { externalBytes: snap.externalBytes, reintroducedTokens: snap.reintroducedTokens };
+	}
+
+	getContextFlowSnapshot(breakdown?: import("@oh-my-pi/pi-tui/status-line/context-usage").ContextBreakdown): ContextFlowSnapshot {
+		const bd = breakdown ?? computeSessionContextBreakdown(this, { snapcompactSavings: true });
+		let rlmMetrics: import("../rlm/store").RlmMetrics | undefined;
+		try {
+			if (rlmEnabled(this as never)) {
+				rlmMetrics = getRlmRuntime(this as never).store.metrics;
+			}
+		} catch {
+			rlmMetrics = undefined;
+		}
+		return buildContextFlowSnapshot({
+			registry: getContextFlowRegistry(this),
+			breakdown: bd,
+			bridge: this.#tokenomics,
+			rlmMetrics,
+		});
+	}
+
+
 
 	/**
 	 * Run a one-shot side-channel completion against a detached snapshot of the

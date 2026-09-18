@@ -211,6 +211,7 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { ContextExplorerOverlay } from "@oh-my-pi/pi-tui/overlays/context-explorer";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -959,6 +960,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlay: PlanReviewOverlay | undefined;
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
+	#contextExplorerOverlayHandle: OverlayHandle | undefined;
 	#planReviewCancel: (() => void) | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
@@ -5839,6 +5841,29 @@ export class InteractiveMode implements InteractiveModeContext {
 			margin: 0,
 		});
 		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+	}
+
+
+	showContextExplorer(body: string): void {
+		this.#hideContextExplorer();
+		const overlay = new ContextExplorerOverlay(this.ui, body, () => this.#hideContextExplorer());
+		this.#contextExplorerOverlayHandle = this.ui.showOverlay(overlay, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+	}
+
+	#hideContextExplorer(): void {
+		const handle = this.#contextExplorerOverlayHandle;
+		this.#contextExplorerOverlayHandle = undefined;
+		if (!handle) return;
+		handle.hide();
+		this.#selectorController.focusActiveEditorArea();
 		this.ui.requestRender();
 	}
 
