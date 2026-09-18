@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+
+## [18.2.6] - 2026-09-18
+
 ### Fixed
 
 - Fixed clipboard paste stalling on an empty clipboard; image and text clipboard reads now run concurrently so the empty-clipboard status surfaces after the slower read instead of the sum of both.
