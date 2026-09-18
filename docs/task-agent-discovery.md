@@ -241,6 +241,10 @@ The task item's optional `schemaMode` overrides the parent session mode; the def
 
 The model-facing prompt (`src/prompts/tools/task.md`) tags read-only agents and warns against offloading reasoning to `scout`/`sonic`.
 
+## Workloads
+
+A `prompt` step in a declarative workload ([Workloads](./workloads.md)) is spawned through `runStructuredSubagent`. The step's `model` is the spawn request's own selector — above `task.agentModelOverrides[agentName]` and the agent definition — and `output_schema` occupies the same caller `outputSchema` slot. `effort` is the coarse `lo` / `med` / `hi` hint documented above.
+
 ## Command discovery interaction
 
 `src/task/commands.ts` is parallel infrastructure for workflow commands (not agent definitions), but it follows the same overall pattern:

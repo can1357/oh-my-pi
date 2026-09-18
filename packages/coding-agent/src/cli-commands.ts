@@ -222,6 +222,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.usageHelp,
 	},
 	{
+		name: "workload",
+		load: () => import("./commands/workload").then(m => m.default),
+		help: commandHelp.workloadHelp,
+	},
+	{
 		name: "tiny-models",
 		load: () => import("./commands/tiny-models").then(m => m.default),
 		help: commandHelp.tinyModelsHelp,
