@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { JobRetuneStatus } from "@oh-my-pi/pi-tui/tools/hub";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import {
 	buildLineSnappedPreview,
@@ -260,6 +261,8 @@ export interface AsyncJobProgressSink {
 	deliver(jobId: string, text: string, job: AsyncJob, seq: number, info: AsyncJobProgressInfo): void | Promise<void>;
 	/** Permanently discard progress that the owner already queued before this job was acknowledged. */
 	acknowledge?(jobId: string): void;
+	/** Re-route progress already queued for `jobId` after its delivery mode changed. */
+	retune?(jobId: string, delivery: AsyncJobProgressDelivery): void;
 }
 
 /**
@@ -822,7 +825,6 @@ export class AsyncJobManager {
 		for (const job of jobs) {
 			job.status = "cancelled";
 			job.abortController.abort(reason);
-
 		}
 	}
 
@@ -904,6 +906,26 @@ export class AsyncJobManager {
 			job.progressDeliveredCount = Math.max(job.progressDeliveredCount ?? 0, 1);
 		}
 		return true;
+	}
+	/**
+	 * Retune a running job's already-monitored progress channel without changing
+	 * any settlement provenance or suppression state. This is deliberately not
+	 * {@link activateProgressDelivery}: that method's foreground provenance and
+	 * coverage defaults erase gap provenance (making settlement render an empty
+	 * completion), and it unsuppresses delivery, which would resume pushes into a
+	 * job a `hub wait` is watching.
+	 */
+	retuneProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery, ownerId?: string): JobRetuneStatus {
+		const job = this.#jobs.get(jobId);
+		if (!job) return "not_found";
+		if (ownerId !== undefined && job.ownerId !== ownerId) return "not_found";
+		if (job.status !== "running") return "not_running";
+		if (job.progressDelivery === undefined) return "unmonitored";
+		if (this.#isProgressDeliverySuppressed(jobId)) return "suppressed";
+		if (job.progressDelivery === delivery) return "unchanged";
+		job.progressDelivery = delivery;
+		if (job.ownerId !== undefined) this.#progressSinks.get(job.ownerId)?.retune?.(jobId, delivery);
+		return "retuned";
 	}
 
 	/** Replace the provisional progress artifact with the producer's settlement-time result. */

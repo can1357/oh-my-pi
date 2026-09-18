@@ -3,31 +3,32 @@
 > Execute a shell command in the session workspace, with optional PTY or background-job handling.
 
 ## Source
+
 - Entry: `packages/coding-agent/src/tools/bash.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/bash.md`
 - Key collaborators:
-  - `packages/coding-agent/src/tools/bash-interactive.ts` — PTY/TUI execution path.
-  - `packages/coding-agent/src/tools/bash-interceptor.ts` — blocks tool-better shell patterns.
-  - `packages/coding-agent/src/tools/bash-skill-urls.ts` — expands internal URLs to paths.
-  - `packages/coding-agent/src/tools/bash-pty-selection.ts` — `canUseInteractiveBashPty()` decides whether a call may use the local PTY overlay.
-  - `packages/coding-agent/src/tools/gh-cache-invalidation.ts` — drops `github-cache` rows for mutating `gh issue`/`gh pr` subcommands.
-  - `packages/coding-agent/src/exec/bash-executor.ts` — non-PTY shell execution.
-  - `packages/coding-agent/src/session/streaming-output.ts` — tail buffer, truncation, artifact spill.
-  - `packages/coding-agent/src/tools/tool-timeouts.ts` — timeout clamp bounds.
-  - `packages/coding-agent/src/config/settings-schema.ts` — default interceptor rules.
-  - `docs/bash-tool-runtime.md` — deeper executor/runtime notes; use as the companion doc for shell-session internals.
+   - `packages/coding-agent/src/tools/bash-interactive.ts` — PTY/TUI execution path.
+   - `packages/coding-agent/src/tools/bash-interceptor.ts` — blocks tool-better shell patterns.
+   - `packages/coding-agent/src/tools/bash-skill-urls.ts` — expands internal URLs to paths.
+   - `packages/coding-agent/src/tools/bash-pty-selection.ts` — `canUseInteractiveBashPty()` decides whether a call may use the local PTY overlay.
+   - `packages/coding-agent/src/tools/gh-cache-invalidation.ts` — drops `github-cache` rows for mutating `gh issue`/`gh pr` subcommands.
+   - `packages/coding-agent/src/exec/bash-executor.ts` — non-PTY shell execution.
+   - `packages/coding-agent/src/session/streaming-output.ts` — tail buffer, truncation, artifact spill.
+   - `packages/coding-agent/src/tools/tool-timeouts.ts` — timeout clamp bounds.
+   - `packages/coding-agent/src/config/settings-schema.ts` — default interceptor rules.
+   - `docs/bash-tool-runtime.md` — deeper executor/runtime notes; use as the companion doc for shell-session internals.
 
 ## Inputs
 
-| Field | Type | Required | Description |
-| --- | --- | --- | --- |
-| `command` | `string` | Yes | Shell command text to execute. A leading `cd <path> && ...` is rewritten into `cwd` only when `cwd` was omitted. |
-| `env` | `Record<string, string>` | No | Extra environment variables. Keys must match `^[A-Za-z_][A-Za-z0-9_]*$` or the tool throws. Values go through internal-URL expansion and are passed as environment values, not shell text. |
-| `timeout` | `number` | No | Timeout in seconds. Default `300`. `0` disables the deadline. Positive values are capped by `tools.maxTimeout` when that setting is positive, then clamped to the Bash range `1..3600`. |
-| `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`. Must exist and be a directory. |
-| `pty` | `boolean` | No | Request PTY mode. Default `false`. PTY is used only when `pty: true`, `PI_NO_PTY !== "1"`, and the tool context has a UI. |
-| `async` | `boolean \| "auto"` | No | `true` starts a background job immediately. `"auto"` starts inline, waits for `bash.asyncAuto.inlineGraceMs` (default one second), then promotes the same process if it is still running; a `timeout` at or below the grace plus a 1 s buffer never promotes and runs inline to completion. Present only when `async.enabled` is true. Neither mode changes the command deadline, including `timeout: 0`. |
-| `progress` | `"ambient" \| "wake"` | No | With `async: true` or `async: "auto"`, deliver complete non-empty output-line events to the model. In auto mode, delivery activates only after promotion: earlier output appears in the foreground/background-start result instead. `wake` pushes a follow-up turn while idle; `ambient` delivers only during an active turn. Lines collect into trailing 200 ms events. A token bucket permits a 10-event burst and refills one event permit every two seconds; this is a rate-limiter permit, not an LLM token. Suppressed inline events remain in the full artifact. Oversized lines retain their first and last 250 characters. A model-facing preview retains at most 3,000 UTF-8 bytes per job, split between its head and tail, and links the complete capture as `artifact://<id>`. |
+| Field      | Type                     | Required | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ---------- | ------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `command`  | `string`                 | Yes      | Shell command text to execute. A leading `cd <path> && ...` is rewritten into `cwd` only when `cwd` was omitted.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `env`      | `Record<string, string>` | No       | Extra environment variables. Keys must match `^[A-Za-z_][A-Za-z0-9_]*$` or the tool throws. Values go through internal-URL expansion and are passed as environment values, not shell text.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `timeout`  | `number`                 | No       | Timeout in seconds. Default `300`. `0` disables the deadline. Positive values are capped by `tools.maxTimeout` when that setting is positive, then clamped to the Bash range `1..3600`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `cwd`      | `string`                 | No       | Working directory, resolved against `session.cwd` via `resolveToCwd`. Must exist and be a directory.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `pty`      | `boolean`                | No       | Request PTY mode. Default `false`. PTY is used only when `pty: true`, `PI_NO_PTY !== "1"`, and the tool context has a UI.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `async`    | `boolean \| "auto"`      | No       | `true` starts a background job immediately. `"auto"` starts inline, waits for `bash.asyncAuto.inlineGraceMs` (default one second), then promotes the same process if it is still running; a `timeout` at or below the grace plus a 1 s buffer never promotes and runs inline to completion. Present only when `async.enabled` is true. Neither mode changes the command deadline, including `timeout: 0`.                                                                                                                                                                                                                                                                                                                                                                                   |
+| `progress` | `"ambient" \| "wake"`    | No       | With `async: true` or `async: "auto"`, deliver complete non-empty output-line events to the model. In auto mode, delivery activates only after promotion: earlier output appears in the foreground/background-start result instead. `wake` pushes a follow-up turn while idle; `ambient` delivers only during an active turn. Lines collect into trailing 200 ms events. A token bucket permits a 10-event burst and refills one event permit every two seconds; this is a rate-limiter permit, not an LLM token. Suppressed inline events remain in the full artifact. Oversized lines retain their first and last 250 characters. A model-facing preview retains at most 3,000 UTF-8 bytes per job, split between its head and tail, and links the complete capture as `artifact://<id>`. |
 
 ## Agent-facing guidance
 
@@ -59,7 +60,7 @@ Waiting on a condition? One sleeping async `until` loop; AVOID repeated tool pol
 Progress: 200 ms batches, 10-event burst, then 1 permit/2 s; suppressed events stay in the full artifact. Truncated batches show bounded `<head>`/`<tail>` and link `artifact://<id>`.
 Chatty progress: lower source verbosity (quiet or warning-only) or filter to actionable lines; safe to retry → stop and relaunch quieter.
 Hub: retune a chatty process without stopping it — `op: "monitor"` with `progress: "ambient"` or `"off"`.
-Bash: a job's `progress` is fixed at launch; retry unsafe → let it finish.
+Bash: retune a chatty job without stopping it — `hub` `op: "monitor"` with `ids: ["<job-id>"]` and `progress: "ambient"`. Queued wake output still lands once; a job launched without `progress` cannot gain one, and a job's channel cannot be detached. Retry unsafe → let it finish.
 Suppression reports repeat this guidance a few times with increasing spacing, then stop.
 Progress is pushed while you are idle. NEVER hold the turn open to receive it — no polling (`logs`, `ps`, any `wait` on a wake-monitored job), no tailing files; end the turn. Ending a turn to await a wake is NOT a yield.
 </async-progress>
@@ -73,24 +74,24 @@ When a batch was rate-limited or its preview exceeded the size bound, `<output>`
 
 Both modes use the same per-job batching and rate limiter. Their difference is when the model runs; the artifact retains the complete raw output in either mode. Concurrent jobs have independent buckets, so aggregate wake traffic grows with the number of monitored jobs.
 
-| Mode | When the agent receives it | Cost and tradeoff | Use it for |
-| --- | --- | --- | --- |
-| `wake` | Starts a follow-up turn when the agent is idle | May add model requests, thinking tokens, and latency, but the agent can act immediately | Readiness, failures, requests for input, or a newly available artifact |
+| Mode      | When the agent receives it                                                     | Cost and tradeoff                                                                           | Use it for                                                                     |
+| --------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `wake`    | Starts a follow-up turn when the agent is idle                                 | May add model requests, thinking tokens, and latency, but the agent can act immediately     | Readiness, failures, requests for input, or a newly available artifact         |
 | `ambient` | Waits for the next turn caused by completion, a user message, or another event | Several batches can share one model request; reaction to intermediate output may be delayed | Test, build, install, download, benchmark, or low-priority diagnostic progress |
 
 Ambient does not change batching, rate limiting, or artifact capture. It avoids spending an inference turn on updates that would produce no useful action, such as another passing test file or download percentage. When completion starts the next turn, queued ambient progress is delivered before the completion result.
 
-For noisy output, first look for a quieter source setting, such as quiet mode or a warning/error log level. Otherwise, filter the stream to lines that may change the next action. If the command is safe to retry, cancel it and relaunch with the quieter configuration. Bash progress cannot be changed after launch, so let it finish when retrying would repeat side effects or discard expensive work.
+For noisy output, first look for a quieter source setting, such as quiet mode or a warning/error log level. Otherwise, filter the stream to lines that may change the next action. If the command is safe to retry, cancel it and relaunch with the quieter configuration. When retrying would repeat side effects or discard expensive work, keep the job running and retune its progress instead: `hub` `{"op":"monitor","ids":["<job-id>"],"progress":"ambient"}` switches a running job between `wake` and `ambient` in place. The switch only changes routing: output already queued under the old mode is merged into the new queue, so a wake batch that was permitted before the switch can still start one more turn. A job's progress channel cannot be detached (`progress: "off"` is rejected for `ids`), and a job launched without `progress` has no channel to retune — it must be relaunched with `progress`. A session without `hub` (or with a bash-only chatty batch, whose reminder omits the clause) is told only to let the job finish.
 
-Hub has another option: use `monitor` to switch the current process to `ambient` or `off`. This changes only the notification subscription and does not stop the process. If quieter output is still needed, stop and start it again with new arguments or environment; `restart` alone reuses the old launch specification.
+Hub processes have a wider option: `monitor` by `name` can also detach the current session with `off`. This changes only the notification subscription and does not stop the process. If quieter output is still needed, stop and start it again with new arguments or environment; `restart` alone reuses the old launch specification.
 
 Use ambient for a long test suite when only the final status changes the plan:
 
 ```json
 {
-  "command": "bun test",
-  "async": "auto",
-  "progress": "ambient"
+	"command": "bun test",
+	"async": "auto",
+	"progress": "ambient"
 }
 ```
 
@@ -98,9 +99,9 @@ Use wake when an intermediate line should change the agent's next action:
 
 ```json
 {
-  "command": "bun scripts/wait-for-preview.ts",
-  "async": "auto",
-  "progress": "wake"
+	"command": "bun scripts/wait-for-preview.ts",
+	"async": "auto",
+	"progress": "wake"
 }
 ```
 
@@ -115,21 +116,21 @@ The same choice applies to Hub processes. A low-priority diagnostic stream can r
 
 This comparison uses the observed Claude Code 2.1.233 Monitor contract. Each surface pushes events from the harness to the agent; the model does not poll after arming the work.
 
-| Capability | OMP async Bash | OMP Hub monitoring | Claude Code Monitor |
-| --- | --- | --- | --- |
-| Intended workload | Finite command spanning turns | Shared long-running process, watcher, service, debugger, or REPL | Command or WebSocket watcher |
-| Start operation | `bash` with `async: "auto"`, `progress: "wake"` (or `async: true` for immediate background) | `hub` `op:"start"`, `progress:"wake"` | Top-level `Monitor` call with a command or WebSocket URL |
-| Attach or retune | No; progress belongs to the command | `hub` `op:"monitor"` by stable process name | No attach/retune operation observed |
-| Detach without stopping work | No separate subscription | `progress:"off"` | Persistent monitor is stopped through task control |
-| Harness push while idle | Starts a follow-up turn | Starts a follow-up turn | Starts a follow-up turn |
-| Events received while busy | Permitted events buffered and delivered together; suppressed events remain in the artifact | Same shared batching contract | Permitted events buffered and delivered together; suppressed events remain in the output file |
-| Burst/rate limit | 10 events, then one event permit every 2s | Same shared meter | Observed: about 10 events, then one event permit every 2s |
-| Command event boundary | Complete non-empty merged stdout/stderr line | Complete non-empty merged stdout/stderr line | Stdout line |
-| WebSocket event boundary | Not supported | Not supported | Text frame |
-| Termination | Separate async-job completion/failure | Separate process completion | Separate monitor termination |
-| Non-waking delivery | `progress:"ambient"` | `progress:"ambient"` | No native ambient mode observed |
-| Native regex, cadence, or stop-on-match controls | None; filtering belongs in the command | None; filtering belongs in the supervised process | None; filtering and polling belong in the monitor command |
-| Lifetime | Command lifetime; `timeout:0` disables its deadline | Monitoring is session-scoped; process lifetime is independently controlled by `persist`/`detached` | Optional `persistent:true` |
+| Capability                                       | OMP async Bash                                                                                     | OMP Hub monitoring                                                                                 | Claude Code Monitor                                                                           |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Intended workload                                | Finite command spanning turns                                                                      | Shared long-running process, watcher, service, debugger, or REPL                                   | Command or WebSocket watcher                                                                  |
+| Start operation                                  | `bash` with `async: "auto"`, `progress: "wake"` (or `async: true` for immediate background)        | `hub` `op:"start"`, `progress:"wake"`                                                              | Top-level `Monitor` call with a command or WebSocket URL                                      |
+| Attach or retune                                 | Retune only: `hub` `op:"monitor"` with job `ids` switches `wake`↔`ambient`; no attach after launch | `hub` `op:"monitor"` by stable process name                                                        | No attach/retune operation observed                                                           |
+| Detach without stopping work                     | No; `progress:"off"` is rejected for job `ids`                                                     | `progress:"off"`                                                                                   | Persistent monitor is stopped through task control                                            |
+| Harness push while idle                          | Starts a follow-up turn                                                                            | Starts a follow-up turn                                                                            | Starts a follow-up turn                                                                       |
+| Events received while busy                       | Permitted events buffered and delivered together; suppressed events remain in the artifact         | Same shared batching contract                                                                      | Permitted events buffered and delivered together; suppressed events remain in the output file |
+| Burst/rate limit                                 | 10 events, then one event permit every 2s                                                          | Same shared meter                                                                                  | Observed: about 10 events, then one event permit every 2s                                     |
+| Command event boundary                           | Complete non-empty merged stdout/stderr line                                                       | Complete non-empty merged stdout/stderr line                                                       | Stdout line                                                                                   |
+| WebSocket event boundary                         | Not supported                                                                                      | Not supported                                                                                      | Text frame                                                                                    |
+| Termination                                      | Separate async-job completion/failure                                                              | Separate process completion                                                                        | Separate monitor termination                                                                  |
+| Non-waking delivery                              | `progress:"ambient"`                                                                               | `progress:"ambient"`                                                                               | No native ambient mode observed                                                               |
+| Native regex, cadence, or stop-on-match controls | None; filtering belongs in the command                                                             | None; filtering belongs in the supervised process                                                  | None; filtering and polling belong in the monitor command                                     |
+| Lifetime                                         | Command lifetime; `timeout:0` disables its deadline                                                | Monitoring is session-scoped; process lifetime is independently controlled by `persist`/`detached` | Optional `persistent:true`                                                                    |
 
 OMP Hub monitoring is the persistent-process counterpart to Claude Code Monitor's `persistent:true`. Hub's `persist:true` is not a monitoring flag: it makes the process survive the last omp client, while `progress` controls only the current session's notification subscription. Fully detached Hub daemons cannot be live-monitored.
 
@@ -143,29 +144,31 @@ bun --cwd=packages/coding-agent run eval:async-progress --case quick --model <pr
 ```
 
 The default wake case runs both surfaces; pass `--surface bash` or `--surface hub` to isolate one. The quick case is Bash-only. Omit `--model` to use the configured default. The command exits non-zero if any run fails and prints the selected tool arguments plus each criterion. It is opt-in because it uses external credentials, incurs provider cost, and measures stochastic model behavior; deterministic queue, batching, and wake semantics remain covered by the regular test suite.
+
 ## Outputs
+
 The tool returns a single `text` content block plus optional `details`.
 
 - Success, foreground:
-  - `content[0].text`: command output, or `(no output)` when the command produced nothing.
-  - `details.timeoutSeconds`: effective positive timeout after global/per-tool clamping, or `details.timeoutDisabled: true` when `timeout: 0`.
-  - `details.requestedTimeoutSeconds`: present when a positive requested timeout differed from the effective timeout.
-  - `details.wallTimeMs`: elapsed wall-clock milliseconds for completed local/client-terminal runs.
-  - `details.terminalId`: present when execution was routed through a client terminal bridge.
-  - `details.exitCode`: present when the command completed with a non-zero exit code.
-  - `details.timedOut: true`: present on local/PTY timeout results.
-  - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
-  - non-zero exits and local/PTY timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
+   - `content[0].text`: command output, or `(no output)` when the command produced nothing.
+   - `details.timeoutSeconds`: effective positive timeout after global/per-tool clamping, or `details.timeoutDisabled: true` when `timeout: 0`.
+   - `details.requestedTimeoutSeconds`: present when a positive requested timeout differed from the effective timeout.
+   - `details.wallTimeMs`: elapsed wall-clock milliseconds for completed local/client-terminal runs.
+   - `details.terminalId`: present when execution was routed through a client terminal bridge.
+   - `details.exitCode`: present when the command completed with a non-zero exit code.
+   - `details.timedOut: true`: present on local/PTY timeout results.
+   - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
+   - non-zero exits and local/PTY timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
 - Success, background start (`async: true`, promoted `async: "auto"`, or settings-driven auto-background):
-  - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id> (<command label>); result will be delivered automatically.` The label is the command collapsed to one line (max 120 chars) — the same label completion notices and `hub jobs` show — so a batch of parallel calls whose results return out of call order stays attributable.
-  - `details.async`: `{ state: "running", jobId, type: "bash" }`.
+   - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id> (<command label>); result will be delivered automatically.` The label is the command collapsed to one line (max 120 chars) — the same label completion notices and `hub jobs` show — so a batch of parallel calls whose results return out of call order stays attributable.
+   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
 - Background progress / completion:
-  - delivered through `onUpdate` / async job manager, not the initial return.
-  - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
-  - with `progress: "wake"`, complete output lines push `async-progress` follow-up turns even while the agent is idle; `progress: "ambient"` uses non-waking step-boundary asides instead. Lines emitted while the agent is busy are retained and delivered together rather than replaced by the newest line. Partial lines are held until completed, including the final unterminated line.
-  - completion/failure updates carry final text and `details.async.state: "completed" | "failed"`. A non-zero exit or timeout is recorded as a failed background job.
+   - delivered through `onUpdate` / async job manager, not the initial return.
+   - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
+   - with `progress: "wake"`, complete output lines push `async-progress` follow-up turns even while the agent is idle; `progress: "ambient"` uses non-waking step-boundary asides instead. Lines emitted while the agent is busy are retained and delivered together rather than replaced by the newest line. Partial lines are held until completed, including the final unterminated line.
+   - completion/failure updates carry final text and `details.async.state: "completed" | "failed"`. A non-zero exit or timeout is recorded as a failed background job.
 - Failure:
-  - cancellation, missing exit status, validation failures, intercepted commands, and client-terminal-bridge timeouts throw `ToolError` / `ToolAbortError`.
+   - cancellation, missing exit status, validation failures, intercepted commands, and client-terminal-bridge timeouts throw `ToolError` / `ToolAbortError`.
 
 Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `Command exited with code <n>`.
 
@@ -173,9 +176,9 @@ Stdout and stderr are merged before the model sees them. Definite non-zero exit 
 
 Two independent settings can prevent a Bash subprocess from starting. They serve different purposes and run at different points in the tool-call lifecycle.
 
-| Setting | Purpose | Rule syntax | Result when matched |
-| --- | --- | --- | --- |
-| `bash.patterns` | Command-specific execution policy | Literal text with `*` wildcards | Allows the call, requests human approval, or denies it. |
+| Setting                    | Purpose                           | Rule syntax                                                           | Result when matched                                                                   |
+| -------------------------- | --------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `bash.patterns`            | Command-specific execution policy | Literal text with `*` wildcards                                       | Allows the call, requests human approval, or denies it.                               |
 | `bashInterceptor.patterns` | Prefer a dedicated tool over Bash | JavaScript regular expression, optional flags, tool name, and message | Returns a Bash tool error telling the model to call the named dedicated tool instead. |
 
 ### `bash.patterns`: permission policy
@@ -184,13 +187,13 @@ Two independent settings can prevent a Bash subprocess from starting. They serve
 
 ```yaml
 bash:
-  patterns:
-    - match: "git *"
-      approval: allow
-    - match: "curl *"
-      approval: prompt
-    - match: "rm -rf *"
-      approval: deny
+   patterns:
+      - match: "git *"
+        approval: allow
+      - match: "curl *"
+        approval: prompt
+      - match: "rm -rf *"
+        approval: deny
 ```
 
 - `deny` stops the call before `BashTool.execute()` runs, including in `yolo` mode.
@@ -206,14 +209,14 @@ Use this setting for safety and user control. It remains useful for commands wit
 
 ```yaml
 bashInterceptor:
-  enabled: true
-  patterns:
-    - pattern: '^\s*(cat|head|tail)\s+'
-      tool: read
-      message: "Use the read tool instead; it handles binary files and provides better context."
-    - pattern: '^\s*(grep|rg)\s+'
-      tool: grep
-      message: "Use the grep tool instead; it respects .gitignore and returns structured results."
+   enabled: true
+   patterns:
+      - pattern: '^\s*(cat|head|tail)\s+'
+        tool: read
+        message: "Use the read tool instead; it handles binary files and provides better context."
+      - pattern: '^\s*(grep|rg)\s+'
+        tool: grep
+        message: "Use the grep tool instead; it respects .gitignore and returns structured results."
 ```
 
 An interceptor rule only applies when its `tool` is available in the current session. If `read` is disabled, a `cat` rule targeting `read` does not block the Bash call. This makes the interceptor a best-effort capability preference rather than an execution-security boundary.
@@ -254,15 +257,16 @@ Choose the setting by the desired outcome:
    4. Non-PTY client-terminal bridge, when the session advertises terminal capability and `pty` is false -> creates a remote terminal, streams/polls current output, and releases the terminal after completion.
    5. Otherwise runs foreground execution.
 9. Foreground non-PTY without client terminal calls `executeBash()` from `packages/coding-agent/src/exec/bash-executor.ts`; that path performs direnv/devenv preflight itself.
-10. Foreground PTY and client-terminal paths run the same direnv preflight in `BashTool` before dispatch. With `bash.direnv: "auto"` (the default), an allowed `.envrc` may merge environment changes into the command; `"off"` disables this. `bash.direnvLoadTimeoutMs` defaults to `30_000`, and a positive command timeout also bounds the preflight.
-11. Local non-PTY and PTY paths allocate an output artifact first when `session.allocateOutputArtifact` is available. The artifact path/id are passed into the sink so large output can spill to disk.
-12. `executeBash()` loads shell settings, optional shell snapshot, and shell minimizer settings, then runs via a persistent native `Shell` session or one-shot `executeShell()`. `docs/bash-tool-runtime.md` covers that path in detail.
-13. `runInteractiveBashPty()` creates a `PtySession`, overlays an xterm-backed console UI, forwards user key input into the PTY, captures output through `OutputSink`, and kills the PTY on dismiss/dispose.
-14. Client-terminal bridge mode calls `session.getClientBridge().createTerminal(...)`, emits `terminalId` updates, polls output until exit/timeout/abort, maps signal exits to `137`, and releases the handle in `finally`.
-15. On completion, `#buildCompletedResult()` formats `(no output)` when needed, attaches truncation metadata from the output summary, appends wall-time/timeout/exit notices, and re-checks unfinished status before returning.
-16. Local/PTY timeout outcomes become `isError` results with `details.timedOut`; client-terminal timeout and cancellation/missing exit status paths throw with captured output when available.
+10.   Foreground PTY and client-terminal paths run the same direnv preflight in `BashTool` before dispatch. With `bash.direnv: "auto"` (the default), an allowed `.envrc` may merge environment changes into the command; `"off"` disables this. `bash.direnvLoadTimeoutMs` defaults to `30_000`, and a positive command timeout also bounds the preflight.
+11.   Local non-PTY and PTY paths allocate an output artifact first when `session.allocateOutputArtifact` is available. The artifact path/id are passed into the sink so large output can spill to disk.
+12.   `executeBash()` loads shell settings, optional shell snapshot, and shell minimizer settings, then runs via a persistent native `Shell` session or one-shot `executeShell()`. `docs/bash-tool-runtime.md` covers that path in detail.
+13.   `runInteractiveBashPty()` creates a `PtySession`, overlays an xterm-backed console UI, forwards user key input into the PTY, captures output through `OutputSink`, and kills the PTY on dismiss/dispose.
+14.   Client-terminal bridge mode calls `session.getClientBridge().createTerminal(...)`, emits `terminalId` updates, polls output until exit/timeout/abort, maps signal exits to `137`, and releases the handle in `finally`.
+15.   On completion, `#buildCompletedResult()` formats `(no output)` when needed, attaches truncation metadata from the output summary, appends wall-time/timeout/exit notices, and re-checks unfinished status before returning.
+16.   Local/PTY timeout outcomes become `isError` results with `details.timedOut`; client-terminal timeout and cancellation/missing exit status paths throw with captured output when available.
 
 ## Modes / Variants
+
 1. Foreground non-PTY local
    - Default path when no client terminal bridge is available.
    - Uses `executeBash()`.
@@ -290,28 +294,30 @@ Choose the setting by the desired outcome:
    - Returns a `ToolError` pointing the model at `read`, `grep`, `glob`, `edit`, or `write`.
 
 ## Side Effects
+
 - Filesystem
-  - Validates `cwd` with `fs.stat()`.
-  - May allocate and write artifact files for full local output (`bash`) and minimizer-preserved raw output (`bash-original`).
-  - `expandInternalUrls(..., { ensureLocalParentDirs: true })` creates parent directories for `local://` paths before execution.
+   - Validates `cwd` with `fs.stat()`.
+   - May allocate and write artifact files for full local output (`bash`) and minimizer-preserved raw output (`bash-original`).
+   - `expandInternalUrls(..., { ensureLocalParentDirs: true })` creates parent directories for `local://` paths before execution.
 - Subprocesses / native bindings / client terminal
-  - Non-PTY local execution uses native shell execution via `@oh-my-pi/pi-natives` (`Shell.run()` or `executeShell()`).
-  - PTY uses native `PtySession.start()`.
-  - Client-terminal mode delegates process execution to the connected client terminal capability.
+   - Non-PTY local execution uses native shell execution via `@oh-my-pi/pi-natives` (`Shell.run()` or `executeShell()`).
+   - PTY uses native `PtySession.start()`.
+   - Client-terminal mode delegates process execution to the connected client terminal capability.
 - Session state
-  - Reads session settings for async, auto-background, interceptor, direnv, global timeout cap, tool availability, and shell configuration.
-  - Registers jobs with `session.asyncJobManager` for explicit/auto background runs.
-  - Uses `session.getSessionId()` to isolate shell reuse and async session keys.
-  - Uses `session.allocateOutputArtifact()` for spill files.
-  - Invalidates `github-cache` rows before execution when the command contains a mutating `gh issue`/`gh pr` subcommand, so later `issue://`/`pr://` reads see post-mutation state (`invalidateGithubCacheForBashCommand`).
+   - Reads session settings for async, auto-background, interceptor, direnv, global timeout cap, tool availability, and shell configuration.
+   - Registers jobs with `session.asyncJobManager` for explicit/auto background runs.
+   - Uses `session.getSessionId()` to isolate shell reuse and async session keys.
+   - Uses `session.allocateOutputArtifact()` for spill files.
+   - Invalidates `github-cache` rows before execution when the command contains a mutating `gh issue`/`gh pr` subcommand, so later `issue://`/`pr://` reads see post-mutation state (`invalidateGithubCacheForBashCommand`).
 - User-visible prompts / interactive UI
-  - PTY mode opens a TUI overlay titled `Console` and forwards input to the PTY.
-  - Background start messages note that the result is delivered automatically when complete and that the `hub` tool can wait on it until then.
+   - PTY mode opens a TUI overlay titled `Console` and forwards input to the PTY.
+   - Background start messages note that the result is delivered automatically when complete and that the `hub` tool can wait on it until then.
 - Background work / cancellation
-  - Async and auto-background jobs continue after the initial tool return, until completion, cancellation, or their deadline (unless `timeout: 0` disabled it).
-  - Cancellation aborts the native run; PTY overlay dismissal also kills the PTY.
+   - Async and auto-background jobs continue after the initial tool return, until completion, cancellation, or their deadline (unless `timeout: 0` disabled it).
+   - Cancellation aborts the native run; PTY overlay dismissal also kills the PTY.
 
 ## Limits & Caps
+
 - Default timeout: `300s` (`TOOL_TIMEOUTS.bash.default` in `packages/coding-agent/src/tools/tool-timeouts.ts`).
 - `timeout: 0` disables the command deadline.
 - Positive timeout clamp: `tools.maxTimeout` is an optional global ceiling (`0` means no global ceiling), followed by the Bash `1..3600s` range.
@@ -322,35 +328,37 @@ Choose the setting by the desired outcome:
 - TUI collapsed preview: `10` visual lines (`BASH_DEFAULT_PREVIEW_LINES`) when rendered inline in the agent UI; this is a renderer cap, not a tool output cap.
 
 ## Errors
+
 - Input validation:
-  - invalid env key -> `ToolError("Invalid bash env name: <key>")`.
-  - async requested while disabled -> `ToolError("Async bash execution is disabled...")`.
-  - missing async job manager -> `ToolError("Background job manager unavailable for this session.")`.
-  - missing/bad `cwd` -> `ToolError("Working directory does not exist: ...")` or `ToolError("Working directory is not a directory: ...")`.
+   - invalid env key -> `ToolError("Invalid bash env name: <key>")`.
+   - async requested while disabled -> `ToolError("Async bash execution is disabled...")`.
+   - missing async job manager -> `ToolError("Background job manager unavailable for this session.")`.
+   - missing/bad `cwd` -> `ToolError("Working directory does not exist: ...")` or `ToolError("Working directory is not a directory: ...")`.
 - Interceptor:
-  - matched command -> `ToolError` with `Blocked: <rule.message>` and the original command.
-  - invalid interceptor regexes are silently skipped by `compileRules()`.
+   - matched command -> `ToolError` with `Blocked: <rule.message>` and the original command.
+   - invalid interceptor regexes are silently skipped by `compileRules()`.
 - Internal URL expansion:
-  - unsupported scheme, unknown skill, path traversal, missing router support, or router resolution failures all throw `ToolError` from `packages/coding-agent/src/tools/bash-skill-urls.ts`.
+   - unsupported scheme, unknown skill, path traversal, missing router support, or router resolution failures all throw `ToolError` from `packages/coding-agent/src/tools/bash-skill-urls.ts`.
 - Execution:
-  - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
-  - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
-  - timeout -> local/PTY execution returns an `isError` result with `details.timedOut: true` and a timeout notice; the client-terminal bridge throws `ToolError` after killing the terminal and attempting a final output read. Managed background execution records either form as a failed job.
-  - user abort -> `ToolAbortError` when the caller signal is aborted.
+   - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
+   - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
+   - timeout -> local/PTY execution returns an `isError` result with `details.timedOut: true` and a timeout notice; the client-terminal bridge throws `ToolError` after killing the terminal and attempting a final output read. Managed background execution records either form as a failed job.
+   - user abort -> `ToolAbortError` when the caller signal is aborted.
 - Artifact allocation / artifact save failures are swallowed in `saveBashOriginalArtifact()` and `OutputSink.#createFileSink()`; execution continues without that artifact.
 
 ## Notes
+
 - `strict = true` is set on `BashTool`; `concurrency` is resolved per call: `pty: true` is `"exclusive"` (it takes over the terminal UI), everything else is `"shared"`, so multiple non-pty bash calls in one assistant message run in parallel. When parallel calls overlap on the same shell session key, the first owns the persistent `Shell`; the rest run in isolated one-shot shells (see `shellSessionsInUse` in `bash-executor.ts`).
 - `command` URL expansions shell-escape replacements; `env` and `cwd` expansion use `noEscape: true` because they become environment values / filesystem paths, not shell text.
 - `checkBashInterception()` blocks only when the matching rule's `tool` name is present in `ctx.toolNames`; missing tools disable their corresponding rule.
 - Interceptor configuration syntax is unchanged. It handles common flat command lists, not full shell parsing: heredocs, parameter expansion, command substitution, backticks, grouping, and malformed quoting only receive the existing whole-input check. This is best-effort routing toward dedicated tools, not a security boundary.
 - `bash.direnv` defaults to `"auto"` and honors direnv's allow list; an unallowed `.envrc` is not executed. Set it to `"off"` to bypass preflight. `bash.direnvLoadTimeoutMs` controls the cold-load budget.
 - Default interceptor rules come from `DEFAULT_BASH_INTERCEPTOR_RULES` in `packages/coding-agent/src/config/settings-schema.ts`:
-  - `cat|head|tail|less|more` -> `read`
-  - `grep|rg|ripgrep|ag|ack` -> `grep`
-  - `find|fd|locate` with name/type/glob flags -> `glob`
-  - `sed -i`, `perl -i`, `awk -i inplace` -> `edit`
-  - `echo|printf|cat <<` with redirection -> `write`
+   - `cat|head|tail|less|more` -> `read`
+   - `grep|rg|ripgrep|ag|ack` -> `grep`
+   - `find|fd|locate` with name/type/glob flags -> `glob`
+   - `sed -i`, `perl -i`, `awk -i inplace` -> `edit`
+   - `echo|printf|cat <<` with redirection -> `write`
 - PTY mode is ignored in non-UI contexts and when `PI_NO_PTY=1` (gated by `canUseInteractiveBashPty()`); the tool falls back to non-PTY execution and appends a `pty requested but unavailable in this environment; ran without a terminal` notice.
 - Non-PTY runs merge `NON_INTERACTIVE_ENV` with `env` via `buildNonInteractiveEnv()`; PTY runs instead inherit the user environment with `TERM=xterm-256color` prepended before the custom `env` values.
 - When the shell minimizer rewrites output inside `executeBash()`, the visible output is replaced with minimized text and a `[raw output: artifact://<id>]` footer may be appended if `onMinimizedSave` persisted the original text.

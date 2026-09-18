@@ -164,9 +164,21 @@ export type AsyncProgressDetails = {
 	jobs: AsyncProgressJobDetails[];
 };
 
+/**
+ * Tool availability at the moment a batch is built. The chatty-progress
+ * guidance advertises a `hub` retune, so a batch built for a session without
+ * the hub tool must not offer it — the batch's own contents cannot answer
+ * that question (a chatty bash job is the case where the advice matters most,
+ * and it carries no hub process).
+ */
+export interface AsyncProgressCapabilities {
+	hubTool?: boolean;
+}
+
 /** Build one progress message, preserving every rate-limit-permitted event and grouping entries by typed source. */
 export function buildAsyncProgressBatchMessage(
 	entries: AsyncProgressEntry[],
+	capabilities?: AsyncProgressCapabilities,
 ): CustomMessage<AsyncProgressDetails> | null {
 	if (entries.length === 0) return null;
 	const entriesBySource = new Map<string, AsyncProgressEntry[]>();
@@ -219,6 +231,7 @@ export function buildAsyncProgressBatchMessage(
 					.render(chattyProgressGuidanceTemplate, {
 						bash: chattyJobs.some(job => job.type === "bash"),
 						hub: chattyJobs.some(job => job.type === "process"),
+						hubTool: capabilities?.hubTool === true,
 					})
 					.trim();
 	return {

@@ -1050,7 +1050,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 					.render(asyncProgressTemplate, {
 						...asyncProgressCapabilities,
 						toolRefs,
-						chattyGuidance: prompt.render(chattyProgressGuidanceTemplate, asyncProgressCapabilities).trim(),
+						chattyGuidance: prompt
+							.render(chattyProgressGuidanceTemplate, {
+								...asyncProgressCapabilities,
+								// In the system prompt both flags already mean "this tool is
+								// available"; the same template also renders as a live
+								// reminder, where `hub` narrows to "a chatty process is in
+								// this batch" and only `hubTool` still means availability.
+								hubTool: asyncProgressCapabilities.hub,
+							})
+							.trim(),
 					})
 					.trim()
 			: "";

@@ -31,11 +31,11 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 | `replyTo` | `string` | No | `send`: message id being answered. |
 | `await` | `boolean` | No | Peer `send`: after delivery, block until the next message from that peer arrives. Invalid with `to: "all"`. |
 | `from` | `string` | No | `wait`: only accept a message from this agent id (pure message wait). |
-| `ids` | `string[]` | No | `wait`: job ids to watch (omit = all running jobs); `cancel`: job ids to kill (required). |
+| `ids` | `string[]` | No | `wait`: job ids to watch (omit = all running jobs); `cancel`: job ids to kill (required); `monitor`: running background jobs whose progress mode to retune (mutually exclusive with `name`). |
 | `peek` | `boolean` | No | `inbox`: leave messages in the process-global bus mailbox. Note that messages already buffered on the live recipient session are still drained into this result by the current implementation. |
 | `name` | `string` | process ops | Stable project-scoped launch name (1-48 chars). On `send`/`wait` it routes the op to the process broker. |
 | `application`, `args`, `env`, `cwd`, `pty`, `ready`, `restart`, `persist`, `detached` | — | `start` | Launch spec, unchanged from the former `launch` tool. |
-| `progress` | `"wake" \| "ambient" \| "off"` | No | `start`: attach live progress with `wake`/`ambient`, or explicitly leave monitoring off with `off`; omitted also defaults off. `monitor`: attach or retune with `wake`/`ambient`, or detach with `off`. |
+| `progress` | `"wake" \| "ambient" \| "off"` | No | `start`: attach live progress with `wake`/`ambient`, or explicitly leave monitoring off with `off`; omitted also defaults off. `monitor` with `name`: attach or retune with `wake`/`ambient`, or detach with `off`. `monitor` with `ids`: required, `wake` or `ambient` only — `off` is rejected because a job's progress channel cannot be detached. |
 | `lines`, `head`, `grep`, `follow`, `cursor` | — | `logs` | Log window controls, unchanged. |
 | `for`, `pattern` | — | `wait` (name) | Process lifecycle condition / output regex. |
 | `text`, `enter`, `keys`, `signal` | — | `send` (name) | Process stdin / terminal keys / signal. |
@@ -43,7 +43,7 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 
 ## Op families and dispatch
 - **Messaging** — `send` (with `to`), `inbox`, `list`, and `wait` with `from`. Fire-and-forget sends return delivery receipts (`injected`/`woken`/`revived`/`failed`); direct sends can revive parked agents, while broadcasts target visible live peers without reviving every parked agent. `await: true` waits for one reply after delivery. A busy recipient with async execution disabled may auto-reply rather than strand an awaiting sender.
-- **Jobs** — `wait` (bare or with `ids`), `cancel`, `jobs`. Owner-scoped visibility, watch/unwatch delivery suppression, `acknowledgeDeliveries` on returned completions, 500 ms `onUpdate` snapshots while waiting, and the adaptive wait window. `jobs` is the former job-list snapshot plus the roster of running subagents with no running job entry.
+- **Jobs** — `wait` (bare or with `ids`), `cancel`, `jobs`, and `monitor` with `ids`. Owner-scoped visibility, watch/unwatch delivery suppression, `acknowledgeDeliveries` on returned completions, 500 ms `onUpdate` snapshots while waiting, and the adaptive wait window. `jobs` is the former job-list snapshot plus the roster of running subagents with no running job entry. `monitor` with `ids` retunes a running job's progress mode (see "Retuning background jobs").
 - **Processes** — `start`, `ps`, `logs`, `stop`, `restart`, `describe`, `monitor`, plus `send`/`wait` when they carry `name`. `monitor` controls the calling session's live-output subscription; `ps` is the broker's `list`. See the launch sections below.
 
 `send` with both `to` and `name` is rejected as ambiguous. `wait` routes by target: `name` → process wait; otherwise the unified coordination wait.
@@ -107,6 +107,17 @@ Names are stable and unique within one project directory. A live name must be st
 ```
 
 `monitor` attaches to, retunes, or detaches the calling session's subscription for an already-running named process. It begins at the current output cursor and does not replay older logs. Each complete non-empty merged stdout/stderr line enters a trailing 200 ms event; an oversized line retains its first and last 250 characters. Each monitor has a token bucket with capacity 10 and continuous refill of one event permit every two seconds. At a sustained five events per second, refill allows eleven initial deliveries before suppression. Permitted events produced while the model is busy arrive together in order. Each model-facing process preview retains at most 3,000 UTF-8 bytes, split between its head and tail. A final unterminated line is flushed when the process exits.
+
+### Retuning background jobs
+
+`monitor` with `ids` instead of `name` retunes running background jobs launched by `bash` with `progress` (an `async` job): each id switches between `wake` and `ambient` in place, without restarting the command or touching its artifact. `progress` is required and must be `wake` or `ambient`; `name` and `ids` together are rejected.
+
+```json
+{"op":"monitor","ids":["bg_1"],"progress":"ambient"}
+{"op":"monitor","ids":["bg_1","bg_2"],"progress":"wake"}
+```
+
+The result reports one line per id: retuned, already delivering as the requested mode, not a job you own, already settled, launched without `progress`, or withheld while a `wait` watches it. Retuning changes routing only. Output already queued under the old mode is merged into the new queue, so a wake batch permitted before the switch can still start one more turn, and switching to `wake` delivers queued ambient output at the next wake. Two forms are rejected outright: `progress: "off"`, because a job's progress channel cannot be detached (let it finish or `cancel` it), and retuning a job launched without `progress`, because no channel exists to retune — relaunch it with `progress`. A job's `artifact://<id>` capture is unaffected by retuning; a job launched without `progress` gains no artifact link from being addressed here.
 
 Rate limiting drops whole post-batch events by timing, not severity. A suppression count names events, not lines. When delivery resumes, the next batch includes bounded previews from the first and last suppressed windows but omits text from the windows between them. Delivered progress therefore cannot prove that an error or state transition did not occur. The full artifact or process logs are authoritative. Each monitor has an independent event bucket, so aggregate progress traffic grows with concurrent monitors; the number of idle wake-ups those events can start does not, because every wake monitor draws on the session-wide wake-turn budget described below.
 

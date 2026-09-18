@@ -1938,6 +1938,108 @@ describe("AgentSession owner-routed async delivery", () => {
 		).toBe(true);
 	});
 
+	it("retunes managed progress between queue kinds without waking an ambient sample", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const busyStarted = Promise.withResolvers<void>();
+		const releaseBusy = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			handler: async () => {
+				busyStarted.resolve();
+				await releaseBusy.promise;
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+
+		const activeTurn = session.sendUserMessage("hold the retune queues");
+		await busyStarted.promise;
+		const gate = Promise.withResolvers<string>();
+		manager.register("bash", "retuned progress", () => gate.promise, {
+			id: "retuned-progress-job",
+			ownerId: "Main",
+			progressDelivery: "ambient",
+		});
+		const job = manager.getJob("retuned-progress-job");
+		if (!job) throw new Error("Expected retuned progress job");
+
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: job.id,
+			text: "FIRST AMBIENT SAMPLE",
+			job,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+			delivery: "ambient",
+		});
+		expect(session.yieldQueue.has("async-progress")).toBe(true);
+		expect(manager.retuneProgressDelivery(job.id, "wake", "Main")).toBe("retuned");
+		expect(session.yieldQueue.has("async-progress")).toBe(false);
+		expect(session.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND)).toBe(true);
+
+		session.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, {
+			jobId: job.id,
+			text: "SECOND WAKE SAMPLE",
+			job,
+			seq: 2,
+			elapsedMs: 20,
+			epoch: 0,
+			delivery: "wake",
+		});
+		expect(manager.retuneProgressDelivery(job.id, "ambient", "Main")).toBe("retuned");
+		expect(session.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND)).toBe(false);
+		expect(session.yieldQueue.has("async-progress")).toBe(true);
+
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: job.id,
+			text: "THIRD AMBIENT SAMPLE",
+			job,
+			seq: 3,
+			elapsedMs: 30,
+			epoch: 0,
+			delivery: "ambient",
+		});
+		expect(mock.calls).toHaveLength(1);
+
+		const messages = session.yieldQueue
+			.drainLazy()
+			.map(thunk => thunk())
+			.filter(
+				(message): message is CustomMessage =>
+					message?.role === "custom" && message.customType === "async-progress",
+			);
+		expect(messages).toHaveLength(1);
+		const progressDetails = (messages[0] as { details?: { jobs?: Array<{ text?: string }> } } | undefined)?.details;
+		const progressText = progressDetails?.jobs?.[0]?.text;
+		expect(progressText).toBe("FIRST AMBIENT SAMPLE\nSECOND WAKE SAMPLE\nTHIRD AMBIENT SAMPLE");
+		expect(progressText?.match(/FIRST AMBIENT SAMPLE/g)).toHaveLength(1);
+		expect(progressText?.match(/SECOND WAKE SAMPLE/g)).toHaveLength(1);
+		expect(progressText?.match(/THIRD AMBIENT SAMPLE/g)).toHaveLength(1);
+
+		gate.resolve("finished");
+		releaseBusy.resolve();
+		await activeTurn;
+		await manager.waitForAll();
+	});
+
 	it("folds queued ambient progress into the completion-triggered flush before the result", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const progressMarker = "AMBIENT PROGRESS MARKER";

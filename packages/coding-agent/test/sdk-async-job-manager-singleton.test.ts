@@ -101,6 +101,17 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 	const HUB_WAIT_MARKER = "`pattern`/`for`/`timeout`";
 	const BASH_CHATTY_MARKER = "\nBash:";
 	const HUB_CHATTY_MARKER = "\nHub:";
+	// A job retune is a Hub `monitor` op addressed by job `ids`; the Bash chatty
+	// clause may only offer it when Hub is active alongside Bash.
+	const HUB_RETUNE_MARKER = 'op: "monitor"';
+	const JOB_RETUNE_MARKER = "`ids:";
+
+	function chattyClause(block: string, marker: string): string {
+		const start = block.indexOf(marker);
+		if (start < 0) throw new Error(`Expected ${JSON.stringify(marker)} clause`);
+		const end = block.indexOf("\n", start + marker.length);
+		return block.slice(start, end < 0 ? undefined : end);
+	}
 
 	function asyncProgressBlock(systemPrompt: string): string | undefined {
 		const start = systemPrompt.indexOf("<async-progress>");
@@ -130,6 +141,10 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			expect(block).toContain(HUB_PROGRESS_MARKER);
 			expect(block).toContain(HUB_WAIT_MARKER);
 			expect(block).toContain(HUB_CHATTY_MARKER);
+			// With Hub active, the Bash clause offers the in-place job retune.
+			const bashClause = chattyClause(block, BASH_CHATTY_MARKER);
+			expect(bashClause).toContain(HUB_RETUNE_MARKER);
+			expect(bashClause).toContain(JOB_RETUNE_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -153,9 +168,11 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			expect(block).toContain(BASH_ASYNC_MARKER);
 			expect(block).toContain(BASH_CHATTY_MARKER);
 			// Hub is inactive, so no clause may reference it: neither the
-			// Hub-only parameter literals nor the tool name itself.
+			// Hub-only parameter literals, the job retune op, nor the tool name itself.
 			expect(block).not.toContain(HUB_PROGRESS_MARKER);
 			expect(block).not.toContain(HUB_WAIT_MARKER);
+			expect(block).not.toContain(HUB_RETUNE_MARKER);
+			expect(block).not.toContain(JOB_RETUNE_MARKER);
 			expect(block).not.toMatch(/\bhub\b/i);
 
 			await session.setActiveToolPresentation(["read"], []);

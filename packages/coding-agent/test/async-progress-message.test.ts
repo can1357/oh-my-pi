@@ -2,10 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import * as os from "node:os";
 import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
-import {
-	buildAsyncProgressBlock,
-	buildAsyncResultBlock,
-} from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
+import { buildAsyncProgressBlock, buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import {
 	ASYNC_PROGRESS_MESSAGE_TYPE,
 	type AsyncProgressEntry,
@@ -35,12 +32,20 @@ function content(message: { content: unknown } | null): string {
 }
 
 // Routing markers, not prose: the label frame that opens each surface's
-// chatty clause plus the Hub-only retune parameter literal. Copy edits to the
+// chatty clause plus the Hub-only retune parameter literals. Copy edits to the
 // guidance sentences never fail these tests; a Hub clause leaking into a Bash
 // reminder (or vice versa) does.
 const BASH_CHATTY_MARKER = "\nBash:";
 const HUB_CHATTY_MARKER = "\nHub:";
 const HUB_RETUNE_MARKER = 'op: "monitor"';
+const JOB_RETUNE_MARKER = "`ids:";
+
+function chattyClause(xml: string, marker: string): string {
+	const start = xml.indexOf(marker);
+	if (start < 0) throw new Error(`Expected ${JSON.stringify(marker)} clause`);
+	const end = xml.indexOf("\n", start + marker.length);
+	return xml.slice(start, end < 0 ? undefined : end);
+}
 
 beforeAll(async () => {
 	const theme = await getThemeByName("dark");
@@ -127,6 +132,7 @@ describe("async progress messages", () => {
 		expect(xml).toContain(BASH_CHATTY_MARKER);
 		expect(xml).not.toContain(HUB_CHATTY_MARKER);
 		expect(xml).not.toContain(HUB_RETUNE_MARKER);
+		expect(xml).not.toContain(JOB_RETUNE_MARKER);
 		expect(xml).toEndWith("</system-reminder>");
 	});
 
@@ -150,6 +156,56 @@ describe("async progress messages", () => {
 		expect(xml).not.toContain(BASH_CHATTY_MARKER);
 		const rendered = Bun.stripANSI(buildAsyncProgressBlock(message).render(100).join("\n"));
 		expect(rendered).toContain("Background process progress monitor-web");
+	});
+
+	test("offers the job retune in the Bash clause whenever the Hub tool is available", () => {
+		// A chatty *bash* job is the case the advice is for, and it never brings a
+		// hub process with it: availability, not batch contents, gates the clause.
+		const bashOnly = content(
+			buildAsyncProgressBatchMessage(
+				[
+					{
+						...entry("bg_chatty", "", 62),
+						artifactId: "chatty-output",
+						suppressedEvents: 9,
+						reminder: "chatty-monitor",
+					},
+				],
+				{ hubTool: true },
+			),
+		);
+		const bashOnlyClause = chattyClause(bashOnly, BASH_CHATTY_MARKER);
+		expect(bashOnlyClause).toContain(HUB_RETUNE_MARKER);
+		expect(bashOnlyClause).toContain(JOB_RETUNE_MARKER);
+		// No process is being monitored, so the process-retune clause stays out.
+		expect(bashOnly).not.toContain(HUB_CHATTY_MARKER);
+
+		const mixed = content(
+			buildAsyncProgressBatchMessage(
+				[
+					{
+						...entry("bg_chatty", "", 62),
+						artifactId: "chatty-output",
+						suppressedEvents: 9,
+						reminder: "chatty-monitor",
+					},
+					{
+						...entry("monitor-web", "still compiling", 62),
+						job: undefined,
+						source: { id: "daemon-web", type: "process", label: "web", startedAt: 0 },
+						artifactId: "monitor-output",
+						suppressedEvents: 4,
+						reminder: "chatty-monitor",
+					},
+				],
+				{ hubTool: true },
+			),
+		);
+		// The process clause stays a `name`-addressed retune: job ids never leak into it.
+		const hubClause = chattyClause(mixed, HUB_CHATTY_MARKER);
+		expect(hubClause).toContain(HUB_RETUNE_MARKER);
+		expect(hubClause).not.toContain(JOB_RETUNE_MARKER);
+		expect(chattyClause(mixed, BASH_CHATTY_MARKER)).toContain(JOB_RETUNE_MARKER);
 	});
 
 	test("does not emit an empty chatty reminder for unsupported progress sources", () => {

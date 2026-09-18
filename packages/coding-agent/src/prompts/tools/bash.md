@@ -13,7 +13,7 @@ Use ONLY for one binary or a short fact pipeline (`wc -l`, `sort | uniq -c`, `di
 {{#if hasShellBuiltins}}- aux utils available: mkdir, wc, sort, comm, diff, uniq, base64, cmp, md5sum, sha{1,224,256,384,512}sum, b2sum, basename, dirname, readlink, realpath, touch, stat, date, mktemp, seq, yes, printenv, truncate, tac, nproc, uname, whoami, hostname, which, ps, pgrep, pkill, pidwait, top, cut, tee, tr, paste, sed, xargs, jq, rm, mv, ln, ts, sponge, ifne, isutf8, combine{{#unless isWindows}}, errno{{/unless}}{{/if}}
 {{#if asyncEnabled}}- `async: "auto"` (finite commands): inline for {{asyncAutoInlineGraceMs}} ms, then the same process promotes to a background job. `timeout` ≤ grace + 1 s → stays inline. Tune: `bash.asyncAuto.inlineGraceMs` (`0` = promote at once). At the job cap: auto runs inline with a notice; `true` errors.
 - `async: true`: background at once (known long-running).
-- `progress` (after backgrounding): `wake` starts an idle follow-up; `ambient` waits for an active turn. Truncated progress links `artifact://<id>`.{{/if}}
+- `progress` (after backgrounding): `wake` starts an idle follow-up; `ambient` waits for an active turn. Truncated progress links `artifact://<id>`.{{#if hasLaunch}} Retune a running job between `wake` and `ambient` with `hub` `op: "monitor"`, `ids: ["<job-id>"]`; a job launched without `progress` cannot gain one later.{{/if}}{{/if}}
 </instruction>
 
 <critical>

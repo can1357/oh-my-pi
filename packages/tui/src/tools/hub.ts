@@ -100,6 +100,8 @@ export interface JobSnapshot {
 	status: "running" | "completed" | "failed" | "cancelled";
 	label: string;
 	durationMs: number;
+	/** Progress delivery mode currently in effect; absent when the job has no progress channel. */
+	progress?: JobProgressMode;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
 	resolvedModel?: string;
 	/** Provider/id including routing, with no added thinking suffix. */
@@ -131,6 +133,24 @@ export interface CancelOutcome {
 	id: string;
 	status: CancelStatus;
 	message: string;
+}
+
+/** Delivery mode a background job's live progress is routed under. */
+export type JobProgressMode = "wake" | "ambient";
+
+/**
+ * Result of retuning one background job's progress mode. `unmonitored` is a
+ * job launched without `progress` — a progress channel cannot be added after
+ * launch; `suppressed` is a job whose progress a `wait` currently withholds.
+ */
+export type JobRetuneStatus = "retuned" | "unchanged" | "not_found" | "not_running" | "unmonitored" | "suppressed";
+
+/** Per-id outcome of `monitor` against background job ids. */
+export interface JobRetuneOutcome {
+	id: string;
+	status: JobRetuneStatus;
+	/** Mode in effect after the attempt, when the job still carries a progress channel. */
+	progress?: JobProgressMode;
 }
 
 /**
@@ -176,6 +196,8 @@ export interface CoordinationDetails {
 	counts?: HubRosterCounts;
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
+	/** Present on `op:"monitor"` against job ids: per-id retune outcomes. */
+	retuned?: JobRetuneOutcome[];
 	/** Running subagents not represented by a job row in this result. */
 	agents?: AgentActivitySnapshot[];
 }
@@ -403,6 +425,7 @@ export const LIST_STATUS_ORDER: Record<string, number> = { running: 0, idle: 1, 
 interface JobRenderArgs {
 	poll?: string[];
 	cancel?: string[];
+	monitor?: string[];
 	list?: boolean;
 }
 
@@ -416,6 +439,8 @@ function toJobRenderArgs(args: HubRenderArgs | undefined): JobRenderArgs | undef
 			return { cancel: args.ids ?? [] };
 		case "jobs":
 			return { list: true };
+		case "monitor":
+			return { monitor: args.ids };
 		default:
 			return {};
 	}
@@ -455,6 +480,39 @@ function statusToColor(status: JobSnapshot["status"]): ToolUIColor {
 	}
 }
 
+const RETUNE_WARNING_STATUS: Record<JobRetuneStatus, boolean> = {
+	retuned: false,
+	unchanged: false,
+	not_found: true,
+	not_running: true,
+	unmonitored: true,
+	suppressed: true,
+};
+
+/**
+ * Compact per-id retune row. The model-facing explanation of each status lives
+ * in the hub tool's result text; duplicating those sentences here would put two
+ * copies of the same copy in two packages and blow past a feed row's width.
+ */
+function jobRetuneRow(outcome: JobRetuneOutcome): string {
+	const id = replaceTabs(outcome.id).replace(/\s+/g, " ");
+	const mode = outcome.progress ? replaceTabs(outcome.progress) : "?";
+	switch (outcome.status) {
+		case "retuned":
+			return `${id} → ${mode}`;
+		case "unchanged":
+			return `${id} already ${mode}`;
+		case "not_found":
+			return `${id} not your job`;
+		case "not_running":
+			return `${id} already settled`;
+		case "unmonitored":
+			return `${id} launched without progress`;
+		case "suppressed":
+			return `${id} withheld by a wait`;
+	}
+}
+
 /**
  * Task job results are delivered in the model-facing `<task-result>` envelope
  * (prompts/tools/task-summary.md) so the parent agent can parse status and the
@@ -483,6 +541,7 @@ function describeTarget(args: JobRenderArgs | undefined): string {
 	if (args?.list) return "background jobs";
 	const poll = args?.poll ?? [];
 	const cancel = args?.cancel ?? [];
+	const monitor = args?.monitor ?? [];
 	const parts: string[] = [];
 	if (cancel.length > 0) {
 		parts.push(cancel.length === 1 ? `cancel ${cancel[0]}` : `cancel ${cancel.length} jobs`);
@@ -490,17 +549,21 @@ function describeTarget(args: JobRenderArgs | undefined): string {
 	if (poll.length > 0) {
 		parts.push(poll.length === 1 ? `poll ${poll[0]}` : `poll ${poll.length} jobs`);
 	}
+	if (monitor.length > 0) {
+		const id = replaceTabs(monitor[0]!).replace(/\s+/g, " ");
+		parts.push(monitor.length === 1 ? `monitor ${id}` : `monitor ${monitor.length} jobs`);
+	}
 	if (parts.length === 0) return "all running jobs";
 	return parts.join(", ");
 }
 
-/** Pending-call frame for job ops (wait/cancel/jobs). */
+/** Pending-call frame for job ops (`wait`/`cancel`/`jobs`/job-id `monitor`). */
 export function jobsRenderCall(args: HubRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 	const text = renderStatusLine({ icon: "pending", title: describeTarget(toJobRenderArgs(args)) || "Job" }, uiTheme);
 	return new Text(text, 0, 0);
 }
 
-/** Result frame for job snapshots (wait/cancel/jobs and the agents roster). */
+/** Result frame for job snapshots, retunes, and the agents roster. */
 export function jobsRenderResult(
 	result: { content: Array<{ type: string; text?: string }>; details?: CoordinationDetails; isError?: boolean },
 	options: RenderResultOptions,
@@ -510,14 +573,18 @@ export function jobsRenderResult(
 	const args = toJobRenderArgs(hubArgs);
 	let jobs = result.details?.jobs ?? [];
 	const agents = result.details?.agents ?? [];
+	const retuneOutcomes = result.details?.retuned ?? [];
+	const hasRetuneOutcomes = retuneOutcomes.length > 0;
 
-	if (jobs.length === 0 && agents.length === 0) {
+	if (jobs.length === 0 && agents.length === 0 && !hasRetuneOutcomes) {
 		const fallback = result.content?.find(c => c.type === "text")?.text || "No jobs to process";
 		const header = renderStatusLine({ icon: "warning", title: describeTarget(args) || "Job" }, uiTheme);
 		return new Text([header, formatEmptyMessage(fallback, uiTheme)].join("\n"), 0, 0);
 	}
 
-	const isPollCall = args ? !args.list && (!args.cancel || args.cancel.length === 0 || args.poll !== undefined) : true;
+	const isPollCall =
+		!hasRetuneOutcomes &&
+		(args ? !args.list && (!args.cancel || args.cancel.length === 0 || args.poll !== undefined) : true);
 
 	// Agent-carrying results (jobs snapshot / empty-wait roster) are real
 	// snapshots, not displaceable waiting frames — only agentless waits
@@ -535,29 +602,51 @@ export function jobsRenderResult(
 	// The title already carries the running count, so meta lists only the
 	// settled categories — "waiting on 19 of 19 · 19 running" read awkward.
 	const meta: string[] = [];
-	if (counts.completed > 0) meta.push(uiTheme.fg("success", `${counts.completed} done`));
-	if (counts.failed > 0) meta.push(uiTheme.fg("error", `${counts.failed} failed`));
-	if (counts.cancelled > 0) meta.push(uiTheme.fg("warning", `${counts.cancelled} cancelled`));
-	if (agents.length > 0 && jobs.length > 0) {
-		meta.push(uiTheme.fg("accent", `${agents.length} agent${agents.length === 1 ? "" : "s"}`));
+	if (hasRetuneOutcomes) {
+		const retunedCount = retuneOutcomes.filter(outcome => outcome.status === "retuned").length;
+		const unchangedCount = retuneOutcomes.filter(outcome => outcome.status === "unchanged").length;
+		const warningCount = retuneOutcomes.filter(outcome => RETUNE_WARNING_STATUS[outcome.status]).length;
+		if (retunedCount > 0) meta.push(uiTheme.fg("success", `${retunedCount} retuned`));
+		if (unchangedCount > 0) meta.push(uiTheme.fg("accent", `${unchangedCount} unchanged`));
+		if (warningCount > 0) meta.push(uiTheme.fg("warning", `${warningCount} warning${warningCount === 1 ? "" : "s"}`));
+	} else {
+		if (counts.completed > 0) meta.push(uiTheme.fg("success", `${counts.completed} done`));
+		if (counts.failed > 0) meta.push(uiTheme.fg("error", `${counts.failed} failed`));
+		if (counts.cancelled > 0) meta.push(uiTheme.fg("warning", `${counts.cancelled} cancelled`));
+		if (agents.length > 0 && jobs.length > 0) {
+			meta.push(uiTheme.fg("accent", `${agents.length} agent${agents.length === 1 ? "" : "s"}`));
+		}
 	}
 
-	const headerIcon: ToolUIStatus =
-		counts.failed > 0 ? "warning" : counts.running > 0 || agents.length > 0 ? "info" : "success";
+	const retuneWarning = retuneOutcomes.some(outcome => RETUNE_WARNING_STATUS[outcome.status]);
+	const retuneChanged = retuneOutcomes.some(outcome => outcome.status === "retuned");
+	const headerIcon: ToolUIStatus = hasRetuneOutcomes
+		? retuneWarning
+			? "warning"
+			: retuneChanged
+				? "success"
+				: "info"
+		: counts.failed > 0
+			? "warning"
+			: counts.running > 0 || agents.length > 0
+				? "info"
+				: "success";
 	const jobsNoun = jobs.length === 1 ? "job" : "jobs";
-	const description =
-		jobs.length === 0
+	const description = hasRetuneOutcomes
+		? `${retuneOutcomes.length} job progress ${retuneOutcomes.length === 1 ? "update" : "updates"}`
+		: jobs.length === 0
 			? `${agents.length} running agent${agents.length === 1 ? "" : "s"} — no jobs`
 			: counts.running > 0
 				? counts.running === jobs.length
 					? `waiting on ${jobs.length} ${jobsNoun}`
 					: `waiting on ${counts.running} of ${jobs.length} ${jobsNoun}`
 				: `${jobs.length} ${jobsNoun} settled`;
+	const jobSpinnerFrame = hasRetuneOutcomes ? undefined : options.spinnerFrame;
 
 	const header = renderStatusLine(
 		{
 			icon: headerIcon,
-			spinnerFrame: counts.running > 0 || agents.length > 0 ? options.spinnerFrame : undefined,
+			spinnerFrame: counts.running > 0 || agents.length > 0 ? jobSpinnerFrame : undefined,
 			title: description,
 			meta,
 		},
@@ -598,7 +687,7 @@ export function jobsRenderResult(
 			// 30fps redraw. Bypass the cache while any row animates, and key on
 			// the animation state so a sealed block never hits stale shimmered
 			// bytes (spinnerFrame falls back to 0 on both sides of the seal).
-			const shimmerActive = counts.running > 0 && options.spinnerFrame !== undefined && shimmerEnabled();
+			const shimmerActive = counts.running > 0 && jobSpinnerFrame !== undefined && shimmerEnabled();
 			const showModelBadge = isFeedModelBadgeEnabled();
 			const key = new Hasher()
 				.bool(expanded)
@@ -624,10 +713,14 @@ export function jobsRenderResult(
 							job.status === "running" ? options.spinnerFrame : undefined,
 						);
 						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
+						const progressSuffix = job.progress
+							? ` ${formatBadge(replaceTabs(job.progress), "accent", uiTheme)}`
+							: "";
 						const durationSuffix = `${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+						const rowSuffix = `${progressSuffix}${durationSuffix}`;
 						const displayId = truncateToWidth(
 							replaceTabs(job.id).replace(/\s+/g, " "),
-							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
+							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${rowSuffix}`)),
 							Ellipsis.Unicode,
 						);
 						const rawLabelLines = (job.label || "(no label)").split(/\r?\n/);
@@ -650,7 +743,7 @@ export function jobsRenderResult(
 										uiTheme,
 										Math.min(
 											FEED_MODEL_BADGE_WIDTH,
-											Math.max(0, rowWidth - visibleWidth(`${rowPrefix}${displayId}${durationSuffix}`) - 1),
+											Math.max(0, rowWidth - visibleWidth(`${rowPrefix}${displayId}${rowSuffix}`) - 1),
 										),
 									)
 								: "";
@@ -660,7 +753,7 @@ export function jobsRenderResult(
 						// stops animating (sealed, or a settled snapshot — spinnerFrame
 						// cleared) they render static so scrollback never keeps a mid-sweep
 						// shimmer band.
-						const live = job.status === "running" && options.spinnerFrame !== undefined;
+						const live = job.status === "running" && jobSpinnerFrame !== undefined;
 						const headLabel = live
 							? shimmerEnabled()
 								? shimmerText(headRaw, uiTheme)
@@ -669,9 +762,9 @@ export function jobsRenderResult(
 						let row = `${rowPrefix}${modelLead}${headLabel}`;
 						const distinctLabel = job.label.trim() !== job.id;
 						const label = visibleLabelLines[0] ?? "";
-						const inlineLabel = distinctLabel && visibleWidth(`${row} ${label}${durationSuffix}`) <= rowWidth;
+						const inlineLabel = distinctLabel && visibleWidth(`${row} ${label}${rowSuffix}`) <= rowWidth;
 						if (inlineLabel) row += ` ${uiTheme.fg("toolOutput", label)}`;
-						row += durationSuffix;
+						row += rowSuffix;
 						lines.push(truncateToWidth(row, rowWidth, ""));
 						const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
 						for (let i = distinctLabel && !inlineLabel ? 0 : 1; i < visibleLabelLines.length; i++) {
@@ -757,11 +850,17 @@ export function jobsRenderResult(
 							uiTheme,
 						);
 
+			const retuneLines = retuneOutcomes.map(outcome =>
+				uiTheme.fg(
+					RETUNE_WARNING_STATUS[outcome.status] ? "warning" : outcome.status === "retuned" ? "success" : "accent",
+					jobRetuneRow(outcome),
+				),
+			);
 			const all = [header];
 			if (aggregateArtifactError) {
 				all.push(uiTheme.fg("warning", formatArtifactErrorNotice(aggregateArtifactError)));
 			}
-			all.push(...itemLines, ...agentLines);
+			all.push(...retuneLines, ...itemLines, ...agentLines);
 			for (let i = 0; i < all.length; i++) all[i] = truncateToWidth(all[i]!, width, Ellipsis.Unicode);
 			cached = { key, lines: all };
 			return all;
@@ -1535,7 +1634,6 @@ export function messagingRenderResult(
 
 const LAUNCH_OPS: Record<string, true> = {
 	start: true,
-	monitor: true,
 	ps: true,
 	logs: true,
 	stop: true,
@@ -1543,19 +1641,22 @@ const LAUNCH_OPS: Record<string, true> = {
 	describe: true,
 };
 
-/** Launch-style call: an explicit process op, or `send`/`wait` targeting a process `name`. */
+/** Launch-style call: a process op, or `send`/`wait` targeting a process `name`. */
 function isLaunchStyleArgs(args: HubRenderArgs | undefined): boolean {
 	if (!args?.op) return false;
+	if (args.op === "monitor") return !!args.name || !args.ids?.length;
 	if (LAUNCH_OPS[args.op]) return true;
 	return (args.op === "send" || args.op === "wait") && !!args.name && !args.to && !args.from;
 }
 
-/** Job-style call: job ops, or a `wait` that does not target a peer or process. */
+/** Job-style call: job ops, job-id `monitor`, or a `wait` that does not target a peer or process. */
 function isJobStyleArgs(args: HubRenderArgs | undefined): boolean {
 	switch (args?.op) {
 		case "jobs":
 		case "cancel":
 			return true;
+		case "monitor":
+			return !!args.ids?.length && !args.name;
 		case "wait":
 			return !!args.ids?.length || (!args.from && !args.name);
 		default:
@@ -1596,7 +1697,7 @@ export const hubToolRenderer = {
 		let detail = op;
 		if (op === "send" && (hubArgs.to || hubArgs.name)) detail = `send → ${hubArgs.to ?? hubArgs.name}`;
 		else if (op === "wait" && (hubArgs.from || hubArgs.name)) detail = `wait ${hubArgs.from ?? hubArgs.name}`;
-		else if ((op === "wait" || op === "cancel") && hubArgs.ids?.length) {
+		else if ((op === "wait" || op === "cancel" || op === "monitor") && hubArgs.ids?.length) {
 			detail = `${op} ${hubArgs.ids.length} job${hubArgs.ids.length === 1 ? "" : "s"}`;
 		} else if (hubArgs.name) detail = `${op} ${hubArgs.name}`;
 		return { label: "Hub", detail };
@@ -1625,7 +1726,10 @@ export const hubToolRenderer = {
 			return launchRenderResult({ ...result, details }, options, uiTheme, toLaunchArgs(args));
 		}
 		const coordination = details;
-		if (coordination && (Array.isArray(coordination.jobs) || Array.isArray(coordination.agents))) {
+		if (
+			coordination &&
+			(Array.isArray(coordination.jobs) || Array.isArray(coordination.agents) || Array.isArray(coordination.retuned))
+		) {
 			return jobsRenderResult({ ...result, details: coordination }, options, uiTheme, args);
 		}
 		if (

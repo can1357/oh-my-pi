@@ -1803,7 +1803,8 @@ export class AgentSession {
 			// the eventual batch message cannot materialize) without limit.
 			coalesceKey: asyncProgressCoalesceKey,
 			coalesce: mergeAsyncProgressEntries,
-			build: buildAsyncProgressBatchMessage,
+			build: entries =>
+				buildAsyncProgressBatchMessage(entries, { hubTool: this.#tools.getActiveToolNames().includes("hub") }),
 		});
 		// Every wake-mode producer (managed jobs and, via queueLaunchProgress,
 		// hub monitors) shares this one budget: per-source rate limits bound each
@@ -1820,7 +1821,10 @@ export class AgentSession {
 				idleTurnBudget: this.#wakeTurnBudget,
 				coalesceKey: asyncProgressCoalesceKey,
 				coalesce: mergeAsyncProgressEntries,
-				build: buildAsyncProgressBatchMessage,
+				build: entries =>
+					buildAsyncProgressBatchMessage(entries, {
+						hubTool: this.#tools.getActiveToolNames().includes("hub"),
+					}),
 			},
 		);
 		// Progress queues must drain before terminal process completions. The broker
@@ -1847,6 +1851,7 @@ export class AgentSession {
 					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, matchesJob);
 					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, matchesJob);
 				},
+				retune: (jobId, delivery) => this.#moveQueuedAsyncProgress(jobId, delivery),
 			});
 			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
 				this.#deliverAsyncJobResult(manager, jobId, text, job),
@@ -2504,6 +2509,42 @@ export class AgentSession {
 	}
 
 	/**
+	 * Re-home one job's queued progress onto the kind `delivery` uses — the two
+	 * kinds differ only in whether a flush may spend a wake turn, so output
+	 * sampled under the old mode must still be delivered under the new one
+	 * rather than sit in a queue the job no longer feeds.
+	 *
+	 * Entries are folded in `seq` order before enqueueing so the target kind's
+	 * coalescer cannot append older text behind newer text. `scope` decides
+	 * whether entries already in the target kind join that fold: completion
+	 * promotion must (after a retune it can face both kinds, and the inverted
+	 * merge would misorder the transcript), while a retune must not — that would
+	 * push the target kind's entries behind every other producer's queued
+	 * progress for no gain.
+	 */
+	#moveQueuedAsyncProgress(
+		jobId: string,
+		delivery: AsyncJobProgressDelivery,
+		scope: "source-only" | "source-and-target" = "source-only",
+	): void {
+		const targetKind = delivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;
+		const sourceKind = delivery === "wake" ? ASYNC_PROGRESS_MESSAGE_TYPE : ASYNC_PROGRESS_WAKE_QUEUE_KIND;
+		const sourceKey = asyncProgressSourceKey({ jobId });
+		const matchesJob = (entry: AsyncProgressEntry) => asyncProgressSourceKey(entry) === sourceKey;
+		const queued = this.yieldQueue.take<AsyncProgressEntry>(sourceKind, matchesJob);
+		if (queued.length === 0) return;
+		if (scope === "source-and-target") {
+			queued.push(...this.yieldQueue.take<AsyncProgressEntry>(targetKind, matchesJob));
+		}
+		queued.sort((left, right) => left.seq - right.seq);
+		let merged = queued[0]!;
+		for (let index = 1; index < queued.length; index++) {
+			merged = mergeAsyncProgressEntries(merged, queued[index]!);
+		}
+		this.yieldQueue.enqueue<AsyncProgressEntry>(targetKind, { ...merged, delivery });
+	}
+
+	/**
 	 * Delivery sink for async jobs owned by this agent: format the result
 	 * (spilling oversized output to an artifact), enqueue it as an async-result
 	 * follow-up, and settle only after the yield queue injects or discards it.
@@ -2547,14 +2588,7 @@ export class AgentSession {
 		// the output was already delivered. Promote it to the wake queue: that
 		// kind registers ahead of async-result, so the flush injects the
 		// remaining progress before the completion result.
-		const completedProgressSourceKey = asyncProgressSourceKey({ jobId });
-		const queuedProgress = this.yieldQueue.take<AsyncProgressEntry>(
-			ASYNC_PROGRESS_MESSAGE_TYPE,
-			entry => asyncProgressSourceKey(entry) === completedProgressSourceKey,
-		);
-		for (const entry of queuedProgress) {
-			this.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, entry);
-		}
+		this.#moveQueuedAsyncProgress(jobId, "wake", "source-and-target");
 		await this.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result", {
 			jobId,
 			result: formatted,
