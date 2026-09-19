@@ -529,7 +529,7 @@ export class ReviewCommand implements CustomCommand {
 				return buildPrReviewPrompt(this.api, ctx, selectedChoice.ref, extraInstructions ?? "");
 
 			case "base-branch": {
-				const branches = await getGitBranches(this.api);
+				const branches = await getGitBranches(ctx.cwd);
 				if (branches.length === 0) {
 					ctx.ui.notify("No git branches found", "error");
 					return undefined;
@@ -538,10 +538,10 @@ export class ReviewCommand implements CustomCommand {
 				const baseBranch = await ctx.ui.select("Select base branch to compare against", branches);
 				if (!baseBranch) return undefined;
 
-				const currentBranch = await getCurrentBranch(this.api);
+				const currentBranch = await getCurrentBranch(ctx.cwd);
 				let diffText: string;
 				try {
-					const repository = vcs.requireGit(this.api.cwd);
+					const repository = vcs.requireGit(ctx.cwd);
 					// PR-style review compares the merge base against the current
 					// branch (`base...head`), so base-only commits are excluded.
 					const mergeBase = await repository.mergeBase(baseBranch, currentBranch);
@@ -567,7 +567,7 @@ export class ReviewCommand implements CustomCommand {
 			}
 
 			case "uncommitted": {
-				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(err => {
+				const reviewDiff = await getUncommittedReviewDiff(ctx.cwd).catch(err => {
 					ctx.ui.notify(`Failed to get diff: ${err instanceof Error ? err.message : String(err)}`, "error");
 					return undefined;
 				});
@@ -584,7 +584,7 @@ export class ReviewCommand implements CustomCommand {
 			}
 
 			case "commit": {
-				const commits = await getRecentCommits(this.api, 20);
+				const commits = await getRecentCommits(ctx.cwd, 20);
 				if (commits.length === 0) {
 					ctx.ui.notify("No commits found", "error");
 					return undefined;
@@ -597,7 +597,7 @@ export class ReviewCommand implements CustomCommand {
 
 				let diffText: string;
 				try {
-					const result = await vcs.requireGit(this.api.cwd).showCommit(hash);
+					const result = await vcs.requireGit(ctx.cwd).showCommit(hash);
 					diffText = result.data.toString("utf8");
 				} catch (err) {
 					ctx.ui.notify(`Failed to get commit: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -623,7 +623,7 @@ export class ReviewCommand implements CustomCommand {
 				);
 				if (!instructions?.trim()) return undefined;
 
-				const reviewDiff = await getUncommittedReviewDiff(this.api).catch(() => undefined);
+				const reviewDiff = await getUncommittedReviewDiff(ctx.cwd).catch(() => undefined);
 
 				if (reviewDiff?.diffText.trim()) {
 					const stats = parseDiff(reviewDiff.diffText);
@@ -644,24 +644,24 @@ export class ReviewCommand implements CustomCommand {
 	}
 }
 
-async function getGitBranches(api: CustomCommandAPI): Promise<string[]> {
+async function getGitBranches(cwd: string): Promise<string[]> {
 	try {
-		return await vcs.requireGit(api.cwd).listBranches(true);
+		return await vcs.requireGit(cwd).listBranches(true);
 	} catch {
 		return [];
 	}
 }
 
-async function getCurrentBranch(api: CustomCommandAPI): Promise<string> {
+async function getCurrentBranch(cwd: string): Promise<string> {
 	try {
-		return (await vcs.git(api.cwd)?.currentBranch()) ?? "HEAD";
+		return (await vcs.git(cwd)?.currentBranch()) ?? "HEAD";
 	} catch {
 		return "HEAD";
 	}
 }
 
-async function getUncommittedReviewDiff(api: CustomCommandAPI): Promise<CurrentReviewDiff> {
-	const repository = vcs.require(api.cwd);
+async function getUncommittedReviewDiff(cwd: string): Promise<CurrentReviewDiff> {
+	const repository = vcs.require(cwd);
 	const diffText = await repository.uncommittedDiff([]);
 	const isJj = repository.kind() === "jj";
 	return {
@@ -672,9 +672,9 @@ async function getUncommittedReviewDiff(api: CustomCommandAPI): Promise<CurrentR
 	};
 }
 
-async function getRecentCommits(api: CustomCommandAPI, count: number): Promise<string[]> {
+async function getRecentCommits(cwd: string, count: number): Promise<string[]> {
 	try {
-		return await vcs.require(api.cwd).logOnelines(count);
+		return await vcs.require(cwd).logOnelines(count);
 	} catch {
 		return [];
 	}

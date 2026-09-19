@@ -102,6 +102,7 @@ describe("ReviewCommand", () => {
 	}
 
 	function createContext(options?: {
+		cwd?: string;
 		selectedMode?: string;
 		selectResults?: string[];
 		editorValue?: string | undefined;
@@ -113,6 +114,7 @@ describe("ReviewCommand", () => {
 	}): HookCommandContext {
 		const selectResults = [...(options?.selectResults ?? [])];
 		return {
+			cwd: options?.cwd ?? tmpDir,
 			hasUI: true,
 			sessionManager: {
 				getEntries: () => options?.sessionEntries ?? [],
@@ -585,6 +587,41 @@ describe("ReviewCommand", () => {
 		expect(diffSpy).toHaveBeenCalledWith({ base: "basesha", head: "feature" });
 	});
 
+	it("uses the invocation cwd after the session moves to a linked worktree", async () => {
+		const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-worktree-repo-"));
+		const worktreeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-worktree-"));
+		await fs.rmdir(worktreeDir);
+		try {
+			await $`git init -q -b main`.cwd(repoDir).quiet();
+			await $`git config user.email test@example.com`.cwd(repoDir).quiet();
+			await $`git config user.name Test`.cwd(repoDir).quiet();
+			await fs.writeFile(path.join(repoDir, "a.txt"), "one\n");
+			await $`git add a.txt`.cwd(repoDir).quiet();
+			await $`git commit -q -m init`.cwd(repoDir).quiet();
+			await $`git worktree add -q -b feature/review ${worktreeDir}`.cwd(repoDir).quiet();
+			await fs.writeFile(path.join(worktreeDir, "a.txt"), "two\n");
+			await $`git commit -q -am feature-change`.cwd(worktreeDir).quiet();
+
+			// The command is loaded while the session is still on main. `/wt`
+			// later rebuilds the invocation context with the linked worktree cwd.
+			const command = new ReviewCommand({ cwd: repoDir } as unknown as CustomCommandAPI);
+			const result = await command.execute(
+				[],
+				createContext({
+					cwd: worktreeDir,
+					selectResults: ["1. Review against a base branch (PR Style)", "main"],
+				}),
+			);
+
+			expect(result).toContain("Reviewing changes between `main` and `feature/review`");
+			expect(result).toContain("a.txt");
+		} finally {
+			await $`git worktree remove --force ${worktreeDir}`.cwd(repoDir).quiet().nothrow();
+			await removeWithRetries(repoDir);
+			await removeWithRetries(worktreeDir);
+		}
+	});
+
 	it("resolves base-branch review against a real repo without a range revspec", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-review-real-"));
 		try {
@@ -602,6 +639,7 @@ describe("ReviewCommand", () => {
 			const sameResult = await sameBranch.execute(
 				[],
 				createContext({
+					cwd: dir,
 					selectResults: ["1. Review against a base branch (PR Style)", "main"],
 					onNotify: call => notices.push(call),
 				}),
@@ -626,6 +664,7 @@ describe("ReviewCommand", () => {
 			const featureResult = await feature.execute(
 				[],
 				createContext({
+					cwd: dir,
 					selectResults: ["1. Review against a base branch (PR Style)", "main"],
 				}),
 			);
@@ -660,6 +699,7 @@ describe("ReviewCommand", () => {
 			const result = await command.execute(
 				[],
 				createContext({
+					cwd: dir,
 					selectResults: ["1. Review against a base branch (PR Style)", "main"],
 					onNotify: call => notices.push(call),
 				}),
