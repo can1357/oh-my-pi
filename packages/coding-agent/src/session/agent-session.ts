@@ -215,7 +215,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
-import type { ImageAttachmentEntry } from "../tools";
+import type { ImageAttachmentEntry, LaunchContextBoundary } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { type AskToolInput, recoverAskQuestions } from "../tools/ask";
@@ -290,6 +290,7 @@ import {
 	ASYNC_PROGRESS_WAKE_QUEUE_KIND,
 	ASYNC_RESULT_MESSAGE_TYPE,
 	type AsyncProgressEntry,
+	type AsyncProgressIdentity,
 	type AsyncResultEntry,
 	asyncProgressCoalesceKey,
 	asyncProgressSourceKey,
@@ -668,6 +669,8 @@ export class AgentSession {
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
+	/** Launch subscriptions torn down at the next conversation boundary; each fires once and is forgotten. */
+	#contextBoundaryCallbacks = new Set<(boundary: LaunchContextBoundary) => void>();
 	#observedSessionId: string | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
@@ -750,8 +753,12 @@ export class AgentSession {
 	#unregisterAsyncProgressSink: (() => void) | undefined;
 	#unregisterAsyncProgressQueue: (() => void) | undefined;
 	#unregisterAsyncProgressWakeQueue: (() => void) | undefined;
+	readonly #activeLaunchMonitors = new Set<string>();
+	#launchMonitorStateChanged = Promise.withResolvers<void>();
 	/** Conversation-boundary fence shared by monitored process progress and completions. */
 	#launchProgressBoundaryDepth = 0;
+	/** Defers queued launch delivery while a different-session switch is still reversible. */
+	#launchProgressTransitionDepth = 0;
 	#launchProgressEpoch = 0;
 	/**
 	 * Async-delivery generation, bumped on every session transition that evicts
@@ -1263,9 +1270,8 @@ export class AgentSession {
 
 		// `agent_end` is deferred until the prompt count reaches zero, but it is
 		// emitted immediately before the settle drain schedules work that arrived
-		// after the loop's final queue/aside poll. Such a tail arrival is a real
-		// continuation, not a terminal stop: mark this end non-terminal so
-		// subscribers wait through the queued steer/follow-up or stranded IRC wake.
+		// after the loop's final queue/aside poll. Any queued, IRC, or asynchronous
+		// wake is a real continuation, not a terminal stop.
 		const canDrain =
 			!this.#abortInProgress && this.#unsubscribeAgent !== undefined && this.#modeExitDrainSuppressionDepth === 0;
 		const queuedContinuation =
@@ -1274,7 +1280,10 @@ export class AgentSession {
 			this.#canAutoContinueForFollowUp() &&
 			this.agent.hasQueuedMessages();
 		const ircContinuation = canDrain && !this.#isDisposed && !this.#planModeState?.enabled && this.#irc.hasPending();
-		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
+		const asyncContinuation = this.#hasPendingAsyncWake();
+		this.#emit(
+			queuedContinuation || ircContinuation || asyncContinuation ? { ...pending, isTerminal: false } : pending,
+		);
 	}
 
 	/**
@@ -1619,7 +1628,7 @@ export class AgentSession {
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
-			isStreaming: () => this.isStreaming,
+			isStreaming: () => this.isStreaming || this.#launchProgressTransitionDepth > 0,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -1654,13 +1663,6 @@ export class AgentSession {
 					throw error;
 				}
 			},
-		});
-		this.yieldQueue.register<SessionLaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
-			isStale: entry =>
-				this.#isDisposed ||
-				entry.epoch !== this.#launchProgressEpoch ||
-				!isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
-			build: buildLaunchCompletionBatchMessage,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -1802,7 +1804,8 @@ export class AgentSession {
 			// the eventual batch message cannot materialize) without limit.
 			coalesceKey: asyncProgressCoalesceKey,
 			coalesce: mergeAsyncProgressEntries,
-			build: buildAsyncProgressBatchMessage,
+			build: entries =>
+				buildAsyncProgressBatchMessage(entries, { hubTool: this.#tools.getActiveToolNames().includes("hub") }),
 		});
 		// Every wake-mode producer (managed jobs and, via queueLaunchProgress,
 		// hub monitors) shares this one budget: per-source rate limits bound each
@@ -1818,10 +1821,22 @@ export class AgentSession {
 				idleTurnBudget: this.#wakeTurnBudget,
 				coalesceKey: asyncProgressCoalesceKey,
 				coalesce: mergeAsyncProgressEntries,
-				build: buildAsyncProgressBatchMessage,
+				build: entries =>
+					buildAsyncProgressBatchMessage(entries, {
+						hubTool: this.#tools.getActiveToolNames().includes("hub"),
+					}),
 			},
 		);
-
+		// Progress queues must drain before terminal process completions. The broker
+		// flushes its final progress batch first; preserve that ordering when both
+		// kinds accumulate while the model is busy.
+		this.yieldQueue.register<SessionLaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
+			isStale: entry =>
+				this.#isDisposed ||
+				entry.epoch !== this.#launchProgressEpoch ||
+				!isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
+			build: buildLaunchCompletionBatchMessage,
+		});
 		if (this.#asyncJobManager && this.#agentId) {
 			const manager = this.#asyncJobManager;
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
@@ -1831,10 +1846,12 @@ export class AgentSession {
 			this.#unregisterAsyncProgressSink = manager.registerProgressSink(this.#agentId, {
 				deliver: (jobId, text, job, seq, info) => this.#deliverAsyncJobProgress(jobId, text, job, seq, info),
 				acknowledge: jobId => {
-					const matchesJob = (entry: AsyncProgressEntry) => entry.jobId === jobId;
+					const managedJobSourceKey = asyncProgressSourceKey({ jobId });
+					const matchesJob = (entry: AsyncProgressEntry) => asyncProgressSourceKey(entry) === managedJobSourceKey;
 					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, matchesJob);
 					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, matchesJob);
 				},
+				retune: (jobId, delivery) => this.#moveQueuedAsyncProgress({ jobId }, this.#asyncDeliveryEpoch, delivery),
 			});
 			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
 				this.#deliverAsyncJobResult(manager, jobId, text, job),
@@ -2413,7 +2430,8 @@ export class AgentSession {
 	 */
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
-		const queuedWake = this.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND);
+		const queuedWake =
+			this.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND) || this.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE);
 		if (!manager) return queuedWake;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
@@ -2430,11 +2448,14 @@ export class AgentSession {
 	}
 
 	/**
-	 * Public view of the pending-async-wake state for run drivers: true while
-	 * owner-scoped async work can still re-wake this session's run.
+	 * Public view for run drivers: true while owner-scoped async work or an active
+	 * process monitor can still deliver output or terminal completion. Active
+	 * monitors belong here, but not in {@link #hasPendingAsyncWake}: a subscription
+	 * with no queued event must keep a subagent alive without preventing its
+	 * current model turn from settling and making room for future delivery.
 	 */
 	hasPendingAsyncWork(): boolean {
-		return this.#hasPendingAsyncWake();
+		return this.#hasPendingAsyncWake() || this.#activeLaunchMonitors.size > 0;
 	}
 
 	/** True while a submission has been admitted but has not yet started a turn, queued, or bailed. */
@@ -2471,15 +2492,68 @@ export class AgentSession {
 	 * jobs.
 	 */
 	async settleAsyncWork(): Promise<void> {
+		const launchMonitorChanged = this.#launchMonitorStateChanged.promise;
 		const manager = this.#asyncJobManager;
-		if (!manager || !this.#agentId) return;
-		await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
-		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
-		// Queued wake progress may be held by the wake-turn budget; wait for that
-		// deferred flush (and the turn it starts) instead of spinning on
-		// hasPendingAsyncWork() until the budget refills.
+		if (manager && this.#agentId) {
+			await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
+			await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		}
+		// Queued wake progress (owner jobs and launch monitors share one budget)
+		// may be held by the wake-turn budget; wait for that deferred flush (and
+		// the turn it starts) instead of spinning on hasPendingAsyncWork() until
+		// the budget refills.
 		await this.yieldQueue.idleFlushSettled();
 		await this.waitForIdle();
+		if (this.#activeLaunchMonitors.size > 0) await launchMonitorChanged;
+		await this.waitForIdle();
+	}
+
+	/**
+	 * Re-home one source's queued progress onto the kind `delivery` uses — the
+	 * two kinds differ only in whether a flush may spend a wake turn, so output
+	 * sampled under the old mode must still be delivered under the new one
+	 * rather than sit in a queue the source no longer feeds. Managed jobs and
+	 * hub monitors share this path: `identity` is matched through
+	 * `asyncProgressSourceKey`, which keys a monitor by `process:<daemonId>`.
+	 *
+	 * Entries are folded in `seq` order before enqueueing so the target kind's
+	 * coalescer cannot append older text behind newer text. `scope` decides
+	 * whether entries already in the target kind join that fold: completion
+	 * promotion must (after a retune it can face both kinds, and the inverted
+	 * merge would misorder the transcript, misdate the entry, and drop the
+	 * newest bytes when the merged preview overflows), while a retune must not
+	 * — that would push the target kind's entries behind every other producer's
+	 * queued progress for no gain.
+	 *
+	 * `epoch` is part of the match, not a filter applied afterwards. A launch
+	 * boundary bumps the launch epoch WITHOUT clearing these queues (unlike the
+	 * job epoch, which clears both kinds), so a stale entry can sit beside a
+	 * live one for the same daemon. Folding across that line would either
+	 * resurrect text the boundary evicted or stamp the fold with the stale
+	 * epoch, whereupon `isStale` drops live progress at flush.
+	 */
+	#moveQueuedAsyncProgress(
+		identity: AsyncProgressIdentity,
+		epoch: number,
+		delivery: AsyncJobProgressDelivery,
+		scope: "source-only" | "source-and-target" = "source-only",
+	): void {
+		const targetKind = delivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;
+		const sourceKind = delivery === "wake" ? ASYNC_PROGRESS_MESSAGE_TYPE : ASYNC_PROGRESS_WAKE_QUEUE_KIND;
+		const sourceKey = asyncProgressSourceKey(identity);
+		const matchesSource = (entry: AsyncProgressEntry) =>
+			entry.epoch === epoch && asyncProgressSourceKey(entry) === sourceKey;
+		const queued = this.yieldQueue.take<AsyncProgressEntry>(sourceKind, matchesSource);
+		if (queued.length === 0) return;
+		if (scope === "source-and-target") {
+			queued.push(...this.yieldQueue.take<AsyncProgressEntry>(targetKind, matchesSource));
+		}
+		queued.sort((left, right) => left.seq - right.seq);
+		let merged = queued[0]!;
+		for (let index = 1; index < queued.length; index++) {
+			merged = mergeAsyncProgressEntries(merged, queued[index]!);
+		}
+		this.yieldQueue.enqueue<AsyncProgressEntry>(targetKind, { ...merged, delivery });
 	}
 
 	/**
@@ -2525,14 +2599,7 @@ export class AgentSession {
 		// the output was already delivered. Promote it to the wake queue: that
 		// kind registers ahead of async-result, so the flush injects the
 		// remaining progress before the completion result.
-		const completedProgressSourceKey = asyncProgressSourceKey({ jobId });
-		const queuedProgress = this.yieldQueue.take<AsyncProgressEntry>(
-			ASYNC_PROGRESS_MESSAGE_TYPE,
-			entry => asyncProgressSourceKey(entry) === completedProgressSourceKey,
-		);
-		for (const entry of queuedProgress) {
-			this.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, entry);
-		}
+		this.#moveQueuedAsyncProgress({ jobId }, epoch, "wake", "source-and-target");
 		await this.yieldQueue.enqueueWithReceipt<AsyncResultEntry>("async-result", {
 			jobId,
 			result: formatted,
@@ -4634,6 +4701,16 @@ export class AgentSession {
 		return () => this.#sessionChangeCallbacks.delete(callback);
 	}
 
+	/**
+	 * Register cleanup that runs when this AgentSession replaces its conversation
+	 * beneath live launch subscriptions (context reset, new session, fork/branch,
+	 * committed switch). Fires once with the boundary kind and is then forgotten.
+	 */
+	registerContextBoundaryCallback(callback: (boundary: LaunchContextBoundary) => void): () => void {
+		this.#contextBoundaryCallbacks.add(callback);
+		return () => this.#contextBoundaryCallbacks.delete(callback);
+	}
+
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {
 		this.#commandMetadataChangedListeners.push(listener);
 		return () => {
@@ -4743,6 +4820,18 @@ export class AgentSession {
 				callback();
 			} catch (error) {
 				logger.warn("Session change callback failed", { error: String(error) });
+			}
+		}
+	}
+
+	#notifyContextBoundaryCallbacks(boundary: LaunchContextBoundary): void {
+		const callbacks = [...this.#contextBoundaryCallbacks];
+		this.#contextBoundaryCallbacks.clear();
+		for (const callback of callbacks) {
+			try {
+				callback(boundary);
+			} catch (error) {
+				logger.warn("Context boundary cleanup failed", { boundary, error: String(error) });
 			}
 		}
 	}
@@ -5071,6 +5160,7 @@ export class AgentSession {
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
 		this.#sessionChangeCallbacks.clear();
+		this.#contextBoundaryCallbacks.clear();
 
 		// A dispose triggered mid-turn (Ctrl-C / timeout / hard-killed subagent)
 		// only *signals* the agent loop via the earlier abort(); the loop and the
@@ -5219,7 +5309,7 @@ export class AgentSession {
 		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
 		const droppedCount = this.agent.state.messages.length;
 
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary("reset");
 		// Tear down the same per-turn runtime state that newSession() resets across
 		// a conversation boundary, so work scheduled from the pre-reset turn cannot
 		// re-enter the cleared context:
@@ -7538,6 +7628,22 @@ export class AgentSession {
 		// A terminal event observed inside a reset/switch boundary belongs to the
 		// process incarnation that boundary is evicting.
 		if (this.#launchProgressBoundaryDepth > 0) return Promise.resolve();
+		// Ambient monitor output queued while this owner sat idle would be
+		// skipped by the completion-triggered idle flush (its queue registers
+		// with `skipIdleFlush`) and would inject only on a later turn — after
+		// the terminal notification for the process it belongs to. Promote it
+		// to the wake queue, which registers ahead of launch-completion, so the
+		// flush injects the remaining output before the completion. The fold is
+		// `source-and-target` for the same reason as the async-job completion
+		// path in #deliverAsyncJobResult: a retuned monitor has entries in both
+		// kinds, and enqueueing the ambient ones on top of a newer wake entry
+		// would coalesce older text behind it.
+		this.#moveQueuedAsyncProgress(
+			{ jobId: notification.daemon.name, source: { id: notification.daemon.id, type: "process" } },
+			this.#launchProgressEpoch,
+			"wake",
+			"source-and-target",
+		);
 		const delivered = this.yieldQueue.enqueueWithReceipt<SessionLaunchCompletionEntry>(
 			LAUNCH_COMPLETION_MESSAGE_TYPE,
 			{ ...notification, epoch: this.#launchProgressEpoch },
@@ -7547,6 +7653,18 @@ export class AgentSession {
 	}
 	captureLaunchProgressEpoch(): number {
 		return this.#launchProgressEpoch;
+	}
+
+	/**
+	 * A monitor retuned to `wake` takes its already-queued ambient output with
+	 * it, so the switch cannot leave that output in the kind an idle flush
+	 * skips — where it would land only on a later turn, behind newer wake
+	 * output. Promotion only: a `wake` → `ambient` retune deliberately leaves
+	 * queued wake entries alone, since demoting them would revoke a turn they
+	 * already hold and delay delivery for no gain.
+	 */
+	promoteLaunchProgress(daemonId: string, epoch: number): void {
+		this.#moveQueuedAsyncProgress({ jobId: daemonId, source: { id: daemonId, type: "process" } }, epoch, "wake");
 	}
 
 	queueLaunchProgress(
@@ -7563,6 +7681,11 @@ export class AgentSession {
 		// model-facing text, so (like AsyncJobManager for managed jobs) they never
 		// become a progress entry, spend a wake permit, or start an idle turn.
 		if (notification.batchKind === "artifact-only") return;
+		// Wake monitors enqueue into the same ASYNC_PROGRESS_WAKE_QUEUE_KIND as
+		// wake background jobs. That kind is the one registered with the
+		// session-wide WakeTurnBudget, so Hub monitor wake-ups draw on the same
+		// idle-turn budget as jobs; monitors deliberately have no budget of their
+		// own and aggregate wake traffic stays bounded per session, not per source.
 		const queueKind = delivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;
 		this.yieldQueue.enqueue<AsyncProgressEntry>(queueKind, {
 			jobId: notification.name,
@@ -7583,11 +7706,32 @@ export class AgentSession {
 			suppressedEvents: notification.suppressedEvents || undefined,
 			reminder: notification.reminder,
 		});
+		this.#signalLaunchMonitorChanged();
 	}
 
-	#beginLaunchProgressBoundary(): Disposable {
+	#signalLaunchMonitorChanged(): void {
+		const changed = this.#launchMonitorStateChanged;
+		this.#launchMonitorStateChanged = Promise.withResolvers<void>();
+		changed.resolve();
+	}
+
+	/**
+	 * Cross a conversation boundary beneath live launch subscriptions: stale the
+	 * progress epoch and tear the subscriptions down. Registrations own broker
+	 * subscriptions and artifact resources beyond the active-monitor bookkeeping
+	 * cleared here; a same-ID reset never changes the session id, so their
+	 * teardown cannot ride on session-change callbacks and runs from this
+	 * boundary instead. Cleanup callbacks are idempotent and are forgotten once
+	 * invoked.
+	 */
+	#beginLaunchProgressBoundary(boundary: LaunchContextBoundary): Disposable {
 		this.#launchProgressBoundaryDepth += 1;
 		this.#launchProgressEpoch += 1;
+		this.#notifyContextBoundaryCallbacks(boundary);
+		if (this.#activeLaunchMonitors.size > 0) {
+			this.#activeLaunchMonitors.clear();
+			this.#signalLaunchMonitorChanged();
+		}
 		let active = true;
 		return {
 			[Symbol.dispose]: () => {
@@ -7596,6 +7740,41 @@ export class AgentSession {
 				this.#launchProgressBoundaryDepth -= 1;
 			},
 		};
+	}
+
+	/**
+	 * Hold queued launch delivery while a different-session switch can still
+	 * roll back. Rollback releases the queue into the restored context; a
+	 * committed switch crosses {@link #beginLaunchProgressBoundary} first, so
+	 * the old epoch is stale before this flush can run.
+	 */
+	#beginLaunchProgressTransition(): Disposable {
+		this.#launchProgressTransitionDepth += 1;
+		let active = true;
+		return {
+			[Symbol.dispose]: () => {
+				if (!active) return;
+				active = false;
+				this.#launchProgressTransitionDepth -= 1;
+				if (this.#launchProgressTransitionDepth === 0) this.yieldQueue.requestIdleFlush();
+			},
+		};
+	}
+
+	setLaunchMonitorActive(
+		monitorId: string,
+		_delivery: AsyncJobProgressDelivery,
+		active: boolean,
+		epoch: number,
+	): void {
+		const wasActive = this.#activeLaunchMonitors.has(monitorId);
+		if (!active || epoch !== this.#launchProgressEpoch) {
+			this.#activeLaunchMonitors.delete(monitorId);
+		} else {
+			this.#activeLaunchMonitors.add(monitorId);
+		}
+		if (wasActive === this.#activeLaunchMonitors.has(monitorId)) return;
+		this.#signalLaunchMonitorChanged();
 	}
 
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
@@ -8506,7 +8685,7 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary("new");
 		let advisorRecordersDetached = false;
 		await this.abort();
 		this.#cancelOwnAsyncJobs();
@@ -8638,7 +8817,6 @@ export class AgentSession {
 				return false;
 			}
 		}
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -8666,6 +8844,10 @@ export class AgentSession {
 				this.#bash.finishSessionTransition(bashTransition, false);
 				return false;
 			}
+			// The fork is committed from here: a rejected or empty fork above keeps
+			// the current conversation live, so its launch subscriptions must
+			// survive until this point.
+			using _launchProgressBoundary = this.#beginLaunchProgressBoundary("new");
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// The fork clones the transcript and keeps this recovery state running
@@ -9689,11 +9871,10 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
-		// The boundary advances the launch-progress epoch so monitors bound to
-		// the outgoing transcript go stale; a rolled-back switch keeps that
-		// transcript live, so the epoch must roll back with it (below).
-		const previousLaunchProgressEpoch = this.#launchProgressEpoch;
-		using _launchProgressBoundary = switchingToDifferentSession ? this.#beginLaunchProgressBoundary() : undefined;
+		// A different-session switch stays reversible until the target has loaded:
+		// hold queued launch delivery meanwhile instead of crossing the boundary
+		// now, so a rollback still owns its monitors and their queued output.
+		using _launchProgressTransition = switchingToDifferentSession ? this.#beginLaunchProgressTransition() : undefined;
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
 
@@ -9904,6 +10085,20 @@ export class AgentSession {
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 			}
+			// Load the target ledger before committing: this read can reject, in
+			// which case the outgoing launch subscriptions and epoch must survive
+			// for the rollback context.
+			const providersBySlug = new Map<string, Set<string>>();
+			const restoredAdvisorCosts = switchingToDifferentSession
+				? await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug })
+				: undefined;
+			// Commit after the last awaited step whose failure rolls the session
+			// back, and before reconnecting target-context activity: the provisional
+			// transition above kept old launch deliveries queued; advancing the epoch
+			// now stales them and unregisters their old-context broker subscriptions.
+			using _launchProgressBoundary = switchingToDifferentSession
+				? this.#beginLaunchProgressBoundary("switch")
+				: undefined;
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
@@ -9929,10 +10124,8 @@ export class AgentSession {
 			// rolled it back. The target's own advisor transcripts are the record of what
 			// it already spent, so a session with history resumes with its total instead
 			// of restarting at zero.
-			if (switchingToDifferentSession) {
-				const providersBySlug = new Map<string, Set<string>>();
-				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
-				this.#advisors.restoreCost(costs, providersBySlug);
+			if (restoredAdvisorCosts) {
+				this.#advisors.restoreCost(restoredAdvisorCosts, providersBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// Keep the old reservations during rollback; the target is committed now,
@@ -9958,7 +10151,7 @@ export class AgentSession {
 			this.agent.replaceQueues(previousSteeringMessages, previousFollowUpMessages);
 			this.#irc.restorePending(previousIrcPending);
 			this.#sessionGeneration = previousSessionGeneration;
-			this.#launchProgressEpoch = previousLaunchProgressEpoch;
+
 			generationSettled.resolve();
 			this.#sessionGenerationSettled = previousSessionGenerationSettled;
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
@@ -10070,7 +10263,7 @@ export class AgentSession {
 			}
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary("new");
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
@@ -10189,7 +10382,7 @@ export class AgentSession {
 		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
 			throw new Error("Cannot branch /btw: session changed since /btw started");
 		}
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary("new");
 
 		await withTimeout(
 			this.#cancelPostPromptTasks(),

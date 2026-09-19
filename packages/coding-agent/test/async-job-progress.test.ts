@@ -41,8 +41,10 @@ interface RecordedProgress {
 function recordingSink(): {
 	sink: AsyncJobProgressSink;
 	seen: RecordedProgress[];
+	retuned: Array<{ jobId: string; delivery: AsyncJobProgressDelivery }>;
 } {
 	const seen: RecordedProgress[] = [];
+	const retuned: Array<{ jobId: string; delivery: AsyncJobProgressDelivery }> = [];
 	return {
 		sink: {
 			deliver: (jobId, text, _job: AsyncJob, seq, info) => {
@@ -56,8 +58,12 @@ function recordingSink(): {
 				if (info.truncated === true) record.truncated = true;
 				seen.push(record);
 			},
+			retune: (jobId, delivery) => {
+				retuned.push({ jobId, delivery });
+			},
 		},
 		seen,
+		retuned,
 	};
 }
 
@@ -339,6 +345,78 @@ describe("AsyncJobManager model progress", () => {
 
 		gate.resolve();
 		await manager.waitForAll();
+	});
+	test("retunes only an owned running progress channel and reports every rejection state", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const running = heldJob(manager, "Main", "ambient");
+		await running.report;
+
+		expect(manager.retuneProgressDelivery(running.jobId, "wake", "Main")).toBe("retuned");
+		expect(manager.getJob(running.jobId)?.progressDelivery).toBe("wake");
+		expect(recorder.retuned).toEqual([{ jobId: running.jobId, delivery: "wake" }]);
+		expect(manager.retuneProgressDelivery(running.jobId, "wake", "Main")).toBe("unchanged");
+		expect(recorder.retuned).toHaveLength(1);
+		expect(manager.retuneProgressDelivery(running.jobId, "ambient", "Other")).toBe("not_found");
+		expect(manager.getJob(running.jobId)?.progressDelivery).toBe("wake");
+
+		manager.watchJobs([running.jobId]);
+		expect(manager.retuneProgressDelivery(running.jobId, "ambient", "Main")).toBe("suppressed");
+		expect(manager.getJob(running.jobId)?.progressDelivery).toBe("wake");
+		manager.unwatchJobs([running.jobId]);
+
+		const unmonitoredGate = Promise.withResolvers<void>();
+		const unmonitoredId = manager.register(
+			"bash",
+			"unmonitored",
+			async () => {
+				await unmonitoredGate.promise;
+				return "done";
+			},
+			{ ownerId: "Main" },
+		);
+		expect(manager.retuneProgressDelivery(unmonitoredId, "wake", "Main")).toBe("unmonitored");
+		expect(manager.getJob(unmonitoredId)?.progressDelivery).toBeUndefined();
+
+		running.release();
+		unmonitoredGate.resolve();
+		await manager.waitForAll();
+		expect(manager.retuneProgressDelivery(running.jobId, "ambient", "Main")).toBe("not_running");
+		expect(manager.retuneProgressDelivery("missing", "wake", "Main")).toBe("not_found");
+	});
+
+	test("retuning a gapped progress channel keeps terminal completion text", async () => {
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		const completions: string[] = [];
+		manager.registerProgressSink("Main", recorder.sink);
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			completions.push(text);
+		});
+		const gate = Promise.withResolvers<string>();
+		const started = Promise.withResolvers<(text: string) => void>();
+		const jobId = manager.register(
+			"bash",
+			"gapped retune",
+			async ({ reportAgentProgress }) => {
+				started.resolve(reportAgentProgress);
+				await gate.promise;
+				return "terminal completion";
+			},
+			{ ownerId: "Main", progressDelivery: "ambient" },
+		);
+		const report = await started.promise;
+		manager.watchJobs([jobId]);
+		report("withheld output");
+		manager.unwatchJobs([jobId]);
+
+		expect(manager.retuneProgressDelivery(jobId, "wake", "Main")).toBe("retuned");
+		gate.resolve("terminal completion");
+		await manager.waitForAll();
+		await manager.drainDeliveries();
+		expect(completions).toEqual(["terminal completion"]);
 	});
 
 	test("waits for asynchronous final progress delivery before delivering completion", async () => {

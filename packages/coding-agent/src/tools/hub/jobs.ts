@@ -6,7 +6,7 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 
-import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "../../async";
+import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobProgressDelivery, AsyncJobType } from "../../async";
 
 import { renderStructuredJson } from "../../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -20,6 +20,8 @@ import type {
 	AgentActivitySnapshot,
 	CancelOutcome,
 	CoordinationDetails,
+	JobRetuneOutcome,
+	JobRetuneStatus,
 	JobSnapshot,
 } from "@oh-my-pi/pi-tui/tools/hub";
 
@@ -123,6 +125,8 @@ interface TrackedJobLike {
 	status: string;
 	label: string;
 	startTime: number;
+	/** Delivery mode of the job's live progress channel; absent when it has none. */
+	progressDelivery?: AsyncJobProgressDelivery;
 	latestDetails?: AsyncJobDetails;
 	resultText?: string;
 	errorText?: string;
@@ -175,6 +179,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			status: latest.status as JobSnapshot["status"],
 			label: latest.label,
 			durationMs: Math.max(0, now - latest.startTime),
+			...(latest.progressDelivery !== undefined ? { progress: latest.progressDelivery } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),
 			...(resolvedModelIdentity ? { resolvedModelIdentity } : {}),
 			...(resolvedThinkingLevel !== undefined ? { resolvedThinkingLevel } : {}),
@@ -438,4 +443,72 @@ export function executeJobsSnapshot(
 ): AgentToolResult<CoordinationDetails> {
 	const jobs = manager.getAllJobs(ownerId ? { ownerId } : undefined);
 	return buildJobResult(session, manager, "jobs", jobs, [], runningAgentsOutsideJobs(session));
+}
+
+/** Model-facing line for one retune attempt; the per-status text is the whole contract. */
+function describeRetune(id: string, status: JobRetuneStatus, delivery: AsyncJobProgressDelivery): string {
+	switch (status) {
+		case "retuned":
+			return `\`${id}\` progress → ${delivery}; output already queued under the old mode was merged into the new queue.`;
+		case "unchanged":
+			return `\`${id}\` is already delivering progress as ${delivery}.`;
+		case "not_found":
+			return `\`${id}\` is not a background job you own.`;
+		case "not_running":
+			return `\`${id}\` already settled; only a running job's progress can be retuned.`;
+		case "unmonitored":
+			return `\`${id}\` was launched without \`progress\`; a progress channel cannot be added after launch — relaunch with \`progress\`.`;
+		case "suppressed":
+			return `\`${id}\` progress is withheld while a \`wait\` watches it; retune after that wait returns.`;
+	}
+}
+
+/**
+ * `monitor` against job ids: flip each running job's progress delivery mode in
+ * place. Unlike every other job op this never consumes results — a retune is
+ * not a result recovery, so a settled job's text stays recoverable by a later
+ * `jobs`/`wait` snapshot.
+ */
+export function retuneJobProgress(
+	session: ToolSession,
+	manager: AsyncJobManager,
+	ownerId: string | undefined,
+	ids: string[],
+	delivery: AsyncJobProgressDelivery,
+): AgentToolResult<CoordinationDetails> {
+	const uniqueIds: string[] = [];
+	const seen = new Set<string>();
+	for (const id of ids) {
+		if (seen.has(id)) continue;
+		seen.add(id);
+		uniqueIds.push(id);
+	}
+	const outcomes: JobRetuneOutcome[] = [];
+	const lines: string[] = [`## Progress Retuned (${uniqueIds.length})\n`];
+	for (const id of uniqueIds) {
+		const status = manager.retuneProgressDelivery(id, delivery, ownerId);
+		// `not_found` covers another agent's job, so its mode is never read
+		// here — reporting it would leak state the caller cannot address.
+		const mode =
+			status === "retuned" || status === "unchanged"
+				? delivery
+				: status === "not_found"
+					? undefined
+					: manager.getJob(id)?.progressDelivery;
+		outcomes.push({ id, status, ...(mode !== undefined ? { progress: mode } : {}) });
+		lines.push(`- ${describeRetune(id, status, delivery)}`);
+	}
+	const applied = outcomes.some(outcome => outcome.status === "retuned" || outcome.status === "unchanged");
+	return {
+		content: [{ type: "text", text: lines.join("\n").trimEnd() }],
+		details: {
+			op: "monitor",
+			meta: { source: { type: "report", value: "background job progress retune" } },
+			jobs: snapshotJobs(session, visibleJobs(manager, uniqueIds, ownerId)),
+			retuned: outcomes,
+		},
+		// A retune that changed nothing must not read as success: the silent
+		// no-op is the failure mode the model cannot otherwise detect.
+		...(applied ? {} : { isError: true }),
+	};
 }

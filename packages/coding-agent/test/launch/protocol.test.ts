@@ -98,6 +98,7 @@ describe("launch logs compatibility", () => {
 					name: "web",
 					owner: "session-owner",
 					artifactPath: "/tmp/monitor.log",
+					daemonId: "daemon-1",
 				},
 			],
 			outputSubscriptionId: "output-subscription-1",
@@ -111,6 +112,7 @@ describe("launch logs compatibility", () => {
 				name: "web",
 				owner: "session-owner",
 				artifactPath: "/tmp/monitor.log",
+				daemonId: "daemon-1",
 			},
 		]);
 		expect(request.outputSubscriptionId).toBe("output-subscription-1");
@@ -337,6 +339,96 @@ describe("launch monitor notifications", () => {
 				text: "progress",
 			}),
 		).toThrow("output.seq must be a finite number");
+	});
+});
+
+describe("launch monitor watchers", () => {
+	const watcherSubscription = {
+		id: "monitor-1",
+		registrationId: "registration-1",
+		name: "web",
+		owner: "session-owner",
+		artifactPath: "/tmp/monitor.log",
+	};
+
+	it("carries the advertised delivery mode, attach time, and artifact id on subscriptions", () => {
+		const request = parseDaemonWireRequest({
+			id: "request-1",
+			token: "token-1",
+			outputSubscriptions: [
+				{ ...watcherSubscription, delivery: "ambient", since: 1_700_000_000_000, artifactId: "hub-progress-1" },
+			],
+			outputSubscriptionId: "output-subscription-1",
+			operation: { op: "ping" },
+		});
+
+		expect(request.outputSubscriptions?.[0]).toMatchObject({
+			delivery: "ambient",
+			since: 1_700_000_000_000,
+			artifactId: "hub-progress-1",
+		});
+	});
+
+	it("rejects a delivery mode the session cannot honor", () => {
+		expect(() =>
+			parseDaemonWireRequest({
+				id: "request-1",
+				token: "token-1",
+				outputSubscriptions: [{ ...watcherSubscription, delivery: "loud" }],
+				outputSubscriptionId: "output-subscription-1",
+				operation: { op: "ping" },
+			}),
+		).toThrow("Unknown monitor delivery: loud");
+	});
+
+	it("decodes watcher rows on list and describe results and tolerates brokers without them", () => {
+		const watcher = {
+			name: "web",
+			id: "monitor-1",
+			owner: "session-owner",
+			delivery: "wake" as const,
+			since: 5,
+			artifactId: "hub-progress-1",
+			daemonId: "daemon-1",
+			connected: false,
+		};
+		const listed = parseDaemonRpcResult({ op: "list" }, { daemons: [baseSnapshot], monitors: [watcher] });
+		if (listed.op !== "list") throw new Error("unexpected result");
+		expect(listed.monitors).toEqual([watcher]);
+
+		const described = parseDaemonRpcResult(
+			{ op: "describe", name: "web" },
+			{
+				daemon: baseSnapshot,
+				spec: {
+					name: "web",
+					application: "node",
+					args: [],
+					env: {},
+					cwd: "/tmp",
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+				monitors: [{ name: "web", id: "monitor-2", owner: "other", connected: true }],
+			},
+		);
+		if (described.op !== "describe") throw new Error("unexpected result");
+		expect(described.monitors).toEqual([{ name: "web", id: "monitor-2", owner: "other", connected: true }]);
+
+		const legacy = parseDaemonRpcResult({ op: "list" }, { daemons: [baseSnapshot] });
+		if (legacy.op !== "list") throw new Error("unexpected result");
+		expect(legacy.monitors).toBeUndefined();
+	});
+
+	it("rejects a watcher row without its connection state", () => {
+		expect(() =>
+			parseDaemonRpcResult(
+				{ op: "list" },
+				{ daemons: [], monitors: [{ name: "web", id: "monitor-1", owner: "session-owner" }] },
+			),
+		).toThrow("result.monitors[0].connected must be a boolean");
 	});
 });
 

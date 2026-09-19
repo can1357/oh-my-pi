@@ -56,4 +56,24 @@ describe("async progress messages", () => {
 		expect(rendered).not.toContain("Resume your work");
 		expect(rendered).not.toContain("<system-reminder>");
 	});
+
+	test("offers the job retune in the Bash chatty clause only when the Hub tool is available", () => {
+		// A chatty *bash* job is the case the advice is for, and it never brings a
+		// hub process with it: tool availability, not batch contents, gates it.
+		const chatty: AsyncProgressEntry = {
+			...entry("bg_chatty", "", 62),
+			artifactId: "chatty-output",
+			suppressedEvents: 9,
+			reminder: "chatty-monitor",
+		};
+
+		const withHub = content(buildAsyncProgressBatchMessage([chatty], { hubTool: true }));
+		expect(withHub).toContain('ids: ["<job-id>"]');
+		expect(withHub).toContain("Queued wake output still lands once");
+
+		const withoutHub = content(buildAsyncProgressBatchMessage([chatty]));
+		expect(withoutHub).toContain("\nBash:");
+		expect(withoutHub).not.toContain('ids: ["<job-id>"]');
+		expect(withoutHub).not.toContain('op: "monitor"');
+	});
 });
