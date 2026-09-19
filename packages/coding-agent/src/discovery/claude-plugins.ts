@@ -16,6 +16,7 @@ import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
+import { normalizeClaudeStyleMcpTimeoutMs } from "../mcp/timeout";
 import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
 	discoverRuleFromMarkdown,
@@ -657,10 +658,11 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				continue;
 			}
 			const resolvedEnv = raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, root.path) : undefined;
+			const timeout = normalizeClaudeStyleMcpTimeoutMs(raw.timeout);
 			const server: MCPServer = {
 				name: namespacedName,
 				...(raw.enabled !== undefined && { enabled: raw.enabled }),
-				...(raw.timeout !== undefined && { timeout: raw.timeout }),
+				...(timeout !== undefined && { timeout }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(raw.args !== undefined && { args: substitutePluginRoot(raw.args, root.path) }),
 				...(resolvedEnv !== undefined && { env: resolvedEnv.env }),
