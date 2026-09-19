@@ -328,7 +328,7 @@ Advisor runtimes retain native `preserveData` for subsequent maintenance and att
 
 Handoff commits a regular `CompactionEntry` on the current session: `SessionMaintenance.handoff()` (manual `/handoff`) and the auto-maintenance `handoff` method both generate the document via `SessionHandoff.generateDocument()` and store it as the compaction summary with `firstKeptEntryId` from `prepareCompaction`, so recent history is kept and the session id, transcript, and provider cache key are unchanged.
 
-When `compaction.handoffSaveToDisk` is enabled, an **automatically triggered** handoff also writes `handoff-<ISO timestamp>.md` in the persisted session's artifact directory. Manual handoffs are not written by this setting, and non-persisted sessions have no artifact directory.
+When `compaction.handoffSaveToDisk` is enabled, a manual or automatically triggered handoff also writes `handoff-<ISO timestamp>.md` in the persisted session's artifact directory. Non-persisted sessions have no artifact directory.
 
 ### File-operation context in summaries
 

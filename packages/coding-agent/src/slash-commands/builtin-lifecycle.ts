@@ -387,9 +387,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					await runtime.output("Handoff cancelled.");
 					return;
 				}
-				// `savedPath` is deliberately not reported: `SessionHandoff` only writes
-				// the document to disk when `options.autoTriggered` is set, which the
-				// user-invoked path never passes.
+				// Keep the ACP command response concise; persisted artifacts remain
+				// available in the session artifacts directory.
 				await runtime.output("Context handed off and compacted in place.");
 			};
 			if (runtime.runCommandInBackground) {

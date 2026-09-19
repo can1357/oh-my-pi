@@ -58,7 +58,7 @@ The same minimum-content guard exists inside `SessionMaintenance.handoff()` and 
   4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
 - Obfuscates the final provider context and calls `generateHandoffFromContext(...)` through the host side-stream transport.
 - Deobfuscates the returned handoff text.
-- For auto-triggered generations with `compaction.handoffSaveToDisk`, writes a timestamped `handoff-*.md` artifact under the session's artifacts directory.
+- For manual and auto-triggered generations with `compaction.handoffSaveToDisk`, writes a timestamped `handoff-*.md` artifact under the session's artifacts directory.
 
 `generateHandoffFromContext(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It issues an OTEL-instrumented `completeSimple`-equivalent oneshot against the caller-built `Context`, overriding the supplied stream options with clamped compaction reasoning and `toolChoice: "none"`.
 
@@ -114,7 +114,7 @@ Manual `/handoff` works regardless of the context-maintenance method order. To u
 
 Async compaction (`compaction.asyncEnabled`) may also generate the handoff document speculatively in the pre-threshold band and commit it instantly when the threshold is crossed; see `docs/compaction.md`.
 
-If auto generation returns no document, maintenance advances to the next configured method. `compaction.handoffSaveToDisk` defaults to `false`; when enabled, only auto-triggered handoffs write the extra markdown artifact.
+If auto generation returns no document, maintenance advances to the next configured method. `compaction.handoffSaveToDisk` defaults to `false`; when enabled, both manual and auto-triggered handoffs write the extra markdown artifact.
 
 ## Controller/UI behavior
 
@@ -129,7 +129,7 @@ If auto generation returns no document, maintenance advances to the next configu
   - invalidates status line and editor border
   - reloads todos
   - appends `Context handed off and compacted in place`
-  - shows `savedPath` when the result includes one (manual `/handoff` normally has none)
+  - shows `savedPath` when the result includes one
 - On exception:
   - if message is `"Handoff cancelled"`: `showError("Handoff cancelled")`
   - otherwise: logs the error and calls `showError("Handoff failed: <message>")`
