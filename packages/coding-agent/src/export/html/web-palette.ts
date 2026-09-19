@@ -10,6 +10,7 @@ const COMMON_EXPORT_PALETTE = {
 	"--muted": "var(--fg-muted)",
 	"--dim": "var(--fg-faint)",
 	"--thinkingText": "var(--fg-muted)",
+	"--assistantMessageText": "var(--text)",
 	"--borderMuted": "color-mix(in srgb, var(--border) 67%, transparent)",
 	"--borderAccent": "#945ff9",
 	"--selectedBg": "var(--accent-muted)",
