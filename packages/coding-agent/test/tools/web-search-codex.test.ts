@@ -1,5 +1,6 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { AuthStorage, type FetchImpl, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { hasCodexSearch, searchCodex } from "@oh-my-pi/pi-coding-agent/web/search/providers/codex";
@@ -12,6 +13,7 @@ type CapturedRequest = {
 };
 
 const originalCodexSearchModel = process.env.PI_CODEX_WEB_SEARCH_MODEL;
+const originalCodexOauthToken = Bun.env.OPENAI_CODEX_OAUTH_TOKEN;
 
 // A completed hosted web_search tool call. Real Codex searches always stream a
 // `response.web_search_call.*` event; the provider now requires that evidence
@@ -307,6 +309,11 @@ describe("searchCodex model selection", () => {
 		} else {
 			process.env.PI_CODEX_WEB_SEARCH_MODEL = originalCodexSearchModel;
 		}
+		if (originalCodexOauthToken === undefined) {
+			delete Bun.env.OPENAI_CODEX_OAUTH_TOKEN;
+		} else {
+			Bun.env.OPENAI_CODEX_OAUTH_TOKEN = originalCodexOauthToken;
+		}
 	});
 
 	it("uses GPT-5.6 Luna as the first bundled default", async () => {
@@ -331,6 +338,30 @@ describe("searchCodex model selection", () => {
 		expect(headers.get("authorization")).toBe("Bearer email-only-access-token");
 		expect(headers.has("chatgpt-account-id")).toBe(false);
 		expect(result.answer).toBe("Codex answer");
+	});
+
+	it("uses OPENAI_CODEX_OAUTH_TOKEN when no stored Codex login exists (#12537)", async () => {
+		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+		Bun.env.OPENAI_CODEX_OAUTH_TOKEN = residencyToken;
+		try {
+			// Inference already accepts this env token via AuthStorage.getApiKey;
+			// stored OAuth (omp /login) is intentionally absent.
+			expect(await authStorage.getOAuthAccess("openai-codex")).toBeUndefined();
+			expect(await hasCodexSearch(authStorage)).toBe(true);
+
+			const result = await searchCodex({
+				...makeSearchParams("env token Codex search", mockCodexFetch("gpt-5.6-luna")),
+				authStorage,
+			});
+
+			const headers = new Headers(capturedRequest?.headers);
+			expect(headers.get("authorization")).toBe(`Bearer ${residencyToken}`);
+			expect(headers.get("chatgpt-account-id")).toBe("acct-test");
+			expect(headers.get("x-openai-internal-codex-residency")).toBe("us");
+			expect(result.answer).toBe("Codex answer");
+		} finally {
+			authStorage.close();
+		}
 	});
 
 	it("applies the configured request timeout to Codex search", async () => {

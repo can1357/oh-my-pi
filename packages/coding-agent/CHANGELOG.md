@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed Codex web search ignoring `OPENAI_CODEX_OAUTH_TOKEN` when no stored `/login openai-codex` credentials exist ([#12537](https://github.com/can1357/oh-my-pi/issues/12537)).
 - Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
