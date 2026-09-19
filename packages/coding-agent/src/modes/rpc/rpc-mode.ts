@@ -128,7 +128,7 @@ export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | 
 export type RpcSkillCommandResult = { agentInvoked: true };
 
 export interface RpcSkillInvocation extends SkillPromptInput {
-	skill: Skill;
+	skills: Skill[];
 }
 
 /**
@@ -138,11 +138,14 @@ export interface RpcSkillInvocation extends SkillPromptInput {
  */
 export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text: string): RpcSkillInvocation | null {
 	if (!session.skillsSettings?.enableSkillCommands) return null;
-	const parsed = parseSkillInvocation(text);
+	const parsed = parseSkillInvocation(text, name => session.skills.some(candidate => candidate.name === name));
 	if (!parsed) return null;
-	const skill = session.skills.find(candidate => candidate.name === parsed.name);
-	if (!skill) return null;
-	return { skill, args: parsed.args, prompt: parsed.prompt };
+	const skills = parsed.names.flatMap(name => {
+		const s = session.skills.find(candidate => candidate.name === name);
+		return s ? [s] : [];
+	});
+	if (skills.length === 0) return null;
+	return { skills, args: parsed.args, prompt: parsed.prompt };
 }
 
 /**
@@ -158,7 +161,7 @@ export async function runRpcSkillCommand(
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
 ): Promise<boolean> {
-	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
+	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skills, invocation, "user"));
 	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -195,7 +198,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	// keep that error contract by awaiting it before answering. The expensive
 	// promptCustomMessage pipeline (usage preflight, compaction, provider
 	// calls) is what moves behind the acknowledgement.
-	const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
+	const built = await buildSkillPromptMessage(invocation.skills, invocation, "user");
 	watchAndReportLocalOnlyPromptResult({
 		id: input.id,
 		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),

@@ -428,96 +428,100 @@ export function getSkillSlashCommandName(skill: Pick<Skill, "name">): string {
  * through as `args` so the skill sees the full user request.
  */
 export interface ParsedSkillInvocation {
-	/** Bare skill name without the leading `skill:` prefix. */
-	name: string;
-	/** User-supplied arguments (everything outside the `/skill:<name>` token). */
+	/** Registered skill names in draft order, deduplicated, length >= 1. */
+	names: string[];
+	/** User-supplied arguments (everything outside the recognized `/skill:<name>` tokens). */
 	args: string;
-	/** The draft as submitted (trimmed), token in place — drives the transcript layout. */
+	/** The draft as submitted (trimmed); drives the transcript layout. */
 	prompt: string;
 }
 
 /**
- * Detect a `/skill:<name>` invocation in a user draft.
+ * Detect `/skill:<name>` invocations in a user draft.
  *
- * Returns `undefined` when the text contains no skill token. Otherwise:
- *   - Leading form (`/skill:foo bar baz`): name=`foo`, args=`bar baz`.
- *   - Mid-prompt form (`fix the bug /skill:foo focus on auth`): name=`foo`,
- *     args=`fix the bug focus on auth` — the surrounding prose collapsed
- *     into a single args string.
+ * Scans for every `/skill:<name>` token. Unknown tokens are skipped and remain
+ * in `args`. Returns `undefined` when no registered skills are found.
  *
- * Mid-prompt detection is gated by {@link allowsSkillTokens}.
+ * Detection is gated by {@link allowsSkillTokens}.
  */
-export function parseSkillInvocation(text: string): ParsedSkillInvocation | undefined {
-	const trimmedStart = text.trimStart();
-	const prompt = trimmedStart.trimEnd();
-	if (trimmedStart.startsWith("/skill:")) {
-		const spaceIndex = trimmedStart.search(/\s/);
-		const name =
-			spaceIndex === -1 ? trimmedStart.slice("/skill:".length) : trimmedStart.slice("/skill:".length, spaceIndex);
-		if (!name) return undefined;
-		const args = spaceIndex === -1 ? "" : trimmedStart.slice(spaceIndex + 1).trim();
-		return { name, args, prompt };
-	}
-	if (!allowsSkillTokens(trimmedStart)) return undefined;
+export function parseSkillInvocation(
+	text: string,
+	isKnown: (name: string) => boolean = () => true,
+): ParsedSkillInvocation | undefined {
+	if (!allowsSkillTokens(text)) return undefined;
+	const names: string[] = [];
+	const spans: [number, number][] = [];
 	SKILL_TOKEN_RE.lastIndex = 0;
-	const match = SKILL_TOKEN_RE.exec(text);
-	if (!match) return undefined;
-	const tokenStart = match.index + match[1].length;
-	const tokenEnd = match.index + match[0].length;
-	const name = match[2];
-	const before = text.slice(0, tokenStart).trimEnd();
-	const after = text.slice(tokenEnd).trimStart();
-	const args = [before, after]
-		.filter(part => part.length > 0)
-		.join(" ")
-		.trim();
-	return { name, args, prompt };
+	for (const match of text.matchAll(SKILL_TOKEN_RE)) {
+		const name = match[2];
+		if (!isKnown(name)) continue;
+		if (!names.includes(name)) names.push(name);
+		spans.push([match.index + match[1].length, match.index + match[0].length]);
+	}
+	if (names.length === 0) return undefined;
+
+	// Segments between recorded spans
+	const segments: string[] = [];
+	let lastIndex = 0;
+	for (const [start, end] of spans) {
+		segments.push(text.slice(lastIndex, start));
+		lastIndex = end;
+	}
+	segments.push(text.slice(lastIndex));
+
+	const args = segments
+		.map(s => s.trim())
+		.filter(s => s.length > 0)
+		.join(" ");
+	const prompt = text.trim();
+	return { names, args, prompt };
 }
 
 export type SkillInvocationKind = "user" | "autoload";
 
-/** What the user typed around a skill token: `args` feed the template, `prompt` only the transcript. */
+/** What the user typed around skill tokens: `args` feed the template, `prompt` only the transcript. */
 export type SkillPromptInput = Pick<ParsedSkillInvocation, "args"> & Partial<Pick<ParsedSkillInvocation, "prompt">>;
 
 export async function buildSkillPromptMessage(
-	skill: Pick<Skill, "name" | "filePath" | "baseDir">,
+	skills: readonly Pick<Skill, "name" | "filePath" | "baseDir">[],
 	input: SkillPromptInput,
 	invocation: SkillInvocationKind = "user",
 ): Promise<BuiltSkillPromptMessage> {
-	const content = await Bun.file(skill.filePath).text();
-	const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+	if (skills.length === 0) {
+		throw new Error("buildSkillPromptMessage requires at least one skill");
+	}
+	const loaded = await Promise.all(
+		skills.map(async s => {
+			const content = await Bun.file(s.filePath).text();
+			const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
+			const lineCount = body ? body.split("\n").length : 0;
+			return { name: s.name, body, baseDir: s.baseDir, filePath: s.filePath, lineCount };
+		}),
+	);
+
 	const trimmedArgs = input.args.trim();
+	const templateContext = {
+		skills: loaded.map(({ name, body, baseDir, filePath }) => ({ name, body, baseDir, filePath })),
+		userArgs: trimmedArgs || undefined,
+	};
+
 	let message: string;
 	if (invocation === "user") {
-		// User-invoked skills announce themselves and expose their skill directory
-		// so the model resolves the skill's own relative paths (scripts/, templates/).
-		message = prompt
-			.render(userInvocationTemplate, {
-				name: skill.name,
-				body,
-				baseDir: skill.baseDir,
-				userArgs: trimmedArgs || undefined,
-			})
-			.trim();
+		message = prompt.render(userInvocationTemplate, templateContext).trim();
 	} else {
-		// Autoload skills are hidden, non-user context — they MUST NOT claim the
-		// user invoked them; this keeps the minimal provenance-only format.
-		message = prompt
-			.render(autoloadTemplate, {
-				body,
-				filePath: skill.filePath,
-				userArgs: trimmedArgs || undefined,
-			})
-			.trim();
+		message = prompt.render(autoloadTemplate, templateContext).trim();
 	}
+
+	const first = loaded[0];
 	return {
 		message,
 		details: {
-			name: skill.name,
-			path: skill.filePath,
+			name: first.name,
+			path: first.filePath,
 			args: trimmedArgs || undefined,
 			prompt: input.prompt,
-			lineCount: body ? body.split("\n").length : 0,
+			lineCount: first.lineCount,
+			skills: loaded.map(s => ({ name: s.name, path: s.filePath, lineCount: s.lineCount })),
 		},
 	};
 }
