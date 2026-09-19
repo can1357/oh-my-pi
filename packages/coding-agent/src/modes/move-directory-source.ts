@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { normalizePathForComparison, sanitizeText } from "@oh-my-pi/pi-utils";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 import type { MoveDirectorySource, MoveDirectoryEntry } from "@oh-my-pi/pi-tui/overlays/move-overlay";
 
 /** TTL for the directory listing cache (ms). */
@@ -114,3 +116,68 @@ function searchDirectories(prefix: string, cwd: string, max: number): MoveDirect
 
 /** Filesystem-backed directory suggestions for the move dialog. */
 export const moveDirectorySource: MoveDirectorySource = { search: searchDirectories };
+
+/** Maximum recent directories to surface in the picker. */
+export const MAX_RECENT_DIRS = 8;
+
+/**
+ * Extract recent unique working directories from session metadata.
+ *
+ * Re-sorts by `modified` descending (overriding `SessionManager.listAll()`'s
+ * pinned-first order) so the result is true recency, not session-picker order.
+ * Deduplicates by canonical path, excludes the current cwd and non-existent
+ * directories.  Scans until {@link MAX_RECENT_DIRS} valid unique dirs are
+ * collected or the session list is exhausted.
+ */
+export async function getRecentWorkingDirectories(
+	sessions: { cwd: string; modified: Date }[],
+	currentCwd: string,
+	dirExists: (p: string) => Promise<boolean>,
+): Promise<string[]> {
+	const byRecency = [...sessions].sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	const seen = new Set([normalizePathForComparison(currentCwd)]);
+	const recentDirs: string[] = [];
+	for (const session of byRecency) {
+		if (recentDirs.length >= MAX_RECENT_DIRS) break;
+		const cwd = session.cwd;
+		if (!cwd) continue;
+		const resolved = path.resolve(cwd);
+		const normalized = normalizePathForComparison(resolved);
+		if (seen.has(normalized)) continue;
+		if (!(await dirExists(resolved))) continue;
+		seen.add(normalized);
+		recentDirs.push(resolved);
+	}
+	return recentDirs;
+}
+
+/**
+ * Create a {@link MoveDirectorySource} that prepends recently used directories
+ * to the empty-state results. When the user types a prefix, the composite
+ * source delegates entirely to the filesystem source so normal path filtering
+ * is unaffected.
+ *
+ * Recent entries are labeled with a ↺ prefix to distinguish them from
+ * filesystem children.  The TUI overlay remains generic — it just renders
+ * whatever {@link MoveDirectoryEntry} list the source returns.
+ */
+export function createRecentAwareSource(recentDirs: string[]): MoveDirectorySource {
+	const recentEntries: MoveDirectoryEntry[] = recentDirs.map(d => ({
+		value: d,
+		label: `↺ ${shortenPath(sanitizeText(d))}`,
+	}));
+	// A recent dir that is also a direct child of cwd would otherwise render
+	// twice in the empty state — once as `↺ <path>` and once as `<name>/`.
+	const recentNormalized = new Set(recentDirs.map(d => normalizePathForComparison(path.resolve(d))));
+	return {
+		search(prefix: string, cwd: string, max: number): MoveDirectoryEntry[] {
+			const fsResults = searchDirectories(prefix, cwd, max);
+			if (prefix || recentEntries.length === 0) return fsResults;
+			// Prepend up to MAX_RECENT_DIRS recent entries, then fill the
+			// remaining slots from filesystem results.
+			const recentSlice = recentEntries.slice(0, Math.min(recentEntries.length, max));
+			const children = fsResults.filter(entry => !recentNormalized.has(normalizePathForComparison(entry.value)));
+			return [...recentSlice, ...children].slice(0, max);
+		},
+	};
+}
