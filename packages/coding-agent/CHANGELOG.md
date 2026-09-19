@@ -12,6 +12,9 @@
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
+### Fixed
+
+- Fixed `/export` argument parsing rejecting quoted output paths that contain spaces ([#10785](https://github.com/can1357/oh-my-pi/pull/10785) by [@oleg494](https://github.com/oleg494)).
 
 ## [18.2.6] - 2026-09-18
 
