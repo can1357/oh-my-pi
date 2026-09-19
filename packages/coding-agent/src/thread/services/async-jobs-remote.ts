@@ -20,6 +20,7 @@
  * {@link WireJobFeed} whose pulls and final push this module answers.
  */
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobRetuneStatus } from "@oh-my-pi/pi-tui/tools/wait";
 import type {
 	AsyncJob,
 	AsyncJobDeliverySink,
@@ -377,18 +378,24 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 
 	registerProgressSink(ownerId: string, sink: AsyncJobProgressSink): () => void {
 		const acknowledge = sink.acknowledge?.bind(sink);
+		const retune = sink.retune?.bind(sink);
 		return localUnsubscribe(
 			this.#remote.callSync(
 				"registerProgressSink",
 				ownerId,
 				(jobId, text, job, seq, info) => sink.deliver(jobId, text, this.#row(job), seq, info),
 				acknowledge ? jobId => acknowledge(jobId) : undefined,
+				retune ? (jobId, delivery) => retune(jobId, delivery) : undefined,
 			),
 		);
 	}
 
 	activateProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery): boolean {
 		return this.#remote.callSync("activateProgressDelivery", jobId, delivery);
+	}
+
+	retuneProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery, ownerId?: string): JobRetuneStatus {
+		return this.#remote.callSync("retuneProgressDelivery", jobId, delivery, ownerId);
 	}
 
 	waitForOwnerJobs(ownerId: string, options?: { timeoutMs?: number; excludeSuppressed?: boolean }): Promise<boolean> {
