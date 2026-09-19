@@ -13,6 +13,7 @@ import type { AgentSessionEvent, SessionStats } from "../../session/agent-sessio
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { ThemeColor } from "@oh-my-pi/pi-tui/theme";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
@@ -410,6 +411,7 @@ export type RpcExtensionUIRequest =
 			method: "setStatus";
 			statusKey: string;
 			statusText: string | undefined;
+			statusColor?: ThemeColor;
 	  }
 	| {
 			type: "extension_ui_request";

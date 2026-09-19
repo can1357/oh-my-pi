@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { isRecord, readJsonl, TempDir } from "@oh-my-pi/pi-utils";
 import {
+	emitRpcStatus,
 	type PendingExtensionRequest,
 	requestRpcDialog,
 	requestRpcSelect,
@@ -226,4 +227,32 @@ export default function(pi) {
 			},
 		});
 	}, 30_000);
+	it("carries a valid status colour on the wire", () => {
+		const output = vi.fn<(frame: object) => void>();
+		emitRpcStatus(output, "cache", "cold 6m", { color: "error" });
+
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: expect.any(String),
+			method: "setStatus",
+			statusKey: "cache",
+			statusText: "cold 6m",
+			statusColor: "error",
+		});
+	});
+
+	it("omits the colour when the extension asks for none", () => {
+		const output = vi.fn<(frame: object) => void>();
+		emitRpcStatus(output, "indexer", "indexing");
+
+		expect(output.mock.calls[0]?.[0]).toMatchObject({ statusText: "indexing", statusColor: undefined });
+	});
+
+	it("drops a token the theme does not define", () => {
+		const output = vi.fn<(frame: object) => void>();
+		// `ThemeColor` is erased at runtime, so an extension can send anything.
+		emitRpcStatus(output, "cache", "warm", { color: "banana" as never });
+
+		expect(output.mock.calls[0]?.[0]).toMatchObject({ statusText: "warm", statusColor: undefined });
+	});
 });
