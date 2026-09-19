@@ -12,16 +12,15 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { rlmEvidenceQuery, rlmQuery } from "../../src/rlm";
+import { rlmEvidenceQuery } from "../../src/rlm";
 import { resolveRlmView } from "../../src/rlm/view";
 import { evidencePacketByteSize } from "../../src/rlm/evidence-packet-v2";
+import { runCvDPair } from "./lib/live-groq-cvd";
 import {
 	buildCacheProbeMessages,
 	buildRuntime,
-	compressionRatio,
 	createEvidenceCompleter,
 	createLiveGroqHost,
-	createProseCompleter,
 	d2StructuredOutputAvailable,
 	estimateTokens,
 	firewallProof,
@@ -32,14 +31,13 @@ import {
 	parsePacketFromResult,
 	RESULTS_DIR,
 	selectGrantsForFixture,
-	semanticRetention,
 	spillFixture,
 	validateCitations,
 	workerUsageFromResult,
 	validatePacketStructural,
 	type LiveFixture,
 } from "./lib/live-groq-common";
-import { computeCodecMetrics, P01_SMOKE_BASELINE } from "./lib/evidence-codec-rubric";
+import { computeCodecMetrics } from "./lib/evidence-codec-rubric";
 
 const OUT = path.join(RESULTS_DIR, "live-groq.jsonl");
 const SMOKE_FIXTURES = LIVE_FIXTURES.filter(f => f.id.startsWith("S"));
@@ -196,103 +194,7 @@ async function runCvD(
 	host: Awaited<ReturnType<typeof createLiveGroqHost>>,
 	fixture: LiveFixture,
 ): Promise<{ c: Row; d: Row }> {
-	const runtime = buildRuntime();
-	const { handle } = spillFixture(runtime, fixture);
-	const selection = selectGrantsForFixture(runtime.store, handle, fixture);
-	const grants = selection.grants;
-	const grantedBytes = selection.grantedBytes;
-	const prose = createProseCompleter(host);
-	const evidence = createEvidenceCompleter(host);
-	let cUsage: ReturnType<typeof workerUsageFromResult> | null = null;
-	let dUsage: ReturnType<typeof workerUsageFromResult> | null = null;
-	const proseTrack: typeof prose = async (prompt, options) => {
-		const raw = await prose(prompt, options);
-		if (typeof raw !== "string") cUsage = workerUsageFromResult(raw as never);
-		return raw;
-	};
-	const evidenceTrack: typeof evidence = async (prompt, options) => {
-		const raw = await evidence(prompt, options);
-		if (typeof raw !== "string") dUsage = workerUsageFromResult(raw as never);
-		return raw;
-	};
-
-	const tC0 = performance.now();
-	const cResult = await rlmQuery(runtime, {
-		handle,
-		question: fixture.question,
-		grants,
-		complete: proseTrack,
-	});
-	const cMs = performance.now() - tC0;
-
-	const tD0 = performance.now();
-	const dResult = await rlmEvidenceQuery(runtime, {
-		handle,
-		question: fixture.question,
-		grants,
-		complete: evidenceTrack,
-	});
-	const dMs = performance.now() - tD0;
-
-	const view = resolveRlmView(runtime.store, grants);
-	const packet = dResult.packet ?? parsePacketFromResult(undefined, dResult.text);
-	const validation = packet
-		? dResult.packetValidation ?? validatePacketStructural(runtime.store, view, packet)
-		: undefined;
-	const citations = packet
-		? validateCitations(runtime.store, view, packet)
-		: { validCount: 0, invalidCount: 0, wrongCitation: true };
-	const dMetrics = computeCodecMetrics(packet, fixture, runtime.store, view, validation, grantedBytes);
-	const dPacketBytes = packet ? evidencePacketByteSize(packet) : Buffer.byteLength(dResult.text, "utf8");
-	const cAnswerBytes = Buffer.byteLength(cResult.text, "utf8");
-
-	const cRow: Row = {
-		phase: "c_vs_d",
-		arm: "C-prose",
-		fixture: fixture.id,
-		grantsFrozen: true,
-		grantedBytes,
-		grantedTokensEst: estimateTokens(grantedBytes),
-		answerBytes: cAnswerBytes,
-		rootTokensEst: estimateTokens(cAnswerBytes),
-		usage: cUsage,
-		e2eLatencyMs: cMs,
-		evidenceLabel: fixture.requiredFacts.some(f => cResult.text.toLowerCase().includes(f.toLowerCase()))
-			? "SUPPORTED"
-			: "MISSED_EVIDENCE",
-		semanticRetention: fixture.requiredFacts.length
-			? fixture.requiredFacts.filter(f => cResult.text.toLowerCase().includes(f.toLowerCase())).length /
-				fixture.requiredFacts.length
-			: 1,
-		ts: Date.now(),
-	};
-
-	const dRow: Row = {
-		phase: "c_vs_d",
-		arm: "D-packet",
-		fixture: fixture.id,
-		grantsFrozen: true,
-		grantedBytes,
-		grantedTokensEst: estimateTokens(grantedBytes),
-		packetBytes: dPacketBytes,
-		rootTokensEst: estimateTokens(dPacketBytes),
-		compressionRatio: dMetrics.compressionRatio,
-		semanticRetention: dMetrics.semanticRetention,
-		atomRecall: dMetrics.atomRecall,
-		relationRecall: dMetrics.relationRecall,
-		structuralValid: dMetrics.structuralValid,
-		citationValidity: dMetrics.citationValidity,
-		validationFailed: dResult.validationFailed ?? false,
-		evidenceLabel: labelEvidencePacket(fixture, packet, dMetrics, validation),
-		citationValidCount: citations.validCount,
-		citationInvalidCount: citations.invalidCount,
-		packetStatus: packet?.status,
-		usage: dUsage,
-		e2eLatencyMs: dMs,
-		ts: Date.now(),
-	};
-
-	return { c: cRow, d: dRow };
+	return runCvDPair(host, fixture);
 }
 
 async function main(): Promise<void> {

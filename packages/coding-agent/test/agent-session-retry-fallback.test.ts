@@ -6517,3 +6517,39 @@ describe("AgentSession retry fallback", () => {
 		expect(finalAssistant.content).toEqual([{ type: "text", text: "Recovered on the same model." }]);
 	});
 });
+
+// Regression for gpt-reserve tier (#12478): when standard usage is depleted
+// for openai-codex models, the reserve model (gpt-5.6-luna) should be used.
+it("falls back to gpt-reserve tier when openai-codex usage is depleted", async () => {
+	const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+	const reserveModel = getBundledModel("openai-codex", "gpt-5.6-luna");
+	if (!primaryModel || !reserveModel) throw new Error("Expected bundled reserve models");
+
+	const mock = createMockModel({ responses: [{ content: ["res"] }] });
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+		streamFn: (model, context, options) => mock.stream(model, context, options),
+	});
+
+	vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async provider =>
+		provider === primaryModel.provider
+			? { state: "depleted", accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted", remainingFraction: 0 }] }
+			: { state: "healthy", accounts: [] },
+	);
+
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"retry.usageAwareFallback": true,
+		"retry.usageReservePolicy": "auto",
+	});
+	settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+	session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+	await session.prompt("Continue");
+	await session.waitForIdle();
+
+	// When usage is depleted, reserve model gpt-5.6-luna should be selected
+	expect(session.model?.provider).toBe(reserveModel.provider);
+	expect(session.model?.id).toBe(reserveModel.id);
+});

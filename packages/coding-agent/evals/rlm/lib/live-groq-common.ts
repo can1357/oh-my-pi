@@ -35,6 +35,11 @@ import {
 import { AuthStorage } from "../../../src/session/auth-storage";
 
 export const P0_CHECKPOINT_SHA = "53769bf12d48233bb262cd4bd61de93e18f400e8";
+/** P0.2 semantic codec correctness checkpoint (frozen before invocation-threshold work). */
+export const P02_CODEC_SHA = "0db7f4a0e4606a74e020e2a1080b9a80f8b8d6bd";
+
+export type GrantBucket = "small" | "medium" | "large";
+export type GrantComplexity = "simple" | "multi_region" | "dense_contradictory";
 export const DEFAULT_GROQ_MODEL = "groq/openai/gpt-oss-20b";
 export const RESULTS_DIR = path.join(import.meta.dir, "..", "results");
 
@@ -50,6 +55,10 @@ export interface LiveFixture {
 	buildCorpus: () => string;
 	patterns: string[];
 	selectPolicy?: RlmGrantSelectPolicy;
+	/** Optional grant-size experiment metadata (codec invocation threshold study). */
+	bucket?: GrantBucket;
+	complexity?: GrantComplexity;
+	grantCapTarget?: number;
 	question: string;
 	parentSecret: string;
 	requiredFacts: string[];
@@ -353,6 +362,38 @@ export function labelEvidencePacket(
 	if (fixture.expectStatus && packet.status !== fixture.expectStatus) {
 		return retention >= 0.5 ? "PARTIAL_OK" : "UNSUPPORTED";
 	}
+	return retention >= 0.5 ? "SUPPORTED" : "MISSED_EVIDENCE";
+}
+
+/** Label C-arm prose using the same fixture gates as packet labeling. */
+export function labelProseAnswer(
+	fixture: LiveFixture,
+	text: string,
+	metrics: CodecMetrics,
+): EvidenceLabel {
+	if (fixture.expectContradictions) {
+		return metrics.contradictionValid && metrics.structuralValid ? "SUPPORTED" : "UNSUPPORTED";
+	}
+	if (fixture.expectMissing) {
+		const lower = text.toLowerCase();
+		const claimsRootCause = /migration|version|exact cause|definitely/i.test(text);
+		const abstains = /unknown|insufficient|cannot determine|not enough|no evidence/i.test(lower);
+		return abstains && !claimsRootCause ? "PARTIAL_OK" : "UNSUPPORTED";
+	}
+	const atomOk = (fixture.requiredAtoms?.length ?? 0) === 0 || metrics.atomRecall >= 0.99;
+	const relationOk = (fixture.requiredRelations?.length ?? 0) === 0 || metrics.relationRecall >= 0.99;
+	if (fixture.requiredAtoms?.length || fixture.requiredRelations?.length) {
+		if (atomOk && relationOk) return "SUPPORTED";
+		if (metrics.atomRecall < 0.5 || metrics.relationRecall < 0.5) return "MISSED_EVIDENCE";
+		return metrics.semanticRetention >= 0.5 ? "PARTIAL_OK" : "MISSED_EVIDENCE";
+	}
+	const retention = semanticRetention(fixture.requiredFacts, {
+		status: "sufficient",
+		atoms: [],
+		claims: [{ fact: text, supports: [], citations: [], confidence: 1 }],
+		contradictions: [],
+		missingEvidence: [],
+	});
 	return retention >= 0.5 ? "SUPPORTED" : "MISSED_EVIDENCE";
 }
 

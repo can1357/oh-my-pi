@@ -121,6 +121,66 @@ export function scoreSemanticRetention(metrics: Pick<CodecMetrics, "atomRecall" 
 	return (metrics.atomRecall + metrics.relationRecall) / 2;
 }
 
+/** C-arm (prose) quality — same atom/relation specs as packet rubric, text-only. */
+export function scoreProseAtomRecall(text: string, fixture: LiveFixture): number {
+	const specs = fixture.requiredAtoms ?? [];
+	if (specs.length === 0) {
+		if (fixture.requiredFacts.length === 0) return 1;
+		const lower = text.toLowerCase();
+		const matched = fixture.requiredFacts.filter(f => lower.includes(f.toLowerCase())).length;
+		return matched / fixture.requiredFacts.length;
+	}
+	const lower = text.toLowerCase();
+	let matched = 0;
+	for (const spec of specs) {
+		const key = normalizeKey(spec.key);
+		const keyHit = lower.includes(key) || lower.includes(key.replace(/_/g, " "));
+		const patternHit = spec.grantTextPattern?.test(text) ?? false;
+		const valueHit = spec.valuePattern?.test(text) ?? false;
+		if (patternHit || (keyHit && (valueHit || !spec.valuePattern))) matched += 1;
+	}
+	return matched / specs.length;
+}
+
+export function scoreProseRelationRecall(text: string, fixture: LiveFixture): number {
+	const specs = fixture.requiredRelations ?? [];
+	if (specs.length === 0) return 1;
+	let matched = 0;
+	for (const spec of specs) {
+		const keysPresent = spec.atomKeys.every(k => text.toLowerCase().includes(k.toLowerCase()));
+		const patternHit = spec.pattern?.test(text) ?? false;
+		if (patternHit || (keysPresent && spec.pattern === undefined)) matched += 1;
+	}
+	return matched / specs.length;
+}
+
+export function scoreProseContradictionValid(text: string, fixture: LiveFixture): boolean {
+	if (!fixture.requiredContradiction) return true;
+	const { leftGrantPattern, rightGrantPattern } = fixture.requiredContradiction;
+	if (!leftGrantPattern.test(text) || !rightGrantPattern.test(text)) return false;
+	const left = text.match(leftGrantPattern)?.[0]?.trim().toLowerCase();
+	const right = text.match(rightGrantPattern)?.[0]?.trim().toLowerCase();
+	return Boolean(left && right && left !== right);
+}
+
+export function computeProseMetrics(text: string, fixture: LiveFixture, grantedBytes: number): CodecMetrics {
+	const atomRecall = scoreProseAtomRecall(text, fixture);
+	const relationRecall = scoreProseRelationRecall(text, fixture);
+	const semanticRetention = scoreSemanticRetention({ atomRecall, relationRecall });
+	const answerBytes = Buffer.byteLength(text, "utf8");
+	const compressionRatio = answerBytes > 0 ? grantedBytes / answerBytes : grantedBytes;
+	const contradictionValid = scoreProseContradictionValid(text, fixture);
+	return {
+		atomRecall,
+		relationRecall,
+		citationValidity: 1,
+		structuralValid: true,
+		semanticRetention,
+		compressionRatio,
+		contradictionValid,
+	};
+}
+
 export function computeCodecMetrics(
 	packet: EvidencePacketV2 | undefined,
 	fixture: LiveFixture,

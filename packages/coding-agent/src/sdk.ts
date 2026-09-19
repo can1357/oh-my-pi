@@ -2704,6 +2704,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								`Usage depleted for ${primary.model.provider}/${primary.model.id}; reserve policy is fail-closed.`,
 							);
 						}
+						// Reserve tier (gpt-reserve / gpt-5.6-luna): when
+						// standard quota is depleted, try the reserve model.
+						if (primary.model.provider === "openai-codex") {
+							const reserve = primary.model.id.includes("-sol")
+								? modelRegistry.find("openai-codex", "gpt-5.6-luna")
+								: undefined;
+							if (reserve) {
+								selectedModel = reserve;
+								usageFallbackTriggered = true;
+								continue;
+							}
+						}
 						if (modelFallbackEnabled) {
 							usageFallbackTriggered = true;
 							continue;
