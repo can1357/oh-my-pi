@@ -3,13 +3,14 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -62,6 +63,76 @@ function openrouterSpec(overrides: Partial<ModelSpec<"openrouter">> = {}): Model
 }
 
 describe("buildModel", () => {
+	describe("discovery backend policy", () => {
+		it("routes built-in and aliased llama discovery through the same persisted Qwen policy", () => {
+			const raw = responsesSpec({
+				id: "qwen3.8-27b",
+				name: "Qwen 3.8 27B",
+				provider: "llama.cpp",
+				baseUrl: "http://llama-box.local:8080",
+				reasoning: false,
+			});
+			const builtIn = buildDiscoveredModel(raw, "llama.cpp");
+			const aliased = buildDiscoveredModel({ ...raw, provider: "workbench" }, "llama.cpp");
+			const rebuilt = buildModel(toModelSpec(aliased));
+
+			expect(builtIn.api).toBe("openai-completions");
+			expect(aliased).toMatchObject({
+				api: "openai-completions",
+				provider: "workbench",
+				providerType: "llama.cpp",
+				reasoning: true,
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+					requiresEffort: true,
+				},
+				compat: {
+					supportsStore: false,
+					supportsDeveloperRole: false,
+					supportsReasoningEffort: true,
+					supportsReasoningParams: true,
+					thinkingFormat: "qwen-chat-template",
+					reasoningDisableMode: "qwen-template-false",
+					qwenPreserveThinking: true,
+					qwenTemplateReasoningEffort: true,
+				},
+			});
+			expect(rebuilt).toEqual(aliased);
+			expect(builtIn.thinking).toEqual(aliased.thinking);
+			expect(builtIn.compat).toEqual(aliased.compat);
+		});
+
+		it("keeps non-Qwen capabilities neutral and lets explicit compat override backend policy", () => {
+			const plain = buildDiscoveredModel(
+				responsesSpec({
+					id: "plain-model",
+					provider: "workbench",
+					baseUrl: "https://llama.internal",
+					reasoning: false,
+				}),
+				"llama.cpp",
+			);
+			expect(plain.api).toBe("openai-responses");
+			expect(plain.reasoning).toBe(false);
+			expect(plain.thinking).toBeUndefined();
+
+			const explicit = buildDiscoveredModel(
+				{
+					...responsesSpec({
+						id: "qwen3.8-27b",
+						provider: "workbench",
+						baseUrl: "https://llama.internal",
+						reasoning: false,
+					}),
+					compat: { supportsStore: true },
+				},
+				"llama.cpp",
+			);
+			expect(explicit.compat).toMatchObject({ supportsStore: true });
+		});
+	});
+
 	it("resolves a complete compat record for an openai-completions spec with no compat", () => {
 		const model = buildModel(completionsSpec());
 

@@ -89,7 +89,7 @@ revision skip-bare "o1" "o3" "o4"
 
 ### Reviewed identity overrides
 
-`override` has properties only and no child block. Required string properties are `id` (stable, globally unique review ID), `model` (exact bare model identifier, compared case-insensitively), `rationale`, and `provenance`.
+`override` has properties only and no child block. Required string properties are `id` (stable, globally unique review ID), `rationale`, and `provenance`, plus exactly one selector: `model` (exact bare identifier) or `glob` (anchored `*` wildcard over the bare identifier). Both selectors compare case-insensitively; namespace prefixes before the final `/` are ignored.
 
 Optional properties are:
 
@@ -104,7 +104,7 @@ Optional properties are:
 | `thinking-variant` | Boolean marker for a separately exposed thinking sibling. |
 | `expires-at-ms` | Non-negative Unix time in milliseconds. The override is inactive when the observation time is at or after this value. |
 
-The pair `(provider, model)` must also be unique, including provider-agnostic pairs. When no observation time is supplied, an expiring override remains active.
+The tuple `(provider, selector-kind, selector)` must also be unique, including provider-agnostic selectors. Active exact overrides take precedence over every glob. Within each selector kind, provider-scoped overrides precede provider-agnostic ones; matching globs rank by non-wildcard byte count. Equal-ranked globs are an ambiguity error, never resolved by declaration order. When no observation time is supplied, an expiring override remains active.
 
 ### Suffix collapse
 
@@ -194,6 +194,8 @@ A `models` string without `*` is an exact, case-sensitive match against the prov
 
 `priority=N` is an optional signed integer property on the block that owns axis assignments. Its default is zero. Use it only to resolve an intentional equal-specificity overlap; do not use it to encode declaration order.
 
+`buildDiscoveredModel(spec, providerType)` resolves the catalog `discovery-api` axis before materializing compatibility. It preserves the credential-bearing provider ID and records `providerType` as the backend used for provider selectors on subsequent rebuilds. Ordinary `buildModel` preserves its input API. This lets custom-named llama.cpp deployments reuse the same rules without model-specific discovery code.
+
 ### Axis vocabulary and value shapes
 
 The directive vocabulary is closed and lives in **`src/compat/axes.ts`** — one table mapping each kebab-case directive to its resolved camelCase field, namespace (`wire` / `thinking` / `catalog`), value shape, applicable compat records, and (for enums) accepted values. The compiler rejects unknown directives and out-of-vocabulary values against that table; consult it rather than a duplicated table here.
@@ -262,7 +264,7 @@ The highest-ranked matching assignment wins for that axis. Two distinct rules th
 
 ### Capability gating
 
-Wire axes are considered for every matching target. Thinking axes are considered only when the structured resolve target sets `reasoning` — except that an exact model selector declaring `thinking-efforts` upgrades the target (a reviewed correction to stale source capability metadata). Family and revision selectors never match targets missing that rank. An unmatched target resolves to empty maps; the cascade does not infer negative capabilities from absence.
+Wire axes are considered for every matching target. Thinking axes require `reasoning`, except that an exact model selector declaring `thinking-efforts` opens the gate for reviewed corrections. A winning `thinking-upgrade-neutral #true` scoped to a recognized class, family, revision, or model selector also opens it when a matching effort ladder exists; provider-wide opt-in alone does not. Materializing a neutral spec as reasoning-capable requires that opt-in and no explicit thinking vocabulary. Family and revision selectors never match targets missing that rank. An unmatched target resolves to empty maps; the cascade does not infer negative capabilities from absence.
 
 ## Runtime behavior grammar
 
