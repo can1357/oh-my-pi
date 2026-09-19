@@ -337,6 +337,19 @@ fn rejects_contaminated_patch_syntax() {
 }
 
 #[test]
+fn gives_direct_hashline_rewrite_for_recognized_unified_hunks() {
+	for (header, rewrite) in [
+		("@@ -2,3 +2,4 @@", "PUT 2.=4:"),
+		("@@ -2,3 +2,0 @@", "CUT 2.=4"),
+		("@@ -2,0 +2,1 @@", "PUT <2:"),
+	] {
+		let error = parse_patch(&format!("{header}\n+replacement")).unwrap_err().to_string();
+		assert!(error.contains("Recognized unified-diff hunk header"), "{header}: {error}");
+		assert!(error.contains(&format!("`{rewrite}`")), "{header}: {error}");
+	}
+}
+
+#[test]
 fn recovers_bare_range_header_as_implicit_put() {
 	let parsed = parse_patch("2.=3:\n+X").unwrap();
 	assert_eq!(

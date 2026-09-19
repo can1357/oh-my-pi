@@ -283,6 +283,50 @@ pub const DIFF_OLD_ROWS_IGNORED_WARNING: &str = "Ignored unified-diff `-old` row
                                                  already removes old content, so only `+new` rows \
                                                  were kept.";
 
+pub(crate) fn unified_hunk_recovery_message(header: &str) -> Option<String> {
+	let body = header.trim_end().strip_prefix("@@")?;
+	let close = body.find("@@")?;
+	let mut ranges = body[..close].split_whitespace();
+	let (old_start, old_count) = parse_unified_range(ranges.next()?, '-')?;
+	let (_new_start, new_count) = parse_unified_range(ranges.next()?, '+')?;
+	if ranges.next().is_some() {
+		return None;
+	}
+	if old_count > 0 && old_start == 0 {
+		return None;
+	}
+
+	let (rewrite, suffix) = match (old_count, new_count) {
+		(0, 0) => return Some(format!(
+			"Recognized unified-diff hunk header {}. This hunk has no changed lines; write a concrete hashline operation such as `PUT N.=M:` or `CUT N.=M`.",
+			json_quote(header.trim_end()),
+		)),
+		(0, _) => (
+			format!("PUT <{}:", old_start.max(1)),
+			"prefix inserted body rows with `+TEXT`",
+		),
+		(_, 0) => {
+			let old_end = old_start.checked_add(old_count.checked_sub(1)?)?;
+			(format!("CUT {old_start}.={old_end}"), "leave the body empty")
+		},
+		(_, _) => {
+			let old_end = old_start.checked_add(old_count.checked_sub(1)?)?;
+			(format!("PUT {old_start}.={old_end}:"), "prefix final body rows with `+TEXT`")
+		},
+	};
+
+	Some(format!(
+		"Recognized unified-diff hunk header {}. Hashline does not apply unified hunks; rewrite it as `{rewrite}` and {suffix}.",
+		json_quote(header.trim_end()),
+	))
+}
+
+fn parse_unified_range(value: &str, prefix: char) -> Option<(u32, u32)> {
+	let value = value.strip_prefix(prefix)?;
+	let (start, count) = value.split_once(',')?;
+	Some((start.parse().ok()?, count.parse().ok()?))
+}
+
 /// Unified-diff-style `-` row in a hunk body.
 pub const MINUS_ROW_REJECTED: &str = "`-` rows are not valid; the range already names the lines \
                                       being changed. For Markdown bullets or other literal `-` \

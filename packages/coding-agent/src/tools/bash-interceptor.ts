@@ -8,6 +8,13 @@
 import { type BashInterceptorRule, DEFAULT_BASH_INTERCEPTOR_RULES } from "../config/settings-schema";
 import { extractFlatShellCommandSegments } from "./shell-tokenize";
 
+export interface InterceptionReplacement {
+	/** Tool the agent can invoke instead of the blocked shell command */
+	tool: string;
+	/** Original shell command, preserved for the replacement tool's caller */
+	command: string;
+}
+
 export interface InterceptionResult {
 	/** If true, the bash command should be blocked */
 	block: boolean;
@@ -15,6 +22,8 @@ export interface InterceptionResult {
 	message?: string;
 	/** Suggested tool to use instead */
 	suggestedTool?: string;
+	/** Structured recovery payload for invoking the suggested tool */
+	replacement?: InterceptionReplacement;
 }
 
 /**
@@ -135,10 +144,15 @@ export function checkBashInterception(
 			// A configured global or sticky regex carries state across calls.
 			regex.lastIndex = 0;
 			if (regex.test(candidate)) {
+				const replacement: InterceptionReplacement = {
+					tool: rule.tool,
+					command: originalCommand,
+				};
 				return {
 					block: true,
 					message: `Blocked: ${rule.message}\n\nOriginal command: ${originalCommand}`,
 					suggestedTool: rule.tool,
+					replacement,
 				};
 			}
 		}
