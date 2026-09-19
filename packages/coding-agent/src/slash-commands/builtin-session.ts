@@ -428,7 +428,6 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "context",
 		description: "Show estimated context usage breakdown",
 		acpDescription: "Show context usage",
-		subcommands: [{ name: "debug", description: "Open full context-flow diagnostics explorer" }],
 		getTuiAutocompleteDescription: runtime => {
 			const usage = runtime.ctx.session.getContextUsage();
 			if (!usage) return "Context: unavailable";
@@ -438,8 +437,8 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.output(buildContextReportText(runtime));
 			return commandConsumed();
 		},
-		handleTui: (command, runtime) => {
-			runtime.ctx.handleContextCommand(command.args);
+		handleTui: (_command, runtime) => {
+			runtime.ctx.handleContextCommand();
 			runtime.ctx.editor.setText("");
 		},
 	},

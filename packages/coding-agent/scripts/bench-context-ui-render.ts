@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 import { initThemeSync, theme } from "@oh-my-pi/pi-tui/theme";
 import { type ContextBreakdown, renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import { renderCompactContextUsage, renderFullContextExplorer } from "../src/context-flow/format";
+import { renderContextUsagePage } from "../src/context-flow/format";
 import { contextFlowBeginTurn } from "../src/context-flow/hooks";
 import { contextFlowRlmGrants, contextFlowRlmWorkerBegin, contextFlowRootBegin, FLOW_KEYS } from "../src/context-flow/rlm-flow";
 import { buildContextFlowSnapshot } from "../src/context-flow/snapshot";
@@ -37,13 +37,11 @@ function bench(label: string, fn: () => void): number {
 	const start = performance.now();
 	for (let i = 0; i < ITERS; i++) fn();
 	const ms = performance.now() - start;
-	console.log(`${label}: ${(ms / ITERS * 1000).toFixed(2)} µs/op (${ms.toFixed(1)} ms total)`);
+	console.log(`${label}: ${(ms / ITERS * 1000).toFixed(2)} µs/op`);
 	return ms;
 }
 
 console.log(`Context UI render benchmark (${ITERS} iterations)`);
-const original = bench("original grid (renderContextUsage)", () => renderContextUsage(breakdown, theme));
-const compact = bench("new default (/context compact)", () => renderCompactContextUsage(breakdown, theme, flow));
-const debug = bench("debug explorer (renderFullContextExplorer)", () => renderFullContextExplorer(breakdown, flow));
-console.log(`compact vs original: ${(compact / original).toFixed(2)}x`);
-console.log(`debug vs compact: ${(debug / compact).toFixed(2)}x`);
+const original = bench("original grid", () => renderContextUsage(breakdown, theme));
+const unified = bench("unified /context page", () => renderContextUsagePage(breakdown, theme, flow));
+console.log(`unified vs original: ${(unified / original).toFixed(2)}x`);

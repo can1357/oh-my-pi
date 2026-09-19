@@ -228,7 +228,7 @@ export function contextExplorerTitle(view: ContextExplorerView): string {
 	}
 }
 
-const FLOW_BREADCRUMB_ORDER = [
+const TURN_FLOW_ORDER = [
 	"omp.user",
 	"omp.rlm.search",
 	"omp.rlm.grants",
@@ -237,87 +237,238 @@ const FLOW_BREADCRUMB_ORDER = [
 	"omp.root",
 ] as const;
 
-function compactFlowLabel(component: string): string {
+function flowStepLabel(component: string): string {
 	switch (component) {
 		case "omp.user":
 			return "prompt";
 		case "omp.rlm.search":
-			return "search";
+			return "RLM search";
 		case "omp.rlm.grants":
 			return "grants";
 		case "omp.rlm.groq_codec":
-			return "Groq";
+			return "Groq codec";
 		case "omp.rlm.worker":
 			return "worker";
 		case "omp.root":
-			return "root";
+			return "root model";
 		default:
 			return component.replace(/^omp\./, "");
 	}
 }
 
-/** One-line offload summary for default /context (hidden when inactive). */
-export function renderCompactOffloadLine(flow: ContextFlowSnapshot): string | undefined {
-	const o = flow.offload;
-	if (!o.active) return undefined;
-	const parts: string[] = [];
-	if (o.externalBytes > 0) parts.push(`${formatBytes(o.externalBytes)} stored`);
-	if (o.grantedTokens && o.grantedTokens > 0) parts.push(`${formatBytes(o.grantedTokens)} worker`);
-	if (o.reintroducedTokens > 0) parts.push(`${formatNumber(o.reintroducedTokens)}t root`);
-	if (parts.length === 0) return undefined;
-	return `↓ RLM ${parts.join(" → ")}`;
+function formatTokenShort(n: number): string {
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+	return String(n);
 }
 
-/** Compact turn pipeline breadcrumb for default /context (no NOT WIRED inventory). */
-export function renderCompactFlowBreadcrumb(flow: ContextFlowSnapshot, maxWidth?: number): string | undefined {
-	const turnNodes = flow.nodes.filter(
-		n => n.turn === flow.turn && n.component.startsWith("omp.") && n.status !== "not_wired",
-	);
-	if (turnNodes.length === 0) return undefined;
+function formatTokenCount(n: number): string {
+	return `${formatTokenShort(n)} t`;
+}
 
+function estimateTokensFromBytes(bytes: number): number {
+	return Math.max(0, Math.round(bytes / 4));
+}
+
+function bestTurnNode(flow: ContextFlowSnapshot, component: string): ContextFlowNode | undefined {
+	const nodes = flow.nodes.filter(
+		n => n.turn === flow.turn && n.component === component && n.status !== "not_wired",
+	);
+	if (nodes.length === 0) return undefined;
+	return nodes.reduce((best, node) => (node.status === "running" ? node : best));
+}
+
+function collectTurnNodes(flow: ContextFlowSnapshot): Map<string, ContextFlowNode> {
 	const byComponent = new Map<string, ContextFlowNode>();
-	for (const node of turnNodes) {
-		const existing = byComponent.get(node.component);
-		if (!existing || node.status === "running") byComponent.set(node.component, node);
+	for (const key of TURN_FLOW_ORDER) {
+		const node = bestTurnNode(flow, key);
+		if (node) byComponent.set(key, node);
 	}
 	if (byComponent.has("omp.rlm.groq_codec")) byComponent.delete("omp.rlm.worker");
-
-	const steps: string[] = [];
-	for (const key of FLOW_BREADCRUMB_ORDER) {
-		const node = byComponent.get(key);
-		if (!node) continue;
-		steps.push(`${compactFlowLabel(key)} ${statusGlyph(node.status)}`);
-	}
-	if (steps.length <= 1) return undefined;
-
-	let line = `Flow  ${steps.join(" → ")}`;
-	if (maxWidth !== undefined && maxWidth > 0 && line.length > maxWidth) {
-		line = `${line.slice(0, Math.max(0, maxWidth - 1))}…`;
-	}
-	return line;
+	return byComponent;
 }
 
-/** Offload + flow augmentation lines (0–2) for the compact /context panel. */
-export function renderCompactContextAugmentation(flow: ContextFlowSnapshot, maxWidth?: number): string[] {
+function formatStepMeta(node: ContextFlowNode, flow: ContextFlowSnapshot): string | undefined {
+	const parts: string[] = [];
+	if (node.durationMs !== undefined && node.status !== "running" && node.durationMs > 0) {
+		if (node.durationMs >= 1000) parts.push(`${(node.durationMs / 1000).toFixed(1)}s`);
+		else parts.push(`${node.durationMs.toFixed(0)}ms`);
+	}
+	if (flow.economics.tokenomicsEnabled && node.component === "omp.root" && flow.economics.costUsd > 0) {
+		parts.push(`$${flow.economics.costUsd.toFixed(4)}`);
+	}
+	return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function formatTurnStepIo(node: ContextFlowNode, flow: ContextFlowSnapshot): string {
+	if (node.component === "omp.root") {
+		if (node.inputTokens !== undefined && node.outputTokens !== undefined) {
+			return `${formatTokenShort(node.inputTokens)} → ${formatTokenShort(node.outputTokens)} t`;
+		}
+		const rein = flow.offload.reintroducedTokens;
+		if (rein > 0) return `+${formatTokenShort(rein)} t`;
+		return "";
+	}
+	if (node.inputTokens !== undefined && node.outputTokens !== undefined) {
+		return `${formatTokenShort(node.inputTokens)} → ${formatTokenShort(node.outputTokens)} t`;
+	}
+	if (node.inputBytes !== undefined && node.outputTokens !== undefined) {
+		return `${formatBytes(node.inputBytes)} → ${formatTokenShort(node.outputTokens)} t`;
+	}
+	if (node.inputBytes !== undefined) return `${formatBytes(node.inputBytes)} external`;
+	if (node.inputTokens !== undefined) return `${formatTokenShort(node.inputTokens)} t`;
+	if (node.outputTokens !== undefined) return `→ ${formatTokenShort(node.outputTokens)} t`;
+	return "";
+}
+
+function padDetail(label: string, detail: string, width = 20): string {
+	if (!detail) return label;
+	const padded = label.length >= width ? `${label} ` : label.padEnd(width);
+	return `${padded}${detail}`;
+}
+
+/** Original Context Usage grid — root window only. */
+export function renderContextWindow(breakdown: ContextBreakdown, theme: Theme): string {
+	return renderContextUsage(breakdown, theme);
+}
+
+/** Context savings from mechanisms that actually ran (no wiring inventory). */
+export function renderContextSavings(flow: ContextFlowSnapshot, breakdown?: ContextBreakdown): string | undefined {
+	const sections: string[] = [];
+	const o = flow.offload;
+	const externalT = estimateTokensFromBytes(o.externalBytes);
+	const grantedT = o.grantedTokens ?? 0;
+	const reintroT = o.reintroducedTokens;
+	const rlmNodes = flow.nodes.some(
+		n => n.turn === flow.turn && n.component.startsWith("omp.rlm.") && n.status !== "not_wired",
+	);
+	const rlmActive = o.active || rlmNodes;
+
+	if (rlmActive && (externalT > 0 || grantedT > 0 || reintroT > 0)) {
+		const keptOut = Math.max(0, externalT - reintroT);
+		const lines = ["RLM"];
+		if (externalT > 0) lines.push(`  Externalized`.padEnd(24) + formatTokenCount(externalT));
+		if (grantedT > 0) lines.push(`  Granted to workers`.padEnd(24) + formatTokenCount(grantedT));
+		if (reintroT > 0) lines.push(`  Reintroduced`.padEnd(24) + formatTokenCount(reintroT));
+		if (keptOut > 0) lines.push(`  Kept out of root`.padEnd(24) + `≈${formatTokenCount(keptOut)}`);
+		const pipeline: string[] = [];
+		if (externalT > 0) pipeline.push(formatTokenShort(externalT));
+		if (grantedT > 0) pipeline.push(formatTokenShort(grantedT));
+		if (reintroT > 0) pipeline.push(formatTokenShort(reintroT));
+		if (pipeline.length >= 2) lines.push(`  Pipeline`.padEnd(24) + `${pipeline.join(" → ")} t`);
+		sections.push(lines.join("\n"));
+	}
+
+	const codecNode = bestTurnNode(flow, "omp.rlm.groq_codec");
+	if (codecNode && codecNode.status !== "skipped") {
+		const inT = codecNode.inputTokens ?? estimateTokensFromBytes(codecNode.inputBytes ?? 0);
+		const outT = codecNode.outputTokens ?? 0;
+		if (inT > 0 || outT > 0) {
+			const lines = ["Groq codec"];
+			if (inT > 0) lines.push(`  Input`.padEnd(24) + formatTokenCount(inT));
+			if (outT > 0) lines.push(`  Output`.padEnd(24) + formatTokenCount(outT));
+			if (inT > 0 && outT > 0) {
+				lines.push(`  Compression`.padEnd(24) + `${(inT / outT).toFixed(1)}×`);
+				const avoided = inT - outT;
+				if (avoided > 0) lines.push(`  Root context avoided`.padEnd(24) + `≈${formatTokenCount(avoided)}`);
+			}
+			if (codecNode.durationMs !== undefined) {
+				lines.push(`  Latency`.padEnd(24) + `${codecNode.durationMs.toFixed(0)} ms`);
+			}
+			sections.push(lines.join("\n"));
+		}
+	}
+
+	const snap = breakdown?.snapcompact;
+	if (snap && snap.savedTokens > 0) {
+		const lines = ["Snapcompact"];
+		lines.push(`  Wire savings`.padEnd(24) + `≈${formatTokenCount(snap.savedTokens)}`);
+		if (snap.toolResults?.swapped) {
+			lines.push(
+				`  Tool results`.padEnd(24) +
+					`${snap.toolResults.swapped} imaged → ≈${formatTokenCount(snap.toolResults.savedTokens)}`,
+			);
+		}
+		sections.push(lines.join("\n"));
+	}
+
+	if (sections.length === 0) return undefined;
+	return sections.join("\n\n");
+}
+
+/** Vertical pipeline for the current turn (participating stages only). */
+export function renderCurrentTurnFlow(flow: ContextFlowSnapshot, maxWidth?: number): string | undefined {
+	const byComponent = collectTurnNodes(flow);
+	if (byComponent.size <= 1) return undefined;
+
+	const ordered = TURN_FLOW_ORDER.filter(key => byComponent.has(key));
+	if (ordered.length <= 1) return undefined;
+
 	const lines: string[] = [];
-	const offload = renderCompactOffloadLine(flow);
-	if (offload) lines.push(offload);
-	const flowLine = renderCompactFlowBreadcrumb(flow, maxWidth);
-	if (flowLine) lines.push(flowLine);
-	return lines;
+	for (let i = 0; i < ordered.length; i++) {
+		const key = ordered[i]!;
+		const node = byComponent.get(key)!;
+		const label = `${flowStepLabel(key)} ${statusGlyph(node.status)}`;
+		const detail = formatTurnStepIo(node, flow);
+		const meta = formatStepMeta(node, flow);
+		let row = padDetail(label, [detail, meta].filter(Boolean).join("  "));
+		if (maxWidth !== undefined && maxWidth > 0 && row.length > maxWidth) {
+			row = `${row.slice(0, Math.max(0, maxWidth - 1))}…`;
+		}
+		lines.push(row);
+		if (i < ordered.length - 1) lines.push("  ↓");
+	}
+	return lines.join("\n");
 }
 
-/** Original Context Usage grid plus compact live offload/flow rows. */
-export function renderCompactContextUsage(
+function renderSessionEconomics(flow: ContextFlowSnapshot): string | undefined {
+	const e = flow.economics;
+	if (!e.tokenomicsEnabled || e.totalIncrementalTokens <= 0) return undefined;
+	const parts = [
+		`root ${formatTokenShort(e.rootTokens)}`,
+		e.workerTokens > 0 ? `worker ${formatTokenShort(e.workerTokens)}` : undefined,
+		e.costUsd > 0 ? `$${e.costUsd.toFixed(4)}` : undefined,
+	].filter(Boolean);
+	return `Session economics  ${parts.join(" · ")}`;
+}
+
+/** Unified /context page: root window + savings + current-turn flow. */
+export function renderContextUsagePage(
 	breakdown: ContextBreakdown,
 	theme: Theme,
 	flow?: ContextFlowSnapshot,
-	options?: { maxAugmentationWidth?: number },
+	options?: { maxWidth?: number },
 ): string {
-	const grid = renderContextUsage(breakdown, theme);
-	if (!flow) return grid;
-	const aug = renderCompactContextAugmentation(flow, options?.maxAugmentationWidth);
-	if (aug.length === 0) return grid;
-	const divider = theme.fg("dim", "─".repeat(40));
-	return [grid, "", divider, ...aug].join("\n");
+	const window = renderContextWindow(breakdown, theme);
+	if (!flow) return window;
+
+	const savings = renderContextSavings(flow, breakdown);
+	const turnFlow = renderCurrentTurnFlow(flow, options?.maxWidth);
+	const economics = renderSessionEconomics(flow);
+	const sections = [window];
+
+	if (savings) {
+		sections.push("", theme.fg("accent", "Context savings"), "", savings);
+	}
+	if (turnFlow) {
+		sections.push("", theme.fg("accent", "Current turn"), "", turnFlow);
+	}
+	if (economics) {
+		sections.push("", theme.fg("dim", economics));
+	}
+
+	if (sections.length === 1) return window;
+	return sections.join("\n");
+}
+
+// Legacy aliases — prefer renderContextUsagePage.
+export const renderCompactContextUsage = renderContextUsagePage;
+export function renderCompactOffloadLine(): string | undefined {
+	return undefined;
+}
+export function renderCompactFlowBreadcrumb(): string | undefined {
+	return undefined;
+}
+export function renderCompactContextAugmentation(): string[] {
+	return [];
 }

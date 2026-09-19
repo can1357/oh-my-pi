@@ -3,14 +3,14 @@ import { theme } from "../theme/theme";
 import { matchesSelectCancel } from "../keybinding-matchers";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 
-const FOOTER_HINT = "Esc close · /context debug for diagnostics";
+const FOOTER_HINT = "Esc close · ↑/↓ scroll";
 const PANEL_CHROME_ROWS = 4;
 
 export interface ContextUsageOverlayHost {
 	readonly terminal: { readonly rows: number };
 }
 
-/** Compact /context panel — original Context Usage grid + live offload/flow rows. */
+/** Unified /context panel — root window, savings, and current-turn flow. */
 export class ContextUsageOverlay implements Component {
 	readonly #host: ContextUsageOverlayHost;
 	readonly #onClose: () => void;

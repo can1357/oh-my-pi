@@ -2,16 +2,16 @@ import { describe, expect, it } from "bun:test";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { type ContextBreakdown, renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import {
-	renderCompactContextAugmentation,
-	renderCompactContextUsage,
-	renderCompactFlowBreadcrumb,
-	renderCompactOffloadLine,
+	renderContextSavings,
+	renderContextUsagePage,
+	renderCurrentTurnFlow,
 	renderFullContextExplorer,
 } from "../src/context-flow/format";
 import { contextFlowBeginTurn, contextFlowSeedResearchStack } from "../src/context-flow/hooks";
 import {
 	contextFlowRlmGrants,
 	contextFlowRlmWorkerBegin,
+	contextFlowRlmWorkerComplete,
 	contextFlowRootBegin,
 	FLOW_KEYS,
 } from "../src/context-flow/rlm-flow";
@@ -44,16 +44,17 @@ function snapshotFor(owner: object, store?: RlmStore) {
 	});
 }
 
-describe("context-flow compact rendering", () => {
-	it("RLM off: compact augmentation is empty and grid matches original renderer", () => {
+describe("context-flow unified /context page", () => {
+	it("RLM off: page matches original Context Usage grid", () => {
 		const owner = {};
 		contextFlowBeginTurn(owner, "hello");
 		const flow = snapshotFor(owner);
-		expect(renderCompactContextAugmentation(flow)).toEqual([]);
-		expect(renderCompactContextUsage(breakdown, theme, flow)).toBe(renderContextUsage(breakdown, theme));
+		expect(renderContextSavings(flow)).toBeUndefined();
+		expect(renderCurrentTurnFlow(flow)).toBeUndefined();
+		expect(renderContextUsagePage(breakdown, theme, flow)).toBe(renderContextUsage(breakdown, theme));
 	});
 
-	it("RLM active: only a few augmentation lines appear", () => {
+	it("RLM active: savings section appears below root grid", () => {
 		const owner = {};
 		const store = new RlmStore();
 		contextFlowBeginTurn(owner, "hello");
@@ -65,67 +66,92 @@ describe("context-flow compact rendering", () => {
 			active: true,
 		});
 		const flow = snapshotFor(owner, store);
-		const aug = renderCompactContextAugmentation(flow);
-		expect(aug.length).toBeGreaterThanOrEqual(1);
-		expect(aug.length).toBeLessThanOrEqual(2);
-		const compact = renderCompactContextUsage(breakdown, theme, flow);
-		const lineCount = compact.split("\n").length;
-		const baseCount = renderContextUsage(breakdown, theme).split("\n").length;
-		expect(lineCount - baseCount).toBeLessThanOrEqual(4);
-		expect(renderCompactOffloadLine(flow)).toContain("RLM");
+		const page = renderContextUsagePage(breakdown, theme, flow);
+		expect(page).toContain("Context savings");
+		expect(page).toContain("RLM");
+		expect(page).toContain("Kept out of root");
+		expect(page.startsWith(renderContextUsage(breakdown, theme))).toBe(true);
 	});
 
-	it("Groq running: compact FLOW breadcrumb updates live", () => {
+	it("RLM + Groq: pipeline visible in savings and current turn", () => {
+		const owner = {};
+		const store = new RlmStore();
+		contextFlowBeginTurn(owner, "hello");
+		contextFlowRlmGrants(owner, { grantedBytes: 4200, grantCount: 2, grantedTokens: 4200 }, store);
+		getContextFlowRegistry(owner).updateOffload({
+			externalBytes: 184_000,
+			reintroducedTokens: 318,
+			grantedTokens: 4200,
+			active: true,
+		});
+		contextFlowRlmWorkerBegin(owner, { component: FLOW_KEYS.RLM_CODEC, grantedBytes: 4200, inputTokens: 4200 });
+		contextFlowRlmWorkerComplete(
+			owner,
+			{ component: FLOW_KEYS.RLM_CODEC, inputTokens: 4200, outputTokens: 318, durationMs: 812 },
+			store,
+		);
+		contextFlowRootBegin(owner, "anthropic", "claude");
+		const flow = snapshotFor(owner, store);
+		const page = renderContextUsagePage(breakdown, theme, flow);
+		expect(page).toContain("Groq codec");
+		expect(page).toContain("Pipeline");
+		expect(page).toContain("Current turn");
+		expect(page).toContain("↓");
+		const turn = renderCurrentTurnFlow(flow)!;
+		expect(turn).toContain("Groq codec");
+		expect(turn).toContain("4.2k → 318 t");
+	});
+
+	it("worker running: live state in current turn", () => {
 		const owner = {};
 		contextFlowBeginTurn(owner, "hello");
 		contextFlowRlmGrants(owner, { grantedBytes: 4200, grantCount: 2, grantedTokens: 4200 });
 		contextFlowRlmWorkerBegin(owner, { component: FLOW_KEYS.RLM_CODEC, grantedBytes: 4200, inputTokens: 4200 });
 		const flow = snapshotFor(owner);
-		const line = renderCompactFlowBreadcrumb(flow);
-		expect(line).toContain("Groq");
-		expect(line).toContain("◉");
+		const turn = renderCurrentTurnFlow(flow)!;
+		expect(turn).toContain("◉");
 	});
 
-	it("root running: active state appears in compact flow", () => {
+	it("root running: active state in current turn", () => {
 		const owner = {};
 		contextFlowBeginTurn(owner, "hello");
 		contextFlowRootBegin(owner, "anthropic", "claude");
 		const flow = snapshotFor(owner);
-		const line = renderCompactFlowBreadcrumb(flow);
-		expect(line).toContain("root");
-		expect(line).toContain("◉");
+		const turn = renderCurrentTurnFlow(flow)!;
+		expect(turn).toContain("root model");
+		expect(turn).toContain("◉");
 	});
 
-	it("no NOT WIRED components appear in normal compact output", () => {
+	it("no NOT WIRED inventory in normal /context page", () => {
 		const owner = {};
 		contextFlowSeedResearchStack(owner);
 		contextFlowBeginTurn(owner, "hello");
 		const flow = snapshotFor(owner);
-		const compact = renderCompactContextUsage(breakdown, theme, flow);
-		expect(compact).not.toMatch(/NOT WIRED/i);
-		expect(compact).not.toMatch(/NanoJev|OpenJev|z0int|Kerdoios|fly|mushroom/);
+		const page = renderContextUsagePage(breakdown, theme, flow);
+		expect(page).not.toMatch(/NOT WIRED/i);
+		expect(page).not.toMatch(/NanoJev|OpenJev|z0int|Kerdoios|fly|mushroom/);
+		expect(page).not.toMatch(/Research stack/i);
 	});
 
-	it("diagnostic explorer still contains full wiring information", () => {
+	it("full explorer (dev) still has wiring inventory when explicitly rendered", () => {
 		const owner = {};
 		contextFlowSeedResearchStack(owner);
 		contextFlowBeginTurn(owner, "hello");
 		const flow = snapshotFor(owner);
 		const debug = renderFullContextExplorer(breakdown, flow);
 		expect(debug).toMatch(/NOT WIRED|NanoJev|OpenJev/);
-		expect(debug).toMatch(/FLOW/);
-		expect(debug).toMatch(/OFFLOAD|ECONOMICS/);
 	});
 
-	it("narrow terminals degrade flow breadcrumb cleanly", () => {
+	it("narrow terminals truncate current-turn rows cleanly", () => {
 		const owner = {};
 		contextFlowBeginTurn(owner, "hello");
 		contextFlowRlmGrants(owner, { grantedBytes: 4200, grantCount: 2, grantedTokens: 4200 });
 		contextFlowRlmWorkerBegin(owner, { component: FLOW_KEYS.RLM_CODEC, grantedBytes: 4200, inputTokens: 4200 });
 		contextFlowRootBegin(owner, "anthropic", "claude");
 		const flow = snapshotFor(owner);
-		const line = renderCompactFlowBreadcrumb(flow, 24);
-		expect(line?.length).toBeLessThanOrEqual(24);
-		expect(line?.endsWith("…")).toBe(true);
+		const turn = renderCurrentTurnFlow(flow, 24)!;
+		for (const line of turn.split("\n")) {
+			expect(line.length).toBeLessThanOrEqual(24);
+		}
 	});
 });

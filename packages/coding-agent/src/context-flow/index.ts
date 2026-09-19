@@ -32,11 +32,16 @@ export {
 	contextExplorerTitle,
 	cycleContextExplorerView,
 	formatBytes,
+	renderContextExplorerView,
+	renderContextSavings,
+	renderContextUsagePage,
+	renderContextWindow,
+	renderCurrentTurnFlow,
+	renderFullContextExplorer,
+	// Legacy aliases
 	renderCompactContextAugmentation,
 	renderCompactContextUsage,
 	renderCompactFlowBreadcrumb,
 	renderCompactOffloadLine,
-	renderContextExplorerView,
-	renderFullContextExplorer,
 	type ContextExplorerView,
 } from "./format";
