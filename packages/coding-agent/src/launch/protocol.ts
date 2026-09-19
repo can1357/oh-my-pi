@@ -29,7 +29,7 @@ export const DAEMON_RUNTIME_DIR_ENV = "OMP_DAEMON_RUNTIME_DIR";
 export const DAEMON_IDLE_GRACE_ENV = "OMP_DAEMON_IDLE_GRACE_MS";
 
 /** Broker support for live output previews plus their recoverable raw capture. */
-export const DAEMON_OUTPUT_MONITOR_CAPABILITY = "output-monitor-v4";
+export const DAEMON_OUTPUT_MONITOR_CAPABILITY = "output-monitor-v5";
 
 /** Signals accepted by daemon input operations. */
 export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKILL";
@@ -44,6 +44,7 @@ export type DaemonOperation =
 			replace?: boolean;
 			/** `false` answers once the process launches; follow with a `wait` for readiness. Legacy brokers ignore it and wait. */
 			awaitReady?: boolean;
+			startId?: string;
 	  }
 	| { op: "list" }
 	| {
@@ -142,12 +143,13 @@ export interface DaemonOutputSubscription {
 	 */
 	artifactBytes?: number;
 	/**
-	 * True while this registration targets the next daemon started with
-	 * {@link name}, rather than the current incarnation. The broker leaves it
-	 * unbound until that new record exists and never replays a prior terminal
-	 * record to it.
+	 * True while this registration targets the start operation identified by
+	 * {@link startId}, rather than the current incarnation. The broker leaves
+	 * it unbound until that operation creates its record.
 	 */
 	startPending?: boolean;
+	/** Unique initiating start operation; required while {@link startPending} is true. */
+	startId?: string;
 	/** Delivery mode the client attached; reported by `list`/`describe` watcher rows. */
 	delivery?: DaemonMonitorDelivery;
 	/** Epoch milliseconds when the client registered this subscription. */
@@ -349,6 +351,10 @@ function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
 				source.startPending === undefined
 					? undefined
 					: booleanValue(source.startPending, `request.outputSubscriptions[${index}].startPending`),
+			startId:
+				source.startPending === true
+					? stringValue(source.startId, `request.outputSubscriptions[${index}].startId`)
+					: optionalString(source.startId, `request.outputSubscriptions[${index}].startId`),
 			delivery: optionalMonitorDelivery(source.delivery, `request.outputSubscriptions[${index}].delivery`),
 			since:
 				source.since === undefined
@@ -586,6 +592,7 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				replace: source.replace === undefined ? undefined : booleanValue(source.replace, "operation.replace"),
 				awaitReady:
 					source.awaitReady === undefined ? undefined : booleanValue(source.awaitReady, "operation.awaitReady"),
+				startId: optionalString(source.startId, "operation.startId"),
 			};
 		case "logs":
 			return {
