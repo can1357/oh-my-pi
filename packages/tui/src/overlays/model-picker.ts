@@ -69,7 +69,7 @@ export interface ModelPickerOptions {
 /** Fixed chrome rows: top border, status row, footer, bottom border. */
 const CHROME_ROWS = 4;
 /** Rows the browser renders around its list window (search + blank, blank + two detail rows). */
-const BROWSER_FRAME_ROWS = 5;
+export const BROWSER_FRAME_ROWS = 5;
 /** Minimum rows for the browser list window on short terminals. */
 const MIN_VISIBLE = 5;
 /** Fraction of the terminal height the floating overlay occupies. */

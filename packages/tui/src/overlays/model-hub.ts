@@ -41,9 +41,14 @@ import {
 	resolveRoleAssignments,
 	sortModelItems,
 } from "./model-browser";
-import { bottomBorder, dividerSplit, PanelRows, row, topBorderSplit } from "../chrome/overlay-box";
-import { SplitPane } from "../components/layout/split-pane";
-import { Stack } from "../components/layout/stack";
+import {
+	HubFrame,
+	moveStripSelection,
+	type SidebarEntry as HubSidebarEntry,
+	type SidebarStyle,
+	type StripChip as HubStripChip,
+	type StripState as HubStripState,
+} from "./hub-frame";
 import { renderSegmentTrack } from "../chrome/segment-track";
 
 /**
@@ -135,14 +140,9 @@ export interface ModelHubOptions {
 	initialProviderId?: string;
 }
 
-interface SidebarEntry {
-	id: string;
-	kind: "recent" | "roles" | "all" | "separator" | "provider";
-	label: string;
+interface SidebarEntry extends HubSidebarEntry<"recent" | "roles" | "all" | "separator" | "provider"> {
 	providerId?: string;
 	locked?: boolean;
-	/** Right-aligned annotation: model count, `assigned/total`, or `login`. */
-	annotation?: string;
 	oauth?: boolean;
 	catalogCount?: number;
 }
@@ -158,48 +158,35 @@ interface SidebarAnchor {
 	offset: number;
 }
 
-interface StripChip {
-	label: string;
-	/** Pre-styled label body (without selection decoration). */
-	styled: string;
+interface StripChip extends HubStripChip<
+	"assign" | "unassign" | "fallback" | "fallbackModel" | "fallbackProvider" | "scope" | "thinking"
+> {
 	role?: string;
-	action: "assign" | "unassign" | "fallback" | "fallbackModel" | "fallbackProvider" | "scope" | "thinking";
 	thinkingLevel?: ConfiguredThinkingLevel;
 	scope?: ModelRoleSelectionScope;
 }
 
 type StripState =
-	| {
+	| (HubStripState<StripChip> & {
 			kind: "role" | "scope" | "thinking";
 			item: ModelBrowserItem;
 			role?: string;
 			/** Set when a thinking strip edits a fallback-chain entry instead of a role assignment. */
 			fallbackIndex?: number;
 			scope?: ModelRoleSelectionScope;
-			chips: StripChip[];
-			index: number;
 			/** Where to land when a scope or thinking strip closes. */
 			returnToRoles: boolean;
 			/** Thinking value already committed for this strip. */
 			initialThinkingLevel?: ConfiguredThinkingLevel;
-	  }
+	  })
 	| {
 			/** Footer text input naming a new custom role. */
 			kind: "roleName";
 			input: Input;
 	  };
 
-/** Recorded chip hit-range on the footer row (columns relative to frame col 0). */
-interface ChipRange {
-	start: number;
-	end: number;
-	index: number;
-}
-
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
-const SIDEBAR_MIN_WIDTH = 18;
-const SIDEBAR_MAX_WIDTH = 26;
 
 /**
  * Providers already auto-refreshed this process. Selecting a provider fetches
@@ -240,7 +227,6 @@ export class ModelHubComponent implements Component {
 	#recentSearchCount = 0;
 	#searchTotal = 0;
 	#activeEntryId = "all";
-	#sidebarScroll = 0;
 	/** Snap the sidebar viewport to the active entry on the next render; wheel panning leaves it free. */
 	#sidebarFollowActive = true;
 	#sidebarHover: number | null = null;
@@ -273,15 +259,6 @@ export class ModelHubComponent implements Component {
 	#pendingCredentialRefreshProviders = new Set<string>();
 	#refreshSpinnerFrame = 0;
 	#refreshSpinnerInterval?: Timer;
-	// Persistent fullscreen frame: top, growing two-pane body, split divider,
-	// footer, bottom. The fullscreen overlay paints from screen row 0, so mouse
-	// rows map 1:1 into the stack; the sidebar width is fixed per render.
-	#renderSidebarPane = (width: number, height: number | undefined): readonly string[] => {
-		const rows = Math.max(0, Math.floor(height ?? 10));
-		const lines = this.#renderSidebar(width, rows);
-		while (lines.length < rows) lines.push("");
-		return lines.slice(0, rows);
-	};
 	#renderBodyPane = (width: number, height: number | undefined): readonly string[] => {
 		const rows = Math.max(1, Math.floor(height ?? 10));
 		const lines: string[] = [this.#statusRow(width)];
@@ -298,27 +275,12 @@ export class ModelHubComponent implements Component {
 		while (lines.length < rows) lines.push("");
 		return lines.slice(0, rows);
 	};
-	readonly #split = new SplitPane({
-		left: this.#renderSidebarPane,
-		right: this.#renderBodyPane,
-		prefix: () => `${theme.fg("border", theme.boxRound.vertical)} `,
-		divider: () => ` ${theme.fg("border", theme.boxRound.vertical)} `,
-		suffix: () => ` ${theme.fg("border", theme.boxRound.vertical)}`,
-	});
-	readonly #frameTop = new PanelRows();
-	readonly #frameDivider = new PanelRows();
-	readonly #frameFooter = new PanelRows();
-	readonly #frameBottom = new PanelRows();
-	readonly #frame = new Stack({
-		children: [
-			{ content: this.#frameTop, height: 1 },
-			{ content: this.#split, grow: 1 },
-			{ content: this.#frameDivider, height: 1 },
-			{ content: this.#frameFooter, height: 1 },
-			{ content: this.#frameBottom, height: 1 },
-		],
-	});
-	#chipRanges: ChipRange[] = [];
+	readonly #frame: HubFrame = new HubFrame(
+		"Models",
+		{ min: 18, max: 26 },
+		(width, rows) => this.#renderSidebar(width, rows),
+		this.#renderBodyPane,
+	);
 	#lockedLoginLine: number | null = null;
 	#rolesRowStart = 1;
 
@@ -578,7 +540,7 @@ export class ModelHubComponent implements Component {
 	/** Snapshot the focused entry and its row within the sidebar viewport. */
 	#captureSidebarAnchor(): SidebarAnchor {
 		const index = this.#entries.findIndex(entry => entry.id === this.#activeEntryId);
-		return { id: this.#activeEntryId, index, offset: index - this.#sidebarScroll };
+		return { id: this.#activeEntryId, index, offset: index - this.#frame.sidebarScroll };
 	}
 
 	/**
@@ -591,13 +553,13 @@ export class ModelHubComponent implements Component {
 		if (anchor.index < 0) return;
 		const survivor = this.#entries.findIndex(entry => entry.id === anchor.id);
 		if (survivor >= 0) {
-			this.#sidebarScroll = Math.max(0, survivor - anchor.offset);
+			this.#frame.sidebarScroll = Math.max(0, survivor - anchor.offset);
 			return;
 		}
 		const replacement = this.#nearestNavigableEntry(anchor.index);
 		if (!replacement) return;
 		this.#activeEntryId = replacement.id;
-		this.#sidebarScroll = Math.max(0, this.#entries.indexOf(replacement) - anchor.offset);
+		this.#frame.sidebarScroll = Math.max(0, this.#entries.indexOf(replacement) - anchor.offset);
 	}
 
 	/** The selectable entry nearest `preferredIndex` in the current `#entries`. */
@@ -1247,7 +1209,7 @@ export class ModelHubComponent implements Component {
 	#closeStrip(): void {
 		const strip = this.#strip;
 		this.#strip = null;
-		this.#chipRanges = [];
+		this.#frame.chipRanges = [];
 		if ((strip?.kind === "scope" || strip?.kind === "thinking") && strip.returnToRoles) {
 			this.#setActiveEntry("roles");
 			this.#focus = "list";
@@ -1299,7 +1261,7 @@ export class ModelHubComponent implements Component {
 				if (strip.role && chip.thinkingLevel !== undefined && strip.fallbackIndex !== undefined) {
 					this.#setFallbackThinking(strip.role, strip.fallbackIndex, chip.thinkingLevel);
 					this.#strip = null;
-					this.#chipRanges = [];
+					this.#frame.chipRanges = [];
 					return;
 				}
 				// The preselected level is confirmation, not a force-reapply action;
@@ -1492,7 +1454,7 @@ export class ModelHubComponent implements Component {
 		if (!/^[a-zA-Z][\w-]*$/.test(name)) return;
 		if (this.#visibleRoleIds().includes(name)) return;
 		this.#strip = null;
-		this.#chipRanges = [];
+		this.#frame.chipRanges = [];
 		this.#startAssign(name);
 	}
 
@@ -1623,14 +1585,7 @@ export class ModelHubComponent implements Component {
 			strip.input.handleInput(data);
 			return;
 		}
-		if (matchesKey(data, "left") || matchesKey(data, "up") || matchesKey(data, "shift+tab")) {
-			strip.index = (strip.index - 1 + strip.chips.length) % strip.chips.length;
-			return;
-		}
-		if (matchesKey(data, "right") || matchesKey(data, "down") || matchesKey(data, "tab")) {
-			strip.index = (strip.index + 1) % strip.chips.length;
-			return;
-		}
+		if (moveStripSelection(strip, data)) return;
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			this.#activateStripChip();
 			return;
@@ -1819,38 +1774,17 @@ export class ModelHubComponent implements Component {
 
 	#routeMouseEvent(event: SgrMouseEvent): boolean {
 		if (this.#assignmentPending) return true;
-		const hit = this.#frame.locate(event.row, event.col);
-		const bodyHeight = this.#frame.childRect(1)?.height ?? 0;
-		let contentLine = -1;
-		let overSidebar = false;
-		let overBody = false;
-		if (hit && hit.index === 1) {
-			const pane = this.#split.locate(hit.line, hit.col);
-			if (pane?.pane === "left") {
-				overSidebar = true;
-				contentLine = pane.line;
-			} else if (pane?.pane === "right") {
-				overBody = true;
-				contentLine = pane.line;
-			}
-		}
-		const overContent = contentLine >= 0 && contentLine < bodyHeight;
-		overSidebar = overSidebar && overContent;
-		overBody = overBody && overContent;
-		const bodyLine = contentLine - 1; // body row 0 is the status row
+		const { footerColumn, bodyHeight, contentLine, overSidebar, overBody, bodyLine } = this.#frame.locate(
+			event.row,
+			event.col,
+		);
 		const entry = this.#activeEntry();
 
 		// Footer strip chips (columns stay in frame coordinates).
-		if (hit && hit.index === 3 && this.#strip) {
+		if (footerColumn !== undefined && this.#strip) {
 			const strip = this.#strip;
-			if (event.leftClick && strip.kind !== "roleName") {
-				for (const range of this.#chipRanges) {
-					if (hit.col >= range.start && hit.col < range.end) {
-						strip.index = range.index;
-						this.#activateStripChip();
-						return true;
-					}
-				}
+			if (event.leftClick && strip.kind !== "roleName" && this.#frame.selectChipAt(strip, footerColumn)) {
+				this.#activateStripChip();
 			}
 			return true;
 		}
@@ -1858,8 +1792,7 @@ export class ModelHubComponent implements Component {
 		if (event.wheel !== null) {
 			if (overSidebar) {
 				// Wheel pans the sidebar viewport; picking a scope is click/keys only.
-				const maxScroll = Math.max(0, this.#entries.length - bodyHeight);
-				this.#sidebarScroll = Math.max(0, Math.min(this.#sidebarScroll + event.wheel, maxScroll));
+				this.#frame.scrollSidebar(event.wheel, bodyHeight, this.#entries.length);
 				this.#sidebarHover = this.#sidebarEntryIndexAt(contentLine);
 			} else if (overBody) {
 				if (entry.kind === "roles" && this.#assigning === null) {
@@ -1936,7 +1869,7 @@ export class ModelHubComponent implements Component {
 
 	/** Map a content-line index to a sidebar entry index (accounting for scroll). */
 	#sidebarEntryIndexAt(contentLine: number): number | null {
-		const index = this.#sidebarScroll + contentLine;
+		const index = this.#frame.sidebarScroll + contentLine;
 		if (index < 0 || index >= this.#entries.length) return null;
 		return index;
 	}
@@ -1945,102 +1878,54 @@ export class ModelHubComponent implements Component {
 	// Rendering
 	// ═══════════════════════════════════════════════════════════════════════
 
-	#sidebarWidth(): number {
-		let longest = 0;
-		for (const entry of this.#entries) {
-			const annotation = entry.annotation ?? "";
-			longest = Math.max(longest, visibleWidth(entry.label) + visibleWidth(annotation) + 5);
-		}
-		return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, longest));
-	}
-
 	#renderSidebar(width: number, rows: number): string[] {
-		// The scroll offset is persistent: the wheel pans it freely. Only an
-		// activation (keys, click, programmatic) snaps the viewport to the
-		// active entry, and only far enough to reveal it.
-		if (this.#sidebarFollowActive) {
-			const activeIndex = Math.max(
-				0,
-				this.#entries.findIndex(entry => entry.id === this.#activeEntryId),
-			);
-			if (activeIndex < this.#sidebarScroll) {
-				this.#sidebarScroll = activeIndex;
-			} else if (activeIndex >= this.#sidebarScroll + rows) {
-				this.#sidebarScroll = activeIndex - rows + 1;
-			}
-			this.#sidebarFollowActive = false;
-		}
-		this.#sidebarScroll = Math.max(0, Math.min(this.#sidebarScroll, Math.max(0, this.#entries.length - rows)));
-
-		const lines: string[] = [];
-		for (let i = this.#sidebarScroll; i < Math.min(this.#entries.length, this.#sidebarScroll + rows); i++) {
-			const entry = this.#entries[i];
-			if (!entry) continue;
-			if (entry.kind === "separator") {
-				lines.push(theme.fg("border", "─".repeat(width)));
-				continue;
-			}
-			const active = entry.id === this.#activeEntryId;
-			const hovered = i === this.#sidebarHover;
-			const searching = this.#searchCounts !== null;
-			let matchCount: number | undefined;
-			if (searching) {
-				if (entry.kind === "provider" && !entry.locked) {
-					matchCount = this.#searchCounts?.get(entry.providerId ?? "") ?? 0;
-				} else if (entry.kind === "recent") {
-					matchCount = this.#recentSearchCount;
-				} else if (entry.kind === "all") {
-					matchCount = this.#searchTotal;
-				}
-			}
-			// While searching, entries the hop skips gray out: locked and
-			// zero-match providers, an empty Recent, and the Roles view.
-			const muted = entry.locked || matchCount === 0 || (searching && entry.kind === "roles");
-			// The sidebar's active entry is state, not a cursor: accent label
-			// plus a cursor glyph while the sidebar owns the arrows. The band
-			// stays in the body pane so the two never look alike.
-			const cursor = active && this.#focus === "scope" ? theme.fg("accent", theme.nav.cursor) : " ";
-
-			let icon: string;
-			if (entry.kind === "recent") {
-				icon = theme.icon.time;
-			} else if (entry.kind === "roles") {
-				icon = theme.icon.extensionSkill;
-			} else if (entry.kind === "all") {
-				icon = theme.icon.model;
-			} else {
-				icon = muted ? theme.status.shadowed : theme.status.enabled;
-			}
-			const labelStyled = muted
-				? theme.fg("dim", entry.label)
-				: active
-					? theme.bold(theme.fg("accent", entry.label))
-					: entry.label;
-
-			const refreshing = entry.providerId ? this.#refreshingProviders.has(entry.providerId) : false;
-			const annotationText = matchCount !== undefined ? String(matchCount) : (entry.annotation ?? "");
-			const annotationStyled = refreshing
-				? theme.fg("warning", theme.spinnerFrames[this.#refreshSpinnerFrame % theme.spinnerFrames.length] ?? "")
-				: theme.fg("dim", annotationText);
-
-			const left = `${cursor} ${muted ? theme.fg("dim", icon) : theme.fg(entry.kind === "provider" ? "success" : "accent", icon)} ${labelStyled}`;
-			const leftWidth = visibleWidth(left);
-			const annWidth = visibleWidth(annotationStyled);
-			let line: string;
-			if (leftWidth + annWidth + 1 <= width) {
-				line = `${left}${" ".repeat(width - leftWidth - annWidth)}${annotationStyled}`;
-			} else {
-				line = truncateToWidth(left, width);
-				const lineWidth = visibleWidth(line);
-				if (lineWidth < width) line += " ".repeat(width - lineWidth);
-			}
-			if (hovered) {
-				line = theme.bg("selectedBg", line);
-			}
-			lines.push(line);
-		}
+		const lines = this.#frame.renderSidebar(
+			this.#entries,
+			width,
+			rows,
+			{ id: this.#activeEntryId, focused: this.#focus === "scope", follow: this.#sidebarFollowActive, clamp: true },
+			this.#sidebarStyle,
+		);
+		this.#sidebarFollowActive = false;
 		return lines;
 	}
+
+	#sidebarStyle = (entry: SidebarEntry, index: number): SidebarStyle => {
+		const searching = this.#searchCounts !== null;
+		let matchCount: number | undefined;
+		if (searching) {
+			if (entry.kind === "provider" && !entry.locked) {
+				matchCount = this.#searchCounts?.get(entry.providerId ?? "") ?? 0;
+			} else if (entry.kind === "recent") {
+				matchCount = this.#recentSearchCount;
+			} else if (entry.kind === "all") {
+				matchCount = this.#searchTotal;
+			}
+		}
+		// Search-ineligible entries gray out, but keep their place in the viewport.
+		const muted = entry.locked || matchCount === 0 || (searching && entry.kind === "roles");
+		let icon: string;
+		if (entry.kind === "recent") {
+			icon = theme.icon.time;
+		} else if (entry.kind === "roles") {
+			icon = theme.icon.extensionSkill;
+		} else if (entry.kind === "all") {
+			icon = theme.icon.model;
+		} else {
+			icon = muted ? theme.status.shadowed : theme.status.enabled;
+		}
+		const refreshing = entry.providerId ? this.#refreshingProviders.has(entry.providerId) : false;
+		const annotationText = matchCount !== undefined ? String(matchCount) : (entry.annotation ?? "");
+		return {
+			icon: theme.fg(muted ? "dim" : entry.kind === "provider" ? "success" : "accent", icon),
+			annotation: refreshing
+				? theme.fg("warning", theme.spinnerFrames[this.#refreshSpinnerFrame % theme.spinnerFrames.length] ?? "")
+				: theme.fg("dim", annotationText),
+			muted,
+			hovered: index === this.#sidebarHover,
+			padTruncated: true,
+		};
+	};
 
 	#statusRow(width: number): string {
 		if (this.#assignmentPending) {
@@ -2338,14 +2223,16 @@ export class ModelHubComponent implements Component {
 		return `Enter assign roles · ${arrows} · type to search${refresh} · Esc close`;
 	}
 
-	/** Footer row: active strip (chips) or the contextual hint line. */
 	#renderFooter(width: number): string {
-		this.#chipRanges = [];
 		const strip = this.#strip;
-		if (!strip) {
-			return truncateToWidth(theme.fg("dim", this.#footerHint()), width);
-		}
+		return this.#frame.renderFooter(
+			width,
+			this.#footerHint(),
+			strip ? () => this.#renderStrip(width, strip) : undefined,
+		);
+	}
 
+	#renderStrip(width: number, strip: StripState): string {
 		if (strip.kind === "roleName") {
 			const label = theme.fg("accent", "New role name:");
 			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth("New role name:") - 24));
@@ -2382,42 +2269,11 @@ export class ModelHubComponent implements Component {
 		let start = startFor(Math.min(strip.index + 1, strip.chips.length - 1));
 		if (start > strip.index) start = startFor(strip.index);
 
-		let line = prefix;
-		// Columns are relative to the frame: row() insets content by 2.
-		let col = 2 + prefixWidth;
-		if (start > 0) {
-			line += theme.fg("dim", "… ");
-			col += 2;
-		}
-		for (let i = start; i < strip.chips.length; i++) {
-			const chip = strip.chips[i];
-			if (!chip) continue;
-			const selected = i === strip.index;
-			const body = ` ${chip.styled} `;
-			const rendered = selected
-				? theme.bg("selectedBg", `${theme.fg("accent", "[")}${body}${theme.fg("accent", "]")}`)
-				: body;
-			const w = visibleWidth(body) + (selected ? 2 : 0);
-			this.#chipRanges.push({ start: col, end: col + w, index: i });
-			line += rendered;
-			col += w;
-			line += " ";
-			col += 1;
-		}
-		return truncateToWidth(line, width);
+		return this.#frame.renderChips(width, prefix, strip, start);
 	}
 
 	render(width: number): readonly string[] {
 		const height = Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
-		const sidebarWidth = this.#sidebarWidth();
-		const contentRows = Math.max(10, height - 4);
-		this.#split.setLeftSize({ fixed: sidebarWidth });
-		const leftWidth = this.#split.measure(width).left?.width ?? 0;
-		this.#frameTop.setLines([topBorderSplit(width, "Models", leftWidth)]);
-		this.#frameDivider.setLines([dividerSplit(width, leftWidth)]);
-		this.#frameFooter.setLines([row(this.#renderFooter(width - 4), width)]);
-		this.#frameBottom.setLines([bottomBorder(width)]);
-		this.#frame.setHeight(contentRows + 4);
-		return this.#frame.render(width);
+		return this.#frame.render(width, height, this.#entries, this.#renderFooter(width - 4));
 	}
 }

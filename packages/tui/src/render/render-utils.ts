@@ -117,6 +117,12 @@ export const PREVIEW_LIMITS = {
 /** Default number of terminal output rows shown before expansion. */
 export const DEFAULT_TERMINAL_PREVIEW_LINES = 10;
 
+/** Match a Markdown fenced-code opener and capture its indentation and marker. */
+export const FENCE_RE = /^( {0,3})([`~]{3,})/;
+
+/** Shared empty link-target lookup for renderers without interactive links. */
+export const EMPTY_LINK_TARGETS: ReadonlyMap<string, string> = new Map();
+
 /** Default display width reserved for a resolved model badge. */
 export const FEED_MODEL_BADGE_WIDTH = 30;
 
@@ -214,9 +220,13 @@ function truncateMiddleToWidth(text: string, maxWidth: number): string {
 	return `${sliceByColumn(text, 0, headWidth, true)}…${sliceByColumn(text, width - tailWidth, tailWidth, true)}`;
 }
 
-/**
- * Get first N lines of text as preview, with each line truncated.
- */
+/** Select a leading line window and count the lines hidden after it. */
+export function cappedHeadLines(lines: readonly string[], max: number): { lines: readonly string[]; hidden: number } {
+	const count = Math.max(0, Math.min(lines.length, Math.floor(max)));
+	return { lines: count === lines.length ? lines : lines.slice(0, count), hidden: lines.length - count };
+}
+
+/** Get the first nonblank preview lines, trimmed and width-capped. */
 export function getPreviewLines(text: string, maxLines: number, maxLineLen: number, ellipsis?: Ellipsis): string[] {
 	const lines = text.split("\n").filter(l => l.trim());
 	return lines.slice(0, maxLines).map(l => truncateToWidth(l.trim(), maxLineLen, ellipsis));
@@ -253,7 +263,7 @@ export function getDomain(url: string): string {
 // Formatting Utilities
 // =============================================================================
 
-export { formatAge, formatBytes, formatCount, formatDuration, pluralize } from "@oh-my-pi/pi-utils";
+export { formatAge, formatBytes, formatCount, formatDuration, formatNumber, pluralize } from "@oh-my-pi/pi-utils";
 
 // =============================================================================
 // Theme Helper Utilities
@@ -383,7 +393,7 @@ function sanitizeErrorText(message: string | undefined): string {
 export function sanitizeDisplayLines(text: string): string[] {
 	return text.split(/\r?\n/).map(line => {
 		const idx = line.lastIndexOf("\r");
-		return replaceTabs(idx < 0 ? line : line.slice(idx + 1));
+		return replaceTabs(sanitizeText(idx < 0 ? line : line.slice(idx + 1)));
 	});
 }
 
@@ -452,7 +462,8 @@ export function formatTitle(label: string, theme: Theme, options?: ToolUITitleOp
 // Diagnostic Formatting
 // =============================================================================
 
-interface ParsedDiagnostic {
+/** Parsed diagnostic location, severity, and optional source and code metadata. */
+export interface ParsedDiagnostic {
 	filePath: string;
 	line: number;
 	col: number;
@@ -462,7 +473,8 @@ interface ParsedDiagnostic {
 	code?: string;
 }
 
-function sanitizeDiagnosticDisplayText(text: string): string {
+/** Expand tabs in diagnostic text for terminal display. */
+export function sanitizeDiagnosticDisplayText(text: string): string {
 	return replaceTabs(text);
 }
 
@@ -479,7 +491,8 @@ function getSeverityRank(severity: ParsedDiagnostic["severity"]): number {
 	}
 }
 
-function parseDiagnosticMessage(msg: string): ParsedDiagnostic | null {
+/** Parse a diagnostic location and message, including optional source and code. */
+export function parseDiagnosticMessage(msg: string): ParsedDiagnostic | null {
 	const match = msg.match(/^(.+?):(\d+):(\d+)\s+\[(\w+)\]\s+(?:\[([^\]]+)\]\s+)?(.+?)(?:\s+\(([^)]+)\))?$/);
 	if (!match) return null;
 	return {
@@ -868,9 +881,15 @@ function homePatternFor(homeDir: string, windowsStyle: boolean): RegExp {
 	const key = `${windowsStyle ? 1 : 0} ${homeDir}`;
 	let pattern = homePatternCache.get(key);
 	if (pattern === undefined) {
-		const escapedHome = homeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const escapedHome = windowsStyle
+			? homeDir
+					.replaceAll("/", "\\")
+					.split("\\")
+					.map(part => RegExp.escape(part))
+					.join("[\\\\/]")
+			: RegExp.escape(homeDir);
 		pattern = new RegExp(
-			`(?<=^|[\\s("'\`\\[])${escapedHome}(?:[\\\\/]|(?=$|[\\s"'(),.;:\\[\\]]))`,
+			`[a-zA-Z][a-zA-Z0-9+.-]*://[^\\s"'<>]+|(^|[\\s"'\\x60([{=,:])(${escapedHome})(?=$|[\\\\/\\s"'\\x60)\\]},;:])`,
 			windowsStyle ? "gi" : "g",
 		);
 		if (homePatternCache.size >= 16) homePatternCache.clear();
@@ -898,15 +917,18 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
-/** Shorten home-prefixed paths inside free text, preserving surrounding
- * punctuation so error strings with embedded paths stay readable. */
-export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
+/** Shorten embedded home paths; normalize Windows separators unless the caller preserves native error text. */
+export function shortenEmbeddedPaths(text: string, homeDir?: string, preserveSeparators = false): string {
 	const resolvedHome = homeDir ?? defaultHomeDir();
-	const shortenedHome = resolvedHome.length > 1 ? shortenPath(resolvedHome, resolvedHome) : resolvedHome;
+	if (!resolvedHome || resolvedHome.length <= 1) return text;
 	const windowsStyle = /^[A-Za-z]:[\\/]/.test(resolvedHome) || resolvedHome.startsWith("\\\\");
 	const homePattern = homePatternFor(resolvedHome, windowsStyle);
-	const textWithShortenedHome =
-		shortenedHome !== resolvedHome ? text.replace(homePattern, match => shortenPath(match, resolvedHome)) : text;
+	const textWithShortenedHome = text.replace(
+		homePattern,
+		(match, boundary: string | undefined, candidate: string | undefined) =>
+			candidate === undefined ? match : `${boundary}~`,
+	);
+	if (preserveSeparators) return textWithShortenedHome;
 	return textWithShortenedHome
 		.split(" ")
 		.map(segment => {

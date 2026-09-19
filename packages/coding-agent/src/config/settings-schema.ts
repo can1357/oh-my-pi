@@ -1,6 +1,6 @@
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
+import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
@@ -2480,6 +2480,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Live streaming (omp stream)
+	"stream.serverUrl": {
+		type: "string",
+		default: DEFAULT_STREAM_URL,
+		ui: {
+			tab: "interaction",
+			group: "Stream",
+			label: "Stream Server",
+			description:
+				"Live stream server used by `omp stream` (https://host[:port]); viewers watch at <base>/<your Stencil username>",
+		},
+	},
+
+	"stream.redactPatterns": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "interaction",
+			group: "Stream",
+			label: "Extra Redaction Patterns",
+			description:
+				"Additional regular expressions redacted from every streamed row, on top of env/secrets.yml values and built-in credential shapes",
+		},
+	},
+
 	// Speech-to-text
 	"stt.enabled": {
 		type: "boolean",
@@ -3671,7 +3696,7 @@ export const SETTINGS_SCHEMA = {
 
 	"edit.enforceSeenLines": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "files",
 			group: "Editing",

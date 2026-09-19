@@ -209,6 +209,14 @@ export function padding(n: number): string {
 	return " ".repeat(n);
 }
 
+/** Center a line in a field of `width` columns, truncating when too wide. */
+export function centerLine(line: string, width: number): string {
+	const lineWidth = visibleWidth(line);
+	if (lineWidth >= width) return truncateToWidth(line, width);
+	const left = Math.floor((width - lineWidth) / 2);
+	return padding(left) + line + padding(width - left - lineWidth);
+}
+
 // Grapheme segmenter (shared instance)
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 

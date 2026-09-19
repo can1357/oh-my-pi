@@ -12,6 +12,7 @@ import { KeyValueList } from "../../components/key-value-list";
 import { Section } from "../../components/section";
 import { renderTableRow } from "../../components/table";
 import { theme } from "../../theme";
+import { divider } from "../../chrome/overlay-box";
 import { expandKeyHint, PREVIEW_LIMITS, replaceTabs, shortenPath } from "../../render/render-utils";
 import {
 	sanitizeDisplayField,
@@ -366,7 +367,7 @@ export class InspectorPanel implements Component {
 				width,
 				"  ",
 			);
-			runtimeExtra.push(this.#rule());
+			runtimeExtra.push(divider(width));
 		}
 		const surface: string[] = [];
 		if (data.alwaysApply) surface.push(`  ${theme.fg("accent", "always apply")}`);
@@ -635,10 +636,6 @@ export class InspectorPanel implements Component {
 				blankAfter: true,
 			}).render(width),
 		];
-	}
-
-	#rule(): string {
-		return theme.fg("dim", "────────────────────────────────────────");
 	}
 
 	#mcpHealthGlyph(health: MCPConnectionHealth): string {

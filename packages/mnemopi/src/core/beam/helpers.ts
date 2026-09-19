@@ -352,19 +352,29 @@ export function vecAvailable(db: Database): boolean {
 	return tableExists(db, "vec_episodes");
 }
 
+// Per-Database memo for the vec table shape: schema is fixed at open, so
+// probing sqlite_master on every insert/search is pure overhead. WeakMap
+// keeps no Database alive.
+const vecTypeMemo = new WeakMap<Database, "float32" | "int8" | "bit">();
+
 export function effectiveVecType(db: Database): "float32" | "int8" | "bit" {
-	if (!vecAvailable(db)) return "float32";
-	try {
-		const row = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_episodes'").get() as {
-			sql?: string;
-		} | null;
-		const sql = row?.sql ?? "";
-		if (sql.includes("int8")) return "int8";
-		if (sql.includes("bit")) return "bit";
-	} catch {
-		return "float32";
+	const cached = vecTypeMemo.get(db);
+	if (cached !== undefined) return cached;
+	let resolved: "float32" | "int8" | "bit" = "float32";
+	if (vecAvailable(db)) {
+		try {
+			const row = db.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_episodes'").get() as {
+				sql?: string;
+			} | null;
+			const sql = row?.sql ?? "";
+			if (sql.includes("int8")) resolved = "int8";
+			else if (sql.includes("bit")) resolved = "bit";
+		} catch {
+			resolved = "float32";
+		}
 	}
-	return "float32";
+	vecTypeMemo.set(db, resolved);
+	return resolved;
 }
 
 export function vecInsert(db: Database, rowid: number, embedding: readonly number[]): void {

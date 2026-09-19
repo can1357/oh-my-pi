@@ -40,15 +40,15 @@ import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
-import { type AgentProgress, type SingleResult, type StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type {
+	AgentProgress,
+	SingleResult,
+	StructuredSubagentOutput,
+	StructuredSubagentSchemaMode,
+	StructuredSubagentSchemaSource,
+} from "@oh-my-pi/pi-tui/tools/task";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import { parseIsolationBackend } from "./worktree";
-
-/** Validation behavior requested for an effective output schema. */
-export type StructuredSubagentSchemaMode = "permissive" | "strict";
-
-/** Where an effective output schema came from. */
-export type StructuredSubagentSchemaSource = "caller" | "agent" | "session" | "none";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
 export type StructuredSubagentSchemaResult = StructuredSubagentOutput;

@@ -230,16 +230,14 @@ export async function executeSend(
 			to,
 		});
 	}
-	// A direct send may address a parked id that another root's scan (or a
-	// prior list) restored into this process-global registry. Refresh this
-	// caller's persisted roster once before the bus resolves the target, so a
-	// same-named parked ref (and the revival that follows it) targets this
-	// root's transcript — never requiring a prior `list`. Broadcasts address
-	// no id and fan out to live peers only, so they skip the refresh. A
-	// missing caller session hint keeps the existing in-memory behavior: no
-	// root is guessed from the registry or cwd.
+	// Discovery can retarget parked refs to the caller's root, but cannot
+	// replace a live peer. Never gate live control messages on filesystem
+	// discovery: the recipient may be waiting for this message to finish work.
 	if (!isBroadcast && sessionFileHint) {
-		await ensurePersistedRoster(registry, sessionFileHint);
+		const recipient = registry.get(to);
+		if (!recipient || recipient.status === "parked") {
+			await ensurePersistedRoster(registry, sessionFileHint);
+		}
 	}
 
 	const bus = IrcBus.global();

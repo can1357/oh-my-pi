@@ -278,6 +278,47 @@ describe("SessionManager signature persistence", () => {
 		await reloaded.close();
 	}, 15_000);
 
+	it("truncates oversized content in INVALID server-tool blocks instead of preserving them", async () => {
+		// A corrupt/forward-version block that fails isAnthropicServerToolHistoryBlock
+		// must NOT take the atomic path: oversized strings inside it truncate
+		// like any other payload (the predicate mirrors the truncate guard).
+		using tempDir = TempDir.createSync("@pi-session-invalid-server-tool-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const oversizedPayload = "W".repeat(600_000);
+		session.appendMessage({
+			role: "assistant",
+			content: [
+				{
+					type: "anthropicServerTool",
+					block: {
+						type: "server_tool_use",
+						// Missing id: fails history-block validation.
+						name: "web_search",
+						input: { query: "current UTC date", filler: oversizedPayload },
+					},
+				} as never,
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-opus",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		});
+		await session.flush();
+		const raw = await fs.readFile(session.getSessionFile()!, "utf-8");
+		expect(raw).not.toContain(oversizedPayload);
+		expect(raw).toContain("[Session persistence truncated large content]");
+		await session.close();
+	});
+
 	it("preserves oversized Anthropic server-tool results byte-for-byte across reload", async () => {
 		using tempDir = TempDir.createSync("@pi-session-anthropic-server-tool-persistence-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());

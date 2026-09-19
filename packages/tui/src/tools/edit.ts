@@ -2,7 +2,7 @@
  * Edit tool renderer.
  */
 
-import { editInspect } from "@oh-my-pi/pi-natives";
+import { type EditInspection, editInspect } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
 import { sliceWithWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -14,6 +14,7 @@ import type { Theme } from "../theme/theme";
 import type { OutputMeta } from "./output-meta";
 import {
 	cachedRenderedString,
+	cappedHeadLines,
 	createRenderedStringCache,
 	formatDiagnostics,
 	formatExpandHint,
@@ -110,6 +111,14 @@ export interface EditToolDetails {
 // TUI Renderer
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** Memoized native inspection of the streamed payload, tagged onto the args it came from. */
+const kInspectedInput = Symbol("edit.inspectedInput");
+
+type InspectedInput = { mode: EditMode; input: string } & (
+	| { entries: InspectedInputEntry[]; error?: undefined }
+	| { entries?: undefined; error: unknown }
+);
+
 interface EditRenderArgs {
 	path?: unknown;
 	file_path?: unknown;
@@ -130,6 +139,7 @@ interface EditRenderArgs {
 	__partialJson?: string;
 	// Hashline mode fields
 	edits?: EditRenderEntry[];
+	[kInspectedInput]?: InspectedInput;
 }
 
 type EditRenderEntry = {
@@ -175,8 +185,6 @@ export interface EditRenderContext {
 	/** Function to render diff text with syntax highlighting */
 	renderDiff?: (diffText: string, options?: { filePath?: string }) => string;
 }
-
-const EDIT_STREAMING_PREVIEW_LINES = 12;
 
 /**
  * Lazily grown per-file preview cache slots: the file count of a streaming
@@ -420,13 +428,13 @@ function hasEditCallPayload(args: EditRenderArgs, renderContext: EditRenderConte
 }
 
 function renderPlainTextPreview(text: string, uiTheme: Theme, _filePath?: string): string {
-	const previewLines = sanitizeText(text).split("\n");
+	const previewLines = cappedHeadLines(sanitizeText(text).split("\n"), CALL_TEXT_PREVIEW_LINES);
 	let preview = "\n\n";
-	for (const line of previewLines.slice(0, CALL_TEXT_PREVIEW_LINES)) {
+	for (const line of previewLines.lines) {
 		preview += `${uiTheme.fg("toolOutput", truncateToWidth(replaceTabs(line), CALL_TEXT_PREVIEW_WIDTH))}\n`;
 	}
-	if (previewLines.length > CALL_TEXT_PREVIEW_LINES) {
-		preview += uiTheme.fg("dim", `… ${previewLines.length - CALL_TEXT_PREVIEW_LINES} more lines`);
+	if (previewLines.hidden > 0) {
+		preview += uiTheme.fg("dim", `… ${previewLines.hidden} more lines`);
 	}
 	return preview.trimEnd();
 }
@@ -489,7 +497,7 @@ function formatStreamingDiff(
 	// the cheap raw-line wrap walk keeps the per-chunk cost bounded.
 	// innerWidth/budget are in the cache salt so a resize re-slices.
 	const innerWidth = Math.max(1, width - 2);
-	const budget = expanded ? previewWindowRows() : Math.min(EDIT_STREAMING_PREVIEW_LINES, previewWindowRows());
+	const budget = expanded ? previewWindowRows() : Math.min(PREVIEW_LIMITS.EXPANDED_LINES, previewWindowRows());
 	let text = cachedRenderedString(cache, uiTheme, expanded, `${rawPath}:${innerWidth}:${budget}`, diff, () => {
 		// "Cursor" tail window: pin the last rows to the bottom so freshly streamed
 		// changes stay on screen. The whole-file diff is recomputed every chunk and
@@ -660,8 +668,25 @@ function getHashlineInputRenderSummary(
 	return { entries: getHashlineInputSections(input) };
 }
 
-function inspectInputEntries(mode: EditMode, input: string): InspectedInputEntry[] {
-	const inspection = editInspect(mode, JSON.stringify({ input }));
+/**
+ * Per-file entries of a possibly partial payload. The native inspect re-parses
+ * the whole payload, and the call header and compact activity row both ask on
+ * every frame, so the answer (or the parser's rejection) is memoized on `args`
+ * for as long as `input` is unchanged.
+ */
+function inspectInputEntries(args: EditRenderArgs, mode: EditMode, input: string): InspectedInputEntry[] {
+	const cached = args[kInspectedInput];
+	if (cached && cached.mode === mode && cached.input === input) {
+		if (cached.entries) return cached.entries;
+		throw cached.error;
+	}
+	let inspection: EditInspection;
+	try {
+		inspection = editInspect(mode, JSON.stringify({ input }));
+	} catch (error) {
+		args[kInspectedInput] = { mode, input, error };
+		throw error;
+	}
 	const entries = new Map<string, InspectedInputEntry>();
 	for (const path of inspection.paths) entries.set(path, { path });
 	for (const intent of inspection.fileOps) {
@@ -674,7 +699,9 @@ function inspectInputEntries(mode: EditMode, input: string): InspectedInputEntry
 		}
 		entries.set(intent.path, entry);
 	}
-	return [...entries.values()];
+	const result = [...entries.values()];
+	args[kInspectedInput] = { mode, input, entries: result };
+	return result;
 }
 
 /** Per-file descriptors for a possibly partial sloppy payload. */
@@ -685,7 +712,7 @@ function getSloppyInputRenderSummary(
 	const input = args.input ?? args._input;
 	if (editMode !== "sloppy" || typeof input !== "string") return undefined;
 	try {
-		const entries = inspectInputEntries("sloppy", input);
+		const entries = inspectInputEntries(args, "sloppy", input);
 		return entries.length > 0 ? { entries } : undefined;
 	} catch {
 		return undefined;
@@ -699,7 +726,7 @@ function getApplyPatchRenderSummary(
 ): ApplyPatchRenderSummary | undefined {
 	if ((editMode !== undefined && editMode !== "apply_patch") || typeof args.input !== "string") return undefined;
 	try {
-		return { entries: inspectInputEntries("apply_patch", args.input) };
+		return { entries: inspectInputEntries(args, "apply_patch", args.input) };
 	} catch (err) {
 		const error = err instanceof Error ? err.message : String(err);
 		return isPartial && error === MISSING_APPLY_PATCH_END_ERROR ? { entries: [] } : { entries: [], error };
@@ -718,7 +745,58 @@ interface EditCallFacts {
 	hasHashlineLineEdits: boolean;
 }
 
+/**
+ * Length gate for the streamed-preview facts path: payloads only grow while
+ * streaming, so facts recompute only after K new bytes (the header/path/op
+ * fields tolerate a small lag) or when the payload shrinks (rewind). The
+ * final frame (`isPartial === false`) always recomputes. This turns the
+ * per-frame O(n) stringify+parse+scan into O(n^2/K) total per call.
+ */
+const EDIT_FACTS_MIN_GROWTH = 512;
+let lastFactsCache:
+	| {
+			editArgs: EditRenderArgs;
+			isPartial: boolean;
+			editMode: EditMode | undefined;
+			length: number;
+			facts: EditCallFacts;
+	  }
+	| undefined;
+
+function editFactsInputLength(editArgs: EditRenderArgs): number {
+	const input = editArgs.input ?? editArgs._input;
+	if (typeof input === "string") return input.length;
+	// Structured `edits[]` calls carry no `input` string; their facts derive
+	// from the array, so length-gate on its size instead of a constant 0
+	// (which would reuse forever after the first compute).
+	return Array.isArray(editArgs.edits) ? editArgs.edits.length : 0;
+}
+
 function resolveEditCallFacts(
+	editArgs: EditRenderArgs,
+	isPartial: boolean,
+	editMode: EditMode | undefined,
+): EditCallFacts {
+	const cached = lastFactsCache;
+	if (
+		cached !== undefined &&
+		cached.editArgs === editArgs &&
+		cached.isPartial === isPartial &&
+		cached.editMode === editMode
+	) {
+		const length = editFactsInputLength(editArgs);
+		// Same args object, still growing gradually: reuse. A rewind
+		// (shorter), a jump past the gate, or the final frame recomputes.
+		if (isPartial && length >= cached.length && length - cached.length < EDIT_FACTS_MIN_GROWTH) {
+			return cached.facts;
+		}
+	}
+	const facts = resolveEditCallFactsUncached(editArgs, isPartial, editMode);
+	lastFactsCache = { editArgs, isPartial, editMode, length: editFactsInputLength(editArgs), facts };
+	return facts;
+}
+
+function resolveEditCallFactsUncached(
 	editArgs: EditRenderArgs,
 	isPartial: boolean,
 	editMode: EditMode | undefined,

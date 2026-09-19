@@ -48,11 +48,14 @@ export interface IfBenchSummary {
 }
 
 /** Optional live-progress callbacks accepted by a benchmark runner. */
-export interface IfBenchObserver {
+export interface IfBenchObserver<
+	Turn extends IfBenchTurnRecord = IfBenchTurnRecord,
+	Report extends IfBenchModelReport = IfBenchModelReport,
+> {
 	modelStarted?(label: string): void;
 	turnStarted?(label: string, turn: number, actions: number): void;
-	turnFinished?(label: string, record: IfBenchTurnRecord): void;
-	modelFinished?(report: IfBenchModelReport): void;
+	turnFinished?(label: string, record: Turn): void;
+	modelFinished?(report: Report): void;
 }
 
 const LADDER_WIDTH = 28;

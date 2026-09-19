@@ -16,6 +16,7 @@ import {
 	type OutputMeta,
 	stripOutputNotice,
 	stripRawOutputArtifactNotice,
+	stripTrailingNotice,
 } from "./output-meta";
 import type { RenderResultOptions, ToolRenderer } from "./renderer";
 
@@ -149,39 +150,6 @@ export function formatWallTimeNotice(wallTimeMs: number): string {
 /** Formats the model-facing command exit status notice. */
 export function formatExitCodeNotice(exitCode: number): string {
 	return `Command exited with code ${exitCode}`;
-}
-
-/**
- * Strip the trailing occurrence of `notice` (plus a single surrounding newline
- * on each side) so the TUI can echo the value via a styled footer label
- * instead of repeating it verbatim in the output pane. The notice is
- * reconstructed from the same value the result was tagged with, so a literal
- * sub-string match never strips a coincidental in-output token — only the
- * exact line we appended in #buildCompletedResult.
- */
-function stripTrailingNotice(text: string, notice: string): string {
-	const idx = text.lastIndexOf(notice);
-	if (idx === -1) return text;
-	let start = idx;
-	let end = idx + notice.length;
-	if (text[start - 1] === "\n") start -= 1;
-	if (text[end] === "\n") end += 1;
-	return (text.slice(0, start) + text.slice(end)).trimEnd();
-}
-
-function stripWallTimeNotice(text: string, wallTimeMs: number | undefined): string {
-	if (wallTimeMs === undefined) return text;
-	return stripTrailingNotice(text, formatWallTimeNotice(wallTimeMs));
-}
-
-function stripExitCodeNotice(text: string, exitCode: number | undefined): string {
-	if (exitCode === undefined) return text;
-	return stripTrailingNotice(text, formatExitCodeNotice(exitCode));
-}
-
-function stripBackgroundNotice(text: string, async: BashToolDetails["async"] | undefined): string {
-	if (async?.state !== "running") return text;
-	return stripTrailingNotice(text, formatBackgroundNotice(async.jobId));
 }
 
 /** Shell arguments used to build a command preview. */
@@ -367,10 +335,19 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					) {
 						return cachedSnapshot;
 					}
-					const withoutBackground = stripBackgroundNotice(rawOutput, details?.async);
+					const withoutBackground =
+						details?.async?.state === "running"
+							? stripTrailingNotice(rawOutput, formatBackgroundNotice(details.async.jobId))
+							: rawOutput;
 					const strippedOutput = stripOutputNotice(withoutBackground, details?.meta);
-					const withoutExit = stripExitCodeNotice(strippedOutput, details?.exitCode);
-					const withoutWall = stripWallTimeNotice(withoutExit, details?.wallTimeMs);
+					const withoutExit =
+						details?.exitCode === undefined
+							? strippedOutput
+							: stripTrailingNotice(strippedOutput, formatExitCodeNotice(details.exitCode));
+					const withoutWall =
+						details?.wallTimeMs === undefined
+							? withoutExit
+							: stripTrailingNotice(withoutExit, formatWallTimeNotice(details.wallTimeMs));
 					const rawOutputArtifact = stripRawOutputArtifactNotice(withoutWall);
 					const output = rawOutputArtifact.text;
 					const displayOutput = output.trimEnd();

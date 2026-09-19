@@ -741,9 +741,92 @@ async function buildTrackTree(
  * Throws {@link TracePathError} for paths outside the sessions root; ENOENT
  * passes through for the caller's 404 mapping.
  */
+// Single-entry memo: the dashboard polls one open trace every 15s. Keyed on
+// the root file's mtime PLUS a fingerprint of the child-transcript SET under
+// the root's artifacts tree (one cheap readdir+stat walk, no parse). A
+// high-water mark alone is blind to deletions and to older-mtime
+// replacements, so the fingerprint encodes every child's (name, mtimeMs)
+// pair: any append, delete, rename, or content swap changes the key and the
+// memo misses. Membership diffs are bounded (depth + file count caps) so a
+// pathological artifacts tree cannot blow the key.
+interface TraceMemoEntry {
+	mtimeMs: number;
+	childFingerprint: string;
+	trace: SessionTrace;
+}
+
+let traceMemo: { file: string; entry: TraceMemoEntry } | undefined;
+
+/**
+ * Fingerprint of the child-transcript set: per-directory file COUNT plus
+ * sorted `name@mtimeMs` pairs, mirroring buildTrackTree's discovery (stats
+ * only, no parse). The count is load-bearing: without it, children past a
+ * truncation cap are invisible and appends to them never invalidate the key.
+ * Best-effort: a raced gc deletion is recorded as `name@gone` (which itself
+ * changes the fingerprint and misses the memo — the safe direction).
+ */
+async function childTranscriptsFingerprint(rootFile: string, depth = 0): Promise<string> {
+	if (depth > MAX_TRACK_DEPTH) return "";
+	let names: string[] = [];
+	try {
+		names = await fs.readdir(transcriptStem(rootFile));
+	} catch {
+		return "";
+	}
+	names.sort();
+	const transcriptNames = names.filter(name => name.endsWith(".jsonl") || name.endsWith(".jsonl.gz"));
+	const parts: string[] = [`n=${transcriptNames.length}`];
+	for (const name of transcriptNames) {
+		const childFile = path.join(transcriptStem(rootFile), name);
+		try {
+			const stat = await fs.stat(childFile);
+			parts.push(`${name}@${stat.mtimeMs}`);
+			// Recurse like the builder (nested subagents), without parsing.
+			const nested = await childTranscriptsFingerprint(childFile, depth + 1);
+			if (nested) parts.push(`${name}/{${nested}}`);
+		} catch {
+			parts.push(`${name}@gone`);
+		}
+	}
+	return parts.join(",");
+}
+
+/**
+ * Freshness fingerprint for the trace ETag pre-check: root mtime plus the
+ * child-transcript set fingerprint (readdir+stat walk, no parse). Returns
+ * undefined when the path is rejected or missing (the caller falls through
+ * to the full build, which maps those to 400/404).
+ */
+export async function traceFingerprintForEtag(fileParam: string): Promise<string | undefined> {
+	try {
+		const resolved = resolveSessionPath(fileParam);
+		const rootMs = (await fs.stat(resolved)).mtimeMs;
+		const childFp = await childTranscriptsFingerprint(resolved);
+		return `${rootMs}:${childFp}`;
+	} catch {
+		return undefined;
+	}
+}
+
+export function traceMemoForTests(): { file: string; mtimeMs: number } | undefined {
+	if (!traceMemo) return undefined;
+	return { file: traceMemo.file, mtimeMs: traceMemo.entry.mtimeMs };
+}
+
 export async function buildSessionTrace(fileParam: string): Promise<SessionTrace> {
 	const resolved = resolveSessionPath(fileParam);
 	const rootStat = await fs.stat(resolved);
+	const memo = traceMemo?.file === resolved ? traceMemo.entry : undefined;
+	// Pre-build child fingerprint on EVERY path (hit check and rebuild
+	// alike): the post-build race guard compares against this, so a child
+	// append landing mid-parse is detected even on first builds and
+	// memo-less rebuilds, where no prior fingerprint exists to compare.
+	const preChildFingerprint = await childTranscriptsFingerprint(resolved);
+	if (memo && memo.mtimeMs === rootStat.mtimeMs) {
+		// Equality, not <=: a LOWER mark (delete/older-mtime replace) is
+		// also stale — only an identical child set may reuse the trace.
+		if (preChildFingerprint === memo.childFingerprint) return memo.trace;
+	}
 
 	const tracks: TraceTrack[] = [];
 	const scans: TrackScan[] = [];
@@ -823,16 +906,39 @@ export async function buildSessionTrace(fileParam: string): Promise<SessionTrace
 		toolStats: [...toolStats.values()].sort((a, b) => b.totalMs - a.totalMs),
 	};
 
-	return {
+	// Re-collect the fingerprint AFTER the parse: a child append landing
+	// between the pre-build check and now would otherwise be baked into
+	// neither the trace nor the key.
+	const childFingerprint = await childTranscriptsFingerprint(resolved);
+	// Root rewritten mid-build: same no-cache rule as the child race below.
+	const rootChanged = (await fs.stat(resolved).catch(() => null))?.mtimeMs !== rootStat.mtimeMs;
+	const raced = childFingerprint !== preChildFingerprint;
+	// Raced builds keep the PRE-build fingerprint as their ETag: the parsed
+	// bytes predate the racy write, so claiming the post-write state would
+	// 304 stale forever when that write was the child's last. The pre-build
+	// key guarantees the next conditional poll misses (filesystem moved on)
+	// and rebuilds — at most one stale response per race, never an
+	// indefinitely cached one. Unraced builds use the post-build key, which
+	// equals the pre-build key by construction.
+	const etagFingerprint = raced || rootChanged ? preChildFingerprint : childFingerprint;
+	const trace: SessionTrace = {
 		file: resolved,
 		title: rootScan.title,
 		cwd: rootScan.cwd,
 		startedAt: start,
 		endedAt: end,
 		mtimeMs: rootStat.mtimeMs,
+		etag: `${rootStat.mtimeMs}:${etagFingerprint}`,
 		tracks,
 		summary,
 	};
+	if (!raced && !rootChanged) {
+		traceMemo = {
+			file: resolved,
+			entry: { mtimeMs: rootStat.mtimeMs, childFingerprint, trace },
+		};
+	}
+	return trace;
 }
 
 /** Fetch one full journal entry by id from a transcript, for the span drawer. */
@@ -945,7 +1051,21 @@ function basenameTimestamp(base: string): number | undefined {
  * Traces list include sessions the sync pass hasn't indexed yet (most
  * importantly the currently running one).
  */
+// Short-TTL memo for the disk sweep behind /api/sessions (30s poll): the
+// session list changes only on create/edit, so readdir+stat of every file per
+// poll is pure syscall churn. TTL is deliberately short so a just-created
+// session appears within seconds.
+let diskRootsMemo:
+	| { atMs: number; limit: number; roots: Array<{ file: string; mtimeMs: number; startedAt: number }> }
+	| undefined;
+const DISK_ROOTS_TTL_MS = 5_000;
+
 async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtimeMs: number; startedAt: number }>> {
+	const now = Date.now();
+	const memo = diskRootsMemo;
+	if (memo && memo.limit >= limit && now - memo.atMs < DISK_ROOTS_TTL_MS) {
+		return memo.roots.slice(0, limit);
+	}
 	const sessionsDir = getSessionsDir();
 	let projects: string[] = [];
 	try {
@@ -978,6 +1098,7 @@ async function scanDiskRoots(limit: number): Promise<Array<{ file: string; mtime
 		}),
 	);
 	roots.sort((a, b) => b.mtimeMs - a.mtimeMs);
+	if (roots.length <= 1000) diskRootsMemo = { atMs: Date.now(), limit, roots };
 	return roots.slice(0, limit);
 }
 

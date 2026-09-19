@@ -1,4 +1,5 @@
-import { padding, truncateToWidth, visibleWidth } from "../../utils";
+import { padding, visibleWidth } from "../../utils";
+import { padToWidth } from "../../render/utils";
 import { type SgrMouseEvent } from "../../mouse";
 import { type SelectItem, SelectList } from "../../components/select-list";
 import { Text } from "../../components/text";
@@ -29,11 +30,6 @@ const CURATED_ITEMS: readonly SelectItem[] = [
 	{ value: "browse", label: "Browse all…", description: "Show every built-in and custom theme" },
 ];
 
-function fitLine(line: string, width: number): string {
-	const truncated = truncateToWidth(line, width);
-	return truncated + padding(Math.max(0, width - visibleWidth(truncated)));
-}
-
 function fillStyledLine(content: string, width: number): string {
 	return content + padding(Math.max(0, width - visibleWidth(content)));
 }
@@ -53,7 +49,7 @@ function renderMockStatusLine(width: number): string {
 	const leftWidth = visibleWidth(left);
 	const rightWidth = visibleWidth(right);
 	const gap = padding(Math.max(1, innerWidth - leftWidth - rightWidth - 2));
-	return theme.bg("statusLineBg", fitLine(` ${left}${gap}${right} `, width));
+	return theme.bg("statusLineBg", width > 0 ? padToWidth(` ${left}${gap}${right} `, width) : "");
 }
 
 function renderMockEditor(width: number): string[] {
@@ -66,7 +62,7 @@ function renderMockEditor(width: number): string[] {
 	const hint = theme.fg("dim", "enter send · shift+enter newline · / commands");
 	return [
 		top,
-		`${theme.fg("borderAccent", box.vertical)}${fitLine(prompt, innerWidth)}${theme.fg("borderAccent", box.vertical)}`,
+		`${theme.fg("borderAccent", box.vertical)}${innerWidth > 0 ? padToWidth(prompt, innerWidth) : ""}${theme.fg("borderAccent", box.vertical)}`,
 		`${theme.fg("borderMuted", box.vertical)}${fillStyledLine(hint, innerWidth)}${theme.fg("borderMuted", box.vertical)}`,
 		bottom,
 	];
