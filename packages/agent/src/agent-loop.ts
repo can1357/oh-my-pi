@@ -604,13 +604,13 @@ export function agentLoop(
 			...context,
 			messages: [...context.messages, ...prompts],
 		};
-		for (const prompt of prompts) {
-			(prompt as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
-		}
-
-		stream.push({ type: "agent_start" });
 
 		try {
+			for (const prompt of prompts) {
+				(prompt as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+			}
+
+			stream.push({ type: "agent_start" });
 			await runLoop(currentContext, newMessages, config, signal, stream, streamFn, prompts);
 		} catch (err) {
 			stream.fail(err);
@@ -1112,7 +1112,13 @@ function resolveAsides(entries: AsideMessage[] | undefined): AgentMessage[] {
 
 function discardAsides(messages: readonly AgentMessage[], error: Error): void {
 	for (const message of messages) {
-		(message as CommittableAsideMessage)[ASIDE_MESSAGE_DISCARD]?.(error);
+		try {
+			(message as CommittableAsideMessage)[ASIDE_MESSAGE_DISCARD]?.(error);
+		} catch (err) {
+			logger.warn("Aside discard hook failed", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
 	}
 }
 

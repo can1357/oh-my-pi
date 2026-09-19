@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolated aside-commit and discard host callbacks so a throwing hook cannot leave the agent stream unsettled or hide the original loop error ([#12545](https://github.com/can1357/oh-my-pi/issues/12545)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed
