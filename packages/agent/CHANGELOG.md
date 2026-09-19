@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed discarded thinking-loop reasoning being restored when a provider stream fails after partial thinking ([#12525](https://github.com/can1357/oh-my-pi/issues/12525)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed punctuation-only thinking loops (for example repeated `?!`) going undetected, and mapped OpenAI-compatible provider repetition stops to a thinking-loop error that discards the runaway reasoning ([#12525](https://github.com/can1357/oh-my-pi/issues/12525)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

@@ -257,6 +257,22 @@ describe("ThinkingLoopDetector", () => {
 		expect(detail).toContain("back-to-back");
 	});
 
+	test("trips on a punctuation-only exact cycle within a bounded character count", () => {
+		// Semantic heuristics stay off so this is only the universal exact-cycle
+		// detector. Pure `?!` has no letter/pictograph; without a punctuation
+		// exception the unit is ineligible no matter how long the run is.
+		const detector = new ThinkingLoopDetector(false);
+		let reason: string | null = null;
+		let characters = 0;
+		for (let i = 0; i < 10_000 && !reason; i++) {
+			characters += 2;
+			reason = detector.push("?!");
+		}
+		reason ??= detector.flush();
+		expect(reason).toContain("back-to-back");
+		expect(characters).toBeLessThanOrEqual(512);
+	});
+
 	test("does not trip on genuinely distinct reasoning paragraphs", () => {
 		const detector = new ThinkingLoopDetector();
 		let detail: string | null = null;
@@ -298,8 +314,9 @@ describe("ThinkingLoopDetector", () => {
 	});
 
 	test("does not trip on legitimate repetitive numeric output", () => {
-		// A zero-page hexdump is highly repetitive but legitimate: a unit with no
-		// letter or pictograph must never count as a loop.
+		// A zero-page hexdump is highly repetitive but legitimate: digit-only
+		// units must stay excluded so structured dumps are not reclassified as
+		// punctuation thinking loops.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("00 ".repeat(200))).toBeNull();
 	});
