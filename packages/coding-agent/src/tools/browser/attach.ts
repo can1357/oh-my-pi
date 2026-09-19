@@ -5,7 +5,8 @@ import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { getBrowserProfilesDir } from "@oh-my-pi/pi-utils";
 import type { Socket } from "bun";
 import type { Browser, Page } from "puppeteer-core";
-import { ToolError, throwIfAborted } from "../tool-errors";
+import { throwIfAborted } from "../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 const ATTACH_TARGET_SKIP_PATTERN =
 	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;
@@ -33,10 +34,22 @@ export async function findFreeCdpPort(): Promise<number> {
 	return promise;
 }
 
+/** Status line plus body of a {@link probeCdpResponse} answer. */
+export interface CdpProbeResponse {
+	status: number;
+	body: string;
+}
+
+interface RawGetOptions {
+	timeoutMs: number;
+	signal?: AbortSignal;
+	/** Resolve after the body arrives (Content-Length or peer close) instead of on the status line. */
+	readBody: boolean;
+}
+
 /**
- * Loopback HTTP/1.1 GET that never routes through a proxy, resolving to the
- * response status code (or null when the endpoint is unreachable, aborted,
- * malformed, or slow past `timeoutMs`).
+ * Loopback HTTP/1.1 GET that never routes through a proxy. Resolves null when
+ * the endpoint is unreachable, aborted, malformed, or slow past `timeoutMs`.
  *
  * Chrome's DevTools endpoint listens on loopback and speaks plain HTTP/1.1.
  * Both `fetch` and Bun's `node:http` honor `HTTP_PROXY`/`HTTPS_PROXY` and
@@ -45,10 +58,7 @@ export async function findFreeCdpPort(): Promise<number> {
  * dead and the CDP readiness checks tear it down (issue #8567). Talking to the
  * socket over raw TCP sidesteps proxy env entirely.
  */
-export async function probeCdpStatus(
-	url: string,
-	opts: { timeoutMs: number; signal?: AbortSignal },
-): Promise<number | null> {
+async function rawHttpGet(url: string, opts: RawGetOptions): Promise<CdpProbeResponse | null> {
 	let target: URL;
 	try {
 		target = new URL(url);
@@ -58,10 +68,10 @@ export async function probeCdpStatus(
 	if (opts.signal?.aborted) return null;
 	const port = target.port ? Number(target.port) : 80;
 	const requestPath = `${target.pathname}${target.search}` || "/";
-	const { promise, resolve } = Promise.withResolvers<number | null>();
+	const { promise, resolve } = Promise.withResolvers<CdpProbeResponse | null>();
 	let socket: Socket<undefined> | undefined;
 	let settled = false;
-	const finish = (status: number | null) => {
+	const finish = (response: CdpProbeResponse | null) => {
 		if (settled) return;
 		settled = true;
 		clearTimeout(timer);
@@ -71,12 +81,17 @@ export async function probeCdpStatus(
 		} catch {
 			// socket already torn down
 		}
-		resolve(status);
+		resolve(response);
 	};
 	const onAbort = () => finish(null);
 	const timer = setTimeout(() => finish(null), opts.timeoutMs);
 	opts.signal?.addEventListener("abort", onAbort, { once: true });
 	let buffered = "";
+	let status: number | null = null;
+	// Offset of the header/body separator once the header block is complete.
+	let headerEnd = -1;
+	let contentLength: number | null = null;
+	const bodySoFar = () => buffered.slice(headerEnd + 4);
 	try {
 		socket = await Bun.connect({
 			hostname: target.hostname,
@@ -87,14 +102,31 @@ export async function probeCdpStatus(
 				},
 				data(_s, chunk) {
 					buffered += chunk.toString("latin1");
-					const match = /^HTTP\/\d(?:\.\d)? (\d{3})/.exec(buffered);
-					if (match) finish(Number(match[1]));
+					if (status === null) {
+						const match = /^HTTP\/\d(?:\.\d)? (\d{3})/.exec(buffered);
+						if (!match) return;
+						status = Number(match[1]);
+						if (!opts.readBody) {
+							finish({ status, body: "" });
+							return;
+						}
+					}
+					if (headerEnd === -1) {
+						headerEnd = buffered.indexOf("\r\n\r\n");
+						if (headerEnd === -1) return;
+						const lengthHeader = /\r\ncontent-length:\s*(\d+)/i.exec(buffered.slice(0, headerEnd));
+						contentLength = lengthHeader ? Number(lengthHeader[1]) : null;
+					}
+					if (contentLength !== null && bodySoFar().length >= contentLength) {
+						finish({ status, body: bodySoFar().slice(0, contentLength) });
+					}
 				},
 				error() {
 					finish(null);
 				},
 				close() {
-					finish(null);
+					// Without Content-Length the peer's close delimits the body.
+					finish(status !== null && headerEnd !== -1 ? { status, body: bodySoFar() } : null);
 				},
 			},
 		});
@@ -102,6 +134,30 @@ export async function probeCdpStatus(
 		finish(null);
 	}
 	return promise;
+}
+
+/**
+ * Proxy-proof loopback probe resolving to the response status code, or null
+ * when the endpoint is unreachable, aborted, malformed, or slow past `timeoutMs`.
+ */
+export async function probeCdpStatus(
+	url: string,
+	opts: { timeoutMs: number; signal?: AbortSignal },
+): Promise<number | null> {
+	const response = await rawHttpGet(url, { ...opts, readBody: false });
+	return response?.status ?? null;
+}
+
+/**
+ * Proxy-proof loopback probe that also reads the response body (for endpoints
+ * whose non-2xx answer carries state, like the relay's 503). Null on the same
+ * conditions as {@link probeCdpStatus}.
+ */
+export function probeCdpResponse(
+	url: string,
+	opts: { timeoutMs: number; signal?: AbortSignal },
+): Promise<CdpProbeResponse | null> {
+	return rawHttpGet(url, { ...opts, readBody: true });
 }
 
 /** Poll `${cdpUrl}/json/version` until it responds with 200, with abort + timeout support. */

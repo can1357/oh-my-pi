@@ -13,7 +13,7 @@ import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cl
 import { getAntigravityUserAgent, getGeminiCliHeaders } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
 import { fetchWithRetry, USER_AGENT } from "@oh-my-pi/pi-utils";
 
-import type { SearchCitation, SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchCitation, SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery, type StructuredQuery } from "../query";
 import type { SearchParams } from "./base";

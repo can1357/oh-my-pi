@@ -5,12 +5,18 @@ import type { MouseRoutable, SgrMouseEvent } from "../mouse";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { ScrollView } from "./scroll-view";
+import { FormField, type FormFieldOptions, type FormFieldTheme } from "./form";
+import { MenuSelection } from "./menu-selection";
 
 function sanitizeSingleLine(text: string): string {
 	return replaceTabs(text)
 		.replace(/[\r\n]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+function hasMouseRouter(component: Component): component is Component & MouseRoutable {
+	return "routeMouse" in component && typeof component.routeMouse === "function";
 }
 
 export interface SettingItem {
@@ -100,8 +106,9 @@ export function getSettingItemFilterText(item: SettingItem): string {
 }
 
 export class SettingsList implements Component {
-	#items: SettingItem[];
-	#filteredItems: SettingItem[];
+	#items: readonly SettingItem[] = [];
+	#filteredItems: readonly SettingItem[] = [];
+	#selection: MenuSelection<SettingItem>;
 	#theme: SettingsListTheme;
 	#selectedIndex = 0;
 	#maxVisible: number;
@@ -132,14 +139,23 @@ export class SettingsList implements Component {
 		onCancel: () => void,
 		options: SettingsListOptions = {},
 	) {
-		this.#items = items;
-		this.#filteredItems = items;
+		this.#selection = new MenuSelection(items, {
+			getKey: item => item.id,
+			getSearchText: getSettingItemFilterText,
+			isDisabled: item => item.heading === true,
+			filter: (candidates, query) =>
+				fuzzyFilter(
+					candidates.filter(item => !item.heading),
+					query,
+					getSettingItemFilterText,
+				),
+		});
+		this.#syncSelectionState();
 		this.#maxVisible = maxVisible;
 		this.#theme = theme;
 		this.#onChange = onChange;
 		this.#onCancel = onCancel;
 		this.#options = options;
-		this.#selectedIndex = this.#firstSelectableIndex();
 		this.#lastNotifiedSelectionId = this.getSelectedItem()?.id;
 	}
 	/** Return item, selection, filter, and submenu state for debug inspection. */
@@ -170,10 +186,11 @@ export class SettingsList implements Component {
 
 	/** Move selection to the item with `id`. Returns false when it is not visible. */
 	selectItem(id: string): boolean {
-		const index = this.#filteredItems.findIndex(item => !item.heading && item.id === id);
-		if (index === -1) return false;
+		const item = this.#filteredItems.find(candidate => !candidate.heading && candidate.id === id);
+		if (!item) return false;
+		this.#selection.setSelectedKey(id);
 		this.#sectionFocus = false;
-		this.#selectedIndex = index;
+		this.#syncSelectionState();
 		this.#notifySelection();
 		return true;
 	}
@@ -272,7 +289,9 @@ export class SettingsList implements Component {
 	 */
 	routeSubmenuMouse(event: SgrMouseEvent, line: number, col: number): boolean {
 		if (!this.#submenuComponent) return false;
-		(this.#submenuComponent as Component & Partial<MouseRoutable>).routeMouse?.(event, line, col);
+		if (hasMouseRouter(this.#submenuComponent)) {
+			this.#submenuComponent.routeMouse(event, line, col);
+		}
 		return true;
 	}
 
@@ -296,8 +315,8 @@ export class SettingsList implements Component {
 
 		item.currentValue = newValue;
 		if (this.#filterQuery.trim()) {
-			this.#applyFilter();
-			this.#clampSelectedIndex();
+			this.#selection.setItems(this.#items, this.#selection.selectedKey);
+			this.#syncSelectionState();
 		}
 	}
 
@@ -309,65 +328,41 @@ export class SettingsList implements Component {
 	 * done callback, and `#closeSubmenu` re-resolves the restored item on exit.
 	 */
 	setItems(items: SettingItem[]): void {
-		const selectedId = this.#filteredItems[this.#selectedIndex]?.id;
-		this.#items = items;
-		this.#applyFilter();
-		if (this.#sectionFocus && !this.hasSectionFocusTargets()) this.#sectionFocus = false;
-
-		const nextIndex = selectedId ? this.#filteredItems.findIndex(item => item.id === selectedId) : -1;
-		if (nextIndex >= 0) {
-			this.#selectedIndex = nextIndex;
-		} else {
-			this.#clampSelectedIndex();
+		const selectedId = this.#selection.selectedKey;
+		const previousIndex = this.#selection.selectedIndex;
+		this.#selection.setItems(items, selectedId);
+		if (selectedId !== undefined && !this.#selection.visibleItems.some(item => item.id === selectedId)) {
+			this.#selection.setSelectedIndex(Math.min(previousIndex, this.#selection.visibleItems.length - 1));
 		}
+		this.#syncSelectionState();
+		if (this.#sectionFocus && !this.hasSectionFocusTargets()) this.#sectionFocus = false;
 		this.#notifySelection();
 	}
 
 	#setFilter(filter: string): void {
-		this.#filterQuery = filter;
 		if (filter.trim()) this.#sectionFocus = false;
-		this.#applyFilter();
-		this.#selectedIndex = this.#firstSelectableIndex();
+		this.#selection.setQuery(filter, false);
+		this.#syncSelectionState();
 		this.#notifySelection();
-	}
-
-	#applyFilter(): void {
-		this.#filteredItems = this.#filterQuery.trim()
-			? fuzzyFilter(
-					this.#items.filter(item => !item.heading),
-					this.#filterQuery,
-					getSettingItemFilterText,
-				)
-			: this.#items;
-	}
-
-	#firstSelectableIndex(): number {
-		const index = this.#filteredItems.findIndex(item => !item.heading);
-		return index >= 0 ? index : 0;
 	}
 
 	/** Move selection by one selectable item, wrapping or clamping, and skipping headings. */
 	#moveSelection(delta: -1 | 1, wrap = true): void {
-		const len = this.#filteredItems.length;
-		if (len === 0) return;
-		let index = this.#selectedIndex;
-		for (let step = 0; step < len * 2; step++) {
-			const next = index + delta;
-			if (next < 0 || next >= len) {
-				if (wrap) {
-					index = (next + len) % len;
-				} else {
-					return;
-				}
-			} else {
-				index = next;
-			}
-			if (!this.#filteredItems[index]?.heading) {
-				this.#selectedIndex = index;
-				this.#notifySelection();
-				return;
-			}
-		}
+		if (!this.#selection.move(delta, wrap)) return;
+		this.#syncSelectionState();
+		this.#notifySelection();
+	}
+
+	#syncSelectionState(): void {
+		this.#items = this.#selection.items;
+		this.#filteredItems = this.#selection.visibleItems;
+		this.#filterQuery = this.#selection.query;
+		this.#selectedIndex = Math.max(0, this.#selection.selectedIndex);
+	}
+
+	#setSelectedIndex(index: number): void {
+		this.#selection.setSelectedIndex(index);
+		this.#syncSelectionState();
 	}
 
 	/** Sections derived from heading rows in the filtered list. */
@@ -404,35 +399,17 @@ export class SettingsList implements Component {
 		if (sections.length < 2) {
 			const len = this.#filteredItems.length;
 			if (len === 0) return;
-			this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex + delta * this.#maxVisible, len - 1));
-			this.#clampSelectedIndex();
+			const index = Math.max(0, Math.min(this.#selectedIndex + delta * this.#maxVisible, len - 1));
+			this.#setSelectedIndex(index);
 		} else {
 			const next = (this.#activeSectionIndex(sections) + delta + sections.length) % sections.length;
-			this.#selectedIndex = sections[next].firstItemIndex;
+			this.#setSelectedIndex(sections[next].firstItemIndex);
 		}
 		this.#notifySelection();
 	}
 
 	#clampSelectedIndex(): void {
-		if (this.#filteredItems.length === 0) {
-			this.#selectedIndex = 0;
-			return;
-		}
-		this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex, this.#filteredItems.length - 1));
-		if (!this.#filteredItems[this.#selectedIndex]?.heading) return;
-		// Landed on a heading: prefer the next selectable item, else the previous one.
-		for (let i = this.#selectedIndex + 1; i < this.#filteredItems.length; i++) {
-			if (!this.#filteredItems[i].heading) {
-				this.#selectedIndex = i;
-				return;
-			}
-		}
-		for (let i = this.#selectedIndex - 1; i >= 0; i--) {
-			if (!this.#filteredItems[i].heading) {
-				this.#selectedIndex = i;
-				return;
-			}
-		}
+		this.#setSelectedIndex(this.#selectedIndex);
 	}
 
 	#renderSearchStatus(width: number): string {
@@ -834,11 +811,57 @@ export class SettingsList implements Component {
 			const index = this.#filteredItems.findIndex(item => !item.heading && item.id === this.#submenuItemId);
 			this.#submenuItemId = null;
 			if (index >= 0) {
-				this.#selectedIndex = index;
+				this.#setSelectedIndex(index);
 			} else {
 				this.#clampSelectedIndex();
 			}
 			this.#notifySelection();
 		}
+	}
+}
+
+/** Construction options for a SettingsList composed as a form field. */
+export interface SettingsFormFieldOptions extends Omit<FormFieldOptions, "theme"> {
+	items: SettingItem[];
+	maxVisible: number;
+	settingsTheme: SettingsListTheme;
+	fieldTheme: FormFieldTheme;
+	onChange(id: string, newValue: string): void;
+	onCancel(): void;
+	listOptions?: SettingsListOptions;
+}
+
+/**
+ * SettingsList adapter for detail forms. It retains the canonical list
+ * implementation while sharing FormField label, description, hint, focus, and
+ * input dispatch with text and selection fields.
+ */
+export class SettingsFormField extends FormField {
+	readonly settingsList: SettingsList;
+
+	constructor(options: SettingsFormFieldOptions) {
+		const settingsList = new SettingsList(
+			options.items,
+			options.maxVisible,
+			options.settingsTheme,
+			options.onChange,
+			options.onCancel,
+			options.listOptions,
+		);
+		super(settingsList, {
+			theme: options.fieldTheme,
+			label: options.label,
+			description: options.description,
+			details: options.details,
+			previewLabel: options.previewLabel,
+			preview: options.preview,
+			hint: options.hint,
+			summary: options.summary,
+			footer: options.footer,
+			leadingSpace: options.leadingSpace,
+			spaceBeforeControl: options.spaceBeforeControl,
+			spaceAfterControl: options.spaceAfterControl,
+		});
+		this.settingsList = settingsList;
 	}
 }

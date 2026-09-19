@@ -14,13 +14,9 @@ import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { collectIrcPeerRoster } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
-import {
-	DEFAULT_HUB_LIST_LIMIT,
-	executeList,
-	executeSend,
-	MAX_HUB_LIST_LIMIT,
-} from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
-import { prompt, TempDir } from "@oh-my-pi/pi-utils";
+import { executeList, executeSend } from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
+import { DEFAULT_HUB_LIST_LIMIT, MAX_HUB_LIST_LIMIT } from "@oh-my-pi/pi-tui/tools/hub";
+import { prompt, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 function sessionHeader(id: string): string {
 	return JSON.stringify({
@@ -1539,6 +1535,84 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 			},
 		} as unknown as AgentSession;
 	}
+
+	it.each(["..jsonl", "...jsonl"])("lists peers despite a %s transcript", async filename => {
+		using tempDir = TempDir.createSync("@omp-hub-roster-cycle-");
+		const root = path.join(tempDir.path(), "main.jsonl");
+		const transcript = path.join(tempDir.path(), "main", filename);
+		await Bun.write(root, `${sessionHeader("main")}\n`);
+		await writeParkedTranscript(transcript, filename, "Unrelated persisted transcript");
+
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Worker",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "running",
+		});
+		const listing = executeList(registry, MAIN_AGENT_ID, {}, root);
+		try {
+			const result = await withTimeout(listing, 1_000, "Roster traversal revisited an ancestor indefinitely");
+			expect(result.details?.peers?.map(peer => peer.id)).toContain("Worker");
+		} finally {
+			// Remove the cycling entry before joining a failed pre-fix scan.
+			await fs.promises.rm(transcript, { force: true });
+			await listing;
+		}
+	});
+
+	it("delivers to a waiting live child while persisted discovery is blocked", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-live-send-");
+		const root = path.join(tempDir.path(), "main.jsonl");
+		const archived = path.join(tempDir.path(), "main", "Archived.jsonl");
+		await Bun.write(root, `${sessionHeader("main")}\n`);
+		await writeParkedTranscript(archived, "archived", "Unrelated persisted transcript");
+		const registry = AgentRegistry.global();
+		registry.register({
+			id: "Worker",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "running",
+		});
+
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const access = fs.promises.access;
+		const tombstone = getAgentTombstonePath(archived);
+		const accessSpy = spyOn(fs.promises, "access").mockImplementation(async (target, mode) => {
+			if (target === tombstone) {
+				entered.resolve();
+				await release.promise;
+			}
+			return access(target, mode);
+		});
+		const scan = ensurePersistedRoster(registry, root);
+		const abort = new AbortController();
+		const message = IrcBus.global().wait("Worker", { from: MAIN_AGENT_ID }, 0, abort.signal);
+		let send: Promise<unknown> | undefined;
+		try {
+			await withTimeout(entered.promise, 1_000, "Discovery did not reach the held filesystem operation");
+			send = executeSend(
+				{ registry, senderId: MAIN_AGENT_ID, settings: Settings.isolated(), sessionFileHint: root },
+				{ to: "Worker", message: "Continue now" },
+			);
+			const [, delivered] = await withTimeout(
+				Promise.all([send, message]),
+				1_000,
+				"Live messaging waited for unrelated persisted discovery",
+			);
+			expect(delivered?.body).toBe("Continue now");
+		} finally {
+			release.resolve();
+			abort.abort();
+			await Promise.allSettled([scan, send, message]);
+			accessSpy.mockRestore();
+		}
+	});
 
 	it("direct send, history://, and agent:// target the caller root's parked Worker without a prior list (A→B→A)", async () => {
 		using tempDir = TempDir.createSync("@omp-hub-direct-root-");

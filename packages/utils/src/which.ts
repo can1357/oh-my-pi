@@ -13,8 +13,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isFullyQualifiedPath } from "./path";
 
-type CacheKey = string | bigint | number;
-
 // Tools shipped by Xcode / Command Line Tools that callers actually look up.
 // Keeps the set small so darwinWhich can fast-reject non-Xcode commands without
 // touching the filesystem.  Only needs entries for binaries that live *exclusively*
@@ -149,12 +147,12 @@ function getMacosToolPaths(): Map<string, string> {
 }
 
 // Map: cache key -> resolved binary path or null (not found)
-const toolCache = new Map<CacheKey, string | null>();
+const toolCache = new Map<string, string | null>();
 
 /**
  * Cache policy for which lookups.
  */
-export const enum WhichCachePolicy {
+export enum WhichCachePolicy {
 	/**
 	 * Use cached result if available.
 	 */
@@ -177,7 +175,7 @@ export const enum WhichCachePolicy {
 export interface WhichOptions extends Bun.WhichOptions {
 	/**
 	 * Cache policy for the lookup.
-	 * Defaults to `WhichCachePolicy.Fresh`.
+	 * Defaults to `WhichCachePolicy.Cached`.
 	 */
 	cache?: WhichCachePolicy;
 	/**
@@ -216,14 +214,14 @@ export const whichFresh =
 		? darwinWhich
 		: (command: string, options?: Bun.WhichOptions): string | null => Bun.which(command, options);
 
-// Derive stable cache key from command and lookup options
-function cacheKey(command: string, options?: Bun.WhichOptions): CacheKey {
+// Length-prefixed (command, cwd, PATH) tuple: exact, unlike the 64-bit hash
+// chain it replaced, and the length prefixes keep `("ab", "c")` and
+// `("a", "bc")` distinct without a separator that cwd/PATH could contain.
+function cacheKey(command: string, options?: Bun.WhichOptions): string {
 	if (!options) return command;
-	if (!options.cwd && !options.PATH) return command;
-	let h = Bun.hash(command);
-	if (options.cwd) h = Bun.hash(options.cwd, h);
-	if (options.PATH) h = Bun.hash(options.PATH, h);
-	return h;
+	const cwd = options?.cwd ?? "";
+	const binPath = options?.PATH ?? "";
+	return `${command.length}:${command}${cwd.length}:${cwd}${binPath.length}:${binPath}`;
 }
 
 /**
@@ -244,7 +242,7 @@ export function $which(command: string, options?: WhichOptions): string | null {
 		lookupOptions = { ...lookupOptions, PATH: safePath };
 	}
 
-	let key: CacheKey | undefined;
+	let key: string | undefined;
 
 	if (cachePolicy !== WhichCachePolicy.Bypass) {
 		key = cacheKey(command, lookupOptions);
