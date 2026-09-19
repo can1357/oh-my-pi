@@ -189,6 +189,12 @@ describe("shortenPath", () => {
 		expect(shortenPath("/home/me/projects/demo", "/home/me/")).toBe("~/projects/demo");
 		expect(shortenPath("/home/me2/demo", "/home/me/")).toBe("/home/me2/demo");
 	});
+
+	it("shortens closing-delimited homes without matching longer path components", () => {
+		const home = "/Users/alice";
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}","next":1}`, home)).toBe('{"cwd":"~","next":1}');
+		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
+	});
 });
 
 describe("Windows home aliases", () => {
