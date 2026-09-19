@@ -13,7 +13,9 @@ import { calculateTokensPerSecond } from "../utils/token-rate";
  * fixtures) still render; a live `AgentSession` satisfies it structurally.
  */
 export type StatusLineHostSession = StatusLineSession &
-	Partial<Pick<AgentSession, "settings" | "modelRegistry" | "sessionId" | "fetchUsageReports">>;
+	Partial<
+		Pick<AgentSession, "settings" | "modelRegistry" | "sessionId" | "fetchUsageReports" | "getAdvisorUsageAccounts">
+	>;
 
 /** Application policy and runtime services consumed by the portable status renderer. */
 export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
@@ -37,6 +39,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	goalStatusInFooter: session => (session.settings ?? settings).get("goal.statusInFooter"),
 	activeAccount: (session, provider) =>
 		session.modelRegistry?.authStorage?.getOAuthAccountIdentity(provider, session.sessionId),
+	getAdvisorUsageAccounts: session => session.getAdvisorUsageAccounts?.() ?? [],
 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
 	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
 	resolveActiveRepo: resolveActiveRepoContextSync,
