@@ -1,5 +1,10 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { buildSkillPromptMessage, getSkillSlashCommandName, parseSkillInvocation } from "../extensibility/skills";
+import {
+	buildSkillPromptMessage,
+	getSkillSlashCommandName,
+	parseSkillInvocation,
+	type Skill,
+} from "../extensibility/skills";
 import { type CustomMessage, SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../session/messages";
 import type { InteractiveModeContext } from "./types";
 
@@ -49,11 +54,13 @@ export interface BuiltSkillCommandPrompt {
 	options: SkillPromptOptions;
 }
 
+function skillPredicate(ctx: SkillCommandHost): (name: string) => boolean {
+	return (name: string) => ctx.skillCommands.has(getSkillSlashCommandName({ name }));
+}
+
 /** Return true when `text` invokes a registered `/skill:<name>` command. */
 export function isKnownSkillCommand(ctx: SkillCommandHost, text: string): boolean {
-	const parsed = parseSkillInvocation(text);
-	if (!parsed) return false;
-	return ctx.skillCommands.has(getSkillSlashCommandName({ name: parsed.name }));
+	return parseSkillInvocation(text, skillPredicate(ctx)) !== undefined;
 }
 
 /** Build the user-attributed custom message for a registered `/skill:<name>` command. */
@@ -63,12 +70,14 @@ export async function buildSkillCommandPrompt(
 	streamingBehavior: "steer" | "followUp",
 	images?: ImageContent[],
 ): Promise<BuiltSkillCommandPrompt | undefined> {
-	const parsed = parseSkillInvocation(text);
+	const parsed = parseSkillInvocation(text, skillPredicate(ctx));
 	if (!parsed) return undefined;
-	const skill = ctx.skillCommands.get(getSkillSlashCommandName({ name: parsed.name }));
-	if (!skill) return undefined;
+	const skills = parsed.names
+		.map(name => ctx.skillCommands.get(getSkillSlashCommandName({ name })))
+		.filter((s): s is Skill => s !== undefined);
+	if (skills.length === 0) return undefined;
 
-	const built = await buildSkillPromptMessage(skill, parsed, "user");
+	const built = await buildSkillPromptMessage(skills, parsed, "user");
 	const textBlock: TextContent = { type: "text", text: built.message };
 	const promptContent = images && images.length > 0 ? [textBlock, ...images] : built.message;
 

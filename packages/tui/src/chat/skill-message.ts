@@ -7,7 +7,7 @@ import { Markdown } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
 import { getMarkdownTheme, theme } from "../theme";
-import type { CustomMessage, SkillPromptDetails } from "./messages";
+import type { CustomMessage, SkillPromptDetails, SkillPromptSkill } from "./messages";
 import { fileHyperlink } from "../render";
 import { collapseSkillTokens, skillChipLabel, skillChipStyle, skillToken } from "../prompt/composer-attachments";
 import { type UserBubbleOptions, UserMessageComponent, userBubbleColor } from "./user-message";
@@ -88,38 +88,61 @@ export class SkillMessageComponent extends Container {
 		this.#disclosure?.dispose();
 		this.clear();
 		const details = this.#message.details;
-		const name = details?.name?.trim() || "unknown";
-		const token = skillToken(name);
-		const prompt = details?.prompt ?? (details?.args ? `${token} ${details.args}` : token);
-		// Display-only collapse: only the invoked skill becomes a chip; a second `/skill:` token the
-		// dispatcher ignored stays literal so the transcript never claims a skill that never loaded.
+		const loaded: SkillPromptSkill[] = details?.skills?.length
+			? details.skills
+			: [
+					{
+						name: details?.name?.trim() || "unknown",
+						path: details?.path ?? "",
+						lineCount: details?.lineCount ?? 0,
+					},
+				];
+		const byName = new Map(loaded.map(s => [s.name, s]));
+		const prompt =
+			details?.prompt ??
+			(details?.args ? `${skillToken(loaded[0].name)} ${details.args}` : skillToken(loaded[0].name));
+
+		// Display-only collapse: every loaded skill becomes a chip; a token that did not load stays literal.
 		const display = collapseSkillTokens(
 			prompt,
-			candidate => candidate === name,
+			name => byName.has(name),
 			() => {},
 		);
-		const label = skillChipLabel(name);
-		const leading = display.startsWith(label) && /^\s*$/.test(display.charAt(label.length));
+
 		const bubble: UserBubbleOptions = {
 			imageLinks: this.#imageLinks,
-			skillPath: candidate => (candidate === name ? details?.path : undefined),
+			skillPath: name => byName.get(name)?.path || undefined,
 		};
 
+		const headerSkills: SkillPromptSkill[] = [];
+		let rest = display;
+		while (true) {
+			const nextSkill = loaded.find(
+				s =>
+					!headerSkills.includes(s) &&
+					rest.startsWith(skillChipLabel(s.name)) &&
+					/^\s*$/.test(rest.charAt(skillChipLabel(s.name).length)),
+			);
+			if (!nextSkill) break;
+			headerSkills.push(nextSkill);
+			rest = rest.slice(skillChipLabel(nextSkill.name).length).trimStart();
+		}
+
+		const leading = headerSkills.length > 0;
 		if (!leading) {
 			this.#disclosure = new Disclosure({
 				summary: new UserMessageComponent(display, bubble),
 				// Prompt extraction and Markdown layout stay lazy: the factory
 				// runs on the first expanded render, reading the current theme.
-				body: () =>
-					new SkillCallout([new Text(this.#header(label, details), 0, 0), ...this.#promptSection(bubble)]),
+				body: () => new SkillCallout([new Text(this.#header(loaded), 0, 0), ...this.#promptSection(bubble)]),
 				expanded,
 			});
 			this.addChild(this.#disclosure);
 			return;
 		}
 
-		const body = display.slice(label.length).trim();
-		const children: Component[] = [new Text(this.#header(label, details), 0, 0)];
+		const body = rest.trim();
+		const children: Component[] = [new Text(this.#header(headerSkills), 0, 0)];
 		if (body) children.push(new Spacer(1), this.#markdown(body, bubble));
 		// The prompt disclosure nests inside the one callout so the
 		// skill-colored rail stays continuous across summary and detail.
@@ -154,14 +177,20 @@ export class SkillMessageComponent extends Container {
 		return md;
 	}
 
-	/** Chip linked to its SKILL.md, then the muted prompt size. */
-	#header(label: string, details: SkillPromptDetails | undefined): string {
-		const chip = skillChipStyle(label, bubbleReset());
-		const parts = [details?.path ? fileHyperlink(details.path, chip, { line: 1 }) : chip];
-		if (typeof details?.lineCount === "number") {
-			parts.push(theme.fg("muted", `${details.lineCount} ${details.lineCount === 1 ? "line" : "lines"}`));
+	/** Chips linked to their SKILL.md, each followed by muted prompt size. */
+	#header(skills: SkillPromptSkill[]): string {
+		const skillEntries: string[] = [];
+		for (const s of skills) {
+			const label = skillChipLabel(s.name);
+			const chip = skillChipStyle(label, bubbleReset());
+			const linked = s.path ? fileHyperlink(s.path, chip, { line: 1 }) : chip;
+			const parts = [linked];
+			if (typeof s.lineCount === "number") {
+				parts.push(theme.fg("muted", `${s.lineCount} ${s.lineCount === 1 ? "line" : "lines"}`));
+			}
+			skillEntries.push(parts.join(" "));
 		}
-		return parts.join("  ");
+		return skillEntries.join("  ");
 	}
 
 	/** The rendered SKILL.md prompt under a calm subheader (expanded view only). */

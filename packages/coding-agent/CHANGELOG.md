@@ -14,6 +14,9 @@
 - Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
 
 ## [18.2.6] - 2026-09-18
+### Added
+
+- Supported invoking multiple skills in a single prompt submission (`/skill:foo /skill:bar`) ([#12535](https://github.com/can1357/oh-my-pi/pull/12535) by [@aleister1102](https://github.com/aleister1102)).
 
 ### Fixed
 
