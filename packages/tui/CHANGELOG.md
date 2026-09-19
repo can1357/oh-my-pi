@@ -20,6 +20,8 @@
 ### Fixed
 
 - Prevented magic keywords from triggering spelling autocorrect and underlining
+- Added kind-filtered image, web, speech, dictation, and judge role selection with editable default fallback chains in the model hub.
+- Added an optional `assistantMessageText` theme token that colors assistant reply paragraph prose; unset or empty keeps the terminal default foreground ([#11204](https://github.com/can1357/oh-my-pi/issues/11204)).
 
 ## [18.2.5] - 2026-09-17
 
