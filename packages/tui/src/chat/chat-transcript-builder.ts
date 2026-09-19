@@ -32,6 +32,7 @@ import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
+	buildAsyncProgressDisplayMessage,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
@@ -583,8 +584,9 @@ export class ChatTranscriptBuilder {
 			this.container.addChild(handoffComponent);
 			return;
 		}
+		const displayMessage = buildAsyncProgressDisplayMessage(message);
 		const component = new CustomMessageComponent(
-			message as CustomMessage<unknown>,
+			displayMessage as CustomMessage<unknown>,
 			this.#deps.getMessageRenderer?.(message.customType),
 		);
 		this.#trackExpandable(component);
