@@ -5,6 +5,7 @@ import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
@@ -49,6 +50,9 @@ type ToolValue =
 	| { cancelled: boolean }
 	| {
 			text: string;
+			content: EvalToolContentBlock[];
+			structured?: Record<string, unknown>;
+			meta?: OutputMeta;
 			details?: unknown;
 			images?: Array<{ mimeType: string; data: string }>;
 			hasError?: boolean;
@@ -56,6 +60,54 @@ type ToolValue =
 function toolResultHasError(result: AgentToolResult): boolean {
 	if (isRecord(result) && result.isError === true) return true;
 	return isRecord(result.details) && result.details.isError === true;
+}
+
+/**
+ * One content block of a tool result as a kernel caller receives it.
+ *
+ * This is the data channel that complements `text`: the same blocks `text` is
+ * flattened from, still separate, so a caller reads a tool's output as data
+ * instead of cutting a model-facing rendering apart. Image blocks carry
+ * `mimeType` only — the base64 payload reaches the model as an image display and
+ * would otherwise flood the cell value and the transcript echo it is written
+ * into (see `surfaceBridgedToolImages`).
+ */
+export type EvalToolContentBlock = { type: "text"; text: string } | { type: "image"; mimeType: string };
+
+function bridgedContentBlocks(content: AgentToolResult["content"]): EvalToolContentBlock[] {
+	const blocks: EvalToolContentBlock[] = [];
+	for (const block of content) {
+		if (block.type === "text") {
+			if (typeof block.text === "string") blocks.push({ type: "text", text: block.text });
+			continue;
+		}
+		if (block.type === "image") {
+			if (typeof block.mimeType === "string") blocks.push({ type: "image", mimeType: block.mimeType });
+			continue;
+		}
+		// A block type the result type does not describe reaches the caller
+		// verbatim rather than being dropped without a trace.
+		blocks.push(block);
+	}
+	return blocks;
+}
+
+/**
+ * The two `details` sub-fields the bridge republishes as first-class result
+ * fields. `details` is untyped here (`details?: unknown`), so both are read
+ * defensively: a tool that stores something else under either key degrades to
+ * `undefined` instead of handing a caller a malformed contract.
+ */
+function readRepublishedDetails(details: unknown): {
+	structured?: Record<string, unknown>;
+	meta?: OutputMeta;
+} {
+	if (!isRecord(details)) return {};
+	const { structuredContent, meta } = details;
+	return {
+		structured: isRecord(structuredContent) ? structuredContent : undefined,
+		meta: isRecord(meta) ? (meta as unknown as OutputMeta) : undefined,
+	};
 }
 
 function getTool(session: ToolSession, name: string): AgentTool {
@@ -169,7 +221,14 @@ export function bridgeValueFromToolResult(
 		if (event) emitStatus(event);
 	}
 	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
-	const value: Exclude<ToolValue, string> = { text, details: result.details };
+	const value: Exclude<ToolValue, string> = {
+		text,
+		content: bridgedContentBlocks(result.content),
+		details: result.details,
+	};
+	const { structured, meta } = readRepublishedDetails(result.details);
+	if (structured !== undefined) value.structured = structured;
+	if (meta !== undefined) value.meta = meta;
 	if (imageBlocks.length > 0) {
 		value.images = imageBlocks.map(block => ({ mimeType: block.mimeType, data: block.data }));
 	}

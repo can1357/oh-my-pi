@@ -762,6 +762,10 @@ describe("callSessionTool", () => {
 
 		expect(result).toEqual({
 			text: "done",
+			content: [
+				{ type: "text", text: "done" },
+				{ type: "image", mimeType: "image/png" },
+			],
 			details: { ok: true },
 			images: [{ mimeType: "image/png", data: "abc123" }],
 		});
@@ -784,6 +788,7 @@ describe("callSessionTool", () => {
 
 		expect(result).toEqual({
 			text: "Error: bad input",
+			content: [{ type: "text", text: "Error: bad input" }],
 			details: { serverName: "demo", mcpToolName: "fail", isError: true },
 			hasError: true,
 		});
@@ -814,6 +819,7 @@ describe("callSessionTool", () => {
 
 		expect(result).toEqual({
 			text: "preview mismatch",
+			content: [{ type: "text", text: "preview mismatch" }],
 			details: undefined,
 			hasError: true,
 		});
@@ -872,5 +878,76 @@ describe("callSessionTool", () => {
 			"Unknown tool from js runtime",
 		);
 		expect(rawExecute).not.toHaveBeenCalled();
+	});
+
+	describe("result data channel", () => {
+		it("exposes content blocks, structuredContent and truncation meta beside the unchanged text", async () => {
+			// MCP shape: the payload reaches the model as a fenced JSON echo appended to
+			// a terse ack. A cell that writes `result.text` to disk persists the payload
+			// twice, and the fence is not a delimiter a caller can cut reliably.
+			const payload = { guide: "# Rules", sample: "```json\n{}\n```" };
+			const envelope = `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
+			const meta = {
+				truncation: { direction: "tail" as const, totalBytes: 25_975, artifactId: "artifact://7" },
+			};
+			const details = {
+				serverName: "rhizome-mcp",
+				mcpToolName: "read_file",
+				structuredContent: payload,
+				meta,
+			};
+			const execute = vi.fn().mockResolvedValue({
+				content: [
+					{ type: "text", text: "guide read" },
+					{ type: "text", text: envelope },
+				],
+				details,
+			});
+			const session = createSession([createTool("read_file", execute)]);
+
+			const result = await callSessionTool("read_file", { path: "guide.md" }, { session });
+
+			// `text` is untouched: still the model-facing rendering, envelope included.
+			expect(result).toMatchObject({ text: `guide read${envelope}` });
+			// The same blocks, still separate from each other.
+			expect(result).toMatchObject({
+				content: [
+					{ type: "text", text: "guide read" },
+					{ type: "text", text: envelope },
+				],
+			});
+			expect(result).toMatchObject({ structured: payload });
+			expect(result).toMatchObject({ meta });
+			expect(result).toMatchObject({ details: expect.objectContaining({ serverName: "rhizome-mcp" }) });
+		});
+
+		it("elides image payloads from content while keeping the image display channel", async () => {
+			const data = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString("base64");
+			const execute = vi.fn().mockResolvedValue({
+				content: [
+					{ type: "text", text: "1024x768 png" },
+					{ type: "image", mimeType: "image/png", data },
+				],
+				details: { lines: 1 },
+			});
+			const session = createSession([createTool("read", execute)]);
+
+			const result = await callSessionTool("read", { path: "img.png" }, { session });
+
+			expect(result).toMatchObject({
+				content: [
+					{ type: "text", text: "1024x768 png" },
+					{ type: "image", mimeType: "image/png" },
+				],
+			});
+			// The display channel is unchanged: the block still reaches the model.
+			expect(result).toMatchObject({ images: [{ mimeType: "image/png", data }] });
+			// `content` never reintroduces the payload the display channel owns.
+			expect(JSON.stringify((result as { content: unknown }).content)).not.toContain(data);
+			// A tool with no structured payload or meta degrades instead of guessing.
+			const value = result as { structured?: unknown; meta?: unknown };
+			expect(value.structured).toBeUndefined();
+			expect(value.meta).toBeUndefined();
+		});
 	});
 });

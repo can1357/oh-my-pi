@@ -566,6 +566,7 @@ describe("executeJs", () => {
 		expect(getJsonData(result)).toEqual({
 			toolResult: {
 				text: "annotated",
+				content: [{ type: "text", text: "annotated" }],
 				details: { path: "package.json", kind: "tool-result" },
 				images: undefined,
 			},
@@ -632,6 +633,7 @@ describe("executeJs", () => {
 		expect(result.exitCode).toBe(0);
 		expect(getJsonData(result)).toEqual({
 			text: "tool output",
+			content: [{ type: "text", text: "tool output" }],
 			details: { kind: "tool-result" },
 			images: undefined,
 		});

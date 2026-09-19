@@ -226,6 +226,11 @@ function formatMCPContent(content: MCPContent[]): Array<TextContent | ImageConte
  * reaches the model through the standard content channel — and the eval
  * `tool.*` and subagent proxy bridges that read the same result. Subject to the
  * usual spill/byte-cap machinery like any other text block.
+ *
+ * This envelope is a display artifact: the payload and its envelope share one
+ * string, and the fence collides with payloads that legitimately contain fenced
+ * JSON, so a caller cannot cut it apart reliably. Programmatic callers read
+ * `details.structuredContent` instead.
  */
 function formatStructuredContent(structured: Record<string, unknown>): string {
 	let json: string;
@@ -284,6 +289,10 @@ function buildResult(
 		}
 	}
 	const structured = result.structuredContent;
+	if (structured !== undefined) {
+		// The text echo below is for the model; programmatic callers read this copy.
+		details.structuredContent = structured;
+	}
 	if (structured !== undefined && !structuredContentAlreadyInText(structured, result.content)) {
 		const rendered = formatStructuredContent(structured);
 		if (rendered.length > 0) {

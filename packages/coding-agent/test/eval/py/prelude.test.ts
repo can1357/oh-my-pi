@@ -184,4 +184,34 @@ describe("python prelude", () => {
 			proxy.stop(true);
 		}
 	});
+
+	it("passes the tool result data channel through image surfacing", async () => {
+		// Every runtime must hand a cell the same shape: the host bridge returns
+		// content/structured/meta, and surfacing image blocks must not drop them.
+		const result = await runPrelude(
+			[
+				"value = {",
+				"    'text': '1024x768 png',",
+				"    'content': [{'type': 'text', 'text': '1024x768 png'}, {'type': 'image', 'mimeType': 'image/png'}],",
+				"    'structured': {'width': 1024},",
+				"    'meta': {'truncation': {'direction': 'tail'}},",
+				"    'images': [{'mimeType': 'image/png', 'data': 'iVBORw0KGgo='}],",
+				"}",
+				"print(json.dumps(_surface_bridged_tool_images(value), sort_keys=True))",
+			].join("\n"),
+			{},
+		);
+
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.stdout.trim())).toEqual({
+			text: "1024x768 png",
+			content: [
+				{ type: "text", text: "1024x768 png" },
+				{ type: "image", mimeType: "image/png" },
+			],
+			structured: { width: 1024 },
+			meta: { truncation: { direction: "tail" } },
+			images: "(1 image displayed)",
+		});
+	});
 });

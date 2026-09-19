@@ -20,6 +20,7 @@
 - Fixed clipboard paste stalling on an empty clipboard; image and text clipboard reads now run concurrently so the empty-clipboard status surfaces after the slower read instead of the sum of both.
 - Fixed memory recall blocks carrying a minute-resolution `Current time` stamp that dirtied the cached system prompt on every refresh; recall rows already carry dates, so the stamp is removed.
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
+- Fixed `eval` cells receiving MCP `structuredContent` only as a JSON echo glued into the model-facing text: the tool bridge now also returns `content`, `structured`, and `meta`, so a cell that writes a result to disk no longer persists the payload twice, and an MCP `read_file` payload is reachable as an object without cutting an envelope out of `text` ([#10643](https://github.com/can1357/oh-my-pi/issues/10643), [#12429](https://github.com/can1357/oh-my-pi/pull/12429) by [@MertSoylu](https://github.com/MertSoylu)).
 
 ## [18.2.5] - 2026-09-17
 

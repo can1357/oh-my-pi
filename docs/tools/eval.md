@@ -128,6 +128,20 @@ All enabled runtimes expose equivalent helpers where the language permits:
 
 JS helpers are asynchronous; Python file helpers are synchronous while `tool.<name>()` is a coroutine. `read()` delegates non-`local://` schemes to the registered read tool, resolves `local://` through injected roots, and reads regular paths relative to cwd. `write()` accepts regular and `local://` paths but rejects other protocol URLs.
 
+### `tool.<name>()` result contract
+
+A text-only result with no details, images, or error resolves to a plain string. Anything else resolves to an object, so the data channel stays additive and existing `result.text` callers keep working:
+
+| Field | Contents |
+| --- | --- |
+| `text` | Model-facing rendering, kept byte-identical to the model path: content blocks joined, an MCP server's `structuredContent` echoed as a fenced JSON block, truncation notices appended. Treat it as display output — the payload shares one string with that envelope and the fence collides with payloads that legitimately contain fenced JSON. |
+| `content` | The result's content blocks as produced: `{ type: "text", text }` and `{ type: "image", mimeType }`. Image payloads are never included here; they surface as image displays. Block boundaries are exact, so reading a file through an MCP `read_file` needs no envelope stripping. |
+| `structured` | An MCP server's `structuredContent` as an object, unserialized; `undefined` when the tool exposes none. |
+| `meta` | Output metadata when the tool set one: `truncation` (direction, ranges, `artifactId`), so truncated output is distinguishable from complete output and the spilled artifact holding the whole of it is addressable. |
+| `details` | The tool's own details record, untyped and tool-specific. MCP results also carry `serverName`, `mcpToolName`, and `rawContent` — the original MCP blocks, the only place a blob resource's payload survives, since `text` reduces it to a `[Resource: uri]` marker. |
+| `images` | Image blocks as `{ mimeType, data }`, replaced by a `(N images displayed)` note once emitted as displays. |
+| `hasError` | Set when the result is an error. |
+
 `display()` captures JSON-compatible structures, images, markdown, or text according to the backend.
 
 ### `completion()`
