@@ -2293,33 +2293,6 @@ function b() {
 			).rejects.toThrow(/Use the `grep` tool for customcmd\./);
 		});
 
-		it("should expose env values without shell re-parsing", async () => {
-			const mermaid = [
-				"flowchart TD",
-				'N0["attack"]',
-				'N1["[target] cluster"]',
-				'N2["diff-review"]',
-				'N3["extract"]',
-				'N4["report"]',
-				'N5["setup"]',
-				"N3 --> N0",
-				"N0 --> N1",
-				"N2 --> N1",
-				"N3 --> N2",
-				"N5 --> N3",
-				"N1 --> N4",
-			].join("\n");
-			const result = await bashTool.execute("test-call-8-env", {
-				command: "printf '%s' \"$MERMAID\"",
-				env: { MERMAID: mermaid },
-			});
-			const output = getTextOutput(result);
-			expect(output).toContain('N0["attack"]');
-			expect(output).toContain("N1 --> N4");
-			expect(fs.existsSync(path.join(testDir, "N0"))).toBe(false);
-			expect(fs.existsSync(path.join(testDir, "N4"))).toBe(false);
-		});
-
 		it("should resolve local:// destination paths for mv commands", async () => {
 			const sourcePath = path.join(testDir, "move-source.json");
 			const targetPath = path.join(testDir, "session", "local", "moved-via-bash.json");

@@ -20,7 +20,8 @@ State persists across `eval` calls. Every call provides:
   - Results auto-deliver. Need to block? Leave `eval`, then call `hub` with `op:"wait", ids:["<pool-name>"]`; re-issue until settled. NEVER block the kernel with `pool.wait()`.
 - `agent(prompt, *, agent=None, label=None, schema=None{{#if isolationEnabled}}, isolated=None, apply=None, merge=None{{/if}}{{#if evalTools}}, tools=None{{/if}})`: immediate `AgentHandle`; use for a small fixed dependency graph or when the parent needs validated `schema` data. `.wait()` returns text/data; `.handle` is `agent://<id>`. Unwaited results auto-deliver.{{#if isolationEnabled}} `isolated` requests a worktree; `apply`/`merge` control its changes.{{/if}}
 - `completion(prompt, *, model="default", system=None, schema=None)`: immediate `CompletionHandle` for a tool-free one-shot call. Tiers: `"smol"`, `"default"`, `"slow"`.
-- `wait(handles, timeout=None, *, raise_errors=True)`: ordered barrier for agent/completion handles only; `raise_errors=False` keeps an error in its slot.
+- `judge(state, questions)`: immediate `JudgmentHandle` for typed `choice`/`bool`/`score` questions over one state; `.wait()` returns `{id: answer}` with probabilities. Cheaper than `completion()` for classification.
+- `wait(handles, timeout=None, *, raise_errors=True)`: ordered barrier for agent/completion/judgment handles only; `raise_errors=False` keeps an error in its slot.
 {{#if evalTools}}- `@tool` (Python) / `tool(fn, {…})` (JS): kernel-local tool exposed via `tools=`. Use for shared caches, dedup sets, scoring, or structured accumulation across pool workers; calls execute in YOUR kernel and a raised exception returns to the caller without killing it.
 {{/if}}- `log(message)`: progress line. `phase(title)`: status-tree phase.
 - `budget`: Python `budget.total` / `budget.spent()` / `budget.remaining()`; JS awaits them. User `+Nk` = advisory; `+Nk!` = hard.

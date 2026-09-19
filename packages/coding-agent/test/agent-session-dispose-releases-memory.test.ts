@@ -172,7 +172,7 @@ describe("AgentSession dispose releases retained memory", () => {
 		expect(current.rawSseDebugBuffer.snapshot().records).toHaveLength(0);
 	});
 
-	it("drains in-flight event handlers so a late persist cannot repopulate a disposed session", async () => {
+	it("drains pending notifications before releasing retained session memory", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled model");
 		const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
@@ -184,11 +184,8 @@ describe("AgentSession dispose releases retained memory", () => {
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
-		// A real extension whose message_end hook blocks. This models the exact
-		// gap the fix closes: agent-core dispatches the session's event handler
-		// fire-and-forget, and that handler awaits extension work BEFORE it
-		// persists the finished message — so agent.waitForIdle() alone is not
-		// enough to know the session is quiescent.
+		// Persistence proceeds independently, but dispose must still drain the
+		// notification handler before releasing the session state it can access.
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const runtime = new ExtensionRuntime();
@@ -234,11 +231,8 @@ describe("AgentSession dispose releases retained memory", () => {
 			timestamp: Date.now(),
 		};
 
-		// Dispatch a real message_end: the session handler runs fire-and-forget
-		// and parks in the extension hook before it can persist the entry.
 		current.agent.emitExternalEvent({ type: "message_end", message });
 		await reached.promise;
-		expect(current.sessionManager.getEntries()).toHaveLength(0); // persist not reached yet
 
 		// Dispose must not release memory until that in-flight handler settles.
 		const reachedSettle = Promise.withResolvers<void>();
@@ -247,30 +241,24 @@ describe("AgentSession dispose releases retained memory", () => {
 			detach(fn);
 			reachedSettle.resolve();
 		});
-		const releaseSpy = vi.spyOn(current.sessionManager, "releaseRetainedEntries");
-		const closeSpy = vi.spyOn(current.sessionManager, "close");
-
-		const disposeP = current.dispose();
-		await reachedSettle.promise;
-		for (let i = 0; i < 10; i++) await Promise.resolve();
-
-		// Blocked draining the in-flight handler: memory release has not run.
-		expect(releaseSpy).not.toHaveBeenCalled();
-		expect(closeSpy).not.toHaveBeenCalled();
-
-		release.resolve();
-		await disposeP;
+		let disposed = false;
+		const disposeP = current.dispose().then(() => {
+			disposed = true;
+		});
+		try {
+			await reachedSettle.promise;
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+			expect(disposed).toBe(false);
+		} finally {
+			release.resolve();
+			await disposeP;
+		}
 		session = undefined;
-
-		// The late persist landed during the drain and was then cleared, so the
-		// disposed session retains neither the entry nor the message.
-		expect(releaseSpy).toHaveBeenCalledTimes(1);
-		expect(closeSpy).toHaveBeenCalledTimes(1);
 		expect(current.sessionManager.getEntries()).toHaveLength(0);
 		expect(current.agent.state.messages).toHaveLength(0);
 	});
 
-	it("re-finalizes after the drain deadline so a late persist cannot repopulate the session", async () => {
+	it("keeps session memory empty when notifications finish after the drain deadline", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled model");
 		const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
@@ -282,9 +270,8 @@ describe("AgentSession dispose releases retained memory", () => {
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
-		// A message_end hook that outlives the dispose drain deadline: dispose
-		// must resolve at the deadline, and the handler's late persist must not
-		// leave the released session repopulated.
+		// Dispose must resolve at the deadline without retaining completed messages,
+		// and late notification bookkeeping must not repopulate the session.
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const runtime = new ExtensionRuntime();
@@ -339,16 +326,14 @@ describe("AgentSession dispose releases retained memory", () => {
 			releaseCalls++;
 			if (releaseCalls === 2) secondRelease.resolve();
 		});
-		await current.dispose({ drainTimeoutMs: 20 });
-		session = undefined;
-
-		// The deadline elapsed with the handler still parked: memory was
-		// released once and dispose did not block on the hook.
-		expect(releaseCalls).toBe(1);
-
-		// Unpark the hook: the handler resumes and persists its entry, then the
-		// deferred finalize closes and releases again.
-		release.resolve();
+		try {
+			await current.dispose({ drainTimeoutMs: 20 });
+			session = undefined;
+			expect(current.sessionManager.getEntries()).toHaveLength(0);
+			expect(current.agent.state.messages).toHaveLength(0);
+		} finally {
+			release.resolve();
+		}
 		await secondRelease.promise;
 		expect(current.sessionManager.getEntries()).toHaveLength(0);
 		expect(current.agent.state.messages).toHaveLength(0);
@@ -408,7 +393,7 @@ describe("AgentSession dispose releases retained memory", () => {
 
 		const message: AssistantMessage = {
 			role: "assistant",
-			content: [{ type: "text", text: "late persist" }],
+			content: [{ type: "text", text: "completed before disposal" }],
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
@@ -438,25 +423,27 @@ describe("AgentSession dispose releases retained memory", () => {
 		session = undefined;
 		const bytesAfterDispose = await Bun.file(sessionFile).text();
 
-		// Immediate revival: a new manager reopens the same JSONL and sees the
-		// seed transcript — and nothing from the still-parked handler.
+		// Revival sees completed messages even though their notifications remain
+		// parked; notification-side writes after sealing must still be rejected.
 		const revived = await SessionManager.open(sessionFile, tempDir.path());
 		const revivedTexts = revived
 			.getEntries()
 			.filter(entry => entry.type === "message")
 			.map(entry => JSON.stringify(entry.message));
-		expect(revivedTexts).toEqual([expect.stringContaining("seed")]);
-
-		// Unpark the hook: the resumed handler's late persist must be dropped by
-		// the sealed manager, never written under the revival writer.
-		release.resolve();
+		try {
+			expect(revivedTexts).toEqual([
+				expect.stringContaining("seed"),
+				expect.stringContaining("completed before disposal"),
+			]);
+		} finally {
+			release.resolve();
+		}
 		await secondRelease.promise;
 		expect(current.sessionManager.getEntries()).toHaveLength(0);
 		expect(await Bun.file(sessionFile).text()).toBe(bytesAfterDispose);
 
-		// The revival writer still owns the file: its append lands cleanly, and
-		// the reopened transcript holds exactly the seed + post-revive messages —
-		// the sealed manager's late persist never reached the file.
+		// The revival writer can append without losing completed messages or
+		// incorporating the old notification handler's rejected writes.
 		revived.appendMessage({ role: "user", content: "post-revive", timestamp: Date.now() });
 		await revived.flush();
 		await revived.close();
@@ -465,9 +452,12 @@ describe("AgentSession dispose releases retained memory", () => {
 			.getEntries()
 			.filter(entry => entry.type === "message")
 			.map(entry => JSON.stringify(entry.message));
-		expect(rereadTexts).toEqual([expect.stringContaining("seed"), expect.stringContaining("post-revive")]);
+		expect(rereadTexts).toEqual([
+			expect.stringContaining("seed"),
+			expect.stringContaining("completed before disposal"),
+			expect.stringContaining("post-revive"),
+		]);
 		const rereadSerialized = JSON.stringify(reread.getEntries());
-		expect(rereadSerialized).not.toContain("late persist");
 		expect(rereadSerialized).not.toContain("late-title");
 		expect(rereadSerialized).not.toContain("late-custom");
 		expect(lateTitleAccepted).toBe(false);

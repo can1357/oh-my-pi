@@ -14,8 +14,8 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
-	formatModelSelectorValue,
 	formatModelStringWithRouting,
 	resolveAgentAdvisorSelection,
 	resolveAgentPrewalkPattern,
@@ -58,13 +58,18 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
-import { truncateTail } from "../session/streaming-output";
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
+import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import {
+	type ConfiguredThinkingLevel,
+	prewalkWouldBeNoop,
+	resolveTaskEffortLevel,
+	type TaskEffort,
+} from "@oh-my-pi/pi-tui/thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
-import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
-import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
+import { LIST_STATUS_ORDER } from "@oh-my-pi/pi-tui/tools/hub";
+import { DEFAULT_HUB_LIST_LIMIT } from "@oh-my-pi/pi-tui/tools/hub";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -82,22 +87,25 @@ import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
-	type AgentProgress,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
+	TASK_SUBAGENT_EVENT_CHANNEL,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+	TASK_SUBAGENT_PROGRESS_CHANNEL,
+} from "./types";
+import {
+	type AgentProgress,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
 	type StructuredSubagentSchemaSource,
-	TASK_SUBAGENT_EVENT_CHANNEL,
-	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
-	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	type TaskToolDetails,
 	type YieldItem,
-} from "./types";
-import { arrayValuedLabels, assembleYieldResult } from "./yield-assembly";
+} from "@oh-my-pi/pi-tui/tools/task";
+import { arrayValuedLabels } from "./yield-assembly";
+import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 
-export type { YieldItem } from "./types";
+export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
@@ -1061,6 +1069,13 @@ interface SubagentRunMonitor {
 	readonly accumulatedUsage: Usage;
 	hasUsage(): boolean;
 	yieldCalled(): boolean;
+	/**
+	 * Latch or clear the reminder ladder's forced final `yield`. While set, the
+	 * next accepted `yield` is terminal even when it carries incremental
+	 * section labels, so a model pinned to `yield` by `toolChoice` cannot
+	 * satisfy the pin forever without ending the run.
+	 */
+	markFinalYieldForced(forced: boolean): void;
 	/** Epoch ms when the run's terminal `yield` was recorded; undefined while none is latched. */
 	yieldAcceptedAt(): number | undefined;
 	runtimeLimitExceeded(): boolean;
@@ -1176,6 +1191,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	let activeSession: AgentSession | null = null;
 	let yieldCalled = false;
 	let yieldCallPending = false;
+	/**
+	 * A `yield` awaiting validation suppresses the soft-budget check for its
+	 * own turn (#5006). The check is deferred, not dropped: every turn that
+	 * carries a yield latches {@link yieldCallPending}, so dropping it lets a
+	 * run of yield-only turns bypass the budget entirely.
+	 */
+	let budgetCheckDeferred = false;
+	/** True while the reminder ladder's forced final `yield` is outstanding. */
+	let finalYieldForced = false;
 	let yieldInvalidatedByAsync = false;
 	/** Epoch ms the current terminal yield was recorded; cleared when it is invalidated. */
 	let yieldAcceptedAt: number | undefined;
@@ -1513,13 +1537,55 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		if (toolName === "yield") {
 			const item = isRecord(data) ? data : undefined;
 			const incremental = Array.isArray(item?.type) && item.type.length > 0;
-			yieldCalled = !incremental || item?.complete === true || item?.status === "aborted";
+			// A forced final yield ends the run. Once the reminder ladder has
+			// pinned `toolChoice` to `yield`, an incremental section satisfies
+			// the pin without terminating the run, so re-prompting loops
+			// forever: take the section as the final report it was asked for.
+			yieldCalled = !incremental || finalYieldForced || item?.complete === true || item?.status === "aborted";
 			yieldCallPending = false;
 			if (yieldCalled) {
 				yieldInvalidatedByAsync = false;
 				yieldAcceptedAt = Date.now();
 			}
 		}
+	};
+
+	/**
+	 * Soft request budget: steer at the budget, stop the free-running turn at
+	 * 1.5x, and hard-abort {@link BUDGET_STOP_GRACE_REQUESTS} requests later if
+	 * the forced final yield never lands.
+	 */
+	const evaluateSoftRequestBudget = () => {
+		if (softRequestBudget <= 0 || abortSent) return;
+		const stopThreshold = softRequestBudget * 1.5;
+		if (budgetStopRequested) {
+			// Grace window after the stop: the forced yield needs a request or
+			// two; a child that keeps burning requests instead of yielding is
+			// hard-aborted.
+			if (progress.requests >= stopThreshold + BUDGET_STOP_GRACE_REQUESTS) {
+				requestAbort("budget");
+			}
+			return;
+		}
+		if (progress.requests >= stopThreshold) {
+			requestBudgetStop();
+			return;
+		}
+		if (!softRequestBudgetNotice || budgetSteerSent || progress.requests < softRequestBudget) return;
+		budgetSteerSent = true;
+		const steerSession = activeSession;
+		if (!steerSession) return;
+		// Build the notice now (the count at crossing time), but send behind an
+		// async boundary: a synchronously-throwing send must never take down
+		// event processing (which escalates to terminate).
+		const notice = buildBudgetNotice(progress.requests, softRequestBudget);
+		void Promise.resolve()
+			.then(() => steerSession.sendUserMessage(notice, { deliverAs: "steer", attribution: "agent" }))
+			.catch(err => {
+				logger.warn("Subagent budget steer failed", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			});
 	};
 
 	const processEvent = (event: AgentEvent) => {
@@ -1614,18 +1680,28 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 
 					if (event.toolName === "yield") {
 						yieldCallPending = false;
+						if (budgetCheckDeferred) {
+							budgetCheckDeferred = false;
+							// The yield validated without ending the run: the turn
+							// that submitted it still counts against the budget.
+							if (!yieldCalled) evaluateSoftRequestBudget();
+						}
 					}
 
-					// Check if handler wants to terminate the session
-					if (
+					// Check if the handler wants to terminate the session. A forced
+					// final yield terminates too: it was accepted as terminal above,
+					// and leaving the turn running would let the pinned model answer
+					// with another incremental section instead of finishing.
+					const wantsTerminate =
 						handler.shouldTerminate?.({
 							toolName: event.toolName,
 							toolCallId: event.toolCallId,
 							args: eventArgs,
 							result: event.result,
 							isError: event.isError,
-						})
-					) {
+						}) === true;
+					const forcedFinalYield = event.toolName === "yield" && finalYieldForced && yieldCalled;
+					if (wantsTerminate || forcedFinalYield) {
 						if (event.toolName === "yield" && sessionHasPendingAsyncWork()) {
 							// Terminal yield with owner jobs still pending: park the
 							// run behind the quiescence barrier instead of completing
@@ -1748,37 +1824,12 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						if (startedMoreWork) lastReportTurnText = undefined;
 						else if (text.trim()) lastReportTurnText = text;
 					}
-					if (softRequestBudget > 0 && !abortSent && !yieldCallPending) {
-						const stopThreshold = softRequestBudget * 1.5;
-						if (budgetStopRequested) {
-							// Grace window after the stop: the forced yield needs a
-							// request or two; a child that keeps burning requests
-							// instead of yielding is hard-aborted.
-							if (progress.requests >= stopThreshold + BUDGET_STOP_GRACE_REQUESTS) {
-								requestAbort("budget");
-							}
-						} else if (progress.requests >= stopThreshold) {
-							requestBudgetStop();
-						} else if (softRequestBudgetNotice && !budgetSteerSent && progress.requests >= softRequestBudget) {
-							budgetSteerSent = true;
-							const steerSession = activeSession;
-							if (steerSession) {
-								// Build the notice now (the count at crossing time), but send
-								// behind an async boundary: a synchronously-throwing send must
-								// never take down event processing (which escalates to terminate).
-								const notice = buildBudgetNotice(progress.requests, softRequestBudget);
-								void Promise.resolve()
-									.then(() =>
-										steerSession.sendUserMessage(notice, { deliverAs: "steer", attribution: "agent" }),
-									)
-									.catch(err => {
-										logger.warn("Subagent budget steer failed", {
-											error: err instanceof Error ? err.message : String(err),
-										});
-									});
-							}
-						}
-					}
+					// A yield awaiting validation suppresses the budget check for
+					// its own turn (#5006). Defer it rather than drop it: every
+					// yield turn latches the pending flag, so dropping the check
+					// lets a run of yield-only turns never account for a request.
+					if (yieldCallPending) budgetCheckDeferred = true;
+					else evaluateSoftRequestBudget();
 				}
 				// Extract and accumulate usage (prefer message.usage, fallback to event.usage)
 				const eventUsage = isRecord(event) && "usage" in event ? event.usage : undefined;
@@ -1945,6 +1996,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		accumulatedUsage,
 		hasUsage: () => hasUsage,
 		yieldCalled: () => yieldCalled,
+		markFinalYieldForced: (forced: boolean) => {
+			finalYieldForced = forced;
+		},
 		yieldAcceptedAt: () => yieldAcceptedAt,
 		runtimeLimitExceeded: () => runtimeLimitExceeded,
 		terminalError: () => terminalError,
@@ -2112,6 +2166,7 @@ async function driveSessionToYield(
 
 		const runYieldLadder = async (): Promise<void> => {
 			let retryCount = 0;
+			let retriesForced = false;
 			while (!monitor.yieldCalled() && retryCount < MAX_YIELD_RETRIES && !abortSignal.aborted) {
 				// A budget stop collapses the reminder ladder to a single forced
 				// final yield: wait for the stop's session abort to settle, then
@@ -2137,6 +2192,12 @@ async function driveSessionToYield(
 					});
 
 					const isFinalRetry = retryCount >= MAX_YIELD_RETRIES;
+					// Last chance: the next accepted yield ends the run, incremental
+					// or not, so the pinned model cannot answer the pin forever.
+					// Armed for this prompt's turn only — the quiescence barrier's
+					// later notice turn may legitimately submit more sections.
+					retriesForced = isFinalRetry;
+					if (retriesForced) monitor.markFinalYieldForced(true);
 					await awaitAbortable(
 						session.prompt(reminder, {
 							attribution: "agent",
@@ -2156,6 +2217,11 @@ async function driveSessionToYield(
 						logger.error("Subagent prompt failed", {
 							error: err instanceof Error ? err.message : String(err),
 						});
+					}
+				} finally {
+					if (retriesForced) {
+						retriesForced = false;
+						monitor.markFinalYieldForced(false);
 					}
 				}
 			}

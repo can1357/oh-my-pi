@@ -1,6 +1,30 @@
 // Provider-wire compat for "llama.cpp".
 
 provider "llama.cpp" {
+	supports-store #false
+	supports-developer-role #false
+	supports-reasoning-effort #false
 	// Replaces the string-only named-tool-choice provider table.
 	supports-named-tool-choice #false
+
+	class "qwen" {
+		// Responses cannot encode the template's thinking controls.
+		discovery-api "openai-completions"
+		// llama-server exposes the model's bundled chat template. Qwen templates
+		// preserve prior reasoning and accept the chat-template thinking controls.
+		thinking-upgrade-neutral #true
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high" "max"
+		supports-reasoning-params #true
+		thinking-format "qwen-chat-template"
+		reasoning-disable-mode "qwen-template-false"
+		qwen-preserve-thinking #true
+
+		revision ">=3.8" {
+			supports-reasoning-effort #true
+			template-reasoning-effort #true
+			thinking-efforts "low" "medium" "xhigh"
+			thinking-requires-effort #true
+		}
+	}
 }

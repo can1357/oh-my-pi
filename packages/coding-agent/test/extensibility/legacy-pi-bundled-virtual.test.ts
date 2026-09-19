@@ -8,15 +8,15 @@ describe("bundled extension modules", () => {
 		await Bun.write(
 			entry,
 			[
-				'import { theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";',
+				'import { theme } from "@oh-my-pi/pi-tui/theme";',
 				'import format, { double } from "@oh-my-pi/pi-utils/virtual-fixture";',
 				"export { theme };",
 				'export function render() { return theme.fg("accent", "extension"); }',
 				"export function describe(value) { return format(double(value)); }",
 			].join("\n"),
 		);
-		const themePath = import.meta.resolve("../../src/modes/theme/theme.ts");
-		const loaderPath = import.meta.resolve("../../src/modes/theme/loader.ts");
+		const themePath = import.meta.resolve("../../../tui/src/theme/theme.ts");
+		const loaderPath = import.meta.resolve("../../../tui/src/theme/loader.ts");
 		const compatPath = import.meta.resolve("../../src/extensibility/plugins/legacy-pi-compat.ts");
 		const result = await ptree.exec(
 			[
@@ -33,7 +33,7 @@ Bun.plugin({
 			loader: "object",
 			exports: {
 				BUNDLED_PI_MODULE_LOADERS: {
-					"@oh-my-pi/pi-coding-agent/modes/theme/theme": async () => host,
+					"@oh-my-pi/pi-tui/theme": async () => host,
 					"@oh-my-pi/pi-utils/virtual-fixture": async () => ({
 						default: value => "value=" + value,
 						double: value => value * 2,

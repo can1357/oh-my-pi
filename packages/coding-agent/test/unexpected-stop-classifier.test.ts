@@ -5,8 +5,8 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	classifyUnexpectedStop,
 	isUnexpectedStopCandidate,
-	parseUnexpectedStopClassification,
 } from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
+import { asGlobalFetch } from "./helpers/fetch-mock";
 
 function makeAssistantMessage(options: {
 	stopReason: AssistantMessage["stopReason"];
@@ -120,6 +120,7 @@ describe("classifyUnexpectedStop", () => {
 			},
 		} as never;
 		const registry = {
+			authStorage: { hasAuth: () => false },
 			getAvailable: () => [model],
 			getApiKey: async () => "test-key",
 			resolver: () => async () => "test-key",
@@ -146,24 +147,64 @@ describe("classifyUnexpectedStop", () => {
 		expect(options?.maxTokens).toBe(4096);
 		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
-});
 
-describe("parseUnexpectedStopClassification", () => {
-	it("returns true for YES output", () => {
-		expect(parseUnexpectedStopClassification("YES")).toBe(true);
-		expect(parseUnexpectedStopClassification("yes")).toBe(true);
-		expect(parseUnexpectedStopClassification("  Yes, this is unexpected  ")).toBe(true);
+	it("routes to TypeSafe when a credential exists and thresholds the yes-probability", async () => {
+		const settings = {
+			get(path: string) {
+				if (path === "providers.unexpectedStopModel") return "online";
+				return undefined;
+			},
+			getModelRole() {
+				return undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const registry = {
+			authStorage: { hasAuth: (provider: string) => provider === "typesafe", resolver: () => "ts-key" },
+			getAvailable: () => [],
+		} as never;
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				const body = JSON.parse(String(init?.body)) as { questions: Record<string, { type: string }> };
+				expect(body.questions.stopped.type).toBe("noul");
+				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer ts-key");
+				return Response.json({
+					model: "jev-latest",
+					answers: { stopped: { type: "noul", noul: 0.31 } },
+					usage: { input_tokens: 10, output_tokens: 1 },
+				});
+			}),
+		);
+
+		const result = await classifyUnexpectedStop("Let me run the tests next.", {
+			settings,
+			registry,
+			sessionId: "session-1",
+		});
+
+		expect(result).toBe(false);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
 
-	it("returns false for NO output", () => {
-		expect(parseUnexpectedStopClassification("NO")).toBe(false);
-		expect(parseUnexpectedStopClassification("no")).toBe(false);
-		expect(parseUnexpectedStopClassification("No, the task is complete.")).toBe(false);
-	});
+	it("returns undefined instead of throwing when every judge fails", async () => {
+		const settings = {
+			get(path: string) {
+				if (path === "providers.unexpectedStopModel") return "online";
+				return undefined;
+			},
+			getModelRole() {
+				return undefined;
+			},
+			getStorage() {
+				return undefined;
+			},
+		} as never;
+		const registry = { authStorage: { hasAuth: () => false }, getAvailable: () => [] } as never;
 
-	it("returns undefined for unparseable output", () => {
-		expect(parseUnexpectedStopClassification("maybe")).toBeUndefined();
-		expect(parseUnexpectedStopClassification("")).toBeUndefined();
-		expect(parseUnexpectedStopClassification("I don't know")).toBeUndefined();
+		expect(await classifyUnexpectedStop("Doing that now.", { settings, registry, sessionId: "s" })).toBeUndefined();
 	});
 });

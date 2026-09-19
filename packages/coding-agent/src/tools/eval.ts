@@ -7,13 +7,10 @@ import type {
 	ToolSpeculationPolicy,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
+import { formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { prompt } from "@oh-my-pi/pi-utils";
-import {
-	DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
-	formatBackgroundNotice,
-	raceJobSettlement,
-	resolveAutoBackgroundWaitMs,
-} from "../async";
+import { DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS, raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
 import { jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
@@ -23,7 +20,7 @@ import type { BackendProbeOptions } from "../eval/probe";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { EvalShadowCellSession } from "../eval/speculation/cell-session";
 import { runWithEvalShadowCell } from "../eval/speculation/runtime-context";
-import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "../eval/types";
+import type { EvalCellResult, EvalLanguage, EvalStatusEvent, EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
 import evalDescription from "../prompts/tools/eval.md" with { type: "text" };
 import evalCodeModeDescription from "../prompts/tools/eval-code-mode.md" with { type: "text" };
 import {
@@ -32,23 +29,23 @@ import {
 	type OutputSummary,
 	TailBuffer,
 	truncateHeadBytes,
-} from "../session/streaming-output";
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isIsolationAvailable, resolveSpawnPolicy } from "../task/spawn-policy";
 import { canSpawnAtDepth } from "../task/types";
-import { webpExclusionForModel } from "../utils/image-loading";
+import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends";
-import { generateCodeModeDeclarations } from "./eval-format/code-mode-declarations";
-import { upsertStatusEvent } from "./eval-render";
-import { formatOutputNotice, resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
-import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
+import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
+import { upsertStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
+import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
-
-export { EVAL_DEFAULT_PREVIEW_LINES, evalToolRenderer } from "./eval-render";
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
@@ -871,7 +868,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 								return;
 							}
 							cellResult.statusEvents ??= [];
-							upsertStatusEvent(cellResult.statusEvents, event);
+							upsertStatusEvent(cellResult.statusEvents, {
+								...event,
+								resolvedThinkingLevel: parseConfiguredThinkingLevel(
+									typeof event.resolvedThinkingLevel === "string" ? event.resolvedThinkingLevel : undefined,
+								),
+							});
 							pushUpdate();
 						},
 					});
@@ -920,8 +922,16 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						}
 					}
 					if (output.type === "status") {
-						upsertStatusEvent(statusEvents, output.event);
-						upsertStatusEvent(cellStatusEvents, output.event);
+						const event: EvalStatusEvent = {
+							...output.event,
+							resolvedThinkingLevel: parseConfiguredThinkingLevel(
+								typeof output.event.resolvedThinkingLevel === "string"
+									? output.event.resolvedThinkingLevel
+									: undefined,
+							),
+						};
+						upsertStatusEvent(statusEvents, event);
+						upsertStatusEvent(cellStatusEvents, event);
 					}
 					if (output.type === "markdown") {
 						cellHasMarkdown = true;

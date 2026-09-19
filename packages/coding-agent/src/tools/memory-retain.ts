@@ -1,3 +1,4 @@
+import type { MemoryRetainDetails } from "@oh-my-pi/pi-tui/tools/memory";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isHindsightConfigured, loadHindsightConfig } from "../hindsight/config";
@@ -15,7 +16,7 @@ const memoryRetainSchema = type({
 });
 
 export type MemoryRetainParams = typeof memoryRetainSchema.infer;
-export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
+export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema, MemoryRetainDetails> {
 	readonly name = "retain";
 	readonly approval = "read" as const;
 	readonly label = "Retain";
@@ -34,7 +35,7 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
 		return new MemoryRetainTool(session);
 	}
 
-	async execute(_id: string, params: MemoryRetainParams): Promise<AgentToolResult> {
+	async execute(_id: string, params: MemoryRetainParams): Promise<AgentToolResult<MemoryRetainDetails>> {
 		const backend = this.session.settings.get("memory.backend");
 		if (backend === "mnemopi") {
 			const state = this.session.getMnemopiSessionState?.();

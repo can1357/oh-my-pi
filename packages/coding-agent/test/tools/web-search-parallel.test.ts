@@ -147,12 +147,10 @@ describe("Parallel web search", () => {
 		]);
 	});
 
-	it("keeps credential-free Parallel out of the auto chain while allowing explicit selection", () => {
+	it("admits credential-free Parallel to the automatic chain", () => {
 		delete process.env.PARALLEL_API_KEY;
-		const provider = new ParallelProvider();
 
-		expect(provider.isAvailable(fakeAuthStorage)).toBe(false);
-		expect(provider.isExplicitlyAvailable(fakeAuthStorage)).toBe(true);
+		expect(new ParallelProvider().isAvailable(fakeAuthStorage)).toBe(true);
 	});
 
 	it("uses anonymous MCP and maps structured results when Parallel has no credential", async () => {
