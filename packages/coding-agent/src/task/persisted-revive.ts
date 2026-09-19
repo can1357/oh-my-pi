@@ -10,6 +10,7 @@ import { initializeExtensions } from "../modes/runtime-init";
 import type { PersistedSubagentReviverFactory } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
+import { loadSessionFile } from "../session/session-loader";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
@@ -98,7 +99,14 @@ export function createPersistedSubagentReviverFactory(
 				suppressBreadcrumb: true,
 				throwIfMissing: true,
 			});
-			const entries = reopened.getEntries();
+			// Validate the contract from storage, not the reopened manager's
+			// entries: `open` may be intercepted (capability-shimmed managers in
+			// embedders, test doubles) while the transcript on disk remains the
+			// source of truth for what may be revived. Re-reading also rebuilds
+			// from a file rewritten after the factory's peek rather than a stale
+			// capture, and keeps `open` purely the writer/lock handle.
+			const loaded = await loadSessionFile(sessionFile);
+			const entries = loaded.entries;
 			const init = extractSessionInit(entries);
 			if (!init) {
 				await reopened.close();
@@ -206,7 +214,6 @@ export function createPersistedSubagentReviverFactory(
 								enableIrc: false,
 								enableMCP: false,
 								preloadedExtensionPaths: [],
-								preloadedPreparedExtensions: [],
 								preloadedCustomToolPaths: [],
 							}
 						: {

@@ -225,7 +225,7 @@ import {
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { TRUNCATE_LENGTHS } from "../tools/render-utils";
+import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,

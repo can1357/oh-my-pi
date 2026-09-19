@@ -227,6 +227,21 @@ export function getTodoHudVisibility(
 	const snapshot = getLatestTodoSnapshotIdentity(entries);
 	if (!snapshot || snapshot.fingerprint !== todoPhasesFingerprint(phases)) return undefined;
 
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i];
+		if (entry.type !== "custom" || entry.customType !== TODO_HUD_STATE_CUSTOM_TYPE) continue;
+		const data = entry.data as Partial<TodoHudStateEntryData> | undefined;
+		if (
+			data?.sourceEntryId === snapshot.sourceEntryId &&
+			data.fingerprint === snapshot.fingerprint &&
+			(data.visibility === "dismissed" || data.visibility === "revealed")
+		) {
+			return data.visibility;
+		}
+	}
+	return undefined;
+}
+
 /**
  * Structural equality for todo phase lists. Key order in recorded tool
  * results follows the model's tool-call JSON, not our object literals, so
@@ -249,20 +264,6 @@ export function todoPhasesEqual(a: TodoPhase[], b: TodoPhase[]): boolean {
 			});
 		})
 	);
-}
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		if (entry.type !== "custom" || entry.customType !== TODO_HUD_STATE_CUSTOM_TYPE) continue;
-		const data = entry.data as Partial<TodoHudStateEntryData> | undefined;
-		if (
-			data?.sourceEntryId === snapshot.sourceEntryId &&
-			data.fingerprint === snapshot.fingerprint &&
-			(data.visibility === "dismissed" || data.visibility === "revealed")
-		) {
-			return data.visibility;
-		}
-	}
-	return undefined;
 }
 
 /** Build persisted HUD metadata only for phases matching the latest durable canonical snapshot. */
