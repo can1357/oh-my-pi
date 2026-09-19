@@ -1,0 +1,5 @@
+[test]
+# Isolate the agent directory resolver for every test in this package so no
+# suite can read or pollute the real ~/.omp/agent. See
+# test/preload-agent-dir-isolation.ts.
+preload = ["./test/preload-agent-dir-isolation.ts"]
