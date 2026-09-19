@@ -4,6 +4,7 @@ import {
 	getImageDimensions,
 	type ImageDimensions,
 	imageFallback,
+	ImageProtocol,
 	renderImage,
 	TERMINAL,
 } from "../terminal-capabilities";
@@ -774,7 +775,9 @@ export class Image implements Component {
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
-			(this.#imageId == null || this.#budget?.shouldTransmit(this.#imageId) !== true)
+			(imageProtocol !== ImageProtocol.Kitty ||
+				this.#imageId == null ||
+				this.#budget?.shouldTransmit(this.#imageId) !== true)
 		) {
 			return this.#cachedLines;
 		}
