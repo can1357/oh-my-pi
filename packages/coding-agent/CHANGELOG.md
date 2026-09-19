@@ -103,7 +103,7 @@
 ## [18.2.6] - 2026-09-18
 ### Added
 
-- Supported invoking multiple skills in a single prompt submission (`/skill:foo /skill:bar`).
+- Supported invoking multiple skills in a single prompt submission (`/skill:foo /skill:bar`) ([#12535](https://github.com/can1357/oh-my-pi/pull/12535) by [@aleister1102](https://github.com/aleister1102)).
 
 ### Fixed
 
