@@ -62,6 +62,8 @@
 
 ### Changed
 
+- The difficulty, unexpected-stop, and AI-staging classifiers share one judgment interface; without TypeSafe, or when a TypeSafe request fails, they fall back through the `tiny`, `smol`, `default`, and active-session models. Agent-tuned small models receive guarded JSON state so they classify requests instead of emitting tool calls. AI staging now asks one yes/no question per file in a single batched request instead of echoing paths.
+- A subagent with an output schema no longer loses its result to repeated invalid yields. `yield` accepts the full output object, or one object-typed section per incremental call; a scalar-valued or whole-list section value now travels inside the terminal object ([#12337](https://github.com/can1357/oh-my-pi/pull/12337) by [@Aerma7309](https://github.com/Aerma7309)).
 - Unified thinking-level detection, unexpected-stop detection, and AI-assisted staging around a shared judgment system with automatic fallback across configured models when TypeSafe is unavailable or cannot complete a request. AI-assisted staging now evaluates files as a single batched judgment while preserving one yes/no decision per file.
 
 ## [18.2.3] - 2026-09-17

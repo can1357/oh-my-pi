@@ -1095,15 +1095,15 @@ describe("YieldTool", () => {
 				arguments: { type: ["findings"], data: { title: "t", body: "b", priority: 1 } },
 			}),
 		).toBeDefined();
-		// A lone verdict value must validate too.
-		expect(
+		// A lone scalar section value is rejected; `withSectionVariants` owns why.
+		expect(() =>
 			validateToolArguments(toolDefinition, {
 				type: "toolCall",
 				id: "call-verdict",
 				name: tool.name,
 				arguments: { type: ["overall_correctness"], data: "incorrect" },
 			}),
-		).toBeDefined();
+		).toThrow("expected object, received string");
 		// The full terminal output still validates.
 		expect(
 			validateToolArguments(toolDefinition, {
@@ -1123,6 +1123,69 @@ describe("YieldTool", () => {
 		for (const combinator of ["allOf", "anyOf", "oneOf", "enum", "const", "not"]) {
 			expect(converted.parameters[combinator]).toBeUndefined();
 		}
+	});
+
+	it("keeps non-object section branches out of a JSON-Schema-dialect data union", () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					additionalProperties: false,
+					required: ["summary", "findings"],
+					properties: {
+						summary: { type: "string" },
+						tags: { type: "array", items: { type: "string" } },
+						findings: {
+							type: "array",
+							items: {
+								type: "object",
+								additionalProperties: false,
+								required: ["title"],
+								properties: { title: { type: "string" } },
+							},
+						},
+						owner: {
+							anyOf: [{ type: "string" }, { type: "object", properties: { id: { type: "string" } } }],
+						},
+					},
+				},
+			}),
+		);
+		const branches = getDataSchema(tool.parameters as unknown as Record<string, unknown>).anyOf;
+		if (!Array.isArray(branches)) throw new Error("expected a section-variant union");
+
+		// The scalar `summary`, the array-of-scalar `tags`, and the mixed-variant
+		// `owner` union are all excluded; only the terminal object and the
+		// object-typed `findings` element survive. The length and `toStrictEqual`
+		// are load-bearing: `toEqual` ignores an `undefined` entry, so an extra
+		// untyped branch would compare equal to this list.
+		expect(branches).toHaveLength(2);
+		expect(branches.map(branch => toRecord(branch).type)).toStrictEqual(["object", "object"]);
+		expect(toRecord(branches[0]).required).toEqual(["summary", "findings"]);
+		expect(toRecord(branches[1]).required).toEqual(["title"]);
+
+		const toolDefinition: Tool = {
+			name: tool.name,
+			description: tool.description,
+			parameters: tool.parameters,
+			strict: tool.strict,
+		};
+		expect(() =>
+			validateToolArguments(toolDefinition, {
+				type: "toolCall",
+				id: "call-owner-string",
+				name: tool.name,
+				arguments: { type: ["owner"], data: "a-bare-name" },
+			}),
+		).toThrow("expected object, received string");
+		expect(
+			validateToolArguments(toolDefinition, {
+				type: "toolCall",
+				id: "call-one-finding",
+				name: tool.name,
+				arguments: { type: ["findings"], data: { title: "t" } },
+			}),
+		).toBeDefined();
 	});
 	it("supports $defs/$ref output schemas by inlining definitions and degrades after first runtime failure", async () => {
 		const outputSchema = {
