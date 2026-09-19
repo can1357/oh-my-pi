@@ -259,6 +259,35 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
+         # One clear failure instead of N scattered `X is not a function`
+         # TypeErrors in downstream shards when the release addon predates an
+         # export the checkout consumes (the 18.2.0 hashline window). Loader
+         # sentinels are excluded: they move every release and loadNative()
+         # resolves the addon's own sentinel.
+         #
+         # Only PRs that change the export surface itself: the diff is main's
+         # state, not this PR's, so during a main-ahead-of-release window an
+         # unconditional gate would red every unrelated PR, including the
+         # release-prep PRs that could close the window. index.js is the
+         # surface the checker parses; d.ts is its committed counterpart.
+         # Files captured via command substitution, not a `grep -q` pipe:
+         # under pipefail a SIGPIPE'd diff would look like "no natives
+         # changed" and skip the gate.
+         - name: Fail fast on exports missing from the release addon
+           if: github.event_name == 'pull_request'
+           shell: bash
+           run: |
+              set -euo pipefail
+              base="${{ github.event.pull_request.base.sha }}"
+              git fetch -q --depth=1 origin "$base"
+              changed="$(git diff --name-only FETCH_HEAD HEAD -- packages/natives/native/index.js packages/natives/native/index.d.ts)"
+              if [ -z "$changed" ]; then
+                 echo "native export surface untouched by this PR; export check only gates surface changes"
+                 exit 0
+              fi
+              node scripts/check-native-exports.mjs \
+                bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node \
+                bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node
          # Make the policy visible on the rare native-touching PR instead of
          # leaving a reviewer to wonder which addons the tests exercised.
          # Best-effort: a diff-API failure must not fail the job over a notice.
