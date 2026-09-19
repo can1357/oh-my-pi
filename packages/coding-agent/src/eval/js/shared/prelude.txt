@@ -117,6 +117,11 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		error.name = "TimeoutError";
 		return error;
 	};
+	const waitOptions = (name, value) => {
+		if (isNil(value)) return {};
+		if (isPlainObject(value)) return value;
+		throw new TypeError(`${name}() expects an options object: { timeout?: number }`);
+	};
 
 	class EvalHandle {
 		constructor(kind, id, schema) {
@@ -137,7 +142,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			return (await this.status()) !== "running";
 		}
 
-		async wait({ timeout } = {}) {
+		async wait(options) {
+			const { timeout } = waitOptions(`${this.constructor.name}.wait`, options);
 			if (this._result !== HANDLE_UNSET) return this._result;
 			return (await wait([this], { timeout }))[0];
 		}
@@ -248,7 +254,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return value;
 	};
 
-	const wait = async (handles, { timeout, raiseErrors = true } = {}) => {
+	const wait = async (handles, options) => {
+		const { timeout, raiseErrors = true } = waitOptions("wait", options);
 		const isHandleLike = value => value instanceof EvalHandle || value instanceof PendingHandle;
 		const raw = isHandleLike(handles) ? [handles] : Array.from(handles ?? []);
 		const items = await Promise.all(raw);

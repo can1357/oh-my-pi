@@ -97,6 +97,66 @@ describe("eval js agent() handle", () => {
 	});
 });
 
+describe("eval js handle.wait() timeout options", () => {
+	// Regression for #12549: JS destructuring boxes a positional number into a
+	// Number object, so `{ timeout }` is undefined and the wait has no deadline.
+	type WaitHandle = { wait(options?: unknown): Promise<unknown> };
+
+	it("forwards { timeout } in seconds as timeoutMs", async () => {
+		let waitArgs: Record<string, unknown> | undefined;
+		const sandbox = loadPrelude(async (name, args) => {
+			if (name === "__agent__") return { id: "w-1", agent: "task" };
+			if (name === "__wait__") {
+				waitArgs = args as Record<string, unknown>;
+				return { items: [{ status: "completed", text: "ok" }] };
+			}
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const handle = (await (sandbox.agent as AgentHelper)("go")) as WaitHandle;
+
+		expect(await handle.wait({ timeout: 2 })).toBe("ok");
+		expect(waitArgs).toEqual({
+			items: [{ kind: "agent", id: "w-1" }],
+			timeoutMs: 2000,
+		});
+	});
+
+	it("rejects a positional number instead of silently dropping the timeout", async () => {
+		let waited = false;
+		const sandbox = loadPrelude(async name => {
+			if (name === "__agent__") return { id: "w-2", agent: "task" };
+			if (name === "__wait__") {
+				waited = true;
+				return { items: [{ status: "completed", text: "ok" }] };
+			}
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const handle = (await (sandbox.agent as AgentHelper)("go")) as WaitHandle;
+
+		await expect(handle.wait(3_600_000)).rejects.toThrow(
+			"AgentHandle.wait() expects an options object: { timeout?: number }",
+		);
+		expect(waited).toBe(false);
+	});
+
+	it("rejects a positional timeout on wait(handles, number)", async () => {
+		let waited = false;
+		const sandbox = loadPrelude(async name => {
+			if (name === "__agent__") return { id: "w-3", agent: "task" };
+			if (name === "__wait__") {
+				waited = true;
+				return { items: [{ status: "completed", text: "ok" }] };
+			}
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const handle = await (sandbox.agent as AgentHelper)("go");
+		const waitAll = sandbox.wait as (handles: unknown, options?: unknown) => Promise<unknown[]>;
+
+		await expect(waitAll(handle, 2)).rejects.toThrow("wait() expects an options object: { timeout?: number }");
+		expect(waited).toBe(false);
+	});
+});
+
 describe("eval js immediate-handle contract", () => {
 	// Regression for #10986: the JS factories return immediately, so the
 	// documented pattern `const h = completion(...); await h.wait()` must work
