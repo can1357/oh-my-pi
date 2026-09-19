@@ -2388,6 +2388,9 @@ function b() {
 			expect(result.details?.timeoutSeconds).toBe(300);
 			expect(result.details?.async).toBeUndefined();
 			await asyncJobManager.drainDeliveries({ timeoutMs: 1 });
+			const [job] = asyncJobManager.getAllJobs();
+			await job?.promise;
+			expect(job && asyncJobManager.isJobResultConsumed(job.id)).toBe(true);
 			expect(deliveries).toEqual([]);
 			await asyncJobManager.dispose();
 		});

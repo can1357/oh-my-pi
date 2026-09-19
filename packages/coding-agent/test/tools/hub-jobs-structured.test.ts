@@ -110,7 +110,14 @@ describe("hub jobs structured output rendering", () => {
 			"Foo",
 		);
 		expect(jobId).not.toBe("Foo");
+		await manager.getJob(jobId)!.promise;
 		const tool = new HubTool(makeSession(manager));
+		const summary = await tool.execute("summary", { op: "jobs" });
+		const summaryText = summary.content[0]?.type === "text" ? summary.content[0].text : "";
+		expect(summaryText).toContain(`- \`${jobId}\` [task] — completed — Foo — delivery pending — agent://Foo`);
+		expect(summaryText).not.toContain("<task-result>done</task-result>");
+		if (!summary.details || !("jobs" in summary.details)) throw new Error("Expected job summary details");
+		expect(summary.details.jobs?.find(job => job.id === jobId)?.structured).toBeUndefined();
 
 		const result = await tool.execute("call_3", { op: "wait", ids: [jobId] });
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";

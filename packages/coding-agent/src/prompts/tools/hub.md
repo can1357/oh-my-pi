@@ -3,7 +3,7 @@ Use `op: "list"` to discover live peers. Default is running+idle plus running/id
 
 # Messaging & Jobs
 
-Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`/`wait` observes a settled job first, that snapshot is the delivery and suppresses duplicate `async-result`.
+Background jobs auto-deliver when they finish. You NEVER need to poll. `jobs` is a non-consuming summary; `wait` observing a settled job first delivers its result and suppresses duplicate `async-result`.
 
 - **The user is NOT a peer.** `Main` answers the user ONLY in a plain text block; a `send` shows them a tool-card preview (2 lines while collapsed). Thinking is not output either.
 - **`send`** (with `to`): fire-and-forget, NEVER blocks. Delivery receipts (`delivered`/`failed`) immediate; `failed` → peer gone, don't retry.
@@ -14,7 +14,7 @@ Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`
   - A **user** message arriving as steering is not a wake reason to poll past: answer it in a text block BEFORE re-issuing `wait`. Parent/peer steering is answered with `send`; advisor and budget steers need no reply.
 - **`inbox`**: drain queued messages without blocking.
 - **`cancel`**: kill background jobs by `ids` when they have hung, stalled, or are no longer needed. Returns immediately.
-- **`jobs`**: status snapshot of every job without waiting. A settled row consumes auto-delivery. Also names running subagents with no job entry — coordinate with those via `send`.
+- **`jobs`**: non-consuming status summary of every job. Use `wait` with an id to recover a settled result before auto-delivery. Also names running subagents with no job entry — coordinate with those via `send`.
 - Job rows are process-local. A row whose result was delivered or recovered by a snapshot expires shortly (~30s) after; unconsumed rows stay inspectable for up to five minutes after settlement. Afterward, use the agent ID with `send`, `agent://<id>`, or `history://<id>`.
 - `completed` means successful yield/job exit, not artifact acceptance. Verify claimed changes.
 - NEVER use shell tools, grep, or read other sessions' files to figure out what a peer is doing. Message them directly.
