@@ -244,6 +244,8 @@ interface OutputRegistration {
 	startedAt: number;
 	/** Daemon incarnation this monitor accepted; never rebound by process name. */
 	daemonId?: string;
+	/** Identity of the initiating start, retained across speculative rollback. */
+	startId?: string;
 	/** Whether the broker must defer binding until a new start replaces the current record. */
 	binding: "start-pending" | "attached";
 	active: boolean;
@@ -264,6 +266,8 @@ interface OutputRegistration {
 	/** Switch the delivery mode in place and re-advertise it so `ps`/`describe` watcher rows stay accurate. */
 	retune: (delivery: AsyncJobProgressDelivery) => void;
 	acquirePendingStart?: (delivery: AsyncJobProgressDelivery) => OutputLease;
+	/** Restored pending lease adopted by the original in-flight start. */
+	restoredLease?: OutputLease;
 }
 
 const outputRegistrations = new WeakMap<ToolSession, Map<DaemonBrokerClient, Map<string, OutputRegistration>>>();
@@ -452,6 +456,7 @@ export async function registerOutputSink(
 	epoch: number,
 	daemonId?: string,
 	restoreOf?: OutputRegistration,
+	startId?: string,
 ): Promise<OutputLease | undefined> {
 	if (restoreOf && outputRegistrationGenerations.get(session)?.get(client)?.get(name) !== restoreOf.id)
 		return undefined;
@@ -459,13 +464,19 @@ export async function registerOutputSink(
 	if (
 		!captureLaunchProgressEpoch ||
 		!session.queueLaunchProgress ||
+		!session.discardLaunchProgress ||
 		!session.queueLaunchCompletion ||
 		!client.onOutput
 	) {
 		return undefined;
 	}
 	const existing = outputRegistrations.get(session)?.get(client)?.get(name);
-	if (existing?.epoch === epoch && existing.binding === "start-pending" && startPending) {
+	if (
+		existing?.epoch === epoch &&
+		existing.binding === "start-pending" &&
+		startPending &&
+		existing.startId === startId
+	) {
 		return existing.acquirePendingStart?.(delivery);
 	}
 	if (existing?.epoch === epoch && existing.active && !startPending && existing.daemonId === daemonId) {
@@ -547,7 +558,13 @@ export async function registerOutputSink(
 		return undefined;
 	}
 	const current = outputRegistrations.get(session)?.get(client)?.get(name);
-	if (current?.epoch === epoch && current.active && current.binding === "start-pending" && startPending) {
+	if (
+		current?.epoch === epoch &&
+		current.active &&
+		current.binding === "start-pending" &&
+		startPending &&
+		current.startId === startId
+	) {
 		operation.markInstalled();
 		return bindOperation(current.acquirePendingStart?.(delivery));
 	}
@@ -558,6 +575,8 @@ export async function registerOutputSink(
 				delivery: replaceable.delivery,
 				epoch: replaceable.epoch,
 				daemonId: replaceable.daemonId,
+				startPending: replaceable.binding === "start-pending",
+				startId: replaceable.startId,
 			}
 		: undefined;
 	if (replaceable) {
@@ -601,6 +620,7 @@ export async function registerOutputSink(
 	let unregisterContextBoundary: (() => void) | void;
 	let outputUnregister: DaemonOutputUnregister | undefined;
 	let cleanupPromise: Promise<void> | undefined;
+	let speculativeTerminalReceipt: PromiseWithResolvers<void> | undefined;
 	const registration: OutputRegistration = {
 		id,
 		name,
@@ -608,6 +628,7 @@ export async function registerOutputSink(
 		epoch,
 		delivery,
 		daemonId,
+		startId,
 		binding: startPending ? "start-pending" : "attached",
 		startedAt: Date.now(),
 		active: true,
@@ -620,6 +641,9 @@ export async function registerOutputSink(
 			// Fence synchronous re-entry before unregistering broker/session
 			// callbacks; every underlying resource must be released at most once.
 			cleanupPromise = Promise.resolve();
+			const terminalReceipt = speculativeTerminalReceipt;
+			speculativeTerminalReceipt = undefined;
+			terminalReceipt?.resolve();
 			session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
 			outputUnregister?.();
 			unregisterDispose?.();
@@ -681,7 +705,6 @@ export async function registerOutputSink(
 			}
 		}
 		registration.terminalState = notification.daemon.state;
-		await registration.cleanup();
 		// The owner session receives the real daemon-completed through its
 		// completion subscription, so a synthesized one would duplicate it — but
 		// only when the broker actually emitted one. A stop issued by another
@@ -689,36 +712,41 @@ export async function registerOutputSink(
 		// ownerNotified=false and this terminal notification is then the only
 		// signal the monitoring session will ever get. An absent flag means an
 		// older broker: keep the historical suppression.
-		if (notification.daemon.owner === owner && notification.ownerNotified !== false) return;
+		if (notification.daemon.owner === owner && notification.ownerNotified !== false) {
+			await registration.cleanup();
+			return;
+		}
 		// Once a local stop RPC reports terminal settlement, its tool result is
 		// the single completion surface even when the monitor notification
 		// arrives after the response.
-		if (registration.localStop.state === "terminal-response") return;
+		if (registration.localStop.state === "terminal-response") {
+			await registration.cleanup();
+			return;
+		}
 		const completion = session.queueLaunchCompletion?.(
 			{
 				event: "daemon-completed",
-				completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,
+				completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? "terminal"}`,
 				owner,
 				daemon: notification.daemon,
 			},
 			registration.epoch,
 		);
-		const releaseEpochAssociation = (): void => {
+		if (!completion) throw new Error("Session cannot accept launch completion delivery");
+		const commitTerminalDelivery = async (): Promise<void> => {
+			await completion;
 			releaseCompletionDaemonAssociation(session, client, owner, notification.daemon.id, registration.epoch);
+			await registration.cleanup();
 		};
 		if (waitForTerminalCompletion) {
-			try {
-				await completion;
-			} finally {
-				releaseEpochAssociation();
-			}
+			await commitTerminalDelivery();
 		} else {
-			// Buffered terminal notifications were already accepted by the
-			// client sink while the start RPC was pending. Queue the completion
-			// after their preceding output, but do not wait for its delivery
-			// receipt: that receipt can require the current tool step to finish.
-			void completion?.then(releaseEpochAssociation, error => {
-				releaseEpochAssociation();
+			// The start cannot await a receipt that requires its own tool step
+			// to finish. Keep the broker sink pending until delivery commits.
+			void commitTerminalDelivery().catch(error => {
+				const terminalReceipt = speculativeTerminalReceipt;
+				speculativeTerminalReceipt = undefined;
+				terminalReceipt?.reject(error);
 				logger.warn("Buffered launch monitor completion delivery failed", {
 					monitorId: id,
 					name,
@@ -741,7 +769,9 @@ export async function registerOutputSink(
 	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
 		if (speculative) {
 			bufferSpeculativeMonitorNotification(speculative, notification);
-			return;
+			if (notification.event !== "daemon-monitor-completed") return;
+			speculativeTerminalReceipt ??= Promise.withResolvers<void>();
+			return speculativeTerminalReceipt.promise;
 		}
 		if (speculativeFlush) await speculativeFlush;
 		await deliver(notification);
@@ -752,6 +782,7 @@ export async function registerOutputSink(
 		owner,
 		artifactPath: artifact.path,
 		daemonId,
+		startId,
 		delivery,
 		since: Date.now(),
 		artifactId,
@@ -769,12 +800,20 @@ export async function registerOutputSink(
 			name,
 			previous.owner,
 			previous.delivery,
-			false,
+			previous.startPending,
 			previous.epoch,
 			previous.daemonId,
 			fence,
+			previous.startId,
 		);
-		await restored?.retain();
+		if (!restored) return;
+		// Retaining a pending lease accepts its start; let the original start
+		// adopt and settle it instead of binding to a stale incarnation.
+		if (previous.startPending) {
+			restored.registration.restoredLease = restored;
+			return;
+		}
+		await restored.retain();
 	};
 	try {
 		outputUnregister = client.onOutput(subscription, sink);
@@ -809,12 +848,36 @@ export async function registerOutputSink(
 	if (startPending) {
 		let pendingLeases = 0;
 		let startAccepted = false;
+		// Restoration may rebuild the per-client map. Resolve the live slot,
+		// not the map captured by the registration that was replaced.
+		const adoptRestoredLease = (leaseDaemonId: string | undefined): OutputLease | undefined => {
+			const successor = outputRegistrations.get(session)?.get(client)?.get(name);
+			if (
+				!successor ||
+				successor === registration ||
+				!successor.active ||
+				successor.binding !== "start-pending" ||
+				successor.epoch !== registration.epoch ||
+				successor.startId !== registration.startId
+			) {
+				return undefined;
+			}
+			const lease = successor.restoredLease;
+			if (!lease) return undefined;
+			successor.restoredLease = undefined;
+			if (leaseDaemonId !== undefined) lease.bindDaemon(leaseDaemonId);
+			return lease;
+		};
 		registration.acquirePendingStart = requestedDelivery => {
 			pendingLeases++;
 			let settled = false;
+			let leaseDaemonId: string | undefined;
 			return {
 				registration,
-				bindDaemon,
+				bindDaemon: boundDaemonId => {
+					leaseDaemonId = boundDaemonId;
+					bindDaemon(boundDaemonId);
+				},
 				retain: async () => {
 					if (settled) return;
 					await registration.ready;
@@ -824,7 +887,14 @@ export async function registerOutputSink(
 						await registration.cleanup();
 						return;
 					}
-					if (!registration.active) return;
+					if (!registration.active) {
+						const lease = adoptRestoredLease(leaseDaemonId);
+						if (!lease) return;
+						startAccepted = true;
+						await lease.retain();
+						if (lease.registration.active) lease.registration.retune(requestedDelivery);
+						return;
+					}
 					registration.retune(requestedDelivery);
 					if (startAccepted) return;
 					startAccepted = true;
@@ -843,9 +913,12 @@ export async function registerOutputSink(
 					if (settled) return;
 					settled = true;
 					pendingLeases--;
-					if (startAccepted || pendingLeases > 0 || !registration.active || monitors.get(name) !== registration) {
+					if (startAccepted || pendingLeases > 0) return;
+					if (!registration.active) {
+						await adoptRestoredLease(leaseDaemonId)?.reject();
 						return;
 					}
+					if (monitors.get(name) !== registration) return;
 					speculative = undefined;
 					await registration.cleanup();
 					await restorePrevious();
@@ -903,7 +976,9 @@ export async function detachOutputSink(
 ): Promise<boolean> {
 	const registration = outputRegistrations.get(session)?.get(client)?.get(name);
 	if (!registration) return false;
-	await registration.cleanup();
+	const cleanup = registration.cleanup();
+	session.discardLaunchProgress?.(registration.id, registration.epoch);
+	await cleanup;
 	return true;
 }
 

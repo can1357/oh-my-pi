@@ -33,6 +33,7 @@ import {
 	writeDaemonScopeMeta,
 } from "./paths";
 import type { DaemonMonitorWatcher, DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import { displayExitReason, normalizeExitReason } from "./exit-reason";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -102,6 +103,15 @@ const SIGNAL_NUMBER: Record<DaemonSignal, number> = {
 	SIGQUIT: os.constants.signals.SIGQUIT,
 	SIGKILL: os.constants.signals.SIGKILL,
 };
+function subprocessExitReason(subprocess: { readonly signalCode: NodeJS.Signals | null }): string | undefined {
+	if (subprocess.signalCode) return `process was terminated by ${subprocess.signalCode}`;
+	return undefined;
+}
+
+function fallbackExitReason(exitCode: number | undefined, stopRequested: boolean): string | undefined {
+	if (stopRequested || exitCode === undefined || exitCode === 0) return undefined;
+	return `process exited with code ${exitCode} without a reported termination reason`;
+}
 
 /**
  * Bounds on the output batches a monitor registration retains until its client
@@ -127,16 +137,24 @@ interface ManagedProcess {
 	exited: Promise<number>;
 	unref(): void;
 }
+interface GenerationExit {
+	exitCode?: number;
+	exitReason?: string;
+}
 
 interface ManagedDaemon {
 	spec: DaemonSpec;
 	snapshot: DaemonSnapshot;
 	dir: string;
+	/** Initiating start identity, also used when a speculative monitor is restored. */
+	startId?: string;
 	log?: DaemonLog;
 	process?: ManagedProcess;
 	input?: Bun.FileSink;
 	pty?: PtySession;
 	generation: number;
+	generationExitRecords: Map<number, GenerationExit>;
+	generationWaiters: Map<number, number>;
 	stopRequested: boolean;
 	/**
 	 * True when the record's last settlement emitted (or queued) a
@@ -341,6 +359,10 @@ function reapRecoveredSnapshot(snapshot: DaemonSnapshot, now: number): boolean {
 	snapshot.exitedAt = now;
 	snapshot.exitReason = "previous broker exited";
 	return true;
+}
+function recoveredGenerationExitRecords(snapshot: DaemonSnapshot): Map<number, GenerationExit> {
+	if (!terminalState(snapshot.state)) return new Map();
+	return new Map([[0, { exitCode: snapshot.exitCode, exitReason: snapshot.exitReason }]]);
 }
 
 /** Mirror per-condition readiness progress into the snapshot so clients can see which condition is unmet. */
@@ -878,7 +900,13 @@ class DaemonBroker {
 			case "ping":
 				return { op: "ping", projectDir: this.#projectDir, capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
 			case "start":
-				return this.#start(operation.spec, operation.owner, operation.replace, operation.awaitReady);
+				return this.#start(
+					operation.spec,
+					operation.owner,
+					operation.replace,
+					operation.awaitReady,
+					operation.startId,
+				);
 			case "list": {
 				await Promise.all([...this.#records.values()].map(record => this.#refreshDetached(record)));
 				return {
@@ -946,7 +974,13 @@ class DaemonBroker {
 		return watchers;
 	}
 
-	async #start(spec: DaemonSpec, owner?: string, replace = false, awaitReady = true): Promise<DaemonRpcResult> {
+	async #start(
+		spec: DaemonSpec,
+		owner?: string,
+		replace = false,
+		awaitReady = true,
+		startId?: string,
+	): Promise<DaemonRpcResult> {
 		if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(spec.name)) {
 			throw new Error("Daemon name must be 1-48 letters, numbers, dots, underscores, or hyphens");
 		}
@@ -991,6 +1025,7 @@ class DaemonBroker {
 			const now = Date.now();
 			record = {
 				spec,
+				startId,
 				snapshot: {
 					name: spec.name,
 					id: crypto.randomUUID(),
@@ -1006,6 +1041,8 @@ class DaemonBroker {
 				dir,
 				log: await DaemonLog.create(dir),
 				generation: 0,
+				generationExitRecords: new Map(),
+				generationWaiters: new Map(),
 				stopRequested: false,
 				ownerCompletionEmitted: false,
 				logReady: !spec.ready?.log,
@@ -1027,7 +1064,7 @@ class DaemonBroker {
 			};
 			syncReadyPending(record);
 			this.#records.set(spec.name, record);
-			this.#bindOutputRegistrations(record);
+			this.#bindOutputRegistrations(record, startId);
 		} finally {
 			this.#startingNames.delete(spec.name);
 		}
@@ -1052,6 +1089,7 @@ class DaemonBroker {
 
 	async #launch(record: ManagedDaemon, outputCursor: DetachedOutputCursorPolicy): Promise<void> {
 		record.generation++;
+		this.#pruneGenerationExitRecords(record);
 		const generation = record.generation;
 		record.stopRequested = false;
 		record.ownerCompletionEmitted = false;
@@ -1187,7 +1225,7 @@ class DaemonBroker {
 		const stdout = this.#drain(record, generation, process.stdout);
 		const stderr = this.#drain(record, generation, process.stderr);
 		void Promise.all([stdout, stderr, process.exited])
-			.then(([, , exitCode]) => this.#settle(record, generation, exitCode))
+			.then(([, , exitCode]) => this.#settle(record, generation, exitCode, subprocessExitReason(process)))
 			.catch(error =>
 				this.#settle(record, generation, undefined, error instanceof Error ? error.message : String(error)),
 			);
@@ -1208,7 +1246,7 @@ class DaemonBroker {
 			this.#persist(record);
 			process.unref();
 			void process.exited
-				.then(exitCode => this.#settle(record, generation, exitCode))
+				.then(exitCode => this.#settle(record, generation, exitCode, subprocessExitReason(process)))
 				.catch(error =>
 					this.#settle(record, generation, undefined, error instanceof Error ? error.message : String(error)),
 				);
@@ -1475,9 +1513,8 @@ class DaemonBroker {
 						existing.offlineTimer = undefined;
 						existing.owner = subscription.owner;
 						existing.delivery = subscription.delivery;
-						existing.startPending = subscription.startPending;
 						const reconnected = existing.socket !== socket;
-						existing.startPending = subscription.startPending;
+						existing.startPending = existing.daemonId === undefined ? subscription.startPending : undefined;
 						existing.socket = socket;
 						this.#acknowledgeOutput(existing, subscription);
 						if (reconnected) {
@@ -1527,7 +1564,10 @@ class DaemonBroker {
 						existingArtifactBytes = await this.#artifactSize(subscription.artifactPath);
 						if (!current()) return;
 					}
-					const currentDaemonId = subscription.startPending === true ? undefined : record?.snapshot.id;
+					const startPending =
+						subscription.startPending === true &&
+						(subscription.startId !== record?.startId || subscription.owner !== record?.snapshot.owner);
+					const currentDaemonId = startPending ? undefined : record?.snapshot.id;
 					const registration = createOutputRegistration(
 						subscription,
 						socket,
@@ -1535,6 +1575,7 @@ class DaemonBroker {
 						subscription.daemonId ?? currentDaemonId,
 						existingArtifactBytes,
 					);
+					registration.startPending = startPending || undefined;
 					this.#outputRegistrations.set(key, registration);
 					if (
 						subscription.startPending !== true &&
@@ -1554,7 +1595,7 @@ class DaemonBroker {
 						record &&
 						terminalState(record.snapshot.state) &&
 						!record.monitorSettlementPending &&
-						subscription.startPending !== true
+						!startPending
 					) {
 						this.#notifyMonitorCompletion(record, registration);
 					}
@@ -1569,9 +1610,16 @@ class DaemonBroker {
 		}
 	}
 
-	#bindOutputRegistrations(record: ManagedDaemon): void {
+	#bindOutputRegistrations(record: ManagedDaemon, startId?: string): void {
 		for (const registration of this.#outputRegistrations.values()) {
 			if (registration.disabled) continue;
+			if (
+				registration.startPending &&
+				(registration.startId === undefined ||
+					registration.startId !== startId ||
+					registration.owner !== record.snapshot.owner)
+			)
+				continue;
 			if (registration.name === record.snapshot.name && registration.daemonId === undefined) {
 				registration.daemonId = record.snapshot.id;
 				registration.startPending = undefined;
@@ -1955,7 +2003,8 @@ class DaemonBroker {
 	}
 
 	async #onPtyExit(record: ManagedDaemon, generation: number, result: PtyRunResult): Promise<void> {
-		return this.#settle(record, generation, result.exitCode, result.timedOut ? "timed out" : undefined);
+		const reason = result.timedOut ? "timed out" : result.cancelled ? "process was cancelled" : undefined;
+		return this.#settle(record, generation, result.exitCode, reason);
 	}
 
 	#notifyCompletion(completion: DaemonCompletionNotification): void {
@@ -1968,14 +2017,23 @@ class DaemonBroker {
 	}
 
 	#settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
-		const settlement = record.settlementQueue.then(() => this.#settleRecord(record, generation, exitCode, error));
+		const stopRequestedAtExit = record.stopRequested;
+		const settlement = record.settlementQueue.then(() =>
+			this.#settleRecord(record, generation, exitCode, error, stopRequestedAtExit),
+		);
 		record.settlementQueue = settlement.catch(() => {
 			if (!record.monitorRestarting) record.monitorSettlementPending = false;
 		});
 		return settlement;
 	}
 
-	async #settleRecord(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
+	async #settleRecord(
+		record: ManagedDaemon,
+		generation: number,
+		exitCode: number | undefined,
+		error: string | undefined,
+		stopRequestedAtExit: boolean,
+	): Promise<void> {
 		// `restarting` is a settled state (child exited, relaunch timer armed). Any op that
 		// runs #refreshDetached on such a record must not re-settle it: re-entry double-counts
 		// restartCount and overwrites record.restartTimer, orphaning the armed timer so it fires
@@ -1992,18 +2050,20 @@ class DaemonBroker {
 		}
 		await this.#flushOutputProgress(record);
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
+		const stopRequested = stopRequestedAtExit || record.stopRequested;
 		record.process = undefined;
 		record.input = undefined;
 		record.pty = undefined;
 		record.snapshot.pid = undefined;
 		record.snapshot.exitedAt = Date.now();
+		const exitReason = normalizeExitReason(error) ?? fallbackExitReason(exitCode, stopRequested);
 		record.snapshot.exitCode = exitCode;
-		record.snapshot.exitReason = error;
+		record.snapshot.exitReason = exitReason;
+		this.#recordGenerationExit(record, generation, exitCode, exitReason);
 		record.snapshot.readyPending = undefined;
-		const failed = error !== undefined || (exitCode !== undefined && exitCode !== 0);
+		const failed = exitReason !== undefined || (exitCode !== undefined && exitCode !== 0);
 		const shouldRestart =
-			!record.stopRequested &&
-			(record.spec.restart === "always" || (record.spec.restart === "on-failure" && failed));
+			!stopRequested && (record.spec.restart === "always" || (record.spec.restart === "on-failure" && failed));
 		if (shouldRestart && !this.#shuttingDown) {
 			const uptime = Date.now() - record.snapshot.startedAt;
 			record.consecutiveFailures = uptime >= 30_000 ? 0 : record.consecutiveFailures + 1;
@@ -2019,7 +2079,7 @@ class DaemonBroker {
 				RESTART_MAX_DELAY_MS,
 			);
 			record.log?.append(
-				`\n[daemon exited${exitCode === undefined ? "" : ` with code ${exitCode}`}; restarting in ${delay}ms]\n`,
+				`\n[daemon exited${exitCode === undefined ? "" : ` with code ${exitCode}`}${exitReason ? `; ${exitReason}` : ""}; restarting in ${delay}ms]\n`,
 			);
 			this.#persist(record);
 			record.restartTimer = setTimeout(() => {
@@ -2029,10 +2089,10 @@ class DaemonBroker {
 			return;
 		}
 		record.monitorSettlementPending = true;
-		record.snapshot.state = failed && !record.stopRequested ? "failed" : "exited";
+		record.snapshot.state = failed && !stopRequested ? "failed" : "exited";
 		const completion =
 			record.snapshot.owner !== undefined &&
-			!record.stopRequested &&
+			!stopRequested &&
 			this.#completionSubscriptions.has(record.snapshot.owner)
 				? ({
 						event: "daemon-completed",
@@ -2111,6 +2171,33 @@ class DaemonBroker {
 			state: record.snapshot.state,
 		};
 	}
+	#retainGenerationWait(record: ManagedDaemon, generation: number): void {
+		record.generationWaiters.set(generation, (record.generationWaiters.get(generation) ?? 0) + 1);
+	}
+
+	#releaseGenerationWait(record: ManagedDaemon, generation: number): void {
+		const waiters = record.generationWaiters.get(generation) ?? 0;
+		if (waiters <= 1) record.generationWaiters.delete(generation);
+		else record.generationWaiters.set(generation, waiters - 1);
+		this.#pruneGenerationExitRecords(record);
+	}
+
+	#recordGenerationExit(
+		record: ManagedDaemon,
+		generation: number,
+		exitCode: number | undefined,
+		exitReason: string | undefined,
+	): void {
+		record.generationExitRecords.set(generation, { exitCode, exitReason });
+	}
+
+	#pruneGenerationExitRecords(record: ManagedDaemon): void {
+		for (const generation of record.generationExitRecords.keys()) {
+			if (generation < record.generation && !record.generationWaiters.has(generation)) {
+				record.generationExitRecords.delete(generation);
+			}
+		}
+	}
 
 	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>, signal?: AbortSignal): Promise<DaemonRpcResult> {
 		const record = this.#record(operation.name);
@@ -2118,6 +2205,20 @@ class DaemonBroker {
 		// relaunches reuse the managed record, so polling the record without this
 		// binding can hang past an exit or consume the replacement's output.
 		const boundGeneration = record.generation;
+		this.#retainGenerationWait(record, boundGeneration);
+		try {
+			return await this.#waitGeneration(record, operation, boundGeneration, signal);
+		} finally {
+			this.#releaseGenerationWait(record, boundGeneration);
+		}
+	}
+
+	async #waitGeneration(
+		record: ManagedDaemon,
+		operation: Extract<DaemonOperation, { op: "wait" }>,
+		boundGeneration: number,
+		signal?: AbortSignal,
+	): Promise<DaemonRpcResult> {
 		await this.#refreshDetached(record);
 		let matched: string | undefined;
 		let pattern: RegExp | undefined;
@@ -2134,8 +2235,20 @@ class DaemonBroker {
 			record.snapshot.readyAt !== undefined ||
 			record.snapshot.state === "ready" ||
 			(record.snapshot.state === "running" && !record.spec.ready);
-		const generationEnded = (): boolean =>
-			record.generation !== boundGeneration || record.snapshot.state === "restarting";
+		let generationExit: GenerationExit | undefined;
+		const generationEnded = (): boolean => {
+			const ended = record.generation !== boundGeneration || record.snapshot.state === "restarting";
+			if (!ended) return false;
+			generationExit ??= record.generationExitRecords.get(boundGeneration);
+			if (!generationExit && record.generation === boundGeneration) {
+				generationExit = {
+					exitCode: record.snapshot.exitCode,
+					exitReason: record.snapshot.exitReason,
+				};
+			}
+			generationExit ??= {};
+			return true;
+		};
 		const condition = (): boolean => {
 			if (generationEnded()) return true;
 			if (pattern) {
@@ -2156,9 +2269,10 @@ class DaemonBroker {
 		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs, signal));
 		if (signal?.aborted) throw new Error(`Daemon ${operation.name} wait cancelled`);
 		if (generationEnded()) {
-			const exit = record.snapshot.exitCode === undefined ? "" : ` with exit code ${record.snapshot.exitCode}`;
+			const exit = generationExit?.exitCode === undefined ? "" : ` with exit code ${generationExit.exitCode}`;
+			const reason = displayExitReason(generationExit?.exitReason);
 			throw new Error(
-				`Daemon ${operation.name} generation ${boundGeneration} exited${exit}; ` +
+				`Daemon ${operation.name} generation ${boundGeneration} exited${exit}${reason ? `; reason: ${reason}` : ""}; ` +
 					"the wait was rejected instead of continuing against a replacement generation",
 			);
 		}
@@ -2236,12 +2350,29 @@ class DaemonBroker {
 		else if (record.pty) record.pty.kill();
 	}
 
-	async #restart(name: string): Promise<DaemonRpcResult> {
+	async #restart(name: string, detached = false): Promise<DaemonRpcResult> {
 		const record = this.#record(name);
 		const wasTerminal = terminalState(record.snapshot.state);
 		record.monitorRestarting = true;
 		try {
 			await this.#stopRecord(record, 2_000);
+			if (detached) {
+				// Drain the supervised generation before ending its monitors. Keep
+				// queued output and expiry replayable until their client receives them.
+				await this.#finishOutputProgress(record);
+				for (const registration of this.#outputRegistrations.values()) {
+					if (registration.disabled || registration.daemonId !== record.snapshot.id) continue;
+					registration.disabled = true;
+					this.#sendMonitorNotification(registration, {
+						event: "daemon-monitor-expired",
+						monitorId: registration.id,
+						registrationId: registration.registrationId,
+						name: registration.name,
+						daemonId: record.snapshot.id,
+					});
+				}
+				record.spec = { ...record.spec, detached: true, pty: false, persist: true };
+			}
 			await record.log?.close();
 			record.log = await DaemonLog.open(record.dir);
 			record.stopRequested = false;
@@ -2254,6 +2385,7 @@ class DaemonBroker {
 			// Relaunch with a fresh id so old registrations stay stale.
 			if (wasTerminal) {
 				record.snapshot.id = crypto.randomUUID();
+				record.startId = undefined;
 				this.#bindOutputRegistrations(record);
 			}
 			await this.#launch(record, "reset");
@@ -2281,8 +2413,7 @@ class DaemonBroker {
 		}
 		if (operation.mode === "detached") {
 			if (!record.spec.detached) {
-				record.spec = { ...record.spec, detached: true, pty: false, persist: true };
-				await this.#restart(operation.name);
+				await this.#restart(operation.name, true);
 			}
 		} else {
 			if (record.spec.detached && operation.mode === "session") {
@@ -2423,6 +2554,8 @@ class DaemonBroker {
 					snapshot,
 					dir,
 					generation: 0,
+					generationExitRecords: recoveredGenerationExitRecords(snapshot),
+					generationWaiters: new Map(),
 					stopRequested: !detached || snapshot.state === "stopping",
 					ownerCompletionEmitted: "ownerNotified" in decoded && decoded.ownerNotified === true,
 					logReady: detached && (!spec.ready?.log || snapshot.state === "ready"),
