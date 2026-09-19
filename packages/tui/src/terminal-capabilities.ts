@@ -10,7 +10,7 @@ import {
 	setKittyGraphics,
 } from "./kitty-graphics";
 import { isInsideHerdr, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
-import { isInsideTmux, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
+import { isInsideTmux, resolveTmuxClientTerminal, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
 import type { HangulCompatibilityJamoWidth } from "./utils";
 
 export * from "./terminal-multiplexer";
@@ -684,7 +684,6 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 		ITERM_SESSION_ID,
 		VSCODE_PID,
 		ALACRITTY_WINDOW_ID,
-		TERM_PROGRAM,
 		TERM,
 		COLORTERM,
 	} = env;
@@ -695,6 +694,14 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 	if (ITERM_SESSION_ID) return "iterm2";
 	if (VSCODE_PID) return "vscode";
 	if (ALACRITTY_WINDOW_ID) return "alacritty";
+
+	// tmux >= 3.2 rewrites the pane's identity variables with its own values
+	// (`TERM_PROGRAM=tmux`, `COLORTERM=truecolor`), so an emulator reached
+	// through tmux keeps no marker in `env` and used to degrade to the
+	// color-depth fallback below. The tmux server still knows which terminal its
+	// attached client is — the terminal this process actually draws on — and
+	// only a tmux session has a client to ask.
+	const TERM_PROGRAM = resolveTmuxClientTerminal(env)?.name ?? env.TERM_PROGRAM;
 
 	if (TERM_PROGRAM) {
 		if (caseEq(TERM_PROGRAM, "kitty")) return "kitty";
