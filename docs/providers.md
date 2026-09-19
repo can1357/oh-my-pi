@@ -161,6 +161,14 @@ Each provider has one or more environment variables that supply a key when no st
 
 OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
+### OpenCode Zen free-tier restrictions
+
+A model listed under `opencode-zen` is not necessarily available to OMP. Zen can restrict free-tier access to the OpenCode client even when the same API key works there.
+
+If a request returns HTTP 403 with `FreeTierError` and the message `OpenCode's free tier can only be used from within OpenCode`, Zen is restricting that free model to its own client: use the model in OpenCode, or select a model and plan that Zen permits third-party clients to use. Re-authenticating with the same key does not lift this restriction.
+
+This response was reported for `opencode-zen/muse-spark-1.3-contributor-free` in [#12306](https://github.com/can1357/oh-my-pi/issues/12306). It does not establish that every Zen free model is restricted. OMP's session and User-Agent attribution headers identify requests; they do not grant access to OpenCode-only offers.
+
 ### `.env` discovery and precedence
 
 `omp` eagerly loads `.env` files into the process environment before any provider lookup. It reads four files and, for each variable, the **first** source that defines it wins. Effective precedence, high to low:
