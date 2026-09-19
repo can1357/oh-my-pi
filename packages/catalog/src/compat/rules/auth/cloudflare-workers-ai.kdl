@@ -1,0 +1,4 @@
+auth "cloudflare-workers-ai" {
+	name "Cloudflare Workers AI"
+	login "custom" hook="cloudflare-workers-ai"
+}

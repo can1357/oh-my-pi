@@ -1,0 +1,31 @@
+// Cloudflare Workers AI, called directly (not via AI Gateway). Rows come only from runtime
+// discovery (models-search), so no `discovery` or `seed` node.
+// priority=-1: the `thinking-efforts` fallback yields to classes/gpt-oss.kdl on the equal-rank tie.
+provider "cloudflare-workers-ai" priority=-1 {
+	default-model "@cf/moonshotai/kimi-k2.7-code"
+	env "CLOUDFLARE_WORKERS_AI_API_KEY" "CLOUDFLARE_API_TOKEN"
+	dynamic-models-authoritative #true
+	// Same-id rows elsewhere (the gateway mirror) carry different prices and ladders.
+	skip-cross-provider-reference-fills #true
+
+	// Prompt caching only hits when requests reach the same instance; no `prompt_cache_key`.
+	prompt-cache-session-header "x-session-affinity"
+	// The endpoint defaults to 256 output tokens when no cap is sent.
+	always-send-max-tokens #true
+	// Accepted but unverified: the endpoint ignores unknown fields.
+	supports-developer-role #false
+	supports-store #false
+	// Some models 400 (code 5006) on a `content` array with two or more parts.
+	requires-string-message-content #true
+	// Named tool_choice returns 200 but the tool is not called; "required" works.
+	supports-named-tool-choice #false
+	// Reasoning is duplicated on `delta.reasoning` and `delta.reasoning_content`.
+	reasoning-content-field "reasoning_content"
+	thinking-mode "effort"
+	// Fallback for reasoning rows that publish no effort vocabulary: `minimal`/`xhigh` 400 (code
+	// 8001). Discovered ladders always win.
+	thinking-efforts "low" "medium" "high"
+	class "qwen" {
+		thinking-format "openai"
+	}
+}

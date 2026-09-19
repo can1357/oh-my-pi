@@ -34,6 +34,11 @@ import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "..
 import { normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
 import { CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL } from "../wire/cloudflare-ai-gateway";
+import {
+	CLOUDFLARE_WORKERS_AI_BASE_URL,
+	toCloudflareWorkersAiModelsSearchUrl,
+	toCloudflareWorkersAiSpecBaseUrl,
+} from "../wire/cloudflare-workers-ai";
 import { coreWeaveProjectHeaders } from "../wire/coreweave";
 import {
 	COPILOT_API_HEADERS,
@@ -4765,6 +4770,165 @@ export function cloudflareAiGatewayModelManagerOptions(
 		"https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
 		config,
 	);
+}
+
+// ---------------------------------------------------------------------------
+// 19.5 Cloudflare Workers AI (direct, not via AI Gateway)
+// ---------------------------------------------------------------------------
+
+export interface CloudflareWorkersAiModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/** The endpoint clamps `per_page` to 100. */
+const CLOUDFLARE_WORKERS_AI_PAGE_SIZE = 100;
+/** Runaway guard. */
+const CLOUDFLARE_WORKERS_AI_MAX_PAGES = 20;
+const CLOUDFLARE_WORKERS_AI_TASK = "Text Generation";
+const CLOUDFLARE_WORKERS_AI_TOOLS_FEATURE = "tools";
+const CLOUDFLARE_WORKERS_AI_REASONING_FEATURE = "reasoning";
+/** `reasoning_effort` value that disables thinking; 400 on rows that do not advertise it. */
+const CLOUDFLARE_WORKERS_AI_EFFORT_NONE = "none";
+
+/** A `models/search?format=openrouter` row. `max_output_length` echoes the context window, so it is ignored. */
+interface CloudflareWorkersAiModelRecord extends OpenAICompatibleModelRecord {
+	input_modalities?: unknown;
+	context_length?: unknown;
+	pricing?: unknown;
+	supported_features?: unknown;
+	reasoning?: unknown;
+}
+
+function cloudflareWorkersAiFeatures(value: unknown): readonly string[] {
+	return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+/** USD per token (decimal string) → per million. Missing rates are 0. */
+function toCloudflareWorkersAiRate(value: unknown): number {
+	const parsed = typeof value === "string" ? Number.parseFloat(value) : toNumber(value);
+	return typeof parsed === "number" && Number.isFinite(parsed) && parsed >= 0 ? parsed * 1_000_000 : 0;
+}
+
+function mapCloudflareWorkersAiModel(
+	record: CloudflareWorkersAiModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> {
+	const features = cloudflareWorkersAiFeatures(record.supported_features);
+	const thinking = mapOpenRouterThinking(record);
+	const supportedEfforts = isRecord(record.reasoning) ? record.reasoning.supported_efforts : undefined;
+	const canDisableThinking =
+		Array.isArray(supportedEfforts) && supportedEfforts.includes(CLOUDFLARE_WORKERS_AI_EFFORT_NONE);
+	const modalities = Array.isArray(record.input_modalities) ? record.input_modalities : [];
+	const contextWindow = toPositiveNumber(record.context_length, defaults.contextWindow);
+	const pricing = isRecord(record.pricing) ? record.pricing : undefined;
+	// The cap is always sent, so leave three quarters of the window for the prompt.
+	const seededMaxTokens =
+		typeof contextWindow === "number"
+			? Math.min(OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS, Math.floor(contextWindow / 4))
+			: OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS;
+	return {
+		...defaults,
+		name: toModelName(record.name, defaults.name),
+		// Reasoning rows without a published ladder get theirs from KDL.
+		reasoning: features.includes(CLOUDFLARE_WORKERS_AI_REASONING_FEATURE),
+		...(thinking !== undefined && { thinking }),
+		input: modalities.includes("image") ? ["text", "image"] : ["text"],
+		contextWindow,
+		maxTokens: seededMaxTokens,
+		cost: {
+			input: toCloudflareWorkersAiRate(pricing?.prompt),
+			output: toCloudflareWorkersAiRate(pricing?.completion),
+			cacheRead: toCloudflareWorkersAiRate(pricing?.input_cache_read),
+			cacheWrite: 0,
+		},
+		// `reasoning_effort: "none"` is a 400 unless advertised.
+		...(thinking !== undefined && canDisableThinking
+			? { compat: { reasoningDisableMode: "none-effort" as const } }
+			: {}),
+	};
+}
+
+/**
+ * The host has no `/v1/models`. `total_count` spans all tasks, so stop on a short page.
+ * Returns null on failure so the cached roster is kept.
+ */
+async function fetchCloudflareWorkersAiModels(options: {
+	baseUrl: string;
+	apiKey: string;
+	fetch?: FetchImpl;
+}): Promise<ModelSpec<"openai-completions">[] | null> {
+	const searchUrl = toCloudflareWorkersAiModelsSearchUrl(options.baseUrl);
+	const specBaseUrl = toCloudflareWorkersAiSpecBaseUrl(options.baseUrl);
+	const fetchImpl = discoveryFetch(options.fetch);
+	const collected = new Map<string, ModelSpec<"openai-completions">>();
+	for (let page = 1; page <= CLOUDFLARE_WORKERS_AI_MAX_PAGES; page++) {
+		const url = new URL(searchUrl);
+		url.searchParams.set("task", CLOUDFLARE_WORKERS_AI_TASK);
+		url.searchParams.set("format", "openrouter");
+		url.searchParams.set("per_page", String(CLOUDFLARE_WORKERS_AI_PAGE_SIZE));
+		url.searchParams.set("page", String(page));
+		let response: Response;
+		try {
+			response = await fetchImpl(url.toString(), {
+				method: "GET",
+				headers: { Accept: "application/json", Authorization: `Bearer ${options.apiKey}` },
+			});
+		} catch {
+			return null;
+		}
+		if (!response.ok) return null;
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch {
+			return null;
+		}
+		if (!isRecord(payload) || !Array.isArray(payload.data)) return null;
+		for (const entry of payload.data) {
+			if (!isRecord(entry)) continue;
+			const record = entry as CloudflareWorkersAiModelRecord;
+			const id = typeof record.id === "string" ? record.id.trim() : "";
+			if (!id) continue;
+			// Tool-calling models only.
+			if (!cloudflareWorkersAiFeatures(record.supported_features).includes(CLOUDFLARE_WORKERS_AI_TOOLS_FEATURE)) {
+				continue;
+			}
+			const defaults: ModelSpec<"openai-completions"> = {
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "cloudflare-workers-ai",
+				baseUrl: specBaseUrl,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: null,
+				maxTokens: null,
+			};
+			collected.set(id, mapCloudflareWorkersAiModel(record, defaults));
+		}
+		if (payload.data.length < CLOUDFLARE_WORKERS_AI_PAGE_SIZE) break;
+	}
+	return Array.from(collected.values()).sort((left, right) => left.id.localeCompare(right.id));
+}
+
+/** Runtime discovery is the only source of rows. The cache key stays the provider id: the roster is the same for every account. */
+export function cloudflareWorkersAiModelManagerOptions(
+	config?: CloudflareWorkersAiModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? CLOUDFLARE_WORKERS_AI_BASE_URL;
+	// Needs the account id, which `prepareModelDiscovery` substitutes.
+	const discoverable = apiKey !== undefined && apiKey.length > 0 && !baseUrl.includes("<account>");
+	return {
+		providerId: "cloudflare-workers-ai",
+		dynamicModelsAuthoritative: true,
+		...(discoverable && {
+			fetchDynamicModels: () => fetchCloudflareWorkersAiModels({ baseUrl, apiKey, fetch: config?.fetch }),
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------
