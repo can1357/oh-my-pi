@@ -46,9 +46,10 @@ export function isWaitingPollDetails(details: unknown): boolean {
 }
 
 /**
- * Whether a hub wait still has a running job. Used to keep an already-live
- * displaceable poll spinning after a tracked refresh leaves a mixed snapshot;
- * mixed historical waits must not start a spinner from this alone.
+ * Whether a hub wait still has a running job. Used to keep a tracked
+ * displaceable poll spinning after a refresh leaves a mixed snapshot; mixed
+ * historical waits and pending hub calls must not start a spinner from this
+ * alone.
  */
 export function isLiveHubPollDetails(details: unknown): boolean {
 	const d = details as CoordinationDetails | undefined;

@@ -23,6 +23,7 @@ import {
 } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { hubToolRenderer } from "@oh-my-pi/pi-tui/tools/hub";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import {
 	ASYNC_RESULT_MESSAGE_TYPE,
@@ -141,6 +142,36 @@ describe("hub waiting-poll block lifecycle", () => {
 			vi.advanceTimersByTime(2000);
 			expect(vi.getTimerCount()).toBe(0);
 		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// Regression (#12490): `#spinnerActive` is also set by pending/streaming
+	// tool-call paths. A real hub wait that spun while executing, then returned
+	// mixed completed+running, kept spinnerFrame defined so jobsRenderResult
+	// froze on "waiting on 1 of 2". EventController does not track mixed waits,
+	// so nothing refreshed or sealed the card.
+	it("settles mixed completed+running after a pending hub call without leaking the spinner", () => {
+		vi.useFakeTimers();
+		stopSharedSpinnerTicker();
+		const pendingPreview = vi.spyOn(hubToolRenderer, "animatedPendingPreview").mockReturnValue(true);
+		try {
+			const component = makeJobComponent();
+			component.setExecutionStarted();
+			component.render(120);
+			expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+			component.updateResult(pollResult(["completed", "running"]), false);
+
+			expect(component.isDisplaceableBlock()).toBe(false);
+			const output = Bun.stripANSI(component.render(120).join("\n"));
+			expect(output).not.toContain("waiting on");
+			expect(output).toContain("1 job settled");
+
+			vi.advanceTimersByTime(2000);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			pendingPreview.mockRestore();
 			vi.useRealTimers();
 		}
 	});
@@ -512,6 +543,42 @@ describe("EventController displaces consecutive waiting polls", () => {
 		// A poll that carried real results is kept as history.
 		expect(children).toContain(settled);
 		expect(children).toContain(next);
+	});
+
+	it("settles a pending hub call that completes with mixed jobs instead of freezing waiting-on-N", async () => {
+		vi.useFakeTimers();
+		stopSharedSpinnerTicker();
+		const pendingPreview = vi.spyOn(hubToolRenderer, "animatedPendingPreview").mockReturnValue(true);
+		try {
+			const { controller, children } = createFixture();
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: "t1",
+				toolName: "hub",
+				args: { op: "wait", ids: ["j0", "j1"] },
+			});
+			const component = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
+			component.render(120);
+			expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "t1",
+				toolName: "hub",
+				result: pollResult(["completed", "running"]),
+				isError: false,
+			});
+
+			expect(component.isDisplaceableBlock()).toBe(false);
+			const output = Bun.stripANSI(component.render(120).join("\n"));
+			expect(output).not.toContain("waiting on");
+			expect(output).toContain("1 job settled");
+			vi.advanceTimersByTime(2000);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			pendingPreview.mockRestore();
+			vi.useRealTimers();
+		}
 	});
 });
 
