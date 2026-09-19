@@ -867,9 +867,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				const interception = checkBashInterception(commandToCheck, ctx?.toolNames ?? [], rules, rawCommand);
 				if (interception.block) {
 					const recovery = interception.replacement;
-					const recoveryMessage = recovery
-						? `\n\nStructured recovery: ${JSON.stringify(recovery)}`
-						: "";
+					const recoveryMessage = recovery ? `\n\nStructured recovery: ${JSON.stringify(recovery)}` : "";
 					throw new ToolError(
 						`${interception.message ?? "Command blocked"}${recoveryMessage}`,
 						recovery ? { replacement: recovery } : undefined,

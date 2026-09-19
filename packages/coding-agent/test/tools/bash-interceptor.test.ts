@@ -70,7 +70,10 @@ describe("BashTool interception", () => {
 		const tool = createBashTool(DEFAULT_BASH_INTERCEPTOR_RULES);
 		const error = await tool
 			.execute("tool-call", { command }, undefined, undefined, { toolNames: ["grep"] } as AgentToolContext)
-			.then(() => undefined, caught => caught);
+			.then(
+				() => undefined,
+				caught => caught,
+			);
 
 		expect(error).toMatchObject({ context: { replacement } });
 		expect(error).toBeInstanceOf(Error);
