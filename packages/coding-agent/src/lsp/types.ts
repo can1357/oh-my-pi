@@ -21,15 +21,6 @@ export const lspSchema = type({
 	payload: "string?",
 });
 
-export type LspParams = typeof lspSchema.infer;
-
-export interface LspToolDetails {
-	serverName?: string;
-	action: string;
-	success: boolean;
-	request?: LspParams;
-}
-
 // =============================================================================
 // Core LSP Protocol Types
 // =============================================================================

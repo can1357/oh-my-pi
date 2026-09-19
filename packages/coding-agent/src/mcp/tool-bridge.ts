@@ -1,3 +1,4 @@
+import { MCP_TOOL_NAME_PREFIX, type MCPToolDetails } from "@oh-my-pi/pi-tui/tools/mcp";
 /**
  * MCP to CustomTool bridge.
  *
@@ -16,9 +17,9 @@ import type {
 	RenderResultOptions,
 } from "../extensibility/custom-tools/types";
 import { resolveLocalUrlToFile } from "../internal-urls/local-protocol";
-import type { Theme } from "../modes/theme/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+
 import { sanitizeMCPToolNamePart } from "../tools/builtin-names";
-import type { OutputMeta } from "../tools/output-meta";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
@@ -26,15 +27,15 @@ import { schemaDeclaresIntentField } from "../utils/tool-schema";
 export { sanitizeMCPToolNamePart };
 import { callTool } from "./client";
 import { formatMCPToolFailure, MCPTransportError } from "./errors";
-import { renderMCPCall, renderMCPResult } from "./render";
+import { renderMCPCall, renderMCPResult } from "@oh-my-pi/pi-tui/tools/mcp";
 import type {
 	MCPAuthChallenge,
-	MCPContent,
 	MCPServerConnection,
 	MCPToolCallParams,
 	MCPToolCallResult,
 	MCPToolDefinition,
 } from "./types";
+import type { MCPContent } from "@oh-my-pi/pi-tui/tools/mcp";
 
 /** Reconnect callback: tears down a stale connection, optionally authorizing first. */
 export type MCPReconnect = (options?: { authChallenge?: MCPAuthChallenge }) => Promise<MCPServerConnection | null>;
@@ -186,25 +187,6 @@ async function prepareOutboundArgs(
 	return (await resolveOutboundLocalUrlArgs(args, context)) as MCPToolArgs;
 }
 
-/** Details included in MCP tool results for rendering */
-export interface MCPToolDetails {
-	/** Server name */
-	serverName: string;
-	/** Original MCP tool name */
-	mcpToolName: string;
-	/** Whether the call resulted in an error */
-	isError?: boolean;
-	/** Raw content from MCP response */
-	rawContent?: MCPContent[];
-	/** Structured metadata from the MCP response */
-	mcpMeta?: Record<string, unknown>;
-	/** Provider ID (e.g., "claude", "mcp-json") */
-	provider?: string;
-	/** Provider display name (e.g., "Claude Code", "MCP Config") */
-	providerName?: string;
-	/** Structured output metadata (set by the spill wrapper when output is truncated to an artifact). */
-	meta?: OutputMeta;
-}
 /**
  * Convert MCP content to agent content while retaining image payloads.
  */
@@ -398,9 +380,6 @@ async function reconnectWithAbort(
 		return null;
 	}
 }
-
-/** Registry prefix every minted MCP tool name carries. */
-const MCP_TOOL_NAME_PREFIX = "mcp__";
 
 /**
  * Shared mint pipeline. `keepDigits` selects the sanitizer variant: the
@@ -642,25 +621,6 @@ export function deduplicateMCPToolsByName<T extends MCPToolOriginSource>(tools: 
 	}
 
 	return deduplicated;
-}
-
-/**
- * Parse an MCP tool name back to server and tool components.
- *
- * Note: This returns the normalized tool name (with server prefix stripped).
- * The original MCP tool name may have had the server name as a prefix.
- */
-export function parseMCPToolName(name: string): { serverName: string; toolName: string } | null {
-	if (!name.startsWith(MCP_TOOL_NAME_PREFIX)) return null;
-
-	const rest = name.slice(MCP_TOOL_NAME_PREFIX.length);
-	const underscoreIdx = rest.indexOf("_");
-	if (underscoreIdx === -1) return null;
-
-	return {
-		serverName: rest.slice(0, underscoreIdx),
-		toolName: rest.slice(underscoreIdx + 1),
-	};
 }
 
 /**

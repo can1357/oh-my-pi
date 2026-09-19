@@ -91,7 +91,7 @@ function getTokenFilePath(): string {
 
 async function readToken(): Promise<string | null> {
 	try {
-		const raw = await Bun.file(getTokenFilePath()).text();
+		const raw = await fs.readFile(getTokenFilePath(), "utf8");
 		const trimmed = raw.trim();
 		return trimmed.length > 0 ? trimmed : null;
 	} catch (err) {
@@ -103,7 +103,7 @@ async function readToken(): Promise<string | null> {
 async function writeToken(token: string): Promise<void> {
 	const file = getTokenFilePath();
 	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-	await Bun.write(file, token);
+	await fs.writeFile(file, token, { mode: 0o600 });
 	try {
 		await fs.chmod(file, 0o600);
 	} catch {
@@ -554,7 +554,7 @@ async function loadImportPlan(
 	for (const file of files) {
 		let json: CliProxyCredentialJson;
 		try {
-			json = (await Bun.file(file).json()) as CliProxyCredentialJson;
+			json = JSON.parse(await fs.readFile(file, "utf8")) as CliProxyCredentialJson;
 		} catch (err) {
 			skipped.push({ file, reason: `unreadable JSON: ${String(err)}` });
 			continue;

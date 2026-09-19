@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { CodexResetFireworksEvent } from "@oh-my-pi/pi-coding-agent/modes/components/codex-reset-fireworks";
-import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { CodexResetFireworksEvent } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
 async function flushMicrotasks(): Promise<void> {
@@ -159,6 +160,7 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return [];
 			}),
+			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
@@ -177,6 +179,7 @@ describe("StatusLineComponent usage refresh", () => {
 				signal = nextSignal;
 				return [];
 			}),
+			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
@@ -193,6 +196,7 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return Promise.withResolvers<unknown>().promise;
 			}),
+			statusLineHost,
 		);
 
 		component.refreshUsageInBackground();
@@ -215,7 +219,10 @@ describe("StatusLineComponent usage refresh", () => {
 
 	it("applies late usage reports that resolve after the startup timeout", async () => {
 		const late = Promise.withResolvers<unknown>();
-		const component = new StatusLineComponent(makeSession(() => late.promise));
+		const component = new StatusLineComponent(
+			makeSession(() => late.promise),
+			statusLineHost,
+		);
 		component.updateSettings({
 			preset: "custom",
 			leftSegments: ["usage"],
@@ -258,7 +265,7 @@ describe("StatusLineComponent usage refresh", () => {
 				}),
 			},
 		};
-		const component = new StatusLineComponent(base as unknown as AgentSession);
+		const component = new StatusLineComponent(base as unknown as AgentSession, statusLineHost);
 
 		component.refreshUsageInBackground();
 		vi.advanceTimersByTime(0);
@@ -286,7 +293,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -311,7 +321,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -360,7 +373,10 @@ describe("StatusLineComponent usage refresh", () => {
 			tier: "spark",
 			plan: "pro",
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -404,6 +420,7 @@ describe("StatusLineComponent usage refresh", () => {
 				async () => reports,
 				() => ({ accountId: identityLookups.shift() ?? "account-a" }),
 			),
+			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
@@ -445,6 +462,7 @@ describe("StatusLineComponent usage refresh", () => {
 					orgId: workspaceId,
 				}),
 			),
+			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
@@ -465,7 +483,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 1,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -490,7 +511,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 1,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -513,7 +537,10 @@ describe("StatusLineComponent usage refresh", () => {
 			sevenDayResetAt,
 			savedResets: 0,
 		};
-		const component = new StatusLineComponent(makeCodexSession(async () => codexUsageReport(state)));
+		const component = new StatusLineComponent(
+			makeCodexSession(async () => codexUsageReport(state)),
+			statusLineHost,
+		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));
 
@@ -545,6 +572,7 @@ describe("StatusLineComponent usage refresh", () => {
 				calls++;
 				return calls === 1 ? stale.promise : codexUsageReport(current);
 			}),
+			statusLineHost,
 		);
 		const events: CodexResetFireworksEvent[] = [];
 		component.setCodexResetFireworksHandler(event => events.push(event));

@@ -14,6 +14,40 @@ const E = "(?![A-Za-z0-9_-])"; // right boundary
 // PRIVATE KEY, five dashes, lazy body, matching END armor line.
 const PEM_PRIVATE_KEY_SOURCE = "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----";
 
+export interface CredentialPrefixRule {
+	/** Regex source matching the fixed provider prefix. */
+	readonly source: string;
+	/** `token` redacts from the prefix through non-whitespace; the special modes preserve their introducer semantics. */
+	readonly mode: "token" | "line" | "bearer-token";
+}
+
+/**
+ * Credential introducers which are sensitive before a complete high-entropy token
+ * has been typed. Stream redaction deliberately applies these without the normal
+ * length or entropy gates.
+ */
+export const CREDENTIAL_PREFIX_RULES: readonly CredentialPrefixRule[] = [
+	{ source: "sk-ant-", mode: "token" },
+	{ source: "sk-proj-", mode: "token" },
+	{ source: "sk-", mode: "token" },
+	{ source: "gh[opusr]_", mode: "token" },
+	{ source: "github_pat_", mode: "token" },
+	{ source: "glpat-", mode: "token" },
+	{ source: "xox[abprs]-", mode: "token" },
+	{ source: "AKIA", mode: "token" },
+	{ source: "ASIA", mode: "token" },
+	{ source: "AIza", mode: "token" },
+	{ source: "npm_", mode: "token" },
+	{ source: "hf_", mode: "token" },
+	{ source: "whsec_", mode: "token" },
+	{ source: "rk_live_", mode: "token" },
+	{ source: "sk_live_", mode: "token" },
+	{ source: "sk_test_", mode: "token" },
+	{ source: "eyJ", mode: "token" },
+	{ source: "-----BEGIN", mode: "line" },
+	{ source: "Bearer ", mode: "bearer-token" },
+];
+
 /** Anchored vendor-prefix credential shapes. No generic keyword/entropy rules: a coding agent must still be able to read identifiers like `token_expiry_seconds`. */
 export const CREDENTIAL_PATTERNS: readonly CredentialPattern[] = [
 	{ name: "Credential", source: SENSITIVE_TOKEN_RE.source, flags: "i" },

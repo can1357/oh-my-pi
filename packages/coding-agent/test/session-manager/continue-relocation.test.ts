@@ -289,6 +289,54 @@ describe("SessionManager.continueRecent relocation", () => {
 			await resumed.close();
 		}
 	});
+	it("skips an empty local stub when the breadcrumb file is newest", async () => {
+		// Explicit session dir shared by both projects so the breadcrumb file
+		// can be newest there while cwdB owns its own sessions.
+		const explicitSessionDir = path.join(testAgentDir, "shared-sessions");
+		const moved = SessionManager.create(cwdA, explicitSessionDir);
+		moved.appendMessage({ role: "user", content: "moved", timestamp: 1 });
+		moved.appendMessage(makeAssistantMessage());
+		await moved.flush();
+		const movedFile = moved.getSessionFile();
+		if (!movedFile) throw new Error("Expected persisted session file");
+		await moved.close();
+
+		const local = SessionManager.create(cwdB, explicitSessionDir);
+		local.appendMessage({ role: "user", content: "local", timestamp: 2 });
+		local.appendMessage(makeAssistantMessage());
+		await local.flush();
+		const localFile = local.getSessionFile();
+		if (!localFile) throw new Error("Expected persisted local session file");
+		await local.close();
+		// Untitled header-only stub in the shared dir, newer than the answered
+		// local transcript: the shape where the fallback could pick wrong.
+		const stub = SessionManager.create(cwdB, explicitSessionDir);
+		await stub.ensureOnDisk();
+		const sharedStub = stub.getSessionFile();
+		if (!sharedStub) throw new Error("Expected materialized stub file");
+		await stub.close();
+		expect(fs.existsSync(sharedStub)).toBe(true);
+		// Order newest-first: breadcrumb target, then the empty stub, then the
+		// answered local transcript — the fallback only runs on this shape.
+		const newestFirst = new Date("2026-02-03T00:00:00.000Z");
+		const middle = new Date("2026-02-02T00:00:00.000Z");
+		const oldest = new Date("2026-02-01T00:00:00.000Z");
+		fs.utimesSync(movedFile, newestFirst, newestFirst);
+		fs.utimesSync(sharedStub, middle, middle);
+		fs.utimesSync(localFile, oldest, oldest);
+		// Breadcrumb cwd gone; breadcrumb file newest in the shared dir.
+		writeBreadcrumb(cwdA, movedFile);
+		await fsp.rm(cwdA, { recursive: true, force: true });
+
+		const resumed = await SessionManager.continueRecent(cwdB, explicitSessionDir);
+		try {
+			// The empty stub must not shadow cwdB's latest answered transcript.
+			expect(resumed.getSessionFile()).toBe(path.resolve(localFile));
+			expect(fs.existsSync(movedFile)).toBe(true);
+		} finally {
+			await resumed.close();
+		}
+	});
 
 	it("moves a relocated breadcrumb session into an explicit sessionDir", async () => {
 		const session = SessionManager.create(cwdA);

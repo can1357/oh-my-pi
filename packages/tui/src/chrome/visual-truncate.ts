@@ -1,0 +1,70 @@
+/**
+ * Shared utility for truncating text to visual lines (accounting for line wrapping).
+ * Used by both tool-execution.ts and bash-execution.ts for consistent behavior.
+ */
+import { viewportRange } from "../components/scroll-viewport";
+import { Text } from "../components/text";
+export interface VisualTruncateResult {
+	/** The visual lines to display */
+	visualLines: readonly string[];
+	/** Number of visual lines that were skipped (hidden) */
+	skippedCount: number;
+}
+
+const textCache = new Map<string, Text>();
+const TRUNCATE_CACHE_MAX = 8;
+
+function cacheKey(text: string, width: number, paddingX: number): string {
+	return `${paddingX} ${width} ${text.length} ${Bun.hash(text).toString(36)}`;
+}
+
+function getCachedText(cacheKeyValue: string, paddingX: number): Text {
+	let text = textCache.get(cacheKeyValue);
+	if (!text) {
+		text = new Text("", paddingX, 0);
+		if (textCache.size >= TRUNCATE_CACHE_MAX) textCache.clear();
+		textCache.set(cacheKeyValue, text);
+	}
+	return text;
+}
+
+/**
+ * Truncate text to a maximum number of visual lines (from the end).
+ * This accounts for line wrapping based on terminal width.
+ *
+ * @param text - The text content (may contain newlines)
+ * @param maxVisualLines - Maximum number of visual lines to show
+ * @param width - Terminal/render width
+ * @param paddingX - Horizontal padding for Text component (default 0).
+ *                   Use 0 when result will be placed in a Box (Box adds its own padding).
+ *                   Use 1 when result will be placed in a plain Container.
+ * @returns The truncated visual lines and count of skipped lines
+ */
+export function truncateToVisualLines(
+	text: string,
+	maxVisualLines: number,
+	width: number,
+	paddingX: number = 0,
+): VisualTruncateResult {
+	if (!text) {
+		return { visualLines: [], skippedCount: 0 };
+	}
+
+	// Keyed by (text, width, padding): Text caches internally, so a shared
+	// single slot thrashes with 2+ live cards at the same padding.
+	const tempText = getCachedText(cacheKey(text, width, paddingX), paddingX);
+	if (tempText.getText() !== text) {
+		tempText.setText(text);
+	}
+	const allVisualLines = tempText.render(width);
+
+	if (allVisualLines.length <= maxVisualLines) {
+		return { visualLines: allVisualLines, skippedCount: 0 };
+	}
+
+	// Take the last N visual lines
+	const range = viewportRange(allVisualLines.length, maxVisualLines, allVisualLines.length);
+	const truncatedLines = allVisualLines.slice(range.start, range.end);
+
+	return { visualLines: truncatedLines, skippedCount: range.start };
+}
