@@ -14,10 +14,10 @@ use super::{
 	messages::{
 		self, BARE_BODY_AUTO_PIPED_WARNING, BARE_RANGE_AUTO_PUT_WARNING, COLON_ON_REGISTER_PUT,
 		COLONLESS_PUT_TAKES_NO_BODY, COLONLESS_SPAN_PUT, CUT_COLON_IGNORED_WARNING,
-		CUT_TAKES_NO_BODY, DIFF_OLD_ROWS_IGNORED_WARNING, EMPTY_INSERT, EMPTY_PUT_AUTO_CUT_WARNING,
-		MINUS_BULLET_AUTO_PIPED_WARNING, MINUS_ROW_REJECTED, MOVE_TAKES_NO_BODY,
-		READ_METADATA_IGNORED_WARNING, REGISTER_PUT_TAKES_NO_BODY, REM_TAKES_NO_BODY,
-		REPLACE_PAIR_COALESCED_WARNING, SNAPSHOT_ROWS_AUTO_PUT_WARNING,
+		CUT_TAKES_NO_BODY, DIAGNOSTIC_PREVIEW_WIDTH, DIFF_OLD_ROWS_IGNORED_WARNING, EMPTY_INSERT,
+		EMPTY_PUT_AUTO_CUT_WARNING, MINUS_BULLET_AUTO_PIPED_WARNING, MINUS_ROW_REJECTED,
+		MOVE_TAKES_NO_BODY, READ_METADATA_IGNORED_WARNING, REGISTER_PUT_TAKES_NO_BODY,
+		REM_TAKES_NO_BODY, REPLACE_PAIR_COALESCED_WARNING, SNAPSHOT_ROWS_AUTO_PUT_WARNING,
 	},
 	prefixes::{is_read_metadata_line, strip_one_leading_hashline_prefix},
 	tokenizer::{BlockTarget, Token, Tokenizer, is_hunk_header_text},
@@ -28,6 +28,53 @@ use crate::error::EditError;
 const MAX_EXPANDED_RANGE_LINES: u32 = 100_000;
 static UNIFIED_HUNK_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
+
+const APPLY_PATCH_MARKERS: [&str; 4] =
+	["*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"];
+
+fn is_apply_patch_marker(line: &str) -> bool {
+	APPLY_PATCH_MARKERS
+		.iter()
+		.any(|prefix| line.starts_with(prefix))
+}
+
+fn is_unified_hunk_line(line: &str) -> bool {
+	line
+		.strip_prefix("@@")
+		.is_some_and(|rest| rest.contains("@@"))
+}
+
+/// Best-effort labels used only to improve missing-header diagnostics.
+///
+/// False positives and false negatives affect wording only; parsing remains
+/// authoritative.
+pub(super) fn detect_foreign_syntax<'a>(lines: impl IntoIterator<Item = &'a str>) -> String {
+	let mut apply_patch = false;
+	let mut unified_diff = false;
+	let mut unified_old_header = false;
+	let mut unified_new_header = false;
+	let mut search_marker = false;
+	let mut replace_marker = false;
+	for raw_line in lines {
+		let line = raw_line.trim();
+		apply_patch |= is_apply_patch_marker(line);
+		unified_diff |= line.starts_with("diff --git ") || is_unified_hunk_line(line);
+		unified_old_header |= line.starts_with("--- ");
+		unified_new_header |= line.starts_with("+++ ");
+		search_marker |= line.starts_with("<<<<<<< SEARCH");
+		replace_marker |= line.starts_with(">>>>>>> REPLACE");
+	}
+	unified_diff |= unified_old_header && unified_new_header;
+	[
+		apply_patch.then_some("apply_patch"),
+		unified_diff.then_some("unified diff"),
+		(search_marker && replace_marker).then_some("SEARCH/REPLACE"),
+	]
+	.into_iter()
+	.flatten()
+	.collect::<Vec<_>>()
+	.join(", ")
+}
 
 /// Inverted concrete range with metadata for source-aware enrichment.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,20 +784,12 @@ fn parse_bare_range(text: &str) -> Option<ParsedRange> {
 }
 fn contamination_message(text: &str) -> Option<String> {
 	let trimmed = text.trim_start();
-	if ["*** Update File:", "*** Add File:", "*** Delete File:", "*** Move to:"]
-		.iter()
-		.any(|prefix| trimmed.starts_with(prefix))
-	{
-		let preview = if trimmed.chars().count() > 48 {
-			format!("{}…", trimmed.chars().take(48).collect::<String>())
-		} else {
-			trimmed.into()
-		};
+	if is_apply_patch_marker(trimmed) {
+		let preview = messages::json_quote_preview(trimmed, DIAGNOSTIC_PREVIEW_WIDTH);
 		return Some(format!(
-			"apply_patch sentinel {} is not valid in hashline. File sections start with \
+			"apply_patch sentinel {preview} is not valid in hashline. File sections start with \
 			 `[path#HASH]` (no `Update File:` / `Add File:` keyword). Use `PUT N.=M:`, `CUT N.=M`, \
-			 or `PUT <N:`/`PUT >N:` ops.",
-			messages::json_quote(&preview)
+			 or `PUT <N:`/`PUT >N:` ops."
 		));
 	}
 	if trimmed.starts_with("@@") {
@@ -761,15 +800,10 @@ fn contamination_message(text: &str) -> Option<String> {
 					.to_string(),
 			);
 		}
-		let preview = if trimmed.chars().count() > 48 {
-			format!("{}…", trimmed.chars().take(48).collect::<String>())
-		} else {
-			trimmed.into()
-		};
+		let preview = messages::json_quote_preview(trimmed, DIAGNOSTIC_PREVIEW_WIDTH);
 		return Some(format!(
-			"`@@`-bracketed hunk header {} is not valid in hashline. Drop the `@@ ... @@` brackets \
-			 and write a header such as `PUT N.=M:`.",
-			messages::json_quote(&preview)
+			"`@@`-bracketed hunk header {preview} is not valid in hashline. Drop the `@@ ... @@` \
+			 brackets and write a header such as `PUT N.=M:`."
 		));
 	}
 	if !trimmed.is_empty()

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Hashline edit errors now tell agents to replace incompatible patch bodies on the first rejection and keep echoed malformed input bounded, instead of only asking for a snapshot header ([#11771](https://github.com/can1357/oh-my-pi/issues/11771); [#12085](https://github.com/can1357/oh-my-pi/pull/12085) by [@vwsa](https://github.com/vwsa)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

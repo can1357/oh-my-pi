@@ -16,17 +16,30 @@ const HL_CUT_KEYWORD: &str = "CUT";
 const HL_FILE_HASH_SEP: &str = "#";
 const HL_RANGE_SEP: &str = ".=";
 const HL_LINE_BODY_SEP: &str = ":";
+/// Maximum Unicode scalar count and terminal-cell width echoed from untrusted
+/// input in one diagnostic preview.
+pub const DIAGNOSTIC_PREVIEW_WIDTH: usize = 48;
 
 #[inline]
 fn format_numbered_line(line_number: u32, line: &str) -> String {
 	format!("{line_number}{HL_LINE_BODY_SEP}{line}")
 }
 
-/// Tiny JS-compatible `JSON.stringify(str)` that escapes `"`, `\`, and control
-/// characters, emitting other UTF-8 characters as-is.
-pub fn json_quote(s: &str) -> String {
-	let mut out = String::with_capacity(s.len() + 2);
-	out.push('"');
+fn json_fragment_width(fragment: &str) -> usize {
+	if fragment.chars().all(|c| c >= ' ' && c != '"' && c != '\\') {
+		return xutf::width_str(fragment);
+	}
+	fragment
+		.chars()
+		.map(|c| match c {
+			'"' | '\\' | '\n' | '\r' | '\t' | '\x08' | '\x0C' => 2,
+			c if (c as u32) < 0x20 => 6,
+			c => xutf::width_char(c),
+		})
+		.sum()
+}
+
+fn push_json_escaped(out: &mut String, s: &str) {
 	for c in s.chars() {
 		match c {
 			'"' => out.push_str("\\\""),
@@ -37,12 +50,53 @@ pub fn json_quote(s: &str) -> String {
 			'\x08' => out.push_str("\\b"),
 			'\x0C' => out.push_str("\\f"),
 			c if (c as u32) < 0x20 => {
-				use std::fmt::Write;
 				let _ = write!(out, "\\u{:04x}", c as u32);
 			},
 			c => out.push(c),
 		}
 	}
+}
+
+/// JSON-quotes an untrusted diagnostic preview, bounding both Unicode scalar
+/// count and rendered terminal width. A trailing ellipsis indicates truncation.
+pub fn json_quote_preview(s: &str, max_width: usize) -> String {
+	let mut out = String::with_capacity(s.len().min(max_width.saturating_mul(4)) + 3);
+	out.push('"');
+	let mut chars = 0usize;
+	let mut width = 0usize;
+	let mut truncated = false;
+	for fragment in xutf::graphemes_str(s) {
+		let remaining_chars = max_width.saturating_sub(chars);
+		let fragment_chars = fragment
+			.chars()
+			.take(remaining_chars.saturating_add(1))
+			.count();
+		if fragment_chars > remaining_chars {
+			truncated = true;
+			break;
+		}
+		let fragment_width = json_fragment_width(fragment);
+		if width.saturating_add(fragment_width) > max_width {
+			truncated = true;
+			break;
+		}
+		push_json_escaped(&mut out, fragment);
+		chars += fragment_chars;
+		width += fragment_width;
+	}
+	if truncated {
+		out.push('…');
+	}
+	out.push('"');
+	out
+}
+
+/// Tiny JS-compatible `JSON.stringify(str)` that escapes `"`, `\`, and control
+/// characters, emitting other UTF-8 characters as-is.
+pub fn json_quote(s: &str) -> String {
+	let mut out = String::with_capacity(s.len() + 2);
+	out.push('"');
+	push_json_escaped(&mut out, s);
 	out.push('"');
 	out
 }
