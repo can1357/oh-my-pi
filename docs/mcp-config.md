@@ -37,7 +37,7 @@ OMP also translates these current tool-native sources:
 - Cursor: `~/.cursor/mcp.json` and `.cursor/mcp.json`
 - Windsurf: `~/.codeium/windsurf/mcp_config.json` and `.windsurf/mcp_config.json`
 - VS Code: project-only `.vscode/mcp.json` using `mcp.servers`
-- installed Claude marketplace plugins and OMP extension packages that declare MCP servers
+- installed Claude marketplace plugins and OMP extension packages that declare MCP servers. Plugin `.mcp.json` `timeout` values below 1000 are treated as seconds (Claude Code / SAP-style), not milliseconds.
 
 For Claude Code, Codex, Gemini CLI, Cursor, and Windsurf, the project entry is encountered before its same-named user entry — matching OMP-native config, whose project entry precedes its active-profile user entry — so a project `enabled: false` suppresses a same-named user server. OpenCode currently encounters the user entry first. Cross-provider priority is listed in [Discovery and precedence](#discovery-and-precedence).
 
@@ -99,7 +99,7 @@ The config writer accepts names up to 100 characters containing letters, numbers
 Shared fields for every transport:
 
 - `enabled?: boolean` — skip this server when `false`, unless the active-profile user `enabledServers` allowlist names it
-- `timeout?: number` — MCP request timeout in milliseconds; `0` disables client-side MCP timeouts
+- `timeout?: number` — MCP request timeout in milliseconds; `0` disables client-side MCP timeouts. Claude marketplace plugins and standalone project `mcp.json` / `.mcp.json` files may use seconds for small values (below 1000, for example SAP `"timeout": 600`); those are converted to milliseconds. Native `.omp/mcp.json` values are always milliseconds.
 - `requestIdFormat?: "number" | "string"` — outgoing JSON-RPC request-id encoding; defaults to per-transport integers. `"string"` uses collision-resistant snowflake IDs. This OMP-specific field is read only from OMP-native files, root `mcp.json` / `.mcp.json`, and OMP extension packages; configs translated from other tools ignore it.
 - `auth?: { ... }` — stored-credential metadata; managed credential injection is implemented for OAuth
 - `oauth?: { ... }` — explicit OAuth client and callback settings used during auth/reauth

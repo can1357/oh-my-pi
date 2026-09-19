@@ -2,8 +2,29 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 const DEFAULT_MCP_TIMEOUT_MS = 30_000;
 const MCP_TIMEOUT_ENV = "OMP_MCP_TIMEOUT_MS";
+/** Claude-style `.mcp.json` values below this are treated as seconds, not milliseconds. */
+const CLAUDE_STYLE_TIMEOUT_MS_FLOOR = 1_000;
 
 let neverAbortController: AbortController | undefined;
+
+/**
+ * Convert a Claude-style `.mcp.json` `timeout` into OMP milliseconds.
+ *
+ * Marketplace plugins (SAP `"timeout": 600`) use seconds. OMP's canonical
+ * `MCPServer.timeout` is milliseconds. Bare numbers in `(0, 1000)` are
+ * implausible as a connect/request deadline, so they are multiplied by 1000.
+ * `0` still disables. Values `>= 1000` are already milliseconds and pass
+ * through. Invalid values are ignored so callers fall back to the default.
+ *
+ * Do not use this for native OMP configs (`.omp/mcp.json`) or for
+ * `resolveMCPTimeoutMs`; those already speak milliseconds.
+ */
+export function normalizeClaudeStyleMcpTimeoutMs(raw: unknown): number | undefined {
+	if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0) return undefined;
+	if (raw === 0) return 0;
+	if (raw < CLAUDE_STYLE_TIMEOUT_MS_FLOOR) return raw * 1_000;
+	return raw;
+}
 
 export function resolveMCPTimeoutMs(configTimeout?: number): number {
 	const raw = Bun.env[MCP_TIMEOUT_ENV]?.trim();

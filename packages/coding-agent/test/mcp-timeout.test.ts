@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { createMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "@oh-my-pi/pi-coding-agent/mcp/timeout";
+import {
+	createMCPTimeout,
+	isMCPTimeoutEnabled,
+	normalizeClaudeStyleMcpTimeoutMs,
+	resolveMCPTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/mcp/timeout";
 import { logger } from "@oh-my-pi/pi-utils";
 
 const ORIGINAL_TIMEOUT = process.env.OMP_MCP_TIMEOUT_MS;
@@ -62,6 +67,42 @@ describe("MCP timeout configuration", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	test("keeps a programmatic sub-second timeout as milliseconds", () => {
+		delete process.env.OMP_MCP_TIMEOUT_MS;
+
+		// Native/runtime configs already speak milliseconds. A global seconds
+		// heuristic here would turn test and operator timeouts like 600ms into
+		// 10 minutes.
+		expect(resolveMCPTimeoutMs(600)).toBe(600);
+	});
+});
+
+describe("Claude-style MCP timeout unit normalisation", () => {
+	test("treats a SAP-style timeout of 600 as 600 seconds", () => {
+		// Failure mode: marketplace `.mcp.json` `"timeout": 600` was 600ms, so
+		// npx-started plugin servers aborted before they could connect.
+		expect(normalizeClaudeStyleMcpTimeoutMs(600)).toBe(600_000);
+	});
+
+	test("keeps timeout 0 as disabled", () => {
+		expect(normalizeClaudeStyleMcpTimeoutMs(0)).toBe(0);
+	});
+
+	test("leaves millisecond timeouts at or above 1000 unchanged", () => {
+		expect(normalizeClaudeStyleMcpTimeoutMs(1_000)).toBe(1_000);
+		expect(normalizeClaudeStyleMcpTimeoutMs(30_000)).toBe(30_000);
+		expect(normalizeClaudeStyleMcpTimeoutMs(600_000)).toBe(600_000);
+	});
+
+	test("ignores invalid timeout values", () => {
+		expect(normalizeClaudeStyleMcpTimeoutMs(undefined)).toBeUndefined();
+		expect(normalizeClaudeStyleMcpTimeoutMs(-1)).toBeUndefined();
+		expect(normalizeClaudeStyleMcpTimeoutMs(Number.NaN)).toBeUndefined();
+		expect(normalizeClaudeStyleMcpTimeoutMs(Number.POSITIVE_INFINITY)).toBeUndefined();
+		expect(normalizeClaudeStyleMcpTimeoutMs("600")).toBeUndefined();
+		expect(normalizeClaudeStyleMcpTimeoutMs({ seconds: 600 })).toBeUndefined();
 	});
 });
 
