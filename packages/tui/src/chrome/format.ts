@@ -2,8 +2,20 @@ import { renderProgressBar } from "../components/progress-bar";
 import { shimmerText } from "../theme/shimmer";
 import { theme as currentTheme, type Theme } from "../theme/theme";
 
+/**
+ * Provider ids whose brand casing the generic title-case rule gets wrong
+ * (`commandcode` → "Commandcode"). Entries are limited to ids with an explicit
+ * brand spelling; everything else keeps the id-derived name, which is already
+ * right for most providers (`google-antigravity` → "Google Antigravity").
+ */
+const PROVIDER_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+	commandcode: "Command Code",
+};
+
 /** Title-case a provider id for display (`openai-codex` → `Openai Codex`). */
 export function formatProviderName(provider: string): string {
+	const branded = PROVIDER_DISPLAY_NAMES[provider.toLowerCase()];
+	if (branded) return branded;
 	return provider
 		.split(/[-_]/g)
 		.map(part => (part ? part[0].toUpperCase() + part.slice(1) : ""))
