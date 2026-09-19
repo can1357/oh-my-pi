@@ -232,6 +232,59 @@ describe("tool output details", () => {
 		expect(Bun.stringWidth(plain(rows))).toBeLessThanOrEqual(40);
 	});
 
+	it("collapses a multi-target folded read call onto its own row", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "src/one.ts:1-5, src/two.ts:9-12" }, "read-0");
+		group.updateResult(
+			{
+				content: [{ type: "text", text: "combined" }],
+				details: { displayReadTargets: ["src/one.ts:1-5", "src/two.ts:9-12"] },
+			},
+			false,
+			"read-0",
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const rows = group.render(120);
+
+		expect(rows).toHaveLength(1);
+		expect(plain(rows)).toContain("one.ts:1-5");
+		expect(plain(rows)).toContain("two.ts:9-12");
+	});
+
+	it("keeps one folded row per call when a group holds several reads", () => {
+		const group = new ReadToolGroupComponent({ showContentPreview: false });
+		group.updateArgs({ path: "/tmp/a.ts" }, "read-a");
+		group.updateArgs({ path: "/tmp/b.ts" }, "read-b");
+		group.updateResult({ content: [{ type: "text", text: "a" }] }, false, "read-a");
+		group.updateResult({ content: [{ type: "text", text: "b" }] }, false, "read-b");
+		group.attachUsage(
+			["read-a"],
+			{
+				input: 1111,
+				output: 11,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1122,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			1000,
+			500,
+		);
+
+		group.setToolOutputDetailsHidden(true);
+
+		const rows = group.render(120);
+		const row = plain(rows);
+
+		expect(rows).toHaveLength(2);
+		expect(row.split("\n")[0]).toContain("a.ts");
+		expect(row.split("\n")[0]).toContain("1.1K");
+		expect(row.split("\n")[1]).toContain("b.ts");
+		expect(row.split("\n")[1]).not.toContain("1.1K");
+	});
+
 	it("shortens a home path inside a folded label", () => {
 		const home = os.homedir();
 		const card = new ToolExecutionComponent(

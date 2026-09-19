@@ -607,6 +607,14 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 			return;
 		}
 
+		if (this.#toolOutputDetailsHidden) {
+			// Folded mode promises one row per read call, so a call that fanned out
+			// into several target rows collapses back onto its own line here.
+			this.#summaryLines = this.#foldedSummaryLines(entries, displayTargets);
+			this.addChild(this.#text);
+			return;
+		}
+
 		if (displayRows.length === 1) {
 			const row = displayRows[0]!;
 			if (!this.#shouldRenderPreviewRow(row)) {
@@ -738,6 +746,33 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		this.#appendUsageRows(lines, usageRows, `   ${continuation} `);
 	}
 
+	/**
+	 * The folded rows: one bounded line per read call, whatever its target
+	 * fan-out. The call keeps the target list its expanded tree row showed, so
+	 * the row still names what was read instead of dropping to a bare count.
+	 */
+	#foldedSummaryLines(entries: ReadEntry[], targets: ReadDisplayTarget[]): string[] {
+		const usageRowsByEntry = this.#usageRowsByIndex(
+			new Map(entries.map((entry, index): [string, number] => [entry.toolCallId, index])),
+		);
+		const lines: string[] = [];
+		for (const [index, entry] of entries.entries()) {
+			const entryTargets = targets.filter(target => target.entry === entry);
+			// Per-call rows, so the same-file ranges a call merged into one expanded
+			// row merge here too, and a call with no target still keeps its line.
+			const rows = this.#buildSummaryRows(entryTargets);
+			const status = this.#formatStatus(
+				entryTargets.length > 0 ? this.#statusForTargets(entryTargets) : entry.status,
+			);
+			const count = rows.length > 1 ? ` ${theme.fg("dim", `(${rows.length})`)}` : "";
+			const paths = rows.map(row => this.#formatRowPath(row)).join(theme.fg("dim", ", "));
+			const title = theme.fg("toolTitle", theme.bold("Read"));
+			lines.push(` ${status} ${title}${count} ${paths}`.trimEnd());
+			this.#appendUsageRows(lines, usageRowsByEntry.get(index) ?? [], "   ");
+		}
+		return lines;
+	}
+
 	#usageRowsBySummaryRow(rows: ReadSummaryRow[]): Map<number, ReadUsageRow[]> {
 		const lastRowIndexByToolCallId = new Map<string, number>();
 		for (const [index, row] of rows.entries()) {
@@ -745,20 +780,24 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 				lastRowIndexByToolCallId.set(target.entry.toolCallId, index);
 			}
 		}
+		return this.#usageRowsByIndex(lastRowIndexByToolCallId);
+	}
 
+	/** Usage rows bucketed onto the last of the indexes their calls occupy. */
+	#usageRowsByIndex(lastIndexByToolCallId: Map<string, number>): Map<number, ReadUsageRow[]> {
 		const usageRowsByIndex = new Map<number, ReadUsageRow[]>();
 		for (const usageRow of this.#usageRows.values()) {
-			let lastRowIndex: number | undefined;
+			let lastIndex: number | undefined;
 			for (const toolCallId of usageRow.toolCallIds) {
-				const index = lastRowIndexByToolCallId.get(toolCallId);
-				if (index !== undefined && (lastRowIndex === undefined || index > lastRowIndex)) {
-					lastRowIndex = index;
+				const index = lastIndexByToolCallId.get(toolCallId);
+				if (index !== undefined && (lastIndex === undefined || index > lastIndex)) {
+					lastIndex = index;
 				}
 			}
-			if (lastRowIndex === undefined) continue;
-			const usageRows = usageRowsByIndex.get(lastRowIndex);
+			if (lastIndex === undefined) continue;
+			const usageRows = usageRowsByIndex.get(lastIndex);
 			if (usageRows) usageRows.push(usageRow);
-			else usageRowsByIndex.set(lastRowIndex, [usageRow]);
+			else usageRowsByIndex.set(lastIndex, [usageRow]);
 		}
 		return usageRowsByIndex;
 	}
