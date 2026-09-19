@@ -101,6 +101,34 @@ describe("executeBash", () => {
 		}
 	});
 
+	it.skipIf(process.platform === "win32" || !fs.existsSync("/bin/bash"))(
+		"initializes the user shell once for concurrent first commands",
+		async () => {
+			const shell = path.join(tempDir, "fixture-bash");
+			fs.symlinkSync("/bin/bash", shell);
+			await Bun.write(
+				path.join(tempDir, ".bashrc"),
+				'echo invoked >> "$HOME/rc-count"\nprobe_ready () { echo ready; }\n',
+			);
+			vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+				shell,
+				args: ["-c"],
+				env: { HOME: tempDir, PATH: Bun.env.PATH ?? "/usr/bin:/bin" },
+				prefix: undefined,
+			});
+			Settings.instance.set("bash.direnv", "off");
+			Settings.instance.set("shellMinimizer.enabled", false);
+			const run = () => executeBash("probe_ready", { cwd: tempDir, timeout: 5_000 });
+			const results = await Promise.all(Array.from({ length: 4 }, run));
+			results.push(await run());
+			for (const result of results) {
+				expect(result.exitCode).toBe(0);
+				expect(result.output.trim()).toBe("ready");
+			}
+			expect(await Bun.file(path.join(tempDir, "rc-count")).text()).toBe("invoked\n");
+		},
+	);
+
 	it("omits minimizer options when the feature is disabled", () => {
 		const group: ShellMinimizerSettings = {
 			enabled: false,

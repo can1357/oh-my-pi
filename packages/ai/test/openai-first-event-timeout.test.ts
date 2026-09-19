@@ -476,25 +476,18 @@ describe("OpenAI-family first-event timeouts", () => {
 	});
 
 	it("forwards streamSimple per-call timeout options to OpenAI-family providers", async () => {
-		const fetchMock = createHangingFetch();
-		const controller = new AbortController();
-		const abortTimer = setTimeout(() => controller.abort(new Error("fallback abort")), 200);
-		abortTimer.unref();
-
-		try {
-			const result = await streamSimple(openAIResponsesModel, baseContext(), {
-				apiKey: "test-key",
-				signal: controller.signal,
-				streamFirstEventTimeoutMs: 20,
-				streamIdleTimeoutMs: 20,
-				fetch: fetchMock,
-			}).result();
-
-			expect(result.stopReason).toBe("error");
-			expect(result.errorMessage).toBe("OpenAI responses stream timed out while waiting for the first event");
-		} finally {
-			clearTimeout(abortTimer);
-		}
+		// A competing caller-abort timer can fire during streamSimple startup on
+		// a busy worker and mask the provider timeout this test is checking.
+		await expectFirstEventTimeout(
+			(streamFirstEventTimeoutMs, fetchMock) =>
+				streamSimple(openAIResponsesModel, baseContext(), {
+					apiKey: "test-key",
+					streamFirstEventTimeoutMs,
+					streamIdleTimeoutMs: 20,
+					fetch: fetchMock,
+				}).result(),
+			"OpenAI responses stream timed out while waiting for the first event",
+		);
 	});
 
 	it("surfaces the OpenAI completions first-event timeout message", async () => {
