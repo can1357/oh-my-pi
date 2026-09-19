@@ -1,6 +1,7 @@
 import { isRetryableError, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils";
 import {
 	CODEX_HTTP_BODY_READ_ERROR_PATTERN,
+	isDnsResolutionErrorText,
 	isRetryableStreamEnvelopeError,
 	isTransientStreamDropError,
 	isTransientStreamParseError,
@@ -31,6 +32,20 @@ function isTransientTransportMessage(message: string): boolean {
 	return message.includes("tls: bad record mac") || message.includes("type=server_error");
 }
 
+function hasDnsResolutionError(error: unknown): boolean {
+	let link: unknown = error;
+	for (let depth = 0; depth <= 2; depth++) {
+		if (typeof link === "string") return isDnsResolutionErrorText(link);
+		if (link === undefined || link === null || typeof link !== "object") return false;
+		let message: string | undefined;
+		if (link instanceof Error) message = link.message;
+		else if ("message" in link && typeof link.message === "string") message = link.message;
+		if (message !== undefined && isDnsResolutionErrorText(message)) return true;
+		link = "cause" in link ? link.cause : undefined;
+	}
+	return false;
+}
+
 /**
  * Whether a provider stream error should be retried against the same credential.
  *
@@ -52,6 +67,7 @@ export function isProviderRetryableError(error: unknown): boolean {
 	if (
 		isUnexpectedSocketCloseMessage(msg) ||
 		isTransientTransportMessage(msg) ||
+		hasDnsResolutionError(error) ||
 		TRANSIENT_TRANSPORT_PATTERN.test(msg) ||
 		CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(msg) ||
 		PROVIDER_TRANSIENT_EXTRA_PATTERN.test(msg) ||

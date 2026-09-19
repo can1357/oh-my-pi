@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed raw `getaddrinfo ENOTFOUND` and `EAI_AGAIN` failures losing retry eligibility after request-level retries finish.
 
 ## [18.2.6] - 2026-09-18
 

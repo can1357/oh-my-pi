@@ -163,6 +163,11 @@ export const PYTHON_HTTP_INCOMPLETE_CHUNK_PATTERN =
 	/peer closed connection without sending complete message body \(incomplete chunked read\)/;
 /** reqwest body-frame failures forwarded by the Codex HTTP proxy. */
 export const CODEX_HTTP_BODY_READ_ERROR_PATTERN = /\btransport error reading codex response body\b/i;
+const DNS_RESOLUTION_ERROR_PATTERN = /\bgetaddrinfo\s+(?:ENOTFOUND|EAI_AGAIN)\b/i;
+
+export function isDnsResolutionErrorText(text: string): boolean {
+	return DNS_RESOLUTION_ERROR_PATTERN.test(text);
+}
 
 const RESPONSES_REQUEST_BODY_READ_TIMEOUT_PATTERN = /\btimed out reading request body\b/i;
 
@@ -544,6 +549,9 @@ function classifyText(
 				isTransientStreamDropError(errorMessage) ||
 				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage))
 		) {
+			kinds |= Flag.Transient;
+		}
+		if (!isTerminalClientErrorStatus(statusClean) && isDnsResolutionErrorText(cleanMessage)) {
 			kinds |= Flag.Transient;
 		}
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests

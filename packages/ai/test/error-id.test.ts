@@ -51,6 +51,78 @@ describe("error-id classification", () => {
 		}
 	});
 
+	it("classifies standard DNS resolver failures as transient on live and persisted paths", () => {
+		for (const errorMessage of [
+			"getaddrinfo ENOTFOUND bedrock-mantle.us-west-2.api.aws",
+			"getaddrinfo EAI_AGAIN bedrock-runtime.us-east-1.amazonaws.com",
+			"GETADDRINFO enotfound bedrock-mantle.us-west-2.api.aws",
+		]) {
+			const error = new Error(errorMessage);
+			const liveId = AIError.classify(error);
+			expect(AIError.is(liveId, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(liveId)).toBe(true);
+			expect(AIError.isProviderRetryableError(error)).toBe(true);
+
+			const persisted = message({ errorMessage });
+			const persistedId = AIError.classifyMessage(persisted);
+			expect(AIError.is(persistedId, AIError.Flag.Transient)).toBe(true);
+			expect(AIError.retriable(persistedId)).toBe(true);
+		}
+
+		const wrapped = new Error("request failed", {
+			cause: new Error("getaddrinfo EAI_AGAIN bedrock-runtime.us-east-1.amazonaws.com"),
+		});
+		expect(AIError.isProviderRetryableError(wrapped)).toBe(true);
+	});
+
+	it("honors terminal and retryable statuses across DNS error causes", () => {
+		for (const errorStatus of [400, 401, 403, 404, 424]) {
+			const errorMessage = "getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com";
+			const liveError = new AIError.ProviderHttpError("request failed", errorStatus, {
+				cause: new Error(errorMessage),
+			});
+			const liveId = AIError.classify(liveError);
+			expect(AIError.is(liveId, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(liveId)).toBe(false);
+			expect(AIError.isProviderRetryableError(liveError)).toBe(false);
+
+			const persistedId = AIError.classifyMessage(message({ errorStatus, errorMessage }));
+			expect(AIError.is(persistedId, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(persistedId)).toBe(false);
+		}
+
+		for (const errorStatus of [408, 429]) {
+			const errorMessage = "getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com";
+			const liveError = new AIError.ProviderHttpError("request failed", errorStatus, {
+				cause: new Error(errorMessage),
+			});
+			expect(AIError.retriable(AIError.classify(liveError))).toBe(true);
+			expect(AIError.isProviderRetryableError(liveError)).toBe(true);
+			expect(AIError.retriable(AIError.classifyMessage(message({ errorStatus, errorMessage })))).toBe(true);
+		}
+	});
+
+	it("does not classify filesystem or unrelated not-found diagnostics as DNS failures", () => {
+		for (const errorMessage of [
+			"getaddrinfo ENOENT example.invalid",
+			"getaddrinfo ENOTFOUNDish example.invalid",
+			"ENOTFOUND example.invalid",
+			"resource not found",
+		]) {
+			const id = AIError.classify(new Error(errorMessage));
+			expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+			expect(AIError.retriable(id)).toBe(false);
+			expect(AIError.isProviderRetryableError(new Error(errorMessage))).toBe(false);
+		}
+	});
+
+	it("keeps an ordinary abort classified as abort-only", () => {
+		const id = AIError.classify(new AIError.AbortError());
+		expect(AIError.is(id, AIError.Flag.Abort)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(id)).toBe(false);
+	});
+
 	it.each([
 		"Transport error reading Codex response body: error decoding response body",
 		"Anthropic stream error (api_error): Transport error reading Codex response body: error decoding response body",
