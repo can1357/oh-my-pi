@@ -105,4 +105,107 @@ describe("daemon broker completion acknowledgement", () => {
 			await broker;
 		}
 	}, 20_000);
+
+	it.each([
+		{ preservePending: true, replayed: true },
+		{ preservePending: false, replayed: false },
+	])(
+		"detaching an owner with preservePending=$preservePending before exit replays its completion: $replayed",
+		async ({ preservePending, replayed }) => {
+			using tempDir = TempDir.createSync("@omp-launch-completion-detach-");
+			const projectDir = path.join(tempDir.path(), "project");
+			const runtimeDir = path.join(tempDir.path(), "runtime");
+			await fs.mkdir(projectDir);
+			const scriptPath = path.join(projectDir, "gated.ts");
+			// Exits once its release file appears, so the owner can detach while
+			// the process is still alive and the completion is produced afterwards.
+			const releasePath = path.join(projectDir, "release");
+			await Bun.write(
+				scriptPath,
+				`const { existsSync } = require("node:fs");
+const release = ${JSON.stringify(releasePath)};
+const tick = () => (existsSync(release) ? process.exit(0) : setTimeout(tick, 20));
+tick();
+`,
+			);
+
+			const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+			const broker = startBroker(projectDir, runtimeDir);
+			const spec: DaemonSpec = {
+				name: "gated",
+				application: process.execPath,
+				args: [scriptPath],
+				env: {},
+				cwd: projectDir,
+				pty: false,
+				restart: "no",
+				persist: false,
+				detached: false,
+			};
+			const replays: DaemonCompletionNotification[] = [];
+			let unregisterReplay: (() => void) | undefined;
+			try {
+				const unregister = client.onCompletion("owner-1", () => {
+					throw new Error("The detached owner must not receive completions");
+				});
+				await client.request({ op: "ping" });
+				await client.request({ op: "start", owner: "owner-1", spec: { ...spec } });
+
+				// Detach the owner while the process is still running, the way a
+				// context boundary does, then let the process exit.
+				unregister({ preservePending });
+				await Bun.write(releasePath, "go");
+				await client.request({ op: "wait", name: "gated", for: "exit", timeoutMs: 5_000 });
+
+				// Re-register the same owner, the way the next Hub call from that
+				// session does, and observe whether the broker replays the exit.
+				const replayed1 = Promise.withResolvers<void>();
+				unregisterReplay = client.onCompletion("owner-1", notification => {
+					replays.push(notification);
+					replayed1.resolve();
+				});
+				// Real-time poll, as above: the retained replay's acknowledgement
+				// travels over a real socket with no client-visible landing signal.
+				const deadline = Date.now() + 5_000;
+				let restarted = false;
+				let lastError: unknown;
+				while (Date.now() < deadline) {
+					try {
+						// A retained completion blocks the same-name start until the
+						// replay is acknowledged; a discarded one never blocks it.
+						await client.request({ op: "start", owner: "owner-2", spec: { ...spec } });
+						restarted = true;
+						break;
+					} catch (error) {
+						lastError = error;
+						if (!String(error).includes("unacknowledged completion")) throw error;
+						if (!replayed) throw new Error(`Discarded completion still blocks restart: ${String(error)}`);
+						await Bun.sleep(25);
+					}
+				}
+				if (!restarted) throw new Error(`Name never became startable again: ${String(lastError)}`);
+				if (replayed) {
+					await replayed1.promise;
+					expect(replays).toHaveLength(1);
+					expect(replays[0]).toMatchObject({ owner: "owner-1", daemon: { name: "gated", state: "exited" } });
+				} else {
+					// The broker writes a replay to the socket while applying the
+					// owner re-registration, ahead of any later request's response
+					// on that same socket: after two ordered round trips a replay
+					// that was going to arrive has arrived.
+					await client.request({ op: "describe", name: "gated" });
+					expect(replays).toEqual([]);
+				}
+				await Bun.write(releasePath, "go");
+				await client.request({ op: "wait", name: "gated", for: "exit", timeoutMs: 5_000 });
+			} finally {
+				unregisterReplay?.();
+				await client.request({ op: "stop", name: "gated", timeoutMs: 2_000 }).catch(() => undefined);
+				await client.request({ op: "shutdown" }).catch(() => undefined);
+				client.close();
+				await broker;
+			}
+		},
+		20_000,
+	);
 });
