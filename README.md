@@ -282,7 +282,7 @@ Core tools live in the same namespace as `read` and `bash`. Pin the active set w
 **Coordination**
 
 - `task` — fan out subagents in parallel, optionally workspace-isolated.
-- `hub` — message live agents, wait on or cancel background jobs, and supervise long-running processes.
+- `hub` — message live agents, control background jobs, and supervise long-running processes with optional output notifications.
 - `todo` — ordered mutations over the session todo list with phase tracking.
 - `ask` — structured follow-up questions for interactive runs.
 
