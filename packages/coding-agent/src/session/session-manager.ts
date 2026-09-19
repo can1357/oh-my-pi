@@ -2848,6 +2848,7 @@ export class SessionManager {
 		spawns?: string;
 		readSummarize?: boolean;
 		advisor?: string;
+		isIsolated?: boolean;
 		isolated?: boolean;
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
@@ -3668,6 +3669,8 @@ export interface PersistedSessionInit {
 	spawns?: string;
 	readSummarize?: boolean;
 	advisor?: string;
+	/** Whether the session ran inside an isolation worktree (nested-isolation gate marker, revivable). */
+	isIsolated?: boolean;
 	isolated?: boolean;
 }
 
@@ -3690,9 +3693,10 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			outputSchema: entry.outputSchema,
 			outputSchemaMode: entry.outputSchemaMode,
 			restrictToolNames: entry.restrictToolNames,
-			readSummarize: entry.readSummarize,
 			spawns: entry.spawns,
+			readSummarize: entry.readSummarize,
 			advisor: entry.advisor,
+			isIsolated: entry.isIsolated,
 			isolated: entry.isolated,
 		};
 	}

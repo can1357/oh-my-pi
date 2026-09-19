@@ -144,8 +144,8 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 
 Registers one background subagent job and returns an `AgentHandle` immediately:
 
-- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools? })`; Python uses keyword arguments (`schema_mode`).
-- Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, unknown `tools` names) fails the call synchronously; execution failures surface from `.wait()`.
+- JS: `await agent(prompt, { agent?, label?, schema?, schemaMode?, isolated?, apply?, merge?, tools? })`; Python uses keyword arguments (`schema_mode`). `isolated`/`apply`/`merge` exist only when `task.isolation.enabled` is true, plan mode is disabled, and the calling agent is not itself isolated (unless `task.isolation.allowNested` is enabled, default false) — the same gate the `task` tool applies, and the eval prompt drops them from the signature when it is off.
+- Preflight (spawn policy, unknown agent, `task.maxRecursionDepth`, hard turn budget, plan-mode isolation controls, the nested-isolation gate, unknown `tools` names) fails the call synchronously; execution failures surface from `.wait()`. An explicit `isolated: true` from an already-isolated agent without `task.isolation.allowNested` is rejected with a clear error rather than silently ignored.
 - `agent` defaults from the current spawn policy; the selected agent's frontmatter model and settings always apply (no per-call `model`). `schema` overrides agent/session schemas; `schemaMode`/`schema_mode` chooses `permissive` or `strict`.
 - `isolated` requests isolation. `apply` controls whether captured changes are integrated; `merge=false` selects patch mode while the normal setting controls branch mode.
 - `tools`: names of kernel-defined tools (see below) the child may call; each call executes inside the caller's kernel.

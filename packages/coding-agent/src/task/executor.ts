@@ -409,6 +409,14 @@ export interface ExecutorOptions {
 	/** Parent session whose stored credential affinities seed the child session. */
 	credentialSourceSessionId?: string;
 	worktree?: string;
+	/**
+	 * Whether the spawning session itself runs inside an isolation worktree.
+	 * A non-isolated child of an isolated parent still executes inside the
+	 * parent's worktree (`cwd`), so the child session must inherit the marker —
+	 * otherwise it would expose `isolated` to its own children and let a nested
+	 * `isolated: true` bypass the `task.isolation.allowNested` gate.
+	 */
+	isIsolated?: boolean;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -3785,6 +3793,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				prewalk,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
+				isIsolated: worktree !== undefined || options.isIsolated === true,
 				// The whole spawn tree shares the root session's observability bus,
 				// so nested lifecycle/progress/event frames reach its surfaces
 				// without leaking into another root session's traffic.
@@ -3957,6 +3966,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				isIsolated: worktree !== undefined || options.isIsolated === true,
 				// Isolated runs are never revivable (worktree merged + cleaned):
 				// stamp the contract so cold revival leaves them transcript-only
 				// even when the workspace was retained for recovery.

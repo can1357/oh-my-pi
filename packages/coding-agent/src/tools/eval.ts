@@ -31,7 +31,7 @@ import {
 	truncateHeadBytes,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
-import { resolveSpawnPolicy } from "../task/spawn-policy";
+import { isIsolationAvailable, resolveSpawnPolicy } from "../task/spawn-policy";
 import { canSpawnAtDepth } from "../task/types";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
@@ -194,7 +194,9 @@ export interface EvalToolDescriptionOptions {
 	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
 	 */
 	spawns?: boolean | string | null;
-	/** Advertise auto-backgrounding of long-running cells in the tool prompt. */
+	/** Whether `isolated`/`apply`/`merge` controls are offered in the prompt. */
+	isolationEnabled?: boolean;
+	/** Whether eval auto-backgrounding is enabled (hides the backgrounding controls in the prompt when off). */
 	autoBackgroundEnabled?: boolean;
 	/** Advertise `@tool` / `tool(fn)` and the `tools` spawn option (`eval.tools.enabled`). */
 	evalTools?: boolean;
@@ -217,6 +219,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 		spawns: spawnPolicy.enabled,
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
+		isolationEnabled: options.isolationEnabled ?? true,
 		preludeDocumentation: options.preludeDocumentation,
 	});
 }
@@ -324,6 +327,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				py: backends.python,
 				js: backends.js,
 				spawns: depthAllowsSpawning ? sessionSpawns : false,
+				isolationEnabled: isIsolationAvailable(this.session, this.session.getPlanModeState?.()?.enabled === true),
 				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
 				evalTools: this.session.settings.get("eval.tools.enabled"),
 				eagerDelegation: sessionDelegationBias(this.session) === "eager",
