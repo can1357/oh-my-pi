@@ -33,6 +33,7 @@ interface RunEphemeralTurnArgs {
 	promptText: string;
 	onTextDelta?: (delta: string) => void;
 	signal?: AbortSignal;
+	dedupeReply?: boolean;
 }
 
 interface RunEphemeralTurnResult {
@@ -128,6 +129,9 @@ describe("BtwController", () => {
 		expect(callArg?.promptText).toContain("Fable 5.1");
 		expect(callArg?.promptText).toContain("prompt-optimizer");
 		expect(callArg?.signal).toBeInstanceOf(AbortSignal);
+		// /btw replies must not hit the IRC-oriented dedupe/4KiB cap — the full
+		// answer is what the panel shows and what `c`/`b` copy and branch.
+		expect(callArg?.dedupeReply).toBe(false);
 		expect(typeof callArg?.onTextDelta).toBe("function");
 		expect(controller.hasActiveRequest()).toBe(true);
 	});

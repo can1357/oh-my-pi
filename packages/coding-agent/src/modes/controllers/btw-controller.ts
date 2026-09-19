@@ -136,6 +136,9 @@ export class BtwController {
 			const promptText = prompt.render(btwUserPrompt, { question: request.question });
 			const { replyText, assistantMessage } = await this.ctx.session.runEphemeralTurn({
 				promptText,
+				// The reply IS the product here: skip the IRC-oriented dedupe/4KiB
+				// cap so the panel, `c` copy, and `b` branch all carry the full text.
+				dedupeReply: false,
 				onTextDelta: delta => {
 					if (this.#isActiveRequest(request)) {
 						request.component.appendText(delta);

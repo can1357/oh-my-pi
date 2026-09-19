@@ -12,6 +12,10 @@
 - Verified native token-savings autonomous task execution and added the token savings benchmark suite (`scripts/benchmark-token-savings.ts` and `test/benchmark-token-savings.test.ts`), measuring frontier context reduction across direct vs. delegated workspaces (>350-line read and 100-line generation parity with source separation and receipt validation).
 - Added `ix_bridge action=verify`: snapshots a lane (augmented with live DOM field values via `browser_execute`, passwords masked) and asks a fast OpenRouter judge model (default `google/gemini-3.5-flash-lite`, `OPENROUTER_API_KEY`) whether the page state satisfies a caller-supplied `goal`, returning per-question probabilities plus `verified` and `uncertain` flags at a configurable `threshold` — `uncertain` surfaces mid-range ("cannot tell") answers so callers escalate rather than guess. Backed by the shared `lib/openrouter-judge` client and the `evals/typesafe-jev` accuracy/latency harness (33/35 correct on real captured states, ~1s mean latency). The `browser-control` agent prompt now recommends verifying before reporting success; `browser-operation`/`ix-browser-fast` (bash-only, no tool access) instead must report observed end-state evidence for the parent to verify.
 
+### Fixed
+
+- `/btw` replies no longer truncate at 4 KiB: the ephemeral turn now skips the IRC-oriented dedupe/byte cap (`dedupeReply: false`), so the panel shows the full answer, `c` copies the complete text instead of the `[…truncated]` marker, and `b` branches the full reply into the chat.
+
 ## [16.4.18] - 2026-09-09
 
 ### Added

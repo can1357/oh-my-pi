@@ -278,6 +278,56 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.preferWebsockets).toBe(false);
 	});
 
+	it("returns the full ephemeral reply when dedupeReply is false", async () => {
+		const api = "test-ephemeral-dedupe-bypass";
+		// Unique lines: long enough to exceed the 4 KiB cap without tripping the
+		// repeated-line collapse.
+		const longReply = Array.from({ length: 600 }, (_, i) => `line-${i}`).join("\n");
+		registerCustomApi(api, (_model, _context, _options) => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage(longReply);
+				stream.push({ type: "text_delta", contentIndex: 0, delta: longReply, partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+
+		const model = buildModel({
+			id: "side-model-dedupe",
+			name: "Side Model",
+			api,
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 8192,
+		} as ModelSpec<Api>) as Model<Api>;
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+		});
+		sessions.push(session);
+
+		const capped = await session.runEphemeralTurn({ promptText: "Question?" });
+		expect(capped.replyText).toEndWith("[…truncated]");
+		expect(Buffer.byteLength(capped.replyText, "utf8")).toBeLessThanOrEqual(4096);
+
+		const full = await session.runEphemeralTurn({ promptText: "Question?", dedupeReply: false });
+		expect(full.replyText).toBe(longReply);
+	});
+
 	it("rotates ephemeral side-channel credentials on Google Resource exhausted", async () => {
 		const api = "test-ephemeral-google-resource-exhausted";
 		const googleErrorMessage = "Google API error (429): Resource exhausted. Please try again later.";
