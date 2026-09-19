@@ -6,12 +6,14 @@ import { rlmEvidenceQuery } from "../rlm/evidence-query";
 import { rlmQuery } from "../rlm/query";
 import { parseGrantRanges, selectGrantsFromSearch } from "../rlm/select-grants";
 import {
+	classifyGrantComplexity,
 	formatAutoGateFlowDecision,
 	formatWorkerModeDecisionLine,
 	resolveEffectiveWorkerMode,
 	workerModeInputFromSelection,
 } from "../rlm/worker-mode-policy";
-import { contextFlowRlmAutoGate } from "../context-flow/rlm-flow";
+import { contextFlowDeciderShadow, contextFlowRlmAutoGate } from "../context-flow/rlm-flow";
+import { launchShadowWorkerNeeded } from "../rlm/shadow";
 import { getRlmRuntime, rlmEnabled, rlmWorkerModeOverride, rlmWorkerModeSetting } from "../rlm/session";
 import { parseRlmGrants, rlmSubcall } from "../rlm/subcall";
 import type { ToolSession } from ".";
@@ -256,60 +258,89 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 			const workerModeSetting = rlmWorkerModeSetting(this.session);
 			let useEvidence = workerModeSetting === "evidence-packet";
 			let autoDecisionHeader = "";
+			let policyInput;
+			let autoDecision;
+			if (rangeGrants.length > 0) {
+				const grantedBytes = rangeGrants.reduce((acc, g) => {
+					const rec = store.get(g.handle.replace(/^rlm:\/\/h\//, ""));
+					if (!rec) return acc;
+					const start = g.start ?? 0;
+					const end = g.end ?? rec.text.length;
+					return acc + Math.max(0, end - start);
+				}, 0);
+				policyInput = {
+					grantedBytes,
+					grantCount: rangeGrants.length,
+					patternCount: params.pattern ? 1 : 0,
+					patterns: params.pattern ? [params.pattern] : [],
+					question: params.question,
+				};
+			} else if (params.pattern) {
+				const selected = selectGrantsFromSearch(store, params.handle, params.pattern, queryArgs.selectPolicy);
+				const sample = selected.hits.map(h => h.text).join("\n").slice(0, 4096);
+				policyInput = workerModeInputFromSelection(
+					selected,
+					params.question,
+					Array.isArray(params.pattern) ? params.pattern : [params.pattern],
+					sample,
+				);
+			} else {
+				const peek = store.peek(params.handle, params.start ?? 0, params.end);
+				policyInput = {
+					grantedBytes: Buffer.byteLength(peek.text, "utf8"),
+					grantCount: 1,
+					patternCount: 0,
+					patterns: [],
+					question: params.question,
+					grantTextSample: peek.text.slice(0, 4096),
+				};
+			}
 			if (workerModeSetting === "auto") {
-				let policyInput;
-				if (rangeGrants.length > 0) {
-					const grantedBytes = rangeGrants.reduce((acc, g) => {
-						const rec = store.get(g.handle.replace(/^rlm:\/\/h\//, ""));
-						if (!rec) return acc;
-						const start = g.start ?? 0;
-						const end = g.end ?? rec.text.length;
-						return acc + Math.max(0, end - start);
-					}, 0);
-					policyInput = {
-						grantedBytes,
-						grantCount: rangeGrants.length,
-						patternCount: params.pattern ? 1 : 0,
-						patterns: params.pattern ? [params.pattern] : [],
-						question: params.question,
-					};
-				} else if (params.pattern) {
-					const selected = selectGrantsFromSearch(store, params.handle, params.pattern, queryArgs.selectPolicy);
-					const sample = selected.hits.map(h => h.text).join("\n").slice(0, 4096);
-					policyInput = workerModeInputFromSelection(
-						selected,
-						params.question,
-						Array.isArray(params.pattern) ? params.pattern : [params.pattern],
-						sample,
-					);
-				} else {
-					const peek = store.peek(params.handle, params.start ?? 0, params.end);
-					policyInput = {
-						grantedBytes: Buffer.byteLength(peek.text, "utf8"),
-						grantCount: 1,
-						patternCount: 0,
-						patterns: [],
-						question: params.question,
-						grantTextSample: peek.text.slice(0, 4096),
-					};
-				}
-				const decision = resolveEffectiveWorkerMode(
+				autoDecision = resolveEffectiveWorkerMode(
 					workerModeSetting,
 					policyInput,
 					rlmWorkerModeOverride(this.session),
 				);
-				useEvidence = decision.mode === "evidence-packet";
-				autoDecisionHeader = `${formatWorkerModeDecisionLine(decision)}\n`;
-				store.note("worker-mode-auto", decision.reason, false);
+				useEvidence = autoDecision.mode === "evidence-packet";
+				autoDecisionHeader = `${formatWorkerModeDecisionLine(autoDecision)}\n`;
+				store.note("worker-mode-auto", autoDecision.reason, false);
 				const flowOwner = runtime.flowOwner ?? runtime.store.flowOwner;
 				if (flowOwner) {
 					contextFlowRlmAutoGate(
 						flowOwner,
-						{ flowDecision: formatAutoGateFlowDecision(decision), reason: decision.reason },
+						{ flowDecision: formatAutoGateFlowDecision(autoDecision), reason: autoDecision.reason },
 						store,
 					);
 				}
+			} else if (!autoDecision) {
+				const { complexity } = classifyGrantComplexity(policyInput);
+				autoDecision = {
+					mode: useEvidence ? "evidence-packet" : "prose",
+					complexity,
+					reason: `fixed workerMode=${workerModeSetting}`,
+					grantedBytes: policyInput.grantedBytes,
+					override: "none",
+					setting: workerModeSetting,
+				};
 			}
+			// Observe-only Decider shadow — MUST NOT await; MUST NOT change useEvidence.
+			const shadowFlowOwner = runtime.flowOwner ?? runtime.store.flowOwner;
+			launchShadowWorkerNeeded({
+				host: {
+					getTokenomicsBridge: () => this.session.getTokenomicsBridge?.(),
+					settings: this.session.settings,
+					getSessionId: () => this.session.getSessionId?.() ?? null,
+					flowOwner: shadowFlowOwner,
+				},
+				policyInput,
+				useEvidencePacket: useEvidence,
+				handle: params.handle,
+				autoDecision,
+				onFlow: args => {
+					if (!shadowFlowOwner) return;
+					contextFlowDeciderShadow(shadowFlowOwner, args, store);
+				},
+			});
 			const result = useEvidence
 				? await rlmEvidenceQuery(runtime, queryArgs)
 				: await rlmQuery(runtime, queryArgs);

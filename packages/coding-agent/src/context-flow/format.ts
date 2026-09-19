@@ -232,6 +232,7 @@ const TURN_FLOW_ORDER = [
 	"omp.user",
 	"omp.rlm.search",
 	"omp.rlm.auto_gate",
+	"omp.shadow.decider",
 	"omp.rlm.grants",
 	"omp.rlm.groq_codec",
 	"omp.rlm.worker",
@@ -246,6 +247,8 @@ function flowStepLabel(component: string): string {
 			return "RLM search";
 		case "omp.rlm.auto_gate":
 			return "Auto gate";
+		case "omp.shadow.decider":
+			return "Decider shadow";
 		case "omp.rlm.grants":
 			return "RLM";
 		case "omp.rlm.groq_codec":
@@ -306,6 +309,9 @@ function formatStepMeta(node: ContextFlowNode, flow: ContextFlowSnapshot): strin
 function formatTurnStepIo(node: ContextFlowNode, flow: ContextFlowSnapshot): string {
 	if (node.component === "omp.rlm.auto_gate") {
 		return node.decision ?? "";
+	}
+	if (node.component === "omp.shadow.decider") {
+		return node.decision ?? "SHADOW";
 	}
 	if (node.component === "omp.rlm.grants") {
 		if (node.inputBytes !== undefined) return `${formatBytes(node.inputBytes)} selected`;

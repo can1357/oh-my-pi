@@ -23,6 +23,7 @@ export { scheduleContextSnapshot, flushContextSnapshot } from "./emitter";
 export {
 	bindRlmContextFlow,
 	contextFlowRlmAutoGate,
+	contextFlowDeciderShadow,
 	contextFlowRlmSpill,
 	contextFlowRootBegin,
 	contextFlowRootComplete,

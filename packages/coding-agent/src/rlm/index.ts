@@ -195,3 +195,13 @@ export {
 	deriveContextPolicy,
 } from "./tokenomics-bridge";
 export type { ContextPolicy, ModelCallEmit, TokenomicsBridgeOptions } from "./tokenomics-bridge";
+
+export {
+	launchShadowWorkerNeeded,
+	runShadowWorkerNeeded,
+	createMockShadowPredictor,
+	setShadowPredictorForTest,
+	WORKER_NEEDED_CAPABILITY,
+	SHADOW_EXPERIMENT_ID,
+} from "./shadow";
+export type { ShadowPrediction, ShadowWorkerNeededResult } from "./shadow";

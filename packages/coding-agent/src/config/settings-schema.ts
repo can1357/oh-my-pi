@@ -2684,6 +2684,27 @@ export const SETTINGS_SCHEMA = {
 			description: "When set, forces C or D under auto mode (empty = no override)",
 		},
 	},
+	"rlm.shadow.workerNeeded": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "Shadow Decider (worker_needed)",
+			description:
+				"Observe-only Decider-2B predictions for rlm.worker_needed. Never controls worker execution. Requires Tokenomics.",
+		},
+	},
+	"rlm.shadow.timeoutMs": {
+		type: "number",
+		default: 1500,
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "Shadow Decider timeout (ms)",
+			description: "Fail-open timeout for observe-only Decider shadow calls (does not block the hot path).",
+		},
+	},
 	"rlm.kernelBind": {
 		type: "boolean",
 		default: false,

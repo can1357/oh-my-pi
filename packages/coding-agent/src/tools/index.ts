@@ -221,6 +221,8 @@ export interface ToolSession {
 	) => Promise<
 		string | { text: string; tokens?: number; cost?: number; inputTokens?: number; outputTokens?: number }
 	>;
+	/** Optional Tokenomics bridge for observe-only shadow decisions. */
+	getTokenomicsBridge?: () => import("../rlm/tokenomics-bridge").OmpTokenomicsBridge | undefined;
 	/** Session-owned RLM spill store (legacy attach). */
 	rlmStore?: import("../rlm/store").RlmStore;
 	/** Session-owned RLM runtime (RFC v3). */

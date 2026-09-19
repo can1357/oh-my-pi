@@ -328,6 +328,176 @@ export class OmpTokenomicsBridge {
 		);
 	}
 
+	/**
+	 * Observe-only Decider shadow for rlm.worker_needed.
+	 * Attaches to the session trace; never credits tokens_saved / latency_saved.
+	 */
+	async emitShadowWorkerNeeded(input: {
+		pairId: string;
+		taskSnapshotId: string;
+		armId: string;
+		treatmentHash: string;
+		status: "ok" | "error" | "cancelled" | "unknown";
+		prediction?: string;
+		probabilities?: Record<string, number>;
+		confidence?: number;
+		abstained?: boolean;
+		latencyMs?: number;
+		revision?: string;
+		actualPolicy: string;
+		featureSchema: string;
+		grantedBytes: number;
+		complexityClass: string;
+		errorClass?: string;
+		reason?: string;
+	}): Promise<TokenomicsEvent | null> {
+		if (!this.enabled) return null;
+		const experiment = {
+			experiment_id: "omp-shadow-rlm-worker-needed-v1",
+			pair_id: input.pairId,
+			task_snapshot_id: input.taskSnapshotId,
+			arm_id: input.armId,
+			treatment_hash: input.treatmentHash,
+			selection_policy: "shadow",
+			replay_grade: "live_shadow",
+		};
+		const decision = await this.#record(
+			makeEvent({
+				...this.baseFields(),
+				kind: "decision",
+				name: "omp.shadow.rlm.worker_needed",
+				capability_id: "rlm.worker_needed",
+				role: "router",
+				status: input.status,
+				model: {
+					provider: "local",
+					name: input.armId,
+					revision: input.revision,
+					role: "router",
+				},
+				latency: input.latencyMs !== undefined ? { duration_ms: input.latencyMs } : undefined,
+				experiment,
+				// Shadow compute is real cost later; never claim savings while observe-only.
+				economics: {
+					estimated_tokens_avoided: 0,
+					measured_tokens_avoided: 0,
+				},
+				attributes: {
+					"decision.shadow": true,
+					"decision.prediction": input.prediction ?? "",
+					"decision.confidence": input.confidence ?? -1,
+					"decision.abstained": Boolean(input.abstained),
+					"omp.actual_policy": input.actualPolicy,
+					"omp.feature_schema": input.featureSchema,
+					"omp.granted_bytes": input.grantedBytes,
+					"omp.complexity_class": input.complexityClass,
+					"tokenomics.context.policy": this.contextPolicy,
+					...(input.errorClass ? { "benchmark.error_class": input.errorClass } : {}),
+				},
+				extra: {
+					"decision.probabilities": input.probabilities ?? {},
+					"benchmark.reason": input.reason,
+					source: "live_shadow",
+				},
+			}),
+		);
+
+		// Actual OMP policy action (not gold).
+		await this.#record(
+			makeEvent({
+				...this.baseFields(),
+				kind: "decision",
+				name: "omp.policy.rlm.worker_needed",
+				capability_id: "rlm.worker_needed",
+				role: "router",
+				status: "ok",
+				experiment: {
+					...experiment,
+					selection_policy: "operator",
+					arm_id: "omp_auto_policy",
+				},
+				attributes: {
+					"decision.shadow": false,
+					"omp.actual_policy": input.actualPolicy,
+					"omp.feature_schema": input.featureSchema,
+				},
+				extra: { source: "live_policy" },
+			}),
+		);
+
+		// Gold unknown until counterfactual / verifier joins later.
+		await this.#record(
+			makeEvent({
+				...this.baseFields(),
+				kind: "verification",
+				name: "omp.shadow.rlm.worker_needed.gold",
+				capability_id: "rlm.worker_needed",
+				role: "verifier",
+				status: "unknown",
+				experiment,
+				outcome: {
+					source: "omp_shadow",
+					verification_source: "pending_counterfactual",
+					note: "gold unknown — do not train on this row",
+				},
+				attributes: {
+					"decision.gold_status": "unknown",
+					"decision.shadow": true,
+				},
+				extra: { source: "live_shadow" },
+			}),
+		);
+
+		return decision;
+	}
+
+	/**
+	 * Append gold verification to an existing shadow pair (same session trace).
+	 */
+	async emitShadowWorkerNeededGold(input: {
+		pairId: string;
+		taskSnapshotId?: string;
+		armId?: string;
+		treatmentHash?: string;
+		gold: string;
+		correct?: boolean;
+		verificationSource: string;
+		dangerousFalse?: boolean;
+	}): Promise<TokenomicsEvent | null> {
+		if (!this.enabled) return null;
+		return this.#record(
+			makeEvent({
+				...this.baseFields(),
+				kind: "verification",
+				name: "omp.shadow.rlm.worker_needed.gold",
+				capability_id: "rlm.worker_needed",
+				role: "verifier",
+				status: "ok",
+				experiment: {
+					experiment_id: "omp-shadow-rlm-worker-needed-v1",
+					pair_id: input.pairId,
+					task_snapshot_id: input.taskSnapshotId,
+					arm_id: input.armId ?? "decider_2b",
+					treatment_hash: input.treatmentHash,
+					selection_policy: "shadow",
+					replay_grade: "counterfactual",
+				},
+				outcome: {
+					verified_success: input.correct,
+					verifier_ok: input.correct,
+					verification_source: input.verificationSource,
+					source: "omp_counterfactual",
+				},
+				attributes: {
+					"decision.gold": input.gold,
+					"decision.gold_status": "known",
+					"decision.correct": Boolean(input.correct),
+					"decision.dangerous_false": Boolean(input.dangerousFalse),
+				},
+			}),
+		);
+	}
+
 	/** Summarize in-memory events via Tokenomics (no OMP reimplementation). */
 	summary(): TraceSummary | null {
 		if (!this.#memory.events.length) return null;

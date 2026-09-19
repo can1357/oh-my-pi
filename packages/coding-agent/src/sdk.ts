@@ -1878,6 +1878,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			trackEvalExecution: (execution, abortController) =>
 				session ? session.trackEvalExecution(execution, abortController) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
+			getTokenomicsBridge: () => session?.getTokenomicsBridge?.(),
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),

@@ -8,6 +8,7 @@ export const FLOW_KEYS = {
 	RLM_SPILL: "omp.rlm.spill",
 	RLM_SEARCH: "omp.rlm.search",
 	RLM_AUTO_GATE: "omp.rlm.auto_gate",
+	DECIDER_SHADOW: "omp.shadow.decider",
 	RLM_GRANTS: "omp.rlm.grants",
 	RLM_WORKER: "omp.rlm.worker",
 	RLM_CODEC: "omp.rlm.groq_codec",
@@ -119,6 +120,39 @@ export function contextFlowRlmAutoGate(
 		decision: decision.flowDecision,
 		reason: decision.reason,
 		durationMs: 0,
+	});
+	if (store) emitSnapshot(owner as ContextFlowEmitterHost, store);
+}
+
+export function contextFlowDeciderShadow(
+	owner: object,
+	args: {
+		prediction?: string;
+		confidence?: number;
+		latencyMs: number;
+		status: "ok" | "error" | "cancelled" | "unavailable" | "unknown";
+		reason?: string;
+	},
+	store?: RlmStore,
+): void {
+	const pred = args.prediction ?? "—";
+	const conf =
+		args.confidence !== undefined && Number.isFinite(args.confidence)
+			? ` · ${args.confidence.toFixed(2)}`
+			: "";
+	const decision = `SHADOW ${pred}${conf}`;
+	getContextFlowRegistry(owner).recordInstant({
+		stage: "classifier",
+		component: FLOW_KEYS.DECIDER_SHADOW,
+		role: "shadow_router",
+		visibility: "shadow",
+		wiringStatus: "shadow",
+		decision,
+		reason: args.reason ?? `decider_2b ${args.status}`,
+		durationMs: args.latencyMs,
+		status: args.status === "ok" ? "complete" : args.status === "cancelled" ? "skipped" : "failed",
+		provider: "local",
+		model: "decider_2b",
 	});
 	if (store) emitSnapshot(owner as ContextFlowEmitterHost, store);
 }
