@@ -135,6 +135,10 @@
 - Fixed silent MCP requests being terminated by an undeclared idle timeout; closing a legacy SSE connection now also cancels pending requests and notifications.
 - Fixed browser reuse for Chromium installed behind Linux wrapper scripts and prevented duplicate launches when a profile is locked ([#12236](https://github.com/can1357/oh-my-pi/pull/12236) by [@shivamklr](https://github.com/shivamklr)).
 
+### Fixed
+
+- The bundled agent now identifies as omp instead of following the Anthropic OAuth Claude Code transport fingerprint ([#12071](https://github.com/can1357/oh-my-pi/issues/12071)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Breaking Changes
