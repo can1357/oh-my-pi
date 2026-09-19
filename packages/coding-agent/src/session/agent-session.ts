@@ -1061,9 +1061,35 @@ export class AgentSession {
 	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
+	/** Queue IRC records behind the active turn when the fire-and-forget wake loses a scheduling race. */
+	#queueIrcFollowUps(records: AgentMessage[]): void {
+		for (const record of records) this.agent.followUp(record);
+	}
+
+	/** Observe a queued wake across the active turn and its follow-up. */
+	#observeQueuedIrcFollowUps(records: AgentMessage[]): void {
+		let finishObservation: ((error?: unknown) => void | Promise<void>) | undefined;
+		try {
+			finishObservation = this.#ircWakeTurnObserver?.(records);
+		} catch (error) {
+			logger.warn("IRC queued wake observer failed to start", { error: String(error) });
+			return;
+		}
+		if (!finishObservation) return;
+		void this.agent
+			.waitForIdle()
+			.then(() => finishObservation?.())
+			.catch(error => finishObservation?.(error))
+			.catch(error => logger.warn("IRC queued wake observer failed to finish", { error: String(error) }));
+	}
 	#wakeForIrc(records: AgentMessage[]): void {
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(records);
+			return;
+		}
+		if (this.agent.state.isStreaming) {
+			this.#observeQueuedIrcFollowUps(records);
+			this.#queueIrcFollowUps(records);
 			return;
 		}
 		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
@@ -1128,13 +1154,13 @@ export class AgentSession {
 			.catch(error => {
 				if (error instanceof AgentBusyError) {
 					// Lost the prompt race after passing the checks above: an
-					// ordinary running turn takes these as asides, but a pooled
+					// ordinary running turn takes these as follow-ups, but a pooled
 					// turn must not flush them, so park them instead.
 					if (this.#workPoolYieldItems.length > 0) {
 						this.#irc.queueDeferredWake(records);
 						logger.debug("IRC wake turn parked while pooled");
 					} else {
-						this.#irc.queueAside(records);
+						this.#queueIrcFollowUps(records);
 						logger.debug("IRC wake turn deferred behind the running turn");
 					}
 					return;
