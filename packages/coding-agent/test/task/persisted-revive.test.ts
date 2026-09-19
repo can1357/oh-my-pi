@@ -62,6 +62,8 @@ interface RevivedSessionHandle {
 	setLastAssistantText: (text: string) => void;
 	/** Report a terminal wake turn: provider error, abort, or empty completion. */
 	setLastAssistantStop: (stop: LastAssistantStop) => void;
+	/** Deliver a session event to the wake monitor's subscriber. */
+	emit: (event: AgentSessionEvent) => void;
 }
 
 /** Shape of a terminal assistant message the stub can report from a failed/cancelled wake turn. */
@@ -86,13 +88,20 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		  }
 		| undefined;
 	const trackedReplies: Promise<void>[] = [];
+	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const session = {
 		...createSessionDefaults(),
 		getMountedXdevToolNames: () => [],
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},
-		subscribe: (_listener: (event: AgentSessionEvent) => void) => () => {},
+		subscribe: (listener: (event: AgentSessionEvent) => void) => {
+			listeners.push(listener);
+			return () => {
+				const index = listeners.indexOf(listener);
+				if (index >= 0) listeners.splice(index, 1);
+			};
+		},
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
@@ -107,6 +116,9 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		session,
 		observer: () => observer,
 		trackedReplies,
+		emit: event => {
+			for (const listener of [...listeners]) listener(event);
+		},
 		setLastAssistantText: text => {
 			lastAssistant = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
 		},
@@ -677,6 +689,11 @@ describe("persisted subagent revival", () => {
 		});
 		rpcRegistry.setSubscriptionLevel("progress");
 		const ref = createRef(sessionFile);
+		// Transcript-derived totals the registry restored for the parked ref. The
+		// duration is a transcript span (hours idle), not active runtime.
+		ref.history = {
+			metrics: { tokens: 1000, requests: 7, tools: 3, cost: 1.5, durationMs: 3_600_000, durationKind: "span" },
+		};
 		AgentRegistry.global().register({
 			id: ref.id,
 			displayName: ref.displayName,
@@ -713,6 +730,90 @@ describe("persisted subagent revival", () => {
 		if (last?.type !== "subagent_lifecycle") throw new Error("expected terminal lifecycle frame");
 		expect(last.payload.id).toBe(ref.id);
 		expect(last.payload.status).not.toBe("started");
+		// The wake turn publishes on top of the persisted totals, so the roster
+		// row continues the agent's lifetime instead of restarting at zero — but
+		// the idle transcript span must not be reported as active runtime.
+		const progress = frames.find(frame => frame.type === "subagent_progress");
+		expect(progress).toMatchObject({
+			payload: { progress: { requests: 7, tokens: 1000, toolCount: 3, cost: 1.5 } },
+		});
+		if (progress?.type !== "subagent_progress") throw new Error("expected a progress frame");
+		expect(progress.payload.progress.durationMs).toBeLessThan(3_600_000);
+		rpcRegistry.dispose();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("keeps cold-revive lifetime totals across repeated parking of the same reviver", async () => {
+		// The lifecycle manager caches the reviver after the first cold revive and
+		// reuses it for every later park→revive; usage from wake turns in between
+		// must not fall back to the originally scanned transcript totals.
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-repeat-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([]);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+		const eventBus = new EventBus();
+		const frames: RpcSubagentFrame[] = [];
+		let terminal = Promise.withResolvers<void>();
+		const rpcRegistry = new RpcSubagentRegistry(eventBus, frame => {
+			frames.push(frame);
+			if (frame.type === "subagent_lifecycle" && frame.payload.status !== "started") terminal.resolve();
+		});
+		rpcRegistry.setSubscriptionLevel("progress");
+		const ref = createRef(sessionFile);
+		ref.history = { metrics: { tokens: 0, requests: 7, tools: 0, cost: 0, durationMs: 0, durationKind: "span" } };
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd, eventBus)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+
+		const wake = async (body: string): Promise<number> => {
+			const observer = handle?.observer();
+			if (!observer) throw new Error("Expected the wake observer to be installed");
+			frames.length = 0;
+			terminal = Promise.withResolvers<void>();
+			const finish = observer([
+				{
+					role: "custom",
+					customType: "irc:incoming",
+					content: body,
+					display: true,
+					details: { id: `irc-${body}`, from: "Main", message: body },
+					attribution: "agent",
+					timestamp: Date.now(),
+				},
+			]);
+			// One assistant turn = one request burned by this wake.
+			handle?.emit({
+				type: "message_end",
+				message: { role: "assistant", content: [{ type: "text", text: body }], stopReason: "stop" },
+			} as unknown as AgentSessionEvent);
+			await finish?.();
+			await terminal.promise;
+			const last = frames.findLast(frame => frame.type === "subagent_progress");
+			if (last?.type !== "subagent_progress") throw new Error("expected a progress frame");
+			return last.payload.progress.requests;
+		};
+
+		await reviver(ref);
+		// Persisted 7 + this wake's request.
+		expect(await wake("first")).toBe(8);
+		// Second cold revive through the SAME reviver, as after an idle-TTL park:
+		// continues from 8, not from the persisted 7 again.
+		await reviver(ref);
+		expect(await wake("second")).toBe(9);
 		rpcRegistry.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();

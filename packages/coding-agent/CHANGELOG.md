@@ -102,6 +102,8 @@
 - Configured discovery models retain request-time credentials after offline cache reloads and failed refreshes.
 - Runtime API-key overrides retain precedence over configured credentials.
 - Element handles returned by `tab.waitForSelector`, `tab.$`, and related selector helpers can now be passed as arguments to `tab.evaluate` inside `tab.run` instead of failing with "JSHandles can be evaluated only in the context they were created".
+- Agent roster cost, request, token, and tool counts now keep accumulating when a kept-alive subagent is woken by a hub message, including after park/revive; previously each wake turn restarted the row at zero, hiding earlier spend.
+- Agent roster cost, request, token, and tool counts now keep accumulating when a kept-alive subagent is woken by a hub message, including after park/revive; previously each wake turn restarted the row at zero, hiding earlier spend ([#12275](https://github.com/can1357/oh-my-pi/pull/12275) by [@GeneMyslinsky](https://github.com/GeneMyslinsky)).
 
 ## [18.2.2] - 2026-09-16
 

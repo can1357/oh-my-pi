@@ -14,7 +14,12 @@ import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
-import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+import {
+	attachIrcWakeTurnMonitor,
+	createMCPProxyTools,
+	createSubagentSettings,
+	type SubagentLifetimeTotals,
+} from "./executor";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -91,6 +96,22 @@ export function createPersistedSubagentReviverFactory(
 			taskDepth++;
 			parentId = registry.get(parentId)?.parentId;
 		}
+		// Persisted transcript totals become the baseline so the roster row keeps
+		// counting up across the revive instead of resetting to this turn. One
+		// object per reviver: the lifecycle manager reuses this reviver for every
+		// later park→revive cycle, and each wake turn folds its usage back in, so
+		// re-creating it per revival would drop everything since the cold revive.
+		// Wake-turn progress is published as active runtime, and the persisted
+		// duration is a transcript span (idle gaps included), so only an
+		// active-kind duration may seed it.
+		const metrics = ref.history?.metrics;
+		const lifetime: SubagentLifetimeTotals = {
+			requests: metrics?.requests ?? 0,
+			tokens: metrics?.tokens ?? 0,
+			toolCount: metrics?.tools ?? 0,
+			cost: metrics?.cost ?? 0,
+			durationMs: metrics?.durationKind === "active" ? metrics.durationMs : 0,
+		};
 		return async expectedRef => {
 			// Re-open fresh on every revive: park closes the writer, so this takes
 			// the single-writer lock cleanly and restores the full message history.
@@ -246,6 +267,7 @@ export function createPersistedSubagentReviverFactory(
 				// Anchor artifacts to the revived ref's own dir (its parent's children
 				// dir), not the live root session's, matching the spawn callers (#11563).
 				artifactsDir: path.dirname(sessionFile),
+				lifetime,
 			});
 			return session;
 		};

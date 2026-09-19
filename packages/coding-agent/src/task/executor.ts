@@ -1019,6 +1019,20 @@ export type AbortReason = "signal" | "shutdown" | "terminate" | "timeout" | "bud
 
 const MAX_YIELD_TOOL_ERRORS = 6;
 
+/**
+ * Roster counters a kept-alive subagent accumulated over its earlier runs.
+ * Published progress snapshots add these so a hub-wake turn extends the
+ * agent's lifetime totals instead of restarting the roster row from zero.
+ * Internal counters (budget guard, per-turn result summary) stay per-run.
+ */
+export interface SubagentLifetimeTotals {
+	requests: number;
+	tokens: number;
+	toolCount: number;
+	cost: number;
+	durationMs: number;
+}
+
 /** Inputs for the run monitor driving one subagent assignment. */
 interface RunMonitorArgs {
 	index: number;
@@ -1047,6 +1061,8 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
+	/** Totals from earlier runs of the same agent, added to every published snapshot. */
+	carryOver?: SubagentLifetimeTotals;
 }
 
 /**
@@ -1400,10 +1416,23 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		progress.recentOutput = filtered.slice(-8).reverse();
 	};
 
+	const carry = args.carryOver;
+	const snapshotProgress = (): AgentProgress =>
+		carry
+			? {
+					...progress,
+					requests: progress.requests + carry.requests,
+					tokens: progress.tokens + carry.tokens,
+					toolCount: progress.toolCount + carry.toolCount,
+					cost: progress.cost + carry.cost,
+					durationMs: progress.durationMs + carry.durationMs,
+				}
+			: { ...progress };
+
 	const emitProgressNow = () => {
 		refreshRecentOutput();
 		progress.durationMs = Date.now() - startTime;
-		onProgress?.({ ...progress });
+		onProgress?.(snapshotProgress());
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
 		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
@@ -1415,7 +1444,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			parentToolCallId: args.parentToolCallId,
 			detached: args.detached,
 			assignment,
-			progress: { ...progress },
+			progress: snapshotProgress(),
 			sessionFile: args.sessionFile,
 		};
 		emitSubagentFrame(args.eventBus, args.subagentEventBus, TASK_SUBAGENT_PROGRESS_CHANNEL, progressPayload);
@@ -2613,6 +2642,11 @@ export interface IrcWakeTurnMonitorOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
+	/**
+	 * Mutable lifetime counters shared across this agent's runs. Each wake turn
+	 * publishes on top of them and folds its own usage back in when it settles.
+	 */
+	lifetime?: SubagentLifetimeTotals;
 }
 
 /** Sender + message id of one `irc:incoming` record that woke a turn. */
@@ -2816,6 +2850,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
+			carryOver: options.lifetime && { ...options.lifetime },
 		});
 
 		const startedPayload = {
@@ -2908,6 +2943,19 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					error: caught instanceof Error ? caught.message : String(caught),
 				});
 			} finally {
+				// Fold after finalization: it re-emits a final snapshot whose
+				// durationMs is later than at finish(), and the next wake's baseline
+				// must equal the last published total or the roster moves backward.
+				// Uses the monitor's own last-published progress, so a failed
+				// finalization folds exactly what observers saw.
+				if (options.lifetime) {
+					const turn = turnMonitor.progress;
+					options.lifetime.requests += turn.requests;
+					options.lifetime.tokens += turn.tokens;
+					options.lifetime.toolCount += turn.toolCount;
+					options.lifetime.cost += turn.cost;
+					options.lifetime.durationMs += turn.durationMs;
+				}
 				// Unconditional: a failed, cancelled, empty, or even un-finalized
 				// wake turn must still tell whoever woke it, or a `send await:true`
 				// waiter mistakes a dead peer for a healthy-but-silent one.
@@ -3430,7 +3478,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	let unsubscribe: (() => void) | null = null;
 	let registryAbortUnsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
+	// Shared across the initial install and every live revive so wake turns
+	// keep extending the same lifetime counters (the roster row's totals).
+	let lifetime: SubagentLifetimeTotals | undefined;
 	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
+		lifetime ??= {
+			requests: progress.requests,
+			tokens: progress.tokens,
+			toolCount: progress.toolCount,
+			cost: progress.cost,
+			durationMs: progress.durationMs,
+		};
 		attachIrcWakeTurnMonitor(target, {
 			id,
 			index,
@@ -3447,6 +3505,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
 			artifactsDir: options.artifactsDir,
+			lifetime,
 		});
 	};
 

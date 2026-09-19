@@ -352,7 +352,9 @@ describe("runSubprocess soft request budget", () => {
 		expect(AgentLifecycleManager.global().has(id)).toBe(true);
 		expect(handle.disposeCalls()).toBe(0);
 
-		const expectRpcTurn = (advised: boolean): void => {
+		// Every wake turn publishes on top of the agent's lifetime totals: the
+		// roster row keeps counting up instead of restarting at 0 per turn.
+		const expectRpcTurn = (advised: boolean, requestsBefore: number): void => {
 			expect(frames[0]).toMatchObject({
 				type: "subagent_lifecycle",
 				payload: { id, status: "started" },
@@ -360,10 +362,11 @@ describe("runSubprocess soft request budget", () => {
 			const firstProgress = frames.find(frame => frame.type === "subagent_progress");
 			expect(firstProgress).toBeDefined();
 			expect(firstProgress?.payload.progress.advisor === true).toBe(advised);
-			if (advised) {
-				// The badge must appear before the awakened agent emits its first request.
-				expect(firstProgress?.payload.progress.requests).toBe(0);
-			}
+			// The badge and the carried-over baseline both appear before the
+			// awakened agent emits its first request.
+			expect(firstProgress?.payload.progress.requests).toBe(requestsBefore);
+			const lastProgress = frames.findLast(frame => frame.type === "subagent_progress");
+			expect(lastProgress?.payload.progress.requests).toBe(requestsBefore + 1);
 			expect(frames.at(-1)).toMatchObject({
 				type: "subagent_lifecycle",
 				payload: { id, status: "completed" },
@@ -376,7 +379,8 @@ describe("runSubprocess soft request budget", () => {
 		const idleReceipt = await new IrcBus().send({ from: "Main", to: id, body: "resume your inventory" });
 		expect(idleReceipt.outcome).toBe("woken");
 		await idleTerminal;
-		expectRpcTurn(true);
+		// Initial run burned 8 requests before the hard abort.
+		expectRpcTurn(true, 8);
 
 		await AgentLifecycleManager.global().park(id);
 		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
@@ -395,7 +399,7 @@ describe("runSubprocess soft request budget", () => {
 		const revivedReceipt = await new IrcBus().send({ from: "Main", to: id, body: "resume after parking" });
 		expect(revivedReceipt.outcome).toBe("revived");
 		await revivedTerminal;
-		expectRpcTurn(false);
+		expectRpcTurn(false, 9);
 		rpcRegistry.dispose();
 	});
 
