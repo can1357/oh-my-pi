@@ -81,6 +81,17 @@ describe("AdvisorEmissionGuard", () => {
 		});
 	});
 
+	it("treats zero as unlimited capacity while retaining noise and dedupe filters", () => {
+		const guard = new AdvisorEmissionGuard({ budgetPerUpdate: 0 });
+		for (let i = 1; i <= 64; i++) {
+			expect(guard.admit(`Distinct unlimited concern ${i}.`, { rank: 2, pending: false }).accepted).toBe(true);
+		}
+		expect(guard.admit("Stop.", { rank: 2, pending: false })).toEqual({ accepted: false, reason: "noise" });
+		expect(guard.admit("Distinct unlimited concern 1!", { rank: 2, pending: false })).toEqual({
+			accepted: false,
+			reason: "duplicate",
+		});
+	});
 	it("does not let a suppressed call consume the per-update budget", () => {
 		// A noise call like "Stop." must never displace a real concern that
 		// follows in the same advisor model cycle.

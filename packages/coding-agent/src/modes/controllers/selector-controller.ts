@@ -621,6 +621,9 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 			case "advisor.maxNotesPerUpdate":
+			case "advisor.reassessOnAdvice":
+			case "advisor.maxCheckInTurns":
+			case "advisor.maxToolCallsPerReview":
 				if (this.ctx.session.isAdvisorEnabled()) {
 					this.ctx.session.setAdvisorEnabled(true);
 					this.ctx.ui.requestRender();

@@ -417,14 +417,17 @@ describe("maxNotesPerUpdate configuration", () => {
 				"advisors:",
 				"  - name: High Throughput",
 				"    maxNotesPerUpdate: 5",
+				"  - name: Unlimited",
+				"    maxNotesPerUpdate: 0",
 				"  - name: Default Budget",
 			].join("\n");
 			await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
 
 			const { advisors, sharedMaxNotesPerUpdate } = await discoverAdvisorConfigs(tmp, tmp);
 			expect(sharedMaxNotesPerUpdate).toBe(4);
-			expect(advisors).toHaveLength(2);
+			expect(advisors).toHaveLength(3);
 			expect(advisors.find(a => a.name === "High Throughput")?.maxNotesPerUpdate).toBe(5);
+			expect(advisors.find(a => a.name === "Unlimited")?.maxNotesPerUpdate).toBe(0);
 			expect(advisors.find(a => a.name === "Default Budget")?.maxNotesPerUpdate).toBeUndefined();
 		} finally {
 			await fsp.rm(tmp, { recursive: true, force: true });

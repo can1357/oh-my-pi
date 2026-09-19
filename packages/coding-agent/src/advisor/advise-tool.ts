@@ -9,7 +9,7 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import { escapeXmlAttribute, escapeXmlText, logger } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, escapeXmlText, logger, prompt } from "@oh-my-pi/pi-utils";
 import adviseDescription from "../prompts/advisor/advise-tool.md" with { type: "text" };
 import { AdvisorEmissionGuard, type AdvisorSuppressionReason, normalizeAdvisorNote } from "./emission-guard";
 
@@ -35,7 +35,8 @@ export interface AdviseDetails {
  * stays a clean `<advisory>` block. The primary agent's system prompt never
  * mentions advisories, so this is its only cue for how to treat them.
  */
-const ADVISOR_GUIDANCE = "weigh, don't blindly obey";
+const ADVISOR_GUIDANCE =
+	"nit/omitted is a passive aside by default; when reassessOnAdvice is enabled every accepted note requests reassessment; concern requires primary reassessment; blocker requires stop, recovery, and verification; weigh, don't blindly obey";
 
 /**
  * Render a batch of advisor notes as the agent-facing message body: one
@@ -80,30 +81,31 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *
  * - A `preserveOnly` caller records every note that arrives while the primary
  *   is idle as a visible card and never starts a new primary turn.
- * - A non-interrupting `nit` rides the non-interrupting aside queue while
- *   streaming, or is preserved as a visible card when idle after a terminal answer.
- * - An interrupting `concern`/`blocker` is normally steered into the agent: into
- *   the live turn while one is streaming, or (when idle) a triggered turn so the
- *   advice is acted on immediately.
- * - If the primary tail is already a terminal text answer and there is no queued
- *   work, late non-blocker advice (a `nit` or `concern`) is preserved as a visible
- *   card instead of waking the primary to restate completion. A `blocker` is the
- *   exception: it means the agent handed off broken or unexercised work, so it
- *   still steers a triggered turn to force the primary to acknowledge and continue
- *   before the turn is considered done (#5628) — deferring it to the next user
- *   turn is the bug.
+ * - By default, a non-interrupting `nit` rides the non-interrupting aside queue
+ *   while streaming, or is preserved as a visible card when idle after a
+ *   terminal answer.
+ * - When `reassessOnAdvice` is enabled, accepted notes use the steering path
+ *   regardless of severity. The safety gates below still preserve notes after a
+ *   deliberate user interrupt, during abort/unwind, or when the host explicitly
+ *   forbids agent-initiated turns.
+ * - By default, an interrupting `concern`/`blocker` is steered into the agent:
+ *   into the live turn while one is streaming, or (when idle) a triggered turn
+ *   so the advice is acted on immediately.
+ * - If the primary tail is already a terminal text answer and there is no
+ *   queued work, late non-blocker advice is preserved by default instead of
+ *   waking the primary to restate completion. With `reassessOnAdvice`, that
+ *   terminal-answer preservation rule does not apply.
  * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
  *   not auto-resume the stopped run. While the agent is idle — or still tearing
  *   the interrupted turn down (`aborting`) — the note is preserved as a visible
  *   card instead of restarting the run. But once a turn is actively streaming
  *   again (a resume the user already drove), steering the note in does NOT
  *   auto-resume anything, so it is delivered live. Parking it during an active
- *   run instead strands it (it never reaches the running agent) and the withheld
- *   notes dump as one burst at the next user prompt — the bug this guards.
- * - During the post-interrupt immune-turn window, further `concern` notes are
- *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
- *   means the agent handed off broken or unexercised work, so it still steers a
- *   triggered turn even right after a prior interrupt (#5628).
+ *   run instead strands it.
+ * - During the post-interrupt immune-turn window, further default `concern`
+ *   notes are downgraded to asides; a `blocker` is exempt. Opt-in
+ *   `reassessOnAdvice` intentionally overrides this severity-only cooldown,
+ *   but not the user-interrupt preservation above.
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
@@ -113,13 +115,21 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	terminalAnswerNoQueuedWork?: boolean;
 	interruptImmuneTurnActive?: boolean;
 	preserveOnly?: boolean;
+	reassessOnAdvice?: boolean;
 }): AdvisorDeliveryChannel {
+	const reassessOnAdvice = opts.reassessOnAdvice === true;
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
-	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
+	if (
+		!reassessOnAdvice &&
+		opts.terminalAnswerNoQueuedWork &&
+		opts.severity !== "blocker" &&
+		!opts.streaming &&
+		!opts.aborting
+	)
 		return "preserve";
-	if (!isInterruptingSeverity(opts.severity)) return "aside";
+	if (!reassessOnAdvice && !isInterruptingSeverity(opts.severity)) return "aside";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
-	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
+	if (!reassessOnAdvice && opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
 	return "steer";
 }
 
@@ -178,7 +188,7 @@ const ADVISOR_ACK_SUPPRESSED: Record<AdvisorSuppressionReason, string> = {
 export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails> {
 	readonly name = "advise";
 	readonly label = "Advise";
-	readonly description = adviseDescription;
+	readonly description: string;
 	readonly parameters = adviseSchema;
 	readonly intent = "omit" as const;
 	/**
@@ -209,12 +219,16 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 	 *   note is emitted (live or deferred). Defaults to a stock
 	 *   {@link AdvisorEmissionGuard} (default budget
 	 *   {@link ADVISOR_DEFAULT_BUDGET_PER_UPDATE}).
+	 * @param reassessOnAdvice Render the configured routing mode into the advisor's
+	 *   tool description so omitted/nit guidance matches the host delivery policy.
 	 */
 	constructor(
 		private readonly onAdvice: (note: string, severity?: AdviseDetails["severity"]) => void,
 		guard?: AdvisorEmissionGuard,
+		reassessOnAdvice = false,
 	) {
 		this.#guard = guard ?? new AdvisorEmissionGuard();
+		this.description = prompt.render(adviseDescription, { reassess_on_advice: reassessOnAdvice });
 	}
 
 	/**

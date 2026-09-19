@@ -1377,6 +1377,7 @@ describe("advisor", () => {
 			]);
 			// No-severity note: bare advisory tag (no severity attribute).
 			expect(content).toMatch(/<advisory guidance="[^"]*">\nfirst note\n<\/advisory>/);
+			expect(content).toMatch(/<advisory guidance="[^"]*concern requires primary reassessment[^"]*">/);
 			// Severity rides an attribute, not an inline `[blocker]` tag or a bullet.
 			expect(content).toMatch(/<advisory severity="blocker" guidance="[^"]*">/);
 			expect(content).not.toContain("[blocker]");
@@ -6402,13 +6403,14 @@ describe("advisor", () => {
 			}
 		});
 
-		it("routes a non-interrupting nit to the aside queue regardless of state", () => {
+		it("keeps normal omitted/nit advice passive", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "nit",
-					autoResumeSuppressed: true,
+					autoResumeSuppressed: false,
 					streaming: true,
-					aborting: true,
+					aborting: false,
+					reassessOnAdvice: false,
 				}),
 			).toBe("aside");
 			expect(
@@ -6417,8 +6419,23 @@ describe("advisor", () => {
 					autoResumeSuppressed: false,
 					streaming: false,
 					aborting: false,
+					reassessOnAdvice: false,
 				}),
 			).toBe("aside");
+		});
+
+		it("steers omitted/nit advice when reassessOnAdvice is enabled", () => {
+			for (const severity of [undefined, "nit"] as const) {
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: true,
+						aborting: false,
+						reassessOnAdvice: true,
+					}),
+				).toBe("steer");
+			}
 		});
 
 		it("steers concern/blocker when no user interrupt is in effect", () => {
@@ -6436,16 +6453,34 @@ describe("advisor", () => {
 			}
 		});
 
-		it("preserves a late concern when the primary already ended with a terminal answer", () => {
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: "concern",
-					autoResumeSuppressed: false,
-					streaming: false,
-					aborting: false,
-					terminalAnswerNoQueuedWork: true,
-				}),
-			).toBe("preserve");
+		it("preserves late nit and concern in normal mode after a terminal answer", () => {
+			for (const severity of ["nit", "concern"] as const) {
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+						terminalAnswerNoQueuedWork: true,
+						reassessOnAdvice: false,
+					}),
+				).toBe("preserve");
+			}
+		});
+
+		it("steers late omitted, nit, and concern with reassessOnAdvice", () => {
+			for (const severity of [undefined, "nit", "concern"] as const) {
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+						terminalAnswerNoQueuedWork: true,
+						reassessOnAdvice: true,
+					}),
+				).toBe("steer");
+			}
 		});
 
 		it("steers a late blocker after a terminal answer so the primary continues and acknowledges it (#5628)", () => {
@@ -6525,6 +6560,41 @@ describe("advisor", () => {
 						aborting: false,
 					}),
 				).toBe("steer");
+			}
+		});
+		it("keeps reassessment opt-in behind user-interrupt and abort safety gates", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "nit",
+					autoResumeSuppressed: true,
+					streaming: false,
+					aborting: false,
+					reassessOnAdvice: true,
+				}),
+			).toBe("preserve");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: undefined,
+					autoResumeSuppressed: true,
+					streaming: true,
+					aborting: true,
+					reassessOnAdvice: true,
+				}),
+			).toBe("preserve");
+		});
+
+		it("preserves reassessment opt-in when plan/ACP host safety forbids idle triggers", () => {
+			for (const severity of [undefined, "nit", "concern"] as const) {
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+						preserveOnly: true,
+						reassessOnAdvice: true,
+					}),
+				).toBe("preserve");
 			}
 		});
 	});

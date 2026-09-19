@@ -9,10 +9,12 @@ An advisor does not approve actions or mutate primary session state directly. It
 - [`src/advisor/runtime.ts`](../packages/coding-agent/src/advisor/runtime.ts)
 - [`src/advisor/advise-tool.ts`](../packages/coding-agent/src/advisor/advise-tool.ts)
 - [`src/advisor/emission-guard.ts`](../packages/coding-agent/src/advisor/emission-guard.ts)
+- [`src/advisor/check-in.ts`](../packages/coding-agent/src/advisor/check-in.ts)
 - [`src/advisor/watchdog.ts`](../packages/coding-agent/src/advisor/watchdog.ts)
 - [`src/advisor/config.ts`](../packages/coding-agent/src/advisor/config.ts)
 - [`src/advisor/transcript-recorder.ts`](../packages/coding-agent/src/advisor/transcript-recorder.ts)
 - [`src/prompts/advisor/system.md`](../packages/coding-agent/src/prompts/advisor/system.md)
+- [`src/prompts/advisor/check-in-tool.md`](../packages/coding-agent/src/prompts/advisor/check-in-tool.md)
 - [`src/prompts/advisor/advise-tool.md`](../packages/coding-agent/src/prompts/advisor/advise-tool.md)
 - [`src/session/session-advisors.ts`](../packages/coding-agent/src/session/session-advisors.ts)
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
@@ -101,18 +103,20 @@ A `WATCHDOG.yml` roster entry may select any subset of built-ins that were actua
 
 Advisor tools are built against the isolated advisor `ToolSession` and wrapped with `ExtensionToolWrapper`, so `tools.approvalMode`, per-tool approval policies, and `autoApprove` apply just as they do to registry tools. Cursor's server-side exec bridge uses the same approval context and only exposes delete/edit/search capabilities when the corresponding advisor grant exists.
 
-The `advise` tool accepts one note and an optional severity:
+Each review also has a hard investigative-call cap from `advisor.maxToolCallsPerReview` (default `1`). At `0`, the advisor is transcript-only; otherwise it may make at most that many investigative calls, then it must report with `advise` or defer with `check_in`. This cap limits investigative tools only; `advise` and `check_in` remain available.
 
-| Severity        | Delivery                                                                                                                                                             | Intended use                                                                 |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| omitted / `nit` | Non-interrupting aside, batched into the primary transcript at the next step boundary.                                                                               | Cleanup, simplification, low-risk edge cases.                                |
-| `concern`       | Interrupting steering message when the delivery constraints below permit it. A late terminal-answer `concern` is preserved as a visible card instead.                | Material risk, likely wrong direction, missing constraint, hallucinated API. |
-| `blocker`       | Interrupting steering message when the delivery constraints below permit it. Unlike a `concern`, a terminal answer alone does not prevent it from triggering a turn. | Continuing would clearly waste work or produce broken output.                |
+The `advise` tool accepts one note and an optional severity. Severity encodes the primary's required response, not the advisor's confidence:
+
+| Severity        | Delivery                                                                                                                                                                                                 | Intended use                                                                 |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| omitted / `nit` | Normal mode: non-interrupting aside, batched into the primary transcript at the next step boundary; it never starts a reassessment turn. With `advisor.reassessOnAdvice: true`: accepted notes use the reassessment route when delivery permits. | Cleanup, simplification, low-risk edge cases.                                |
+| `concern`       | Normal mode: requires primary reassessment and normally steers when delivery permits; a late terminal-answer concern is preserved for the next resume. With reassessment enabled, the same route also applies to accepted nits/omitted notes. | Material risk, likely wrong direction, missing constraint, hallucinated API. |
+| `blocker`       | Requires the primary to stop, recover, and verify; normally steers when delivery permits, including reopening a terminal handoff.                                                                                                                               | Continuing would clearly waste work or produce broken output.                |
 
 Accepted notes are rendered into the primary transcript as XML-escaped `<advisory>` elements. Named roster advisors add an `advisor` attribute:
 
 ```text
-<advisory advisor="Architecture" severity="concern" guidance="weigh, don't blindly obey">
+<advisory advisor="Architecture" severity="concern" guidance="nit/omitted is a passive aside by default; reassessOnAdvice makes every accepted note request reassessment; concern requires primary reassessment; blocker requires stop, recovery, and verification; weigh, don't blindly obey">
 note text
 </advisory>
 ```
@@ -121,10 +125,10 @@ When you deliberately interrupt the agent (Esc, or a cancel from collab, ACP, RP
 
 A normal yield the agent drove itself is treated differently from a deliberate interrupt, but it is not a blanket "always steers and resumes". The loop state and completed turn first determine the normal delivery path:
 
-- **While the loop is still streaming**, blockers can steer into the live turn. Nits and concerns from an in-progress review remain deferred until a final boundary.
+- **While the loop is still streaming**, blockers can steer into the live turn. Nits and concerns from an in-progress review remain deferred until a final boundary; with `advisor.reassessOnAdvice: true`, accepted deferred notes use the reassessment route after that boundary.
 - **Once the loop has yielded and gone idle**, delivery keys on how the turn ended:
-  - If the primary's tail is a **terminal text answer with no queued work**, a late `concern` is preserved as a visible card rather than waking the agent to restate a completed turn (#4840) — it re-enters context on the next resume (a new message, `.`/`c`, or a steer/follow-up), exactly like the interrupt case. A `blocker` is the exception: it normally steers a triggered turn, because it means the agent handed off broken or unexercised work that must be acknowledged before the turn is considered done (#5628).
-  - Otherwise (the agent yielded mid-work, no terminal answer), an idle `concern`/`blocker` normally triggers a fresh turn so the advice is acted on immediately.
+  - In normal mode, if the primary's tail is a **terminal text answer with no queued work**, a late `concern` is preserved as a visible card rather than waking the agent to restate a completed turn (#4840) — it re-enters context on the next resume. With `advisor.reassessOnAdvice: true`, accepted late nit/omitted/concern notes bypass this terminal-answer severity rule and request reassessment when delivery permits. A `blocker` normally steers a triggered turn, because it means the agent handed off broken or unexercised work that must be acknowledged before the turn is considered done (#5628).
+  - Otherwise (the agent yielded mid-work, no terminal answer), an idle concern/blocker normally triggers a fresh turn so the advice is acted on immediately; reassessment mode applies that trigger to every accepted note when safety permits.
 
 Two session/client constraints can still preserve a note whose normal delivery path is steering:
 
@@ -133,9 +137,21 @@ Two session/client constraints can still preserve a note whose normal delivery p
 
 So the advisor can steer and resume a run the agent ended on its own **while it is running or yielded mid-work and the current mode/client permits steering**. When steering is blocked instead, the note is either preserved as a card (the terminal-answer, plan-mode, and deferred-ACP cases above) or downgraded to a non-interrupting aside (the `advisor.immuneTurns` cooldown below); either way it waits for the next step boundary or resume rather than waking the agent.
 
-`advisor.immuneTurns` limits interruption frequency. After the advisor successfully delivers a `concern` or `blocker` through the steering channel, later concerns/blockers are routed as non-interrupting asides until the configured number of primary turns has completed. The default is `3`. `nit` notes are unchanged, and advice raised while user-interrupt auto-resume suppression is active is still preserved instead of restarting a stopped run.
+`advisor.immuneTurns` limits interruption frequency in normal mode. After the advisor successfully delivers a `concern` or `blocker` through the steering channel, later concerns/blockers are routed as non-interrupting asides until the configured number of primary turns has completed. With `advisor.reassessOnAdvice: true`, accepted notes use the reassessment severity route instead of this severity-only cooldown; deliberate user-interrupt, plan-mode, ACP, and abort safety preservation still wins.
 
 While an advisor update reviews work still in progress, `AdviseTool` defers `nit` and `concern` calls until a final boundary; only a `blocker` may interrupt partial work. Deferred notes pass the emission guard before reservation. A higher-severity note may displace a pending lower-severity note from the same review, but cannot displace notes from earlier reviews or retract routed advice. A final boundary flushes pending notes without resetting the current review's budget.
+
+### Self-scheduled check-ins
+
+The advisor is due on the next primary turn by default. During a review it may call the built-in `check_in` tool once to defer the next review while the watched agent makes more progress:
+
+- `afterTurns: 1` means check after the next primary turn.
+- Larger values allow that many completed primary turns before the next review.
+- `advisor.maxCheckInTurns` bounds the delay (default `5`).
+- Omitting `check_in` keeps the default next-turn review.
+- A delivered `concern` or `blocker` resets the next review to the next primary turn.
+
+Deferral gates delivery of the next transcript delta; it does not rebuild, disable, or discard the advisor runtime. When the advisor becomes due, it receives the accumulated delta, so skipped turns are reviewed together. Conversation-boundary resets clear pending schedules.
 
 ### Emission guard
 
@@ -144,7 +160,7 @@ Each advisor has its own `AdvisorEmissionGuard` (`src/advisor/emission-guard.ts`
 1. **Normalization.** Lowercase, NFKC, collapse every run of non-alphanumeric characters to one space, then trim. `"Stop."`, `"*Stop*"`, and `"  stop  "` all key to `stop`.
 2. **Content-free phrase filter.** Short phrases with no concrete reason — `stop`, `done`, `complete`, `no issue continue`, `lgtm`, `nothing to add`, and similar — are suppressed.
 3. **Severity-aware dedupe.** A repeated normalized note is dropped at equal or lower severity. A real escalation (`nit` → `concern` → `blocker`) remains eligible even after the earlier note was delivered. The FIFO history holds at most 4096 entries.
-4. **Per-update rank budget.** Up to N non-blocker notes per advisor model `prompt()` cycle (default 4, configurable from 1–32). At capacity, a higher-severity note may replace the lowest-rank still-pending note from the same update. Routed notes retain their slots; earlier updates' pending notes remain reserved. Blockers are exempt, and suppressed noise consumes no budget. Precedence: per-advisor config > shared `WATCHDOG.yml` top-level > `advisor.maxNotesPerUpdate` setting > default 4. There is no additional aggregate backlog budget.
+4. **Per-update rank budget.** Up to N non-blocker notes per advisor model `prompt()` cycle (default 4; `0` means unlimited, otherwise positive values are capped at 32). At capacity, a higher-severity note may replace the lowest-rank still-pending note from the same update. Routed notes retain their slots; earlier updates' pending notes remain reserved. Blockers are exempt, and suppressed noise consumes no budget. A zero budget bypasses only this capacity; noise, dedupe, rank escalation, and displacement semantics remain active. Precedence: per-advisor config > shared `WATCHDOG.yml` top-level > `advisor.maxNotesPerUpdate` setting > default 4. There is no additional aggregate backlog budget.
 
 Acknowledgments distinguish acceptance, conditional deferral, duplicates, noise, and budget suppression. Acceptance means the host accepted the note for primary delivery, not that the primary model consumed it. Deferred acceptance warns that a higher-severity finding from the same review may displace the note. A rejected note receives no delivery promise; the advisor should not rephrase rejected findings to evade the guard.
 
@@ -288,7 +304,7 @@ Fields:
 - `advisors[].enabled`: optional per-advisor switch, default `true`. `false` leaves the advisor visible as paused in status/configuration.
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning; if that leaves a nonempty input with no valid names, the implementation currently treats the result as omitted and uses the default subset.
-- `maxNotesPerUpdate` (top level or per advisor): accepted non-blocker notes per prompt update, default `4`. A per-advisor value overrides the top-level value, which overrides the `advisor.maxNotesPerUpdate` setting.
+- `maxNotesPerUpdate` (top level or per advisor): accepted non-blocker notes per prompt update, default `4`. `0` means unlimited distinct non-blocker notes for that update; positive values are capped at 32. Noise and duplicates remain filtered, and a per-advisor value overrides the top-level value, which overrides the `advisor.maxNotesPerUpdate` setting.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
 
 ### Discovery locations
