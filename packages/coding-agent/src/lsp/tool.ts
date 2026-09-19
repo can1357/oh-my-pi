@@ -309,6 +309,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
 			let totalServerSuccesses = 0;
+			let unmatchedTargets = 0;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -321,6 +322,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const servers = getServersForFile(config, resolved);
 				if (servers.length === 0) {
 					results.push(`${theme.status.error} ${target}: No language server found`);
+					unmatchedTargets++;
 					continue;
 				}
 
@@ -338,14 +340,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								return getLinterClient(serverName, serverConfig, this.session.cwd).lint(resolved, signal);
 							}
 							const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
-							const minVersion = client.diagnosticsVersion;
+							let minVersion = client.diagnosticsVersion;
 							// Opening the file can trigger the project load we are about to await.
 							await refreshFile(client, resolved, signal);
-							const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 							if (needsDiagnosticProjectWait(client)) {
 								await waitForProjectLoaded(client, signal);
 								throwIfAborted(signal);
+								minVersion = client.diagnosticsVersion;
+								await refreshFile(client, resolved, signal);
 							}
+							const expectedDocumentVersion = client.openFiles.get(uri)?.version;
 							const waitCapMs = detailed
 								? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
 								: isProjectAwareLspServer(serverConfig)
@@ -460,7 +464,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
-			const allServersSucceeded = totalServerAttempts > 0 && totalServerSuccesses === totalServerAttempts;
+			const allServersSucceeded =
+				unmatchedTargets === 0 && totalServerAttempts > 0 && totalServerSuccesses === totalServerAttempts;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
 				details: { action, serverName: Array.from(allServerNames).join(", "), success: allServersSucceeded },

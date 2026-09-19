@@ -4,7 +4,13 @@ import path from "node:path";
 import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
-import { getOrCreateClient, sendRequest, supportsDocumentDiagnostics, waitForProjectLoaded } from "./client";
+import {
+	getOrCreateClient,
+	refreshFile,
+	sendRequest,
+	supportsDocumentDiagnostics,
+	waitForProjectLoaded,
+} from "./client";
 import { getLinterClient } from "./clients";
 import { hasRootMarkerAncestor } from "./config";
 import { applyTextEditsToString } from "./edits";
@@ -602,13 +608,16 @@ export async function getDiagnosticsForFile(
 				// Default: use LSP
 				const client = await getOrCreateClient(serverConfig, cwd, undefined, boundSignal);
 				throwIfAborted(boundSignal);
+				let minVersion = minVersions?.get(serverName);
+				let expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
 				if (needsDiagnosticProjectWait(client)) {
 					await waitForProjectLoaded(client, boundSignal);
 					throwIfAborted(boundSignal);
+					minVersion = client.diagnosticsVersion;
+					await refreshFile(client, absolutePath, boundSignal);
+					expectedDocumentVersion = client.openFiles.get(uri)?.version;
 				}
 				// Content already synced + didSave sent, wait for fresh diagnostics
-				const minVersion = minVersions?.get(serverName);
-				const expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
 				const diagnostics = await waitForDiagnostics(client, uri, {
 					timeoutMs: waitBudgetMs,
 					signal: boundSignal,

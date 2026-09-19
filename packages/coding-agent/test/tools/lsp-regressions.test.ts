@@ -1883,22 +1883,17 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("opens an explicit diagnostics document before project-loading progress can finish", async () => {
-		const tempDir = TempDir.createSync("@omp-lsp-diagnostic-open-");
+	it("refreshes push diagnostics after project loading completes", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-diagnostic-ready-");
 		try {
 			const filePath = path.join(tempDir.path(), "target.ts");
+			const uri = fileToUri(filePath);
 			await Bun.write(filePath, "export const value = 42;\n");
 			await initTheme();
 			const events: string[] = [];
 			installFakeLsp((message, server) => {
 				if (message.method === "initialize") {
-					events.push("initialize");
-					server.send({
-						jsonrpc: "2.0",
-						id: message.id,
-						result: { capabilities: { diagnosticProvider: true } },
-					});
-					events.push("progress-begin");
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
 					server.send({
 						jsonrpc: "2.0",
 						method: "$/progress",
@@ -1906,18 +1901,38 @@ describe("lsp regressions", () => {
 					});
 				} else if (message.method === "textDocument/didOpen") {
 					events.push("didOpen");
+					events.push("pre-readiness-publish");
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri, version: 1, diagnostics: [] },
+					});
 					events.push("progress-end");
 					server.send({
 						jsonrpc: "2.0",
 						method: "$/progress",
 						params: { token: "project", value: { kind: "end" } },
 					});
-				} else if (message.method === "textDocument/diagnostic") {
-					events.push("diagnostic");
+				} else if (message.method === "textDocument/didSave") {
+					events.push("didSave");
+					events.push("post-readiness-publish");
 					server.send({
 						jsonrpc: "2.0",
-						id: message.id,
-						result: { kind: "full", items: [] },
+						method: "textDocument/publishDiagnostics",
+						params: {
+							uri,
+							version: 2,
+							diagnostics: [
+								{
+									range: {
+										start: { line: 0, character: 13 },
+										end: { line: 0, character: 18 },
+									},
+									severity: 1,
+									message: "post-readiness error",
+								},
+							],
+						},
 					});
 				} else if (message.method === "shutdown") {
 					server.send({ jsonrpc: "2.0", id: message.id, result: null });
@@ -1935,25 +1950,17 @@ describe("lsp regressions", () => {
 				idleTimeoutMs: undefined,
 			});
 			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["project-aware-lsp", serverConfig]]);
-			const waitForProjectLoaded = lspClient.waitForProjectLoaded;
-			vi.spyOn(lspClient, "waitForProjectLoaded").mockImplementation(async (client, signal) => {
-				if (!client.openFiles.has(fileToUri(filePath))) throw new Error("Project wait preceded document open");
-				return waitForProjectLoaded(client, signal);
-			});
 
-			const result = await new LspTool(makeLspSession(tempDir.path())).execute("diagnostic-open-order", {
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("diagnostic-ready", {
 				action: "diagnostics",
 				file: filePath,
 				timeout: 5,
 			});
 
 			expect(result.details?.success).toBe(true);
-			const didOpen = events.indexOf("didOpen");
-			const progressEnd = events.indexOf("progress-end");
-			const diagnostic = events.indexOf("diagnostic");
-			expect(didOpen).toBeGreaterThanOrEqual(0);
-			expect(progressEnd).toBeGreaterThan(didOpen);
-			expect(diagnostic).toBeGreaterThan(progressEnd);
+			expect(textResult(result)).toContain("post-readiness error");
+			expect(events.indexOf("didSave")).toBeGreaterThan(events.indexOf("progress-end"));
+			expect(events.indexOf("post-readiness-publish")).toBeGreaterThan(events.indexOf("progress-end"));
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
@@ -2412,6 +2419,46 @@ describe("lsp regressions", () => {
 			expect(output).not.toBe("OK");
 			expect(output).toContain("all language servers failed");
 			expect(output).toContain("broken");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("reports mixed unsupported glob targets as incomplete", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-mixed-glob-");
+		try {
+			await Promise.all([
+				Bun.write(path.join(tempDir.path(), "target.ts"), "export const target = 1;\n"),
+				Bun.write(path.join(tempDir.path(), "notes.md"), "# Notes\n"),
+			]);
+			await initTheme();
+			const serverConfig: ServerConfig = {
+				command: "healthy-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+			const client = makeMockLspClient(tempDir.path(), serverConfig, { diagnosticProvider: true });
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { healthy: serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockImplementation((_config, filePath) =>
+				filePath.endsWith(".ts") ? [["healthy", serverConfig]] : [],
+			);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue({ kind: "full", items: [] });
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("mixed-glob", {
+				action: "diagnostics",
+				file: "*.*",
+				timeout: 5,
+			});
+
+			expect(result.details?.success).toBe(false);
+			const output = textResult(result);
+			expect(output).toContain("target.ts: no issues");
+			expect(output).toContain("notes.md: No language server found");
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
