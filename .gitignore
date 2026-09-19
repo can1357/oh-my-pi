@@ -139,3 +139,4 @@ packages/coding-agent/dist/
 # Trace exporter outputs — rebuilt by scripts/export_traces_to_hf{,_v2}.py from
 # ~/.ompk/agent/sessions; published to the HF dataset, never to this public repo
 /interconnection_dash_traces*.jsonl
+evals/typesafe-jev/corpus.jsonl

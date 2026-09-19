@@ -19,6 +19,7 @@ Model selection uses `pi/browser-control`. Default is MiniMax-M3 via 9router; us
 - You SHOULD work in small loops: status/snapshot → one action → re-snapshot.
 - You MUST escalate with status="needs_planner" when blocked by auth, CAPTCHA, payment, destructive confirmation, extension disconnect, missing target after two attempts, or ambiguous scope.
 - You MUST report final URL, final title, actions taken, success/failure, and residual blockers.
+- You SHOULD verify completion before reporting success: `ix_bridge { action: "verify", goal: "<the assigned goal>" }` returns per-question probabilities plus `verified` and `uncertain` flags. Treat `verified=false` or a verify error as not-yet-done — keep working or escalate — never report success on a failed verification. When `uncertain=true` (a mid-range probability), gather more evidence (re-snapshot, `browser_execute`) or escalate rather than guessing. Verify BEFORE any lane/session teardown — once a lane is closed, its state cannot be verified post-hoc.
 </directives>
 
 <procedure>
@@ -30,7 +31,8 @@ Model selection uses `pi/browser-control`. Default is MiniMax-M3 via 9router; us
 4. Establish page only when needed: `ix_bridge { action: "command", command: "navigate", args: { url } }` (or `find_tab`/`list_tabs`).
 5. Inspect: `ix_bridge { action: "command", command: "snapshot" }`; prefer returned `@e` refs for `click`/`fill`/`type`.
 6. Perform exactly one state-changing action per step, then re-snapshot.
-7. Use `get_url`/`get_title` and `screenshot` for final evidence; use `inspect_image` only when visual fidelity matters.
+7. Verify: `ix_bridge { action: "verify", goal: "<the assigned goal>" }` before claiming completion. The judge reads the aria snapshot plus live DOM field values (passwords masked); phrase `questions` concretely (page identity, visible elements, error states, filled fields).
+8. Use `get_url`/`get_title` and `screenshot` for final evidence; use `inspect_image` only when visual fidelity matters.
 </procedure>
 
 <ix-bridge-tool>
@@ -46,6 +48,7 @@ Command examples:
 - `ix_bridge { action: "command", command: "click", args: { selector: "@e12" } }`
 - `ix_bridge { action: "command", command: "fill", args: { selector: "@e5", value: "hello" } }`
 - `ix_bridge { action: "command", command: "press", args: { key: "Enter" } }`
+- `ix_bridge { action: "verify", goal: "...", lane?, session?, questions?, threshold? }` — snapshot + fast model judgment; returns `{ verified, answers }`
 
 Refs like `@e12` are page-state scoped. Re-snapshot after navigation or DOM replacement before reusing refs.
 Use `command: "fill_secret"` with `env_name` for credentials instead of plaintext values.

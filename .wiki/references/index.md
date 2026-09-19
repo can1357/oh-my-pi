@@ -12,3 +12,4 @@ External sources mirrored as first-class OKF concepts. Each links to its canonic
 # Vendor docs
 
 * [Claude Code subagents & compaction](claude-code-subagents.md) - isolated context windows, summary-only return, compaction preserving structured state.
+* [TypeSafe Jev](typesafe-jev.md) - System One judgment model; typed noul/choice/score answers over caller state, no generation.

@@ -15,6 +15,7 @@
 import type { AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import { logger } from "@pk-nerdsaver-ai/pi-utils";
 import { type } from "arktype";
+import { judgeState, OPENROUTER_DEFAULT_JUDGE_MODEL } from "../lib/openrouter-judge";
 import type { ToolSession } from "./index";
 
 /** Default IX Bridge daemon base URL. */
@@ -26,8 +27,10 @@ const IX_BRIDGE_DEFAULT_TIMEOUT_MS = 30_000;
 const IX_BRIDGE_MIN_TIMEOUT_MS = 1_000;
 const IX_BRIDGE_MAX_TIMEOUT_MS = 300_000;
 
+const verifyQuestions = type({ "[string]": { instructions: "string" } });
+
 const ixBridgeParams = type({
-	action: type.enumerated("status", "guide", "command").describe("status | guide | command"),
+	action: type.enumerated("status", "guide", "command", "verify").describe("status | guide | command | verify"),
 	"baseUrl?": type("string").describe(`daemon base URL (default ${IX_BRIDGE_DEFAULT_BASE_URL})`),
 	"lane?": type("string").describe(`agent route / lane (default ${IX_BRIDGE_DEFAULT_LANE})`),
 	"session?": type("string").describe("stable session id so tabs stay grouped per task"),
@@ -37,6 +40,14 @@ const ixBridgeParams = type({
 	),
 	"args?": type("object").describe("command arguments, e.g. { selector: '@e12', value: 'x' }"),
 	"timeoutMs?": type("number").describe(`request timeout ms (default ${IX_BRIDGE_DEFAULT_TIMEOUT_MS})`),
+	"goal?": type("string").describe("for action=verify: the goal the browser task was supposed to achieve"),
+	"questions?": verifyQuestions.describe(
+		"for action=verify: yes/no questions to judge against the snapshot (default: one goal_met question)",
+	),
+	"model?": type("string").describe(
+		`for action=verify: OpenRouter judge model (default ${OPENROUTER_DEFAULT_JUDGE_MODEL})`,
+	),
+	"threshold?": type("number").describe("for action=verify: probability required per question (default 0.7)"),
 });
 
 type IxBridgeParams = typeof ixBridgeParams.infer;
@@ -80,7 +91,7 @@ export function createIxBridgeTool(session: ToolSession): AgentTool<typeof ixBri
 		strict: false,
 		approval: "write",
 		description:
-			"Drive the local IX Bridge browser daemon (Chrome/Edge extension at http://127.0.0.1:18086). action=status checks daemon/extension health, action=guide fetches the live command guide, action=command sends a browser action (snapshot before element actions; use returned @e refs). Primary browser surface for OMPK; prefer over ad-hoc HTTP.",
+			"Drive the local IX Bridge browser daemon (Chrome/Edge extension at http://127.0.0.1:18086). action=status checks daemon/extension health, action=guide fetches the live command guide, action=command sends a browser action (snapshot before element actions; use returned @e refs), action=verify snapshots the lane and asks a fast OpenRouter model whether the page state satisfies `goal` — use it to confirm a browser task actually completed. Primary browser surface for OMPK; prefer over ad-hoc HTTP.",
 		parameters: ixBridgeParams,
 		async execute(_toolCallId, rawParams, signal) {
 			const params = rawParams as IxBridgeParams;
@@ -113,6 +124,82 @@ export function createIxBridgeTool(session: ToolSession): AgentTool<typeof ixBri
 					return { content: [{ type: "text", text }], isError: !ok, details: makeDetails(ok, res.status) };
 				}
 
+				if (params.action === "verify") {
+					if (!params.goal?.trim()) {
+						return {
+							content: [{ type: "text", text: "ix_bridge action=verify requires a `goal`." }],
+							isError: true,
+							details: makeDetails(false),
+						};
+					}
+					const lane = params.lane ?? IX_BRIDGE_DEFAULT_LANE;
+					const snapRes = await fetchImpl(`${baseUrl}/ix-bridge/command`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify({ lane, action: "snapshot", args: {} }),
+						signal: controller.signal,
+					});
+					if (!snapRes.ok) {
+						const text = `IX Bridge verify snapshot failed (${snapRes.status}):\n${await snapRes.text()}`;
+						return {
+							content: [{ type: "text", text }],
+							isError: true,
+							details: makeDetails(false, snapRes.status),
+						};
+					}
+					let state = await snapRes.text();
+					// Aria snapshots omit input values — augment with live DOM field
+					// values so "was the form filled" questions are answerable.
+					// Passwords are masked; failure degrades to snapshot-only.
+					try {
+						const fieldsRes = await fetchImpl(`${baseUrl}/ix-bridge/command`, {
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify({
+								lane,
+								action: "browser_execute",
+								args: {
+									code: `JSON.stringify([...document.querySelectorAll('input,textarea,select')].map(e=>({name:e.name||e.id||e.type,type:e.type,value:e.type==='password'?(e.value?'[set]':'[empty]'):e.value,checked:e.checked})).filter(f=>f.value||f.checked))`,
+								},
+							}),
+							signal: controller.signal,
+						});
+						if (fieldsRes.ok) {
+							state += `\n\nFORM FIELD VALUES (live DOM):\n${await fieldsRes.text()}`;
+						}
+					} catch {
+						// snapshot-only verification still applies
+					}
+					const questions = params.questions ?? {
+						goal_met: { instructions: `Does the page state show this goal was achieved: ${params.goal}` },
+					};
+					const threshold = params.threshold ?? 0.7;
+					try {
+						const result = await judgeState({
+							goal: params.goal,
+							state,
+							questions,
+							model: params.model,
+							signal: controller.signal,
+							fetchImpl,
+						});
+						const verified = Object.values(result.answers).every(a => a.noul >= threshold);
+						// Mid-range probabilities mean "cannot tell" — surface that so the
+						// caller escalates instead of treating ambiguity as failure.
+						const uncertain = Object.values(result.answers).some(a => a.noul > 0.3 && a.noul < threshold);
+						const text =
+							`IX Bridge verify (${result.model}, ${result.latencyMs.toFixed(0)}ms):\n` +
+							stringifyBody({ verified, uncertain, threshold, goal: params.goal, answers: result.answers });
+						return { content: [{ type: "text", text }], isError: false, details: makeDetails(true) };
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						return {
+							content: [{ type: "text", text: `IX Bridge verify failed: ${message}` }],
+							isError: true,
+							details: makeDetails(false),
+						};
+					}
+				}
 				// action === "command"
 				if (!params.command?.trim()) {
 					return {
