@@ -5,19 +5,18 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
-import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { HubTool, hubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/hub";
-import type { CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-coding-agent/tools/hub/types";
-import {
-	formatOutputNotice,
-	type OutputMeta,
-	wrapToolWithMetaNotice,
-} from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import { hubToolRenderer } from "@oh-my-pi/pi-tui/tools/hub";
+import type { CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-tui/tools/hub";
+import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";

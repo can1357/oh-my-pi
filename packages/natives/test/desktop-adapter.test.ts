@@ -159,4 +159,15 @@ describe("legacy DesktopSession adapter", () => {
 
 		await expect(session.click("desktop", 1, 1)).rejects.toThrow(/^InvalidCoordinateFrame: /);
 	});
+
+	it("compares captured frames without retaining screenshot bytes", async () => {
+		// The stored captured-target state keeps geometry only: same-geometry
+		// input must not invalidate the frame, changed geometry must.
+		const DesktopSession = adaptDesktopSession(LegacyDesktopSession);
+		const session = new DesktopSession({ display: "all" });
+		const capture = await session.capture("desktop");
+		expect(capture.data).toBeInstanceOf(Uint8Array);
+		await session.click("desktop", 1, 1);
+		await session.click("desktop", 1, 1);
+	});
 });

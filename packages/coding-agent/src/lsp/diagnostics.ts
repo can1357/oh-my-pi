@@ -1,3 +1,4 @@
+import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import * as fs from "node:fs";
 import path from "node:path";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
@@ -328,20 +329,6 @@ export async function waitForDiagnostics(
 	return pulled;
 }
 
-/** Result from getDiagnosticsForFile */
-export interface FileDiagnosticsResult {
-	/** Name of the LSP server used (if available) */
-	server?: string;
-	/** Formatted diagnostic messages */
-	messages: string[];
-	/** Summary string (e.g., "2 error(s), 1 warning(s)") */
-	summary: string;
-	/** Whether there are any errors (severity 1) */
-	errored: boolean;
-	/** Whether the file was formatted */
-	formatter?: FileFormatResult;
-}
-
 export type ServerVersionMap = Map<string, number>;
 
 interface GetDiagnosticsForFileOptions {
@@ -518,13 +505,6 @@ export async function getDiagnosticsForFile(
 		summary,
 		errored: hasErrors,
 	};
-}
-
-export enum FileFormatResult {
-	UNCHANGED = "unchanged",
-	FORMATTED = "formatted",
-	FAILED = "failed",
-	UNSUPPORTED = "unsupported",
 }
 
 /**

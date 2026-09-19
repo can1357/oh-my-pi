@@ -39,9 +39,7 @@ const MODELS_YML = `providers:
           cacheWrite: 0
 `;
 
-const RUNNER = `import { runReadCommand } from "../src/cli/read-cli";
-await runReadCommand({ path: process.argv[2] });
-`;
+const READ_CLI_URL = new URL("../src/cli/read-cli.ts", import.meta.url).href;
 
 describe("omp read <image>?q=", () => {
 	it("resolves a vision model instead of failing with the registry guard", async () => {
@@ -60,11 +58,16 @@ describe("omp read <image>?q=", () => {
 			const pngPath = path.join(project, "test.png");
 			fs.writeFileSync(pngPath, Buffer.from(PNG_1X1, "base64"));
 
-			// The runner lives inside the package so its imports resolve against the
-			// repo node_modules; cwd is the isolated project so getProjectDir() never
-			// picks up repo settings.
-			const runnerPath = path.join(import.meta.dir, `.read-cli-runner-${process.pid}.ts`);
-			fs.writeFileSync(runnerPath, RUNNER);
+			// The runner imports the CLI entry by file URL so it resolves
+			// independently of its own location; it lives in the TempDir (never
+			// the repo checkout) so a crash before cleanup leaves nothing
+			// behind in git status. cwd is the isolated project so
+			// getProjectDir() never picks up repo settings.
+			const runnerPath = tempDir.join(`read-cli-runner-${process.pid}.ts`);
+			fs.writeFileSync(
+				runnerPath,
+				`import { runReadCommand } from ${JSON.stringify(READ_CLI_URL)};\nawait runReadCommand({ path: process.argv[2] });\n`,
+			);
 			try {
 				const child = Bun.spawn(["bun", runnerPath, `${pngPath}?q=describe this image`], {
 					cwd: project,

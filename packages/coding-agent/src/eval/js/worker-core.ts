@@ -1,4 +1,4 @@
-import { ToolError } from "../../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
 import type {
 	RunErrorPayload,

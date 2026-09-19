@@ -133,6 +133,40 @@ describe("compat compiler grammar", () => {
 		).toThrow(/duplicate override pair/);
 	});
 
+	test("identity override selectors are mutually exclusive", () => {
+		const required = 'class="dup" rationale="r" provenance="p"';
+		expect(() =>
+			compileTaxonomy(
+				taxonomySources(
+					`class "dup" { bounded "dup"\noverride id="both" model="opaque" glob="opaque*" ${required} }`,
+				),
+			),
+		).toThrow(/malformed value/);
+		expect(() =>
+			compileTaxonomy(taxonomySources(`class "dup" { bounded "dup"\noverride id="neither" ${required} }`)),
+		).toThrow(/malformed value/);
+	});
+
+	test("glob override selectors compile case-insensitively and reject duplicate provider patterns", () => {
+		const compiled = compileTaxonomy(
+			taxonomySources(
+				'class "dup" { bounded "dup"\noverride id="one" provider="host" glob="Opaque-27B*" class="dup" rationale="r" provenance="p" }',
+			),
+		);
+		expect(compiled.classes[0]?.overrides[0]).toMatchObject({
+			id: "one",
+			provider: "host",
+			glob: "opaque-27b*",
+		});
+		expect(() =>
+			compileTaxonomy(
+				taxonomySources(
+					'class "dup" { bounded "dup"\noverride id="one" provider="host" glob="Opaque*" class="dup" rationale="r" provenance="p"\noverride id="two" provider="HOST" glob="opaque*" class="dup" rationale="r" provenance="p" }',
+				),
+			),
+		).toThrow(/duplicate override glob/);
+	});
+
 	test("missing collapse definition is rejected", () => {
 		expect(() => compileTaxonomy([{ file: "taxonomy/test.kdl", text: 'class "solo" { bounded "solo" }' }])).toThrow(
 			/collapse/,

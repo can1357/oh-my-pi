@@ -2,13 +2,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
 	type BuiltinSlashCommandRuntime,
 	executeBuiltinSlashCommand,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import { CollabQrCodeComponent } from "@oh-my-pi/pi-coding-agent/slash-commands/helpers/collab-qrcode";
+import { CollabQrCodeComponent } from "@oh-my-pi/pi-tui/chrome/collab-qrcode";
 import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
 
 beforeAll(async () => {

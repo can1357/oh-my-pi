@@ -516,8 +516,12 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			settings,
 		});
 
+		// The rejected yield is suppressed only while it is validating (#5006):
+		// no abort before its execution end. Once it resolves as an error the
+		// run is 2 requests into a budget of 1, so the deferred budget check
+		// runs and stops the turn — the reminder then collects a valid yield.
 		expect(abortCountBeforeRejectedYieldExecutionEnd).toBe(0);
-		expect(abortCountBeforeValidYieldExecutionEnd).toBe(0);
+		expect(abortCountBeforeValidYieldExecutionEnd).toBe(1);
 		expect(promptCalls.length).toBeGreaterThanOrEqual(2);
 		expect(promptCalls[1]?.options?.synthetic).toBe(true);
 		expect(result.aborted).toBe(false);
