@@ -8,7 +8,7 @@
 
 ### Added
 
-- Added optional caller-supplied request IDs to Python RPC prompt methods and raw requests for correlating late scheduling failures.
+- Added optional caller-supplied request IDs to Python RPC prompt methods and raw requests for correlating late scheduling failures ([#12555](https://github.com/can1357/oh-my-pi/pull/12555) by [@marcelojmontanez](https://github.com/marcelojmontanez)).
 
 ### Fixed
 
@@ -17,7 +17,7 @@
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
-- Fixed identified late RPC errors being assigned to a different pending Python request with the same command name.
+- Fixed identified late RPC errors being assigned to a different pending Python request with the same command name ([#12555](https://github.com/can1357/oh-my-pi/pull/12555) by [@marcelojmontanez](https://github.com/marcelojmontanez)).
 
 ## [18.2.6] - 2026-09-18
 
