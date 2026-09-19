@@ -10,6 +10,7 @@
 ### Changed
 
 - Centralized llama.cpp Qwen routing and thinking policy in KDL, with reviewed Bonsai lineage aliases and shared backend policy for custom provider names.
+- Added the `requiresStringMessageContent` compat option: text-only `messages[].content` is sent as one string for endpoints that reject multi-part arrays ([#12508](https://github.com/can1357/oh-my-pi/pull/12508) by [@ryanskidmore](https://github.com/ryanskidmore)).
 
 ## [18.2.5] - 2026-09-17
 

@@ -296,6 +296,11 @@ export interface OpenAICompat {
 	qwenTemplateReasoningEffort?: boolean;
 	/** Whether assistant tool-call messages must include non-empty content. Default: false. */
 	requiresAssistantContentForToolCalls?: boolean;
+	/**
+	 * Send text-only `messages[].content` as one string (parts joined by `\n`) for hosts that reject
+	 * multi-part arrays. Content with a non-text part keeps its array. Default: false.
+	 */
+	requiresStringMessageContent?: boolean;
 	/** Whether the provider supports the `tool_choice` parameter. Default: true. */
 	supportsToolChoice?: boolean;
 	/**

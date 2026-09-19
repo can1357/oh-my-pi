@@ -213,6 +213,7 @@ describe("openai-completions compatibility", () => {
 			qwenPreserveThinking: false,
 			qwenTemplateReasoningEffort: false,
 			requiresAssistantContentForToolCalls: false,
+			requiresStringMessageContent: false,
 			openRouterRouting: {},
 			vercelGatewayRouting: {},
 			extraBody: {},
