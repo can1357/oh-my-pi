@@ -86,12 +86,12 @@ describe("queued user delivery policy", () => {
 				const data = mode?.type === "custom" ? mode.data : undefined;
 				const enabled = !data || typeof data !== "object" || !("enabled" in data) || data.enabled !== false;
 				return {
-					systemPrompt: enabled ? [...event.systemPrompt, `policy:${event.prompt}`] : event.systemPrompt,
+					systemPrompt: enabled ? [...event.systemPromptBlocks, `policy:${event.prompt}`] : event.systemPromptBlocks,
 					message: { customType: "prepared-context", content: `context:${event.prompt}`, display: false },
 				};
 			}),
 			extension("independent", async event =>
-				options.policy === false ? undefined : { systemPrompt: [...event.systemPrompt, "independent policy"] },
+				options.policy === false ? undefined : { systemPrompt: [...event.systemPromptBlocks, "independent policy"] },
 			),
 		];
 		const runner = new ExtensionRunner(extensions, new ExtensionRuntime(), manager.getCwd(), manager, registry);
@@ -704,7 +704,7 @@ describe("queued user delivery policy", () => {
 		const absolute = "tools:old_tool is a historical example; use only this absolute policy";
 		extensions.push(
 			extension("absolute", async () => ({ systemPrompt: absolute })),
-			extension("after-absolute", async event => ({ systemPrompt: [...event.systemPrompt, "absolute follower"] })),
+			extension("after-absolute", async event => ({ systemPrompt: [...event.systemPromptBlocks, "absolute follower"] })),
 		);
 		pausePreparation(async () => {
 			await session.setActiveToolsByName(["new_tool"]);
