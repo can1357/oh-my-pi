@@ -91,6 +91,8 @@ export interface MockResponse {
 	fallbackCreditHandle?: AnthropicFallbackCreditHandle;
 	/** Error text paired with an explicit `"error"` stop reason. */
 	errorMessage?: string;
+	/** Pre-set structured error flags (AIError id) carried onto the terminal message. */
+	errorId?: number;
 	/** Usage stats. Missing fields default to 0; missing `cost.total` is recomputed from components. */
 	usage?: Partial<Omit<Usage, "cost">> & { cost?: Partial<Usage["cost"]> };
 	/** Pre-set responseId. */
@@ -361,7 +363,7 @@ async function runMock(
 				: response.throw instanceof Error
 					? response.throw.message
 					: String(response.throw);
-		emitTerminalError(stream, model, startedAt, perfStart, "error", message);
+		emitTerminalError(stream, model, startedAt, perfStart, "error", message, response.errorId);
 		return;
 	}
 
@@ -408,6 +410,7 @@ async function runMock(
 	partial.stopDetails = response.stopDetails;
 	partial.fallbackCreditHandle = response.fallbackCreditHandle;
 	partial.errorMessage = response.errorMessage;
+	partial.errorId = response.errorId;
 	partial.usage = mergeUsage(response.usage);
 	partial.duration = performance.now() - perfStart;
 
@@ -482,6 +485,7 @@ function emitTerminalError(
 	perfStart: number,
 	reason: "aborted" | "error",
 	message: string,
+	errorId?: number,
 ): void {
 	const failure: AssistantMessage = {
 		role: "assistant",
@@ -492,6 +496,7 @@ function emitTerminalError(
 		usage: emptyUsage(),
 		stopReason: reason as StopReason,
 		errorMessage: message,
+		errorId,
 		timestamp: startedAt,
 		duration: performance.now() - perfStart,
 	};
