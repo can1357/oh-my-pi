@@ -231,6 +231,7 @@ export function contextExplorerTitle(view: ContextExplorerView): string {
 const TURN_FLOW_ORDER = [
 	"omp.user",
 	"omp.rlm.search",
+	"omp.rlm.auto_gate",
 	"omp.rlm.grants",
 	"omp.rlm.groq_codec",
 	"omp.rlm.worker",
@@ -243,14 +244,16 @@ function flowStepLabel(component: string): string {
 			return "prompt";
 		case "omp.rlm.search":
 			return "RLM search";
+		case "omp.rlm.auto_gate":
+			return "Auto gate";
 		case "omp.rlm.grants":
-			return "grants";
+			return "RLM";
 		case "omp.rlm.groq_codec":
-			return "Groq codec";
+			return "codec";
 		case "omp.rlm.worker":
 			return "worker";
 		case "omp.root":
-			return "root model";
+			return "Root";
 		default:
 			return component.replace(/^omp\./, "");
 	}
@@ -301,6 +304,13 @@ function formatStepMeta(node: ContextFlowNode, flow: ContextFlowSnapshot): strin
 }
 
 function formatTurnStepIo(node: ContextFlowNode, flow: ContextFlowSnapshot): string {
+	if (node.component === "omp.rlm.auto_gate") {
+		return node.decision ?? "";
+	}
+	if (node.component === "omp.rlm.grants") {
+		if (node.inputBytes !== undefined) return `${formatBytes(node.inputBytes)} selected`;
+		if (node.inputTokens !== undefined) return `${formatTokenShort(node.inputTokens)} selected`;
+	}
 	if (node.component === "omp.root") {
 		if (node.inputTokens !== undefined && node.outputTokens !== undefined) {
 			return `${formatTokenShort(node.inputTokens)} → ${formatTokenShort(node.outputTokens)} t`;
@@ -364,7 +374,13 @@ export function renderContextSavings(flow: ContextFlowSnapshot, breakdown?: Cont
 		const inT = codecNode.inputTokens ?? estimateTokensFromBytes(codecNode.inputBytes ?? 0);
 		const outT = codecNode.outputTokens ?? 0;
 		if (inT > 0 || outT > 0) {
-			const lines = ["Groq codec"];
+			const codecTitle =
+				codecNode.provider === "groq"
+					? "Groq codec"
+					: codecNode.provider
+						? `${codecNode.provider} codec`
+						: "RLM codec";
+			const lines = [codecTitle];
 			if (inT > 0) lines.push(`  Input`.padEnd(24) + formatTokenCount(inT));
 			if (outT > 0) lines.push(`  Output`.padEnd(24) + formatTokenCount(outT));
 			if (inT > 0 && outT > 0) {

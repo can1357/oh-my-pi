@@ -6,10 +6,12 @@ import { rlmEvidenceQuery } from "../rlm/evidence-query";
 import { rlmQuery } from "../rlm/query";
 import { parseGrantRanges, selectGrantsFromSearch } from "../rlm/select-grants";
 import {
+	formatAutoGateFlowDecision,
 	formatWorkerModeDecisionLine,
 	resolveEffectiveWorkerMode,
 	workerModeInputFromSelection,
 } from "../rlm/worker-mode-policy";
+import { contextFlowRlmAutoGate } from "../context-flow/rlm-flow";
 import { getRlmRuntime, rlmEnabled, rlmWorkerModeOverride, rlmWorkerModeSetting } from "../rlm/session";
 import { parseRlmGrants, rlmSubcall } from "../rlm/subcall";
 import type { ToolSession } from ".";
@@ -299,6 +301,14 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 				useEvidence = decision.mode === "evidence-packet";
 				autoDecisionHeader = `${formatWorkerModeDecisionLine(decision)}\n`;
 				store.note("worker-mode-auto", decision.reason, false);
+				const flowOwner = runtime.flowOwner ?? runtime.store.flowOwner;
+				if (flowOwner) {
+					contextFlowRlmAutoGate(
+						flowOwner,
+						{ flowDecision: formatAutoGateFlowDecision(decision), reason: decision.reason },
+						store,
+					);
+				}
 			}
 			const result = useEvidence
 				? await rlmEvidenceQuery(runtime, queryArgs)

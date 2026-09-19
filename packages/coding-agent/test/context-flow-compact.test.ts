@@ -93,12 +93,12 @@ describe("context-flow unified /context page", () => {
 		contextFlowRootBegin(owner, "anthropic", "claude");
 		const flow = snapshotFor(owner, store);
 		const page = renderContextUsagePage(breakdown, theme, flow);
-		expect(page).toContain("Groq codec");
+		expect(page).toMatch(/codec/i);
 		expect(page).toContain("Pipeline");
 		expect(page).toContain("Current turn");
 		expect(page).toContain("↓");
 		const turn = renderCurrentTurnFlow(flow)!;
-		expect(turn).toContain("Groq codec");
+		expect(turn).toContain("codec");
 		expect(turn).toContain("4.2k → 318 t");
 	});
 
@@ -118,7 +118,7 @@ describe("context-flow unified /context page", () => {
 		contextFlowRootBegin(owner, "anthropic", "claude");
 		const flow = snapshotFor(owner);
 		const turn = renderCurrentTurnFlow(flow)!;
-		expect(turn).toContain("root model");
+		expect(turn).toContain("Root");
 		expect(turn).toContain("◉");
 	});
 

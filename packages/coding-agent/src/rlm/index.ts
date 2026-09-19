@@ -147,6 +147,8 @@ export {
 } from "./session";
 export {
 	classifyGrantComplexity,
+	complexityShortLabel,
+	formatAutoGateFlowDecision,
 	formatWorkerModeDecisionLine,
 	resolveAutoWorkerMode,
 	resolveEffectiveWorkerMode,

@@ -1758,6 +1758,9 @@ export async function runRootCommand(
 			// Session-scoped RLM membrane (not persisted). Search-driven grants preferred.
 			settingsInstance.override("context.engine", "rlm");
 			settingsInstance.override("rlm.enabled", true);
+			if (parsedArgs.rlmAuto) {
+				settingsInstance.override("rlm.workerMode", "auto");
+			}
 		}
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyRpcDefaultSettingOverrides(settingsInstance);

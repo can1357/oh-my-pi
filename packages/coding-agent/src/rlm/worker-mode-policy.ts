@@ -191,6 +191,27 @@ export function workerModeInputFromSelection(
 	};
 }
 
+export function complexityShortLabel(complexity: GrantComplexityClass): string {
+	switch (complexity) {
+		case "simple_single_fact":
+			return "simple";
+		case "multi_region_causal":
+			return "multi_region";
+		case "dense_log_extraction":
+			return "dense_log";
+		case "contradictory_evidence":
+			return "contradict";
+		default:
+			return "unknown";
+	}
+}
+
+/** Compact label for Context FLOW (e.g. `D · multi_region`). */
+export function formatAutoGateFlowDecision(decision: WorkerModeAutoDecision): string {
+	const arm = decision.mode === "evidence-packet" ? "D" : "C";
+	return `${arm} · ${complexityShortLabel(decision.complexity)}`;
+}
+
 export function formatWorkerModeDecisionLine(decision: WorkerModeAutoDecision): string {
 	const arm = decision.mode === "evidence-packet" ? "D" : "C";
 	return (

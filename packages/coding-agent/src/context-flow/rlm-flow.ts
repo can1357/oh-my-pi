@@ -7,6 +7,7 @@ export const FLOW_KEYS = {
 	ROOT: "omp.root",
 	RLM_SPILL: "omp.rlm.spill",
 	RLM_SEARCH: "omp.rlm.search",
+	RLM_AUTO_GATE: "omp.rlm.auto_gate",
 	RLM_GRANTS: "omp.rlm.grants",
 	RLM_WORKER: "omp.rlm.worker",
 	RLM_CODEC: "omp.rlm.groq_codec",
@@ -101,6 +102,23 @@ export function contextFlowRlmGrants(
 	reg.updateOffload({
 		grantedTokens: args.grantedTokens ?? Math.round(args.grantedBytes / 4),
 		active: true,
+	});
+	if (store) emitSnapshot(owner as ContextFlowEmitterHost, store);
+}
+
+export function contextFlowRlmAutoGate(
+	owner: object,
+	decision: { flowDecision: string; reason: string },
+	store?: RlmStore,
+): void {
+	getContextFlowRegistry(owner).recordInstant({
+		stage: "classifier",
+		component: FLOW_KEYS.RLM_AUTO_GATE,
+		role: "auto_gate",
+		visibility: "externalized",
+		decision: decision.flowDecision,
+		reason: decision.reason,
+		durationMs: 0,
 	});
 	if (store) emitSnapshot(owner as ContextFlowEmitterHost, store);
 }
