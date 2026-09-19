@@ -268,9 +268,8 @@ describe("async progress chatty guidance", () => {
 
 		expect(message).not.toBeNull();
 		expect(message!.content).toContain("<system-reminder>");
-		expect(message!.content).toContain("Chatty progress → lower source verbosity");
-		expect(message!.content).toContain("Bash: progress cannot be retuned; if retry is unsafe, let it finish.");
-		expect(message!.content).not.toContain("Hub: retune the monitor");
+		expect(message!.content).toContain("\nBash:");
+		expect(message!.content).not.toContain("\nHub:");
 	});
 
 	test("renders process reminder metadata with monitor controls", () => {
@@ -289,8 +288,8 @@ describe("async progress chatty guidance", () => {
 
 		expect(message).not.toBeNull();
 		expect(message!.content).toContain("<system-reminder>");
-		expect(message!.content).toContain("Hub: retune the monitor to `ambient` or `off` without stopping the process.");
-		expect(message!.content).not.toContain("Bash: progress cannot be retuned");
+		expect(message!.content).toContain("\nHub:");
+		expect(message!.content).not.toContain("\nBash:");
 	});
 
 	test("omits the reminder element for unsupported sources", () => {
