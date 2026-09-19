@@ -64,6 +64,13 @@ export type {
 } from "./evidence-packet";
 export { buildEvidenceWorkerContext, buildEvidenceWorkerRequest, rlmEvidenceQuery, tryDeterministicEvidencePacket } from "./evidence-query";
 export type { EvidenceWorkerRequestInput, RlmEvidenceQueryResult } from "./evidence-query";
+export {
+	brokerResultUsageFields,
+	extractWorkerUsageFromCompleter,
+	resolveCompleterTotalTokens,
+	workerUsageToQueryFields,
+} from "./worker-usage";
+export type { RlmWorkerUsage, RlmWorkerUsageFields, RlmWorkerUsageSource } from "./worker-usage";
 export { runRlmWorkerCompletion } from "./worker-completion";
 export type {
 	RlmWorkerCompletionHost,

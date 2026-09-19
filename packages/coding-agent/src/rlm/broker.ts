@@ -5,6 +5,11 @@ import {
 	resolveRlmFlowOwner,
 } from "../context-flow/rlm-flow";
 import type { RlmCompleter } from "./query";
+import {
+	extractWorkerUsageFromCompleter,
+	type RlmWorkerUsageSource,
+	resolveCompleterTotalTokens,
+} from "./worker-usage";
 import type { RlmLedger, RlmLease } from "./ledger";
 import type { RlmRuntime } from "./runtime";
 import type { RlmView } from "./view";
@@ -57,6 +62,13 @@ export interface RlmBrokerResult {
 	failOpen?: boolean;
 	tokens?: number;
 	cost?: number;
+	inputTokens?: number;
+	outputTokens?: number;
+	cacheReadTokens?: number;
+	provider?: string;
+	model?: string;
+	workerUsageKnown?: boolean;
+	workerUsageSource?: RlmWorkerUsageSource;
 	overBudget?: boolean;
 	lease?: RlmLease;
 	context: RlmWorkerContext;
@@ -211,10 +223,11 @@ export async function executeLeasedCompletion(
 			workerMessages: ctx.messages,
 		});
 		const text = typeof raw === "string" ? raw : raw.text;
-		const totalTokens = typeof raw === "string" ? approxTokens : (raw.tokens ?? approxTokens);
+		const usage = extractWorkerUsageFromCompleter(raw, approxTokens);
+		const totalTokens = resolveCompleterTotalTokens(raw, approxTokens);
 		const cost = typeof raw === "string" ? 0 : (raw.cost ?? 0);
-		const inputTokens = typeof raw === "string" ? undefined : raw.inputTokens;
-		const outputTokens = typeof raw === "string" ? undefined : raw.outputTokens;
+		const inputTokens = usage.inputTokens;
+		const outputTokens = usage.outputTokens;
 
 		// Completer returned: reconcile exact usage even if cancel raced the return.
 		const reconciled = ledger.reconcile(lease, {
@@ -223,6 +236,10 @@ export async function executeLeasedCompletion(
 			inputTokens,
 			outputTokens,
 		});
+		usage.totalTokens = reconciled.tokens;
+		usage.cost = reconciled.cost;
+		usage.inputTokens = usage.inputTokens ?? reconciled.lease.inputTokens;
+		usage.outputTokens = usage.outputTokens ?? reconciled.lease.outputTokens;
 		emitTrajectory(runtime, {
 			leaseId: reconciled.lease.id,
 			viewId: ctx.viewId,
@@ -259,8 +276,15 @@ export async function executeLeasedCompletion(
 				text: `${text}\n\n(rlm over-budget after completion; fail-open)`,
 				citation: ctx.citations || ctx.viewId,
 				failOpen: true,
-				tokens: reconciled.tokens,
-				cost: reconciled.cost,
+				tokens: usage.totalTokens,
+				cost: usage.cost,
+				inputTokens: usage.inputTokens,
+				outputTokens: usage.outputTokens,
+				cacheReadTokens: usage.cacheReadTokens,
+				provider: usage.provider,
+				model: usage.model,
+				workerUsageKnown: usage.providerReported,
+				workerUsageSource: usage.source,
 				overBudget: true,
 				lease: reconciled.lease,
 				context: ctx,
@@ -270,8 +294,15 @@ export async function executeLeasedCompletion(
 		return {
 			text,
 			citation: ctx.citations || ctx.viewId,
-			tokens: reconciled.tokens,
-			cost: reconciled.cost,
+			tokens: usage.totalTokens,
+			cost: usage.cost,
+			inputTokens: usage.inputTokens,
+			outputTokens: usage.outputTokens,
+			cacheReadTokens: usage.cacheReadTokens,
+			provider: usage.provider,
+			model: usage.model,
+			workerUsageKnown: usage.providerReported,
+			workerUsageSource: usage.source,
 			lease: reconciled.lease,
 			context: ctx,
 			aborted: lease.signal.aborted || undefined,
@@ -323,3 +354,5 @@ function emitTrajectory(runtime: RlmRuntime, record: RlmTrajectoryRecord): void 
 		record.status !== "completed" && record.status !== "overshoot",
 	);
 }
+
+export { brokerResultUsageFields } from "./worker-usage";

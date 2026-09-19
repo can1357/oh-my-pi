@@ -65,18 +65,32 @@ function armOrderForSeed(seed: number, fixtureId: string, prefer?: "C" | "D"): [
 interface UsageCapture {
 	usage: WorkerUsageRow | null;
 	usageKnown: boolean;
-	usageSource: "completer" | "query_result" | "worker_skipped" | "unknown";
+	usageSource: "completer" | "query_result" | "broker" | "worker_skipped" | "unknown";
 	completerCalled: boolean;
 }
 
 function captureUsage(
 	completerCalled: boolean,
 	completerRaw: unknown,
-	queryResult: { tokens?: number; cost?: number; workerSkipped?: boolean },
+	queryResult: {
+		tokens?: number;
+		cost?: number;
+		inputTokens?: number;
+		outputTokens?: number;
+		cacheReadTokens?: number;
+		provider?: string;
+		model?: string;
+		workerUsageKnown?: boolean;
+		workerSkipped?: boolean;
+	},
 	latencyMs: number,
 ): UsageCapture {
 	if (queryResult.workerSkipped) {
 		return { usage: null, usageKnown: true, usageSource: "worker_skipped", completerCalled: false };
+	}
+	if (queryResult.workerUsageKnown === true) {
+		const row = workerUsageFromResult({ ...queryResult, latencyMs } as never);
+		return { usage: row, usageKnown: true, usageSource: "broker", completerCalled };
 	}
 	if (completerCalled && typeof completerRaw !== "string") {
 		const row = workerUsageFromResult({ ...(completerRaw as object), latencyMs } as never);
@@ -86,16 +100,17 @@ function captureUsage(
 	}
 	if (queryResult.tokens !== undefined || queryResult.cost !== undefined) {
 		return {
-			usage: {
-				inputTokens: 0,
-				outputTokens: queryResult.tokens ?? 0,
-				cacheReadTokens: 0,
-				reasoningTokens: 0,
-				totalTokens: queryResult.tokens ?? 0,
-				costUsd: queryResult.cost ?? 0,
+			usage: workerUsageFromResult({
+				inputTokens: queryResult.inputTokens,
+				outputTokens: queryResult.outputTokens ?? queryResult.tokens,
+				cacheReadTokens: queryResult.cacheReadTokens,
+				tokens: queryResult.tokens,
+				cost: queryResult.cost,
 				latencyMs,
-			},
-			usageKnown: true,
+				provider: queryResult.provider,
+				model: queryResult.model,
+			}),
+			usageKnown: false,
 			usageSource: "query_result",
 			completerCalled,
 		};
@@ -190,7 +205,7 @@ async function runPacketArm(
 	const usageCapture = captureUsage(
 		completerCalled,
 		completerRaw,
-		{ tokens: dResult.tokens, cost: dResult.cost, workerSkipped: dResult.workerSkipped },
+		{ tokens: dResult.tokens, cost: dResult.cost, inputTokens: dResult.inputTokens, outputTokens: dResult.outputTokens, cacheReadTokens: dResult.cacheReadTokens, provider: dResult.provider, model: dResult.model, workerUsageKnown: dResult.workerUsageKnown, workerSkipped: dResult.workerSkipped },
 		e2eMs,
 	);
 

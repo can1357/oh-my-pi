@@ -19,6 +19,7 @@ import {
 	type RlmGrantSelectResult,
 } from "./select-grants";
 import type { RlmStore } from "./store";
+import { brokerResultUsageFields, type RlmWorkerUsageSource } from "./worker-usage";
 import { resolveRlmView, type RlmGrant } from "./view";
 
 
@@ -62,6 +63,13 @@ export interface RlmQueryResult {
 	failOpen?: boolean;
 	tokens?: number;
 	cost?: number;
+	inputTokens?: number;
+	outputTokens?: number;
+	cacheReadTokens?: number;
+	provider?: string;
+	model?: string;
+	workerUsageKnown?: boolean;
+	workerUsageSource?: RlmWorkerUsageSource;
 	overBudget?: boolean;
 	context?: RlmBrokerResult["context"];
 	leaseId?: string;
@@ -185,8 +193,7 @@ export async function rlmQuery(
 		text: result.text,
 		citation: result.citation,
 		failOpen: result.failOpen,
-		tokens: result.tokens,
-		cost: result.cost,
+		...brokerResultUsageFields(result),
 		overBudget: result.overBudget,
 		context: result.context,
 		leaseId: result.lease?.id,

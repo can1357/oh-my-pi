@@ -2001,25 +2001,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								responseSchema: EVIDENCE_PACKET_V1_JSON_SCHEMA,
 							},
 						);
-						const usage =
-							workerResult.inputTokens !== undefined
-								? {
-										input: workerResult.inputTokens,
-										output: workerResult.outputTokens ?? 0,
-										cacheRead: workerResult.cacheReadTokens ?? 0,
+						const usageInput = workerResult.inputTokens ?? 0;
+						const usageOutput = workerResult.outputTokens ?? 0;
+						const usageTotal =
+							workerResult.tokens ??
+							(usageInput + usageOutput > 0 ? usageInput + usageOutput : undefined);
+						const hasProviderUsage =
+							workerResult.inputTokens !== undefined ||
+							workerResult.outputTokens !== undefined ||
+							workerResult.tokens !== undefined ||
+							(workerResult.cost ?? 0) > 0;
+						const usage = hasProviderUsage
+							? {
+									input: usageInput,
+									output: usageOutput,
+									cacheRead: workerResult.cacheReadTokens ?? 0,
+									cacheWrite: 0,
+									totalTokens: usageTotal ?? usageOutput,
+									cost: {
+										input: 0,
+										output: 0,
+										cacheRead: 0,
 										cacheWrite: 0,
-										totalTokens:
-											workerResult.tokens ??
-											workerResult.inputTokens + (workerResult.outputTokens ?? 0),
-										cost: {
-											input: 0,
-											output: 0,
-											cacheRead: 0,
-											cacheWrite: 0,
-											total: workerResult.cost ?? 0,
-										},
-									}
-								: undefined;
+										total: workerResult.cost ?? 0,
+									},
+								}
+							: undefined;
 						if (usage && workerResult.provider && workerResult.model) {
 							try {
 								sessionManager.appendModelUsage(

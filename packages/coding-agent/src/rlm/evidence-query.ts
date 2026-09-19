@@ -28,6 +28,7 @@ import {
 } from "./evidence-grant-supplement";
 import { rejectInvalidEvidencePacket, validateEvidencePacket, type EvidenceValidationResult } from "./evidence-validator";
 import type { RlmCompleter, RlmQueryArgs, RlmQueryResult } from "./query";
+import { brokerResultUsageFields } from "./worker-usage";
 import { QUERY_SLICE } from "./query";
 import { RlmRuntime } from "./runtime";
 import { selectGrantsFromSearch, type RlmGrantSelectResult } from "./select-grants";
@@ -41,6 +42,8 @@ export interface RlmEvidenceQueryResult extends RlmQueryResult {
 	validationFailed?: boolean;
 	workerSkipped?: boolean;
 	packetBytes?: number;
+	/** Worker ran but packet was repaired/supplemented from grants (usage still attributed). */
+	grantRepairUsed?: boolean;
 }
 
 export interface RlmEvidenceCompleter extends RlmCompleter {
@@ -296,6 +299,7 @@ export async function rlmEvidenceQuery(
 
 	let parsed: EvidencePacketV2 | undefined;
 	let parseFailed = false;
+	let grantRepairUsed = false;
 	try {
 		if (structuredFromWorker !== undefined) {
 			parsed = parseEvidencePacketV2(structuredFromWorker);
@@ -304,10 +308,10 @@ export async function rlmEvidenceQuery(
 		}
 	} catch {
 		parseFailed = true;
-		parsed =
-			tryDeterministicGrantRepair(store, view) ??
-			emptyEvidencePacketV2("partial");
+		const repaired = tryDeterministicGrantRepair(store, view);
+		parsed = repaired ?? emptyEvidencePacketV2("partial");
 		parsed.missingEvidence.push("worker returned non-conforming EvidencePacketV2");
+		if (repaired) grantRepairUsed = true;
 	}
 
 	if (parsed && view) {
@@ -335,8 +339,7 @@ export async function rlmEvidenceQuery(
 		text,
 		citation: result.citation,
 		failOpen: result.failOpen || validationFailed || (parseFailed && validationFailed),
-		tokens: result.tokens,
-		cost: result.cost,
+		...brokerResultUsageFields(result),
 		overBudget: result.overBudget,
 		context: result.context,
 		leaseId: result.lease?.id,
@@ -348,5 +351,6 @@ export async function rlmEvidenceQuery(
 		validationFailed: validationFailed || undefined,
 		packetBytes: parsed ? evidencePacketByteSize(parsed) : undefined,
 		workerSkipped: false,
+		grantRepairUsed: grantRepairUsed || undefined,
 	};
 }
