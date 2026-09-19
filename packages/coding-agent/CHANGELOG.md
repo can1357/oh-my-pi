@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.22] - 2026-09-19
+
 ### Added
 
 - Added the optional `9rdeepseek` 9router combo candidate to the default, balanced, task, and budget routing slots.
