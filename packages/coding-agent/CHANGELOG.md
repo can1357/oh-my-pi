@@ -42,6 +42,16 @@
 - Fixed edit operations that could loop after empty insertions or fail on Unicode no-op and overlapping duplicate matches.
 - Fixed live subagent messages being delayed by agent discovery and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery and routing for PrismML Bonsai 2 27B GGUF models, including support for cached models and the Qwen 3.8 thinking-level ladder.
+- Fixed resume clutter: elide 0-turn sessions from the /resume menu; -c similarly skips empty sessions.
+- Fixed image and speech fallback models disappearing after discovery and false incompatibility warnings for providers without credentials.
+
+- Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
+- Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
+- Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
+- Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
+### Fixed
+
+- Fixed `details.truncation` misreporting oversized first lines delivered as byte-capped preview windows ([#10774](https://github.com/can1357/oh-my-pi/issues/10774)): `lastLinePartial` now says the delivered prefix is partial on the plain-file, artifact, and in-memory read paths, and the in-memory stats now describe the rendered snippet instead of reporting zero delivered lines/bytes.
 
 ## [18.2.6] - 2026-09-18
 

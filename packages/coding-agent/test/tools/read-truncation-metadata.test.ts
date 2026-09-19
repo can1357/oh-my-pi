@@ -101,7 +101,9 @@ describe("read truncation metadata", () => {
 		expect(textOutput(result)).not.toContain("1:xxx");
 		expect(result.details?.truncation).toMatchObject({
 			firstLineExceedsLimit: true,
-			lastLinePartial: false,
+			// #10774: the delivered preview is a byte-capped window of the
+			// oversized source line, so the flag must say partial.
+			lastLinePartial: true,
 			totalBytes: DEFAULT_MAX_BYTES + 1,
 			outputBytes: DEFAULT_MAX_BYTES,
 		});
@@ -119,7 +121,8 @@ describe("read truncation metadata", () => {
 		expect(result.details?.displayContent).toMatchObject({ text: preview, startLine: 2, lineNumbers: [2] });
 		expect(result.details?.truncation).toMatchObject({
 			firstLineExceedsLimit: true,
-			lastLinePartial: false,
+			// #10774: partial byte window of the oversized source line.
+			lastLinePartial: true,
 			totalBytes: Buffer.byteLength(line),
 			outputBytes: Buffer.byteLength(preview),
 			outputLines: 1,
@@ -198,11 +201,13 @@ describe("read truncation metadata", () => {
 		expect(result.details?.displayContent?.text).toBe(line.slice(0, DEFAULT_MAX_BYTES));
 		expect(result.details?.truncation).toMatchObject({
 			firstLineExceedsLimit: true,
-			lastLinePartial: false,
+			// #10774: the rendered snippet is a byte-capped window of the
+			// oversized line; stats must describe the delivered preview.
+			lastLinePartial: true,
 			totalLines: 2,
 			totalBytes: DEFAULT_MAX_BYTES + 6,
-			outputLines: 0,
-			outputBytes: 0,
+			outputLines: 1,
+			outputBytes: DEFAULT_MAX_BYTES,
 		});
 		expect(result.details?.meta?.truncation).toMatchObject({ partialLine: true, shownRange: { start: 1, end: 1 } });
 	});

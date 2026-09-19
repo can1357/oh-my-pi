@@ -401,7 +401,16 @@ export function buildInMemoryTextResult(
 			)}, exceeds ${formatBytes(DEFAULT_MAX_BYTES)} limit. Unable to display a valid UTF-8 snippet.]`;
 		}
 
-		details.truncation = toReadTruncationStats(truncation);
+		// #10774: the rendered snippet is a byte-capped window of the
+		// oversized source line, so the stats must flag it partial and
+		// describe what was actually delivered (the truncateHead result
+		// reports zero output because it never emits a partial line).
+		const snippetBytes = Buffer.byteLength(snippet.text, "utf-8");
+		const stats = toReadTruncationStats(truncation);
+		stats.outputLines = snippetBytes > 0 ? 1 : 0;
+		stats.outputBytes = snippetBytes;
+		stats.lastLinePartial = snippetBytes > 0;
+		details.truncation = stats;
 		truncationInfo = {
 			result: truncation,
 			options: { direction: "head", startLine: startLineDisplay, totalFileLines: totalLines },
