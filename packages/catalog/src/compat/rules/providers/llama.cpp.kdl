@@ -19,6 +19,12 @@ provider "llama.cpp" {
 		reasoning-disable-mode "qwen-enable-thinking-false"
 		qwen-preserve-thinking #true
 
+		discovered #true {
+			thinking-upgrade-neutral #true
+			thinking-format "qwen-chat-template"
+			reasoning-disable-mode "qwen-template-false"
+		}
+
 		revision ">=3.8" {
 			supports-reasoning-effort #true
 			template-reasoning-effort #true

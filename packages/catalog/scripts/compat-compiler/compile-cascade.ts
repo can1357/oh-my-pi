@@ -19,12 +19,13 @@ const CHILD_CLASS = 1 << 1;
 const CHILD_FAMILY = 1 << 2;
 const CHILD_REVISION = 1 << 3;
 const CHILD_MODELS = 1 << 4;
+const CHILD_DISCOVERED = 1 << 6;
 const CHILD_API = 1 << 5;
-const CLASS_CHILDREN = CHILD_ON | CHILD_API | CHILD_FAMILY | CHILD_REVISION | CHILD_MODELS;
-const CLASS_FILTER_CHILDREN = CHILD_FAMILY | CHILD_REVISION | CHILD_MODELS;
-const PROVIDER_CHILDREN = CHILD_CLASS | CHILD_MODELS;
-const FAMILY_CHILDREN = CHILD_REVISION | CHILD_MODELS;
-const REVISION_CHILDREN = CHILD_MODELS;
+const CLASS_CHILDREN = CHILD_ON | CHILD_API | CHILD_FAMILY | CHILD_REVISION | CHILD_MODELS | CHILD_DISCOVERED;
+const CLASS_FILTER_CHILDREN = CHILD_FAMILY | CHILD_REVISION | CHILD_MODELS | CHILD_DISCOVERED;
+const PROVIDER_CHILDREN = CHILD_CLASS | CHILD_MODELS | CHILD_DISCOVERED;
+const FAMILY_CHILDREN = CHILD_REVISION | CHILD_MODELS | CHILD_DISCOVERED;
+const REVISION_CHILDREN = CHILD_MODELS | CHILD_DISCOVERED;
 
 interface RuleScope {
 	class?: string;
@@ -33,6 +34,7 @@ interface RuleScope {
 	family?: string;
 	revision?: CompiledRule["revision"];
 	models?: CompiledSelector[];
+	discovered?: boolean;
 }
 
 /** `priority=` (and `token=` on `models`) are the only named entries selectors accept. */
@@ -76,6 +78,11 @@ function stringArguments(node: KdlNodeView): string[] {
 	return values;
 }
 
+function discoveredArgument(node: KdlNodeView): boolean {
+	if (node.args.length !== 1 || node.args[0] !== true || node.props.length !== 0) malformed(node);
+	return true;
+}
+
 function parseScope(node: KdlNodeView, scope: RuleScope, allowed: number, rules: CompiledRule[]): void {
 	const priority = nodePriority(node);
 	const axes: RuleAxes = { wire: {}, thinking: {}, catalog: {} };
@@ -111,6 +118,10 @@ function parseScope(node: KdlNodeView, scope: RuleScope, allowed: number, rules:
 				kind = CHILD_MODELS;
 				nextAllowed = 0;
 				break;
+			case "discovered":
+				kind = CHILD_DISCOVERED;
+				nextAllowed = 0;
+				break;
 			default:
 				collectAxis(child, axes);
 				continue;
@@ -142,6 +153,9 @@ function parseScope(node: KdlNodeView, scope: RuleScope, allowed: number, rules:
 			case CHILD_MODELS:
 				nested.models = selectorArguments(child);
 				break;
+			case CHILD_DISCOVERED:
+				nested.discovered = discoveredArgument(child);
+				break;
 		}
 		parseScope(child, nested, nextAllowed, rules);
 	}
@@ -159,6 +173,7 @@ function parseScope(node: KdlNodeView, scope: RuleScope, allowed: number, rules:
 	if (scope.family !== undefined) rule.family = scope.family;
 	if (scope.revision !== undefined) rule.revision = scope.revision;
 	if (scope.models !== undefined) rule.models = scope.models;
+	if (scope.discovered !== undefined) rule.discovered = scope.discovered;
 	if (priority !== 0) rule.priority = priority;
 	if (Object.keys(axes.wire).length > 0) rule.wire = axes.wire;
 	if (Object.keys(axes.thinking).length > 0) rule.thinking = axes.thinking;

@@ -1220,6 +1220,7 @@ function buildResolveTarget<TApi extends Api>(
 		class: identity.class,
 		model: spec.id,
 		reasoning: Boolean(spec.reasoning),
+		discovered: spec.providerType !== undefined,
 	};
 	if (identity.family !== undefined) target.family = identity.family;
 	if (identity.revision !== undefined) target.revision = identity.revision;

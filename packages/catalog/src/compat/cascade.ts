@@ -131,7 +131,8 @@ function buildRuleIndex(cascade: CompiledCascade): RuleIndex {
 				Number(compiled.apis !== undefined) +
 				Number(compiled.family !== undefined) +
 				Number(compiled.revision !== undefined) +
-				Number(compiled.models !== undefined),
+				Number(compiled.models !== undefined) +
+				Number(compiled.discovered !== undefined),
 			hasExactEffortsRule: compiled.thinking !== undefined && "efforts" in compiled.thinking,
 			order,
 		};
@@ -219,6 +220,7 @@ function rankRule(rule: IndexedRule, prepared: PreparedTarget): readonly [number
 	if (rule.revision !== undefined && (!prepared.revision || !revisionSatisfies(prepared.revision, rule.revision))) {
 		return undefined;
 	}
+	if (compiled.discovered !== undefined && compiled.discovered !== target.discovered) return undefined;
 	let exactness = 0;
 	if (compiled.models !== undefined) {
 		let best = -1;
@@ -296,7 +298,8 @@ function targetKey(target: ResolveTarget): string {
 		keyPart(target.family) +
 		keyPart(target.revision) +
 		keyPart(target.model) +
-		(target.reasoning ? "1" : "0")
+		(target.reasoning ? "1" : "0") +
+		(target.discovered ? "1" : "0")
 	);
 }
 

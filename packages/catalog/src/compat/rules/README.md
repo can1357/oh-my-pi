@@ -184,6 +184,7 @@ provider "openrouter" {
 | `provider` | `provider "id" { ... }` | Exact provider ID. It is root-only and may contain `class` and `models`. |
 | `on` | `on "provider-a" "provider-b" { ... }` | One or more provider IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`. |
 | `on-api` | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`. |
+| `discovered` | `discovered #true { … }` | Matches models materialized by `buildDiscoveredModel`; only `#true` is valid. |
 | `family` | `family "id" { ... }` | Exact classified family ID. It may contain `revision` and `models`. A target with no family does not match. |
 | `revision` | `revision ">=2.5 <4" { ... }` | A non-empty, whitespace-separated conjunction of comparisons. It may contain `models`. A target with no revision does not match. |
 | `models` | `models "id" "vendor/*" { ... }` | One or more alternatives, combined as OR. It cannot contain another selector. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics. |
@@ -194,7 +195,7 @@ A `models` string without `*` is an exact, case-sensitive match against the prov
 
 `priority=N` is an optional signed integer property on the block that owns axis assignments. Its default is zero. Use it only to resolve an intentional equal-specificity overlap; do not use it to encode declaration order.
 
-`buildDiscoveredModel(spec, providerType)` resolves the catalog `discovery-api` axis before materializing compatibility. It preserves the credential-bearing provider ID and records `providerType` as the backend used for provider selectors on subsequent rebuilds. Ordinary `buildModel` preserves its input API. This lets custom-named llama.cpp deployments reuse the same rules without model-specific discovery code.
+`buildDiscoveredModel(spec, providerType)` resolves the catalog `discovery-api` axis before materializing compatibility. It preserves the credential-bearing provider ID, records `providerType` as the backend used for provider selectors on subsequent rebuilds, and marks the resolve target as discovered. Ordinary `buildModel` preserves its input API and is not discovered. This lets custom-named llama.cpp deployments reuse backend rules while allowing a discovery-only wire exception.
 
 ### Axis vocabulary and value shapes
 

@@ -213,6 +213,8 @@ export interface CompiledRule {
 	providers?: string[];
 	/** Request adapter identifiers matched by an `on-api` selector. */
 	apis?: string[];
+	/** Whether the target originated from provider discovery. */
+	discovered?: boolean;
 	family?: string;
 	revision?: CompiledRevisionTerm[];
 	models?: CompiledSelector[];
@@ -697,6 +699,8 @@ export interface ResolveTarget {
 	model: string;
 	/** Whether the model exposes a reasoning control surface. */
 	reasoning: boolean;
+	/** Whether provider discovery materialized this model. */
+	discovered?: boolean;
 }
 
 /** Wire, thinking, and catalog assignments resolved for one target. */
