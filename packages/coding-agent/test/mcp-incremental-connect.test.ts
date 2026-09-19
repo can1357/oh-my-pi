@@ -24,9 +24,31 @@ const SERVER_B = "bravo";
 const TOOL_A = `mcp__${SERVER_A}_${manyToolName(0)}`;
 const TOOL_B = `mcp__${SERVER_B}_${manyToolName(0)}`;
 
-function fixtureConfig(): MCPStdioServerConfig {
-	return { type: "stdio", command: process.execPath, args: [FIXTURE_PATH] };
+function fixtureConfig(initializeDelayMs?: number): MCPStdioServerConfig {
+	const args = [FIXTURE_PATH];
+	if (initializeDelayMs !== undefined) args.push("--delay", String(initializeDelayMs));
+	return { type: "stdio", command: process.execPath, args };
 }
+
+function waitUntil(predicate: () => boolean, label: string, timeoutMs = 8_000): Promise<void> {
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	const start = Date.now();
+	const tick = () => {
+		if (predicate()) {
+			resolve();
+			return;
+		}
+		if (Date.now() - start > timeoutMs) {
+			reject(new Error(`timed out waiting for ${label}`));
+			return;
+		}
+		setTimeout(tick, 15);
+	};
+	tick();
+	return promise;
+}
+
+const DELAYED_INITIALIZE_MS = 400;
 
 describe("MCP incremental connectServers", () => {
 	let workDir: string;
@@ -44,15 +66,28 @@ describe("MCP incremental connectServers", () => {
 
 	it("keeps server A tools after incrementally connecting server B", async () => {
 		await manager.connectServers({ [SERVER_A]: fixtureConfig() }, {});
+		await waitUntil(
+			() =>
+				manager.getConnectionStatus(SERVER_A) === "connected" &&
+				manager.getTools().some(tool => tool.name === TOOL_A),
+			"server A tools",
+		);
+
 		expect(manager.getConnectionStatus(SERVER_A)).toBe("connected");
 		const afterA = manager.getTools();
 		expect(afterA.map(t => t.name)).toContain(TOOL_A);
 		expect(afterA).toHaveLength(MANY_TOOL_COUNT);
 		expect(afterA.every(t => t.mcpServerName === SERVER_A)).toBe(true);
 
-		const result = await manager.connectServers({ [SERVER_B]: fixtureConfig() }, {});
-		expect(manager.getConnectionStatus(SERVER_A)).toBe("connected");
-		expect(manager.getConnectionStatus(SERVER_B)).toBe("connected");
+		await manager.connectServers({ [SERVER_B]: fixtureConfig(DELAYED_INITIALIZE_MS) }, {});
+		await waitUntil(
+			() =>
+				manager.getConnectionStatus(SERVER_A) === "connected" &&
+				manager.getConnectionStatus(SERVER_B) === "connected" &&
+				manager.getTools().some(tool => tool.name === TOOL_A) &&
+				manager.getTools().some(tool => tool.name === TOOL_B),
+			"server A+B tools",
+		);
 
 		const tools = manager.getTools();
 		expect(tools.map(t => t.name)).toContain(TOOL_A);
@@ -60,31 +95,56 @@ describe("MCP incremental connectServers", () => {
 		expect(tools).toHaveLength(MANY_TOOL_COUNT * 2);
 		expect(tools.filter(t => t.mcpServerName === SERVER_A)).toHaveLength(MANY_TOOL_COUNT);
 		expect(tools.filter(t => t.mcpServerName === SERVER_B)).toHaveLength(MANY_TOOL_COUNT);
-		expect(result.tools.map(t => t.name)).toEqual(tools.map(t => t.name));
-		expect(result.connectedServers).toContain(SERVER_B);
 	}, 20_000);
 
 	it("applyMcpToggleRuntime enable of B refreshes the A+B union", async () => {
 		await manager.connectServers({ [SERVER_A]: fixtureConfig() }, {});
-		expect(manager.getTools()).toHaveLength(MANY_TOOL_COUNT);
+		await waitUntil(
+			() =>
+				manager.getConnectionStatus(SERVER_A) === "connected" &&
+				manager.getTools().some(tool => tool.name === TOOL_A),
+			"server A tools",
+		);
 
 		const refreshed: string[][] = [];
+		const session = {
+			refreshMCPTools: (tools: Array<{ name: string }>) => {
+				refreshed.push(tools.map(tool => tool.name));
+			},
+		};
+		// Match the SDK's live manager-to-session bridge so a background tool load
+		// refreshes the session after connectServers' bounded startup window.
+		manager.setOnToolsChanged(async tools => {
+			await session.refreshMCPTools(tools);
+		});
+
 		await applyMcpToggleRuntime({
 			name: SERVER_B,
 			enabled: true,
 			cwd: workDir,
 			manager,
-			session: {
-				refreshMCPTools: next => {
-					refreshed.push(next.map(t => t.name));
-				},
-			},
+			session,
 			loadConfigs: async () => ({
-				configs: { [SERVER_B]: fixtureConfig() },
+				configs: { [SERVER_B]: fixtureConfig(DELAYED_INITIALIZE_MS) },
 				sources: {},
 				exaApiKeys: [],
 			}),
 		});
+
+		await waitUntil(() => {
+			const names = manager.getTools().map(tool => tool.name);
+			const latestRefresh = refreshed.at(-1) ?? [];
+			return (
+				manager.getConnectionStatus(SERVER_A) === "connected" &&
+				manager.getConnectionStatus(SERVER_B) === "connected" &&
+				names.includes(TOOL_A) &&
+				names.includes(TOOL_B) &&
+				names.length === MANY_TOOL_COUNT * 2 &&
+				latestRefresh.includes(TOOL_A) &&
+				latestRefresh.includes(TOOL_B) &&
+				latestRefresh.length === MANY_TOOL_COUNT * 2
+			);
+		}, "server A+B session refresh");
 
 		expect(manager.getConnectionStatus(SERVER_A)).toBe("connected");
 		expect(manager.getConnectionStatus(SERVER_B)).toBe("connected");
@@ -106,12 +166,22 @@ describe("MCP incremental connectServers", () => {
 			});
 		});
 		await manager.connectServers({ [SERVER_A]: fixtureConfig() }, {});
+		await waitUntil(
+			() => events.some(event => event.type === "connected" && event.name === SERVER_A),
+			"server A connected",
+		);
+
 		expect(events.some(event => event.type === "connecting" && event.name === SERVER_A)).toBe(true);
 		expect(events.some(event => event.type === "connected" && event.name === SERVER_A)).toBe(true);
 
 		const connection = manager.getConnection(SERVER_A);
 		expect(connection).toBeDefined();
 		connection?.transport.onClose?.();
+		await waitUntil(
+			() => events.some(event => event.type === "reconnecting" && event.name === SERVER_A),
+			"server A reconnecting",
+		);
+
 		expect(events.some(event => event.type === "reconnecting" && event.name === SERVER_A)).toBe(true);
 		stop();
 	}, 20_000);

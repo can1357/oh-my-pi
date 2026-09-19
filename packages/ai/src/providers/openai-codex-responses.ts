@@ -467,6 +467,8 @@ type CodexWebSocketSessionState = {
 	lastResponseId?: string;
 	lastResponseItems?: InputItem[];
 	canAppend: boolean;
+	/** Monotonic generation for append/history state invalidation across async setup. */
+	appendStateVersion: number;
 	modelsEtag?: string;
 	connection?: CodexWebSocketConnection;
 	lastTransport?: CodexTransport;
@@ -1819,8 +1821,16 @@ async function openCodexWebSocketTransport(
 	requestBodyForState: RequestBody;
 	transport: CodexTransport;
 }> {
-	const canAppendBeforeRequest = websocketState.canAppend === true;
+	const appendVersionBeforeRequest = websocketState.appendStateVersion;
 	const chainedBody = buildCodexChainedRequestBody(requestContext.transformedBody, websocketState);
+	const fullInputBeforeHook = Array.isArray(requestContext.transformedBody.input)
+		? (structuredCloneJSON(requestContext.transformedBody.input) as InputItem[])
+		: undefined;
+	const chainedInputBeforeHook = Array.isArray(chainedBody.input)
+		? (structuredCloneJSON(chainedBody.input) as InputItem[])
+		: undefined;
+	const hadPreviousResponseIdBeforeHook =
+		typeof chainedBody.previous_response_id === "string" && chainedBody.previous_response_id.length > 0;
 	// WebSocket frames cannot carry per-request HTTP headers. Canonical Codex
 	// request identity is already in `client_metadata`; connection-scoped
 	// compatibility values that can change after the upgrade ride alongside it
@@ -1832,16 +1842,22 @@ async function openCodexWebSocketTransport(
 	if (requestContext.turnState.value) {
 		websocketClientMetadata[X_CODEX_TURN_STATE_HEADER] = requestContext.turnState.value;
 	}
-	let websocketRequest = {
+	let websocketRequest: Record<string, unknown> = {
 		type: "response.create",
-		...chainedBody,
+		...(structuredCloneJSON(chainedBody) as RequestBody),
 		client_metadata: websocketClientMetadata,
 	};
 	const replacementWebsocketRequest = await options?.onPayload?.(websocketRequest, model);
 	if (replacementWebsocketRequest !== undefined) {
-		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
+		websocketRequest = replacementWebsocketRequest as Record<string, unknown>;
 	}
-	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
+	const effectiveRequestBody = buildCodexEffectiveRequestBody(
+		fullInputBeforeHook,
+		chainedInputBeforeHook,
+		hadPreviousResponseIdBeforeHook,
+		websocketRequest,
+	);
+	const routedRequest = getCodexRoutedRequest(websocketRequest, requestContext.transformedBody);
 	const websocketHeaders = createCodexHeaders(
 		requestContext.requestHeaders,
 		requestContext.accountId,
@@ -1854,30 +1870,9 @@ async function openCodexWebSocketTransport(
 		requestContext.responsesLite,
 		requestContext.requestMetadata,
 		await getCodexAttestationHeader(requestContext.accountId),
-		requestContext.transformedBody,
+		routedRequest,
 	);
-	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
-	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`);
-	// recorded state must reflect what was actually sent — the sequential-cutoff
-	// summary decoder keys off it.
-	if (websocketRequest.stream_options === undefined) {
-		delete requestBodyForState.stream_options;
-	} else {
-		requestBodyForState.stream_options = websocketRequest.stream_options;
-	}
-	requestContext.rawRequestDump.body = websocketRequest;
-	CODEX_DEBUG &&
-		logger.debug("[codex] codex websocket request", {
-			url: toWebSocketUrl(requestContext.url),
-			model: requestContext.transformedBody.model,
-			reasoningEffort: requestContext.transformedBody.reasoning?.effort ?? null,
-			headers: redactHeaders(websocketHeaders),
-			sentTurnStateHeader: websocketHeaders.has(X_CODEX_TURN_STATE_HEADER),
-			sentModelsEtagHeader: websocketHeaders.has(X_MODELS_ETAG_HEADER),
-			requestType: websocketRequest.type,
-			retry,
-			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
-		});
+	const appendVersionBeforeConnection = websocketState.appendStateVersion;
 	const websocketConnection = await getOrCreateCodexWebSocketConnection(
 		websocketState,
 		requestContext.turnState,
@@ -1886,6 +1881,41 @@ async function openCodexWebSocketTransport(
 		model.provider,
 		requestSetup.requestSignal,
 	);
+	const appendStateChanged =
+		websocketState.appendStateVersion !== appendVersionBeforeRequest ||
+		websocketState.appendStateVersion !== appendVersionBeforeConnection;
+	if (appendStateChanged) {
+		websocketRequest = rebuildCodexWebSocketRequestWithFullInput(websocketRequest, effectiveRequestBody);
+	} else {
+		const reconciledBody = buildCodexChainedRequestBody(effectiveRequestBody, websocketState);
+		if (reconciledBody.previous_response_id) {
+			websocketRequest = {
+				...websocketRequest,
+				previous_response_id: reconciledBody.previous_response_id,
+				input: reconciledBody.input,
+			};
+		} else {
+			websocketRequest = rebuildCodexWebSocketRequestWithFullInput(websocketRequest, effectiveRequestBody);
+		}
+	}
+	const canAppendForRequest =
+		typeof websocketRequest.previous_response_id === "string" && websocketRequest.previous_response_id.length > 0;
+	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendForRequest);
+	const requestBodyForState = effectiveRequestBody;
+	requestContext.rawRequestDump.body = websocketRequest;
+	requestContext.rawRequestDump.headers = headersToRecord(websocketHeaders);
+	CODEX_DEBUG &&
+		logger.debug("[codex] codex websocket request", {
+			url: toWebSocketUrl(requestContext.url),
+			model: routedRequest.model,
+			reasoningEffort: effectiveRequestBody.reasoning?.effort ?? null,
+			headers: redactHeaders(websocketHeaders),
+			sentTurnStateHeader: websocketHeaders.has(X_CODEX_TURN_STATE_HEADER),
+			sentModelsEtagHeader: websocketHeaders.has(X_MODELS_ETAG_HEADER),
+			requestType: websocketRequest.type,
+			retry,
+			retryBudget: CODEX_WEBSOCKET_RETRY_BUDGET,
+		});
 	const eventStream = websocketConnection.streamRequest(
 		websocketRequest,
 		{
@@ -2570,6 +2600,7 @@ class CodexStreamProcessor {
 					state.lastResponseId = responseId;
 					state.lastResponseItems = replayableResponseItems;
 					state.canAppend = rawEvent.type === "response.done" || rawEvent.type === "response.completed";
+					state.appendStateVersion += 1;
 				} else {
 					// No response id, or replay sanitization dropped an item the server
 					// still holds. Sanitization is 1:1-or-fewer, so either case makes the
@@ -3112,7 +3143,14 @@ export async function prewarmOpenAICodexResponses(
 	model: Model<"openai-codex-responses">,
 	options?: Pick<
 		OpenAICodexResponsesOptions,
-		"apiKey" | "headers" | "sessionId" | "signal" | "preferWebsockets" | "providerSessionState" | "responsesLite"
+		| "apiKey"
+		| "headers"
+		| "sessionId"
+		| "signal"
+		| "preferWebsockets"
+		| "providerSessionState"
+		| "responsesLite"
+		| "serviceTier"
 	>,
 ): Promise<void> {
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -3154,6 +3192,10 @@ export async function prewarmOpenAICodexResponses(
 		responsesLite,
 		requestIdentity,
 		attestation,
+		{
+			model: model.requestModelId ?? model.id,
+			service_tier: options?.serviceTier === "auto" ? undefined : options?.serviceTier,
+		},
 	);
 	await logger.time(
 		"prewarmCodex:establishWs",
@@ -3193,6 +3235,7 @@ function getCodexWebSocketSessionState(
 	const created: CodexWebSocketSessionState = {
 		disableWebsocket: false,
 		canAppend: false,
+		appendStateVersion: 0,
 		fallbackCount: 0,
 		prewarmed: false,
 		stats: {
@@ -3210,6 +3253,7 @@ function resetCodexWebSocketAppendState(state: CodexWebSocketSessionState): void
 	state.lastRequest = undefined;
 	state.lastResponseId = undefined;
 	state.lastResponseItems = undefined;
+	state.appendStateVersion += 1;
 }
 
 function recordCodexWebSocketFailure(state: CodexWebSocketSessionState, activateFallback: boolean): void {
@@ -3606,10 +3650,63 @@ function buildCodexChainedRequestBody(
 			logger.debug("[codex] codex append reset", {
 				hadModelsEtagHeader: Boolean(state.modelsEtag),
 			});
+
 		resetCodexWebSocketAppendState(state);
 		state.modelsEtag = undefined;
 	}
 	return requestBody;
+}
+
+/**
+ * Rebuild the logical full body after `onPayload` has rewritten a chained
+ * delta. The hook sees the provider's final chained preview, but the local
+ * append baseline must retain the complete prefix plus the hook-adjusted
+ * delta so a later logical-history mismatch forces a safe full replay.
+ */
+function buildCodexEffectiveRequestBody(
+	fullInputBeforeHook: InputItem[] | undefined,
+	chainedInputBeforeHook: InputItem[] | undefined,
+	hadPreviousResponseIdBeforeHook: boolean,
+	websocketRequest: Record<string, unknown>,
+): RequestBody {
+	const body = structuredCloneJSON(websocketRequest) as RequestBody;
+	delete body.type;
+	delete body.previous_response_id;
+	for (const [key, value] of Object.entries(body)) {
+		if (value === undefined) delete body[key];
+	}
+	const sentInput = websocketRequest.input;
+	if (Array.isArray(sentInput)) {
+		if (fullInputBeforeHook && chainedInputBeforeHook && hadPreviousResponseIdBeforeHook) {
+			const prefixLength = Math.max(0, fullInputBeforeHook.length - chainedInputBeforeHook.length);
+			body.input = [
+				...fullInputBeforeHook.slice(0, prefixLength),
+				...(structuredCloneJSON(sentInput) as InputItem[]),
+			];
+		} else {
+			body.input = structuredCloneJSON(sentInput) as InputItem[];
+		}
+	}
+	delete body.previous_response_id;
+	return body;
+}
+
+function getCodexRoutedRequest(
+	request: Record<string, unknown>,
+	fallback: RequestBody,
+): Pick<RequestBody, "model" | "service_tier"> {
+	const model = typeof request.model === "string" ? request.model : fallback.model;
+	const serviceTier = request.service_tier as RequestBody["service_tier"];
+	return { model, service_tier: serviceTier };
+}
+
+function rebuildCodexWebSocketRequestWithFullInput(
+	request: Record<string, unknown>,
+	effectiveBody: RequestBody,
+): Record<string, unknown> {
+	const rebuilt: Record<string, unknown> = { ...request, input: effectiveBody.input };
+	delete rebuilt.previous_response_id;
+	return rebuilt;
 }
 
 function toWebSocketUrl(url: string): string {
@@ -3712,6 +3809,10 @@ class CodexWebSocketConnection {
 
 	matchesAuth(headers: Record<string, string>): boolean {
 		return this.#headers.authorization === headers.authorization;
+	}
+
+	matchesRoutingHint(headers: Record<string, string>): boolean {
+		return this.#headers[OPENAI_HEADERS.ROUTING_HINT] === headers[OPENAI_HEADERS.ROUTING_HINT];
 	}
 
 	close(reason = "done"): void {
@@ -4263,8 +4364,9 @@ async function getOrCreateCodexWebSocketConnection(
 		}
 	}
 	if (state.connection?.isOpen()) {
-		if (!state.connection.matchesAuth(headerRecord)) {
-			state.connection.close("token-refresh");
+		if (!state.connection.matchesAuth(headerRecord) || !state.connection.matchesRoutingHint(headerRecord)) {
+			const reason = state.connection.matchesAuth(headerRecord) ? "routing-change" : "token-refresh";
+			state.connection.close(reason);
 			resetCodexWebSocketAppendState(state);
 		} else if (state.connection.isHealthyForReuse()) {
 			logger.time("codexWs:reuseOpenSocket");
