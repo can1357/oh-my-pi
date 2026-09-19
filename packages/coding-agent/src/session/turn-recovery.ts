@@ -214,9 +214,14 @@ export interface TurnRecoveryHost {
 	persistedAssistantEntryId(message: AssistantMessage): string | undefined;
 	sessionMessageAlreadyPersisted(message: AssistantMessage): boolean;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
-	/** Edit mode resolved for the active model and settings, captured before a fallback swap. */
+	/** The edit variant resolved against the currently active model, captured before a swap. */
 	resolveActiveEditMode(): EditMode;
-	/** Rebuilds the model-dependent base system prompt when a swap changed the edit mode or model policy. */
+	/**
+	 * Re-syncs all model-dependent prompt policy after a model change that
+	 * bypassed `model-controls`: rebuilds the base system prompt when the edit
+	 * variant flipped or the model-prompt key changed (`includeModelInPrompt` /
+	 * delegation-bias policy), not just the variant.
+	 */
 	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	resetCurrentResponsesProviderSession(reason: string): void;
 	/**
@@ -1891,11 +1896,13 @@ export class TurnRecovery {
 			if (previousModel && this.#host.model() === candidate) {
 				await this.#host.setModelWithProviderSessionReset(previousModel);
 			}
+			await this.#host.syncAfterModelChange(previousEditMode);
 			return false;
 		}
 		if (this.#host.model() !== candidate) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
+			await this.#host.syncAfterModelChange(previousEditMode);
 			return false;
 		}
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
