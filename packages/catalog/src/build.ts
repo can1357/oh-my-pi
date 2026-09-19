@@ -7,7 +7,7 @@
  * compat per request.
  */
 
-import { resolveModelPolicy } from "./compat/resolve";
+import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
@@ -274,6 +274,16 @@ function supportsOpenAIGAComputerUse(
 }
 
 /**
+ * Build a discovered model using the backend's catalog-selected request API.
+ * The credential-bearing provider id remains unchanged while `providerType`
+ * persists the backend policy identity across cache and config round trips.
+ */
+export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string): Model<Api> {
+	const api = resolveDiscoveryApi(spec, providerType);
+	return buildModel({ ...spec, api, providerType });
+}
+
+/**
  * Build one model from an authored spec. Bundled models.json rows are fully
  * materialized by the generator and consumed directly (see `models.ts`), so
  * this only runs for discovered/custom/override specs.
@@ -283,9 +293,9 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
-		// An exact `thinking-efforts` rule upgrades a stale `reasoning: false`
-		// discovery default (see `resolveThinkingPolicy`); materialize the
-		// correction so transports and the picker see a reasoning-capable model.
+		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
+		// `reasoning: false` discovery default (see `resolveThinkingPolicy`);
+		// materialize the correction for transports and the picker.
 		reasoning: spec.reasoning || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,

@@ -5,6 +5,17 @@
 ### Added
 
 - Added `advisor.steerSeverity` setting (`blocker` / `concern` / `both`, default `both`) controlling which advisor severities may interrupt the primary through the steering channel; severities outside the threshold ride the non-interrupting aside queue, and a plain `nit` never steers ([#12510](https://github.com/can1357/oh-my-pi/pull/12510) by [@oldschoola](https://github.com/oldschoola)).
+### Breaking Changes
+
+- Removed support for the env parameter in the bash tool
+
+### Fixed
+
+- Fixed resume clutter: elide 0-turn sessions from the /resume menu; -c similarly skips empty sessions.
+- Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
+- Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
+- Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
+- Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
 
 ## [18.2.6] - 2026-09-18
 

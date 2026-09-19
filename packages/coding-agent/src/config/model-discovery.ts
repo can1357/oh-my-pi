@@ -7,7 +7,7 @@
  */
 import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Api, FetchImpl, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,
 	inheritReferenceThinking,
@@ -552,48 +552,6 @@ async function discoverLlamaCppServerMetadata(
 	}
 }
 
-/**
- * PrismLM Ternary/1-bit Bonsai GGUFs are Qwen3.6-27B derivatives served locally
- * via llama.cpp; their ids do not carry classifiable Qwen lineage, so this
- * reviewed local alias supplements the structured identity.
- */
-function isBonsaiQwenGguf(id: string): boolean {
-	return /(?:ternary-)?bonsai-27b/i.test(id);
-}
-
-/**
- * applyLlamaCppQwenThinking rewrites a discovered or cached llama.cpp model so a
- * Qwen-family chat template (which defaults `enable_thinking: true`) can be
- * turned off. Qwen ids and the Qwen3.6-based PrismLM Ternary Bonsai GGUFs are
- * routed through chat-completions (the implicit llama.cpp provider defaults to
- * `openai-responses`, whose disable path has no Qwen encoding) with the
- * `qwen-template-false` dialect; omp emits `preserve_thinking` inside
- * `chat_template_kwargs` for Qwen, so the toggle rides there too and history
- * `<think>` blocks survive (`qwenPreserveThinking`). The runtime base URL gets a
- * `/v1` suffix because the chat-completions request would otherwise POST to the
- * native root, which does not serve it. A model with a custom transport (e.g.
- * `pi-native`, whose client appends `/v1/pi/stream`) keeps its base URL so the
- * suffix is not doubled. Non-Qwen models pass through unchanged. Applied on both
- * fresh discovery and cache load, so an upgraded cache is corrected without
- * waiting for re-discovery.
- */
-export function applyLlamaCppQwenThinking(model: Model<Api>): Model<Api> {
-	if (model.identity.class !== "qwen" && !isBonsaiQwenGguf(model.id)) return model;
-	return buildModel({
-		...model,
-		api: "openai-completions",
-		baseUrl: model.transport ? model.baseUrl : ensureLlamaCppV1BaseUrl(normalizeLlamaCppBaseUrl(model.baseUrl)),
-		reasoning: true,
-		compat: {
-			...model.compatConfig,
-			supportsReasoningParams: true,
-			thinkingFormat: "qwen-chat-template",
-			reasoningDisableMode: "qwen-template-false",
-			qwenPreserveThinking: true,
-		},
-	} as unknown as ModelSpec<Api>);
-}
-
 export async function discoverLlamaCppModels(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -636,12 +594,9 @@ export async function discoverLlamaCppModels(
 			serverMetadata?.contextWindow ??
 			item.trainingContextWindow ??
 			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
-		// Local llama.cpp models stamp `reasoning: false` with a minimal compat;
-		// applyLlamaCppQwenThinking upgrades Qwen-family ids (which cannot disable
-		// their default-on thinking otherwise) after the base model is built.
 		discovered.push(
-			applyLlamaCppQwenThinking(
-				buildModel({
+			buildDiscoveredModel(
+				{
 					id,
 					name: id,
 					api: providerConfig.api,
@@ -654,12 +609,8 @@ export async function discoverLlamaCppModels(
 					contextWindow,
 					maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
 					headers,
-					compat: {
-						supportsStore: false,
-						supportsDeveloperRole: false,
-						supportsReasoningEffort: false,
-					},
-				} as ModelSpec<Api>),
+				},
+				providerConfig.discovery.type,
 			),
 		);
 	}
