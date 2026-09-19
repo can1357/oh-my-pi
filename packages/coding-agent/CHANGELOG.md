@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Figma remote MCP OAuth registration by using its catalog-compatible client identity and fixed loopback callback when no explicit OAuth client is configured, allowing `/mcp add figma --url https://mcp.figma.com/mcp --transport http` to complete authentication. ([#12470](https://github.com/can1357/oh-my-pi/pull/12470) by [@peterrauscher](https://github.com/peterrauscher)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
