@@ -23,6 +23,7 @@ import {
 	type DaemonOutputUnregister,
 	daemonClientForProject,
 } from "../../launch/client";
+import { displayExitReason } from "../../launch/exit-reason";
 import type {
 	DaemonMonitorNotification,
 	DaemonOperation,
@@ -132,6 +133,13 @@ interface OutputRegistration {
 	/** Switch the delivery mode in place and re-advertise it so `ps`/`describe` watcher rows stay accurate. */
 	retune: (delivery: AsyncJobProgressDelivery) => void;
 	acquirePendingStart?: (delivery: AsyncJobProgressDelivery) => OutputLease;
+	/**
+	 * Pending-start lease a failed replacement's restore acquired on behalf of
+	 * the still in-flight start that owned the replaced registration. That
+	 * start's own lease adopts it, so an accepted start attaches this
+	 * registration and a failed start releases it.
+	 */
+	restoredLease?: OutputLease;
 }
 
 const outputRegistrations = new WeakMap<ToolSession, Map<DaemonBrokerClient, Map<string, OutputRegistration>>>();
@@ -327,6 +335,7 @@ async function registerOutputSink(
 	if (
 		!captureLaunchProgressEpoch ||
 		!session.queueLaunchProgress ||
+		!session.discardLaunchProgress ||
 		!session.queueLaunchCompletion ||
 		!client.onOutput
 	) {
@@ -426,6 +435,10 @@ async function registerOutputSink(
 				delivery: replaceable.delivery,
 				epoch: replaceable.epoch,
 				daemonId: replaceable.daemonId,
+				// A replaced start-pending registration has no incarnation yet;
+				// restoring it as attached would bind it to whatever terminal
+				// record the name currently describes.
+				startPending: replaceable.binding === "start-pending",
 			}
 		: undefined;
 	if (replaceable) {
@@ -469,6 +482,7 @@ async function registerOutputSink(
 	let unregisterContextBoundary: (() => void) | void;
 	let outputUnregister: DaemonOutputUnregister | undefined;
 	let cleanupPromise: Promise<void> | undefined;
+	let speculativeTerminalReceipt: PromiseWithResolvers<void> | undefined;
 	const registration: OutputRegistration = {
 		id,
 		name,
@@ -488,6 +502,9 @@ async function registerOutputSink(
 			// Fence synchronous re-entry before unregistering broker/session
 			// callbacks; every underlying resource must be released at most once.
 			cleanupPromise = Promise.resolve();
+			const terminalReceipt = speculativeTerminalReceipt;
+			speculativeTerminalReceipt = undefined;
+			terminalReceipt?.resolve();
 			session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
 			outputUnregister?.();
 			unregisterDispose?.();
@@ -549,7 +566,6 @@ async function registerOutputSink(
 			}
 		}
 		registration.terminalState = notification.daemon.state;
-		await registration.cleanup();
 		// The owner session receives the real daemon-completed through its
 		// completion subscription, so a synthesized one would duplicate it — but
 		// only when the broker actually emitted one. A stop issued by another
@@ -557,36 +573,43 @@ async function registerOutputSink(
 		// ownerNotified=false and this terminal notification is then the only
 		// signal the monitoring session will ever get. An absent flag means an
 		// older broker: keep the historical suppression.
-		if (notification.daemon.owner === owner && notification.ownerNotified !== false) return;
+		if (notification.daemon.owner === owner && notification.ownerNotified !== false) {
+			await registration.cleanup();
+			return;
+		}
 		// Once a local stop RPC reports terminal settlement, its tool result is
 		// the single completion surface even when the monitor notification
 		// arrives after the response.
-		if (registration.localStop.state === "terminal-response") return;
+		if (registration.localStop.state === "terminal-response") {
+			await registration.cleanup();
+			return;
+		}
 		const completion = session.queueLaunchCompletion?.(
 			{
 				event: "daemon-completed",
-				completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,
+				completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? "terminal"}`,
 				owner,
 				daemon: notification.daemon,
 			},
 			registration.epoch,
 		);
-		const releaseEpochAssociation = (): void => {
+		if (!completion) throw new Error("Session cannot accept launch completion delivery");
+		const commitTerminalDelivery = async (): Promise<void> => {
+			await completion;
 			releaseCompletionDaemonAssociation(session, client, owner, notification.daemon.id);
+			await registration.cleanup();
 		};
 		if (waitForTerminalCompletion) {
-			try {
-				await completion;
-			} finally {
-				releaseEpochAssociation();
-			}
+			await commitTerminalDelivery();
 		} else {
-			// Buffered terminal notifications were already accepted by the
-			// client sink while the start RPC was pending. Queue the completion
-			// after their preceding output, but do not wait for its delivery
-			// receipt: that receipt can require the current tool step to finish.
-			void completion?.then(releaseEpochAssociation, error => {
-				releaseEpochAssociation();
+			// Buffered terminal notifications reach the client sink while the
+			// start RPC is pending. Queue completion after their preceding output,
+			// but let the sink's deferred receipt wait for commit: awaiting it here
+			// can require the current tool step itself to finish.
+			void commitTerminalDelivery().catch(error => {
+				const terminalReceipt = speculativeTerminalReceipt;
+				speculativeTerminalReceipt = undefined;
+				terminalReceipt?.reject(error);
 				logger.warn("Buffered launch monitor completion delivery failed", {
 					monitorId: id,
 					name,
@@ -609,7 +632,9 @@ async function registerOutputSink(
 	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
 		if (speculative) {
 			bufferSpeculativeMonitorNotification(speculative, notification);
-			return;
+			if (notification.event !== "daemon-monitor-completed") return;
+			speculativeTerminalReceipt ??= Promise.withResolvers<void>();
+			return speculativeTerminalReceipt.promise;
 		}
 		if (speculativeFlush) await speculativeFlush;
 		await deliver(notification);
@@ -637,12 +662,21 @@ async function registerOutputSink(
 			name,
 			previous.owner,
 			previous.delivery,
-			false,
+			previous.startPending,
 			previous.epoch,
 			previous.daemonId,
 			fence,
 		);
-		await restored?.retain();
+		if (!restored) return;
+		// Retaining a start-pending lease means "the start was accepted"; a
+		// restored pending registration must instead wait for the in-flight
+		// start. Park the lease on the restored registration so that start's
+		// own lease settles it: retain attaches, reject releases the slot.
+		if (previous.startPending) {
+			restored.registration.restoredLease = restored;
+			return;
+		}
+		await restored.retain();
 	};
 	try {
 		outputUnregister = client.onOutput(subscription, sink);
@@ -677,12 +711,39 @@ async function registerOutputSink(
 	if (startPending) {
 		let pendingLeases = 0;
 		let startAccepted = false;
+		// A failed same-name replacement may have restored the start-pending
+		// slot under a fresh registration while this start was still in flight.
+		// The restore parked its lease there on this start's behalf; take it so
+		// the start's outcome settles the restored slot exactly once. The
+		// restore may have rebuilt the per-client map, so resolve the live slot
+		// instead of the map this registration was created in.
+		const adoptRestoredLease = (leaseDaemonId: string | undefined): OutputLease | undefined => {
+			const successor = outputRegistrations.get(session)?.get(client)?.get(name);
+			if (
+				!successor ||
+				successor === registration ||
+				!successor.active ||
+				successor.binding !== "start-pending" ||
+				successor.epoch !== registration.epoch
+			) {
+				return undefined;
+			}
+			const lease = successor.restoredLease;
+			if (!lease) return undefined;
+			successor.restoredLease = undefined;
+			if (leaseDaemonId !== undefined) lease.bindDaemon(leaseDaemonId);
+			return lease;
+		};
 		registration.acquirePendingStart = requestedDelivery => {
 			pendingLeases++;
 			let settled = false;
+			let leaseDaemonId: string | undefined;
 			return {
 				registration,
-				bindDaemon,
+				bindDaemon: boundDaemonId => {
+					leaseDaemonId = boundDaemonId;
+					bindDaemon(boundDaemonId);
+				},
 				retain: async () => {
 					if (settled) return;
 					await registration.ready;
@@ -692,7 +753,18 @@ async function registerOutputSink(
 						await registration.cleanup();
 						return;
 					}
-					if (!registration.active) return;
+					if (!registration.active) {
+						// Hand the accepted start to the restored registration so
+						// the replacement's output is not stranded awaiting a start.
+						const lease = adoptRestoredLease(leaseDaemonId);
+						if (!lease) return;
+						startAccepted = true;
+						await lease.retain();
+						// The restore re-used the replaced registration's mode; the
+						// accepted start decides the delivery mode.
+						if (lease.registration.active) lease.registration.retune(requestedDelivery);
+						return;
+					}
 					registration.retune(requestedDelivery);
 					if (startAccepted) return;
 					startAccepted = true;
@@ -711,9 +783,15 @@ async function registerOutputSink(
 					if (settled) return;
 					settled = true;
 					pendingLeases--;
-					if (startAccepted || pendingLeases > 0 || !registration.active || monitors.get(name) !== registration) {
+					if (startAccepted || pendingLeases > 0) return;
+					if (!registration.active) {
+						// The restored registration exists only for this start; a
+						// failed start has nothing to monitor, so release it instead
+						// of leaving it active and start-pending forever.
+						await adoptRestoredLease(leaseDaemonId)?.reject();
 						return;
 					}
+					if (monitors.get(name) !== registration) return;
 					speculative = undefined;
 					await registration.cleanup();
 					await restorePrevious();
@@ -767,7 +845,9 @@ async function registerOutputSink(
 async function detachOutputSink(session: ToolSession, client: DaemonBrokerClient, name: string): Promise<boolean> {
 	const registration = outputRegistrations.get(session)?.get(client)?.get(name);
 	if (!registration) return false;
-	await registration.cleanup();
+	const cleanup = registration.cleanup();
+	session.discardLaunchProgress?.(registration.id, registration.epoch);
+	await cleanup;
 	return true;
 }
 
@@ -1115,6 +1195,12 @@ function daemonLabel(daemon: DaemonSnapshot): string {
 	)} restarts=${daemon.restartCount}${daemon.detached ? " detached" : daemon.persist ? " persistent" : ""}`;
 }
 
+/** `Reason: …` line for the model-facing text, home directory hidden. */
+function daemonReasonText(daemon: DaemonSnapshot, indent = ""): string | undefined {
+	const reason = displayExitReason(daemon.exitReason);
+	return reason ? `${indent}Reason: ${reason}` : undefined;
+}
+
 /**
  * One watcher in prose: who (this session vs. a session id), the delivery
  * mode, how long it has been attached, its artifact, and any state that
@@ -1156,7 +1242,8 @@ function toolContent(
 		case "start": {
 			const daemon = result.daemon;
 			const lines = [`${daemon.state === "failed" ? "Failed to launch" : "Started"} ${daemonLabel(daemon)}`];
-			if (daemon.state === "failed" && daemon.exitReason) lines.push(`Reason: ${daemon.exitReason}`);
+			const reason = daemonReasonText(daemon);
+			if (reason) lines.push(reason);
 			if (daemon.readyMatch) lines.push(`Ready log matched: ${daemon.readyMatch}`);
 			if (result.readyTimedOut) {
 				const pending = readyPendingSummary(daemon, params.ready);
@@ -1179,6 +1266,8 @@ function toolContent(
 			const lines: string[] = [];
 			for (const daemon of result.daemons) {
 				lines.push(`- ${daemonLabel(daemon)}`);
+				const reason = daemonReasonText(daemon, "  ");
+				if (reason) lines.push(reason);
 				const watchers = result.monitors?.filter(watcher => watcher.name === daemon.name) ?? [];
 				if (watchers.length === 0) continue;
 				lines.push(
@@ -1193,6 +1282,8 @@ function toolContent(
 		}
 		case "wait": {
 			const lines = [daemonLabel(result.daemon)];
+			const reason = daemonReasonText(result.daemon);
+			if (reason) lines.push(reason);
 			if (result.matched) lines.push(`Matched: ${result.matched}`);
 			if (result.timedOut) {
 				lines.push(`Wait timed out (still waiting on: ${waitPendingSummary(result.daemon, params).join("; ")}).`);
@@ -1210,8 +1301,10 @@ function toolContent(
 				if (params.progress !== "off") return `Monitoring ${daemonLabel(result.daemon)}`;
 				return `${detached ? "Stopped monitoring" : "No active monitor for"} ${daemonLabel(result.daemon)}`;
 			}
+			const reason = daemonReasonText(result.daemon);
 			return [
 				daemonLabel(result.daemon),
+				...(reason ? [reason] : []),
 				`Command: ${[result.spec.application, ...result.spec.args].join(" ")}`,
 				`Cwd: ${shortenPath(result.spec.cwd)}`,
 				`PTY: ${result.spec.pty}; restart=${result.spec.restart}; persist=${result.spec.persist}; detached=${result.spec.detached}`,

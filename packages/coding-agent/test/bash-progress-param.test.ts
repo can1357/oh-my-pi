@@ -6,6 +6,7 @@ import { ProgressLines } from "@oh-my-pi/pi-coding-agent/async/progress-lines";
 import { OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -146,15 +147,76 @@ describe("bash progress parameter", () => {
 		expect(await Bun.file(artifact.path).text()).toBe(`${"H".repeat(300)}${"0".repeat(4_400)}${"T".repeat(300)}`);
 	});
 
+	test("classifies a non-zero streamed result as progress provenance", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-progress-failure-");
+		const artifact = { id: "failed-progress", path: path.join(tempDir.path(), "output.txt") };
+		const manager = new AsyncJobManager({});
+		const progress: string[] = [];
+		const completions: Array<{ text: string; job?: AsyncJob }> = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				progress.push(text);
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text, job) => {
+			completions.push({ text, job });
+		});
+		const session = makeSession(manager);
+		session.allocateOutputArtifact = async () => artifact;
+		const tool = new BashTool(session);
+
+		const started = await tool.execute("failed-stream", {
+			command:
+				'export STDOUT_MARKER="stdout-$(printf 1)"; ' +
+				'export ERROR_MARKER="ASYNC_ERROR_$(printf MESSAGE)"; ' +
+				'printf "$STDOUT_MARKER\\n"; printf "$ERROR_MARKER\\n" >&2; exit 7',
+			async: true,
+			progress: "wake",
+		});
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		const jobId = started.details?.async?.jobId;
+		expect(jobId).toBeDefined();
+		expect(progress.join("\n")).toContain("stdout-1");
+		const completion = completions[0];
+		if (!completion?.job || !jobId) throw new Error("Expected failed async completion");
+		const message = buildAsyncResultBatchMessage([
+			{
+				jobId,
+				result: completion.text,
+				job: completion.job,
+				durationMs: 1_000,
+				epoch: 0,
+				progressSummary: {
+					artifactId: completion.job.progressArtifactId!,
+					leftover: completion.job.completionLeftover,
+				},
+			},
+		]);
+		if (!message || typeof message.content !== "string") throw new Error("Expected text async-result");
+		const errorMessage = "ASYNC_ERROR_MESSAGE";
+		const errorChannels = [progress.join("\n"), message.content].filter(text => text.includes(errorMessage));
+
+		expect(errorChannels).toHaveLength(1);
+		expect(message.content).not.toContain("stdout-1");
+		expect(manager.getJob(jobId!)).toMatchObject({
+			status: "failed",
+			progressArtifactId: artifact.id,
+			terminalTextProvenance: "progress",
+			latestDetails: { exitCode: 7 },
+		});
+	});
+
 	test("keeps terminal output when the progress artifact cannot be created", async () => {
 		using tempDir = TempDir.createSync("@omp-bash-progress-artifact-failure-");
 		const artifact = { id: "broken-progress", path: path.join(tempDir.path(), "missing", "output.txt") };
 		const manager = new AsyncJobManager({});
-		const progress: AsyncJobProgressInfo[] = [];
+		const progress: Array<{ text: string; info: AsyncJobProgressInfo }> = [];
 		const completions: Array<{ text: string; job?: AsyncJob }> = [];
 		manager.registerProgressSink("Main", {
-			deliver: (_jobId, _text, _job, _seq, info) => {
-				progress.push(info);
+			deliver: (_jobId, text, _job, _seq, info) => {
+				progress.push({ text, info });
 			},
 		});
 		manager.registerDeliverySink("Main", (_jobId, text, job) => {
@@ -172,7 +234,9 @@ describe("bash progress parameter", () => {
 		await manager.waitForAll();
 		await manager.drainDeliveries();
 
-		expect(progress).toEqual([]);
+		expect(progress).toHaveLength(1);
+		expect(progress[0]?.text).toBe("only-result");
+		expect(progress[0]?.info.artifactId).toBeUndefined();
 		expect(completions).toHaveLength(1);
 		expect(completions[0]?.text).toContain("only-result");
 		expect(completions[0]?.job?.progressArtifactId).toBeUndefined();

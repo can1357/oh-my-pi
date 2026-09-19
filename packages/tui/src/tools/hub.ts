@@ -30,6 +30,7 @@ import {
 	formatExpandHint,
 	previewLine,
 	TRUNCATE_LENGTHS,
+	shortenEmbeddedPaths,
 	shortenPath,
 	formatErrorDetail,
 	type ConfiguredThinkingLevel,
@@ -343,6 +344,17 @@ export interface LaunchParams {
 	signal?: "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKILL";
 	timeout?: number;
 }
+
+/**
+ * One process's rows in a `list` render: the collapsed form keeps the process
+ * line with its diagnostic and a bounded slice of watcher rows.
+ */
+interface DaemonListGroup {
+	collapsedRows: string[];
+}
+
+/** Collapsed `list` line budget: one process line plus one detail line each, and the summary row. */
+const COLLAPSED_LIST_LINE_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS * 2 + 1;
 
 /** Structured launch state retained for compact TUI rendering. */
 export interface LaunchToolDetails {
@@ -895,6 +907,40 @@ function daemonMeta(daemon: DaemonSnapshot, theme: Theme): string[] {
 	return meta;
 }
 
+/** Maximum sanitized diagnostic text retained in daemon snapshots and display. */
+const MAX_EXIT_REASON_LENGTH = 1_024;
+
+/**
+ * Mirror of `normalizeExitReason`/`displayExitReason` in
+ * `@oh-my-pi/pi-coding-agent` (`src/launch/exit-reason.ts`): the renderer
+ * cannot import the agent package, so display normalization stays identical to
+ * the durable form. `normalize` bounds arbitrary runtime text; `display` also
+ * hides the home directory.
+ */
+export function normalizeDaemonExitReason(reason: string | undefined): string | undefined {
+	if (reason === undefined) return undefined;
+	const normalized = sanitizeText(reason).replace(/\s+/g, " ").trim();
+	if (!normalized) return undefined;
+	return normalized.length > MAX_EXIT_REASON_LENGTH
+		? `${normalized.slice(0, MAX_EXIT_REASON_LENGTH - 1)}…`
+		: normalized;
+}
+
+export function displayDaemonExitReason(reason: string | undefined): string | undefined {
+	const normalized = normalizeDaemonExitReason(reason);
+	return normalized ? shortenEmbeddedPaths(normalized) : undefined;
+}
+
+/**
+ * Exit diagnostics survive whatever state the process reached: a nonzero exit
+ * explains itself even when the supervisor never marked it `failed`. Bounded to
+ * one status line so a long diagnostic cannot reflow the row.
+ */
+function daemonReasonLine(daemon: DaemonSnapshot, indent = ""): string | undefined {
+	const reason = displayDaemonExitReason(daemon.exitReason);
+	return reason ? `${indent}Reason: ${truncateToWidth(reason, TRUNCATE_LENGTHS.LINE)}` : undefined;
+}
+
 /** Indented `↳ owner · mode · age · state` row under a process line; owner ids are sanitized like any display text. */
 function watcherRow(watcher: DaemonMonitorWatcher, daemon: DaemonSnapshot, theme: Theme): string {
 	const owner = truncateToWidth(replaceTabs(sanitizeText(watcher.owner)), TRUNCATE_LENGTHS.TITLE);
@@ -966,6 +1012,10 @@ export function launchRenderResult(
 
 	const meta: string[] = [];
 	const body: string[] = [];
+	// `list` collapses by process, not by row: the diagnostic and watcher rows
+	// belong to the process above them, so the limit counts processes and each
+	// group carries its own bounded collapsed form.
+	const listGroups: DaemonListGroup[] = [];
 	let description = params.name ?? daemon?.name;
 
 	if (isError) {
@@ -984,8 +1034,8 @@ export function launchRenderResult(
 					meta.push(theme.fg("accent", `monitor ${details.monitoring}`));
 				}
 				if (daemon?.readyMatch) body.push(theme.fg("dim", `log matched: ${replaceTabs(daemon.readyMatch)}`));
-				if (daemon?.state === "failed" && daemon.exitReason)
-					body.push(theme.fg("error", replaceTabs(daemon.exitReason)));
+				const startReason = daemon ? daemonReasonLine(daemon) : undefined;
+				if (startReason) body.push(theme.fg("error", startReason));
 				if (details?.timedOut) {
 					const pending = daemon ? readyPendingSummary(daemon, params.ready) : [];
 					body.push(
@@ -1015,6 +1065,8 @@ export function launchRenderResult(
 			case "wait": {
 				meta.push(...launchCallMeta(params));
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				const waitReason = daemon ? daemonReasonLine(daemon) : undefined;
+				if (waitReason) body.push(theme.fg("error", waitReason));
 				if (details?.matched) body.push(theme.fg("dim", `matched: ${replaceTabs(details.matched)}`));
 				if (details?.timedOut) {
 					body.push(
@@ -1032,12 +1084,23 @@ export function launchRenderResult(
 				const daemons = details?.daemons ?? [];
 				description = `${daemons.length || "no"} ${pluralize("process", daemons.length)}`;
 				for (const item of daemons) {
-					body.push(
+					const baseRows = [
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
-					);
-					for (const watcher of details?.monitors ?? []) {
-						if (watcher.name === item.name) body.push(watcherRow(watcher, item, theme));
+					];
+					const itemReason = daemonReasonLine(item);
+					if (itemReason) baseRows.push(theme.fg("error", itemReason));
+					const watcherRows = (details?.monitors ?? [])
+						.filter(watcher => watcher.name === item.name)
+						.map(watcher => watcherRow(watcher, item, theme));
+					const rows = [...baseRows, ...watcherRows];
+					const collapsedWatcherRows = watcherRows.slice(0, PREVIEW_LIMITS.COLLAPSED_LINES);
+					const omittedWatchers = watcherRows.length - collapsedWatcherRows.length;
+					const collapsedRows = [...baseRows, ...collapsedWatcherRows];
+					if (omittedWatchers > 0) {
+						collapsedRows.push(theme.fg("dim", `  ${formatMoreItems(omittedWatchers, "watcher")}`));
 					}
+					listGroups.push({ collapsedRows });
+					body.push(...rows);
 				}
 				break;
 			}
@@ -1065,10 +1128,14 @@ export function launchRenderResult(
 					meta.push(theme.fg("accent", `monitor ${mode}`));
 				}
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				const monitorReason = daemon ? daemonReasonLine(daemon) : undefined;
+				if (monitorReason) body.push(theme.fg("error", monitorReason));
 				break;
 			}
 			case "describe": {
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				const describeReason = daemon ? daemonReasonLine(daemon) : undefined;
+				if (describeReason) body.push(theme.fg("error", describeReason));
 				const spec = details?.spec;
 				if (spec) {
 					body.push(theme.fg("toolOutput", replaceTabs([spec.application, ...spec.args].join(" "))));
@@ -1128,12 +1195,26 @@ export function launchRenderResult(
 		() => options.expanded,
 		(width, expanded) => {
 			let visible = body;
-			if (!expanded && op === "list" && body.length > PREVIEW_LIMITS.COLLAPSED_ITEMS) {
-				const remaining = body.length - PREVIEW_LIMITS.COLLAPSED_ITEMS;
-				visible = [
-					...body.slice(0, PREVIEW_LIMITS.COLLAPSED_ITEMS),
-					theme.fg("dim", `${formatMoreItems(remaining, "process")} ${formatExpandHint(theme, false, true)}`),
-				];
+			if (!isError && !expanded && op === "list") {
+				const visibleGroups: DaemonListGroup[] = [];
+				let visibleRows = 0;
+				const groupLimit = Math.min(listGroups.length, PREVIEW_LIMITS.COLLAPSED_ITEMS);
+				for (let index = 0; index < groupLimit; index++) {
+					const group = listGroups[index]!;
+					const remainingAfter = listGroups.length - (index + 1);
+					const summaryRows = remainingAfter > 0 ? 1 : 0;
+					const fitsBudget = visibleRows + group.collapsedRows.length + summaryRows <= COLLAPSED_LIST_LINE_LIMIT;
+					if (!fitsBudget && visibleGroups.length > 0) break;
+					visibleGroups.push(group);
+					visibleRows += group.collapsedRows.length;
+				}
+				const remaining = listGroups.length - visibleGroups.length;
+				visible = visibleGroups.flatMap(group => group.collapsedRows);
+				if (remaining > 0) {
+					visible.push(
+						theme.fg("dim", `${formatMoreItems(remaining, "process")} ${formatExpandHint(theme, false, true)}`),
+					);
+				}
 			}
 			return [header, ...visible].map(line => truncateToWidth(line, width));
 		},

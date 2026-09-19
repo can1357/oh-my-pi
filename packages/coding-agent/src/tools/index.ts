@@ -510,6 +510,8 @@ export interface ToolSession {
 	): void;
 	/** Carry a monitor's queued ambient output into the wake queue when it is retuned to `wake`. */
 	promoteLaunchProgress?(daemonId: string, epoch: number): void;
+	/** Discard queued process progress produced by a detached broker output registration. */
+	discardLaunchProgress?(monitorId: string, epoch: number): void;
 	/** Track live monitors so subagent quiescence waits for their terminal event. */
 	setLaunchMonitorActive?(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void;
 	/** Register cleanup that runs when this session is disposed; returns a handle that removes the cleanup. */

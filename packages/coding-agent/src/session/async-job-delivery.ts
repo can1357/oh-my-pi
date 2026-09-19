@@ -71,6 +71,8 @@ export interface AsyncProgressEntry {
 	text: string;
 	job: AsyncJob | undefined;
 	source?: AsyncProgressSource;
+	/** Broker output registration that produced this process entry. */
+	monitorId?: string;
 	seq: number;
 	elapsedMs: number;
 	epoch: number;
@@ -269,6 +271,11 @@ export type AsyncResultJobDetails = {
 	status?: AsyncJob["status"];
 	exitCode?: number;
 	timedOut?: boolean;
+	/** Bounded, sanitized terminal result copy for transcript rendering. */
+	terminalText?: string;
+	terminalHead?: string;
+	terminalTail?: string;
+	terminalTruncated?: boolean;
 };
 
 export type AsyncResultDetails = {
@@ -304,6 +311,21 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		const timedOut = entry.job?.latestDetails?.timedOut === true;
 		const status = entry.job?.status;
 		const leftover = entry.progressSummary?.leftover;
+		// A failed Bash result can contain the complete raw stream plus terminal
+		// notices. Once provenance says that stream reached progress, only the
+		// settlement leftover belongs in the completion payload and preview,
+		// even when no stable artifact was allocated.
+		const terminalResult = entry.job?.terminalTextProvenance === "progress" ? "" : entry.result;
+		const terminalPreview = terminalResult
+			? buildLineSnappedPreview(sanitizeText(terminalResult))
+			: leftover
+				? {
+						text: leftover.text ? sanitizeText(leftover.text) : undefined,
+						head: leftover.head ? sanitizeText(leftover.head) : undefined,
+						tail: leftover.tail ? sanitizeText(leftover.tail) : undefined,
+						truncated: leftover.truncated,
+					}
+				: undefined;
 		return {
 			jobId: entry.jobId,
 			// The job manager disambiguates a requested job id when it collides
@@ -313,7 +335,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			// advertised `agent://` URL from that, or the delivery would point
 			// at an id with no backing `<id>.md`/`.json` on disk.
 			agentUrlId: entry.job?.agentId ?? entry.jobId,
-			result: entry.result,
+			result: terminalResult,
 			type: entry.job?.type,
 			label: entry.job?.label,
 			durationMs: entry.durationMs,
@@ -333,7 +355,8 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			progressSummarized: entry.progressSummary !== undefined,
 			// Preserve tabs in the model-facing completion payload. Transcript
 			// renderers normalize tabs at the TUI boundary.
-			terminalText: entry.progressSummary && entry.result ? sanitizeText(entry.result) : undefined,
+			terminalText: entry.progressSummary && terminalResult ? sanitizeText(terminalResult) : undefined,
+			terminalPreview,
 			artifactId: entry.progressSummary?.artifactId,
 			leftoverText: leftover?.text ? sanitizeText(leftover.text) : undefined,
 			leftoverTruncated: leftover?.truncated === true,
@@ -355,6 +378,14 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			status: job.status,
 			exitCode: job.exitCode,
 			timedOut: job.timedOut,
+			...(job.terminalPreview
+				? {
+						terminalText: job.terminalPreview.text,
+						terminalHead: job.terminalPreview.head,
+						terminalTail: job.terminalPreview.tail,
+						terminalTruncated: job.terminalPreview.truncated,
+					}
+				: {}),
 		})),
 	};
 	const text = prompt.render(asyncResultTemplate, {
