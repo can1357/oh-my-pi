@@ -605,11 +605,18 @@ export class ToolExecutionComponent extends Container {
 			this.#toolName !== "todo" &&
 			!isBackgroundAsyncRunning &&
 			(pendingCallConsumesSpinner || partialResultConsumesSpinner);
+		// Mixed hub waits (completed+running) are historical — EventController
+		// only tracks all-running displaceable polls — so they must not start a
+		// spinner they will never refresh or seal. A tracked poll that later
+		// becomes mixed keeps spinning via `#spinnerActive` until it is sealed.
 		const needsSpinner =
 			isStreamingArgs ||
 			isLivePartialTool ||
 			this.#displaceableByToolName === "hub" ||
-			(!this.#sealed && this.#toolName === "hub" && isLiveHubPollDetails(this.#result?.details));
+			(!this.#sealed &&
+				this.#spinnerActive &&
+				this.#toolName === "hub" &&
+				isLiveHubPollDetails(this.#result?.details));
 		if (needsSpinner && !this.#spinnerActive) {
 			const frameCount = theme.spinnerFrames.length;
 			const frame = sharedSpinnerFrame(frameCount);

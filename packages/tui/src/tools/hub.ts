@@ -45,7 +45,11 @@ export function isWaitingPollDetails(details: unknown): boolean {
 	return d.jobs.every(job => job?.status === "running");
 }
 
-/** Whether a hub wait snapshot still has at least one running job. */
+/**
+ * Whether a hub wait still has a running job. Used to keep an already-live
+ * displaceable poll spinning after a tracked refresh leaves a mixed snapshot;
+ * mixed historical waits must not start a spinner from this alone.
+ */
 export function isLiveHubPollDetails(details: unknown): boolean {
 	const d = details as CoordinationDetails | undefined;
 	if (!d || d.op !== "wait" || !Array.isArray(d.jobs) || d.jobs.length === 0) return false;

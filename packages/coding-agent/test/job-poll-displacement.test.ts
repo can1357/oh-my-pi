@@ -16,7 +16,11 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import {
+	stopSharedSpinnerTicker,
+	ToolExecutionComponent,
+	type ToolExecutionHandle,
+} from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -116,6 +120,29 @@ describe("hub waiting-poll block lifecycle", () => {
 
 		expect(component.isDisplaceableBlock()).toBe(false);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	// Regression (#12490 follow-up): isLiveHubPollDetails used to start the
+	// shared spinner for any wait with a running job, but EventController only
+	// tracks/seals all-running displaceable polls. A mixed completed+running
+	// result therefore leaked the 80ms ticker and froze "waiting on 1 of 2".
+	it("does not leak a spinner or freeze waiting-on-N for a mixed completed+running poll", () => {
+		vi.useFakeTimers();
+		stopSharedSpinnerTicker();
+		try {
+			const component = makeJobComponent();
+			component.updateResult(pollResult(["completed", "running"]), false);
+
+			expect(component.isDisplaceableBlock()).toBe(false);
+			const output = Bun.stripANSI(component.render(120).join("\n"));
+			expect(output).not.toContain("waiting on");
+			expect(output).toContain("1 job settled");
+
+			vi.advanceTimersByTime(2000);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("finalizes a poll that carried cancel outcomes or an error", () => {
