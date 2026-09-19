@@ -1,8 +1,10 @@
 /**
  * MCP JSON Provider
  *
- * Discovers standalone mcp.json / .mcp.json files in the project root.
+ * Discovers standalone mcp.json / .mcp.json from the nearest ancestor of cwd
+ * (stopping at repoRoot, or the filesystem root when no repo is known).
  * This is a fallback for projects that have a standalone mcp.json without any config directory.
+ * Nearest directory wins — stacked ancestor files are not merged.
  *
  * Priority: 5 (low, as this is a fallback after tool-specific providers)
  */
@@ -12,7 +14,7 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
-import { createSourceMeta, expandEnvVarsDeep, parseRequestIdFormat } from "./helpers";
+import { createSourceMeta, expandEnvVarsDeep, findNearestAncestorDir, parseRequestIdFormat } from "./helpers";
 
 const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
@@ -159,8 +161,12 @@ async function loadMCPJsonFile(
  */
 async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 	const filenames = ["mcp.json", ".mcp.json"];
+	const nearestDir = await findNearestAncestorDir(ctx.cwd, filenames, ctx.repoRoot);
+	if (!nearestDir) {
+		return { items: [] };
+	}
 	const results = await Promise.all(
-		filenames.map(filename => loadMCPJsonFile(ctx, path.join(ctx.cwd, filename), "project")),
+		filenames.map(filename => loadMCPJsonFile(ctx, path.join(nearestDir, filename), "project")),
 	);
 
 	const allItems = results.flatMap(r => r.items);
@@ -176,7 +182,7 @@ async function load(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
 registerProvider(mcpCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load MCP servers from standalone mcp.json or .mcp.json in project root",
+	description: "Load MCP servers from the nearest ancestor mcp.json or .mcp.json",
 	priority: 5,
 	load,
 });
