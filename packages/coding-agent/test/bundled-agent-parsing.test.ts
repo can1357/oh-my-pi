@@ -9,7 +9,7 @@ import {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 
 describe("bundled agent parsing", () => {
 	it("defaults the task agent to the auto thinking selector", () => {

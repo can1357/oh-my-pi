@@ -1,3 +1,4 @@
+import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 /**
  * Regression: the agent-hub chat transcript must not render SILENT_ABORT_MARKER verbatim.
  *
@@ -13,9 +14,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-coding-agent/modes/components/agent-transcript-viewer";
-import type { ObservableSession } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
+import type { ObservableSession } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { TUI } from "@oh-my-pi/pi-tui";
@@ -37,7 +38,7 @@ function makeSubagentRegistry(sessions: ObservableSession[]) {
 		onChange: () => () => {},
 		setMainSession: () => {},
 		getActiveSubagentCount: () => sessions.filter(s => s.status === "active").length,
-	} as unknown as import("@oh-my-pi/pi-coding-agent/modes/session-observer-registry").SessionObserverRegistry;
+	} as unknown as import("@oh-my-pi/pi-tui/overlays/session-observer-registry").SessionObserverRegistry;
 }
 
 function makeViewer(sessionFile: string, observed: ObservableSession[]): AgentTranscriptViewer {
@@ -53,6 +54,7 @@ function makeViewer(sessionFile: string, observed: ObservableSession[]): AgentTr
 	});
 	const ui = { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI;
 	return new AgentTranscriptViewer({
+		transcript: agentTranscriptSource,
 		agentId: SESSION_ID,
 		registry: agents,
 		observers: makeSubagentRegistry(observed),

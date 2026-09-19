@@ -12,7 +12,7 @@ It covers tool behavior, runner lifecycle, environment handling, execution seman
 - Prelude helpers loaded into every kernel: `src/eval/py/prelude.py`
 - Host-side subagent helper bridge: `src/eval/agent-bridge.ts`
 - MIME bundle renderer (text + structured outputs): `src/eval/py/display.ts`
-- Interactive-mode renderer for user-triggered Python runs: `src/modes/components/eval-execution.ts`
+- Interactive-mode renderer for user-triggered Python runs: `packages/tui/src/chat/eval-execution.ts`
 - Runtime/env filtering and Python resolution: `src/eval/py/runtime.ts`
 
 ## What eval's Python backend is

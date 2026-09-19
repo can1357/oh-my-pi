@@ -32,11 +32,9 @@ export interface CompiledRevisionPrefix {
 	anywhere?: boolean;
 }
 
-/** One compiled reviewed identity correction. */
-export interface CompiledIdentityOverride {
+interface CompiledIdentityOverrideFields {
 	id: string;
 	provider?: string;
-	model: string;
 	logical?: string;
 	class?: string;
 	family?: string;
@@ -48,6 +46,21 @@ export interface CompiledIdentityOverride {
 	provenance: string;
 	expiresAtMs?: number;
 }
+
+/** One compiled reviewed identity correction with exactly one bare-model selector. */
+export type CompiledIdentityOverride = CompiledIdentityOverrideFields &
+	(
+		| {
+				/** Exact bare-model selector. */
+				model: string;
+				glob?: never;
+		  }
+		| {
+				model?: never;
+				/** Anchored, case-insensitive bare-model glob. */
+				glob: string;
+		  }
+	);
 
 /** One compiled model class: matchers, families, revision rules, overrides. */
 export interface CompiledClass {
@@ -456,6 +469,10 @@ export interface CompiledOAuthCodeLogin {
 	kind: "oauth-code";
 	clientId?: CompiledAuthValue;
 	clientSecret?: CompiledAuthValue;
+	/** `{base}` placeholder source (the provider's API origin). */
+	baseUrl?: CompiledAuthValue;
+	/** `{auth}` placeholder source for the authorize, token, and userinfo URLs when the issuer is a separate host. */
+	authUrl?: CompiledAuthValue;
 	authorizeUrl: CompiledAuthValue;
 	scopes: string[];
 	scopeSeparator: string;

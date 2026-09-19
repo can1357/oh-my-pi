@@ -11,7 +11,7 @@ import type { EffectiveExtensionRoots, SourceMeta } from "../capability/types";
 import type { SkillsSettings } from "../config/settings";
 import { type Skill as CapabilitySkill, isUserSourceEnabled, loadCapability } from "../discovery";
 import { compareSkillOrder, scanSkillsFromDir } from "../discovery/helpers";
-import { allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
+import { allowsSkillTokens, SKILL_TOKEN_RE } from "@oh-my-pi/pi-tui/prompt/skill-tokens";
 import autoloadTemplate from "../prompts/skills/autoload.md" with { type: "text" };
 import userInvocationTemplate from "../prompts/skills/user-invocation.md" with { type: "text" };
 import type { SkillPromptDetails } from "../session/messages";

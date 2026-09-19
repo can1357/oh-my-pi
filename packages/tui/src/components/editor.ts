@@ -36,6 +36,7 @@ import {
 	VimState,
 	visualRange,
 } from "../vim";
+import { scrollbarThumbRange } from "./scroll-viewport";
 import {
 	borderlessComposerStyle,
 	type ComposerChromeContext,
@@ -1211,17 +1212,7 @@ export class Editor implements Component, Focusable {
 		const needsScrollbar = this.#scrollbarVisible && layoutLines.length > visibleContentHeight;
 		let scrollbarThumb: { start: number; end: number } | null = null;
 		if (needsScrollbar && visibleContentHeight > 0) {
-			const thumbSize = Math.max(
-				1,
-				Math.min(
-					Math.floor((visibleContentHeight * visibleContentHeight) / layoutLines.length),
-					visibleContentHeight,
-				),
-			);
-			const travel = visibleContentHeight - thumbSize;
-			const maxOffset = Math.max(0, layoutLines.length - visibleContentHeight);
-			const start = maxOffset === 0 ? 0 : Math.round((this.#scrollOffset / maxOffset) * travel);
-			scrollbarThumb = { start, end: start + thumbSize };
+			scrollbarThumb = scrollbarThumbRange(visibleContentHeight, layoutLines.length, this.#scrollOffset);
 		}
 
 		// Resolve the custom top-border content once per frame; the style decides
@@ -3264,7 +3255,14 @@ export class Editor implements Component, Focusable {
 
 	#recordUndoState(): void {
 		if (this.#suspendUndo) return;
-		this.#undoStack.push(structuredClone(this.#state));
+		// EditorState holds only primitives plus an array of immutable strings:
+		// a shallow array copy is a complete snapshot. structuredClone pays for
+		// general-case dispatch per element on every edit keystroke.
+		this.#undoStack.push({
+			lines: this.#state.lines.slice(),
+			cursorLine: this.#state.cursorLine,
+			cursorCol: this.#state.cursorCol,
+		});
 		if (this.#undoStack.length > MAX_UNDO_STACK) {
 			this.#undoStack.shift();
 		}

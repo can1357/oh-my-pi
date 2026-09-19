@@ -8,7 +8,8 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { ServingModel } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, AgentProgress } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import { createSessionDefaults } from "./helpers/session-defaults";
 
 function model(provider: string, id: string): Model<Api> {

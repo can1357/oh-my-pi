@@ -4,12 +4,7 @@ import * as path from "node:path";
 
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
-export interface ActiveRepoContext {
-	cwd: string;
-	repoRoot: string;
-	relativeRepoRoot: string;
-	source: "single-direct-child-repo";
-}
+import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 
 function compareEntryNames(left: fs.Dirent, right: fs.Dirent): number {
 	if (left.name < right.name) return -1;

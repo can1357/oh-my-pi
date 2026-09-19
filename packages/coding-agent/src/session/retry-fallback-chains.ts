@@ -1,14 +1,14 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
-import {
-	formatModelSelectorValue,
-	formatModelString,
-	formatModelStringWithRouting,
-	parseModelString,
-} from "../config/model-resolver";
+import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import { type ConfiguredThinkingLevel, concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
+import {
+	type ConfiguredThinkingLevel,
+	concreteThinkingLevel,
+	resolveThinkingLevelForModel,
+} from "@oh-my-pi/pi-tui/thinking";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
