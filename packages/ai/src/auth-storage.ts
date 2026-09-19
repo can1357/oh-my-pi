@@ -63,7 +63,7 @@ import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityRankingStrategy, antigravityUsageProvider } from "./usage/google-antigravity";
 import { kimiRankingStrategy, kimiUsageProvider } from "./usage/kimi";
 import { museCodeUsageProvider } from "./usage/muse-code";
-import { minimaxCodeUsageProvider } from "./usage/minimax-code";
+import { minimaxCodeCnUsageProvider, minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
 import {
@@ -77,7 +77,7 @@ import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./usage/open
 import { syntheticUsageProvider } from "./usage/synthetic";
 import { umansUsageProvider } from "./usage/umans";
 import { xaiOauthUsageProvider } from "./usage/xai-oauth";
-import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
+import { zaiRankingStrategy, zaiUsageProvider, zhipuCodingPlanUsageProvider } from "./usage/zai";
 
 export { isSqliteBusyError, isSqliteCorruptionError, SqliteAuthCredentialStore } from "./auth/sqlite-credential-store";
 
@@ -665,6 +665,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	openaiCodexUsageProvider,
 	kimiUsageProvider,
 	minimaxCodeUsageProvider,
+	minimaxCodeCnUsageProvider,
 	museCodeUsageProvider,
 	antigravityUsageProvider,
 	googleGeminiCliUsageProvider,
@@ -673,6 +674,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	claudeUsageProvider,
 	clinePassUsageProvider,
 	zaiUsageProvider,
+	zhipuCodingPlanUsageProvider,
 	umansUsageProvider,
 	opencodeGoUsageProvider,
 	githubCopilotUsageProvider,
@@ -1158,6 +1160,7 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 	["google-antigravity", antigravityRankingStrategy],
 	["kimi-code", kimiRankingStrategy],
 	["zai", zaiRankingStrategy],
+	["zhipu-coding-plan", zaiRankingStrategy],
 	["opencode-go", opencodeGoRankingStrategy],
 ]);
 

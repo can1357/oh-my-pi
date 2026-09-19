@@ -5,6 +5,8 @@ import { HOUR_MS, parsePositiveTimestamp, usageStatus } from "./shared";
 
 const INTL_PROVIDER = "minimax-code";
 const INTL_BASE_URL = "https://api.minimax.io";
+const CN_PROVIDER = "minimax-code-cn";
+const CN_BASE_URL = "https://api.minimaxi.com";
 const REMAINS_PATH = "/v1/token_plan/remains";
 /** `current_*_status` enum reported per window: 1 normal, 2 exhausted, 3 unlimited. */
 const STATUS_EXHAUSTED = 2;
@@ -187,7 +189,7 @@ function buildBucketLimits(provider: string, bucket: TokenPlanBucket, accountId:
 }
 
 /**
- * MiniMax Token Plan usage provider (international, `api.minimax.io`).
+ * MiniMax Token Plan usage provider (international `api.minimax.io`, China `api.minimaxi.com`).
  *
  * `GET /v1/token_plan/remains` returns one `model_remains[]` bucket per plan
  * quota (text, media, …), each carrying a rolling interval window and a weekly
@@ -195,13 +197,14 @@ function buildBucketLimits(provider: string, bucket: TokenPlanBucket, accountId:
  * rejected credentials, so `base_resp.status_code` is the real success signal.
  */
 async function fetchMiniMaxCodeUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
-	if (params.provider !== INTL_PROVIDER) return null;
+	if (params.provider !== INTL_PROVIDER && params.provider !== CN_PROVIDER) return null;
 	const apiKey = params.credential.apiKey;
 	if (params.credential.type !== "api_key" || !apiKey) return null;
 
 	try {
 		const configuredBaseUrl = params.baseUrl?.trim();
-		const baseUrl = configuredBaseUrl ? configuredBaseUrl.replace(/\/+$/, "").replace(/\/v1$/, "") : INTL_BASE_URL;
+		const fallbackBaseUrl = params.provider === CN_PROVIDER ? CN_BASE_URL : INTL_BASE_URL;
+		const baseUrl = configuredBaseUrl ? configuredBaseUrl.replace(/\/+$/, "").replace(/\/v1$/, "") : fallbackBaseUrl;
 		const response = await ctx.fetch(`${baseUrl}${REMAINS_PATH}`, {
 			headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
 			signal: params.signal,
@@ -262,10 +265,18 @@ async function fetchMiniMaxCodeUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	}
 }
 
-/** MiniMax Token Plan (international, `api.minimax.io`). */
+/** MiniMax Token Plan (international `api.minimax.io`, China `api.minimaxi.com`). */
 export const minimaxCodeUsageProvider: UsageProvider = {
 	id: INTL_PROVIDER,
 	fetchUsage: fetchMiniMaxCodeUsage,
 	supports: params =>
 		params.provider === INTL_PROVIDER && params.credential.type === "api_key" && Boolean(params.credential.apiKey),
+};
+
+/** MiniMax Token Plan China (`api.minimaxi.com`); same wire contract as international. */
+export const minimaxCodeCnUsageProvider: UsageProvider = {
+	id: CN_PROVIDER,
+	fetchUsage: fetchMiniMaxCodeUsage,
+	supports: params =>
+		params.provider === CN_PROVIDER && params.credential.type === "api_key" && Boolean(params.credential.apiKey),
 };

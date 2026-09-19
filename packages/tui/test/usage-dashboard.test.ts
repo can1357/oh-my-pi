@@ -85,7 +85,7 @@ describe("buildProviderCards", () => {
 
 	it("averages a window across accounts instead of showing the worst account", () => {
 		// One exhausted + one barely-used account: the classic report shows the
-		// aggregate (~50% free), so the card must not read 0% free.
+		// aggregate (~50% used), so the card must not read as fully used (100%).
 		const reports = [
 			report("anthropic", "a@x.test", [limit("anthropic", "a", "7d", "Claude 7 Day", 1.0, "exhausted", now + 1000)]),
 			report("anthropic", "b@x.test", [limit("anthropic", "b", "7d", "Claude 7 Day", 0.0, "ok", now + 99_000)]),
@@ -235,6 +235,50 @@ describe("UsageDashboardComponent", () => {
 		expect(contentLine).toContain(
 			"Usage history unavailable (subprocess crashed at ~/.omp/stats.db: failed to open line 2).",
 		);
+	});
+
+	it("agrees the card percentage with the bar's used direction", async () => {
+		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
+		const component = new UsageDashboardComponent({
+			reports: [
+				report("openai-codex", "o@x.test", [
+					limit("openai-codex", "o", "7d", "7 days", 1.0, "exhausted", Date.now() + 3_600_000),
+				]),
+			],
+			renderDetail: () => "",
+			loadActivity: () => Promise.resolve(),
+			requestRender: () => markRendered(),
+			onClose: () => {},
+		});
+		await rendered;
+		const lines = component.render(120).join("\n");
+		// Bar fill and number must move together: an exhausted window is 100% used,
+		// never "0%" (the old free-percentage read).
+		expect(lines).toContain("100%");
+		expect(lines).not.toContain("  0%");
+	});
+
+	it("keeps 16-character window labels intact at four-column widths", async () => {
+		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
+		const providers = ["zhipu-coding-plan", "minimax-code-cn", "openai-codex", "kimi-code"];
+		const component = new UsageDashboardComponent({
+			reports: providers.map(provider =>
+				report(provider, "a@x.test", [
+					limit(provider, "a", "1mo", "Monthly Requests", 0.05, "ok", Date.now() + 1_000_000_000),
+				]),
+			),
+			renderDetail: () => "",
+			loadActivity: () => Promise.resolve(),
+			requestRender: () => markRendered(),
+			onClose: () => {},
+		});
+		await rendered;
+		const gridLine = component.render(190).find(line => line.includes("Monthly"));
+		// Four active cards share one row at this width; each must carry the full
+		// label — the old 32-column floor squeezed them to ~10 characters.
+		expect(gridLine).toBeDefined();
+		expect(gridLine?.split("Monthly Requests").length).toBe(5);
+		expect(gridLine).not.toContain("…");
 	});
 });
 
