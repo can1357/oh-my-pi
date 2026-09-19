@@ -11,6 +11,10 @@
 
 - Centralized llama.cpp Qwen routing and thinking policy in KDL, with reviewed Bonsai lineage aliases and shared backend policy for custom provider names.
 
+### Fixed
+
+- Restored llama.cpp Qwen thinking controls and preserved prior thinking in local Qwen chat templates.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
