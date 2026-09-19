@@ -18,6 +18,7 @@ from omp_rpc import (
     RpcCommandError,
     RpcConcurrencyError,
     RpcError,
+    RpcTimeoutError,
     host_tool,
 )
 from omp_rpc.client import _RpcFrameDecoder
@@ -761,6 +762,88 @@ LATE_PROMPT_FAILURE_SERVER = textwrap.dedent(
     """
 )
 
+
+REQUEST_ID_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    def respond(command, *, success=True, data=None, error=None, request_id=None):
+        frame = {
+            "id": command.get("id") if request_id is None else request_id,
+            "type": "response",
+            "command": command["type"],
+            "success": success,
+        }
+        if data is not None:
+            frame["data"] = data
+        if error is not None:
+            frame["error"] = error
+        print(json.dumps(frame), flush=True)
+
+    pending_reverse = []
+    held = None
+    timed_out = None
+    accepted_same = None
+    command_count = 0
+    pending_marker = None
+    print(json.dumps({"type": "ready"}), flush=True)
+    for raw_line in sys.stdin:
+        command = json.loads(raw_line)
+        command_type = command["type"]
+        if command_type == "set_host_tools":
+            respond(command, data={"toolNames": []})
+            continue
+
+        command_count += 1
+        if command_type in {"prompt", "abort_and_prompt"}:
+            respond(command)
+            respond(command, success=False, error=f"late {command_type} failure")
+        elif command_type == "reverse":
+            pending_reverse.append(command)
+            if len(pending_reverse) == 2:
+                for item in reversed(pending_reverse):
+                    respond(item, data={"value": item["value"]})
+                pending_reverse.clear()
+        elif command_type == "hold":
+            held = command
+            if pending_marker is not None:
+                respond(pending_marker)
+                pending_marker = None
+        elif command_type == "marker":
+            if command.get("await_hold") and held is None:
+                pending_marker = command
+            else:
+                respond(command)
+        elif command_type == "release":
+            respond(held, data={"value": "original"})
+            held = None
+            respond(command)
+        elif command_type == "count":
+            respond(command, data={"count": command_count})
+        elif command_type == "same_command":
+            if accepted_same is None:
+                accepted_same = command
+                respond(command, data={"value": "a", "request_id": command["id"]})
+            else:
+                respond(
+                    command,
+                    success=False,
+                    error="late a failure",
+                    request_id=accepted_same["id"],
+                )
+                respond(command, data={"value": "b"})
+        elif command_type == "timeout":
+            timed_out = command
+        elif command_type == "after_timeout":
+            respond(timed_out, data={"value": "stale"})
+            timed_out = None
+            respond(command, data={"value": "fresh"})
+        else:
+            respond(command)
+    """
+)
+
 STDERR_SERVER = textwrap.dedent(
     """
     import json
@@ -1353,9 +1436,7 @@ class RpcClientTests(unittest.TestCase):
             client.on_unknown_notification(
                 lambda event: unknown_errors.append(event.parse_error)
             )
-            with self.assertRaisesRegex(
-                RpcError, "Failed to parse terminal agent_end"
-            ):
+            with self.assertRaisesRegex(RpcError, "Failed to parse terminal agent_end"):
                 client.prompt_and_wait("malformed terminal", timeout=1.0)
 
         self.assertEqual(len(unknown_errors), 1)
@@ -1428,6 +1509,146 @@ class RpcClientTests(unittest.TestCase):
         self.assertEqual(turn.require_assistant_text(), "pong")
         self.assertEqual(messages[0]["content"][0]["text"], "pong")
 
+    def test_prompt_reports_late_failure_with_caller_request_id(self) -> None:
+        protocol_errors = []
+        client = self.make_client(server=REQUEST_ID_SERVER)
+        client.on_protocol_error(protocol_errors.append)
+
+        with client:
+            client.prompt("accepted", request_id="caller-prompt")
+            client.request_raw("marker", request_id="prompt-barrier")
+
+        self.assertEqual(len(protocol_errors), 1)
+        self.assertEqual(protocol_errors[0].request_id, "caller-prompt")
+        self.assertEqual(protocol_errors[0].remote_error, "late prompt failure")
+
+    def test_abort_and_prompt_reports_late_failure_with_caller_request_id(
+        self,
+    ) -> None:
+        protocol_errors = []
+        client = self.make_client(server=REQUEST_ID_SERVER)
+        client.on_protocol_error(protocol_errors.append)
+
+        with client:
+            client.abort_and_prompt("accepted", request_id="caller-abort")
+            client.request_raw("marker", request_id="abort-barrier")
+
+        self.assertEqual(len(protocol_errors), 1)
+        self.assertEqual(protocol_errors[0].request_id, "caller-abort")
+        self.assertEqual(
+            protocol_errors[0].remote_error, "late abort_and_prompt failure"
+        )
+
+    def test_concurrent_custom_request_ids_receive_reverse_order_replies(
+        self,
+    ) -> None:
+        results: dict[str, str] = {}
+        errors: list[BaseException] = []
+
+        with self.make_client(server=REQUEST_ID_SERVER) as client:
+
+            def request(value: str) -> None:
+                try:
+                    response = client.request_raw(
+                        "reverse", value=value, request_id=f"caller-{value}"
+                    )
+                    results[value] = str(response["value"])
+                except (RpcError, ValueError) as error:
+                    errors.append(error)
+
+            threads = [
+                threading.Thread(target=request, args=(value,))
+                for value in ("one", "two")
+            ]
+            for thread in threads:
+                self.addCleanup(thread.join, 3.0)
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2.0)
+                self.assertFalse(thread.is_alive())
+
+        self.assertEqual(errors, [])
+        self.assertEqual(results, {"one": "one", "two": "two"})
+
+    def test_pending_duplicate_request_id_does_not_replace_original_waiter(
+        self,
+    ) -> None:
+        result: list[dict[str, object]] = []
+        errors: list[BaseException] = []
+
+        with self.make_client(server=REQUEST_ID_SERVER) as client:
+
+            def hold() -> None:
+                try:
+                    result.append(
+                        client.request_raw("hold", request_id="caller-pending")
+                    )
+                except (RpcError, ValueError) as error:
+                    errors.append(error)
+
+            thread = threading.Thread(target=hold)
+            self.addCleanup(thread.join, 3.0)
+            thread.start()
+            client.request_raw("marker", request_id="pending-marker", await_hold=True)
+
+            with self.assertRaises(ValueError):
+                client.request_raw("hold", request_id="caller-pending")
+
+            client.request_raw("release", request_id="pending-release")
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+
+        self.assertEqual(errors, [])
+        self.assertEqual(result, [{"value": "original"}])
+
+    def test_invalid_request_ids_and_raw_id_are_rejected_before_write(
+        self,
+    ) -> None:
+        with self.make_client(server=REQUEST_ID_SERVER) as client:
+            for request_id in ("", "req_reserved", 7):
+                with self.subTest(request_id=request_id), self.assertRaises(ValueError):
+                    client.request_raw("marker", request_id=request_id)  # type: ignore[arg-type]
+
+            with self.assertRaises(ValueError):
+                client.request_raw("marker", id="wire-injection")
+
+            response = client.request_raw("count", request_id="caller-count")
+
+        self.assertEqual(response["count"], 1)
+
+    def test_identified_late_error_does_not_reject_same_command_waiter(
+        self,
+    ) -> None:
+        protocol_errors = []
+        with self.make_client(server=REQUEST_ID_SERVER) as client:
+            client.on_protocol_error(protocol_errors.append)
+            first = client.request_raw("same_command")
+            second = client.request_raw("same_command")
+
+        self.assertEqual(first["value"], "a")
+        self.assertEqual(second, {"value": "b"})
+        self.assertEqual(len(protocol_errors), 1)
+        self.assertEqual(protocol_errors[0].remote_error, "late a failure")
+        self.assertEqual(protocol_errors[0].request_id, first["request_id"])
+
+    def test_timed_out_reply_does_not_settle_new_request(
+        self,
+    ) -> None:
+        client = RpcClient(
+            command=[sys.executable, "-u", "-c", REQUEST_ID_SERVER],
+            startup_timeout=2.0,
+            request_timeout=0.5,
+        )
+
+        with client:
+            with self.assertRaises(RpcTimeoutError):
+                client.request_raw("timeout", request_id="caller-timeout")
+            response = client.request_raw(
+                "after_timeout", request_id="caller-after-timeout"
+            )
+
+        self.assertEqual(response, {"value": "fresh"})
+
     def test_id_less_error_responses_are_correlated(self) -> None:
         with self.make_client(server=IDLESS_ERROR_SERVER) as client:
             with self.assertRaises(RpcCommandError) as ctx:
@@ -1444,13 +1665,16 @@ class RpcClientTests(unittest.TestCase):
         try:
             client.start()
             with self.assertRaises(RpcCommandError) as ctx:
-                client.prompt_and_wait("say hello", timeout=2.0)
+                client.prompt_and_wait(
+                    "say hello", request_id="caller-prompt-and-wait", timeout=2.0
+                )
         finally:
             client.stop()
 
         self.assertEqual(ctx.exception.command, "prompt")
         self.assertEqual(ctx.exception.error, "late failure")
         self.assertEqual(len(protocol_errors), 1)
+        self.assertEqual(client.protocol_errors[0].request_id, "caller-prompt-and-wait")
         self.assertIn("late failure", protocol_errors[0])
         self.assertEqual(len(client.protocol_errors), 1)
 
