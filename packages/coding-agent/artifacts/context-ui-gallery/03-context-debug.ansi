@@ -1,0 +1,59 @@
+WINDOW — root context only
+Context  33K / 200K   16.5%
+
+[[38;2;95;102;115m██[39m[38;2;119;125;136m█[39m[1m[38;2;254;188;56m██░░░[22m[39m[38;2;119;125;136m░░[39m[38;2;95;102;115m░░░░░░░░░░░░░░░░░░░░░░[39m] 17%
+
+System prompt      4.8K
+System tools       15K
+System context     9.4K
+Skills             3.6K
+Messages           1.2K
+────────────────────────────
+Auto-compact buffer 30K
+Free               137K
+
+════════════════════════════════════════
+
+FLOW — turn 1
+
+● ✓ omp.user                0.0ms
+│    └─ fix context UI
+● ✓ omp.rlm.grants          0.0ms  4.2K→0t  2 grants
+│    (externalized)
+● ◉ omp.rlm.groq_codec      running  4.2K→0t
+│    (worker)
+● ◉ omp.root                running
+│    └─ groq/gpt-oss-20b
+
+Research stack (static wiring):
+  typesafe.jev     COND
+  nanojev          NOT WIRED
+  openjev          NOT WIRED
+  z0int            NOT WIRED
+  kerdoios         EXPERIMENT
+  fly.classifier   NOT WIRED
+  mushroom.classifier NOT WIRED
+
+════════════════════════════════════════
+
+OFFLOAD — external / addressable (not in root window %)
+
+RLM stored (external)     184.0k
+Granted to workers        4.2K t (est.)
+Reintroduced to root      318 t
+
+Semantic / SLM layer:
+  NanoJev                  NOT WIRED
+  OpenJev                  NOT WIRED
+  TypeSafe Jev             COND
+
+Neural classifiers:
+  fly                      NOT WIRED
+  mushroom                 NOT WIRED
+
+  z0int                    NOT WIRED
+  Kerdoios                 EXPERIMENT
+
+════════════════════════════════════════
+
+ECONOMICS — Tokenomics disabled (set OMP_TOKENOMICS≠0)

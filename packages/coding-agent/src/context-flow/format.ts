@@ -1,4 +1,6 @@
 import { renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import { renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { ContextBreakdown } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { ContextFlowSnapshot, ContextFlowNode, ContextFlowNodeStatus, WiringStatus } from "./types";
@@ -224,4 +226,98 @@ export function contextExplorerTitle(view: ContextExplorerView): string {
 		case "economics":
 			return "Context Explorer — ECONOMICS";
 	}
+}
+
+const FLOW_BREADCRUMB_ORDER = [
+	"omp.user",
+	"omp.rlm.search",
+	"omp.rlm.grants",
+	"omp.rlm.groq_codec",
+	"omp.rlm.worker",
+	"omp.root",
+] as const;
+
+function compactFlowLabel(component: string): string {
+	switch (component) {
+		case "omp.user":
+			return "prompt";
+		case "omp.rlm.search":
+			return "search";
+		case "omp.rlm.grants":
+			return "grants";
+		case "omp.rlm.groq_codec":
+			return "Groq";
+		case "omp.rlm.worker":
+			return "worker";
+		case "omp.root":
+			return "root";
+		default:
+			return component.replace(/^omp\./, "");
+	}
+}
+
+/** One-line offload summary for default /context (hidden when inactive). */
+export function renderCompactOffloadLine(flow: ContextFlowSnapshot): string | undefined {
+	const o = flow.offload;
+	if (!o.active) return undefined;
+	const parts: string[] = [];
+	if (o.externalBytes > 0) parts.push(`${formatBytes(o.externalBytes)} stored`);
+	if (o.grantedTokens && o.grantedTokens > 0) parts.push(`${formatBytes(o.grantedTokens)} worker`);
+	if (o.reintroducedTokens > 0) parts.push(`${formatNumber(o.reintroducedTokens)}t root`);
+	if (parts.length === 0) return undefined;
+	return `↓ RLM ${parts.join(" → ")}`;
+}
+
+/** Compact turn pipeline breadcrumb for default /context (no NOT WIRED inventory). */
+export function renderCompactFlowBreadcrumb(flow: ContextFlowSnapshot, maxWidth?: number): string | undefined {
+	const turnNodes = flow.nodes.filter(
+		n => n.turn === flow.turn && n.component.startsWith("omp.") && n.status !== "not_wired",
+	);
+	if (turnNodes.length === 0) return undefined;
+
+	const byComponent = new Map<string, ContextFlowNode>();
+	for (const node of turnNodes) {
+		const existing = byComponent.get(node.component);
+		if (!existing || node.status === "running") byComponent.set(node.component, node);
+	}
+	if (byComponent.has("omp.rlm.groq_codec")) byComponent.delete("omp.rlm.worker");
+
+	const steps: string[] = [];
+	for (const key of FLOW_BREADCRUMB_ORDER) {
+		const node = byComponent.get(key);
+		if (!node) continue;
+		steps.push(`${compactFlowLabel(key)} ${statusGlyph(node.status)}`);
+	}
+	if (steps.length <= 1) return undefined;
+
+	let line = `Flow  ${steps.join(" → ")}`;
+	if (maxWidth !== undefined && maxWidth > 0 && line.length > maxWidth) {
+		line = `${line.slice(0, Math.max(0, maxWidth - 1))}…`;
+	}
+	return line;
+}
+
+/** Offload + flow augmentation lines (0–2) for the compact /context panel. */
+export function renderCompactContextAugmentation(flow: ContextFlowSnapshot, maxWidth?: number): string[] {
+	const lines: string[] = [];
+	const offload = renderCompactOffloadLine(flow);
+	if (offload) lines.push(offload);
+	const flowLine = renderCompactFlowBreadcrumb(flow, maxWidth);
+	if (flowLine) lines.push(flowLine);
+	return lines;
+}
+
+/** Original Context Usage grid plus compact live offload/flow rows. */
+export function renderCompactContextUsage(
+	breakdown: ContextBreakdown,
+	theme: Theme,
+	flow?: ContextFlowSnapshot,
+	options?: { maxAugmentationWidth?: number },
+): string {
+	const grid = renderContextUsage(breakdown, theme);
+	if (!flow) return grid;
+	const aug = renderCompactContextAugmentation(flow, options?.maxAugmentationWidth);
+	if (aug.length === 0) return grid;
+	const divider = theme.fg("dim", "─".repeat(40));
+	return [grid, "", divider, ...aug].join("\n");
 }

@@ -3,16 +3,16 @@ import { theme } from "../theme/theme";
 import { matchesSelectCancel } from "../keybinding-matchers";
 import { OverlayPanel, PanelDivider, PanelRows } from "../chrome/overlay-box";
 
-const FOOTER_HINT = "Diagnostics · ↑/↓ scroll · Esc close";
+const FOOTER_HINT = "Esc close · /context debug for diagnostics";
 const PANEL_CHROME_ROWS = 4;
 
-export interface ContextExplorerOverlayHost {
+export interface ContextUsageOverlayHost {
 	readonly terminal: { readonly rows: number };
 }
 
-/** Fullscreen /context inspector with scrollable sections. */
-export class ContextExplorerOverlay implements Component {
-	readonly #host: ContextExplorerOverlayHost;
+/** Compact /context panel — original Context Usage grid + live offload/flow rows. */
+export class ContextUsageOverlay implements Component {
+	readonly #host: ContextUsageOverlayHost;
 	readonly #onClose: () => void;
 	readonly #panel: OverlayPanel;
 	readonly #body: Text;
@@ -22,14 +22,14 @@ export class ContextExplorerOverlay implements Component {
 	#lastLines: readonly string[] | undefined;
 	#lastHeight: number | undefined;
 
-	constructor(host: ContextExplorerOverlayHost, body: string, onClose: () => void) {
+	constructor(host: ContextUsageOverlayHost, body: string, onClose: () => void) {
 		this.#host = host;
 		this.#onClose = onClose;
 		this.#body = new Text(body, 0, 0);
 		this.#scrollView = new ScrollView([], { height: 0, scrollbar: "auto" });
 		this.#footer = new PanelRows();
 		this.#footer.setHeight(1);
-		this.#panel = new OverlayPanel("Context Explorer — debug");
+		this.#panel = new OverlayPanel("Context Usage");
 		this.#panel.addChild(this.#scrollView);
 		this.#panel.addChild(new PanelDivider());
 		this.#panel.addChild(this.#footer);

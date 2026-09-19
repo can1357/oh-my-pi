@@ -211,9 +211,10 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
-import { renderFullContextExplorer } from "../context-flow/format";
+import { renderCompactContextUsage, renderFullContextExplorer } from "../context-flow/format";
 import { computeSessionContextBreakdown } from "../session/context-usage-runtime";
 import { ContextExplorerOverlay } from "@oh-my-pi/pi-tui/overlays/context-explorer";
+import { ContextUsageOverlay } from "@oh-my-pi/pi-tui/overlays/context-usage-overlay";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -964,6 +965,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#contextExplorerOverlayHandle: OverlayHandle | undefined;
 	#contextExplorerOverlay: ContextExplorerOverlay | undefined;
+	#contextUsageOverlayHandle: OverlayHandle | undefined;
+	#contextUsageOverlay: ContextUsageOverlay | undefined;
 	#contextFlowUnsub: (() => void) | undefined;
 	#contextFlowRenderScheduled = false;
 	#planReviewCancel: (() => void) | undefined;
@@ -5850,9 +5853,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 
+	showContextUsagePanel(body: string): void {
+		this.#hideContextPanels();
+		const overlay = new ContextUsageOverlay(this.ui, body, () => this.#hideContextPanels());
+		this.#contextUsageOverlay = overlay;
+		this.#contextUsageOverlayHandle = this.ui.showOverlay(overlay, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.#contextFlowUnsub = this.session.subscribeContextFlow?.(() => this.#scheduleContextPanelRefresh());
+		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+	}
+
 	showContextExplorer(body: string): void {
-		this.#hideContextExplorer();
-		const overlay = new ContextExplorerOverlay(this.ui, body, () => this.#hideContextExplorer());
+		this.#hideContextPanels();
+		const overlay = new ContextExplorerOverlay(this.ui, body, () => this.#hideContextPanels());
 		this.#contextExplorerOverlay = overlay;
 		this.#contextExplorerOverlayHandle = this.ui.showOverlay(overlay, {
 			anchor: "bottom-center",
@@ -5860,35 +5878,46 @@ export class InteractiveMode implements InteractiveModeContext {
 			maxHeight: "100%",
 			margin: 0,
 		});
-		this.#contextFlowUnsub = this.session.subscribeContextFlow?.(() => this.#scheduleContextExplorerRefresh());
+		this.#contextFlowUnsub = this.session.subscribeContextFlow?.(() => this.#scheduleContextPanelRefresh());
 		this.ui.setFocus(overlay);
 		this.ui.requestRender();
 	}
 
-	#hideContextExplorer(): void {
+	#hideContextPanels(): void {
 		this.#contextFlowUnsub?.();
 		this.#contextFlowUnsub = undefined;
 		this.#contextExplorerOverlay = undefined;
+		this.#contextUsageOverlay = undefined;
 		this.#contextFlowRenderScheduled = false;
-		const handle = this.#contextExplorerOverlayHandle;
+		const explorerHandle = this.#contextExplorerOverlayHandle;
+		const usageHandle = this.#contextUsageOverlayHandle;
 		this.#contextExplorerOverlayHandle = undefined;
-		if (!handle) return;
-		handle.hide();
+		this.#contextUsageOverlayHandle = undefined;
+		if (!explorerHandle && !usageHandle) return;
+		explorerHandle?.hide();
+		usageHandle?.hide();
 		this.#selectorController.focusActiveEditorArea();
 		this.ui.requestRender();
 	}
 
-	#scheduleContextExplorerRefresh(): void {
-		if (!this.#contextExplorerOverlay || this.#contextFlowRenderScheduled) return;
+	#scheduleContextPanelRefresh(): void {
+		const usageOverlay = this.#contextUsageOverlay;
+		const explorerOverlay = this.#contextExplorerOverlay;
+		if ((!usageOverlay && !explorerOverlay) || this.#contextFlowRenderScheduled) return;
 		this.#contextFlowRenderScheduled = true;
 		queueMicrotask(() => {
 			this.#contextFlowRenderScheduled = false;
-			const overlay = this.#contextExplorerOverlay;
-			if (!overlay) return;
+			const usage = this.#contextUsageOverlay;
+			const explorer = this.#contextExplorerOverlay;
+			if (!usage && !explorer) return;
 			try {
 				const breakdown = computeSessionContextBreakdown(this.session, { snapcompactSavings: true });
 				const flow = this.session.getContextFlowSnapshot(breakdown);
-				overlay.setBody(renderFullContextExplorer(breakdown, flow));
+				if (usage) {
+					usage.setBody(renderCompactContextUsage(breakdown, theme, flow));
+				} else if (explorer) {
+					explorer.setBody(renderFullContextExplorer(breakdown, flow));
+				}
 				this.statusLine.invalidate();
 				this.ui.requestRender();
 			} catch {
@@ -6337,8 +6366,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleToolsCommand();
 	}
 
-	handleContextCommand(): void {
-		this.#commandController.handleContextCommand();
+	handleContextCommand(args = ""): void {
+		this.#commandController.handleContextCommand(args);
 	}
 
 	#vibeSessionTransitionBlocked(): boolean {

@@ -302,6 +302,7 @@ export interface InteractiveModeContext {
 	presentCommandOutput(content: Component | readonly Component[]): void;
 	/** Show session information in a focused transient overlay. */
 	showSessionInfo(info: string): void;
+	showContextUsagePanel(body: string): void;
 	showContextExplorer(body: string): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
@@ -421,7 +422,7 @@ export interface InteractiveModeContext {
 	handleChangelogCommand(showFull?: boolean): Promise<void>;
 	handleHotkeysCommand(): void;
 	handleToolsCommand(): void;
-	handleContextCommand(): void;
+	handleContextCommand(args?: string): void;
 	handleDumpCommand(): Promise<void>;
 	handleAdvisorDumpCommand(isRaw?: boolean): void;
 	handleDebugTranscriptCommand(): Promise<void>;
