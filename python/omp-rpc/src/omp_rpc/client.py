@@ -42,7 +42,9 @@ from .protocol import (
     MessageUpdateEvent,
     ModelCycleResult,
     ModelInfo,
+    QueuedMessageQueue,
     ReadyEvent,
+    RemoveQueuedMessageResult,
     RetryFallbackAppliedEvent,
     RetryFallbackSucceededEvent,
     RpcAgentEvent,
@@ -76,6 +78,7 @@ from .protocol import (
     parse_model_cycle_result,
     parse_model_info,
     parse_notification,
+    parse_remove_queued_message_result,
     parse_session_state,
     parse_session_stats,
     parse_thinking_level_cycle_result,
@@ -1165,6 +1168,14 @@ class RpcClient:
             "follow_up",
             message=message,
             images=list(images) if images is not None else None,
+        )
+
+    def remove_queued_message(
+        self, message: str, queue: QueuedMessageQueue
+    ) -> RemoveQueuedMessageResult:
+        """Remove one queued prompt; inspect the returned result's ``removed`` flag."""
+        return parse_remove_queued_message_result(
+            self._request("remove_queued_message", message=message, queue=queue)
         )
 
     def abort(self) -> None:

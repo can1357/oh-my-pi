@@ -250,6 +250,10 @@ agent.followUp({
 Steering messages are checked after each tool call by default. Set `interruptMode` to `"wait"` to defer
 steering until the current turn completes.
 
+Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
+records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records
+remain separate. `replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
+
 ## Custom Message Types
 
 Extend `AgentMessage` via declaration merging:

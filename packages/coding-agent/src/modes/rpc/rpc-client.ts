@@ -609,6 +609,14 @@ export class RpcClient {
 	}
 
 	/**
+	 * Remove the first matching user message and its companions from one pending queue.
+	 */
+	async removeQueuedMessage(message: string, queue: "steering" | "followUp"): Promise<{ removed: boolean }> {
+		const response = await this.#send({ type: "remove_queued_message", message, queue });
+		return this.#getData(response);
+	}
+
+	/**
 	 * Abort current operation.
 	 */
 	async abort(): Promise<void> {

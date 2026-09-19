@@ -16,6 +16,7 @@ ThinkingLevel: TypeAlias = Literal[
     "off", "minimal", "low", "medium", "high", "xhigh", "max"
 ]
 StreamingBehavior: TypeAlias = Literal["steer", "followUp"]
+QueuedMessageQueue: TypeAlias = Literal["steering", "followUp"]
 SteeringMode: TypeAlias = Literal["all", "one-at-a-time"]
 InterruptMode: TypeAlias = Literal["immediate", "wait"]
 StopReason: TypeAlias = Literal["stop", "length", "toolUse", "error", "aborted"]
@@ -899,6 +900,11 @@ class CancellationResult:
 
 
 @dataclass(slots=True, frozen=True)
+class RemoveQueuedMessageResult:
+    removed: bool
+
+
+@dataclass(slots=True, frozen=True)
 class BranchMessage:
     entry_id: str
     text: str
@@ -1500,6 +1506,10 @@ def parse_thinking_level_cycle_result(
 
 def parse_cancellation_result(payload: JsonObject | None) -> CancellationResult:
     return CancellationResult(cancelled=bool((payload or {}).get("cancelled", False)))
+
+
+def parse_remove_queued_message_result(payload: JsonObject) -> RemoveQueuedMessageResult:
+    return RemoveQueuedMessageResult(removed=_require_bool(payload, "removed"))
 
 
 def parse_branch_result(payload: JsonObject | None) -> BranchResult:

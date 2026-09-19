@@ -99,6 +99,29 @@ with RpcClient(
     print(client.get_state().session_id)
 ```
 
+## Removing Queued Messages
+
+`remove_queued_message(message, queue)` removes one matching prompt from the
+`"steering"` or `"followUp"` queue. `QueuedMessageQueue` and
+`RemoveQueuedMessageResult` are exported for typed callers:
+
+```python
+from omp_rpc import QueuedMessageQueue, RpcClient
+
+with RpcClient() as client:
+    client.follow_up("Review the diff")
+    queue: QueuedMessageQueue = "followUp"
+    result = client.remove_queued_message("Review the diff", queue)
+    print(result.removed)
+```
+
+Check `result.removed`, not the truthiness of the result object. `True` means the
+server removed the queued prompt; `False` means it did not, for example because
+the prompt was already claimed or no longer queued. This does not abort a running
+prompt. Native rejection, including an older server that does not support the
+command, raises `RpcCommandError`. Missing or non-boolean `removed` values raise
+`ValueError` rather than being treated as successful cancellation.
+
 ## Host-Owned Custom Tools
 
 RPC hosts can expose custom tools to the agent with JSON Schema metadata. The

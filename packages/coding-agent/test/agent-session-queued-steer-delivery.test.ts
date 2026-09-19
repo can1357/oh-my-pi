@@ -15,14 +15,16 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, type CustomMessage, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -64,18 +66,22 @@ describe("AgentSession queued steer delivery", () => {
 		removeSyncWithRetries(fixtureDir);
 	});
 
-	async function createSession(responses: MockResponse[]): Promise<SteerHarness> {
+	async function createSession(
+		responses: MockResponse[],
+		promptTemplates: PromptTemplate[] = [],
+	): Promise<SteerHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
 			streamFn: mock.stream,
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
 
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, promptTemplates });
 		return { session, sessionManager, mock };
 	}
 
@@ -379,5 +385,271 @@ describe("AgentSession queued steer delivery", () => {
 		await session.waitForIdle();
 
 		expect(session.agent.peekSteeringQueue()).toEqual([]);
+	});
+
+	it("delivers an RPC skill through the default steering queue with its invocation intact", async () => {
+		const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["skill response"] }]);
+		const skillPath = path.join(tempDir, "SKILL.md");
+		await Bun.write(skillPath, "---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code.\n");
+		const invocation = "/skill:reviewer  focus on risks\nand correctness";
+		let queued: { steering: readonly string[]; followUp: readonly string[] } | undefined;
+		let injected = false;
+		session.agent.setOnBeforeYield(async () => {
+			if (injected) return;
+			injected = true;
+			await tryRunRpcSkillCommand(
+				{
+					skillsSettings: { enableSkillCommands: true },
+					skills: [
+						{
+							name: "reviewer",
+							description: "Review code",
+							filePath: skillPath,
+							baseDir: tempDir,
+							source: "project",
+						},
+					],
+					promptCustomMessage: session.promptCustomMessage.bind(session),
+				},
+				invocation,
+			);
+			queued = session.getQueuedMessages();
+		});
+
+		await session.prompt("start");
+		await session.waitForIdle();
+
+		expect(queued).toEqual({ steering: [invocation], followUp: [] });
+		const delivered = session.messages.filter(
+			(message): message is CustomMessage => message.role === "custom" && message.customType === "skill-prompt",
+		);
+		expect(delivered).toHaveLength(1);
+		expect(delivered[0].content).toContain("focus on risks\nand correctness");
+		expect(mock.calls).toHaveLength(2);
+		expect(JSON.stringify(mock.calls[1].context.messages)).toContain("Review the supplied code.");
+		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	describe("removeQueuedMessage", () => {
+		for (const kind of ["prompt", "skill"] as const) {
+			it(`claims concurrent ${kind} companions atomically in one-at-a-time mode`, async () => {
+				const { session, mock } = await createSession([{ content: ["initial"] }, { content: ["kept B"] }]);
+				const queue = kind === "prompt" ? "steering" : "followUp";
+				const streamingBehavior = kind === "prompt" ? "steer" : "followUp";
+				session.agent.setSteeringMode("one-at-a-time");
+				session.agent.setFollowUpMode("one-at-a-time");
+				const chip = (name: string) =>
+					kind === "prompt" ? `ultrathink ${name}` : `/skill:reviewer ultrathink ${name}`;
+				const submit = (name: string) =>
+					kind === "prompt"
+						? session.prompt(chip(name), { streamingBehavior })
+						: session.promptCustomMessage(
+								{
+									customType: "skill-prompt",
+									content: `Expanded review context for ${name}`,
+									display: true,
+									attribution: "user",
+									details: { name: "reviewer", args: `ultrathink ${name}` },
+								},
+								{ streamingBehavior, queueChipText: chip(name) },
+							);
+				let queued: readonly AgentMessage[] = [];
+				let remaining: readonly AgentMessage[] = [];
+				let pendingAtFirstRecord: readonly string[] | undefined;
+				let removedAfterClaim: boolean | undefined;
+				let removed = false;
+				let injected = false;
+				session.agent.subscribe(event => {
+					if (event.type !== "message_start" || event.message !== remaining[0]) return;
+					pendingAtFirstRecord = session.getQueuedMessages()[queue];
+					removedAfterClaim = session.removeQueuedMessage(chip("keep B"), queue);
+				});
+				session.agent.setOnBeforeYield(async () => {
+					if (injected) return;
+					injected = true;
+					// Hold the running turn while both real submissions cross their async
+					// preprocessing from the same barrier, without serializing either call.
+					const release = Promise.withResolvers<void>();
+					const first = release.promise.then(() => submit("cancel A"));
+					const second = release.promise.then(() => submit("keep B"));
+					release.resolve();
+					await Promise.all([first, second]);
+					queued = [
+						...(queue === "steering" ? session.agent.peekSteeringQueue() : session.agent.peekFollowUpQueue()),
+					];
+					removed = session.removeQueuedMessage(chip("cancel A"), queue);
+					remaining = [
+						...(queue === "steering" ? session.agent.peekSteeringQueue() : session.agent.peekFollowUpQueue()),
+					];
+				});
+
+				await session.prompt("start");
+				await session.waitForIdle();
+
+				const userRole = kind === "prompt" ? "user" : "skill-prompt";
+				expect(queued.map(message => (message.role === "custom" ? message.customType : message.role))).toEqual([
+					"ultrathink-notice",
+					userRole,
+					"ultrathink-notice",
+					userRole,
+				]);
+				expect(removed).toBe(true);
+				expect(remaining).toEqual(queued.slice(2));
+				expect(pendingAtFirstRecord).toEqual([]);
+				expect(removedAfterClaim).toBe(false);
+				const notices = session.messages.filter(
+					(message): message is CustomMessage =>
+						message.role === "custom" && message.customType === "ultrathink-notice",
+				);
+				expect<readonly AgentMessage[]>(notices).toEqual([queued[2]]);
+				expect(mock.calls).toHaveLength(2);
+				const delivered = JSON.stringify(mock.calls[1].context.messages);
+				expect(delivered).toContain("keep B");
+				expect(delivered).not.toContain("cancel A");
+				expect(delivered).toContain(JSON.stringify(notices[0].content).slice(1, -1));
+				expect(session.agent.hasQueuedMessages()).toBe(false);
+			});
+		}
+
+		for (const queue of ["steering", "followUp"] as const) {
+			it(`prevents delivery of a ${queue} prompt and its hidden companions`, async () => {
+				const { session, mock } = await createSession([{ content: ["initial"] }]);
+				let injected = false;
+				let removed: boolean | undefined;
+				session.agent.setOnBeforeYield(async () => {
+					if (injected) return;
+					injected = true;
+					await session.prompt("cancel this ultrathink", {
+						streamingBehavior: queue === "steering" ? "steer" : "followUp",
+					});
+					removed = session.removeQueuedMessage("cancel this ultrathink", queue);
+				});
+
+				await session.prompt("start");
+				await session.waitForIdle();
+
+				expect(removed).toBe(true);
+				expect(session.removeQueuedMessage("cancel this ultrathink", queue)).toBe(false);
+				expect(session.agent.hasQueuedMessages()).toBe(false);
+				expect(mock.calls).toHaveLength(1);
+				expect(session.messages.filter(message => message.role === "user" || message.role === "custom")).toEqual([
+					expect.objectContaining({ role: "user", content: [{ type: "text", text: "start" }] }),
+				]);
+			});
+
+			it(`removes only the first user match and its companions from ${queue}`, async () => {
+				const { session } = await createSession([]);
+				const internal: AgentMessage = {
+					role: "custom",
+					customType: "advisor",
+					content: "duplicate",
+					attribution: "agent",
+					display: true,
+					timestamp: 1,
+				};
+				const internalUser: AgentMessage = {
+					role: "user",
+					content: "duplicate",
+					attribution: "agent",
+					timestamp: 1,
+				};
+				const companion: AgentMessage = {
+					role: "custom",
+					customType: "image-attachment-description",
+					content: "hidden",
+					attribution: "user",
+					display: false,
+					timestamp: 2,
+				};
+				const keyword: AgentMessage = { ...companion, customType: "ultrathink-notice" };
+				const video: AgentMessage = { ...companion, customType: "video-attachment" };
+				const first: AgentMessage = { role: "user", content: "duplicate", timestamp: 3 };
+				const keptCompanion: AgentMessage = { ...companion, timestamp: 4 };
+				const duplicate: AgentMessage = { ...first, timestamp: 5 };
+				const selected = [internal, internalUser, keyword, video, companion, first, keptCompanion, duplicate];
+				const other = [
+					{ ...companion, timestamp: 6 },
+					{ ...first, timestamp: 7 },
+				];
+				session.agent.replaceQueues(
+					queue === "steering" ? selected : other,
+					queue === "followUp" ? selected : other,
+				);
+
+				expect(session.getQueuedMessages()[queue]).toEqual(["duplicate", "duplicate"]);
+				expect(session.removeQueuedMessage("duplicate", queue)).toBe(true);
+				const remaining = [internal, internalUser, keptCompanion, duplicate];
+				expect(session.agent.peekSteeringQueue()).toEqual(queue === "steering" ? remaining : other);
+				expect(session.agent.peekFollowUpQueue()).toEqual(queue === "followUp" ? remaining : other);
+				expect(session.removeQueuedMessage("hidden", queue)).toBe(false);
+				expect(session.removeQueuedMessage("absent", queue)).toBe(false);
+				expect(session.removeQueuedMessage("duplicate", queue)).toBe(true);
+				expect(session.removeQueuedMessage("duplicate", queue)).toBe(false);
+				expect(session.agent.peekSteeringQueue()).toEqual(queue === "steering" ? [internal, internalUser] : other);
+				expect(session.agent.peekFollowUpQueue()).toEqual(queue === "followUp" ? [internal, internalUser] : other);
+				expect(session.getQueuedMessages()[queue]).toEqual([]);
+			});
+		}
+
+		it("matches raw and expanded prompt-template chips without changing surviving work", async () => {
+			const { session } = await createSession(
+				[],
+				[{ name: "review", description: "Review", content: "Review $1", source: "(test)" }],
+			);
+			await session.followUp("/review raw", undefined, { expandPromptTemplates: false });
+			await session.followUp("/review expanded");
+			await session.followUp("keep");
+
+			expect(session.removeQueuedMessage("/review raw", "followUp")).toBe(true);
+			expect(session.removeQueuedMessage("/review expanded", "followUp")).toBe(true);
+			expect(session.getQueuedMessages()).toEqual({ steering: [], followUp: ["keep"] });
+		});
+
+		it("cancels a skill queued through RPC by its original invocation before it reaches the model", async () => {
+			const { session, mock } = await createSession([{ content: ["initial"] }]);
+			const skillPath = path.join(tempDir, "SKILL.md");
+			await Bun.write(
+				skillPath,
+				"---\nname: reviewer\ndescription: Review code\n---\n\nReview the supplied code.\n",
+			);
+			const invocation = "/skill:reviewer  ultrathink focus on risks\nand correctness";
+			let injected = false;
+			let removed: boolean | undefined;
+			let queued: readonly string[] | undefined;
+			session.agent.setOnBeforeYield(async () => {
+				if (injected) return;
+				injected = true;
+				await tryRunRpcSkillCommand(
+					{
+						skillsSettings: { enableSkillCommands: true },
+						skills: [
+							{
+								name: "reviewer",
+								description: "Review code",
+								filePath: skillPath,
+								baseDir: tempDir,
+								source: "project",
+							},
+						],
+						promptCustomMessage: session.promptCustomMessage.bind(session),
+					},
+					invocation,
+					"followUp",
+				);
+				queued = session.getQueuedMessages().followUp;
+				removed = session.removeQueuedMessage(invocation, "followUp");
+			});
+
+			await session.prompt("start");
+			await session.waitForIdle();
+
+			expect(queued).toEqual([invocation]);
+			expect(removed).toBe(true);
+			expect(session.agent.hasQueuedMessages()).toBe(false);
+			expect(mock.calls).toHaveLength(1);
+			expect(session.messages.filter(message => message.role === "user" || message.role === "custom")).toEqual([
+				expect.objectContaining({ role: "user", content: [{ type: "text", text: "start" }] }),
+			]);
+		});
 	});
 });
