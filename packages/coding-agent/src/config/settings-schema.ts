@@ -416,6 +416,38 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.checkConcerns": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Check Concerns",
+			description:
+				"When the agent finishes with an unresolved advisor concern, automatically continue the session so the agent judges whether the concern is valid and material instead of leaving the note for the next human prompt.",
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.checkConcernsMaxTurns": {
+		type: "number",
+		default: 3,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Check Concerns Max Turns",
+			description:
+				"Maximum automatic check turns per human turn while the advisor keeps raising new concerns. 0 is unlimited and can keep the agent looping; the counter resets on the next real user prompt. The picker lists presets; set any other count with /set or the config file.",
+			options: [
+				{ value: "0", label: "Unlimited", description: "Keep checking while the advisor raises new concerns." },
+				{ value: "1", label: "1 turn" },
+				{ value: "2", label: "2 turns" },
+				{ value: "3", label: "3 turns", description: "Default." },
+				{ value: "5", label: "5 turns" },
+				{ value: "10", label: "10 turns" },
+			],
+			condition: "advisorCheckConcerns",
+		},
+	},
 	"advisor.maxNotesPerUpdate": {
 		type: "number",
 		default: ADVISOR_DEFAULT_BUDGET_PER_UPDATE,

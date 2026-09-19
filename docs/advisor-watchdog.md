@@ -106,7 +106,7 @@ The `advise` tool accepts one note and an optional severity:
 | Severity        | Delivery                                                                                                                                                             | Intended use                                                                 |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
 | omitted / `nit` | Non-interrupting aside, batched into the primary transcript at the next step boundary.                                                                               | Cleanup, simplification, low-risk edge cases.                                |
-| `concern`       | Interrupting steering message when the delivery constraints below permit it. A late terminal-answer `concern` is preserved as a visible card instead.                | Material risk, likely wrong direction, missing constraint, hallucinated API. |
+| `concern`       | Interrupting steering message when the delivery constraints below permit it. A late terminal-answer `concern` is preserved as a visible card instead, unless `advisor.checkConcerns` converts it into a framed check turn. | Material risk, likely wrong direction, missing constraint, hallucinated API. |
 | `blocker`       | Interrupting steering message when the delivery constraints below permit it. Unlike a `concern`, a terminal answer alone does not prevent it from triggering a turn. | Continuing would clearly waste work or produce broken output.                |
 
 Accepted notes are rendered into the primary transcript as XML-escaped `<advisory>` elements. Named roster advisors add an `advisor` attribute:
@@ -123,7 +123,7 @@ A normal yield the agent drove itself is treated differently from a deliberate i
 
 - **While the loop is still streaming**, blockers can steer into the live turn. Nits and concerns from an in-progress review remain deferred until a final boundary.
 - **Once the loop has yielded and gone idle**, delivery keys on how the turn ended:
-  - If the primary's tail is a **terminal text answer with no queued work**, a late `concern` is preserved as a visible card rather than waking the agent to restate a completed turn (#4840) — it re-enters context on the next resume (a new message, `.`/`c`, or a steer/follow-up), exactly like the interrupt case. A `blocker` is the exception: it normally steers a triggered turn, because it means the agent handed off broken or unexercised work that must be acknowledged before the turn is considered done (#5628).
+  - If the primary's tail is a **terminal text answer with no queued work**, a late `concern` is preserved as a visible card rather than waking the agent to restate a completed turn (#4840) — it re-enters context on the next resume (a new message, `.`/`c`, or a steer/follow-up), exactly like the interrupt case. A `blocker` is the exception: it normally steers a triggered turn, because it means the agent handed off broken or unexercised work that must be acknowledged before the turn is considered done (#5628). With `advisor.checkConcerns` enabled, a budgeted late `concern` takes that same blocker path as a framed check turn (see `advisor.checkConcerns` below).
   - Otherwise (the agent yielded mid-work, no terminal answer), an idle `concern`/`blocker` normally triggers a fresh turn so the advice is acted on immediately.
 
 Two session/client constraints can still preserve a note whose normal delivery path is steering:
@@ -193,6 +193,12 @@ the latest pending context. A second consecutive quarantine emits one
 deduplicated host warning, drops the affected batch, and resets the Advisor
 context to break the loop. Any successful Advisor turn resets the quarantine
 counter.
+
+## Automatic follow-up with `advisor.checkConcerns`
+
+`advisor.checkConcerns` (off by default) automatically continues the session when the agent finishes with an unresolved advisor `concern`, so the agent judges whether the concern is valid and material instead of leaving the note for the next human prompt. An eligible late terminal-answer `concern` steers a triggered turn framed to judge the concern — fix what is valid and material, dismiss the rest in one line each — rather than preserving it as a visible card. The framing ships only on that steered check message: when steering is blocked (plan mode, deferred ACP clients) the preserved card keeps the plain note. The check turn carries its own budget (`advisor.checkConcernsMaxTurns`) instead of arming the `advisor.immuneTurns` window, and it interrupts nothing: the primary is already idle after a terminal answer.
+
+`advisor.checkConcernsMaxTurns` caps the automatic check turns per human turn (default `3`). `0` means unlimited, which can keep the agent looping while the advisor keeps raising new concerns. The counter resets on the next real user prompt; when the budget is exhausted, further concerns fall back to the visible-card path.
 
 ## WATCHDOG.md
 

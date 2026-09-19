@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `advisor.checkConcerns` setting: when the agent finishes with an unresolved advisor `concern`, the session automatically continues so the agent judges whether the concern is valid and material instead of leaving the note for the next human prompt. `advisor.checkConcernsMaxTurns` caps the automatic check turns per human turn (default `3`, `0` for unlimited).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

@@ -208,3 +208,148 @@ it.each(["concern", "nit", "blocker"] as const)(
 		expect(primaryContexts[terminalCalls]).toContain(nextUserMarker);
 	},
 );
+
+it("checkConcerns steals two late concerns as framed turns, then preserves once the budget is spent", async () => {
+	// Budget-refresh guard: the two agent-initiated check turns must consume the
+	// per-human-turn budget (not refresh it), so an advisor that keeps advising
+	// gets exactly `checkConcernsMaxTurns` extra turns and the next concern lands
+	// as a plain preserved card. An advisor steer never flows through the user
+	// prompt path, so only a real user prompt may reset the counter.
+	const temp = TempDir.createSync("@pi-advisor-check-concerns-");
+	const auth = await AuthStorage.create(":memory:");
+	auth.setRuntimeApiKey("anthropic", "test-key");
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	let primaryCalls = 0;
+	let advisedTurns = 0;
+	let adviseCount = 0;
+	const primaryMock = createMockModel({
+		id: "check-concerns-primary",
+		provider: "anthropic",
+		// A thinking block per answer gives the later history-rewrite probe
+		// something real to strip; terminal-answer detection skips thinking.
+		handler: async () => ({
+			content: [{ type: "thinking", thinking: "primary deliberation" }, "finished answer"],
+			stopReason: "stop",
+		}),
+	});
+	const advisorMock = createMockModel({
+		id: "check-concerns-advisor",
+		provider: "anthropic",
+		handler: async () => {
+			// One concern per completed primary turn: the sync check-and-set keeps
+			// overlapping advisor updates from double-advising the same turn.
+			if (advisedTurns < primaryCalls) {
+				advisedTurns = primaryCalls;
+				adviseCount++;
+				return toolResponse(`advice-${adviseCount}`, "advise", {
+					note: `late concern ${adviseCount}`,
+					severity: "concern",
+				});
+			}
+			return textResponse("advisor quiet");
+		},
+	});
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: {
+			model,
+			systemPrompt: ["check concerns budget regression"],
+			tools: [],
+		},
+		streamFn: (messages, context, options) => {
+			primaryCalls++;
+			return primaryMock.stream(messages, context, options);
+		},
+	});
+	const settings = Settings.isolated({
+		"compaction.enabled": false,
+		"retry.enabled": false,
+		"advisor.syncBacklog": "off",
+		"advisor.checkConcerns": true,
+		"advisor.checkConcernsMaxTurns": 2,
+	});
+	settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+	const session = new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(),
+		settings,
+		modelRegistry: new ModelRegistry(auth, temp.join("models.yml")),
+		advisorTools: [],
+		advisorStreamFn: advisorMock.stream,
+	});
+	active = { session, auth, temp };
+	if (!session.setAdvisorEnabled(true)) throw new Error("Expected advisor runtime");
+
+	await session.prompt("do the work");
+	await session.waitForIdle();
+	await session.waitForAdvisorCatchup(10_000);
+	await session.waitForIdle();
+	// Stability: a refreshed budget would keep spawning turns, so the counts
+	// must hold still across a second full drain.
+	const settledCalls = primaryCalls;
+	await session.waitForAdvisorCatchup(10_000);
+	await session.waitForIdle();
+	expect(primaryCalls).toBe(settledCalls);
+
+	// Initial turn plus exactly two framed check turns, then stop: the steered
+	// advisory rides the steer channel (not the provider context), so the
+	// framing is asserted on the transcript cards the turns leave behind.
+	expect(primaryCalls).toBe(3);
+	expect(adviseCount).toBe(3);
+
+	const cards = session.agent.state.messages.filter(
+		(message: AgentMessage) =>
+			message.role === "custom" && "customType" in message && message.customType === "advisor",
+	);
+	expect(cards).toHaveLength(3);
+	const texts = cards.map(card => (card.role === "custom" ? contentText(card.content) : ""));
+	expect(texts[0]).toContain("Advisor follow-up");
+	expect(texts[0]).toContain("late concern 1");
+	// The advisory block is XML interpolated through prompt.render: it must
+	// reach the model unescaped (literal <advisory>), never HTML-escaped.
+	expect(texts[0]).toContain("<advisory");
+	expect(texts[0]).not.toContain("&lt;advisory");
+	expect(texts[1]).toContain("Advisor follow-up");
+	expect(texts[1]).toContain("late concern 2");
+	expect(texts[1]).toContain("<advisory");
+	expect(texts[1]).not.toContain("&lt;advisory");
+	expect(texts[2]).not.toContain("Advisor follow-up");
+	expect(texts[2]).toContain("late concern 3");
+
+	// A within-conversation history rewrite must not refill the spent budget:
+	// shake the thinking blocks out of the transcript (the same rewrite path —
+	// replaceMessages plus resetAllRuntimes — as compaction/shake/rewind),
+	// then raise one more late concern. It must land as a plain preserved
+	// card, never a framed check turn.
+	const shakeResult = await session.shake("thinking");
+	expect(shakeResult.thinkingBlocksDropped).toBeGreaterThan(0);
+	await session.waitForIdle();
+	await session.waitForAdvisorCatchup(10_000);
+	await session.waitForIdle();
+
+	const advisorAgent = session.getAdvisorAgent();
+	if (!advisorAgent) throw new Error("Expected advisor agent");
+	const probeAdvise = advisorAgent.state.tools.find(tool => tool.name === "advise");
+	if (!probeAdvise) throw new Error("Expected advise tool");
+	const probeResult = await probeAdvise.execute("post-shake-probe", {
+		note: "post-shake concern",
+		severity: "concern",
+	});
+	// The tool acks "Delivered." on every live path (steer and preserve alike),
+	// so the turn-count and card assertions below — not the ack — carry the teeth.
+	expect(contentText(probeResult.content)).toContain("Delivered.");
+	await session.waitForIdle();
+	await session.waitForAdvisorCatchup(10_000);
+	await session.waitForIdle();
+
+	expect(primaryCalls).toBe(3);
+	expect(adviseCount).toBe(3);
+	const cardsAfterShake = session.agent.state.messages.filter(
+		(message: AgentMessage) =>
+			message.role === "custom" && "customType" in message && message.customType === "advisor",
+	);
+	expect(cardsAfterShake).toHaveLength(4);
+	const textsAfterShake = cardsAfterShake.map(card => (card.role === "custom" ? contentText(card.content) : ""));
+	expect(textsAfterShake[3]).toContain("post-shake concern");
+	expect(textsAfterShake[3]).not.toContain("Advisor follow-up");
+});

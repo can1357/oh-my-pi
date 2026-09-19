@@ -82,6 +82,7 @@ import { bridgeToolMap } from "../cursor-bridge-tools";
 import { estimateToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
+import checkConcernsPrompt from "../prompts/advisor/check-concerns.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	concreteThinkingLevel,
@@ -456,6 +457,10 @@ export class SessionAdvisors {
 	#terminalUnwindActive = false;
 	#advisorPrimaryTurnsCompleted = 0;
 	#advisorInterruptImmuneTurnStart: number | undefined;
+	/** Automatic check-concerns turns consumed since the last real user prompt. */
+	#advisorCheckConcernsTurnsUsed = 0;
+	/** Completed-turn index of the last check-concerns delivery: several notes landing on the same idle terminal answer cost one turn. */
+	#advisorCheckConcernsLastTurn: number | undefined;
 	#pendingAdvisorCardEvents = new Set<Promise<void>>();
 	#advisorYieldQueueUnsubscribe: (() => void) | undefined;
 
@@ -748,6 +753,51 @@ export class SessionAdvisors {
 		if (!Number.isFinite(immuneTurns) || immuneTurns <= 0) return 0;
 		return Math.trunc(immuneTurns);
 	}
+	/**
+	 * Automatic check-concerns turns allowed per human turn. Unlike
+	 * {@link #advisorImmuneTurnLimit}, `0` means unlimited (the boolean toggle is
+	 * what disables the feature), so the internal representation keeps `0` as
+	 * infinity rather than off.
+	 */
+	#checkConcernsTurnLimit(): number {
+		const maxTurns = this.#host.settings.get("advisor.checkConcernsMaxTurns") as number;
+		if (!Number.isFinite(maxTurns) || maxTurns < 0) return 3;
+		if (maxTurns === 0) return Number.POSITIVE_INFINITY;
+		return Math.trunc(maxTurns);
+	}
+
+	/**
+	 * Whether this late terminal-answer concern may take the blocker delivery
+	 * path as an automatic check turn. The budget counts converted primary
+	 * turns, not notes: several `advise` calls landing on the same idle
+	 * terminal answer share one turn.
+	 */
+	#isCheckConcernsDeliveryEligible(
+		severity: AdvisorSeverity | undefined,
+		terminalAnswerNoQueuedWork: boolean,
+	): boolean {
+		if (severity !== "concern" || terminalAnswerNoQueuedWork !== true) return false;
+		if (this.#host.settings.get("advisor.checkConcerns") !== true) return false;
+		if (this.#advisorCheckConcernsLastTurn === this.#advisorPrimaryTurnsCompleted) return true;
+		return this.#advisorCheckConcernsTurnsUsed < this.#checkConcernsTurnLimit();
+	}
+
+	/** Charge one budget turn for a converted check-concerns primary turn. */
+	#recordCheckConcernsTurnDelivered(): void {
+		if (this.#advisorCheckConcernsLastTurn === this.#advisorPrimaryTurnsCompleted) return;
+		this.#advisorCheckConcernsLastTurn = this.#advisorPrimaryTurnsCompleted;
+		this.#advisorCheckConcernsTurnsUsed++;
+	}
+
+	/**
+	 * Reset the per-human-turn check-concerns budget. Called for real user
+	 * prompts only — advisor-initiated steers never flow through the user
+	 * prompt path, so a check turn cannot refresh its own budget.
+	 */
+	resetCheckConcernsBudget(): void {
+		this.#advisorCheckConcernsTurnsUsed = 0;
+		this.#advisorCheckConcernsLastTurn = undefined;
+	}
 	#advisorMaxNotesPerUpdate(config?: AdvisorConfig): number {
 		const clamp = (value: unknown): number | undefined =>
 			typeof value === "number" && Number.isFinite(value) && value >= 1
@@ -846,6 +896,8 @@ export class SessionAdvisors {
 		this.#advisorPrimaryTurnsCompleted = 0;
 		this.#advisorInterruptImmuneTurnStart = undefined;
 		this.#advisorAutoResumeSuppressed = false;
+		this.#advisorCheckConcernsTurnsUsed = 0;
+		this.#advisorCheckConcernsLastTurn = undefined;
 		this.#host.yieldQueue.clear("advisor");
 		this.#host.extractQueuedAdvisorCards();
 		this.#host.dropPendingAdvisorCards();
@@ -1339,19 +1391,7 @@ export class SessionAdvisors {
 		return this.#advisors.length > 0;
 	}
 
-	/**
-	 * Route one accepted advice note from `advisor` to the primary. Concern and
-	 * blocker interrupt the running agent through the steering channel; once the
-	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
-	 * no queued work, late non-blocker advice (a nit or concern) is preserved as a
-	 * visible advisor card, while a blocker wakes the primary to acknowledge work
-	 * it handed off incorrectly. After a deliberate user interrupt auto-resume is
-	 * suppressed while idle/unwinding (the note becomes a preserved card re-entering
-	 * on resume); a live-streaming turn is steered in directly. A plain nit rides
-	 * the non-interrupting YieldQueue aside during streaming. The emission guard
-	 * has already accepted the note; rejected calls never enter this route and
-	 * receive their specific policy outcome from `AdviseTool`.
-	 */
+	/** Whether the primary transcript tail is a terminal text assistant answer with no queued follow-up work. */
 	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
 		const messages = this.#host.agent.state.messages;
@@ -1360,17 +1400,39 @@ export class SessionAdvisors {
 		return isTerminalTextAssistantAnswer(messages[tail]);
 	}
 
-	/** Route an already-accepted advice note to the primary. Never re-runs
-	 *  admission — the note cleared the emission guard inside AdviseTool when it
-	 *  was emitted, so a deferred flush replays the backlog without
-	 *  re-filtering. */
+	/**
+	 * Route one accepted advice note from `advisor` to the primary. Concern and
+	 * blocker interrupt the running agent through the steering channel; once the
+	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
+	 * no queued work, late non-blocker advice (a nit or concern) is preserved as a
+	 * visible advisor card, while a blocker wakes the primary to acknowledge work
+	 * it handed off incorrectly. With `advisor.checkConcerns`, a budgeted late
+	 * concern takes that same blocker path as a framed check turn instead of a
+	 * card. After a deliberate user interrupt auto-resume is
+	 * suppressed while idle/unwinding (the note becomes a preserved card re-entering
+	 * on resume); a live-streaming turn is steered in directly. A plain nit rides
+	 * the non-interrupting YieldQueue aside during streaming. The emission guard
+	 * has already accepted the note; rejected calls never enter this route and
+	 * receive their specific policy outcome from `AdviseTool`. Never re-runs
+	 * admission — the note cleared the emission guard inside AdviseTool when it
+	 * was emitted, so a deferred flush replays the backlog without
+	 * re-filtering.
+	 */
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
 		const interrupting = isInterruptingSeverity(severity);
 		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
-		const terminalUnwindPreserve = this.#terminalUnwindActive && severity !== "blocker" && terminalAnswerNoQueuedWork;
+		// An eligible check-concerns concern takes the blocker path below: the
+		// advisor reviews the turn delta at `onPrimaryTurnEnd`, so most
+		// terminal-answer concerns arrive during exactly this unwind window.
+		const checkConcernsBudgeted = this.#isCheckConcernsDeliveryEligible(severity, terminalAnswerNoQueuedWork);
+		const terminalUnwindPreserve =
+			this.#terminalUnwindActive && severity !== "blocker" && !checkConcernsBudgeted && terminalAnswerNoQueuedWork;
+		const streaming =
+			this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice && !terminalUnwindPreserve;
+		const aborting = this.#host.abortInProgress();
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
 			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
@@ -1378,10 +1440,11 @@ export class SessionAdvisors {
 			// Key on the live agent-core loop, not session `isStreaming` (which also
 			// counts `#promptInFlightCount` during post-turn unwind). Only a running
 			// loop consumes a steer at its next boundary.
-			streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice && !terminalUnwindPreserve,
-			aborting: this.#host.abortInProgress(),
+			streaming,
+			aborting,
 			terminalAnswerNoQueuedWork,
 			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
+			checkConcerns: checkConcernsBudgeted,
 		});
 		if (channel === "aside") {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
@@ -1426,14 +1489,28 @@ export class SessionAdvisors {
 			});
 			return;
 		}
+		// A check-concerns steer must be framed: concern preservation exists so the
+		// agent is not woken to restate a completed turn. The framing ships only
+		// on the steered check-concerns message — never on normal steers, asides,
+		// blockers, or preserved cards (both preserve paths above keep the plain
+		// batch content).
+		const isCheckConcernsTurn =
+			channel === "steer" && checkConcernsBudgeted && terminalAnswerNoQueuedWork && !streaming && !aborting;
+		const steeredContent = isCheckConcernsTurn
+			? prompt.render(checkConcernsPrompt, { advisories: content })
+			: content;
 		// Arm the post-interrupt immune window only now that a turn is actually
 		// being steered/triggered. A merely preserved card never interrupts, so
 		// arming earlier would downgrade the next `advisor.immuneTurns` worth of
 		// real concerns/blockers to skip-idle-flush asides (#5628 review).
-		this.#recordAdvisorInterruptDelivered();
+		// A check-concerns delivery throttles through its own budget, not the
+		// post-interrupt immune window — arming it here would downgrade genuine
+		// later interrupts. Charge the budget only for a turn actually started.
+		if (isCheckConcernsTurn) this.#recordCheckConcernsTurnDelivered();
+		else this.#recordAdvisorInterruptDelivered();
 		void this.#host
 			.sendCustomMessage(
-				{ customType: "advisor", content, display: true, attribution: "agent", details },
+				{ customType: "advisor", content: steeredContent, display: true, attribution: "agent", details },
 				{ deliverAs: "steer", triggerTurn: true },
 			)
 			.catch(err => logger.debug("advisor delivery failed", { err: String(err) }));
@@ -1447,6 +1524,12 @@ export class SessionAdvisors {
 			// pending wait's usage-limit budget into the reset conversation.
 			a.usageLimitRetries = 0;
 		}
+		// Deliberately not the check-concerns budget: a mid-conversation rewrite
+		// (compaction, shake, rewind) is not a real user prompt, so the
+		// per-human-turn budget survives it — mirroring #advisorPrimaryTurnsCompleted
+		// and the immune-window start, which this path also leaves untouched.
+		// The budget resets only at the conversation boundary
+		// (#resetAdvisorSessionState) and on real user prompts.
 	}
 
 	#stopAdvisorRuntime(): void {
