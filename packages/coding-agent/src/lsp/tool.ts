@@ -39,6 +39,7 @@ import {
 	formatLocationWithContext,
 	hasRustWorkspaceAncestor,
 	isOnlyQueriedDeclaration,
+	needsDiagnosticProjectWait,
 	MAX_GLOB_DIAGNOSTIC_TARGETS,
 	normalizeLocationResult,
 	PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS,
@@ -308,6 +309,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
 			let totalServerSuccesses = 0;
+			let unmatchedTargets = 0;
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -320,6 +322,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const servers = getServersForFile(config, resolved);
 				if (servers.length === 0) {
 					results.push(`${theme.status.error} ${target}: No language server found`);
+					unmatchedTargets++;
 					continue;
 				}
 
@@ -329,56 +332,54 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				const failedServers: string[] = [];
 				let succeededServers = 0;
 
-				// Query all applicable servers for this file
-				for (const [serverName, serverConfig] of servers) {
+				const serverResults = await Promise.allSettled(
+					servers.map(([serverName, serverConfig]) =>
+						untilAborted(signal, async () => {
+							throwIfAborted(signal);
+							if (serverConfig.createClient) {
+								return getLinterClient(serverName, serverConfig, this.session.cwd).lint(resolved, signal);
+							}
+							const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+							let minVersion = client.diagnosticsVersion;
+							// Opening the file can trigger the project load we are about to await.
+							await refreshFile(client, resolved, signal);
+							if (needsDiagnosticProjectWait(client)) {
+								await waitForProjectLoaded(client, signal);
+								throwIfAborted(signal);
+								minVersion = client.diagnosticsVersion;
+								await refreshFile(client, resolved, signal);
+							}
+							const expectedDocumentVersion = client.openFiles.get(uri)?.version;
+							const waitCapMs = detailed
+								? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
+								: isProjectAwareLspServer(serverConfig)
+									? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
+									: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
+							return waitForDiagnostics(client, uri, {
+								timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
+								signal,
+								minVersion,
+								expectedDocumentVersion,
+							});
+						}),
+					),
+				);
+				throwIfAborted(signal);
+				for (const [index, result] of serverResults.entries()) {
+					const serverName = servers[index]![0];
 					allServerNames.add(serverName);
 					totalServerAttempts++;
-					try {
-						throwIfAborted(signal);
-						if (serverConfig.createClient) {
-							const linterClient = getLinterClient(serverName, serverConfig, this.session.cwd);
-							const diagnostics = await linterClient.lint(resolved, signal);
-							allDiagnostics.push(...diagnostics);
-							succeededServers++;
-							totalServerSuccesses++;
-							continue;
-						}
-						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
-						if (isProjectAwareLspServer(serverConfig)) {
-							await waitForProjectLoaded(client, signal);
-							throwIfAborted(signal);
-						}
-						const minVersion = client.diagnosticsVersion;
-						await refreshFile(client, resolved, signal);
-						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
-						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
-						// on demand; their first response routinely overruns the 3s single-file
-						// budget, which would otherwise surface as a false "OK". An explicit
-						// diagnostics request can afford to wait, bounded by the tool timeout.
-						const waitCapMs = detailed
-							? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
-							: isProjectAwareLspServer(serverConfig)
-								? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
-								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
-						const diagnostics = await waitForDiagnostics(client, uri, {
-							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
-							signal,
-							minVersion,
-							expectedDocumentVersion,
-						});
-						allDiagnostics.push(...diagnostics);
+					if (result.status === "fulfilled") {
+						allDiagnostics.push(...result.value);
 						succeededServers++;
 						totalServerSuccesses++;
-					} catch (err) {
-						if (err instanceof ToolAbortError || signal?.aborted) {
-							throw err;
-						}
-						// Server failed; record it so a total failure is not reported as clean.
+					} else {
+						if (result.reason instanceof ToolAbortError) throw result.reason;
 						failedServers.push(serverName);
 						logger.debug("LSP diagnostics server failed", {
 							server: serverName,
 							file: relPath,
-							error: err instanceof Error ? err.message : String(err),
+							error: String(result.reason),
 						});
 					}
 				}
@@ -412,11 +413,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					if (uniqueDiagnostics.length === 0) {
 						const text =
 							failedServers.length > 0
-								? `OK\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`
+								? `${theme.status.warning} Incomplete diagnostics: some servers failed (${failedServers.join(", ")})`
 								: "OK";
 						return {
 							content: [{ type: "text", text }],
-							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+							details: {
+								action,
+								serverName: Array.from(allServerNames).join(", "),
+								success: failedServers.length === 0,
+							},
 						};
 					}
 
@@ -428,7 +433,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					}
 					return {
 						content: [{ type: "text", text: output }],
-						details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
+						details: {
+							action,
+							serverName: Array.from(allServerNames).join(", "),
+							success: failedServers.length === 0,
+						},
 					};
 				}
 
@@ -437,13 +446,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						results.push(
 							`${theme.status.error} ${relPath}: all language servers failed (${failedServers.join(", ")})`,
 						);
+					} else if (failedServers.length > 0) {
+						results.push(
+							`${theme.status.warning} ${relPath}: incomplete diagnostics (${failedServers.join(", ")} failed)`,
+						);
 					} else {
 						results.push(`${theme.status.success} ${relPath}: no issues`);
-						if (failedServers.length > 0) {
-							results.push(
-								`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`,
-							);
-						}
 					}
 				} else {
 					const summary = formatDiagnosticsSummary(uniqueDiagnostics);
@@ -456,10 +464,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				}
 			}
 
-			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
+			const allServersSucceeded =
+				unmatchedTargets === 0 && totalServerAttempts > 0 && totalServerSuccesses === totalServerAttempts;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
-				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },
+				details: { action, serverName: Array.from(allServerNames).join(", "), success: allServersSucceeded },
 			};
 		}
 

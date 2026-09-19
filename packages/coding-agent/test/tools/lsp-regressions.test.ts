@@ -69,6 +69,40 @@ const lspTestSettings = Settings.isolated();
 function makeLspSession(cwd: string): ToolSession {
 	return { cwd, settings: lspTestSettings } as ToolSession;
 }
+const TS_DIAGNOSTIC_COMMANDS = [
+	"syntacticDiagnosticsSync",
+	"semanticDiagnosticsSync",
+	"suggestionDiagnosticsSync",
+] as const;
+
+function makeMockLspClient(
+	cwd: string,
+	config: ServerConfig,
+	serverCapabilities: LspClient["serverCapabilities"] = {},
+): LspClient {
+	return {
+		name: config.command,
+		cwd,
+		config,
+		proc: {
+			stdin: { write() {}, flush: async () => {} },
+		} as unknown as LspClient["proc"],
+		requestId: 0,
+		diagnostics: new Map(),
+		diagnosticsVersion: 0,
+		openFiles: new Map(),
+		pendingRequests: new Map(),
+		messageBuffer: new Uint8Array(),
+		isReading: false,
+		status: "ready",
+		lastActivity: Date.now(),
+		writeQueue: Promise.resolve(),
+		activeProgressTokens: new Set(),
+		projectLoaded: Promise.resolve(),
+		resolveProjectLoaded: () => {},
+		serverCapabilities,
+	};
+}
 
 interface RpcMessage {
 	jsonrpc?: string;
@@ -1685,6 +1719,375 @@ describe("lsp regressions", () => {
 		expect(lines.join("\n")).not.toContain("x".repeat(100));
 	});
 
+	it("uses authoritative TypeScript replies for repeated clean checks and preserves diagnostic metadata", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-ts-diagnostics-");
+		try {
+			const filePath = path.join(tempDir.path(), "target.ts");
+			const relatedPath = path.join(tempDir.path(), "types.ts");
+			await Bun.write(filePath, "const value: string = 42;\n");
+			await Bun.write(relatedPath, "export type Expected = string;\n");
+			const uri = fileToUri(filePath);
+			const config: ServerConfig = {
+				command: "typescript-language-server",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+			const client = makeMockLspClient(tempDir.path(), config, {
+				executeCommandProvider: { commands: ["typescript.tsserverRequest"] },
+			});
+			const rawDiagnostic = {
+				start: { line: 3, offset: 5 },
+				end: { line: 3, offset: 14 },
+				text: "Type 'number' is not assignable to type 'string'.",
+				category: "error",
+				code: 2322,
+				source: "typescript",
+				reportsUnnecessary: {},
+				reportsDeprecated: {},
+				relatedInformation: [
+					{
+						category: "warning",
+						code: 6196,
+						message: "The declaration is here.",
+						span: {
+							file: relatedPath,
+							start: { line: 2, offset: 3 },
+							end: { line: 2, offset: 9 },
+						},
+					},
+				],
+			};
+			const expectedDiagnostic: Diagnostic = {
+				range: {
+					start: { line: 2, character: 4 },
+					end: { line: 2, character: 13 },
+				},
+				severity: 1,
+				code: 2322,
+				source: "typescript",
+				message: "Type 'number' is not assignable to type 'string'.",
+				tags: [1, 2],
+				relatedInformation: [
+					{
+						location: {
+							uri: fileToUri(relatedPath),
+							range: {
+								start: { line: 1, character: 2 },
+								end: { line: 1, character: 8 },
+							},
+						},
+						message: "The declaration is here.",
+					},
+				],
+			};
+			const requests: Array<{ command: string; arguments: Record<string, unknown> }> = [];
+			let requestCount = 0;
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (_client, method, params) => {
+				expect(method).toBe("workspace/executeCommand");
+				const request = params as {
+					command: string;
+					arguments: [string, Record<string, unknown>];
+				};
+				expect(request.command).toBe("typescript.tsserverRequest");
+				const [command, arguments_] = request.arguments;
+				requests.push({ command, arguments: arguments_ });
+				expect(arguments_).toMatchObject({ file: filePath, includeLinePosition: false });
+				const body =
+					requestCount >= TS_DIAGNOSTIC_COMMANDS.length &&
+					requestCount < TS_DIAGNOSTIC_COMMANDS.length * 2 &&
+					command === "semanticDiagnosticsSync"
+						? [rawDiagnostic]
+						: [];
+				requestCount++;
+				return { type: "response", command, success: true, body };
+			});
+
+			const first = await waitForDiagnostics(client, uri, { timeoutMs: 100 });
+			const minVersion = client.diagnosticsVersion;
+			const second = await waitForDiagnostics(client, uri, { timeoutMs: 100, minVersion });
+			const third = await waitForDiagnostics(client, uri, { timeoutMs: 100, minVersion: client.diagnosticsVersion });
+			const fourth = await waitForDiagnostics(client, uri, {
+				timeoutMs: 100,
+				minVersion: client.diagnosticsVersion,
+			});
+
+			expect(first).toEqual([]);
+			expect(second).toEqual([expectedDiagnostic]);
+			expect(third).toEqual([]);
+			expect(fourth).toEqual([]);
+			expect(requests.map(request => request.command).sort()).toEqual(
+				Array.from({ length: 4 }, () => TS_DIAGNOSTIC_COMMANDS)
+					.flat()
+					.sort(),
+			);
+			expect(requests.every(request => request.arguments.file === filePath)).toBe(true);
+			expect(requests.every(request => request.arguments.includeLinePosition === false)).toBe(true);
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("never reports clean when TypeScript replies fail or are malformed, or push diagnostics time out", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-diagnostic-unknown-");
+		try {
+			const filePath = path.join(tempDir.path(), "target.ts");
+			await Bun.write(filePath, "const value: string = 42;\n");
+			const uri = fileToUri(filePath);
+			const config: ServerConfig = {
+				command: "typescript-language-server",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+			const sendRequest = vi.spyOn(lspClient, "sendRequest");
+
+			for (const failedCommand of TS_DIAGNOSTIC_COMMANDS) {
+				const client = makeMockLspClient(tempDir.path(), config, {
+					executeCommandProvider: { commands: ["typescript.tsserverRequest"] },
+				});
+				sendRequest.mockImplementation(async (_client, _method, params) => {
+					const { arguments: requestArguments } = params as {
+						arguments: [string, Record<string, unknown>];
+					};
+					const [command] = requestArguments;
+					if (command === failedCommand) throw new Error(`${command} failed`);
+					return { type: "response", command, success: true, body: [] };
+				});
+				await expect(waitForDiagnostics(client, uri, { timeoutMs: 100 })).rejects.toThrow();
+			}
+
+			const malformedClient = makeMockLspClient(tempDir.path(), config, {
+				executeCommandProvider: { commands: ["typescript.tsserverRequest"] },
+			});
+			sendRequest.mockImplementation(async (_client, _method, params) => {
+				const { arguments: requestArguments } = params as {
+					arguments: [string, Record<string, unknown>];
+				};
+				const [command] = requestArguments;
+				return {
+					type: "response",
+					command,
+					success: true,
+					body: command === "semanticDiagnosticsSync" ? { diagnostics: [] } : [],
+				};
+			});
+			await expect(waitForDiagnostics(malformedClient, uri, { timeoutMs: 100 })).rejects.toThrow();
+
+			const pushOnly = makeMockLspClient(tempDir.path(), {
+				command: "push-only-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			});
+			await expect(waitForDiagnostics(pushOnly, uri, { timeoutMs: 10 })).rejects.toThrow();
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("refreshes push diagnostics after project loading completes", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-diagnostic-ready-");
+		try {
+			const filePath = path.join(tempDir.path(), "target.ts");
+			const uri = fileToUri(filePath);
+			await Bun.write(filePath, "export const value = 42;\n");
+			await initTheme();
+			const events: string[] = [];
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					server.send({
+						jsonrpc: "2.0",
+						method: "$/progress",
+						params: { token: "project", value: { kind: "begin" } },
+					});
+				} else if (message.method === "textDocument/didOpen") {
+					events.push("didOpen");
+					events.push("pre-readiness-publish");
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri, version: 1, diagnostics: [] },
+					});
+					events.push("progress-end");
+					server.send({
+						jsonrpc: "2.0",
+						method: "$/progress",
+						params: { token: "project", value: { kind: "end" } },
+					});
+				} else if (message.method === "textDocument/didSave") {
+					events.push("didSave");
+					events.push("post-readiness-publish");
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: {
+							uri,
+							version: 2,
+							diagnostics: [
+								{
+									range: {
+										start: { line: 0, character: 13 },
+										end: { line: 0, character: 18 },
+									},
+									severity: 1,
+									message: "post-readiness error",
+								},
+							],
+						},
+					});
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const serverConfig: ServerConfig = {
+				command: "project-aware-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { "project-aware-lsp": serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["project-aware-lsp", serverConfig]]);
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("diagnostic-ready", {
+				action: "diagnostics",
+				file: filePath,
+				timeout: 5,
+			});
+
+			expect(result.details?.success).toBe(true);
+			expect(textResult(result)).toContain("post-readiness error");
+			expect(events.indexOf("didSave")).toBeGreaterThan(events.indexOf("progress-end"));
+			expect(events.indexOf("post-readiness-publish")).toBeGreaterThan(events.indexOf("progress-end"));
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	}, 15_000);
+
+	it("runs independent diagnostic servers concurrently and keeps healthy results visible after partial failure", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-diagnostic-partial-");
+		try {
+			const filePath = path.join(tempDir.path(), "target.ts");
+			await Bun.write(filePath, "export const value = 42;\n");
+			await initTheme();
+			const slowGate = Promise.withResolvers<void>();
+			const slowEntered = Promise.withResolvers<void>();
+			let fastStarted = false;
+			const slowConfig: ServerConfig = {
+				command: "slow-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+			const fastConfig: ServerConfig = {
+				command: "fast-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+			const fastClient = makeMockLspClient(tempDir.path(), fastConfig, { diagnosticProvider: true });
+			const healthyDiagnostic: Diagnostic = {
+				range: {
+					start: { line: 0, character: 0 },
+					end: { line: 0, character: 6 },
+				},
+				severity: 2,
+				source: "fast-lsp",
+				message: "healthy server warning",
+			};
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { slow: slowConfig, fast: fastConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([
+				["slow", slowConfig],
+				["fast", fastConfig],
+			]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config => {
+				if (config.command === slowConfig.command) {
+					slowEntered.resolve();
+					await slowGate.promise;
+					throw new Error("slow server failed");
+				}
+				fastStarted = true;
+				return fastClient;
+			});
+			vi.spyOn(lspClient, "refreshFile").mockImplementation(async client => {
+				client.openFiles.set(fileToUri(filePath), { version: 1, languageId: "typescript" });
+			});
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (_client, method) => {
+				if (method !== "textDocument/diagnostic") return null;
+				return { kind: "full", items: [healthyDiagnostic] };
+			});
+
+			const run = new LspTool(makeLspSession(tempDir.path())).execute("diagnostic-partial", {
+				action: "diagnostics",
+				file: filePath,
+				timeout: 5,
+			});
+			await slowEntered.promise;
+			const fastStartedBeforeRelease = fastStarted;
+			slowGate.resolve();
+			const result = await run;
+			const output = textResult(result);
+
+			expect(fastStartedBeforeRelease).toBe(true);
+			expect(output).toContain("healthy server warning");
+			expect(output).toContain("slow");
+			expect(result.details?.success).toBe(false);
+		} finally {
+			tempDir.removeSync();
+		}
+	}, 15_000);
+
+	it("waits for Tailwind project discovery and rejects unknown project replies", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-tailwind-diagnostics-");
+		try {
+			const filePath = path.join(tempDir.path(), "index.html");
+			await Bun.write(filePath, '<div class="flex"></div>\n');
+			const uri = fileToUri(filePath);
+			const config: ServerConfig = {
+				command: "tailwindcss-language-server",
+				fileTypes: ["html"],
+				rootMarkers: [],
+			};
+			const scenarios = [
+				{ result: { error: "no-project" }, clean: true },
+				{ result: { classLists: ["flex"] }, clean: false },
+				{ result: { error: "unknown" }, clean: false },
+				{ result: null, clean: false },
+			] as const;
+			const sendRequest = vi.spyOn(lspClient, "sendRequest");
+
+			for (const scenario of scenarios) {
+				const client = makeMockLspClient(tempDir.path(), config, { colorProvider: true });
+				const methods: string[] = [];
+				sendRequest.mockImplementation(async (_client, method, params) => {
+					methods.push(method);
+					if (method === "textDocument/documentColor") {
+						expect(params).toEqual({ textDocument: { uri } });
+						return [];
+					}
+					if (method === "@/tailwindCSS/sortSelection") {
+						expect(params).toEqual({ uri, classLists: [] });
+						return scenario.result;
+					}
+					throw new Error(`unexpected Tailwind request: ${method}`);
+				});
+
+				if (scenario.clean) {
+					expect(await waitForDiagnostics(client, uri, { timeoutMs: 100 })).toEqual([]);
+				} else {
+					await expect(waitForDiagnostics(client, uri, { timeoutMs: 10 })).rejects.toThrow();
+				}
+				expect(methods).toEqual(["textDocument/documentColor", "@/tailwindCSS/sortSelection"]);
+			}
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
 	for (const dynamicRegistration of [false, true]) {
 		it(`reports pull diagnostics advertised through ${dynamicRegistration ? "dynamic registration" : "server capabilities"}`, async () => {
 			const tempDir = TempDir.createSync("@omp-lsp-pull-diags-");
@@ -2016,6 +2419,46 @@ describe("lsp regressions", () => {
 			expect(output).not.toBe("OK");
 			expect(output).toContain("all language servers failed");
 			expect(output).toContain("broken");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("reports mixed unsupported glob targets as incomplete", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-mixed-glob-");
+		try {
+			await Promise.all([
+				Bun.write(path.join(tempDir.path(), "target.ts"), "export const target = 1;\n"),
+				Bun.write(path.join(tempDir.path(), "notes.md"), "# Notes\n"),
+			]);
+			await initTheme();
+			const serverConfig: ServerConfig = {
+				command: "healthy-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+			const client = makeMockLspClient(tempDir.path(), serverConfig, { diagnosticProvider: true });
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+				servers: { healthy: serverConfig },
+				idleTimeoutMs: undefined,
+			});
+			vi.spyOn(lspConfig, "getServersForFile").mockImplementation((_config, filePath) =>
+				filePath.endsWith(".ts") ? [["healthy", serverConfig]] : [],
+			);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "sendRequest").mockResolvedValue({ kind: "full", items: [] });
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("mixed-glob", {
+				action: "diagnostics",
+				file: "*.*",
+				timeout: 5,
+			});
+
+			expect(result.details?.success).toBe(false);
+			const output = textResult(result);
+			expect(output).toContain("target.ts: no issues");
+			expect(output).toContain("notes.md: No language server found");
 		} finally {
 			vi.restoreAllMocks();
 			tempDir.removeSync();
