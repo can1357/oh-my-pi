@@ -4,7 +4,8 @@ import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
-import { type TodoPhase, TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function createTool(name: string, execute: AgentTool["execute"]): AgentTool {
@@ -721,6 +722,29 @@ describe("callSessionTool", () => {
 		expect(phases).toEqual([
 			{ name: "Recovered", tasks: [{ content: "From malformed JSON", status: "in_progress" }] },
 		]);
+	});
+
+	it("persists bridged todo mutations to the branch, which a direct toolResult would carry", async () => {
+		let phases: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "Persist", status: "in_progress" }] }];
+		const persisted: TodoPhase[][] = [];
+		const session: ToolSession = {
+			...createSession([]),
+			getTodoPhases: () => phases,
+			setTodoPhases: next => {
+				phases = next;
+			},
+			persistTodoPhases: next => persisted.push(next),
+			getToolByName: name => (name === "todo" ? (todoTool as unknown as AgentTool) : undefined),
+		};
+		const todoTool = new TodoTool(session);
+
+		await callSessionTool("todo", { op: "done", task: "Persist" }, { session });
+		expect(persisted).toEqual([[{ name: "Ship", tasks: [{ content: "Persist", status: "completed" }] }]]);
+
+		// Reads and rejected batches leave the branch untouched.
+		await callSessionTool("todo", { op: "view" }, { session });
+		await callSessionTool("todo", { op: "done", task: "No such task" }, { session });
+		expect(persisted).toHaveLength(1);
 	});
 
 	it("returns structured tool results when details or images are present", async () => {

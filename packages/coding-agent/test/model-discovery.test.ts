@@ -3,18 +3,16 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
+import type { FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
-import {
-	applyLlamaCppQwenThinking,
-	discoverOllamaModels,
-	discoveryProbeTimeoutMs,
-} from "@oh-my-pi/pi-coding-agent/config/model-discovery";
+import { discoverOllamaModels, discoveryProbeTimeoutMs } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
+import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -88,7 +86,13 @@ describe("ModelRegistry runtime discovery", () => {
 	}
 
 	function withEnv(
-		name: "LLAMA_CPP_BASE_URL" | "LM_STUDIO_BASE_URL" | "OLLAMA_BASE_URL" | "OLLAMA_CONTEXT_LENGTH" | "OLLAMA_HOST",
+		name:
+			| "LITELLM_BASE_URL"
+			| "LLAMA_CPP_BASE_URL"
+			| "LM_STUDIO_BASE_URL"
+			| "OLLAMA_BASE_URL"
+			| "OLLAMA_CONTEXT_LENGTH"
+			| "OLLAMA_HOST",
 		value: string | undefined,
 	) {
 		const original = Bun.env[name];
@@ -1314,7 +1318,12 @@ describe("ModelRegistry runtime discovery", () => {
 			if (url === "http://127.0.0.1:8080/models") {
 				return new Response(
 					JSON.stringify({
-						data: [{ id: "qwen3-8b" }, { id: "ternary-bonsai-27b-q2_0" }, { id: "llama-3.1-8b" }],
+						data: [
+							{ id: "qwen3-8b" },
+							{ id: "ternary-bonsai-27b-q2_0" },
+							{ id: "bonsai-2-27b" },
+							{ id: "llama-3.1-8b" },
+						],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -1332,23 +1341,35 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 
-		type DialectFields = { thinkingFormat?: string; reasoningDisableMode?: string; qwenPreserveThinking?: boolean };
-		for (const id of ["qwen3-8b", "ternary-bonsai-27b-q2_0"]) {
+		for (const id of ["qwen3-8b", "ternary-bonsai-27b-q2_0", "bonsai-2-27b"]) {
 			const qwen = registry.find("llama.cpp", id);
 			expect(qwen?.reasoning).toBe(true);
 			expect(qwen?.api).toBe("openai-completions");
 			expect(qwen?.baseUrl).toBe("http://127.0.0.1:8080/v1");
-			const compat = qwen?.compat as DialectFields | undefined;
-			expect(compat?.thinkingFormat).toBe("qwen-chat-template");
-			expect(compat?.reasoningDisableMode).toBe("qwen-template-false");
-			expect(compat?.qwenPreserveThinking).toBe(true);
+			expect(qwen?.compat).toMatchObject({
+				thinkingFormat: "qwen-chat-template",
+				reasoningDisableMode: "qwen-template-false",
+				qwenPreserveThinking: true,
+			});
 		}
+
+		// Bonsai 2 is Qwen3.8-based: its template takes `reasoning_effort` with a
+		// wire-exact low/medium/xhigh ladder and raises on anything else.
+		const bonsai2 = registry.find("llama.cpp", "bonsai-2-27b");
+		expect(bonsai2?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+			requiresEffort: true,
+		});
+		expect(bonsai2?.compat).toMatchObject({ qwenTemplateReasoningEffort: true });
+		const bonsai1 = registry.find("llama.cpp", "ternary-bonsai-27b-q2_0");
+		expect(bonsai1?.compat).toMatchObject({ qwenTemplateReasoningEffort: false });
 
 		const plain = registry.find("llama.cpp", "llama-3.1-8b");
 		expect(plain?.reasoning).toBe(false);
 		expect(plain?.api).toBe("openai-responses");
 		expect(plain?.baseUrl).toBe("http://127.0.0.1:8080/v1");
-		expect((plain?.compat as DialectFields | undefined)?.reasoningDisableMode).not.toBe("qwen-template-false");
+		expect(plain?.compat).not.toMatchObject({ reasoningDisableMode: "qwen-template-false" });
 	});
 
 	test("discovery timeout rejects even when fetch ignores abort", async () => {
@@ -1457,28 +1478,79 @@ providers:
 		expect(qwen?.baseUrl).toBe("http://127.0.0.1:8080/v1");
 	});
 
-	test("applyLlamaCppQwenThinking keeps a pi-native gateway base URL without doubling /v1", () => {
-		const upgraded = applyLlamaCppQwenThinking(
-			buildModel({
-				id: "qwen3-8b",
-				name: "qwen3-8b",
-				api: "openai-responses",
-				provider: "llama.cpp",
+	test("configured llama.cpp discovery keeps a pi-native gateway URL without doubling /v1", async () => {
+		writeRawModelsJson({
+			"custom-llama": {
 				baseUrl: "http://gw:4000",
+				api: "openai-responses",
 				transport: "pi-native",
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 32_768,
-				maxTokens: 4096,
-			}),
+				auth: "none",
+				discovery: { type: "llama.cpp" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			if (String(input) === "http://gw:4000/models") {
+				return Response.json({ data: [{ id: "prismml/Bonsai-2-27B-Q4_K_M.gguf" }] });
+			}
+			return Response.json({}, { status: 404 });
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("custom-llama", "prismml/Bonsai-2-27B-Q4_K_M.gguf");
+
+		// The custom transport appends /v1/pi/stream to this gateway root.
+		expect(model?.baseUrl).toBe("http://gw:4000");
+		expect(model?.transport).toBe("pi-native");
+		expect(model?.api).toBe("openai-completions");
+		expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.XHigh]);
+	});
+
+	test("cached custom llama.cpp rows regain discovery policy without a successful probe", async () => {
+		writeRawModelsJson({
+			"custom-llama": {
+				baseUrl: "http://remote:8080",
+				api: "openai-responses",
+				auth: "none",
+				discovery: { type: "llama.cpp" },
+			},
+		});
+		writeModelCache(
+			"custom-llama",
+			Date.now(),
+			[
+				buildModel({
+					id: "prismml/Bonsai-2-27B-Q4_K_M.gguf",
+					name: "Bonsai",
+					api: "openai-responses",
+					provider: "custom-llama",
+					baseUrl: "http://remote:8080",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 32_768,
+					maxTokens: 4096,
+				}),
+			],
+			true,
+			"",
+			cacheDbPath,
 		);
-		// streamPiNative appends `/v1/pi/stream`, so the gateway URL must stay bare
-		// rather than gaining a `/v1` that would double to `.../v1/v1/pi/stream`.
-		expect(upgraded.baseUrl).toBe("http://gw:4000");
-		expect(upgraded.transport).toBe("pi-native");
-		expect(upgraded.reasoning).toBe(true);
-		expect((upgraded.compat as { reasoningDisableMode?: string }).reasoningDisableMode).toBe("qwen-template-false");
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => Response.json({}, { status: 503 }),
+		});
+		const before = registry.find("custom-llama", "prismml/Bonsai-2-27B-Q4_K_M.gguf");
+		await registry.refreshProvider("custom-llama");
+		const after = registry.find("custom-llama", "prismml/Bonsai-2-27B-Q4_K_M.gguf");
+		for (const model of [before, after]) {
+			expect(model?.api).toBe("openai-completions");
+			expect(model?.baseUrl).toBe("http://remote:8080/v1");
+			expect(model?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.XHigh]);
+			expect(model?.thinking?.requiresEffort).toBe(true);
+			expect(model?.compat).toMatchObject({
+				thinkingFormat: "qwen-chat-template",
+				qwenTemplateReasoningEffort: true,
+			});
+		}
 	});
 
 	test("runtime metadata refresh probes native /models for a /v1-routed Qwen model", async () => {
@@ -2676,6 +2748,196 @@ providers:
 		expect(registry.find("litellm-test", "vendor-7/model-7")?.baseUrl).toBe("http://127.0.0.1:4013/v1");
 	});
 
+	test("configured litellm discovery omits non-conversational rich modes", async () => {
+		writeRawModelsJson({
+			"litellm-test": {
+				baseUrl: "http://127.0.0.1:4004/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:4004/model_group/info") {
+				return Response.json({
+					data: [
+						{ model_group: "drop-audio-speech", mode: "audio_speech", supports_vision: false },
+						{ model_group: "drop-audio-transcription", mode: "audio_transcription", supports_vision: false },
+						{ model_group: "drop-batch", mode: "batch", supports_vision: false },
+						{ model_group: "drop-embedding", mode: "embedding", supports_vision: false },
+						{ model_group: "drop-guardrail", mode: "guardrail", supports_vision: false },
+						{ model_group: "drop-image-edit", mode: "image_edit", supports_vision: false },
+						{ model_group: "drop-image-generation", mode: "image_generation", supports_vision: false },
+						{ model_group: "drop-moderation", mode: "moderation", supports_vision: false },
+						{ model_group: "drop-ocr", mode: "ocr", supports_vision: false },
+						{ model_group: "drop-rerank", mode: "rerank", supports_vision: false },
+						{ model_group: "drop-search", mode: "search", supports_vision: false },
+						{ model_group: "drop-vector-store", mode: "vector_store", supports_vision: false },
+						{ model_group: "drop-video-generation", mode: "video_generation", supports_vision: false },
+						{ model_group: "keep-chat", mode: "chat", supports_vision: false },
+						{ model_group: "keep-completion", mode: "completion", supports_vision: false },
+						{ model_group: "keep-realtime", mode: "realtime", supports_vision: false },
+						{ model_group: "maven-auto", mode: null, supports_vision: false },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		expect(
+			getModelsForProvider(registry, "litellm-test")
+				.map(model => model.id)
+				.sort(),
+		).toEqual(["keep-chat", "keep-completion", "keep-realtime", "maven-auto"]);
+	});
+
+	test("configured litellm discovery replaces partially and fully filtered rich refreshes", async () => {
+		writeRawModelsJson({
+			"litellm-test": {
+				baseUrl: "http://127.0.0.1:4006/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm" },
+			},
+		});
+		let modelGroups: Record<string, unknown>[] = [
+			{
+				model_group: "keep-chat-a",
+				mode: "chat",
+				providers: ["openai"],
+				supports_vision: false,
+			},
+			{
+				model_group: "keep-chat-b",
+				mode: "chat",
+				providers: ["openai"],
+				supports_vision: false,
+			},
+		];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:4006/model_group/info") {
+				return Response.json({ data: modelGroups });
+			}
+			if (
+				url === "http://127.0.0.1:4006/v2/model/info" ||
+				url === "http://127.0.0.1:4006/model/info" ||
+				url === "http://127.0.0.1:4006/v1/model/info"
+			) {
+				return new Response("Not Found", { status: 404 });
+			}
+			throw new Error(`/v1/models must not reintroduce the excluded model: ${url}`);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh("online");
+		expect(getModelsForProvider(registry, "litellm-test").map(model => model.id)).toEqual([
+			"keep-chat-a",
+			"keep-chat-b",
+		]);
+
+		modelGroups = [
+			{ model_group: "keep-chat-a", mode: "chat", providers: ["openai"], supports_vision: false },
+			{ model_group: "keep-chat-b", mode: "embedding" },
+		];
+		await registry.refresh("online");
+		expect(getModelsForProvider(registry, "litellm-test").map(model => model.id)).toEqual(["keep-chat-a"]);
+
+		modelGroups = [{ model_group: "keep-chat-a", mode: "embedding" }];
+		await registry.refresh("online");
+		expect(getModelsForProvider(registry, "litellm-test")).toEqual([]);
+	});
+
+	test("built-in litellm discovery replaces partially and fully filtered rich refreshes", async () => {
+		using _litellmBaseUrl = withEnv("LITELLM_BASE_URL", "http://127.0.0.1:4007/v1");
+		writeRawModelsJson({});
+		authStorage.setRuntimeApiKey("litellm", "sk-litellm-test");
+		let modelGroups: Record<string, unknown>[] = [
+			{
+				model_group: "keep-chat-a",
+				mode: "chat",
+				providers: ["openai"],
+				supports_vision: false,
+			},
+			{
+				model_group: "keep-chat-b",
+				mode: "chat",
+				providers: ["openai"],
+				supports_vision: false,
+			},
+		];
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "https://catalog.stencil.so/models.json.zstd") {
+				return Response.json({});
+			}
+			if (url === "http://127.0.0.1:4007/model_group/info") {
+				return Response.json({ data: modelGroups });
+			}
+			if (
+				url === "http://127.0.0.1:4007/v2/model/info" ||
+				url === "http://127.0.0.1:4007/model/info" ||
+				url === "http://127.0.0.1:4007/v1/model/info"
+			) {
+				return new Response("Not Found", { status: 404 });
+			}
+			throw new Error(`/v1/models must not reintroduce the excluded model: ${url}`);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refreshProvider("litellm", "online");
+		expect(getModelsForProvider(registry, "litellm").map(model => model.id)).toEqual(["keep-chat-a", "keep-chat-b"]);
+		expect(registry.getProviderDiscoveryState("litellm")?.status).toBe("ok");
+
+		modelGroups = [
+			{ model_group: "keep-chat-a", mode: "chat", providers: ["openai"], supports_vision: false },
+			{ model_group: "keep-chat-b", mode: "embedding" },
+		];
+		await registry.refreshProvider("litellm", "online");
+		expect(getModelsForProvider(registry, "litellm").map(model => model.id)).toEqual(["keep-chat-a"]);
+
+		modelGroups = [{ model_group: "keep-chat-a", mode: "embedding" }];
+		await registry.refreshProvider("litellm", "online");
+		expect(getModelsForProvider(registry, "litellm")).toEqual([]);
+	});
+
+	test("built-in litellm discovery timeout settles pending state", async () => {
+		vi.useFakeTimers();
+		try {
+			writeRawModelsJson({
+				litellm: {
+					baseUrl: "https://litellm-timeout.example.net/v1",
+					apiKey: "sk-litellm-test",
+					api: "openai-completions",
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: () => Promise.withResolvers<Response>().promise,
+			});
+			expect(registry.find("litellm", "not-yet-discovered")).toBeUndefined();
+			expect(registry.isProviderDiscoveryPending("litellm")).toBe(true);
+
+			const refresh = registry.refreshProvider("litellm", "online");
+			for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+			vi.advanceTimersByTime(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS);
+			await refresh;
+
+			expect(registry.getProviderDiscoveryState("litellm")).toMatchObject({
+				status: "unavailable",
+				stale: true,
+				models: [],
+				error: `model discovery timed out after ${RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS}ms`,
+			});
+			expect(registry.isProviderDiscoveryPending("litellm")).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("litellm discovery enriches configured proxy models with bundled references", async () => {
 		writeRawModelsJson({
 			"litellm-test": {
@@ -2732,6 +2994,74 @@ providers:
 
 		expect(registry.find("litellm-test", "default-litellm")?.baseUrl).toBe("http://localhost:4000/v1");
 		expect(registry.find("litellm-test", "openai/gpt-5")?.api).toBe("openai-responses");
+	});
+
+	test("configured litellm /v1/models fallback preserves only selectable modes", async () => {
+		writeRawModelsJson({
+			"litellm-test": {
+				baseUrl: "http://127.0.0.1:4005/v1",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "litellm" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (
+				url === "http://127.0.0.1:4005/model_group/info" ||
+				url === "http://127.0.0.1:4005/v2/model/info" ||
+				url === "http://127.0.0.1:4005/model/info" ||
+				url === "http://127.0.0.1:4005/v1/model/info"
+			) {
+				return new Response("Not Found", { status: 404 });
+			}
+			if (url === "http://127.0.0.1:4005/v1/models") {
+				return Response.json({
+					data: [
+						{ id: "drop-audio-speech", mode: "audio_speech" },
+						{ id: "drop-audio-transcription", mode: "audio_transcription" },
+						{ id: "drop-batch", mode: "batch" },
+						{ id: "drop-embedding", mode: "embedding" },
+						{ id: "drop-guardrail", mode: "guardrail" },
+						{ id: "drop-image-edit", mode: "image_edit" },
+						{ id: "drop-image-generation", mode: "image_generation" },
+						{ id: "drop-moderation", mode: "moderation" },
+						{ id: "drop-ocr", mode: "ocr" },
+						{ id: "drop-rerank", mode: "rerank" },
+						{ id: "drop-search", mode: "search" },
+						{ id: "drop-vector-store", mode: "vector_store" },
+						{ id: "drop-video-generation", mode: "video_generation" },
+						{ id: "keep-chat", mode: "chat" },
+						{ id: "keep-completion", mode: "completion" },
+						{ id: "keep-realtime", mode: "realtime" },
+						{ id: "keep-responses", mode: "responses" },
+						{ id: "keep-null", mode: null },
+						{ id: "keep-missing" },
+						{ id: "keep-unknown", mode: "future_mode" },
+						{ id: "keep-malformed", mode: { unexpected: true } },
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		expect(
+			getModelsForProvider(registry, "litellm-test")
+				.map(model => model.id)
+				.sort(),
+		).toEqual([
+			"keep-chat",
+			"keep-completion",
+			"keep-malformed",
+			"keep-missing",
+			"keep-null",
+			"keep-realtime",
+			"keep-responses",
+			"keep-unknown",
+		]);
 	});
 
 	test("litellm discovery reuses configured bearer on rich and fallback requests", async () => {

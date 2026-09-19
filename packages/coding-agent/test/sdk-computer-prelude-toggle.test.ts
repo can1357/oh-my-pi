@@ -83,6 +83,34 @@ describe("AgentSession eval preludes", () => {
 		expect(session.getEvalPreludes().map(definition => definition.name)).toEqual(["browser"]);
 	});
 
+	it("exposes enabled host preludes to user-initiated Python cells", async () => {
+		const settings = Settings.isolated({
+			"browser.enabled": false,
+			"computer.enabled": true,
+		});
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		});
+		sessions.push(session);
+
+		const result = await session.executePython("print(computer is not None)");
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("True");
+	});
+
 	it("reconciles browser MCP filtering on live browser toggles", async () => {
 		const manager = new MCPManager(registryDir, null, async () => ({
 			configs: {},

@@ -9,15 +9,15 @@ import {
 	expandPath,
 	probeLiteralPathExists,
 	resolveToCwd,
-	splitPathAndSel,
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { runGrepCommand } from "../../src/cli/grep-cli";
-import { initTheme } from "../../src/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { GrepTool } from "../../src/tools/grep";
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -336,6 +336,36 @@ describe("literal colon filename resolution (issue #4618)", () => {
 			const output = getText(result);
 
 			expect(output).toContain("literal archive needle");
+		});
+
+		it("applies line ranges to an existing file whose name contains glob characters", async () => {
+			const literal = path.join(tmpDir, "{proposal} {acme} offer.md");
+			await Bun.write(literal, "offer included\nignored\noffer excluded\n");
+
+			const tool = new GrepTool(createSession());
+			const result = await tool.execute("grep-ranged-brace-literal", {
+				pattern: "offer",
+				path: `${literal}:1-2`,
+			});
+			const output = getText(result);
+
+			expect(output).toContain("offer included");
+			expect(output).not.toContain("offer excluded");
+		});
+
+		it("preserves ranged glob-named files before delimiter expansion", async () => {
+			const literal = path.join(tmpDir, "a;b[1].md");
+			await Bun.write(literal, "needle included\nignored\nneedle excluded\n");
+
+			const tool = new GrepTool(createSession());
+			const result = await tool.execute("grep-ranged-delimiter-literal", {
+				pattern: "needle",
+				path: `${literal}:1-2`,
+			});
+			const output = getText(result);
+
+			expect(output).toContain("needle included");
+			expect(output).not.toContain("needle excluded");
 		});
 
 		it("preserves `:N-M` line-range filtering when the literal file does not exist", async () => {

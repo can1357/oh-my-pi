@@ -4,7 +4,7 @@
  * only when a caller requests a link.
  */
 import { formatAge } from "@oh-my-pi/pi-utils";
-import chalk from "chalk";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	COLLAB_REGISTRY_VERSION,
 	type CollabHostSnapshot,
@@ -13,8 +13,8 @@ import {
 	listCollabHosts,
 	resolveCollabHostLink,
 } from "../collab/registry";
-import { sanitizeDisplayLine } from "../modes/components/extensions/display-text";
-import { shortenPath } from "../tools/render-utils";
+import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
 
 export interface CollabListCommandArgs {
 	/** Emit deterministic machine-readable JSON. */

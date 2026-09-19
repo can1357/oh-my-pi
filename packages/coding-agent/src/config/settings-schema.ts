@@ -1,6 +1,7 @@
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
-import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
-import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
+import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
+import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
 	type BlobDestinationId,
@@ -9,6 +10,7 @@ import {
 } from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import type { AnyUiMetadata, SettingTab, SubmenuOption, UiBase } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import {
 	COMPACTION_METHOD_CHOICES,
 	type CompactionMethod,
@@ -16,7 +18,7 @@ import {
 } from "../session/compaction-methods";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
-import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
+import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
@@ -52,8 +54,8 @@ import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
 	SEARCH_PROVIDER_CHOICES,
-	type SearchProviderId,
 } from "../web/search/types";
+import { type SearchProviderId } from "@oh-my-pi/pi-tui/tools/web-search";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -101,193 +103,24 @@ const BLOB_BACKEND_CHOICES = BUILTIN_BLOB_DESTINATION_METADATA.filter(
 	description: destination.reason ?? destination.family,
 }));
 
-/** Composer shape id; extensions may register additional values at runtime. */
-export type ComposerShape = string;
-
-/** Built-in composer choices and their shared settings/setup copy. */
-export const BUILTIN_COMPOSER_SHAPES = [
-	{
-		value: "band",
-		label: "Status Band (Default)",
-		description: "Flush soft-capped status band above a curved prompt, no frame",
-	},
-	{
-		value: "box",
-		label: "Rounded Box",
-		description: "Status line embedded in top border, compact 2-line prompt",
-	},
-	{
-		value: "claude",
-		label: "Claude Code",
-		description: "Full-width horizontal rules above and below, status line at bottom",
-	},
-	{
-		value: "pi",
-		label: "Pi",
-		description: "Framed horizontal rules with status line at bottom",
-	},
-	{
-		value: "borderless",
-		label: "Borderless",
-		description: "Clean prompt glyph with status line at bottom, no box borders",
-	},
-	{
-		value: "rule",
-		label: "Top Rule Dock",
-		description: "Single top rule with status docked onto it and below",
-	},
-	{
-		value: "field",
-		label: "Compact Field",
-		description: "Filled one-row field with accent end caps",
-	},
-	{
-		value: "rail",
-		label: "Accent Rail",
-		description: "Filled one-row field anchored by a single accent rail",
-	},
-] as const;
-
-/** Built-in composer ids used by tests and non-runtime consumers. */
-export const COMPOSER_SHAPE_VALUES = BUILTIN_COMPOSER_SHAPES.map(shape => shape.value);
-
-export type ContextLineMode = "off" | "percentage" | "annotated" | "embedded";
-export const CONTEXT_LINE_MODE_VALUES = ["off", "percentage", "annotated", "embedded"] as const;
-
-export type SettingTab =
-	| "appearance"
-	| "model"
-	| "interaction"
-	| "context"
-	| "memory"
-	| "files"
-	| "shell"
-	| "tools"
-	| "tasks"
-	| "providers";
-
-/** Tab display metadata - icon is resolved via theme.symbol() */
-export type TabMetadata = { label: string; icon: `tab.${string}` };
-
-/** Ordered list of tabs for UI rendering */
-export const SETTING_TABS: SettingTab[] = [
-	"appearance",
-	"model",
-	"interaction",
-	"context",
-	"memory",
-	"files",
-	"shell",
-	"tools",
-	"tasks",
-	"providers",
-];
-
-/** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
-export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${string}` }> = {
-	appearance: { label: "Appearance", icon: "tab.appearance" },
-	model: { label: "Model", icon: "tab.model" },
-	interaction: { label: "Interaction", icon: "tab.interaction" },
-	context: { label: "Context", icon: "tab.context" },
-	memory: { label: "Memory", icon: "tab.memory" },
-	files: { label: "Files", icon: "tab.files" },
-	shell: { label: "Shell", icon: "tab.shell" },
-	tools: { label: "Tools", icon: "tab.tools" },
-	tasks: { label: "Tasks", icon: "tab.tasks" },
-	providers: { label: "Providers", icon: "tab.providers" },
-};
-
-/**
- * Ordered section groups per tab. Settings declare their section via `ui.group`;
- * the settings UI renders groups in this order with a heading row between them.
- * Ungrouped settings render first, before any section heading.
- */
-export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
-	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
-	interaction: [
-		"Input",
-		"Approvals",
-		"Notifications",
-		"Speech",
-		"Collab",
-		"Magic Keywords",
-		"Startup & Updates",
-		"Power",
-		"Agent",
-		"Git",
-	],
-	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
-	files: ["Editing", "Reading", "Read Summaries", "LSP"],
-	shell: ["Bash", "Eval & Runtimes"],
-	tools: [
-		"Available Tools",
-		"Todos",
-		"Grep & Browser",
-		"Computer",
-		"GitHub",
-		"Output Limits",
-		"Execution",
-		"Discovery & MCP",
-		"Extensions",
-		"Developer",
-	],
-	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
-	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
-};
-
-/** Status line segment identifiers */
-export type StatusLineSegmentId =
-	| "pi"
-	| "status"
-	| "model"
-	| "mode"
-	| "path"
-	| "git"
-	| "pr"
-	| "subagents"
-	| "token_in"
-	| "token_out"
-	| "token_total"
-	| "token_rate"
-	| "cost"
-	| "context_pct"
-	| "context_total"
-	| "time_spent"
-	| "time"
-	| "session"
-	| "hostname"
-	| "cache_read"
-	| "cache_write"
-	| "cache_hit"
-	| "session_name"
-	| "usage"
-	| "collab"
-	| "vim";
-
-/** Submenu choice metadata. */
-export type SubmenuOption<V extends string = string> = {
-	value: V;
-	label: string;
-	description?: string;
-};
-
-interface UiBase {
-	tab: SettingTab;
-	/** Section within the tab; must be listed in TAB_GROUPS[tab]. Ungrouped settings render at the top. */
-	group?: string;
-	label: string;
-	description: string;
-	/**
-	 * Risk note. Marks the settings row with a warning glyph and renders above
-	 * the description in warning styling. For settings that can get the user
-	 * rate-limited, flagged, or banned — not for merely advanced options.
-	 */
-	warning?: string;
-	/** Condition function name - setting only shown when true */
-	condition?: string;
-}
+import {
+	CONTEXT_LINE_MODE_VALUES,
+	CUSTOM_STATUS_LINE_DEFAULTS,
+	STATUS_LINE_PRESET_VALUES,
+	STATUS_LINE_SEPARATOR_VALUES,
+	type StatusLinePreset,
+	type StatusLineSegmentId,
+	type StatusLineSeparatorStyle,
+} from "@oh-my-pi/pi-tui/status-line/schema";
+export {
+	CONTEXT_LINE_MODE_VALUES,
+	CUSTOM_STATUS_LINE_DEFAULTS,
+	STATUS_LINE_SEGMENT_IDS,
+	type ContextLineMode,
+	type StatusLinePreset,
+	type StatusLineSegmentId,
+	type StatusLineSeparatorStyle,
+} from "@oh-my-pi/pi-tui/status-line/schema";
 
 interface UiBoolean extends UiBase {}
 
@@ -319,13 +152,6 @@ interface UiArray extends UiBase {
 	/** Selection order is meaningful; the editor renders positions and supports reordering. */
 	ordered?: boolean;
 }
-
-/** Wide ui shape exposed to consumers that walk the schema generically. */
-export type AnyUiMetadata = UiBase & {
-	options?: ReadonlyArray<SubmenuOption> | "runtime";
-	secret?: boolean;
-	ordered?: boolean;
-};
 
 /**
  * Marks a setting whose value is a credential.
@@ -768,11 +594,22 @@ export const SETTINGS_SCHEMA = {
 			options: "runtime",
 		},
 	},
+	"composer.tokenRate": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Composer",
+			label: "Generation Rate",
+			description:
+				"Show a live generation tok/s readout on the working row, docked right next to the session title. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
+		},
+	},
 
 	// Status line
 	"statusLine.preset": {
 		type: "enum",
-		values: ["default", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const,
+		values: STATUS_LINE_PRESET_VALUES,
 		default: "default",
 		ui: {
 			tab: "appearance",
@@ -793,7 +630,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.separator": {
 		type: "enum",
-		values: ["powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii"] as const,
+		values: STATUS_LINE_SEPARATOR_VALUES,
 		default: "powerline-thin",
 		ui: {
 			tab: "appearance",
@@ -992,9 +829,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.leftSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.left },
 
-	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.rightSegments": { type: "array", default: CUSTOM_STATUS_LINE_DEFAULTS.right },
 
 	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
 
@@ -1263,7 +1100,25 @@ export const SETTINGS_SCHEMA = {
 			group: "Display",
 			label: "Terminal Title Run State",
 			description:
-				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' on Windows), '>' when it's your turn, '!' when the agent is waiting on you",
+				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' under WSL), '>' when it's your turn, '!' when the agent is waiting on you",
+		},
+	},
+	"tui.titleSpinner": {
+		type: "enum",
+		values: ["braille", "pulse", "dots", "line"] as const,
+		default: "braille",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Terminal Title Spinner",
+			description:
+				"Glyph set for the working-state spinner in the terminal title — braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
+			options: [
+				{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep (default)" },
+				{ value: "pulse", label: "Pulse", description: "Moon filling ○◑● then emptying" },
+				{ value: "dots", label: "Dots", description: "Single braille dots cycling" },
+				{ value: "line", label: "Line", description: "ASCII - \\ | / for fonts without braille coverage" },
+			],
 		},
 	},
 
@@ -2153,7 +2008,7 @@ export const SETTINGS_SCHEMA = {
 
 	treeFilterMode: {
 		type: "enum",
-		values: ["default", "no-tools", "user-only", "labeled-only", "all"] as const,
+		values: TREE_FILTER_MODES,
 		default: "default",
 		ui: {
 			tab: "interaction",
@@ -2587,6 +2442,31 @@ export const SETTINGS_SCHEMA = {
 			group: "Collab",
 			label: "Share Secret Redaction",
 			description: "Run the secret obfuscator over /share snapshots before upload (uses the secrets.* config)",
+		},
+	},
+
+	// Live streaming (omp stream)
+	"stream.serverUrl": {
+		type: "string",
+		default: DEFAULT_STREAM_URL,
+		ui: {
+			tab: "interaction",
+			group: "Stream",
+			label: "Stream Server",
+			description:
+				"Live stream server used by `omp stream` (https://host[:port]); viewers watch at <base>/<your Stencil username>",
+		},
+	},
+
+	"stream.redactPatterns": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "interaction",
+			group: "Stream",
+			label: "Extra Redaction Patterns",
+			description:
+				"Additional regular expressions redacted from every streamed row, on top of env/secrets.yml values and built-in credential shapes",
 		},
 	},
 
@@ -3605,7 +3485,6 @@ export const SETTINGS_SCHEMA = {
 			condition: "hindsightActive",
 		},
 	},
-	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 
 	// TTSR
@@ -3782,7 +3661,7 @@ export const SETTINGS_SCHEMA = {
 
 	"edit.enforceSeenLines": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "files",
 			group: "Editing",
@@ -4844,27 +4723,6 @@ export const SETTINGS_SCHEMA = {
 		default: 100,
 	},
 
-	"async.pollWaitDuration": {
-		type: "enum",
-		values: ["5s", "10s", "30s", "1m", "5m", "smart"] as const,
-		default: "smart",
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "Max Poll Time",
-			description:
-				"How long a `hub` wait watches background jobs before returning the current state. A fixed value waits that exact duration every time. `smart` adapts: it starts at 5s and lengthens with each back-to-back wait (up to 5m), then resets to 5s after about a minute without waiting.",
-			options: [
-				{ value: "5s", label: "5 seconds" },
-				{ value: "10s", label: "10 seconds" },
-				{ value: "30s", label: "30 seconds" },
-				{ value: "1m", label: "1 minute" },
-				{ value: "5m", label: "5 minutes" },
-				{ value: "smart", label: "Smart", description: "Default — adaptive 5s→5m, resets when you stop polling" },
-			],
-		},
-	},
-
 	"irc.timeoutMs": {
 		type: "number",
 		default: 120_000,
@@ -4872,8 +4730,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Execution",
 			label: "IRC Timeout",
-			description:
-				"Default timeout for hub message waits (and send await:true) in milliseconds; 0 disables the timeout",
+			description: "Timeout for hub send await:true in milliseconds; 0 disables the timeout",
 			options: [
 				{ value: "0", label: "Disabled" },
 				{ value: "30000", label: "30 seconds" },
@@ -5775,6 +5632,31 @@ export const SETTINGS_SCHEMA = {
 			options: TTS_LOCAL_VOICE_OPTIONS,
 		},
 	},
+	"providers.judgmentProvider": {
+		type: "enum",
+		values: ["auto", "typesafe", "llm"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Tiny Model",
+			label: "Judgment Provider",
+			description:
+				"Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging, eval judge()). Auto uses TypeSafe when authenticated; failed TypeSafe requests fall back through tiny, smol, default, then the active session model.",
+			options: [
+				{ value: "auto", label: "Auto", description: "TypeSafe when authenticated, else the LLM bridge (default)" },
+				{
+					value: "typesafe",
+					label: "TypeSafe",
+					description: "Prefer TypeSafe; fall back through the online model roles on failure",
+				},
+				{
+					value: "llm",
+					label: "LLM",
+					description: "Never TypeSafe; keyword prompts to the tiny/smol or local model",
+				},
+			],
+		},
+	},
 	"providers.tinyModel": {
 		type: "enum",
 		values: TINY_TITLE_MODEL_VALUES,
@@ -6326,7 +6208,11 @@ export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boo
 
 /** Get the default value for a setting path */
 export function getDefault<P extends SettingPath>(path: P): SettingValue<P> {
-	return SETTINGS_SCHEMA[path].default as SettingValue<P>;
+	const definition = SETTINGS_SCHEMA[path];
+	if (definition.type === "array" || definition.type === "record") {
+		return structuredClone(definition.default) as SettingValue<P>;
+	}
+	return definition.default as SettingValue<P>;
 }
 
 /** Check if a path has UI metadata (should appear in settings panel) */
@@ -6377,14 +6263,7 @@ export function getEnumValues(path: SettingPath): readonly string[] | undefined 
 // Derived Types from Schema
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Status line preset - derived from schema */
-export type StatusLinePreset = SettingValue<"statusLine.preset">;
-
-/** Status line separator style - derived from schema */
-export type StatusLineSeparatorStyle = SettingValue<"statusLine.separator">;
-
-/** Tree selector filter mode - derived from schema */
-export type TreeFilterMode = SettingValue<"treeFilterMode">;
+export type { TreeFilterMode } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 
 /** Personality preset - derived from schema */
 export type Personality = SettingValue<"personality">;

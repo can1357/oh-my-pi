@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [18.2.5] - 2026-09-17
+
+### Added
+
+- Added the `omp stream` wire contract (`@oh-my-pi/pi-wire/stream`) for pane screen updates, viewer snapshots and chat, channel metadata, and `live.omp.sh` stream routes.
+- Added authentication support for stencil.so streams, including user identity in welcome messages, channel ownership metadata, and explicit unauthorized and forbidden close codes.
+
+### Changed
+
+- Restricted channel names to the Stencil-compatible alphanumeric-and-underscore format and derived host channels from authentication tokens rather than URL path segments.
+
 ## [16.3.0] - 2026-07-02
 
 ### Breaking Changes

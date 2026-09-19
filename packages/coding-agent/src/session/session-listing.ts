@@ -1,8 +1,13 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
-import { getSessionsDir, logger, parseJsonlLenient, toError } from "@oh-my-pi/pi-utils";
+import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
+import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./title-index";
@@ -144,15 +149,6 @@ function sessionDisplayName(info: SessionInfo): string {
 	const date = new Date(ts);
 	const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 	return `Untitled · ${time}`;
-}
-
-function extractTextFromContent(content: Message["content"]): string {
-	if (typeof content === "string") return content;
-	const text: string[] = [];
-	for (const block of content) {
-		if (block.type === "text") text.push(block.text);
-	}
-	return text.join(" ");
 }
 
 /**
@@ -394,10 +390,11 @@ async function scanSessionFile(
 	file: string,
 	storage: SessionStorage,
 	withStatus: boolean,
+	knownStat?: SessionStorageStat,
 ): Promise<SessionInfo | undefined> {
 	let stat: SessionStorageStat;
 	try {
-		stat = storage.statSync(file);
+		stat = knownStat ?? storage.statSync(file);
 	} catch {
 		// Missing/unstatable file: no stat identity to cache under.
 		return undefined;
@@ -442,13 +439,13 @@ async function scanSessionFile(
 				parsedMessageCount++;
 
 				if (entry.message.role === "user" || entry.message.role === "assistant") {
-					const textContent = extractTextFromContent(entry.message.content);
+					const messageText = textContent(entry.message.content, " ");
 
-					if (textContent) {
-						allMessages.push(textContent);
+					if (messageText) {
+						allMessages.push(messageText);
 
 						if (!firstMessage && entry.message.role === "user") {
-							firstMessage = textContent;
+							firstMessage = messageText;
 						}
 					}
 				}
@@ -673,16 +670,35 @@ export async function getRecentSessions(
 ): Promise<RecentSessionInfo[]> {
 	let files: string[];
 	try {
-		files = storage.listFilesSync(sessionDir, "*.jsonl");
+		files =
+			storage instanceof FileSessionStorage
+				? await Array.fromAsync(new Bun.Glob("*.jsonl").scan(sessionDir), name => path.join(sessionDir, name))
+				: storage.listFilesSync(sessionDir, "*.jsonl");
 	} catch {
 		return [];
 	}
 	const byMtime: Array<{ file: string; stat: SessionStorageStat }> = [];
-	for (const file of files) {
-		try {
-			byMtime.push({ file, stat: storage.statSync(file) });
-		} catch {
-			// Vanished between glob and stat; skip.
+	if (storage instanceof FileSessionStorage) {
+		const stats = await Promise.all(
+			files.map(async file => {
+				try {
+					return { file, stat: await fs.promises.stat(file) };
+				} catch {
+					// Vanished between discovery and stat; skip.
+					return undefined;
+				}
+			}),
+		);
+		for (const entry of stats) {
+			if (entry) byMtime.push(entry);
+		}
+	} else {
+		for (const file of files) {
+			try {
+				byMtime.push({ file, stat: storage.statSync(file) });
+			} catch {
+				// Vanished between discovery and stat; skip.
+			}
 		}
 	}
 	byMtime.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
@@ -699,7 +715,7 @@ export async function getRecentSessions(
 			recent.push({ path: file, name: indexed, timeAgo: formatTimeAgo(stat.mtime) });
 			continue;
 		}
-		const info = await scanSessionFile(file, storage, false);
+		const info = await scanSessionFile(file, storage, false, stat);
 		if (!info) continue;
 		const title = sanitizeSessionName(info.title);
 		if (useIndex && title && info.id) recordSessionTitle(info.id, title);

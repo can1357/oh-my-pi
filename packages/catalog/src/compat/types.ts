@@ -5,7 +5,7 @@
  * `behavior.ts`, `resolve.ts`) exposes to consumers.
  */
 import type { Effort } from "../effort";
-import type { ThinkingControlMode } from "../types";
+import type { KnownApi, ThinkingControlMode, TokenCost } from "../types";
 import type { RevisionOp } from "./revision";
 
 /** Class-membership matcher kinds, most to least specific. */
@@ -32,11 +32,9 @@ export interface CompiledRevisionPrefix {
 	anywhere?: boolean;
 }
 
-/** One compiled reviewed identity correction. */
-export interface CompiledIdentityOverride {
+interface CompiledIdentityOverrideFields {
 	id: string;
 	provider?: string;
-	model: string;
 	logical?: string;
 	class?: string;
 	family?: string;
@@ -48,6 +46,21 @@ export interface CompiledIdentityOverride {
 	provenance: string;
 	expiresAtMs?: number;
 }
+
+/** One compiled reviewed identity correction with exactly one bare-model selector. */
+export type CompiledIdentityOverride = CompiledIdentityOverrideFields &
+	(
+		| {
+				/** Exact bare-model selector. */
+				model: string;
+				glob?: never;
+		  }
+		| {
+				model?: never;
+				/** Anchored, case-insensitive bare-model glob. */
+				glob: string;
+		  }
+	);
 
 /** One compiled model class: matchers, families, revision rules, overrides. */
 export interface CompiledClass {
@@ -293,6 +306,12 @@ export interface CompiledExcludeModels {
 	match: CompiledMatchList;
 }
 
+/** Exact upstream discovery modes excluded from one provider's coding-model roster. */
+export interface CompiledExcludeDiscoveryModes {
+	provider: string;
+	modes: string[];
+}
+
 /** Provider plan-requirement tiers keyed by matcher token lists. */
 export interface CompiledPlanRequirement {
 	provider: string;
@@ -306,6 +325,12 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+/** Provider timezone assumption for offset-less absolute retry-reset timestamps. */
+export interface CompiledRetryResetTimezone {
+	provider: string;
+	offset: string;
+}
+
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {
 	openaiResponsesHeuristic?: CompiledResponsesHeuristic;
@@ -316,10 +341,13 @@ export interface CompiledBehavior {
 	hostedDefaults: CompiledHostedDefault[];
 	apiRoutes: CompiledApiRoutes[];
 	modelLimits: CompiledModelLimits[];
+	excludeDiscoveryModes: CompiledExcludeDiscoveryModes[];
 	excludeModels: CompiledExcludeModels[];
 	planRequirements: CompiledPlanRequirement[];
 	pricingPeers: CompiledPricingPeer[];
+	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
+	referenceIsolatedProviders: string[];
 }
 
 /**
@@ -441,6 +469,10 @@ export interface CompiledOAuthCodeLogin {
 	kind: "oauth-code";
 	clientId?: CompiledAuthValue;
 	clientSecret?: CompiledAuthValue;
+	/** `{base}` placeholder source (the provider's API origin). */
+	baseUrl?: CompiledAuthValue;
+	/** `{auth}` placeholder source for the authorize, token, and userinfo URLs when the issuer is a separate host. */
+	authUrl?: CompiledAuthValue;
 	authorizeUrl: CompiledAuthValue;
 	scopes: string[];
 	scopeSeparator: string;
@@ -520,6 +552,8 @@ export interface CompiledAuthProvider {
 	name: string;
 	env?: { vars: string[] } | { hook: string };
 	allowsMissingApiKey?: boolean;
+	/** APIs whose provider transport resolves credentials without a stored account. */
+	nativeAuthApis?: string[];
 	available?: boolean;
 	showInLoginList?: boolean;
 	storeAs?: string;
@@ -538,6 +572,85 @@ export interface CompiledAuth {
 	providers: CompiledAuthProvider[];
 }
 
+/**
+ * When a provider's seed rows enter the generated bundle:
+ * - `always`: every regeneration; same-id upstream/discovery rows win dedup.
+ * - `fallback`: only when authoritative catalog discovery did not succeed.
+ * - `empty`: only when no other source produced a row for the provider.
+ */
+export type SeedBundlePolicy = "always" | "fallback" | "empty";
+
+/** Catalog-generation discovery settings (`discovery` node in `providers/<id>.kdl`). */
+export interface CompiledProviderDiscovery {
+	/** Human-readable name for generator log messages. */
+	label: string;
+	/** Env vars checked for a generation-time API key; defaults to the provider's `env`. */
+	envVars?: string[];
+	/** OAuth provider whose stored credential may stand in for an API key. */
+	oauthProvider?: string;
+	/** Discovery proceeds without credentials. */
+	allowUnauthenticated?: boolean;
+}
+
+/**
+ * One authored seed row: the intrinsic `ModelSpec` fields plus optional
+ * explicit `thinking` / `compat` overrides compiled from the axis vocabulary
+ * (keyed by resolved field, value-validated at compile time). `seeds.ts`
+ * projects rows to `ModelSpec` at the JSON boundary.
+ */
+export interface CompiledSeedModel {
+	id: string;
+	name: string;
+	api: KnownApi;
+	provider: string;
+	baseUrl: string;
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	supportsTools?: boolean;
+	cost: TokenCost;
+	contextWindow: number | null;
+	maxTokens: number | null;
+	thinking?: Record<string, unknown>;
+	compat?: Record<string, unknown>;
+}
+
+/** A provider's authored seed rows (`seed` node in `providers/<id>.kdl`). */
+export interface CompiledSeed {
+	bundle: SeedBundlePolicy;
+	/**
+	 * `seed`: rows are prepended after upstream merging so they outrank same-id
+	 * rows and never receive cross-provider reference fills. `upstream`
+	 * (default): rows are appended and same-id upstream rows win.
+	 */
+	precedence: "upstream" | "seed";
+	/** Rows in declaration order (inherited `models-from` rows appended last). */
+	models: CompiledSeedModel[];
+}
+
+/**
+ * One chat-model provider's catalog entry: the non-code half of what the
+ * runtime and generator know about a provider. A `providers/<id>.kdl` file
+ * declares one by carrying `default-model`; files without it are wire-compat
+ * only (custom provider ids such as `llama.cpp`).
+ */
+export interface CompiledProvider {
+	id: string;
+	/** Preferred model id when no explicit selection is made. */
+	defaultModel: string;
+	/** Env vars consulted, in order, for the runtime API-key fallback. */
+	envVars?: string[];
+	/** The runtime creates a model manager even without a valid API key. */
+	allowUnauthenticated?: boolean;
+	/** Successful runtime discovery replaces bundled provider models instead of merging. */
+	dynamicModelsAuthoritative?: boolean;
+	/** Generator backfills never copy reasoning/input/limits from same-id rows on other hosts. */
+	skipCrossProviderReferenceFills?: boolean;
+	/** Present only for providers enrolled in `generate-models.ts` discovery. */
+	discovery?: CompiledProviderDiscovery;
+	/** Authored bundled rows, when the provider cannot be discovered at generation time. */
+	seed?: CompiledSeed;
+}
+
 /** The complete compiled rule tree persisted as `rules.json`. */
 export interface CompiledCompatRules {
 	/** Compiled-format version; bump on incompatible shape changes. */
@@ -548,6 +661,8 @@ export interface CompiledCompatRules {
 	cascade: CompiledCascade;
 	behavior: CompiledBehavior;
 	auth: CompiledAuth;
+	/** Catalog provider entries keyed by provider id, sorted. */
+	providers: Record<string, CompiledProvider>;
 }
 
 /** Structured identity of one classified model. */
@@ -589,4 +704,12 @@ export interface ResolvedAxes {
 	wire: Record<string, unknown>;
 	thinking: Record<string, unknown>;
 	catalog: Record<string, unknown>;
+	/**
+	 * Reasoning capability after the exact-model effort upgrade: `true` when the
+	 * target reported reasoning or an exact rule declares a ladder for it (the
+	 * reviewed correction to metadata-less discovery rows). Compat resolvers
+	 * read this instead of the raw spec flag, or one id resolves two different
+	 * wire contracts depending on whether it came from discovery or the bake.
+	 */
+	reasoning: boolean;
 }

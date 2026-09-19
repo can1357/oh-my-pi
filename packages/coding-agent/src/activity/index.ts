@@ -1,34 +1,14 @@
+import { activityOneLine, compareActivityRows } from "@oh-my-pi/pi-tui/overlays/agent-activity";
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
-import type { AgentProgress } from "../task/types";
-
-export type AgentActivityKind = "response" | "tool" | "irc" | "lifecycle";
-export type AgentActivityStatus = "pending" | "success" | "error" | "aborted";
-
-export interface AgentActivityRow {
-	id: string;
-	agentId: string;
-	timestamp: number;
-	kind: AgentActivityKind;
-	title: string;
-	summary: string;
-	status?: AgentActivityStatus;
-	entryId?: string;
-	toolCallId?: string;
-	toolName?: string;
-	from?: string;
-	to?: string;
-	replyTo?: string;
-	source: "live" | "transcript" | "irc";
-}
-
-export interface AgentActivityQuery {
-	agentIds?: ReadonlySet<string>;
-	kinds?: ReadonlySet<AgentActivityKind>;
-	search?: string;
-	before?: { timestamp: number; id: string };
-	limit?: number;
-}
+import type { AgentActivityRow, AgentActivityQuery } from "@oh-my-pi/pi-tui/overlays/agent-activity";
+export type {
+	AgentActivityRow,
+	AgentActivityQuery,
+	AgentActivityKind,
+	AgentActivityStatus,
+} from "@oh-my-pi/pi-tui/overlays/agent-activity";
+export { activityRowsFromProgress } from "@oh-my-pi/pi-tui/overlays/agent-activity";
 
 export interface AgentActivityTranscript {
 	text: string;
@@ -78,28 +58,21 @@ function timestampOf(value: unknown, fallback: number): number {
 	return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function oneLine(value: string): string {
-	return value
-		.replace(/[\r\n\t]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
 function textContent(content: unknown): string {
-	if (typeof content === "string") return oneLine(content);
+	if (typeof content === "string") return activityOneLine(content);
 	if (!Array.isArray(content)) return "";
 	const parts: string[] = [];
 	for (const blockValue of content) {
 		const block = recordOf(blockValue);
 		if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
 	}
-	return oneLine(parts.join(" "));
+	return activityOneLine(parts.join(" "));
 }
 
 function firstString(value: Record<string, unknown>, ...keys: string[]): string | undefined {
 	for (const key of keys) {
 		const candidate = value[key];
-		if (typeof candidate === "string" && candidate.trim()) return oneLine(candidate);
+		if (typeof candidate === "string" && candidate.trim()) return activityOneLine(candidate);
 	}
 	return undefined;
 }
@@ -132,7 +105,7 @@ function argumentsSummary(toolName: string, value: unknown): string {
 			const common = firstString(args, "path", "query", "name", "task", "title");
 			if (common) return common;
 			try {
-				const encoded = oneLine(JSON.stringify(args));
+				const encoded = activityOneLine(JSON.stringify(args));
 				return encoded === "{}" ? toolName : encoded;
 			} catch {
 				return toolName;
@@ -152,15 +125,11 @@ function toolBlocks(content: unknown): Array<{ id: string; name: string; args: u
 	return calls;
 }
 
-function compareRows(a: AgentActivityRow, b: AgentActivityRow): number {
-	return a.timestamp - b.timestamp || a.id.localeCompare(b.id);
-}
-
 function boundedPush(rows: AgentActivityRow[], row: AgentActivityRow): AgentActivityRow[] {
 	const existing = rows.findIndex(candidate => candidate.id === row.id);
 	if (existing >= 0) rows[existing] = row;
 	else rows.push(row);
-	rows.sort(compareRows);
+	rows.sort(compareActivityRows);
 	if (rows.length <= MAX_ROWS_PER_AGENT) return [];
 	return rows.splice(0, rows.length - MAX_ROWS_PER_AGENT);
 }
@@ -171,69 +140,6 @@ function pruneToolRows(state: TranscriptState, evicted: readonly AgentActivityRo
 	for (const [toolCallId, row] of state.toolRows) {
 		if (!retained.has(row.id)) state.toolRows.delete(toolCallId);
 	}
-}
-
-export function activityRowsFromProgress(progress: AgentProgress, lastUpdate = Date.now()): AgentActivityRow[] {
-	const rows: AgentActivityRow[] = [];
-	const recentTools = progress.recentTools ?? [];
-	for (let index = recentTools.length - 1; index >= 0; index--) {
-		const tool = recentTools[index]!;
-		rows.push({
-			id: `live:${progress.id}:tool:${tool.endMs}:${index}`,
-			agentId: progress.id,
-			timestamp: tool.endMs,
-			kind: "tool",
-			title: tool.tool,
-			summary: tool.args || tool.tool,
-			status: "success",
-			toolName: tool.tool,
-			source: "live",
-		});
-	}
-	if (progress.currentTool) {
-		rows.push({
-			id: `live:${progress.id}:current-tool`,
-			agentId: progress.id,
-			timestamp: progress.currentToolStartMs ?? lastUpdate,
-			kind: "tool",
-			title: progress.currentTool,
-			summary: progress.lastIntent ?? progress.currentToolArgs ?? progress.currentTool,
-			status: "pending",
-			toolName: progress.currentTool,
-			source: "live",
-		});
-	}
-	rows.push({
-		id: `live:${progress.id}:lifecycle`,
-		agentId: progress.id,
-		timestamp: lastUpdate,
-		kind: "lifecycle",
-		title: progress.status ?? "running",
-		summary: progress.task ?? progress.description ?? "Agent activity",
-		status:
-			progress.status === "completed"
-				? "success"
-				: progress.status === "failed"
-					? "error"
-					: progress.status === "aborted"
-						? "aborted"
-						: "pending",
-		source: "live",
-	});
-	const response = oneLine((progress.recentOutput ?? []).join(" "));
-	if (response) {
-		rows.push({
-			id: `live:${progress.id}:response`,
-			agentId: progress.id,
-			timestamp: lastUpdate,
-			kind: "response",
-			title: "Response",
-			summary: response,
-			status: progress.status === "failed" ? "error" : progress.status === "aborted" ? "aborted" : "pending",
-			source: "live",
-		});
-	}
-	return rows.sort(compareRows);
 }
 
 export class AgentActivityIndex {
@@ -280,7 +186,7 @@ export class AgentActivityIndex {
 		const liveKeys = new Set(live.map(row => `${row.kind}:${row.toolName ?? row.title}:${row.summary}`));
 		const merged = persisted.filter(row => !liveKeys.has(`${row.kind}:${row.toolName ?? row.title}:${row.summary}`));
 		merged.push(...live);
-		merged.sort(compareRows);
+		merged.sort(compareActivityRows);
 		return merged.slice(-Math.max(0, limit));
 	}
 
@@ -308,7 +214,7 @@ export class AgentActivityIndex {
 				rows.push(row);
 			}
 		}
-		rows.sort(compareRows);
+		rows.sort(compareActivityRows);
 		const limit = Math.max(0, Math.min(MAX_QUERY_LIMIT, query.limit ?? DEFAULT_QUERY_LIMIT));
 		return rows.slice(-limit);
 	}

@@ -165,19 +165,31 @@ export function normalizePathForComparison(inputPath: string): string {
 	return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
 }
 
+/**
+ * Compare paths already normalized by {@link normalizePathForComparison}.
+ *
+ * Returns the relative path (an empty string when the paths are equal), or
+ * `null` when the candidate is outside the root. Callers classifying one
+ * candidate against several static roots can normalize each side once and
+ * reuse the public helpers' containment semantics without repeating realpath
+ * work.
+ */
+export function relativePathWithinNormalizedRoot(normalizedRoot: string, normalizedCandidate: string): string | null {
+	const relative = path.relative(normalizedRoot, normalizedCandidate);
+	if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) return null;
+	return relative;
+}
+
 export function pathIsWithin(root: string, candidate: string): boolean {
 	const normalizedRoot = normalizePathForComparison(root);
 	const normalizedCandidate = normalizePathForComparison(candidate);
-	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+	return relativePathWithinNormalizedRoot(normalizedRoot, normalizedCandidate) !== null;
 }
 
 export function relativePathWithinRoot(root: string, candidate: string): string | null {
-	if (!pathIsWithin(root, candidate)) return null;
 	const normalizedRoot = normalizePathForComparison(root);
 	const normalizedCandidate = normalizePathForComparison(candidate);
-	const relative = path.relative(normalizedRoot, normalizedCandidate);
-	return relative || null;
+	return relativePathWithinNormalizedRoot(normalizedRoot, normalizedCandidate) || null;
 }
 
 let projectDir: string | undefined;
@@ -708,6 +720,11 @@ export function getBrowserRelayDir(): string {
 	return dirs.rootSubdir("browser-relay", "data");
 }
 
+/** Get the profile root for Chromium browsers the browser tool spawns via `app.path` (~/.omp/browser-profiles). */
+export function getBrowserProfilesDir(): string {
+	return dirs.rootSubdir("browser-profiles", "state");
+}
+
 /** Get DOCS_RS cache directory () */
 export function getDocsRsCacheDir(): string {
 	return dirs.rootSubdir("webcache", "cache");
@@ -912,6 +929,16 @@ export function getMemoriesDir(agentDir?: string): string {
 /** Get the terminal sessions directory (~/.omp/agent/terminal-sessions). */
 export function getTerminalSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "terminal-sessions", "state");
+}
+
+/**
+ * Get the persistent registry of custom session files
+ * (~/.omp/agent/custom-session-files). Each `--session-dir`/`--session`
+ * transcript is recorded here as one marker file so storage GC can scan its
+ * exact path after its terminal breadcrumb is overwritten by a later session.
+ */
+export function getCustomSessionFilesDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "custom-session-files", "state");
 }
 
 /** Get the crash log path (~/.omp/agent/omp-crash.log). */
