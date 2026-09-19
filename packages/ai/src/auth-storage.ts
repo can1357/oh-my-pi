@@ -6757,9 +6757,15 @@ export class AuthStorage {
 	 * {@link CredentialRankingStrategy.healableBlockScopes}.
 	 */
 	#reconcileUsageBlockForCredential(provider: Provider, credentialId: number, report: UsageReport): void {
-		const providerKey = this.#getProviderTypeKey(provider, "oauth");
-		const credentialIndex = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
+		const stored = this.#getStoredCredentials(provider);
+		const credentialIndex = stored.findIndex(entry => entry.id === credentialId);
 		if (credentialIndex < 0) return;
+		// Blocks are keyed by the credential's own type: an API-key row lives
+		// under `<provider>:api_key`, so assuming `oauth` would look up a key
+		// that never holds its block and silently skip every heal.
+		const credentialType = stored[credentialIndex]?.credential.type;
+		if (!credentialType) return;
+		const providerKey = this.#getProviderTypeKey(provider, credentialType);
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (provider !== "openai-codex") {
 			// Only a live report proves recovery. A broker can serve its retained
@@ -6855,9 +6861,32 @@ export class AuthStorage {
 
 	#reconcileUsageBlock(request: UsageRequestDescriptor, report: UsageReport): void {
 		if (!this.#supportsUsageBlockHealing(request.provider)) return;
-		const credentialId = this.#findStoredCredentialIdForUsageCredential(request.provider, request.credential);
+		const credentialId =
+			this.#findStoredCredentialIdForUsageCredential(request.provider, request.credential) ??
+			this.#findStoredApiKeyCredentialIdForUsageCredential(request.provider, request.credential);
 		if (credentialId === undefined) return;
 		this.#reconcileUsageBlockForCredential(request.provider, credentialId, report);
+	}
+
+	/**
+	 * Resolve the stored API-key row a usage request belongs to.
+	 *
+	 * {@link AuthStorage.#findStoredCredentialIdForUsageCredential} matches OAuth
+	 * rows by token identity, so key-based providers could never heal a stale
+	 * usage-limit block: an API-key block is not re-probed during selection, so
+	 * one bad report would stand until the plan reset. Matching the resolved key
+	 * gives those providers the same recovery path OAuth already has.
+	 */
+	#findStoredApiKeyCredentialIdForUsageCredential(
+		provider: Provider,
+		credential: UsageCredential,
+	): number | undefined {
+		const apiKey = credential.apiKey;
+		if (!apiKey) return undefined;
+		const match = this.#getStoredCredentials(provider).find(
+			entry => entry.credential.type === "api_key" && entry.credential.key === apiKey,
+		);
+		return match?.id;
 	}
 
 	#findStoredCredentialIdsForUsageReport(report: UsageReport): number[] {

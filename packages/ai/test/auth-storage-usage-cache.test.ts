@@ -539,8 +539,12 @@ describe("AuthStorage usage cache: provider failure policy", () => {
 		let usageCalls = 0;
 		const usageFetch = Object.assign(
 			(input: string | URL | Request) => {
-				if (String(input).endsWith("/tool/user/info.json")) {
+				const url = String(input);
+				if (url.endsWith("/tool/user/info.json")) {
 					return Promise.resolve(Response.json({ code: "200", data: { secToken: "sec-token" } }));
+				}
+				if (url.includes("addon%2Flist")) {
+					return Promise.resolve(Response.json({ data: { DataV2: { data: { data: { total: 0, items: [] } } } } }));
 				}
 				usageCalls++;
 				return Promise.resolve(
