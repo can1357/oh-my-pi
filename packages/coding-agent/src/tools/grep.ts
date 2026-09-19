@@ -23,6 +23,9 @@ import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { tryResolveInternalUrlSync } from "../internal-urls/hyperlink-targets";
+import { parseInternalUrl } from "../internal-urls/parse";
+import { extractResourceUri, resolveTargetServer } from "../internal-urls/mcp-protocol";
+import { MCPManager } from "../mcp/manager";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, truncateHead, truncateLineBytes } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -746,6 +749,31 @@ async function expandVirtualInternalResource(
 	return [{ path: rawPath, content: resource.content, ranges }];
 }
 
+/**
+ * Session gate for `grep <mcp-resource>`: mirrors read's `#handleInternalUrl` gate.
+ * `mcp://<uri>` (and server-advertised native URIs like `ags://secret`) resolve
+ * through the process-global router, which has no session, so a scoped subagent
+ * could otherwise search any connected server's resource contents by URI even
+ * though the scope excludes that server everywhere else. Resolution mirrors the
+ * handler's own settle+re-resolve so both agree on which server owns the URI.
+ */
+async function gateMcpResourceRead(router: InternalUrlRouter, rawPath: string, session: ToolSession): Promise<void> {
+	if (!router.routesToMcpResources(rawPath)) return;
+	const mcpManager = MCPManager.instance();
+	if (!mcpManager) return;
+	const urlMeta = parseInternalUrl(rawPath);
+	const uri = extractResourceUri(urlMeta);
+	let serverName = resolveTargetServer(mcpManager, uri);
+	if (serverName === undefined) {
+		await mcpManager.waitForPendingConnections();
+		await Promise.allSettled(mcpManager.getConnectedServers().map(name => mcpManager.ensureServerResources(name)));
+		serverName = resolveTargetServer(mcpManager, uri);
+	}
+	if (serverName !== undefined && session.isMCPServerResourceAllowed?.(serverName) === false) {
+		throw new ToolError(`No MCP server has resource "${rawPath}".`);
+	}
+}
+
 async function resolveInternalSearchInputs(opts: {
 	pathSpecs: readonly GrepPathSpec[];
 	resolvedPaths: string[];
@@ -761,6 +789,7 @@ async function resolveInternalSearchInputs(opts: {
 	getSessionBranch: ResolveContext["getSessionBranch"];
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
+	session: ToolSession;
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
@@ -794,6 +823,7 @@ async function resolveInternalSearchInputs(opts: {
 		if (!rawPath || opts.archiveDisplayMap.has(rawPath) || !internalRouter.canHandle(rawPath)) {
 			continue;
 		}
+		await gateMcpResourceRead(internalRouter, rawPath, opts.session);
 		// `ssh://[::1]/path` carries `[`/`]` in the IPv6 authority — glob metacharacters
 		// — so check only the path portion for ssh:// (the SSH handler reads a single
 		// remote file; there is no glob expansion). A glob in the remote path still trips.
@@ -968,6 +998,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					getSessionBranch: () => getExperimentalContextSession(this.session).getBranch(),
 					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 					agentRegistry: this.session.agentRegistry,
+					session: this.session,
 				});
 				const searchablePaths = internalResolution.paths;
 				const { virtualResources, virtualPathSet, virtualInputIndexes } = internalResolution;
