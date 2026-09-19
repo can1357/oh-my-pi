@@ -22,7 +22,7 @@ import { type EditMode, type PerFileDiffPreview, renderStreamingFallback } from 
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../tools/eval";
 import { taskCardAgentIds } from "../tools/task";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../tools/todo";
-import { isWaitingPollDetails } from "../tools/hub";
+import { isLiveHubPollDetails, isWaitingPollDetails } from "../tools/hub";
 import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
@@ -301,6 +301,10 @@ export class ToolExecutionComponent extends Container {
 	// Spinner animation for partial task results
 	#spinnerFrame?: number;
 	#spinnerActive = false;
+	// True once this block was a displaceable all-running hub poll. Mixed
+	// refreshes of that tracked poll keep spinning until seal; a pending hub
+	// call that merely shared `#spinnerActive` must not inherit this.
+	#liveHubPoll = false;
 	// Todo write completion strikethrough reveal animation
 	#todoStrikeInterval?: NodeJS.Timeout;
 	// Track if args are still being streamed (for edit/write spinner)
@@ -605,7 +609,20 @@ export class ToolExecutionComponent extends Container {
 			this.#toolName !== "todo" &&
 			!isBackgroundAsyncRunning &&
 			(pendingCallConsumesSpinner || partialResultConsumesSpinner);
-		const needsSpinner = isStreamingArgs || isLivePartialTool || this.#displaceableByToolName === "hub";
+		// Mixed hub waits (completed+running) are historical — EventController
+		// only tracks all-running displaceable polls — so they must not start a
+		// spinner they will never refresh or seal. A tracked poll that later
+		// becomes mixed keeps spinning via `#liveHubPoll` until it is sealed.
+		if (this.#displaceableByToolName === "hub") {
+			this.#liveHubPoll = true;
+		} else if (this.#sealed || !isLiveHubPollDetails(this.#result?.details)) {
+			this.#liveHubPoll = false;
+		}
+		const needsSpinner =
+			isStreamingArgs ||
+			isLivePartialTool ||
+			this.#displaceableByToolName === "hub" ||
+			(!this.#sealed && this.#liveHubPoll && isLiveHubPollDetails(this.#result?.details));
 		if (needsSpinner && !this.#spinnerActive) {
 			const frameCount = theme.spinnerFrames.length;
 			const frame = sharedSpinnerFrame(frameCount);
@@ -718,6 +735,7 @@ export class ToolExecutionComponent extends Container {
 		this.#sealed = true;
 		this.#blockVersion++;
 		this.#displaceableByToolName = undefined;
+		this.#liveHubPoll = false;
 		this.stopAnimation();
 		this.#updateDisplay();
 		this.#ui.requestRender();
@@ -755,6 +773,7 @@ export class ToolExecutionComponent extends Container {
 	 * Stop spinner animation and cleanup resources.
 	 */
 	stopAnimation(): void {
+		this.#liveHubPoll = false;
 		if (this.#spinnerActive) {
 			this.#spinnerActive = false;
 			unregisterSpinnerBlock(this);

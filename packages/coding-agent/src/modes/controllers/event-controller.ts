@@ -2,7 +2,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, isRecord, logger, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
@@ -20,10 +20,13 @@ import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { createUsageRowBlock, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext } from "../../modes/types";
+import type { CoordinationDetails, JobSnapshot } from "@oh-my-pi/pi-tui/tools/hub";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { AsyncJob } from "../../async";
+import type { InteractiveModeContext } from "../../modes/types";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
+import { ASYNC_RESULT_MESSAGE_TYPE } from "../../session/async-job-delivery";
 import {
 	isSilentAbort,
 	isUserInvokedSkillPrompt,
@@ -182,11 +185,13 @@ export class EventController {
 	// Insertion-ordered IRC cards not yet retired; values are the transcript
 	// components each card contributed (see #retireIrcCard for the guard).
 	#liveIrcCards = new Map<string, Component[]>();
-	// Most recent `hub` tool block whose result still had every watched job
-	// running. Kept un-finalized (live) so the next `hub` call displaces it —
-	// one persistent poll instead of a stack of "waiting on N jobs" frames —
-	// and sealed in place the moment anything else lands below it.
+	// Most recent `hub` wait block still watching jobs. Kept live so the next
+	// `hub` call displaces it — one persistent poll instead of a stack of
+	// "waiting on N jobs" frames — and so later job settlement can refresh the
+	// count. Sealed in place the moment anything else lands below it.
 	#displaceablePollComponent: ToolExecutionComponent | undefined = undefined;
+	#displaceablePollDetails: CoordinationDetails | undefined = undefined;
+	#displaceablePollWatchGeneration = 0;
 	// Most recent successful `todo` snapshot in the active turn. It stays live
 	// across intervening tool output so a later `todo` update can replace the
 	// old full list; the turn boundary seals the final snapshot as history.
@@ -767,7 +772,7 @@ export class EventController {
 		}
 		this.#ircExpiryTimers.clear();
 		this.#liveIrcCards.clear();
-		this.#displaceablePollComponent = undefined;
+		this.#clearDisplaceablePollTracker();
 		this.#displaceableTodoComponent = undefined;
 		this.#lastTtsrNotification = undefined;
 		this.#streamingReveal.stop();
@@ -921,6 +926,9 @@ export class EventController {
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
 		this.#ensureWorkingLoaderWhileStreaming();
 		if (event.message.role === "hookMessage" || event.message.role === "custom") {
+			if (event.message.role === "custom" && event.message.customType === ASYNC_RESULT_MESSAGE_TYPE) {
+				this.#refreshDisplaceablePoll(this.#settledJobIdsFromAsyncResult(event.message.details));
+			}
 			const signature = `${event.message.role}:${event.message.customType}:${event.message.timestamp}`;
 			if (this.#renderedCustomMessages.has(signature)) {
 				return;
@@ -1109,15 +1117,97 @@ export class EventController {
 	 * being retracted.
 	 */
 	#resolveDisplaceablePoll(nextToolName?: string): void {
+		if (nextToolName !== "hub") this.#refreshDisplaceablePoll();
 		const previous = this.#displaceablePollComponent;
 		if (!previous) return;
-		this.#displaceablePollComponent = undefined;
-		if (nextToolName === "hub" && previous.isDisplaceableBlock() && this.ctx.chatContainer.canRemoveBlock(previous)) {
+		this.#clearDisplaceablePollTracker();
+		if (nextToolName === "hub" && this.ctx.chatContainer.canRemoveBlock(previous)) {
 			this.ctx.chatContainer.removeChild(previous);
 		}
 		// Sealing stops the waiting-poll spinner and freezes the block (for a
 		// just-removed component it only clears the animation timer).
 		previous.seal();
+		this.ctx.ui.requestRender();
+	}
+
+	#clearDisplaceablePollTracker(): void {
+		this.#displaceablePollComponent = undefined;
+		this.#displaceablePollDetails = undefined;
+		this.#displaceablePollWatchGeneration++;
+	}
+
+	#settledJobIdsFromAsyncResult(details: unknown): ReadonlySet<string> | undefined {
+		if (!isRecord(details) || !Array.isArray(details.jobs)) return undefined;
+		const ids = new Set<string>();
+		for (const job of details.jobs) {
+			if (!isRecord(job) || typeof job.jobId !== "string" || job.jobId.length === 0) continue;
+			ids.add(job.jobId);
+		}
+		return ids.size > 0 ? ids : undefined;
+	}
+
+	#patchPollJobFromLive(job: JobSnapshot, live: AsyncJob, now: number): JobSnapshot {
+		return {
+			...job,
+			status: live.status,
+			label: live.label,
+			durationMs: Math.max(0, now - live.startTime),
+			...(live.resultText ? { resultText: live.resultText } : {}),
+			...(live.errorText ? { errorText: live.errorText } : {}),
+		};
+	}
+
+	#watchDisplaceablePollJobs(): void {
+		const generation = this.#displaceablePollWatchGeneration;
+		const manager = this.ctx.viewSession.asyncJobManager;
+		const jobs = this.#displaceablePollDetails?.jobs;
+		if (!manager || !jobs) return;
+		for (const job of jobs) {
+			const live = manager.getJob(job.id);
+			if (!live) continue;
+			const onSettled = (): void => {
+				if (generation !== this.#displaceablePollWatchGeneration) return;
+				this.#refreshDisplaceablePoll();
+			};
+			void live.promise.then(onSettled, onSettled);
+		}
+	}
+
+	/**
+	 * Rewrite the live waiting-poll snapshot from current job state. Called when
+	 * watched jobs settle (auto-delivery or job promises) so the title does not
+	 * keep advertising a stale waiting-on-N count. Once none of the watched
+	 * jobs are running, the block is sealed as a terminal settled snapshot.
+	 */
+	#refreshDisplaceablePoll(settledIds?: ReadonlySet<string>): void {
+		const component = this.#displaceablePollComponent;
+		const previous = this.#displaceablePollDetails;
+		if (!component || !previous?.jobs?.length) return;
+		const manager = this.ctx.viewSession.asyncJobManager;
+		const now = Date.now();
+		let changed = false;
+		const jobs: JobSnapshot[] = previous.jobs.map(job => {
+			const live = manager?.getJob(job.id);
+			if (live && (live.status !== job.status || live.label !== job.label)) {
+				changed = true;
+				return this.#patchPollJobFromLive(job, live, now);
+			}
+			if (settledIds?.has(job.id) && job.status === "running") {
+				changed = true;
+				return { ...job, status: "completed" };
+			}
+			return job;
+		});
+		if (!changed) return;
+		const details: CoordinationDetails = { ...previous, jobs };
+		component.updateResult({ content: [{ type: "text", text: "" }], details }, false);
+		this.#displaceablePollDetails = details;
+		if (jobs.some(job => job.status === "running")) {
+			this.ctx.ui.requestRender();
+			return;
+		}
+		this.#clearDisplaceablePollTracker();
+		component.seal();
 		this.ctx.ui.requestRender();
 	}
 
@@ -1159,7 +1249,7 @@ export class EventController {
 		if (this.#displaceableTodoComponent && this.#displaceableTodoComponent !== this.#displaceablePollComponent) {
 			components.push(this.#displaceableTodoComponent);
 		}
-		this.#displaceablePollComponent = undefined;
+		this.#clearDisplaceablePollTracker();
 		this.#displaceableTodoComponent = undefined;
 		return components;
 	}
@@ -1889,8 +1979,12 @@ export class EventController {
 				this.#applyToolCompletion(component, event);
 				if (component instanceof ToolExecutionComponent && component.isDisplaceableBlock()) {
 					if (event.toolName === "hub" && component.canBeDisplacedBy("hub")) {
-						// Remember the waiting poll so the next `hub` call can displace it.
+						// Remember the waiting poll so the next `hub` call can displace it,
+						// and so later job settlement can refresh the live count (#12490).
+						this.#displaceablePollWatchGeneration++;
 						this.#displaceablePollComponent = component;
+						this.#displaceablePollDetails = event.result.details as CoordinationDetails | undefined;
+						this.#watchDisplaceablePollJobs();
 					} else if (event.toolName === "todo" && component.canBeDisplacedBy("todo")) {
 						// Successful todo update supersedes the prior live snapshot. A failed
 						// follow-up never reaches this branch (canBeDisplacedBy("todo") returns

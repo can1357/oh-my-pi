@@ -9,14 +9,27 @@
  *    instead of pinning the live viewport); seal() always freezes.
  *  - EventController: a follow-up `hub` call removes the tracked waiting
  *    poll from the transcript; any other tool seals it in place.
+ *  - A live waiting poll refreshes when watched jobs settle (auto-delivery
+ *    or job completion) so the transcript does not keep a stale
+ *    "waiting on N jobs" count (#12490).
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import {
+	stopSharedSpinnerTicker,
+	ToolExecutionComponent,
+	type ToolExecutionHandle,
+} from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { hubToolRenderer } from "@oh-my-pi/pi-tui/tools/hub";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import {
+	ASYNC_RESULT_MESSAGE_TYPE,
+	type AsyncResultDetails,
+} from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
+import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
@@ -108,6 +121,59 @@ describe("hub waiting-poll block lifecycle", () => {
 
 		expect(component.isDisplaceableBlock()).toBe(false);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	// Regression (#12490 follow-up): isLiveHubPollDetails used to start the
+	// shared spinner for any wait with a running job, but EventController only
+	// tracks/seals all-running displaceable polls. A mixed completed+running
+	// result therefore leaked the 80ms ticker and froze "waiting on 1 of 2".
+	it("does not leak a spinner or freeze waiting-on-N for a mixed completed+running poll", () => {
+		vi.useFakeTimers();
+		stopSharedSpinnerTicker();
+		try {
+			const component = makeJobComponent();
+			component.updateResult(pollResult(["completed", "running"]), false);
+
+			expect(component.isDisplaceableBlock()).toBe(false);
+			const output = Bun.stripANSI(component.render(120).join("\n"));
+			expect(output).not.toContain("waiting on");
+			expect(output).toContain("1 job settled");
+
+			vi.advanceTimersByTime(2000);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	// Regression (#12490): `#spinnerActive` is also set by pending/streaming
+	// tool-call paths. A real hub wait that spun while executing, then returned
+	// mixed completed+running, kept spinnerFrame defined so jobsRenderResult
+	// froze on "waiting on 1 of 2". EventController does not track mixed waits,
+	// so nothing refreshed or sealed the card.
+	it("settles mixed completed+running after a pending hub call without leaking the spinner", () => {
+		vi.useFakeTimers();
+		stopSharedSpinnerTicker();
+		const pendingPreview = vi.spyOn(hubToolRenderer, "animatedPendingPreview").mockReturnValue(true);
+		try {
+			const component = makeJobComponent();
+			component.setExecutionStarted();
+			component.render(120);
+			expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+			component.updateResult(pollResult(["completed", "running"]), false);
+
+			expect(component.isDisplaceableBlock()).toBe(false);
+			const output = Bun.stripANSI(component.render(120).join("\n"));
+			expect(output).not.toContain("waiting on");
+			expect(output).toContain("1 job settled");
+
+			vi.advanceTimersByTime(2000);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			pendingPreview.mockRestore();
+			vi.useRealTimers();
+		}
 	});
 
 	it("finalizes a poll that carried cancel outcomes or an error", () => {
@@ -239,6 +305,9 @@ describe("EventController displaces consecutive waiting polls", () => {
 		expect(children).toContain(poll);
 		expect(poll.isTranscriptBlockFinalized()).toBe(true);
 		expect(poll.isDisplaceableBlock()).toBe(false);
+		const sealed = Bun.stripANSI(poll.render(120).join("\n"));
+		expect(sealed).not.toContain("waiting on");
+		expect(sealed).toContain("waited on 2 jobs");
 	});
 
 	it("removes the previous todo snapshot when a later todo update lands in the same turn", async () => {
@@ -355,6 +424,102 @@ describe("EventController displaces consecutive waiting polls", () => {
 		expect(first.isDisplaceableBlock()).toBe(true);
 	});
 
+	it("keeps a live all-running poll titled waiting-on-N until jobs settle", async () => {
+		const { controller, children } = createFixture();
+		const poll = await runPoll(controller, children, "t1");
+		const output = Bun.stripANSI(poll.render(120).join("\n"));
+		expect(output).toContain("waiting on 2 jobs");
+	});
+
+	it("resolves the live waiting poll when auto-delivered jobs settle", async () => {
+		const { controller, children } = createFixture();
+		const poll = await runPoll(controller, children, "t1");
+		expect(Bun.stripANSI(poll.render(120).join("\n"))).toContain("waiting on 2 jobs");
+
+		const message: CustomMessage<AsyncResultDetails> = {
+			role: "custom",
+			customType: ASYNC_RESULT_MESSAGE_TYPE,
+			content: "j0 and j1 finished",
+			display: true,
+			details: {
+				jobs: [
+					{ jobId: "j0", type: "task", label: "job 0" },
+					{ jobId: "j1", type: "task", label: "job 1" },
+				],
+			},
+			timestamp: Date.now(),
+		};
+		await controller.handleEvent({ type: "message_start", message });
+
+		const output = Bun.stripANSI(poll.render(120).join("\n"));
+		expect(output).not.toContain("waiting on");
+		expect(output).toMatch(/2 jobs settled|all watched jobs finished/i);
+		expect(poll.isDisplaceableBlock()).toBe(false);
+		expect(children).toContain(poll);
+	});
+
+	it("updates the live waiting count as watched jobs complete", async () => {
+		const jobs = new Map<
+			string,
+			{
+				id: string;
+				type: "task";
+				status: JobStatus;
+				startTime: number;
+				label: string;
+				abortController: AbortController;
+				promise: Promise<void>;
+				resolve: () => void;
+			}
+		>();
+		for (const id of ["j0", "j1"]) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			jobs.set(id, {
+				id,
+				type: "task",
+				status: "running",
+				startTime: Date.now() - 1_000,
+				label: id,
+				abortController: new AbortController(),
+				promise,
+				resolve,
+			});
+		}
+		const pendingTools = new Map<string, ToolExecutionHandle>();
+		const ctx = createInteractiveModeContext({
+			pendingTools,
+			session: {
+				asyncJobManager: {
+					getJob: (id: string) => jobs.get(id),
+				},
+			},
+		});
+		const children = ctx.chatContainer.children;
+		const controller = new EventController(ctx);
+
+		const poll = await runPoll(controller, children, "t1");
+		expect(Bun.stripANSI(poll.render(120).join("\n"))).toContain("waiting on 2 jobs");
+
+		const first = jobs.get("j0")!;
+		first.status = "completed";
+		first.resolve();
+		await Promise.resolve();
+
+		const afterOne = Bun.stripANSI(poll.render(120).join("\n"));
+		expect(afterOne).toContain("waiting on 1 of 2 jobs");
+		expect(children).toContain(poll);
+
+		const second = jobs.get("j1")!;
+		second.status = "completed";
+		second.resolve();
+		await Promise.resolve();
+
+		const afterAll = Bun.stripANSI(poll.render(120).join("\n"));
+		expect(afterAll).not.toContain("waiting on");
+		expect(afterAll).toMatch(/2 jobs settled|all watched jobs finished/i);
+		expect(poll.isDisplaceableBlock()).toBe(false);
+	});
+
 	it("does not displace a poll that observed completions", async () => {
 		const { controller, children } = createFixture();
 
@@ -378,6 +543,42 @@ describe("EventController displaces consecutive waiting polls", () => {
 		// A poll that carried real results is kept as history.
 		expect(children).toContain(settled);
 		expect(children).toContain(next);
+	});
+
+	it("settles a pending hub call that completes with mixed jobs instead of freezing waiting-on-N", async () => {
+		vi.useFakeTimers();
+		stopSharedSpinnerTicker();
+		const pendingPreview = vi.spyOn(hubToolRenderer, "animatedPendingPreview").mockReturnValue(true);
+		try {
+			const { controller, children } = createFixture();
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: "t1",
+				toolName: "hub",
+				args: { op: "wait", ids: ["j0", "j1"] },
+			});
+			const component = trackComponent(created, children[children.length - 1] as ToolExecutionComponent);
+			component.render(120);
+			expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "t1",
+				toolName: "hub",
+				result: pollResult(["completed", "running"]),
+				isError: false,
+			});
+
+			expect(component.isDisplaceableBlock()).toBe(false);
+			const output = Bun.stripANSI(component.render(120).join("\n"));
+			expect(output).not.toContain("waiting on");
+			expect(output).toContain("1 job settled");
+			vi.advanceTimersByTime(2000);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			pendingPreview.mockRestore();
+			vi.useRealTimers();
+		}
 	});
 });
 

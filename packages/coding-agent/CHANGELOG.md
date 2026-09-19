@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the hub poll block keeping a stale "waiting on N jobs" count after watched jobs finished ([#12490](https://github.com/can1357/oh-my-pi/issues/12490)).
+- Fixed a mixed hub wait snapshot (some jobs done, some still running) keeping a live spinner and "waiting on N" title ([#12490](https://github.com/can1357/oh-my-pi/issues/12490)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

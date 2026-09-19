@@ -167,7 +167,39 @@ describe("job renderer task-result preview", () => {
 			expect(output).toContain("1 job settled");
 		});
 
-		it("shows nothing when isPartial is false and all jobs are running and it is a poll call", () => {
+		it("keeps the live waiting-on count while a poll is still animating", () => {
+			const runningJobsOnly = [
+				{
+					id: "Job1",
+					type: "task" as const,
+					status: "running" as const,
+					label: "Job1 running",
+					durationMs: 1200,
+				},
+				{
+					id: "Job2",
+					type: "task" as const,
+					status: "running" as const,
+					label: "Job2 running",
+					durationMs: 800,
+				},
+			];
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: { op: "wait" as const, jobs: runningJobsOnly },
+			};
+			const component = hubToolRenderer.renderResult(
+				result,
+				{ expanded: true, isPartial: false, spinnerFrame: 1 } as Parameters<typeof hubToolRenderer.renderResult>[1],
+				theme,
+				{ op: "wait", ids: ["Job1", "Job2"] },
+			);
+			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+			expect(output).toContain("waiting on 2 jobs");
+			expect(output).toContain("Job1 running");
+		});
+
+		it("reads a sealed all-running poll as past state instead of an active wait", () => {
 			const runningJobsOnly = [
 				{
 					id: "Job1",
@@ -187,8 +219,9 @@ describe("job renderer task-result preview", () => {
 				theme,
 				{ op: "wait", ids: [] },
 			);
-			const lines = component.render(120) as readonly string[];
-			expect(lines).toHaveLength(0);
+			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+			expect(output).toContain("waited on 1 job");
+			expect(output).not.toContain("waiting on");
 		});
 
 		it("does not collapse running jobs when isPartial is false and list is true", () => {
