@@ -126,6 +126,40 @@ describe("cascade rank precedence", () => {
 		expect(upgraded.thinking.mode).toBe("effort");
 	});
 
+	test("identity-scoped neutral opt-in activates reviewed class and revision ladders only", () => {
+		const cascade = compile(
+			`provider "prov" {
+				thinking-upgrade-neutral #true
+				thinking-efforts "minimal" "low"
+				class "cls" {
+					thinking-upgrade-neutral #true
+					revision ">=2" {
+						thinking-efforts "low" "medium" "xhigh"
+					}
+				}
+				class "other" {
+					revision ">=2" {
+						thinking-efforts "high" "max"
+					}
+				}
+			}`,
+		);
+
+		const upgraded = resolveCascadeRules(cascade, target({ revision: "2.1", reasoning: false }));
+		expect(upgraded.reasoning).toBe(true);
+		expect(upgraded.thinking.efforts).toEqual(["low", "medium", "xhigh"]);
+		expect(upgraded.thinking.upgradeNeutral).toBe(true);
+
+		// Provider-wide opt-in is intentionally insufficient: it must not turn
+		// every neutral discovery row into a reasoning model.
+		const unrelated = resolveCascadeRules(
+			cascade,
+			target({ class: "other", model: "other-model", revision: "2.1", reasoning: false }),
+		);
+		expect(unrelated.reasoning).toBe(false);
+		expect(unrelated.thinking).toEqual({});
+	});
+
 	test("compound wildcard and token selectors preserve conjunction semantics", () => {
 		const cascade: CompiledCascade = {
 			rules: [

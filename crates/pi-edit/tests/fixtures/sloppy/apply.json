@@ -1,12 +1,12 @@
 {
  "cases": [
   {
-   "name": "applies a <SM:FIND>/<SM:PUT> pair",
+   "name": "applies a SM:FIND/SM:PUT pair",
    "files": {
     "a.ts": "const timeout = 1000;\nstart();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst timeout = 1000;\n</SM:FIND>\n<SM:PUT>\nconst timeout = 5000;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst timeout = 1000;\n*** SM:PUT\nconst timeout = 5000;\n"
    },
    "expect": {
     "files": {
@@ -15,12 +15,12 @@
    }
   },
   {
-   "name": "an empty <SM:PUT></SM:PUT> deletes the match",
+   "name": "an empty SM:PUT body deletes the match",
    "files": {
     "a.ts": "keep();\ndebugLog(request);\nfinish();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\ndebugLog(request);\n</SM:FIND>\n<SM:PUT></SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\ndebugLog(request);\n*** SM:PUT\n"
    },
    "expect": {
     "files": {
@@ -37,7 +37,7 @@
     "a.ts": "logger.debug(a);\nlogger.debug(b);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\nlogger.debug(\n</SM:FIND>\n<SM:PUT>\nlogger.trace(\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts all\n*** SM:FIND\nlogger.debug(\n*** SM:PUT\nlogger.trace(\n"
    },
    "expect": {
     "files": {
@@ -46,12 +46,12 @@
    }
   },
   {
-   "name": "multiple pairs in one <SM:EDIT> block apply together",
+   "name": "multiple pairs in one SM:EDIT block apply together",
    "files": {
     "a.ts": "const a = 1;\nconst b = 2;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst a = 1;\n</SM:FIND>\n<SM:PUT>\nconst a = 10;\n</SM:PUT>\n<SM:FIND>\nconst b = 2;\n</SM:FIND>\n<SM:PUT>\nconst b = 20;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst a = 1;\n*** SM:PUT\nconst a = 10;\n*** SM:FIND\nconst b = 2;\n*** SM:PUT\nconst b = 20;\n"
    },
    "expect": {
     "files": {
@@ -60,12 +60,12 @@
    }
   },
   {
-   "name": "content between tags is raw, never entity-decoded",
+   "name": "content between headers is raw, never entity-decoded",
    "files": {
     "a.ts": "if (a < b && c) { run(); }\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nif (a < b && c) { run(); }\n</SM:FIND>\n<SM:PUT>\nif (a < b && c) { stop(); }\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nif (a < b && c) { run(); }\n*** SM:PUT\nif (a < b && c) { stop(); }\n"
    },
    "expect": {
     "files": {
@@ -79,7 +79,7 @@
     "a.ts": "const timeout = 1000;\nrun(timeout);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst timeout = 1000;\n</SM:FIND>\n<SM:PUT>\nconst timeout = 5000;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst timeout = 1000;\n*** SM:PUT\nconst timeout = 5000;\n"
    },
    "expect": {
     "files": {
@@ -93,7 +93,7 @@
     "a.ts": "if (ready) { run(); }\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n⟪};⟫\n</SM:FIND>\n<SM:PUT>\n}\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n⟪};⟫\n*** SM:PUT\n}\n"
    },
    "expect": {
     "error": "pattern is too generic"
@@ -105,7 +105,7 @@
     "a.ts": "const value = oldValue;\nreport(value);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nmissingCall();\n</SM:FIND>\n<SM:PUT>\nnewCall();\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nmissingCall();\n*** SM:PUT\nnewCall();\n"
    },
    "expect": {
     "error": "Operation 1 did not match a.ts"
@@ -117,7 +117,7 @@
     "a.ts": "before();\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nbefore();\n⟪⟫after();\n</SM:FIND>\n<SM:PUT>\n\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nbefore();\n⟪⟫after();\n*** SM:PUT\n\n"
    },
    "expect": {
     "files": {
@@ -131,7 +131,7 @@
     "a.ts": "logger.debug(first);\nlogger.debug(second);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\nlogger.⟪debug│trace⟫(\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts all\n*** SM:FIND\nlogger.⟪debug│trace⟫(\n"
    },
    "expect": {
     "files": {
@@ -146,7 +146,7 @@
     "b.ts": "const b = 2;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst a = 1;\n</SM:FIND>\n<SM:PUT>\nconst a = 10;\n</SM:PUT>\n</SM:EDIT>\n<SM:EDIT path=\"b.ts\">\n<SM:FIND>\nconst b = 2;\n</SM:FIND>\n<SM:PUT>\nconst b = 20;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst a = 1;\n*** SM:PUT\nconst a = 10;\n*** SM:EDIT b.ts\n*** SM:FIND\nconst b = 2;\n*** SM:PUT\nconst b = 20;\n"
    },
    "expect": {
     "files": {
@@ -163,7 +163,7 @@
     "b.ts": "const b = 2;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst a = 1;\n</SM:FIND>\n<SM:PUT>\nconst a = 10;\n</SM:PUT>\n</SM:EDIT>\n<SM:EDIT path=\"b.ts\">\n<SM:FIND>\nmissing\n</SM:FIND>\n<SM:PUT>\nnew\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst a = 1;\n*** SM:PUT\nconst a = 10;\n*** SM:EDIT b.ts\n*** SM:FIND\nmissing\n*** SM:PUT\nnew\n"
    },
    "expect": {
     "error": "No files were modified — sections apply atomically.",
@@ -180,7 +180,7 @@
     "a.ts": "const timeout = readConfig().timeout ?? 1000;\nrun(timeout);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\ntimeout = …⟪1000│5000⟫…\nrun(timeout)\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\ntimeout = …⟪1000│5000⟫…\nrun(timeout)\n"
    },
    "expect": {
     "files": {
@@ -194,7 +194,7 @@
     "a.ts": "const timeout = 1000;\nconst retries = 3;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst timeout = ⟪1000│5000⟫;\nconst retries = ⟪3│5⟫;\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst timeout = ⟪1000│5000⟫;\nconst retries = ⟪3│5⟫;\n"
    },
    "expect": {
     "files": {
@@ -208,7 +208,7 @@
     "a.ts": "const value = oldCall(options);\nreport(value);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = ⟪oldCall(…)│newCall(…) ?? fallback⟫;\nreport(value)\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = ⟪oldCall(…)│newCall(…) ?? fallback⟫;\nreport(value)\n"
    },
    "expect": {
     "files": {
@@ -222,7 +222,7 @@
     "a.ts": "anyhow = { workspace = true }\nitertools = { workspace = true }\ntokio = { workspace = true }\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nitertools = { workspace = true }\n＋jiff = { workspace = true }\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nitertools = { workspace = true }\n＋jiff = { workspace = true }\n"
    },
    "expect": {
     "files": {
@@ -236,7 +236,7 @@
     "a.ts": "first();\nlast();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfirst();\n＋second();\n＋third();\nlast();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfirst();\n＋second();\n＋third();\nlast();\n"
    },
    "expect": {
     "files": {
@@ -250,7 +250,7 @@
     "a.ts": "first();\nold();\nolder();\nlast();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfirst();\n－old();\n－older();\nlast();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfirst();\n－old();\n－older();\nlast();\n"
    },
    "expect": {
     "files": {
@@ -264,7 +264,7 @@
     "a.ts": "start();\nold();\nend();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nstart();\n－old();\n＋fresh();\nend();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nstart();\n－old();\n＋fresh();\nend();\n"
    },
    "expect": {
     "files": {
@@ -278,7 +278,7 @@
     "a.ts": "fn main() {\n\tsetup();\n\trun();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n\tsetup();\n－\trun();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n\tsetup();\n－\trun();\n"
    },
    "expect": {
     "files": {
@@ -292,7 +292,7 @@
     "a.ts": "const retries = 3;\nrun();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst retries = ⟪3│5⟫;\n＋const backoff = 250;\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst retries = ⟪3│5⟫;\n＋const backoff = 250;\n"
    },
    "expect": {
     "files": {
@@ -306,7 +306,7 @@
     "a.ts": "function displayName(user) {\n  if (!user) {\n    return fallback;\n  }\n  return user.name;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n  ⟪if (!user) {\n    return fallback;\n  }\n  return user.name;│return user?.name ?? fallback;⟫\n}\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n  ⟪if (!user) {\n    return fallback;\n  }\n  return user.name;│return user?.name ?? fallback;⟫\n}\n"
    },
    "expect": {
     "files": {
@@ -320,7 +320,7 @@
     "a.ts": "function choose() {\n  if (legacy) {\n    return oldValue;\n  }\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nchoose() …\n⟪if (legacy) {…\nreturn oldValue;…\n}⟫\n…}\n</SM:FIND>\n<SM:PUT>\nreturn newValue;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nchoose() …\n⟪if (legacy) {…\nreturn oldValue;…\n}⟫\n…}\n*** SM:PUT\nreturn newValue;\n"
    },
    "expect": {
     "files": {
@@ -334,7 +334,7 @@
     "a.ts": "const value = compute(input);\nreport(value);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = …⟪⟫compute(input)…\nreport(value)\n</SM:FIND>\n<SM:PUT>\nawait \n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = …⟪⟫compute(input)…\nreport(value)\n*** SM:PUT\nawait \n"
    },
    "expect": {
     "files": {
@@ -348,7 +348,7 @@
     "a.ts": "function runTask() {\n  prepare();\n  debugLog(request);\n  return result;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nrunTask(…\n⟪debugLog(request);⟫…\nreturn result\n</SM:FIND>\n<SM:PUT></SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nrunTask(…\n⟪debugLog(request);⟫…\nreturn result\n*** SM:PUT\n"
    },
    "expect": {
     "files": {
@@ -362,7 +362,7 @@
     "a.ts": "const first = avlue;\nconst second = avlue;\nconst third = avlue;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\n= ⟪avlue⟫;\n</SM:FIND>\n<SM:PUT>\nvalue\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts all\n*** SM:FIND\n= ⟪avlue⟫;\n*** SM:PUT\nvalue\n"
    },
    "expect": {
     "files": {
@@ -376,10 +376,10 @@
     "a.ts": "const value = presentValue;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\n= ⟪missingValue⟫;\n</SM:FIND>\n<SM:PUT>\nnextValue\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts all\n*** SM:FIND\n= ⟪missingValue⟫;\n*** SM:PUT\nnextValue\n"
    },
    "expect": {
-    "error": "<SM:EDIT all> found 0 matches"
+    "error": "*** SM:EDIT all found 0 matches"
    }
   },
   {
@@ -388,7 +388,7 @@
     "a.ts": "const value = oldValue;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n⟪oldValue⟫\n</SM:FIND>\n<SM:PUT>\nnextValue\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n⟪oldValue⟫\n*** SM:PUT\nnextValue\n"
    },
    "expect": {
     "files": {
@@ -402,7 +402,7 @@
     "a.ts": "const timeout = readConfig() ?? 1000;\nrun(timeout);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst timeout …⟪1000⟫…\nrun(timeout)\n</SM:FIND>\n<SM:PUT>\n5000\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst timeout …⟪1000⟫…\nrun(timeout)\n*** SM:PUT\n5000\n"
    },
    "expect": {
     "files": {
@@ -416,7 +416,7 @@
     "a.ts": "function read() {\n  prepare();\n  return oldValue;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfunction read() {…\n  return oldValue;\n}\n</SM:FIND>\n<SM:PUT>\nfunction read() {\n  return newValue;\n}\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfunction read() {…\n  return oldValue;\n}\n*** SM:PUT\nfunction read() {\n  return newValue;\n}\n"
    },
    "expect": {
     "files": {
@@ -430,7 +430,7 @@
     "a.ts": "function outer() {\n  if (ready) {\n    oldCall();\n    keep();\n  }\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n  if (ready) {\n    oldCall();\n    keep();\n  }\n</SM:FIND>\n<SM:PUT>\nif (ready) {\n  newCall();\n  keep();\n}\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n  if (ready) {\n    oldCall();\n    keep();\n  }\n*** SM:PUT\nif (ready) {\n  newCall();\n  keep();\n}\n"
    },
    "expect": {
     "files": {
@@ -444,7 +444,7 @@
     "a.ts": "function run() {\n    const getContrastVsWhite = () => value;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n    const getContrastVsWhite = () => value;\n</SM:FIND>\n<SM:PUT>\n\tconst getContrastVsWhite = () => value;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n    const getContrastVsWhite = () => value;\n*** SM:PUT\n\tconst getContrastVsWhite = () => value;\n"
    },
    "expect": {
     "files": {
@@ -458,7 +458,7 @@
     "a.ts": "const shouldRun = left || right;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nleft && right\n</SM:FIND>\n<SM:PUT>\nleft ?? right\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nleft && right\n*** SM:PUT\nleft ?? right\n"
    },
    "expect": {
     "error": "did not match a.ts"
@@ -470,7 +470,7 @@
     "a.ts": "before();\n\nconst removed = true;\n\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst removed = true;\n</SM:FIND>\n<SM:PUT>\n   \n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst removed = true;\n*** SM:PUT\n   \n"
    },
    "expect": {
     "files": {
@@ -484,7 +484,7 @@
     "a.ts": "if (enwlineIndex === -1) {\n  use(enwlineIndex);\n  next(enwlineIndex);\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nif (⟪enwlineIndex⟫ === -1) {\n  use(⟪enwlineIndex⟫);\n  next(⟪enwlineIndex⟫);\n</SM:FIND>\n<SM:PUT>\nnewlineIndex\nnewlineIndex\nnewlineIndex\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nif (⟪enwlineIndex⟫ === -1) {\n  use(⟪enwlineIndex⟫);\n  next(⟪enwlineIndex⟫);\n*** SM:PUT\nnewlineIndex\nnewlineIndex\nnewlineIndex\n"
    },
    "expect": {
     "files": {
@@ -498,7 +498,7 @@
     "a.ts": "if (avlue === first) use(avlue);\nconst second = avlue;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nif (⟪avlue⟫ === first) use(⟪avlue⟫);\nconst second = ⟪avlue⟫;\n</SM:FIND>\n<SM:PUT>\nvalue\n…\nvalue\n…\nvalue\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nif (⟪avlue⟫ === first) use(⟪avlue⟫);\nconst second = ⟪avlue⟫;\n*** SM:PUT\nvalue\n…\nvalue\n…\nvalue\n"
    },
    "expect": {
     "files": {
@@ -512,7 +512,7 @@
     "a.ts": "const first = oldA;\nconst second = oldB;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst first = ⟪oldA⟫;\nconst second = ⟪oldB⟫;\n</SM:FIND>\n<SM:PUT>\ncomputeA(\n  input,\n)\n…\ncomputeB(\n  input,\n)\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst first = ⟪oldA⟫;\nconst second = ⟪oldB⟫;\n*** SM:PUT\ncomputeA(\n  input,\n)\n…\ncomputeB(\n  input,\n)\n"
    },
    "expect": {
     "files": {
@@ -526,10 +526,10 @@
     "a.ts": "first oldA extra\nsecond oldB\nthird oldC\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfirst ⟪oldA⟫…\nsecond ⟪oldB⟫\nthird ⟪oldC⟫\n</SM:FIND>\n<SM:PUT>\nnewA\n…\nnewC\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfirst ⟪oldA⟫…\nsecond ⟪oldB⟫\nthird ⟪oldC⟫\n*** SM:PUT\nnewA\n…\nnewC\n"
    },
    "expect": {
-    "error": "has 3 selections, but <SM:PUT> proves neither positional substitution nor whole-span replacement"
+    "error": "has 3 selections, but *** SM:PUT proves neither positional substitution nor whole-span replacement"
    }
   },
   {
@@ -538,7 +538,7 @@
     "a.ts": "const pair = oldA + oldB;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst pair = ⟪oldA⟫ + ⟪oldB⟫;\n</SM:FIND>\n<SM:PUT>\nnewValue\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst pair = ⟪oldA⟫ + ⟪oldB⟫;\n*** SM:PUT\nnewValue\n"
    },
    "expect": {
     "error": "Copy-ready per-selection interpretation:"
@@ -550,7 +550,7 @@
     "a.ts": "const newlineIndex = stdinBuffer.indexOf('n');\nif (enwlineIndex === -1) return;\nconst line = stdinBuffer.slice(0, enwlineIndex).trim();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\nenwlineIndex⟪enwlineIndex│newlineIndex⟫\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts all\n*** SM:FIND\nenwlineIndex⟪enwlineIndex│newlineIndex⟫\n"
    },
    "expect": {
     "files": {
@@ -564,7 +564,7 @@
     "a.ts": "    if (entryRow)\n      throw invalidSession(entryId);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n    if (entryRow)\n    if (⟪entryRow│!entryRow⟫)\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n    if (entryRow)\n    if (⟪entryRow│!entryRow⟫)\n"
    },
    "expect": {
     "files": {
@@ -578,7 +578,7 @@
     "a.ts": "const value = oldValue;\nreport(value);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = ⟪oldValue;\nreport(value);\n</SM:FIND>\n<SM:PUT>\nnextValue\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = ⟪oldValue;\nreport(value);\n*** SM:PUT\nnextValue\n"
    },
    "expect": {
     "error": "unclosed selection marker ⟪; add closing ⟫"
@@ -590,7 +590,7 @@
     "a.ts": "const value = oldValue;\nreport(value);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = oldValue⟫;\nreport(value);\n</SM:FIND>\n<SM:PUT>\nnextValue\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = oldValue⟫;\nreport(value);\n*** SM:PUT\nnextValue\n"
    },
    "expect": {
     "error": "unmatched closing selection marker ⟫; add opening ⟪"
@@ -602,7 +602,7 @@
     "a.ts": "const value = oldValue;\nreport(value);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = ⟪oldValue│newValue⟫;⟫\nreport(value)\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = ⟪oldValue│newValue⟫;⟫\nreport(value)\n"
    },
    "expect": {
     "error": "unmatched closing selection marker ⟫; add opening ⟪"
@@ -614,7 +614,7 @@
     "a.ts": "function run() {\n  finish();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfunction run() {\n⟪⟫  finish();\n}\n</SM:FIND>\n<SM:PUT>\n  start();\n\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfunction run() {\n⟪⟫  finish();\n}\n*** SM:PUT\n  start();\n"
    },
    "expect": {
     "files": {
@@ -628,7 +628,7 @@
     "a.ts": "const b = avlue.models;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\navlue\n</SM:FIND>\n<SM:PUT>\nvalue\n</SM:PUT>\n<SM:FIND>\nconst b = avlue.models;\n</SM:FIND>\n<SM:PUT>\nconst b = other.models;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts all\n*** SM:FIND\navlue\n*** SM:PUT\nvalue\n*** SM:FIND\nconst b = avlue.models;\n*** SM:PUT\nconst b = other.models;\n"
    },
    "expect": {
     "error": "target overlapping original spans"
@@ -640,19 +640,19 @@
     "a.ts": "if (a < b) { run(); }\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nif (a &lt; b) { run(); }\n</SM:FIND>\n<SM:PUT>\nif (a > b) { run(); }\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nif (a &lt; b) { run(); }\n*** SM:PUT\nif (a > b) { run(); }\n"
    },
    "expect": {
     "error": "did not match"
    }
   },
   {
-   "name": "gaps in <SM:FIND> re-emit through … in <SM:PUT>",
+   "name": "gaps in SM:FIND re-emit through … in SM:PUT",
    "files": {
     "a.ts": "function legacy(a) {\n  stage(a);\n  commit(a);\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfunction legacy(a) {\n…\n}\n</SM:FIND>\n<SM:PUT>\nfunction modern(a) {\n…\n}\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfunction legacy(a) {\n…\n}\n*** SM:PUT\nfunction modern(a) {\n…\n}\n"
    },
    "expect": {
     "files": {
@@ -666,7 +666,7 @@
     "a.ts": "before();\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nbefore();\n⟪│⟫after();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nbefore();\n⟪│⟫after();\n"
    },
    "expect": {
     "error": "makes no change"
@@ -678,7 +678,7 @@
     "a.ts": "reportStatus();\nreportStatus();\nfinish();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nreportStatus();\n⟪reportStatus();\n│⟫\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nreportStatus();\n⟪reportStatus();\n│⟫\n"
    },
    "expect": {
     "files": {
@@ -692,10 +692,10 @@
     "a.ts": "use std::time::Duration;\n\nfn combined() {}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nuse std::time::Duration;\n</SM:FIND>\n<SM:PUT>\nuse std::{sync::Arc, time::Duration};\n…\nfn combined() {}\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nuse std::time::Duration;\n*** SM:PUT\nuse std::{sync::Arc, time::Duration};\n…\nfn combined() {}\n"
    },
    "expect": {
-    "error": "whole-line … with no <SM:FIND> gap to re-emit"
+    "error": "whole-line … with no *** SM:FIND gap to re-emit"
    }
   },
   {
@@ -704,7 +704,7 @@
     "a.ts": "im = { workspace = true }\nitertools = { workspace = true }\nnext = { workspace = true }\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nitertools = { workspace = true }\n⟪│jiff = { workspace = true }⟫\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nitertools = { workspace = true }\n⟪│jiff = { workspace = true }⟫\n"
    },
    "expect": {
     "files": {
@@ -718,7 +718,7 @@
     "a.ts": "Copyright (c) 2025 First Author\nCopyright (c) 2026 Second Author\n\nPermission is granted\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nCopyright (c) 2026 Second Author\n⟪│Copyright (c) 2026 Third Author\n⟫\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nCopyright (c) 2026 Second Author\n⟪│Copyright (c) 2026 Third Author\n⟫\n"
    },
    "expect": {
     "files": {
@@ -732,7 +732,7 @@
     "a.ts": "alpha = 1\nomega = 2"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nomega = 2\n⟪│zeta = 3⟫\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nomega = 2\n⟪│zeta = 3⟫\n"
    },
    "expect": {
     "files": {
@@ -746,7 +746,7 @@
     "a.ts": "const timeout = 5000;\nconst debug = true;\nrun();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst timeout = 5000;\n⟪│\nconst retries = 3;⟫\n</SM:FIND>\n<SM:FIND>\n⟪const debug = true;│⟫\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst timeout = 5000;\n⟪│\nconst retries = 3;⟫\n*** SM:FIND\n⟪const debug = true;│⟫\n"
    },
    "expect": {
     "files": {
@@ -760,7 +760,7 @@
     "a.ts": "const moved = createMoved();\nbefore();\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n⟪const moved = createMoved();│⟫\n</SM:FIND>\n<SM:FIND>\nbefore();\n⟪│\n»1\n⟫\nafter();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n⟪const moved = createMoved();│⟫\n*** SM:FIND\nbefore();\n⟪│\n»1\n⟫\nafter();\n"
    },
    "expect": {
     "files": {
@@ -774,7 +774,7 @@
     "a.ts": "use std::{\n\tfs,\n\titer,\n};\n\nfn main() {\n\trun();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n\tfs,\n＋\tio,\n…\nfn main() {\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n\tfs,\n＋\tio,\n…\nfn main() {\n"
    },
    "expect": {
     "files": {
@@ -788,7 +788,7 @@
     "a.ts": "run();\ndone();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nrun();\n＋const sel = '⟪a│b⟫';\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nrun();\n＋const sel = '⟪a│b⟫';\n"
    },
    "expect": {
     "files": {
@@ -802,7 +802,7 @@
     "a.ts": "export interface RetryPolicy {\n\tlimit: number;\n\tjitter: boolean;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n\tlimit: number;\n＋\t/** Delay between attempts in ms */\n＋\tdelayMs: number;\n\tjitter: boolean;\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n\tlimit: number;\n＋\t/** Delay between attempts in ms */\n＋\tdelayMs: number;\n\tjitter: boolean;\n"
    },
    "expect": {
     "files": {
@@ -816,7 +816,7 @@
     "a.ts": "function run() {\n  start();\n\n  end();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n  start();\n\n＋  inserted();\n \n  end();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n  start();\n\n＋  inserted();\n \n  end();\n"
    },
    "expect": {
     "files": {
@@ -830,7 +830,7 @@
     "a.ts": "start();\nmiddle();\nend();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nmiddle();\n</SM:FIND>\n<SM:PUT>\n＋replacement();\n＋more();\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nmiddle();\n*** SM:PUT\n＋replacement();\n＋more();\n"
    },
    "expect": {
     "files": {
@@ -844,7 +844,7 @@
     "a.ts": "alpha();\nbeta();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nbeta();\n</SM:FIND>\n<SM:PUT>\n－beta();\n＋gamma();\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nbeta();\n*** SM:PUT\n－beta();\n＋gamma();\n"
    },
    "expect": {
     "files": {
@@ -858,7 +858,7 @@
     "a.ts": "function dispatch(request: Request) {\n\treturn send(request);\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfunction dispatch(request: Request) {\n＋\tvalidate(request);\n\treturn send(request);\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfunction dispatch(request: Request) {\n＋\tvalidate(request);\n\treturn send(request);\n"
    },
    "expect": {
     "files": {
@@ -872,7 +872,7 @@
     "a.ts": "before();\n\nconst removed = true;\n\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst removed = true;\n</SM:FIND>\n<SM:PUT></SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst removed = true;\n*** SM:PUT\n"
    },
    "expect": {
     "files": {
@@ -886,7 +886,7 @@
     "a.ts": "before();\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nbefore();\n⟪⟫after();\n</SM:FIND>\n<SM:PUT>\ninserted();\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nbefore();\n⟪⟫after();\n*** SM:PUT\ninserted();\n"
    },
    "expect": {
     "files": {
@@ -900,7 +900,7 @@
     "a.ts": "const value = oldValue;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = ⟪oldValue⟫;\n</SM:FIND>\n<SM:PUT>\nnewValue\n</SM:PUT>\n<SM:FIND>\n⟪oldValue⟫\n</SM:FIND>\n<SM:PUT>\nnewerValue\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = ⟪oldValue⟫;\n*** SM:PUT\nnewValue\n*** SM:FIND\n⟪oldValue⟫\n*** SM:PUT\nnewerValue\n"
    },
    "expect": {
     "error": "Operations 1 and 2 target overlapping original spans"
@@ -912,7 +912,7 @@
     "a.ts": "start();\nconst removed = true;\nmiddle();\nconst target = oldValue;\nend();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst removed = true;\n</SM:FIND>\n<SM:PUT></SM:PUT>\n<SM:FIND>\nmiddle();\n</SM:FIND>\n<SM:PUT>\nmiddleChanged();\n</SM:PUT>\n<SM:FIND>\nstart();…\nconst removed = true;…\n⟪const target = oldValue;⟫…\nend();\n</SM:FIND>\n<SM:PUT>\nconst target = newValue;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst removed = true;\n*** SM:PUT\n*** SM:FIND\nmiddle();\n*** SM:PUT\nmiddleChanged();\n*** SM:FIND\nstart();…\nconst removed = true;…\n⟪const target = oldValue;⟫…\nend();\n*** SM:PUT\nconst target = newValue;\n"
    },
    "expect": {
     "files": {
@@ -926,7 +926,7 @@
     "a.ts": "for (let i = 0; i < 100; i--) {\n  run();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfor (let i = 0; i < ⟪100⟫; i--;) {\n</SM:FIND>\n<SM:PUT>\n10\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfor (let i = 0; i < ⟪100⟫; i--;) {\n*** SM:PUT\n10\n"
    },
    "expect": {
     "files": {
@@ -940,7 +940,7 @@
     "a.ts": "const result = calculateValue(input);\nreport(result);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst result = …⟪calculateVale(input)⟫…\nreport(result)\n</SM:FIND>\n<SM:PUT>\ncalculateFast(input)\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst result = …⟪calculateVale(input)⟫…\nreport(result)\n*** SM:PUT\ncalculateFast(input)\n"
    },
    "expect": {
     "files": {
@@ -954,7 +954,7 @@
     "a.ts": "throw new Error(\"not-ready\");\nhandleFailure(error);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nthrow new Error(⟪“not—ready”⟫);…\nhandleFailure(\n</SM:FIND>\n<SM:PUT>\n\"ready\"\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nthrow new Error(⟪“not—ready”⟫);…\nhandleFailure(\n*** SM:PUT\n\"ready\"\n"
    },
    "expect": {
     "files": {
@@ -968,7 +968,7 @@
     "a.ts": "const value = oldCall(options);\nreport(value);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = ⟪oldCall(…);⟫…\nreport(value)\n</SM:FIND>\n<SM:PUT>\nnewCall(…) ?? […fallback]\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = ⟪oldCall(…);⟫…\nreport(value)\n*** SM:PUT\nnewCall(…) ?? […fallback]\n"
    },
    "expect": {
     "files": {
@@ -982,7 +982,7 @@
     "a.ts": "fn() {\n  run(a);\n\n  run(a);\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n  run(a);"
+    "input": "*** SM:EDIT a.ts\n  run(a);"
    },
    "expect": {
     "files": {
@@ -996,7 +996,7 @@
     "a.ts": "open() {\n  work(unit);\n\n  work(unit);\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n⟪  work(unit);\n│⟫"
+    "input": "*** SM:EDIT a.ts\n⟪  work(unit);\n│⟫"
    },
    "expect": {
     "files": {
@@ -1010,7 +1010,7 @@
     "a.ts": "    if (!entryRow)\n      throw invalid();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n    if (entryRow)\n      throw invalid();"
+    "input": "*** SM:EDIT a.ts\n    if (entryRow)\n      throw invalid();"
    },
    "expect": {
     "files": {
@@ -1024,7 +1024,7 @@
     "a.ts": "import { parseMCPToolName } from \"../mcp\";\nimport type { ToolRenderer } from \"./renderers\";\n\nrun();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\nimport type { ToolActivitySummary, ToolRenderer } from \"./renderers\";"
+    "input": "*** SM:EDIT a.ts\nimport type { ToolActivitySummary, ToolRenderer } from \"./renderers\";"
    },
    "expect": {
     "files": {
@@ -1038,10 +1038,10 @@
     "a.ts": "const a = 1;\nkeep();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\nawait fetchRemoteConfig(session);"
+    "input": "*** SM:EDIT a.ts\nawait fetchRemoteConfig(session);"
    },
    "expect": {
-    "error": "has <SM:FIND> but no <SM:PUT>"
+    "error": "has *** SM:FIND but no *** SM:PUT"
    }
   },
   {
@@ -1050,7 +1050,7 @@
     "a.ts": "run(alpha);\nrun(alpha);\ndone();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\nrun(alpha);\ndone();"
+    "input": "*** SM:EDIT a.ts\nrun(alpha);\ndone();"
    },
    "expect": {
     "files": {
@@ -1064,7 +1064,7 @@
     "a.ts": "function greet(name) {\n  console.log(\"hi \" + name);\n  return name;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n function greet(name) {\n-  console.log(\"hi \" + name);\n+  console.log(\"hello \" + name);\n+  audit(name);"
+    "input": "*** SM:EDIT a.ts\n function greet(name) {\n-  console.log(\"hi \" + name);\n+  console.log(\"hello \" + name);\n+  audit(name);"
    },
    "expect": {
     "files": {
@@ -1078,7 +1078,7 @@
     "a.ts": "alpha();\nbeta();\ngamma();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n alpha();\n+inserted();\n@@\n-gamma();\n+delta();"
+    "input": "*** SM:EDIT a.ts\n alpha();\n+inserted();\n@@\n-gamma();\n+delta();"
    },
    "expect": {
     "files": {
@@ -1092,7 +1092,7 @@
     "a.ts": "if (ready) {\n  value = first;\n} else {\n  value = second;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nif (ready) {\n  value = ⟪first⟫;\n} else {\n  value = ⟪second⟫;\n}\n</SM:FIND>\n<SM:PUT>\nif (ready) {\n  value = second;\n} else {\n  value = first;\n}\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nif (ready) {\n  value = ⟪first⟫;\n} else {\n  value = ⟪second⟫;\n}\n*** SM:PUT\nif (ready) {\n  value = second;\n} else {\n  value = first;\n}\n"
    },
    "expect": {
     "files": {
@@ -1106,7 +1106,7 @@
     "a.ts": "function first() {\n  return value;\n}\nfunction second() {\n  return value;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nreturn value;\n</SM:FIND>\n<SM:PUT>\nreturn next;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nreturn value;\n*** SM:PUT\nreturn next;\n"
    },
    "expect": {
     "error": "ambiguous: 2 ordered tuples match"
@@ -1118,7 +1118,7 @@
     "a.ts": "class Terminal {\n  private _kittyProtocolActive = true;\n  private one = 1;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nprivate _kittyProtocolActive = …⟪true⟫…;\n</SM:FIND>\n<SM:PUT>\nprivate _kittyProtocolActive = false;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nprivate _kittyProtocolActive = …⟪true⟫…;\n*** SM:PUT\nprivate _kittyProtocolActive = false;\n"
    },
    "expect": {
     "files": {
@@ -1132,7 +1132,7 @@
     "a.ts": "if (enwlineIndex === -1) {\n  return;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nif (…⟪enwlineIndex⟫… === -1) {\n</SM:FIND>\n<SM:PUT>\nif (newlineIndex === -1) {\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nif (…⟪enwlineIndex⟫… === -1) {\n*** SM:PUT\nif (newlineIndex === -1) {\n"
    },
    "expect": {
     "files": {
@@ -1146,7 +1146,7 @@
     "a.ts": "const value = oldValue;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = oldValue;\n</SM:FIND>\n<SM:PUT>\nconst value = newValue;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = oldValue;\n*** SM:PUT\nconst value = newValue;\n"
    },
    "expect": {
     "files": {
@@ -1160,7 +1160,7 @@
     "a.ts": "before();\nobsolete();\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n…\n⟪obsolete();⟫\n…\n</SM:FIND>\n<SM:PUT></SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n…\n⟪obsolete();⟫\n…\n*** SM:PUT\n"
    },
    "expect": {
     "files": {
@@ -1174,7 +1174,7 @@
     "a.ts": "function f() {\n  a();\n  b();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfunction f() {\n…\n}\n</SM:FIND>\n<SM:PUT>\nfunction f() {\n  return `${x}[… ]${y}`;\n}\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfunction f() {\n…\n}\n*** SM:PUT\nfunction f() {\n  return `${x}[… ]${y}`;\n}\n"
    },
    "expect": {
     "files": {
@@ -1188,7 +1188,7 @@
     "a.ts": "  screen = [y -> Blank],  \\* viewport\nnext();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n  screen = [y -> ⟪Blank⟫],  \\* viewport\n</SM:FIND>\n<SM:PUT>\n  screen = [y -> IF y = 1 THEN SRow ELSE Blank],  \\* row 1 is shell\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n  screen = [y -> ⟪Blank⟫],  \\* viewport\n*** SM:PUT\n  screen = [y -> IF y = 1 THEN SRow ELSE Blank],  \\* row 1 is shell\n"
    },
    "expect": {
     "files": {
@@ -1202,7 +1202,7 @@
     "a.ts": "keep();\ndebugLog(request);\nfinish();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\ndebugLog(request);\n</SM:FIND>\n<SM:PUT></SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\ndebugLog(request);\n*** SM:PUT\n"
    },
    "expect": {
     "files": {
@@ -1219,7 +1219,7 @@
     "a.ts": "first();\nsecond();\nconst value = current;\nlast();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = current;\n</SM:FIND>\n<SM:PUT>\nconst value = current;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = current;\n*** SM:PUT\nconst value = current;\n"
    },
    "expect": {
     "error": "Current file content near the closest match"
@@ -1231,7 +1231,7 @@
     "a.ts": "over\ntime.\n\n\n### Builtins\n#### Bash\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\ntime.\n\n\n＋#### Intent injection\n\n\n### Builtins\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\ntime.\n\n\n＋#### Intent injection\n\n\n### Builtins\n"
    },
    "expect": {
     "files": {
@@ -1245,7 +1245,7 @@
     "a.ts": "fn main() {\n\tsetup();\n\trun();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nsetup();\n＋probe();\nrun();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nsetup();\n＋probe();\nrun();\n"
    },
    "expect": {
     "files": {
@@ -1259,7 +1259,7 @@
     "a.ts": "alpha();\nbeta();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nalpha();\n#### Intent injection\n＋one();\nbeta();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nalpha();\n#### Intent injection\n＋one();\nbeta();\n"
    },
    "expect": {
     "error": "Unmarked MATCH lines must already exist in the file; \"#### Intent injection\" does not."
@@ -1271,25 +1271,11 @@
     "a.ts": "over\ntime.\n\n### Builtins\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nover\ntime.\n</SM:FIND>\n<SM:PUT>\n＋#### Intent injection\n\n＋body text\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nover\ntime.\n*** SM:PUT\n＋#### Intent injection\n\n＋body text\n"
    },
    "expect": {
     "files": {
      "a.ts": "over\ntime.\n#### Intent injection\n\nbody text\n\n### Builtins\n"
-    }
-   }
-  },
-  {
-   "name": "drops apply-patch end-of-edit sentinels from the payload",
-   "files": {
-    "a.ts": "start();\nmiddle();\nend();\n"
-   },
-   "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nmiddle();\n</SM:FIND>\n<SM:PUT>\nreplacement();\n</SM:PUT>\n</SM:EDIT>\n*** End of edit"
-   },
-   "expect": {
-    "files": {
-     "a.ts": "start();\nreplacement();\nend();\n"
     }
    }
   },
@@ -1299,7 +1285,7 @@
     "a.ts": "fn main() {\n    setup();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n    setup();\n    ＋run();\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n    setup();\n    ＋run();\n"
    },
    "expect": {
     "files": {
@@ -1308,12 +1294,12 @@
    }
   },
   {
-   "name": "a multi-line empty <SM:PUT> block also deletes",
+   "name": "a multi-line empty SM:PUT body also deletes",
    "files": {
     "a.ts": "keep();\ndebugLog(request);\nfinish();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\ndebugLog(request);\n</SM:FIND>\n<SM:PUT></SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\ndebugLog(request);\n*** SM:PUT\n"
    },
    "expect": {
     "files": {
@@ -1327,7 +1313,7 @@
     "a.ts": "function first() {\n  return value;\n  audit();\n}\nfunction second() {\n  return value;\n  audit();\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfunction …\n⟪return value;⟫…\naudit();\n</SM:FIND>\n<SM:PUT>\nreturn nextValue;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfunction …\n⟪return value;⟫…\naudit();\n*** SM:PUT\nreturn nextValue;\n"
    },
    "expect": {
     "error": "ambiguous: 2 ordered tuples match"
@@ -1339,7 +1325,7 @@
     "a.ts": "if (oldA) {\n  keep();\n  return oldB;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nif (⟪oldA⟫) {\n  keep();\n  return ⟪oldB⟫;\n</SM:FIND>\n<SM:PUT>\nif (newA) {\n  keep();\n  return newB;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nif (⟪oldA⟫) {\n  keep();\n  return ⟪oldB⟫;\n*** SM:PUT\nif (newA) {\n  keep();\n  return newB;\n"
    },
    "expect": {
     "files": {
@@ -1353,7 +1339,7 @@
     "a.ts": "for (let i = 0; i < 100; i--) runFirst();\nfor (let i = 0; i < 100; i--) runSecond();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfor (let i = 0; i < ⟪100⟫; i--;)\n</SM:FIND>\n<SM:PUT>\n10\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfor (let i = 0; i < ⟪100⟫; i--;)\n*** SM:PUT\n10\n"
    },
    "expect": {
     "error": "did not match"
@@ -1365,7 +1351,7 @@
     "a.ts": "for (i = 0; i < 9; i++) {\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nfor (i = 0; i < 9; i⟪+│-⟫) {\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfor (i = 0; i < 9; i⟪+│-⟫) {\n"
    },
    "expect": {
     "files": {
@@ -1379,7 +1365,7 @@
     "a.ts": "const value = oldValue;\nconst other = oldOther;\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = ⟪oldValue│newValue⟫;\nconst other = ⟪newOther⟫;\n</SM:FIND>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = ⟪oldValue│newValue⟫;\nconst other = ⟪newOther⟫;\n"
    },
    "expect": {
     "files": {
@@ -1393,7 +1379,7 @@
     "a.ts": "const status = oldStatus;\nreport(status);\ndebugLog(status);\nfinish(status);\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst status …⟪oldStatus⟫…\nreport(status)\n</SM:FIND>\n<SM:PUT>\nnewStatus\n</SM:PUT>\n<SM:FIND>\nreport(status)…\n⟪debugLog(status);⟫…\nfinish(status)\n</SM:FIND>\n<SM:PUT></SM:PUT>\n</SM:EDIT>\n"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst status …⟪oldStatus⟫…\nreport(status)\n*** SM:PUT\nnewStatus\n*** SM:FIND\nreport(status)…\n⟪debugLog(status);⟫…\nfinish(status)\n*** SM:PUT\n"
    },
    "expect": {
     "files": {
@@ -1407,7 +1393,7 @@
     "a.ts": "class ReportBuilder {\n  step0();\n  step1();\n  step2();\n  step3();\n  step4();\n  step5();\n  step6();\n  step7();\n  step8();\n  step9();\n  step10();\n  step11();\n  step12();\n  step13();\n  step14();\n  step15();\n  step16();\n  step17();\n  step18();\n  step19();\n  step20();\n  step21();\n  step22();\n  step23();\n  step24();\n  step25();\n  step26();\n  step27();\n  step28();\n  step29();\n  render(legacyFormatter);\n  finalize(report);\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nclass ReportBuilder …\nrender(…⟪legacyFormatter⟫…\nfinalize(\n</SM:FIND>\n<SM:PUT>\nstreamingFormatter\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nclass ReportBuilder …\nrender(…⟪legacyFormatter⟫…\nfinalize(\n*** SM:PUT\nstreamingFormatter\n"
    },
    "expect": {
     "files": {
@@ -1421,7 +1407,7 @@
     "a.ts": "function load() {\n  const a = first();\n  const b = legacy(id);\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nload() …\n  ⟪const a = …\n  const b = legacy(…);⟫\n…}\n</SM:FIND>\n<SM:PUT>\nconst a = …\n  const b = modern(id);\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nload() …\n  ⟪const a = …\n  const b = legacy(…);⟫\n…}\n*** SM:PUT\nconst a = …\n  const b = modern(id);\n"
    },
    "expect": {
     "files": {
@@ -1435,7 +1421,7 @@
     "a.ts": "function loadUser(id: string) {\n  const cached = cache.get(id);\n  if (cached) return cached;\n  const user = legacyStore.read(id);\n  return user;\n}\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nloadUser(…\n  ⟪const cached = …\n  const user = legacyStore.read(…);\n  return user;⟫\n…}\n</SM:FIND>\n<SM:PUT>\nconst cached = …\n  const user = await database.users.read(…);\n  return user;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nloadUser(…\n  ⟪const cached = …\n  const user = legacyStore.read(…);\n  return user;⟫\n…}\n*** SM:PUT\nconst cached = …\n  const user = await database.users.read(…);\n  return user;\n"
    },
    "expect": {
     "files": {
@@ -1449,7 +1435,7 @@
     "a.ts": "  const x = 1;\n  return `<button class=\"file-row${sel}\" data-id=\"${file.id}\">${name}</button>`;\n  done();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n  return `<button class=\"file-row…\n</SM:FIND>\n<SM:PUT>\n  return `<button class=\"row…\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n  return `<button class=\"file-row…\n*** SM:PUT\n  return `<button class=\"row…\n"
    },
    "expect": {
     "files": {
@@ -1458,12 +1444,12 @@
    }
   },
   {
-   "name": "reports no change when <SM:FIND> and <SM:PUT> differ only by an open trailing gap",
+   "name": "reports no change when SM:FIND and SM:PUT differ only by an open trailing gap",
    "files": {
     "a.ts": "  const x = 1;\n  return `<button class=\"file-row${sel}\" data-id=\"${file.id}\">${name}</button>`;\n  done();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n  return `<button class=\"file-row…\n</SM:FIND>\n<SM:PUT>\n  return `<button class=\"file-row…\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n  return `<button class=\"file-row…\n*** SM:PUT\n  return `<button class=\"file-row…\n"
    },
    "expect": {
     "error": "Operation 1 makes no change to a.ts.",
@@ -1476,7 +1462,7 @@
     "a.ts": "before();\nfunction legacy(a) {\n  stage(a);\n}\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n…\nfunction legacy(a) {\n…\n}\n…\n</SM:FIND>\n<SM:PUT>\n…\nfunction modern(a) {\n…\n}\n…\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n…\nfunction legacy(a) {\n…\n}\n…\n*** SM:PUT\n…\nfunction modern(a) {\n…\n}\n…\n"
    },
    "expect": {
     "files": {
@@ -1490,7 +1476,7 @@
     "a.ts": "before();\nconst value = old;\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = old;\n…\n</SM:FIND>\n<SM:PUT>\nconst value = new;\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst value = old;\n…\n*** SM:PUT\nconst value = new;\n"
    },
    "expect": {
     "files": {
@@ -1504,7 +1490,7 @@
     "a.ts": "a\r\nconst value = old;\r\nb\r\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n…\r\nconst value = old;\r\n…\n</SM:FIND>\n<SM:PUT>\n…\r\nconst value = new;\r\n…\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n…\r\nconst value = old;\r\n…\n*** SM:PUT\n…\r\nconst value = new;\r\n…\n"
    },
    "expect": {
     "files": {
@@ -1513,16 +1499,89 @@
    }
   },
   {
-   "name": "rejects a <SM:PUT> made only of edge ellipses",
+   "name": "rejects a SM:PUT made only of edge ellipses",
    "files": {
     "a.ts": "before();\nconst value = old;\nafter();\n"
    },
    "args": {
-    "input": "<SM:EDIT path=\"a.ts\">\n<SM:FIND>\n…\nconst value = old;\n…\n</SM:FIND>\n<SM:PUT>\n…\n…\n</SM:PUT>\n</SM:EDIT>"
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n…\nconst value = old;\n…\n*** SM:PUT\n…\n…\n"
    },
    "expect": {
-    "error": "whole-line … with no <SM:FIND> gap to re-emit",
+    "error": "whole-line … with no *** SM:FIND gap to re-emit",
     "writes": 0
+   }
+  },
+  {
+   "name": "optional Begin Patch is ignored while applying the edit",
+   "files": {
+    "a.ts": "old();\n"
+   },
+   "args": {
+    "input": "*** Begin Patch\n*** SM:EDIT a.ts\n*** SM:FIND\nold();\n*** SM:PUT\nnew();\n*** End Patch"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "new();\n"
+    }
+   }
+  },
+  {
+   "name": "a bare edit header continues the file and can select all matches",
+   "files": {
+    "a.ts": "const mode = \"old\";\nitem();\nitem();\n"
+   },
+   "args": {
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nconst mode = \"old\";\n*** SM:PUT\nconst mode = \"new\";\n*** SM:EDIT all\n*** SM:FIND\nitem();\n*** SM:PUT\ndone();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "const mode = \"new\";\ndone();\ndone();\n"
+    }
+   }
+  },
+  {
+   "name": "empty PUT deletes before the next FIND and at EOF",
+   "files": {
+    "a.ts": "first();\nsecond();\nthird();\n"
+   },
+   "args": {
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nfirst();\n*** SM:PUT\n*** SM:FIND\nsecond();\n*** SM:PUT\nchanged();\n*** SM:FIND\nthird();\n*** SM:PUT"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "changed();\n"
+    }
+   }
+  },
+  {
+   "name": "empty PUT deletes before the next file edit",
+   "files": {
+    "a.ts": "remove();\n",
+    "b.ts": "old();\n"
+   },
+   "args": {
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\nremove();\n*** SM:PUT\n*** SM:EDIT b.ts\n*** SM:FIND\nold();\n*** SM:PUT\nnew();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "",
+     "b.ts": "new();\n"
+    },
+    "writes": 2
+   }
+  },
+  {
+   "name": "old XML-looking lines remain literal edit content",
+   "files": {
+    "a.ts": "before();\n<SM:PUT>\n</SM:FIND>\nafter();\n"
+   },
+   "args": {
+    "input": "*** SM:EDIT a.ts\n*** SM:FIND\n<SM:PUT>\n</SM:FIND>\n*** SM:PUT\nliteral();"
+   },
+   "expect": {
+    "files": {
+     "a.ts": "before();\nliteral();\nafter();\n"
+    }
    }
   }
  ]

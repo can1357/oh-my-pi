@@ -4,7 +4,7 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 {{#if hasEval}}Inline scripts, heredocs, `$(…)`, complex control flow/quoting, and non-trivial pipelines → `eval`.{{else}}Inline scripts, heredocs, `$(…)`, and complex control flow → a purpose-built tool or checked-in script.{{/if}}
 
 <instruction>
-- Set `cwd` instead of `cd`; use `env: { NAME: "…" }` for multiline/quote-heavy values.
+- Set `cwd` instead of `cd`.
 - `pty: true` only for terminal interaction (`sudo`, `ssh`).
 - Order-dependent commands use `&&` in one call; independent calls may run concurrently.
 {{#if hasSkills}}- Skill instructions resolve as `skill://<name>`; other internal URIs auto-resolve to paths.
