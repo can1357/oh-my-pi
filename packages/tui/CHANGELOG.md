@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `read` treating a trailing `:raw` or line-range selector on an `xd://` device URL as part of the device name, which failed device calls with `No such tool: xd://<device>:raw` ([#12439](https://github.com/can1357/oh-my-pi/issues/12439)).
+- Fixed `read` treating a trailing `:raw` or line-range selector on an `xd://` device URL as part of the device name, which failed device calls with `No such tool: xd://<device>:raw` ([#12439](https://github.com/can1357/oh-my-pi/issues/12439), [#12519](https://github.com/can1357/oh-my-pi/pull/12519) by [@joseotaviorf](https://github.com/joseotaviorf)).
 
 ## [18.2.5] - 2026-09-17
 
