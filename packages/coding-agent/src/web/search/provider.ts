@@ -111,6 +111,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.ollama,
 		load: async () => new (await import("./providers/ollama")).OllamaProvider(),
 	},
+	serply: {
+		id: "serply",
+		label: SEARCH_PROVIDER_LABELS.serply,
+		load: async () => new (await import("./providers/serply")).SerplyProvider(),
+	},
 	searxng: {
 		id: "searxng",
 		label: SEARCH_PROVIDER_LABELS.searxng,
