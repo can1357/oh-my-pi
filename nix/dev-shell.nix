@@ -18,7 +18,7 @@ pkgs.mkShell (
     name = "omp-dev";
 
     packages =
-      [ bun bun2nix rustToolchain ]
+      [ bun bun2nix lychee rustToolchain ]
       ++ (with pkgs; [
         cargo-nextest
         rustPlatform.bindgenHook
