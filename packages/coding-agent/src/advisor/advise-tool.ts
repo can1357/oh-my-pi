@@ -53,14 +53,23 @@ export function formatAdvisorBatchContent(notes: readonly AdvisorNote[]): string
 		.join("\n");
 }
 
+/** Which advisor severities may interrupt the primary through the steering channel. */
+export type AdvisorSteerSeverity = "blocker" | "concern" | "both";
+
 /**
  * Whether advice at this severity should interrupt the running agent (delivered
  * via the steering channel, aborting in-flight tools) rather than ride the
- * non-interrupting aside queue that lands at the next step boundary. `concern`
- * and `blocker` interrupt; a plain `nit` queues.
+ * non-interrupting aside queue that lands at the next step boundary. Which
+ * severities interrupt is set by the `advisor.steerSeverity` threshold
+ * (default `"both"`, so `concern` and `blocker` interrupt); a plain `nit`
+ * never interrupts regardless of the threshold.
  */
-export function isInterruptingSeverity(severity: AdvisorSeverity | undefined): boolean {
-	return severity === "concern" || severity === "blocker";
+export function isInterruptingSeverity(
+	severity: AdvisorSeverity | undefined,
+	steerSeverity: AdvisorSteerSeverity = "both",
+): boolean {
+	if (severity !== "concern" && severity !== "blocker") return false;
+	return steerSeverity === "both" || steerSeverity === severity;
 }
 
 /** How an advisor note is routed to the primary. */
@@ -82,16 +91,19 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *   is idle as a visible card and never starts a new primary turn.
  * - A non-interrupting `nit` rides the non-interrupting aside queue while
  *   streaming, or is preserved as a visible card when idle after a terminal answer.
- * - An interrupting `concern`/`blocker` is normally steered into the agent: into
- *   the live turn while one is streaming, or (when idle) a triggered turn so the
- *   advice is acted on immediately.
+ * - An interrupting severity (one the `advisor.steerSeverity` threshold lets
+ *   steer — by default `concern`/`blocker`) is normally steered into the agent:
+ *   into the live turn while one is streaming, or (when idle) a triggered turn
+ *   so the advice is acted on immediately. A severity outside the threshold
+ *   rides the aside queue instead.
  * - If the primary tail is already a terminal text answer and there is no queued
- *   work, late non-blocker advice (a `nit` or `concern`) is preserved as a visible
- *   card instead of waking the primary to restate completion. A `blocker` is the
- *   exception: it means the agent handed off broken or unexercised work, so it
- *   still steers a triggered turn to force the primary to acknowledge and continue
- *   before the turn is considered done (#5628) — deferring it to the next user
- *   turn is the bug.
+ *   work, late advice that will not steer is preserved as a visible card instead
+ *   of waking the primary to restate completion: a `nit`, a `concern`, or a
+ *   severity the `advisor.steerSeverity` threshold demotes. A `blocker` the
+ *   threshold lets steer is the exception: it means the agent handed off broken
+ *   or unexercised work, so it still steers a triggered turn to force the
+ *   primary to acknowledge and continue before the turn is considered done
+ *   (#5628) — deferring it to the next user turn is the bug.
  * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
  *   not auto-resume the stopped run. While the agent is idle — or still tearing
  *   the interrupted turn down (`aborting`) — the note is preserved as a visible
@@ -107,6 +119,7 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
+	steerSeverity?: AdvisorSteerSeverity;
 	autoResumeSuppressed: boolean;
 	streaming: boolean;
 	aborting: boolean;
@@ -114,10 +127,16 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	interruptImmuneTurnActive?: boolean;
 	preserveOnly?: boolean;
 }): AdvisorDeliveryChannel {
+	const blockerSteers = isInterruptingSeverity("blocker", opts.steerSeverity);
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
-	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
+	if (
+		opts.terminalAnswerNoQueuedWork &&
+		!(opts.severity === "blocker" && blockerSteers) &&
+		!opts.streaming &&
+		!opts.aborting
+	)
 		return "preserve";
-	if (!isInterruptingSeverity(opts.severity)) return "aside";
+	if (!isInterruptingSeverity(opts.severity, opts.steerSeverity)) return "aside";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
 	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
 	return "steer";
