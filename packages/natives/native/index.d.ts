@@ -350,6 +350,13 @@ export declare class Shell {
    */
   run(options: ShellRunOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
   /**
+   * Deterministically close this shell session.
+   *
+   * Active execution is aborted, the persistent session is released, and
+   * future `run` calls are rejected. Repeated calls are safe.
+   */
+  close(): Promise<void>
+  /**
    * Abort all running commands for this shell session.
    *
    * Returns `Ok(())` even when no commands are running.
