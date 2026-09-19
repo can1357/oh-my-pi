@@ -20,6 +20,8 @@ export * from "./speculative-execution";
 export * from "./telemetry";
 // Thinking selectors
 export * from "./thinking";
+// Tool-context augmentation
+export * from "./tool-context";
 // Tokenizer choice
 export * from "./tokenizer";
 // Types

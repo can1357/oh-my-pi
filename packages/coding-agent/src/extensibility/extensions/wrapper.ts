@@ -8,6 +8,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
+import { isNonBlankContext } from "@oh-my-pi/pi-agent-core/tool-context";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
@@ -204,6 +205,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// runs with. Doing this BEFORE the approval gate means approval (below) resolves against the
 		// input that actually executes, closing the "approve one thing, run another" gap: the prompt
 		// text, policy resolution, and provider safety checks all see `effectiveParams`.
+		// Passive context collected here is held until the approval gate below
+		// succeeds: a deny, user reject, or fail-closed safety refusal throws
+		// before it is forwarded, so refused calls never inject instructions.
+		let pendingAdditionalContext: string | undefined;
 		let effectiveParams = params;
 		if (!loopEmittedToolCall && this.runner.hasHandlers("tool_call")) {
 			try {
@@ -223,6 +228,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (callResult?.block) {
 					const reason = callResult.reason || "Tool execution was blocked by an extension";
 					throw new Error(reason);
+				}
+				if (isNonBlankContext(callResult?.additionalContext)) {
+					pendingAdditionalContext = callResult.additionalContext;
 				}
 				// A non-blocking handler may replace the execution input. The returned object is the raw
 				// input passed to `execute` (handler-owned; not re-normalized). Skipped for `computer`
@@ -344,6 +352,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (!context) throw new Error("Provider safety approval context is unavailable");
 				context.providerSafetyApproved = true;
 			}
+		}
+
+		// The approval gate above throws on deny, user reject, and fail-closed
+		// safety refusal: reaching here means the call may run, so its passive
+		// context is safe to forward to the agent loop.
+		if (pendingAdditionalContext !== undefined) {
+			context?.addAdditionalContext?.(pendingAdditionalContext);
 		}
 
 		// Execute the actual tool

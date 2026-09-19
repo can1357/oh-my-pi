@@ -27,6 +27,7 @@ import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
+import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
@@ -1207,6 +1208,7 @@ export class ExtensionRunner {
 			setInterval: (callback, ms, ...args) => this.#managedTimers.setInterval(callback, ms, ...args),
 			setTimeout: (callback, ms, ...args) => this.#managedTimers.setTimeout(callback, ms, ...args),
 			clearTimer: timer => this.#managedTimers.clear(timer),
+			addAdditionalContext: delegation?.context?.addAdditionalContext,
 			invokeTool:
 				delegation !== undefined && this.hasNativeTool(delegation.toolName)
 					? (params, options) =>
@@ -1489,13 +1491,14 @@ export class ExtensionRunner {
 			this.settings?.get("extensionHandlers.toolCallTimeoutMs") ?? extensionHandlerTimeoutMs,
 		);
 		let result: ToolCallEventResult | undefined;
+		const aggregated = { input: undefined as ToolCallEventResult["input"], additionalContext: [] as string[] };
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await this.#runHandlerWithTimeout(
+				const handlerResult = (await this.#runHandlerWithTimeout(
 					handler,
 					event,
 					ctx,
@@ -1509,21 +1512,22 @@ export class ExtensionRunner {
 								: `Extension ${ext.path} failed: ${message}`,
 					}),
 					signal,
-				);
+				)) as ToolCallEventResult | undefined;
 
-				if (handlerResult) {
-					result = handlerResult;
-					if (result.block) {
-						return result;
-					}
+				if (!handlerResult) continue;
+				if (handlerResult.block) {
+					return handlerResult;
 				}
+				const { additionalContext: _context, input: _input, ...controlResult } = handlerResult;
+				accumulateToolCallResult(aggregated, handlerResult);
+				result = controlResult;
 			}
 		}
 
 		if (signal?.aborted) {
 			return { block: true, reason: `Tool execution was cancelled while an extension handler was pending` };
 		}
-		return result;
+		return buildAggregatedToolCallResult(result, aggregated);
 	}
 
 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {

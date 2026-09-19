@@ -65,7 +65,7 @@ import { EventLoopKeepalive } from "./utils/yield";
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter((m): m is Message => {
 		if (m.role === "assistant") return !isProviderRefusalMessage(m);
-		return m.role === "user" || m.role === "toolResult";
+		return m.role === "user" || m.role === "developer" || m.role === "toolResult";
 	});
 }
 
