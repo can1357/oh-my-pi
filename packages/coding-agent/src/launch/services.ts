@@ -7,6 +7,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AsyncJobProgressDelivery } from "../async";
 import { type DaemonBrokerClient, DaemonBrokerRejectedError, daemonClientForProject } from "./client";
+import { displayExitReason } from "./exit-reason";
 import { canonicalProjectDir } from "./paths";
 import { DAEMON_OUTPUT_MONITOR_CAPABILITY, type DaemonOperation, type DaemonRpcResult } from "./protocol";
 import {
@@ -298,6 +299,7 @@ export async function startService(
 	assertOperationEpoch(session, epoch);
 	const completion = bindCompletionOperation(subscribe(session, client, epoch), params.name, epoch);
 	const dispatch: { state: "local" | "written" } = { state: "local" };
+	const startId = delivery ? crypto.randomUUID() : undefined;
 	let lease: OutputLease | undefined;
 	let result: DaemonRpcResult;
 	try {
@@ -305,12 +307,30 @@ export async function startService(
 			await requireOutputMonitor(client, signal);
 			// Advertise the start-pending subscription after all local and broker
 			// validation, but before the launch request, so early output cannot be lost.
-			lease = await registerOutputSink(session, client, params.name, owner, delivery, true, epoch);
+			lease = await registerOutputSink(
+				session,
+				client,
+				params.name,
+				owner,
+				delivery,
+				true,
+				epoch,
+				undefined,
+				undefined,
+				startId,
+			);
 			if (!lease) throw new ToolError("This session cannot accept service progress delivery");
 		}
-		result = await request(session, { op: "start", spec, owner, replace: true }, signal, client, epoch, state => {
-			dispatch.state = state;
-		});
+		result = await request(
+			session,
+			{ op: "start", spec, owner, replace: true, startId },
+			signal,
+			client,
+			epoch,
+			state => {
+				dispatch.state = state;
+			},
+		);
 		if (result.op !== "start") throw new Error("Unexpected daemon start response");
 		completion?.accept(result.daemon.id);
 		if (lease) {
@@ -453,5 +473,6 @@ export async function modeService(
 
 export function serviceStatus(daemon: DaemonSnapshot): string {
 	const age = formatDuration(Math.max(0, (daemon.exitedAt ?? Date.now()) - daemon.startedAt));
-	return `${daemon.name} [service] — ${daemon.state} — up ${age}${daemon.pid === undefined ? "" : ` — pid ${daemon.pid}`}${daemon.persist ? " — persistent" : ""}${daemon.detached ? " — detached" : ""}`;
+	const reason = displayExitReason(daemon.exitReason);
+	return `${daemon.name} [service] — ${daemon.state} — up ${age}${daemon.pid === undefined ? "" : ` — pid ${daemon.pid}`}${daemon.persist ? " — persistent" : ""}${daemon.detached ? " — detached" : ""}${reason ? `\nReason: ${reason}` : ""}`;
 }

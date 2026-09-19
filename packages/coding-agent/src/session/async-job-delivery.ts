@@ -77,6 +77,8 @@ export interface AsyncProgressEntry {
 	text: string;
 	job: AsyncJob | undefined;
 	source?: AsyncProgressSource;
+	/** Broker output registration that produced this process entry. */
+	monitorId?: string;
 	seq: number;
 	elapsedMs: number;
 	epoch: number;
@@ -112,9 +114,12 @@ export function asyncProgressSourceKey(entry: AsyncProgressIdentity): string {
 	return entry.source ? `${entry.source.type}:${entry.source.id}` : `job:${entry.jobId}`;
 }
 
-/** Coalesce key for enqueue-time folding: one bounded queue entry per source per delivery generation. */
+/** Coalesce per source and generation, without mixing independently detachable process registrations. */
 export function asyncProgressCoalesceKey(entry: AsyncProgressEntry): string {
-	return `${entry.epoch}:${asyncProgressSourceKey(entry)}`;
+	const sourceKey = `${entry.epoch}:${asyncProgressSourceKey(entry)}`;
+	return entry.source?.type === "process" && entry.monitorId !== undefined
+		? `${sourceKey}:${entry.monitorId}`
+		: sourceKey;
 }
 
 /**
@@ -283,6 +288,11 @@ export type AsyncResultJobDetails = {
 	status?: AsyncJob["status"];
 	exitCode?: number;
 	timedOut?: boolean;
+	/** Bounded, sanitized terminal result copy for transcript rendering. */
+	terminalText?: string;
+	terminalHead?: string;
+	terminalTail?: string;
+	terminalTruncated?: boolean;
 };
 
 export type AsyncResultDetails = {
@@ -332,6 +342,20 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		// subagent's output), a subagent's payload and its validation error are
 		// text the job controls: it must not close the `<system-notice>` it renders
 		// into or open a forged harness block.
+		// A failed Bash result can contain the complete raw stream plus terminal
+		// notices. Provenance suppresses it only with a confirmed capture artifact;
+		// otherwise bounded live previews cannot replace recoverable terminal text.
+		const terminalResult = entry.job?.terminalTextProvenance === "progress" ? "" : entry.result;
+		const terminalPreview = terminalResult
+			? buildLineSnappedPreview(sanitizeText(terminalResult))
+			: leftover
+				? {
+						text: leftover.text ? sanitizeText(leftover.text) : undefined,
+						head: leftover.head ? sanitizeText(leftover.head) : undefined,
+						tail: leftover.tail ? sanitizeText(leftover.tail) : undefined,
+						truncated: leftover.truncated,
+					}
+				: undefined;
 		return {
 			jobId: entry.jobId,
 			// The job manager disambiguates a requested job id when it collides
@@ -341,7 +365,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			// advertised `agent://` URL from that, or the delivery would point
 			// at an id with no backing `<id>.md`/`.json` on disk.
 			agentUrlId: entry.job?.agentId ?? entry.jobId,
-			result: escapeHarnessTags(entry.result),
+			result: escapeHarnessTags(terminalResult),
 			type: entry.job?.type,
 			label: entry.job?.label,
 			durationMs: entry.durationMs,
@@ -363,7 +387,8 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			// Preserve tabs in the model-facing completion payload. Transcript
 			// renderers normalize tabs at the TUI boundary.
 			terminalText:
-				entry.progressSummary && entry.result ? escapeHarnessTags(sanitizeText(entry.result)) : undefined,
+				entry.progressSummary && terminalResult ? escapeHarnessTags(sanitizeText(terminalResult)) : undefined,
+			terminalPreview,
 			artifactId: entry.progressSummary?.artifactId,
 			leftoverText: leftover?.text ? escapeHarnessTags(sanitizeText(leftover.text)) : undefined,
 			leftoverTruncated: leftover?.truncated === true,
@@ -385,6 +410,14 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			status: job.status,
 			exitCode: job.exitCode,
 			timedOut: job.timedOut,
+			...(job.terminalPreview
+				? {
+						terminalText: job.terminalPreview.text,
+						terminalHead: job.terminalPreview.head,
+						terminalTail: job.terminalPreview.tail,
+						terminalTruncated: job.terminalPreview.truncated,
+					}
+				: {}),
 		})),
 	};
 	const text = prompt.render(asyncResultTemplate, {
