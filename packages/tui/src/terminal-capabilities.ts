@@ -10,12 +10,7 @@ import {
 	setKittyGraphics,
 } from "./kitty-graphics";
 import { isInsideHerdr, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
-import {
-	isInsideTmux,
-	resolveTmuxClientTerminal,
-	wrapTmuxPassthrough,
-	wrapTmuxPassthroughIfNeeded,
-} from "./tmux";
+import { isInsideTmux, resolveTmuxClientTerminal, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
 import type { HangulCompatibilityJamoWidth } from "./utils";
 
 export * from "./terminal-multiplexer";
