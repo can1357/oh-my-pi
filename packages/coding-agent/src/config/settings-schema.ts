@@ -594,6 +594,17 @@ export const SETTINGS_SCHEMA = {
 			options: "runtime",
 		},
 	},
+	"composer.pinToBottom": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Composer",
+			label: "Pin to Bottom",
+			description:
+				"Keep the input editor and status line on the terminal's bottom rows while the transcript is shorter than the screen, instead of directly below the last message",
+		},
+	},
 	"composer.tokenRate": {
 		type: "boolean",
 		default: false,

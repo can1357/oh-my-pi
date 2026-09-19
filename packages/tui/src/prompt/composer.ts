@@ -33,6 +33,8 @@ export interface ComposerPreferences {
 	readonly spellingTypoDetection: boolean;
 	readonly spellingAutocomplete: boolean;
 	readonly spellingAutocorrect: boolean;
+	/** Keep the editor and status chrome on the terminal's bottom rows while the transcript underfills the screen. */
+	readonly pinToBottom: boolean;
 }
 
 /** Settings-schema-compatible defaults used when constructing a dependency-free composer. */
@@ -47,6 +49,7 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 	spellingTypoDetection: true,
 	spellingAutocomplete: true,
 	spellingAutocorrect: false,
+	pinToBottom: false,
 };
 
 /** Welcome data that can be supplied initially or patched as startup resolves it. */
@@ -339,7 +342,11 @@ export class Composer implements TerminalFrameProvider {
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
 			this.#lastClickSpans = [];
-			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+			// Bootstrap roots are header, gap, editor, status: the last two pin.
+			const pinned = this.#renderRoots(roots.slice(-2), width);
+			const above = this.#renderRoots(roots.slice(0, -2), width);
+			const pad = this.#pinPad(rows - (viewport.anchor ?? 0), above.length + pinned.length);
+			return { viewport: [...above, ...pad, ...pinned].slice(-rows) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
@@ -419,7 +426,17 @@ export class Composer implements TerminalFrameProvider {
 			activeSpans.push({ start: span.start, end: span.end, candidates: () => ids });
 		}
 		const drop = Math.max(0, before.length + active.length + after.length - rows);
-		const mutable = [...before, ...active, ...after].slice(drop);
+		// Appended history lands at the frame anchor and pushes the viewport down
+		// by its row count. A replay is bottom-split by the writer, which pads the
+		// short viewport from the top itself.
+		const pad =
+			history?.kind === "replay"
+				? []
+				: this.#pinPad(
+						rows - (viewport.anchor ?? 0) - (history?.rows.length ?? 0),
+						before.length + active.length + after.length,
+					);
+		const mutable = [...before, ...active, ...pad, ...after].slice(drop);
 		const viewportLength = mutable.length;
 		const spans: ViewportClickSpan[] = [];
 		const shift = (span: ViewportClickSpan, base: number): void => {
@@ -434,7 +451,7 @@ export class Composer implements TerminalFrameProvider {
 			}
 		};
 		for (const span of activeSpans) shift(span, before.length - drop);
-		for (const span of afterSpans) shift(span, before.length + active.length - drop);
+		for (const span of afterSpans) shift(span, before.length + active.length + pad.length - drop);
 		this.#lastClickSpans = spans;
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - (mutable.length + drop));
@@ -509,6 +526,16 @@ export class Composer implements TerminalFrameProvider {
 		}
 	}
 
+	/**
+	 * Blank rows that push the below-transcript chrome onto the bottom row when
+	 * `used` rows underfill the `available` screen rows. Empty while shutdown
+	 * flushes, so the shell prompt lands directly under the content.
+	 */
+	#pinPad(available: number, used: number): string[] {
+		if (!this.#preferences.pinToBottom || this.#historyFlush) return [];
+		return Array.from({ length: Math.max(0, available - used) }, () => "");
+	}
+
 	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
 	renderResizeFrame(viewport: ViewportSize): readonly string[] {
 		if (!this.#started || this.#stopped) return [];
@@ -516,7 +543,10 @@ export class Composer implements TerminalFrameProvider {
 		const rows = Math.max(0, viewport.rows);
 		const tail = this.#runtimeMounted
 			? this.#renderResizeTail(width, rows)
-			: this.#renderRoots([this.#bootstrapInputGap, this.editor, this.#statusHost], width);
+			: {
+					above: this.#renderRoots([this.#bootstrapInputGap], width),
+					pinned: this.#renderRoots([this.editor, this.#statusHost], width),
+				};
 		let header: readonly string[];
 		if (this.#headerRetired) {
 			this.#resizeRetiredHeaderStart ??= Math.max(
@@ -527,7 +557,8 @@ export class Composer implements TerminalFrameProvider {
 		} else {
 			header = this.#header.render(width);
 		}
-		const rendered = [...header, ...tail];
+		const pad = this.#pinPad(rows, header.length + tail.above.length + tail.pinned.length);
+		const rendered = [...header, ...tail.above, ...pad, ...tail.pinned];
 		return rendered.length <= rows ? rendered : rendered.slice(rendered.length - rows);
 	}
 
@@ -671,18 +702,19 @@ export class Composer implements TerminalFrameProvider {
 	 * Mounted-runtime rows for the transient resize buffer. Only the trailing
 	 * viewport can survive the caller's bottom slice, so the transcript renders
 	 * a bounded tail instead of the full committed ledger, and the chrome above
-	 * it renders only when that tail underfills the screen.
+	 * it renders only when that tail underfills the screen. `pinned` is the
+	 * below-transcript chrome a bottom pin keeps on the last rows.
 	 */
-	#renderResizeTail(width: number, rows: number): string[] {
+	#renderResizeTail(width: number, rows: number): { above: string[]; pinned: string[] } {
 		const roots = [...this.#runtimeChildren, this.#statusHost];
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
-		if (transcriptIndex < 0) return this.#renderRoots(roots, width);
+		if (transcriptIndex < 0) return { above: this.#renderRoots(roots, width), pinned: [] };
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const after = this.#renderRoots(roots.slice(transcriptIndex + 1), width);
 		const transcriptRows = transcript.renderTail(width, Math.max(0, rows - after.length));
 		const pre =
 			transcriptRows.length + after.length >= rows ? [] : this.#renderRoots(roots.slice(0, transcriptIndex), width);
-		return [...pre, ...transcriptRows, ...after];
+		return { above: [...pre, ...transcriptRows], pinned: after };
 	}
 
 	/** Reflow accepted hard rows exactly as the restored terminal buffer will. */
