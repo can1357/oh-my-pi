@@ -184,10 +184,10 @@ export interface SegmentContext {
 	worktree: { projectName: string; worktreeName: string } | null;
 	usage: {
 		tier?: string;
-		fiveHour?: { percent: number; resetMinutes?: number };
-		daily?: { percent: number; resetMinutes?: number };
-		sevenDay?: { percent: number; resetHours?: number };
-		monthly?: { percent: number; resetHours?: number };
+		fiveHour?: { percent: number; resetMinutes?: number; resetsAt?: number };
+		daily?: { percent: number; resetMinutes?: number; resetsAt?: number };
+		sevenDay?: { percent: number; resetHours?: number; resetsAt?: number };
+		monthly?: { percent: number; resetHours?: number; resetsAt?: number };
 	} | null;
 }
 

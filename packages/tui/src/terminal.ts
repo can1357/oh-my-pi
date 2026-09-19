@@ -1,4 +1,4 @@
-import { dlopen, FFIType, ptr } from "bun:ffi";
+import { dlopen, FFIType, ptr, type Pointer } from "bun:ffi";
 import * as fs from "node:fs";
 import { TtyWriter } from "@oh-my-pi/pi-natives";
 import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils/env";
@@ -240,6 +240,245 @@ export class StdoutStallWatchdog {
 		this.#armed = false;
 		this.#lowWater = Number.POSITIVE_INFINITY;
 		this.#stalledSinceMs = 0;
+	}
+}
+
+/**
+ * FIONREAD ioctl request per Unix platform: number of bytes readable in the
+ * tty input queue without consuming them.
+ */
+const FIONREAD_REQUEST: Partial<Record<NodeJS.Platform, bigint>> = {
+	darwin: 0x4004_667fn,
+	linux: 0x541bn,
+};
+
+/** libc ioctl signature used by the stdin stall watchdog's kernel-queue probe. */
+type TtyIoctl = (fd: number, request: bigint, out: Pointer) => number;
+
+/** Cached libc ioctl binding; null once dlopen failed (stays disabled). */
+let ttyQueueProbe: TtyIoctl | null | undefined;
+
+/**
+ * Bytes sitting readable in the kernel tty input queue of process stdin, or
+ * -1 when the probe is unavailable (unsupported platform, dlopen failure, or
+ * a non-tty fd — the ioctl fails). Callers treat -1 as "no watchdog here".
+ */
+function ttyInputQueueBytes(): number {
+	if (ttyQueueProbe === undefined) {
+		const request = FIONREAD_REQUEST[process.platform];
+		if (!request) {
+			ttyQueueProbe = null;
+			return -1;
+		}
+		try {
+			const libc = dlopen(process.platform === "darwin" ? "libSystem.dylib" : "libc.so.6", {
+				ioctl: { args: [FFIType.i32, FFIType.u64, FFIType.ptr], returns: FFIType.i32 },
+			});
+			// Bun's NativeFunction has no nameable structural type; the cast fixes
+			// the declared signature.
+			ttyQueueProbe = libc.symbols.ioctl as TtyIoctl;
+		} catch {
+			ttyQueueProbe = null;
+		}
+	}
+	if (!ttyQueueProbe) return -1;
+	const out = new Int32Array(1);
+	const outPtr = ptr(out);
+	if (!outPtr) return -1;
+	try {
+		if (ttyQueueProbe(process.stdin.fd, FIONREAD_REQUEST[process.platform]!, outPtr) !== 0) return -1;
+	} catch {
+		return -1;
+	}
+	return out[0];
+}
+
+/** libc read signature used by the stall watchdog's direct-input fallback. */
+type FdRead = (fd: number, buf: Pointer, count: number) => number;
+
+/** Cached libc read binding; null once dlopen failed (stays disabled). */
+let ttyDirectRead: FdRead | null | undefined;
+
+/**
+ * Decodes direct-read chunks across call boundaries so a UTF-8 sequence
+ * split between two reads is never corrupted.
+ */
+const stdinDirectDecoder = new TextDecoder();
+
+/**
+ * Drain the kernel tty input queue of process stdin and deliver it straight
+ * to the data handler, bypassing the JS stream. The stall watchdog's last
+ * resort: strace of a live flapping corpse showed bun's `resume()` performs
+ * exactly one speculative read and never re-registers the fd with epoll, so
+ * a re-armed pump drains one batch and dies again. Callers must have paused
+ * the stream first — then nothing else reads the fd and delivery is ours.
+ * Returns the number of bytes delivered.
+ */
+function ttyInputQueueRead(handler: (data: string) => void): number {
+	if (ttyDirectRead === undefined) {
+		try {
+			const libc = dlopen(process.platform === "darwin" ? "libSystem.dylib" : "libc.so.6", {
+				read: { args: [FFIType.i32, FFIType.ptr, FFIType.usize], returns: FFIType.isize },
+			});
+			ttyDirectRead = libc.symbols.read as FdRead;
+		} catch {
+			ttyDirectRead = null;
+		}
+	}
+	if (!ttyDirectRead) return 0;
+	const buf = new Uint8Array(4096);
+	const bufPtr = ptr(buf);
+	if (!bufPtr) return 0;
+	let delivered = 0;
+	try {
+		// Re-probe the count each round: bytes can arrive mid-drain, and
+		// reading at most the queued count never blocks.
+		for (let queued = ttyInputQueueBytes(); queued > 0; queued = ttyInputQueueBytes()) {
+			// isize returns BigInt — convert before arithmetic; mixing the
+			// two throws, and a throw after read(2) has consumed the bytes
+			// would drop them undelivered.
+			const n = Number(ttyDirectRead(process.stdin.fd, bufPtr, Math.min(queued, buf.length)));
+			if (n <= 0) break;
+			delivered += n;
+			handler(stdinDirectDecoder.decode(buf.subarray(0, n), { stream: true }));
+		}
+		handler(stdinDirectDecoder.decode());
+	} catch (err) {
+		// Delivery must never fail silently: a throw here can follow a read
+		// that already consumed bytes from the kernel queue.
+		logger.warn("stdin stall watchdog: direct read failed", { err: String(err), delivered });
+	}
+	return delivered;
+}
+
+/**
+ * Liveness window for {@link StdinStallWatchdog}: no data event and no queue
+ * progress for this long with bytes readable means a dead stream pump.
+ */
+const STDIN_STALL_TIMEOUT_MS = 1_500;
+/**
+ * Liveness window once an episode has opened: a pump that died once gets
+ * re-detected at this tightened window so each keystroke batch costs at most
+ * this much lag even if recovery never fully takes.
+ */
+const STDIN_STALL_FAST_TIMEOUT_MS = 300;
+/** Stalls within one episode before escalating to a listener re-attach. */
+const STDIN_STALL_SOFT_REARMS = 2;
+/**
+ * Stalls within one episode before the watchdog stops trusting the stream
+ * entirely and adopts the input pump itself (direct read(2) polling).
+ */
+const STDIN_STALL_ADOPT_AFTER = 4;
+/**
+ * Sustained liveness required to close an episode. A single drained sample
+ * must NOT close it: bun's `resume()` performs exactly one catch-up read
+ * (verified by strace: `read(fd, …) = 1; read(fd, …) = -1 EAGAIN` with no
+ * epoll re-registration), so a broken pump alternates stall→one drain→stall —
+ * resetting on the drain would cap the response at soft re-arms forever and
+ * the escalation would never run.
+ */
+const STDIN_STALL_EPISODE_COOLDOWN_MS = 30_000;
+/**
+ * Cadence at which ProcessTerminal samples the kernel tty input queue. One
+ * ioctl per tick; sized for the fast window above.
+ */
+const STDIN_STALL_POLL_MS = 150;
+/**
+ * Cadence of the adopted direct pump: once the stream has proven unusable,
+ * input latency is one tick.
+ */
+const STDIN_ADOPTED_POLL_MS = 50;
+
+/**
+ * Bounds how long bytes may sit readable in the kernel tty input queue with
+ * the JS stream emitting no `data` events before the stream pump is declared
+ * dead, and escalates recovery: pause+resume first, then dropping and
+ * re-adding the data listener.
+ *
+ * Heavyweight `omp --resume` sessions have frozen under real multiplexer
+ * panes with exactly this signature: keystrokes queued in the kernel,
+ * `process.stdin` reporting healthy (not paused, listener attached, not
+ * ended/destroyed), and no disconnect logged — the read pump simply stopped
+ * consuming. strace of a live corpse showed the real stdin fd (a read-only
+ * pty dup, not fd 0) with no epoll registration at all in the dead state:
+ * `pause()` never deregisters, `resume()` performs one speculative read and
+ * stops, so each keystroke batch wedges until something re-arms the pump.
+ *
+ * Stalls are grouped into episodes: the first stalls answer with soft
+ * `pause()+resume()` re-arms, repeated stalls escalate to a listener
+ * re-attach, and an episode only closes after `cooldownMs` of *sustained*
+ * liveness — a single drained sample deliberately does not close it (the
+ * catch-up read always produces one). While an episode is open the detection
+ * window tightens to `fastStallMs` so a pump that keeps dying costs the user
+ * sub-second keystroke lag instead of `stallMs` per batch. Unlike
+ * {@link StdoutStallWatchdog} this never tears the terminal down: input loss
+ * is recoverable by re-arming, and the kernel queue preserves every byte the
+ * user typed meanwhile.
+ */
+export class StdinStallWatchdog {
+	#prevQueued = 0;
+	#stalledSinceMs = Number.NaN;
+	#healthySinceMs = Number.NaN;
+	#stallsInEpisode = 0;
+	#inEpisode = false;
+
+	/**
+	 * @param stallMs liveness window without queue progress or a data event.
+	 * @param softRearms stalls within an episode answered with pause+resume
+	 * before escalating to a listener re-attach.
+	 * @param fastStallMs tightened liveness window while an episode is open.
+	 * @param cooldownMs sustained liveness required to close an episode.
+	 */
+	constructor(
+		private readonly stallMs: number = STDIN_STALL_TIMEOUT_MS,
+		private readonly softRearms: number = STDIN_STALL_SOFT_REARMS,
+		private readonly fastStallMs: number = STDIN_STALL_FAST_TIMEOUT_MS,
+		private readonly cooldownMs: number = STDIN_STALL_EPISODE_COOLDOWN_MS,
+	) {}
+
+	/**
+	 * Feed the kernel-queue byte count, the timestamp of the last `data`
+	 * event, and the clock. Returns the recovery action: "none" while any
+	 * liveness signal holds (queue empty, queue draining, or data flowing),
+	 * "resume" for the first soft re-arms of an episode, "reattach" once
+	 * stalls repeat within one, and "adopt" when the episode proves the
+	 * stream unusable — the caller then becomes the input pump itself.
+	 */
+	sample(queued: number, lastDataMs: number, nowMs: number): "none" | "resume" | "reattach" | "adopt" {
+		const windowMs = this.#inEpisode ? this.fastStallMs : this.stallMs;
+		const alive = queued <= 0 || queued < this.#prevQueued || nowMs - lastDataMs < windowMs;
+		this.#prevQueued = Math.max(queued, 0);
+		if (alive) {
+			// Outside an episode the observation window restarts on liveness;
+			// inside one it deliberately persists, so a re-stall fires at the
+			// fast window (the catch-up read only ever yields one drain).
+			if (!this.#inEpisode) this.#stalledSinceMs = Number.NaN;
+			if (Number.isNaN(this.#healthySinceMs)) this.#healthySinceMs = nowMs;
+			if (this.#inEpisode && queued <= 0 && nowMs - this.#healthySinceMs >= this.cooldownMs) {
+				this.#inEpisode = false;
+				this.#stallsInEpisode = 0;
+				// The next stall must open its own observation window; leaving
+				// the old clock would fire it on the first stalled sample.
+				this.#stalledSinceMs = Number.NaN;
+			}
+			return "none";
+		}
+		this.#healthySinceMs = Number.NaN;
+		if (Number.isNaN(this.#stalledSinceMs)) this.#stalledSinceMs = nowMs;
+		if (nowMs - this.#stalledSinceMs < windowMs) return "none";
+		this.#stalledSinceMs = nowMs;
+		this.#inEpisode = true;
+		this.#stallsInEpisode++;
+		if (this.#stallsInEpisode <= this.softRearms) return "resume";
+		return this.#stallsInEpisode < STDIN_STALL_ADOPT_AFTER ? "reattach" : "adopt";
+	}
+	/** Reader healthy again or terminal torn down: forget the episode. */
+	reset(): void {
+		this.#prevQueued = 0;
+		this.#stalledSinceMs = Number.NaN;
+		this.#healthySinceMs = Number.NaN;
+		this.#stallsInEpisode = 0;
+		this.#inEpisode = false;
 	}
 }
 
@@ -694,11 +933,30 @@ export class ProcessTerminal implements Terminal {
 	#modifyOtherKeysTimeout?: Timer;
 	#stdinBuffer?: StdinBuffer;
 	#stdinDataHandler?: (data: string) => void;
+	/** Kernel-queue liveness watchdog for the stdin stream pump (see StdinStallWatchdog). */
+	#stdinStall = new StdinStallWatchdog();
+	#stdinStallTimer?: Timer;
+	#lastStdinDataMs = 0;
 	#disconnectHandler?: () => void;
 	#stdinEndHandler = () => {
+		// Bun's internalRead can emit a spurious 'end' on an empty
+		// nonblocking read of a live pty: a genuine EOF flips
+		// readableEnded=true BEFORE 'end' emits, so readableEnded=false
+		// here means the stream is still viable. Ignore the spurious one
+		// and re-arm the flowing read instead of tearing the TUI down.
+		if (!process.stdin.readableEnded && !process.stdin.destroyed) {
+			process.stdin.resume();
+			return;
+		}
 		this.#markTerminalDisconnected("stdin ended");
 	};
 	#stdinCloseHandler = () => {
+		// autoDestroy closes the stream right after a spurious 'end'; a
+		// genuine close only follows a real EOF (readableEnded=true) or an
+		// explicit destroy. Ignore the spurious one.
+		if (!process.stdin.readableEnded) {
+			return;
+		}
 		this.#markTerminalDisconnected("stdin closed");
 	};
 	#stdinErrorHandler = (err: Error) => {
@@ -954,6 +1212,11 @@ export class ProcessTerminal implements Terminal {
 				return;
 			}
 		}
+		// A spurious 'end' (see #stdinEndHandler) would otherwise
+		// autoDestroy the stream and kill input mid-session.
+		try {
+			(process.stdin as { autoDestroy?: boolean }).autoDestroy = false;
+		} catch {}
 		process.stdin.setEncoding("utf8");
 		process.stdin.on("end", this.#stdinEndHandler);
 		process.stdin.on("close", this.#stdinCloseHandler);
@@ -984,6 +1247,8 @@ export class ProcessTerminal implements Terminal {
 		// Explicit probes are safe only after their response parser and stdin
 		// data handler are installed. Keep this false throughout temporary stops.
 		this.#active = true;
+
+		this.#armStdinStallWatchdog();
 		// Query terminal background color via OSC 11 for dark/light detection.
 		// Uses DA1 (Primary Device Attributes) as a sentinel: terminals process
 		// sequences in order, so if DA1 arrives before OSC 11 response,
@@ -1024,6 +1289,93 @@ export class ProcessTerminal implements Terminal {
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
 		}
+	}
+
+	/**
+	 * Watch the kernel tty input queue while the TUI owns stdin and re-arm a
+	 * dead stream pump (see StdinStallWatchdog). Disarms itself permanently on
+	 * the first failed probe: non-tty stdin (headless, pipes) has no queue.
+	 */
+	#armStdinStallWatchdog(): void {
+		this.#disarmStdinStallWatchdog();
+		this.#lastStdinDataMs = Date.now();
+		const timer = setInterval(() => {
+			if (!this.#active || this.#dead || this.#inputDeferred) return;
+			const queued = ttyInputQueueBytes();
+			if (queued < 0) {
+				this.#disarmStdinStallWatchdog();
+				return;
+			}
+			// (Adopted mode never runs here: adoption clears this timer
+			// and arms #armAdoptedStdinPump instead.)
+			const action = this.#stdinStall.sample(queued, this.#lastStdinDataMs, Date.now());
+			if (action === "none") return;
+			logger.warn("stdin stall watchdog: reader stopped consuming; re-arming", { action, queued });
+			try {
+				process.stdin.pause();
+				// Drain FIRST, before any listener re-add: re-adding a
+				// "data" listener implicitly resumes the stream, and that
+				// resume's speculative catch-up read races this drain for
+				// the queue (observed: 24 of 26 fires delivered 0 bytes).
+				const delivered = this.#stdinDataHandler ? ttyInputQueueRead(this.#stdinDataHandler) : 0;
+				if (action === "adopt") {
+					// The episode proved the stream unusable (production
+					// flap: every revival died on the next batch; bun's
+					// resume() never re-registers the fd with epoll).
+					// Park the stream for good and become the pump.
+					if (this.#stdinDataHandler) {
+						process.stdin.removeListener("data", this.#stdinDataHandler);
+					}
+					this.#stdinStallTimer = undefined;
+					clearInterval(timer);
+					this.#armAdoptedStdinPump();
+				} else {
+					if (action === "reattach" && this.#stdinDataHandler) {
+						process.stdin.removeListener("data", this.#stdinDataHandler);
+						process.stdin.on("data", this.#stdinDataHandler);
+					}
+					process.stdin.resume();
+				}
+				if (delivered) {
+					logger.warn("stdin stall watchdog: delivered queued input directly", {
+						delivered,
+					});
+				}
+			} catch (err) {
+				logger.error("stdin stall watchdog re-arm failed", { err: String(err) });
+			}
+		}, STDIN_STALL_POLL_MS);
+		timer.unref?.();
+		this.#stdinStallTimer = timer;
+	}
+
+	/**
+	 * Direct input pump for a stream proven unusable: the stream stays
+	 * paused with no listeners, and a fast timer moves bytes from the kernel
+	 * queue to the data handler. Input latency is one tick.
+	 */
+	#armAdoptedStdinPump(): void {
+		const timer = setInterval(() => {
+			if (!this.#active || this.#dead) return;
+			if (this.#inputDeferred) return; // bytes wait in the kernel queue
+			const queued = ttyInputQueueBytes();
+			if (queued <= 0) return;
+			const handler = this.#stdinDataHandler;
+			if (!handler) return;
+			const delivered = ttyInputQueueRead(handler);
+			if (delivered) {
+				logger.warn("stdin stall watchdog: adopted pump delivered input", { delivered });
+			}
+		}, STDIN_ADOPTED_POLL_MS);
+		timer.unref?.();
+		this.#stdinStallTimer = timer;
+	}
+	#disarmStdinStallWatchdog(): void {
+		if (this.#stdinStallTimer) {
+			clearInterval(this.#stdinStallTimer);
+			this.#stdinStallTimer = undefined;
+		}
+		this.#stdinStall.reset();
 	}
 
 	/**
@@ -1404,6 +1756,7 @@ export class ProcessTerminal implements Terminal {
 
 		// Handler that pipes stdin data through the buffer
 		this.#stdinDataHandler = (data: string) => {
+			this.#lastStdinDataMs = Date.now();
 			this.#stdinBuffer!.process(data);
 		};
 	}
@@ -1857,6 +2210,7 @@ export class ProcessTerminal implements Terminal {
 			this.#stdoutResizeListener = undefined;
 		}
 		this.#disarmStdoutStallWatchdog();
+		this.#disarmStdinStallWatchdog();
 		this.#resizeHandler = undefined;
 		// Flush the restore sequences enqueued above (bounded — a stalled PTY
 		// must not wedge exit), then retire the pump. Later writes (emergency
@@ -1896,6 +2250,7 @@ export class ProcessTerminal implements Terminal {
 		if (this.#dead) return;
 		this.#dead = true;
 		this.#disarmStdoutStallWatchdog();
+		this.#disarmStdinStallWatchdog();
 		logger.warn("terminal disconnected; stopping interactive rendering", { reason, err });
 
 		const disconnectHandler = this.#disconnectHandler;

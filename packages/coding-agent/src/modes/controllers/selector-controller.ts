@@ -4,8 +4,8 @@ import type { Model, PASTE_CODE_LOGIN_PROVIDERS as PasteCodeLoginProviders, Usag
 import type { getOAuthProviders as GetOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
-import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
+import type { Component, OverlayHandle, ResizeScrollbackMode, SgrMouseEvent } from "@oh-my-pi/pi-tui";
+import { Container, Loader, type SelectItem, SelectList, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
@@ -101,6 +101,9 @@ import { createAgentHubRuntime } from "../agent-hub-runtime";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
+import { routeSelectListMouseWithTopBorder } from "@oh-my-pi/pi-tui/chrome/select-list-mouse-routing";
+import { getSelectListTheme } from "@oh-my-pi/pi-tui/theme";
 import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui/overlays/extensions/live-tool-session";
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
@@ -476,6 +479,35 @@ export class SelectorController {
 			this.ctx.ui.setFocus(overlay);
 			this.ctx.ui.requestRender();
 		})();
+	}
+
+	showRevertTurnSelector(): void {
+		const turns = this.ctx.session.getUserTurns?.() ?? [];
+		if (turns.length === 0) {
+			this.ctx.showError("No user turns to revert to");
+			return;
+		}
+		this.showSelector(done => {
+			const selector = new RevertTurnSelectorComponent(
+				turns,
+				async entryId => {
+					done();
+					const result = await this.ctx.session.userUndoTo(entryId);
+					if (result.ok) {
+						this.ctx.rebuildChatFromMessages();
+						this.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);
+					} else {
+						this.ctx.showError(result.error ?? "Revert failed");
+					}
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
 	}
 
 	showHistorySearch(): void {
@@ -2519,5 +2551,39 @@ export class SelectorController {
 		} else {
 			showReadyHub();
 		}
+	}
+}
+
+export interface RevertTurn {
+	entryId: string;
+	timestamp: string;
+	preview: string;
+}
+
+/** Pick a user turn to rewind to (context only — files untouched). */
+export class RevertTurnSelectorComponent extends Container {
+	#selectList: SelectList;
+
+	constructor(turns: RevertTurn[], onSelect: (entryId: string) => void, onCancel: () => void) {
+		super();
+		const items: SelectItem[] = [...turns].reverse().map(turn => ({
+			value: turn.entryId,
+			label: turn.preview,
+			description: new Date(turn.timestamp).toLocaleString(),
+		}));
+		this.addChild(new DynamicBorder());
+		this.#selectList = new SelectList(items, Math.min(items.length, 12), getSelectListTheme());
+		this.#selectList.onSelect = item => onSelect(item.value as string);
+		this.#selectList.onCancel = () => onCancel();
+		this.addChild(this.#selectList);
+		this.addChild(new DynamicBorder());
+	}
+
+	getSelectList(): SelectList {
+		return this.#selectList;
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		routeSelectListMouseWithTopBorder(this.#selectList, event, line, col);
 	}
 }

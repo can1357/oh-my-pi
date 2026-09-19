@@ -223,7 +223,10 @@ describe("persisted subagent revival", () => {
 		const emit = vi.fn(async () => undefined);
 		const extensionRunner = { initialize, onError, emit };
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
-			async () => ({ session: createRevivedSession([], extensionRunner).session }) as CreateAgentSessionResult,
+			async () =>
+				({
+					session: createRevivedSession([], extensionRunner).session,
+				}) as CreateAgentSessionResult,
 		);
 
 		const ref = createRef(sessionFile);
@@ -400,7 +403,9 @@ describe("persisted subagent revival", () => {
 		const cwd = makeTempDir("@pi-restricted-revive-");
 		const sessionFile = await createPersistedSession(cwd, true);
 		const hostileMcpGetTools = vi.fn(() => [{ name: "read", label: "hostile/read" }]);
-		MCPManager.setInstance({ getTools: hostileMcpGetTools } as unknown as MCPManager);
+		MCPManager.setInstance({
+			getTools: hostileMcpGetTools,
+		} as unknown as MCPManager);
 		const activeToolNames: string[][] = [];
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		const attemptedDiscovery: string[] = [];
@@ -410,7 +415,9 @@ describe("persisted subagent revival", () => {
 			if (options?.preloadedCustomToolPaths === undefined) attemptedDiscovery.push("custom:read");
 			if (options?.mcpManager !== undefined || options?.customTools !== undefined)
 				attemptedDiscovery.push("mcp:read");
-			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+			return {
+				session: createRevivedSession(activeToolNames).session,
+			} as CreateAgentSessionResult;
 		});
 
 		const ref = createRef(sessionFile);
@@ -441,7 +448,9 @@ describe("persisted subagent revival", () => {
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
-			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+			return {
+				session: createRevivedSession(activeToolNames).session,
+			} as CreateAgentSessionResult;
 		});
 
 		const ref = createRef(sessionFile);
@@ -463,7 +472,9 @@ describe("persisted subagent revival", () => {
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
-			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+			return {
+				session: createRevivedSession(activeToolNames).session,
+			} as CreateAgentSessionResult;
 		});
 
 		const ref = createRef(sessionFile);
@@ -473,6 +484,64 @@ describe("persisted subagent revival", () => {
 
 		expect(capturedOptions?.toolNames).toEqual(["read", "write", "yield"]);
 		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
+	});
+
+	it("disposes the constructed session when post-factory revival setup fails", async () => {
+		const cwd = makeTempDir("@pi-revive-setup-fail-");
+		const sessionFile = await createPersistedSession(cwd);
+		const managerFile = path.join(cwd, "revive-setup-fail.jsonl");
+		const manager = SessionManager.create(cwd, cwd);
+		await manager.setSessionFile(managerFile);
+		vi.spyOn(SessionManager, "open").mockImplementation(async () => manager);
+		const dispose = vi.fn(async () => undefined);
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			const session = {
+				getMountedXdevToolNames: () => [],
+				setActiveToolsByName: async () => {
+					throw new Error("active-tool clamp failed");
+				},
+				dispose,
+			};
+			return { session } as unknown as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await expect(reviver(ref)).rejects.toThrow("active-tool clamp failed");
+		// The caller never received the session, so the reviver must dispose
+		// it (which also closes the reopened manager) rather than leak both.
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("closes the reopened manager when the session factory rejects during revival", async () => {
+		const cwd = makeTempDir("@pi-revive-factory-reject-");
+		const sessionFile = await createPersistedSession(cwd);
+		// A real file-backed manager with a durable owner claim, handed to the
+		// reviver before the factory rejects.
+		const managerFile = path.join(cwd, "revive-reject.jsonl");
+		const manager = SessionManager.create(cwd, cwd);
+		await manager.setSessionFile(managerFile);
+		vi.spyOn(SessionManager, "open").mockImplementation(async () => manager);
+		// The factory fails before constructing an AgentSession (e.g. the
+		// expected registry generation is no longer available); its error path
+		// does not dispose the externally supplied manager.
+		vi.spyOn(sdkModule, "createAgentSession").mockRejectedValue(new Error("generation gone"));
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+
+		await expect(reviver(ref)).rejects.toThrow("generation gone");
+
+		// The owner sidecar claim must be released so undo-tail gc in the
+		// parent does not skip the session.
+		const sidecar = `${managerFile}.owner`;
+		await Bun.sleep(150);
+		if (fs.existsSync(sidecar)) {
+			const content = fs.readFileSync(sidecar, "utf-8");
+			expect(content.trim()).toBe("");
+		}
 	});
 
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
@@ -485,7 +554,9 @@ describe("persisted subagent revival", () => {
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+			return {
+				session: createRevivedSession([]).session,
+			} as CreateAgentSessionResult;
 		});
 
 		const ref = createRef(sessionFile);
@@ -602,7 +673,9 @@ describe("persisted subagent revival", () => {
 		const captured: Settings[] = [];
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			if (options?.settings) captured.push(options.settings);
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+			return {
+				session: createRevivedSession([]).session,
+			} as CreateAgentSessionResult;
 		});
 
 		const factory = createFactory(cwd);
@@ -627,7 +700,9 @@ describe("persisted subagent revival", () => {
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+			return {
+				session: createRevivedSession([]).session,
+			} as CreateAgentSessionResult;
 		});
 
 		const ref = createRef(sessionFile);
@@ -645,7 +720,9 @@ describe("persisted subagent revival", () => {
 		let capturedOptions: CreateAgentSessionOptions | undefined;
 		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
 			capturedOptions = options;
-			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+			return {
+				session: createRevivedSession([]).session,
+			} as CreateAgentSessionResult;
 		});
 
 		const ref = createRef(sessionFile);

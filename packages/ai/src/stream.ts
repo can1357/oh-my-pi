@@ -15,6 +15,13 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
+import { inferCopilotApi } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import {
+	classifyCopilotIntent,
+	ensureCopilotAutoSession,
+	lastUserPrompt,
+} from "@oh-my-pi/pi-catalog/wire/copilot-auto";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
@@ -909,7 +916,75 @@ function withResolvedModelHeaders<TApi extends Api>(
 			}
 			if (!outer.done) outer.end(await inner.result());
 		} catch (error) {
-			outer.fail(error);
+			if (!outer.done) outer.fail(error as Error);
+		}
+	})();
+	return outer;
+}
+
+/** The synthetic Copilot "Auto" pseudo-model — server-side auto-selection. */
+function isCopilotAutoModel(model: Model<Api>): boolean {
+	return model.provider === "github-copilot" && model.id === "auto";
+}
+
+/**
+ * Resolve a Copilot "Auto" turn: mint (or reuse) the auto-selection session,
+ * optionally classify the prompt for task-optimized routing, then stream from
+ * the chosen concrete pool model on its native endpoint — carrying the session
+ * JWT that unlocks gated models for Free/Student tiers. Mirrors VS Code Copilot
+ * Chat's /models/session + /models/session/intent flow.
+ *
+ * Deferred via an `AssistantMessageEventStream` because the session mint and
+ * intent call are async; the concrete turn is streamed once resolution settles.
+ * Resolution failure (no session) fails the stream rather than silently
+ * falling back to a model the token can't reach.
+ */
+function streamCopilotAuto(
+	model: Model<Api>,
+	context: Context,
+	options: StreamOptions | undefined,
+): AssistantMessageEventStream {
+	const outer = new AssistantMessageEventStream();
+	void (async () => {
+		try {
+			const rawApiKey = options?.apiKey || getEnvApiKey(model.provider);
+			if (!rawApiKey) throw new AIError.MissingApiKeyError(model.provider);
+			const accessToken = parseGitHubCopilotApiKey(rawApiKey).accessToken ?? rawApiKey;
+			const baseUrl = model.baseUrl ?? "https://api.githubcopilot.com";
+			const fetchImpl = options?.fetch ?? (globalThis.fetch as FetchImpl);
+			const session = await ensureCopilotAutoSession(accessToken, baseUrl, fetchImpl);
+			if (!session) {
+				throw new ProviderHttpError(
+					"Copilot auto-selection session unavailable (is the Copilot token valid?)",
+					503,
+					model.provider,
+				);
+			}
+			const prompt = lastUserPrompt(
+				context.messages as ReadonlyArray<{ role?: string; content?: unknown }>,
+			);
+			const intent = await classifyCopilotIntent(accessToken, session, prompt, baseUrl, fetchImpl);
+			const chosenModel = intent?.chosenModel ?? session.selectedModel;
+			// Swap in the concrete pool model, inheriting its endpoint family.
+			// The session JWT rides on the model headers; the Copilot header
+			// builder merges model.headers into every request, so both the
+			// /responses (gpt-5.x) and /v1/messages (Claude) paths carry it.
+			const concrete = {
+				...model,
+				id: chosenModel,
+				requestModelId: chosenModel,
+				name: chosenModel,
+				api: inferCopilotApi(chosenModel),
+				headers: { ...model.headers, "Copilot-Session-Token": session.sessionToken },
+			} as Model<Api>;
+			const inner = stream(concrete, context, options as OptionsForApi<Api>);
+			for await (const event of inner) {
+				outer.push(event);
+				if (outer.done) return;
+			}
+			if (!outer.done) outer.end(await inner.result());
+		} catch (error) {
+if (!outer.done) outer.fail(error as Error);
 		}
 	})();
 	return outer;
@@ -920,6 +995,9 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	if (isCopilotAutoModel(model)) {
+		return streamCopilotAuto(model, context, (options || {}) as StreamOptions);
+	}
 	if (model.resolveHeaders) {
 		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
 	}

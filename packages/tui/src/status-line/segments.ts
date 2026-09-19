@@ -870,19 +870,37 @@ const usageSegment: StatusLineSegment = {
 			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
 		if (u.fiveHour) {
-			parts.push(formatQuotaWindow(ctx, "5h", u.fiveHour.percent, u.fiveHour.resetMinutes, "m", "round"));
+			// Prefer live interpolation from the absolute reset timestamp so the
+			// countdown stays correct between 5-min usage re-polls.
+			const fiveHourMinutes =
+				u.fiveHour.resetsAt !== undefined
+					? Math.max(0, Math.round((u.fiveHour.resetsAt - Date.now()) / 60_000))
+					: u.fiveHour.resetMinutes;
+			parts.push(formatQuotaWindow(ctx, "5h", u.fiveHour.percent, fiveHourMinutes, "m", "round"));
 		}
 		if (u.daily) {
-			parts.push(formatQuotaWindow(ctx, "1d", u.daily.percent, u.daily.resetMinutes, "m", "round"));
+			const dailyMinutes =
+				u.daily.resetsAt !== undefined
+					? Math.max(0, Math.round((u.daily.resetsAt - Date.now()) / 60_000))
+					: u.daily.resetMinutes;
+			parts.push(formatQuotaWindow(ctx, "1d", u.daily.percent, dailyMinutes, "m", "round"));
 		}
 		if (u.sevenDay) {
-			parts.push(formatQuotaWindow(ctx, "7d", u.sevenDay.percent, u.sevenDay.resetHours, "h", "round"));
+			const sevenDayHours =
+				u.sevenDay.resetsAt !== undefined
+					? Math.max(0, Math.round((u.sevenDay.resetsAt - Date.now()) / 3_600_000))
+					: u.sevenDay.resetHours;
+			parts.push(formatQuotaWindow(ctx, "7d", u.sevenDay.percent, sevenDayHours, "h", "round"));
 		}
 		if (u.monthly) {
 			// Cursor and OpenCode Go (normalize gates monthly to those providers).
 			// Both floor used percents upstream (Cursor's dashboard shows 1.88 →
 			// "1% used"; OpenCode's endpoint already emits floored integers).
-			parts.push(formatQuotaWindow(ctx, "mo", u.monthly.percent, u.monthly.resetHours, "h", "floor"));
+			const monthlyHours =
+				u.monthly.resetsAt !== undefined
+					? Math.max(0, Math.round((u.monthly.resetsAt - Date.now()) / 3_600_000))
+					: u.monthly.resetHours;
+			parts.push(formatQuotaWindow(ctx, "mo", u.monthly.percent, monthlyHours, "h", "floor"));
 		}
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
 		return { content, visible: true };

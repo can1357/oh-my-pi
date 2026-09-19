@@ -5701,7 +5701,7 @@ const COPILOT_CACHE_INVALIDATED_MODEL_IDS = [
 	"mai-code-1-flash-picker",
 ];
 
-function inferCopilotApi(modelId: string): Api {
+export function inferCopilotApi(modelId: string): Api {
 	const route = apiRouteFor("github-copilot", modelId);
 	if (route?.api === "anthropic-messages" || route?.api === "openai-responses") return route.api;
 	return "openai-completions";
@@ -6048,6 +6048,31 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					}
 					takenIds.add(variant.id);
 					models.push(variant);
+				}
+				// Append the synthetic "Auto" pseudo-model. The server's auto-selection
+				// session (POST /models/session) unlocks gated models for Free/Student
+				// tiers and task-routes across the pool; omp resolves it to a concrete
+				// model per request in stream.ts. The api here is a placeholder — the
+				// resolver swaps the whole model (incl. api family) from the chosen id.
+				if (!takenIds.has("auto")) {
+					models.push({
+						id: "auto",
+						name: "Auto",
+						api: "openai-responses",
+						provider: "github-copilot",
+						baseUrl,
+						reasoning: true,
+						input: ["text"],
+						contextWindow: 400000,
+						maxTokens: 64000,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						headers: { ...COPILOT_API_HEADERS },
+						compat: {
+							supportsStore: false,
+							supportsDeveloperRole: false,
+							supportsReasoningEffort: false,
+						},
+					});
 				}
 				return models.sort((left, right) => left.id.localeCompare(right.id));
 			},
