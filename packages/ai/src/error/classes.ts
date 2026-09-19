@@ -64,6 +64,19 @@ export class OpenAIHttpError extends ProviderHttpError {
 			if (typeof envelope.message === "string" && envelope.message.length > 0) {
 				return { detail: envelope.message, code: undefined };
 			}
+			// Cloudflare envelope: `{success:false, errors:[{code,message}]}`.
+			const errors = (bodyJson as { errors?: unknown }).errors;
+			if (Array.isArray(errors) && errors.length > 0 && typeof errors[0] === "object" && errors[0] !== null) {
+				const first = errors[0] as { message?: unknown; code?: unknown };
+				const message = typeof first.message === "string" && first.message.length > 0 ? first.message : undefined;
+				const code =
+					typeof first.code === "string"
+						? first.code
+						: typeof first.code === "number"
+							? String(first.code)
+							: undefined;
+				if (message !== undefined || code !== undefined) return { detail: message ?? bodyText, code };
+			}
 		}
 		return { detail: bodyText, code: undefined };
 	}

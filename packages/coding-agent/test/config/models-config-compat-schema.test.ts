@@ -19,3 +19,17 @@ describe("OpenAICompatSchema stripImageInput", () => {
 		expect(String(parsed)).toContain("stripImageInput");
 	});
 });
+
+// The schema object is open: an undeclared key would pass unvalidated.
+describe("OpenAICompatSchema requiresStringMessageContent", () => {
+	test("accepts the documented boolean opt-in", () => {
+		const parsed = OpenAICompatSchema({ requiresStringMessageContent: true });
+		expect(parsed instanceof type.errors).toBe(false);
+	});
+
+	test("rejects a non-boolean value like every other declared compat key", () => {
+		const parsed = OpenAICompatSchema({ requiresStringMessageContent: "yes" });
+		expect(parsed instanceof type.errors).toBe(true);
+		expect(String(parsed)).toContain("requiresStringMessageContent");
+	});
+});

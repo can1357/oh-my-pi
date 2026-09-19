@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/login cloudflare-workers-ai` (API token + account ID) for direct Workers AI access with `x-session-affinity` prompt caching ([#12509](https://github.com/can1357/oh-my-pi/pull/12509) by [@ryanskidmore](https://github.com/ryanskidmore)).
+
+### Fixed
+
+- Fixed Cloudflare API errors surfacing as a raw JSON body ([#12509](https://github.com/can1357/oh-my-pi/pull/12509) by [@ryanskidmore](https://github.com/ryanskidmore)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

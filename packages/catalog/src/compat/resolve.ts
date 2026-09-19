@@ -528,6 +528,8 @@ function detectOpenAICompat(
 			isQwen &&
 			facts.revGte("3.8"),
 		requiresAssistantContentForToolCalls: facts.is("kimi") || d.isDirectDeepseekReasoning,
+		// Rule-owned: only an explicit axis or compat override sets it.
+		requiresStringMessageContent: false,
 		cacheControlFormat:
 			(d.isClinePass && (isQwen || isAnthropicModel)) || (d.isOpenRouter && isAnthropicModel)
 				? "anthropic"

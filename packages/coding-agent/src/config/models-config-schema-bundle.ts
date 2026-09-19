@@ -25,6 +25,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsStore?": "boolean",
 		"supportsDeveloperRole?": "boolean",
 		"supportsMultipleSystemMessages?": "boolean",
+		"requiresStringMessageContent?": "boolean",
 		"supportsReasoningEffort?": "boolean",
 		"reasoningEffortMap?": ReasoningEffortMapSchema,
 		"maxTokensField?": '"max_completion_tokens" | "max_tokens"',

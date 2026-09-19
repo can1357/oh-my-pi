@@ -7,7 +7,7 @@ Model catalog for [oh-my-pi](https://github.com/can1357/oh-my-pi): bundled model
 | Module                          | Purpose                                                                                                     |
 | ------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `models.json` + `models`        | Bundled model database (pricing, context windows, modalities, thinking support)                             |
-| `provider-models`               | Provider catalog descriptors (`CATALOG_PROVIDERS`), per-provider model resolution rules                     |
+| `provider-models`               | Runtime discovery factories (`MODEL_MANAGER_FACTORIES`, the code half of a provider entry), per-provider model resolution rules |
 | `discovery`                     | Runtime model discovery for OpenAI-compatible endpoints, Gemini, Codex, Cursor, Antigravity, Ollama         |
 | `compat/rules`                  | Checked-in KDL policy tree: taxonomy (classes/families/revisions), class/provider cascade rules, runtime behavior vocabulary; compiled by `bun run gen:compat` into the committed `rules.json` |
 | `compat`                        | The rule engine: `classifyModel` (taxonomy), `resolveModelPolicy` (cascade), behavior accessors (`api-routes`, `model-limits`, `exclude-models`, `pricing-peer`), collapse, and OpenAI/Anthropic wire builders that consume resolved records |

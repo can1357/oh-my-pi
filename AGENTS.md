@@ -206,7 +206,7 @@ Rules for TS code:
 To change an entry, fix the source:
 
 - **Model/provider policy** (identity, thinking ladders, wire quirks, modality/limit/pricing corrections, API routing, roster exclusions) → the KDL tree in `packages/catalog/src/compat/rules/` (see the section above).
-- **Provider catalog entries** (default model, discovery factory/flags) → the `CATALOG_PROVIDERS` table in `packages/catalog/src/provider-models/descriptors.ts`.
+- **Provider catalog entries** (default model, discovery flags such as `dynamic-models-authoritative`/`allow-unauthenticated`/`discovery label=`) → the provider's `providers/<id>.kdl` in the KDL tree above; the runtime discovery factory itself (the only provider fact that stays in code) → `MODEL_MANAGER_FACTORIES` in `packages/catalog/src/provider-models/descriptors.ts`.
 - **Discovery/request plumbing** (endpoint shapes, auth, response parsing) → the mappers in `packages/catalog/src/provider-models/openai-compat.ts`.
 - **Generator wiring** (upstream merges, premium multipliers, post-processing order) → `packages/catalog/scripts/generate-models.ts`.
 
