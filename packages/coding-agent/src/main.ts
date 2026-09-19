@@ -1072,13 +1072,20 @@ function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSessi
  *
  * `nativeFlagOwnership: "preliminary"` is reserved for the startup parse,
  * before extensions establish whether a built-in-named flag belongs to them.
+ *
+ * `interactive` reports whether this run owns a terminal. Pass `false` for a
+ * run whose prompt arrived on piped stdin; `--print` and explicit modes are
+ * detected from `parsed` and never auto-resume regardless.
  */
 export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	activeSettings: Settings = settings,
 	askToMoveSession: SessionPrompt = promptMoveSession,
-	options: { nativeFlagOwnership?: "preliminary" | "resolved" } = {},
+	options: {
+		nativeFlagOwnership?: "preliminary" | "resolved";
+		interactive?: boolean;
+	} = {},
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
 		if (parsed.noSession) {
@@ -1174,7 +1181,16 @@ export async function createSessionManager(
 	// session exists. When a prior session is resumed, mark parsed.continue so
 	// buildSessionOptions restores the session's model/thinking instead of
 	// overriding them with CLI defaults.
-	if (activeSettings.get("autoResume")) {
+	//
+	// This is an interactive startup convenience, so it is limited to runs that
+	// own a terminal. A headless run is normally issued while the conversation
+	// it would otherwise adopt is still live in another process — a nested
+	// `omp -p` probe, a cron job, an editor integration — and adopting it makes
+	// two writers share one transcript, replaying the pending tool calls a
+	// resume carries in. `--continue`/`--resume` still resume deliberately from
+	// any mode.
+	const interactive = options.interactive ?? (!parsed.print && parsed.mode === undefined);
+	if (interactive && activeSettings.get("autoResume")) {
 		const manager = await SessionManager.continueRecent(cwd, parsed.sessionDir);
 		if (manager.getEntries().length > 0) {
 			parsed.continue = true;
@@ -1927,7 +1943,7 @@ export async function runRootCommand(
 					cwd,
 					settingsInstance,
 					promptMoveSession,
-					{ nativeFlagOwnership: "preliminary" },
+					{ nativeFlagOwnership: "preliminary", interactive: isInteractive },
 				);
 			}
 		} catch (error: unknown) {
