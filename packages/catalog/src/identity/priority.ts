@@ -37,6 +37,7 @@ const DEFAULT_MODEL_PROVIDER_ORDER = [
 	"opencode-go",
 	"kilo",
 	"vercel-ai-gateway",
+	"cloudflare-workers-ai",
 	"cloudflare-ai-gateway",
 	"nanogpt",
 	"github-copilot",

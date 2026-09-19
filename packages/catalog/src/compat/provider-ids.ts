@@ -16,6 +16,7 @@ export type KnownProvider =
 	| "charm-hyper"
 	| "cline-pass"
 	| "cloudflare-ai-gateway"
+	| "cloudflare-workers-ai"
 	| "commandcode"
 	| "coreweave"
 	| "cursor"
