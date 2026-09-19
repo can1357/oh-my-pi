@@ -4393,9 +4393,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// matching a disallow pattern stays registered but is never activated.
 					// The registration's `mcpServerName` is passed through so
 					// `mcp__<server>_*` matches length-capped minted names by ownership.
+					// A scope entry written in the Claude Code spelling
+					// (`mcp__srv-x__tool`) resolves against THIS registration: the
+					// startup canonicalization ran before the registry held the tool, so
+					// without this the minted key is compared with the raw pattern,
+					// fails to match, and a denied late tool activates (or a
+					// Claude-spelled allowlist entry denies it the inverse way).
+					const canonicalScopeEntry = (entry: string): string => {
+						if (entry.endsWith("*")) return entry;
+						return (
+							resolveMCPToolAlias(entry, candidate =>
+								toolRegistry.has(candidate) ? { name: candidate } : undefined,
+							)?.name ?? entry
+						);
+					};
 					const scopedOut =
-						(enforceToolAllowlist && explicitlyRequestedToolNameSet?.has(name) === false) ||
-						isToolDisallowed(name, disallowedPatterns, registered.definition.mcpServerName);
+						(enforceToolAllowlist && explicitlyRequestedToolNameSet?.has(canonicalScopeEntry(name)) === false) ||
+						isToolDisallowed(
+							name,
+							disallowedPatterns.map(canonicalScopeEntry),
+							registered.definition.mcpServerName,
+						);
 					if (
 						((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) ||
 						scopedOut
