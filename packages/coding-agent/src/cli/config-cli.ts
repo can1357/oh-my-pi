@@ -5,8 +5,12 @@
  * Uses the settings schema as the source of truth for available settings.
  */
 
+import * as path from "node:path";
+import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import type { ConfigError } from "../config/config-file";
+import { ModelsConfigFile } from "../config/models-config";
 import {
 	getDefault,
 	getEnumValues,
@@ -27,7 +31,7 @@ import { initXdg } from "./commands/init-xdg";
 // Types
 // =============================================================================
 
-export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
+export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg" | "doctor";
 
 export interface ConfigCommandArgs {
 	action: ConfigAction;
@@ -78,7 +82,7 @@ function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
 // Argument Parser
 // =============================================================================
 
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
+const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg", "doctor"];
 
 /**
  * Parse config subcommand arguments.
@@ -262,6 +266,9 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		case "init-xdg":
 			await initXdg();
 			break;
+		case "doctor":
+			await handleDoctor(cmd.flags);
+			break;
 	}
 }
 
@@ -426,6 +433,222 @@ function handlePath(): void {
 }
 
 // =============================================================================
+// Doctor: cross-layer config validation
+// =============================================================================
+
+interface DoctorIssue {
+	severity: "error" | "warning" | "info";
+	check: string;
+	message: string;
+	fix?: string;
+}
+
+interface DoctorProviderConfig {
+	hasModels: boolean;
+	/** Model ids this provider serves (custom `models:` entries and `modelOverrides:` keys). */
+	modelIds: string[];
+}
+
+interface DoctorModelsConfig {
+	providers: Record<string, DoctorProviderConfig>;
+	/** Load failure from the schema-backed loader; the model registry rejects the same file. */
+	error?: ConfigError;
+}
+
+/**
+ * Read models.yml through the shared schema-backed loader so the doctor sees
+ * exactly what the model registry accepts or rejects — the models.yaml
+ * fallback, YAML quoting, provider ids outside `\w`, and schema errors
+ * included, instead of a hand-rolled line parser that silently misreads or
+ * discards all of that.
+ */
+async function readModelsConfig(): Promise<DoctorModelsConfig> {
+	const modelsFile = ModelsConfigFile.relocate(path.join(getAgentDir(), "models.yml"));
+	const result = await modelsFile.tryLoadAsync();
+	if (result.status === "not-found") return { providers: {} };
+	if (result.status === "error") return { providers: {}, error: result.error };
+	const providers: Record<string, DoctorProviderConfig> = {};
+	for (const [name, config] of Object.entries(result.value.providers ?? {})) {
+		const modelIds = [
+			...(config.models ?? []).map(model => model.id),
+			...Object.keys(config.modelOverrides ?? {}),
+		];
+		providers[name] = { hasModels: modelIds.length > 0, modelIds };
+	}
+	return { providers };
+}
+
+/**
+ * Map bare model id → providers serving it, built from the bundled catalog
+ * plus custom models.yml providers.
+ */
+function buildModelProviderIndex(modelsProviders: Record<string, DoctorProviderConfig>): Map<string, string[]> {
+	const index = new Map<string, string[]>();
+	const add = (provider: string, modelId: string) => {
+		const providers = index.get(modelId);
+		if (providers) {
+			if (!providers.includes(provider)) providers.push(provider);
+		} else {
+			index.set(modelId, [provider]);
+		}
+	};
+	for (const provider of getBundledProviders()) {
+		for (const model of getBundledModels(provider as GeneratedProvider)) add(provider, model.id);
+	}
+	for (const [provider, config] of Object.entries(modelsProviders)) {
+		for (const modelId of config.modelIds) add(provider, modelId);
+	}
+	return index;
+}
+
+async function handleDoctor(flags: { json?: boolean }): Promise<void> {
+	const issues: DoctorIssue[] = [];
+	const modelsConfig = await readModelsConfig();
+	const modelsProviders = modelsConfig.providers;
+	const disabledProviders = (settings.get("disabledProviders") as string[] | undefined) ?? [];
+	const modelRoles = (settings.get("modelRoles") as Record<string, string> | undefined) ?? {};
+	const fallbackChains =
+		(settings.get("retry.fallbackChains") as Record<string, string[]> | undefined) ?? {};
+	const disabledSet = new Set(disabledProviders);
+
+	// Check: models.yml rejected by the schema-backed loader. The model registry
+	// refuses the same file, so this is an error the runtime will actually hit —
+	// including the credential requirement it enforces (an apiKey is required
+	// when defining models unless auth is "none" or "oauth").
+	if (modelsConfig.error) {
+		issues.push({
+			severity: "error",
+			check: "models-config-invalid",
+			message: `models.yml failed to load: ${modelsConfig.error.message}`,
+			fix: "Fix the models.yml errors; until then the file's custom provider configuration is ignored",
+		});
+	}
+
+	// Check: model roles → resolved provider
+	for (const [role, selector] of Object.entries(modelRoles)) {
+		if (!selector || typeof selector !== "string") continue;
+		const bare = selector.replace(/:\w+$/, "");
+		const parts = bare.split("/");
+		if (parts.length < 2) continue;
+		const [provider] = parts;
+		if (disabledSet.has(provider)) {
+			issues.push({
+				severity: "error",
+				check: "model-role-disabled",
+				message: `Model role "${role}" → "${selector}" resolves to disabled provider "${provider}"`,
+				fix: `Change the model role or remove "${provider}" from disabledProviders`,
+			});
+		}
+	}
+
+	// Check: fallback chains → resolvable providers
+	for (const [chainKey, entries] of Object.entries(fallbackChains)) {
+		if (!Array.isArray(entries)) continue;
+		for (const entry of entries) {
+			if (typeof entry !== "string") continue;
+			const bare = entry.replace(/:\w+$/, "");
+			const parts = bare.split("/");
+			if (parts.length < 2) continue;
+			const [provider] = parts;
+			if (disabledSet.has(provider)) {
+				issues.push({
+					severity: "error",
+					check: "fallback-disabled",
+					message: `Fallback chain "${chainKey}" entry "${entry}" resolves to disabled provider "${provider}"`,
+					fix: `Remove the entry or re-enable the provider`,
+				});
+			}
+		}
+	}
+
+	// Check: catalog conflicts — bare selectors in model roles or fallback
+	// chains served by multiple enabled providers. Bare-id resolution is
+	// preference-ranked, so an ambiguous bare selector may bind a provider the
+	// user did not intend; a provider-qualified selector is unambiguous and
+	// covered by the disabled-provider checks above. Aggregator catalogs mirror
+	// the same ids under many providers, so only user-configured selectors are
+	// checked — flagging every multi-provider id would flood a stock install.
+	const knownProviders = new Set([...getBundledProviders(), ...Object.keys(modelsProviders)]);
+	const modelProviderIndex = buildModelProviderIndex(modelsProviders);
+	const bareSelectors = new Set<string>();
+	const collectBareSelector = (selector: unknown) => {
+		if (typeof selector !== "string" || !selector) return;
+		const bare = selector.replace(/:\w+$/, "");
+		if (knownProviders.has(bare.split("/")[0])) return;
+		bareSelectors.add(bare);
+	};
+	for (const selector of Object.values(modelRoles)) collectBareSelector(selector);
+	for (const entries of Object.values(fallbackChains)) {
+		if (!Array.isArray(entries)) continue;
+		for (const entry of entries) collectBareSelector(entry);
+	}
+	for (const selector of bareSelectors) {
+		const providers = modelProviderIndex.get(selector);
+		if (!providers) continue;
+		const enabled = providers.filter(p => !disabledSet.has(p));
+		if (enabled.length > 1) {
+			issues.push({
+				severity: "warning",
+				check: "catalog-conflict",
+				message: `Bare selector "${selector}" is served by ${enabled.length} enabled providers (${enabled.join(", ")}) — bare-id resolution is preference-ranked and may not pick the intended one`,
+				fix: `Pin the selector to "<provider>/${selector}" to choose explicitly`,
+			});
+		}
+	}
+
+	// Check: disabled providers that have models.yml config (informational)
+	for (const dp of disabledProviders) {
+		if (modelsProviders[dp]) {
+			issues.push({
+				severity: "info",
+				check: "disabled-has-config",
+				message: `Disabled provider "${dp}" still has a config entry in models.yml — harmless but can be cleaned up`,
+			});
+		}
+	}
+
+	if (flags.json) {
+		await writeStdout(
+			`${JSON.stringify(
+				{
+					issues,
+					summary: {
+						errors: issues.filter(i => i.severity === "error").length,
+						warnings: issues.filter(i => i.severity === "warning").length,
+						info: issues.filter(i => i.severity === "info").length,
+					},
+				},
+				null,
+				2,
+			)}\n`,
+		);
+		return;
+	}
+
+	const errors = issues.filter(i => i.severity === "error");
+	const warnings = issues.filter(i => i.severity === "warning");
+	const infos = issues.filter(i => i.severity === "info");
+
+	if (issues.length === 0) {
+		console.log(chalk.green("✓ Config doctor: no issues found"));
+		return;
+	}
+
+	console.log(chalk.bold(`Config doctor: ${errors.length} errors, ${warnings.length} warnings, ${infos.length} info\n`));
+
+	for (const issue of issues) {
+		const icon =
+			issue.severity === "error" ? chalk.red("✗") : issue.severity === "warning" ? chalk.yellow("⚠") : chalk.blue("ℹ");
+		console.log(`${icon} [${issue.check}] ${issue.message}`);
+		if (issue.fix) console.log(`  ${chalk.dim("fix:")} ${issue.fix}`);
+	}
+
+	if (errors.length > 0) {
+		console.log(`\n${chalk.red(`${errors.length} error(s) will cause runtime failures`)}`);
+	}
+}
+
+// =============================================================================
 // Help
 // =============================================================================
 
@@ -439,6 +662,7 @@ ${chalk.bold("Commands:")}
   reset <key>        Reset a setting to its default value
   path               Print the config directory path
   init-xdg           Initialize XDG Base Directory structure
+  doctor             Cross-layer config validation (providers, auth, roles, fallbacks)
 
 ${chalk.bold("Options:")}
   --json             Output as JSON
