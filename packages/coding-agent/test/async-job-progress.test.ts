@@ -344,11 +344,15 @@ describe("AsyncJobManager model progress", () => {
 		await manager.waitForAll();
 	});
 
-	test("activation restores progress after suppression while delivery was disabled", async () => {
+	test("activation preserves foreground suppression until the job is promoted", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({});
 		const recorder = recordingSink();
+		const completions: string[] = [];
 		manager.registerProgressSink("Main", recorder.sink);
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			completions.push(text);
+		});
 		const gate = Promise.withResolvers<void>();
 		const started = Promise.withResolvers<(text: string) => void>();
 		const jobId = manager.register(
@@ -359,19 +363,27 @@ describe("AsyncJobManager model progress", () => {
 				await gate.promise;
 				return "done";
 			},
-			{ ownerId: "Main" },
+			{ ownerId: "Main", foreground: true },
 		);
 		const report = await started.promise;
 
-		manager.watchJobs([jobId]);
-		manager.unwatchJobs([jobId]);
 		expect(manager.activateProgressDelivery(jobId, "wake")).toBe(true);
 		report("after activation");
 		vi.advanceTimersByTime(200);
-		expect(recorder.seen.map(item => item.text)).toEqual(["after activation"]);
+		expect(recorder.seen).toEqual([]);
+		manager.backgroundJob(jobId);
+		report("after promotion");
+		vi.advanceTimersByTime(200);
+		expect(recorder.seen.map(item => item.text)).toEqual(["after promotion"]);
 
 		gate.resolve();
 		await manager.waitForAll();
+		await manager.drainDeliveries();
+		expect(completions).toEqual(["done"]);
+
+		manager.backgroundJob(jobId);
+		await manager.drainDeliveries();
+		expect(completions).toEqual(["done"]);
 	});
 	test("retunes only an owned running progress channel and reports every rejection state", async () => {
 		vi.useFakeTimers();
@@ -555,7 +567,7 @@ describe("AsyncJobManager model progress", () => {
 		expect(completions).toEqual(["full result body"]);
 	});
 
-	test("classifies cumulative raw provenance with split surrogate pairs as progress", async () => {
+	test("classifies cumulative raw provenance across display reset and split surrogate pairs as progress", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({});
 		const recorder = recordingSink();
@@ -588,6 +600,8 @@ describe("AsyncJobManager model progress", () => {
 		sampler.append(`${emoji[1]} batch\n`);
 		vi.advanceTimersByTime(200);
 		expect(recorder.seen.map(item => item.text)).toEqual([`first ${emoji} batch`]);
+
+		sampler.resetDisplay();
 
 		sampler.append("second batch\n\n");
 		vi.advanceTimersByTime(200);
