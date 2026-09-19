@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Draft-07 tuple imports now enforce positional element schemas and additional-item constraints. ([#12289](https://github.com/can1357/oh-my-pi/pull/12289) by [@iliaal](https://github.com/iliaal))
+
 ## [18.2.1] - 2026-09-15
 
 ### Added
