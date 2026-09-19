@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Agent Hub activity footer dropping the `2:activity` hint that the roster footer already shows ([#12432](https://github.com/can1357/oh-my-pi/issues/12432)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
