@@ -102,7 +102,9 @@ import {
 	contextFlowBeginTurn,
 	contextFlowRecordModelCall,
 	contextFlowSeedResearchStack,
+	subscribeContextFlow,
 } from "../context-flow/hooks";
+import { bindRlmContextFlow, contextFlowRootBegin } from "../context-flow/rlm-flow";
 import { computeSessionContextBreakdown } from "./context-usage-runtime";
 
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -1332,6 +1334,13 @@ export class AgentSession {
 			this.#tokenomics = undefined;
 		}
 		contextFlowSeedResearchStack(this);
+		if (rlmEnabled(this as never)) {
+			try {
+				bindRlmContextFlow(this, getRlmRuntime(this as never));
+			} catch {
+				/* fail-open */
+			}
+		}
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#extensionRoots =
@@ -3234,6 +3243,8 @@ export class AgentSession {
 		// background subagent holds a live reading by the time it is focused and
 		// the main session's reading survives focus round-trips.
 		if (event.type === "message_start" && event.message.role === "assistant") {
+			const model = this.model;
+			contextFlowRootBegin(this, model?.provider, model?.id);
 			this.tokenRate.begin(event.message.timestamp);
 		} else if (event.type === "message_update" && event.message.role === "assistant") {
 			const delta = event.assistantMessageEvent;
@@ -3387,8 +3398,8 @@ export class AgentSession {
 					usage: assistantMsg.usage,
 					durationMs: assistantMsg.duration,
 					visibility: "root",
+					failed: assistantMsg.stopReason === "error",
 				});
-				// Tokenomics: root incremental model call (provider-reported only).
 				void this.#tokenomics
 					?.emitModelCall({
 						role: "root",
@@ -9545,6 +9556,15 @@ export class AgentSession {
 			bridge: this.#tokenomics,
 			rlmMetrics,
 		});
+	}
+
+	/** Subscribe to in-memory context-flow revisions (coalesced). */
+	subscribeContextFlow(listener: () => void): () => void {
+		return subscribeContextFlow(this, listener);
+	}
+
+	getContextFlowRevision(): number {
+		return getContextFlowRegistry(this).revision;
 	}
 
 

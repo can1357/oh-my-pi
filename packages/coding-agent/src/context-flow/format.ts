@@ -1,7 +1,7 @@
 import { renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { ContextBreakdown } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import type { ContextFlowSnapshot, ContextFlowNode, WiringStatus } from "./types";
+import type { ContextFlowSnapshot, ContextFlowNode, ContextFlowNodeStatus, WiringStatus } from "./types";
 
 export type ContextExplorerView = "window" | "flow" | "offload" | "economics";
 
@@ -38,18 +38,52 @@ function wiringLabel(status: WiringStatus | undefined): string {
 	}
 }
 
-function formatFlowNode(node: ContextFlowNode): string {
-	const dur = node.durationMs !== undefined ? `${node.durationMs.toFixed(1)}ms` : node.status === "not_wired" ? "NOT WIRED" : "";
+function statusGlyph(status: ContextFlowNodeStatus): string {
+	switch (status) {
+		case "running":
+			return "◉";
+		case "complete":
+			return "✓";
+		case "failed":
+			return "✗";
+		case "skipped":
+			return "⊘";
+		case "pending":
+			return "○";
+		case "not_wired":
+			return "—";
+		default:
+			return "·";
+	}
+}
+
+function formatFlowNode(node: ContextFlowNode, depth = 0): string[] {
+	const prefix = depth === 0 ? "●" : "├─";
+	const indent = depth > 0 ? "│  ".repeat(depth - 1) : "";
+	const dur =
+		node.status === "running"
+			? "running"
+			: node.durationMs !== undefined
+				? `${node.durationMs.toFixed(1)}ms`
+				: node.status === "not_wired"
+					? "NOT WIRED"
+					: "";
 	const io =
 		node.inputTokens !== undefined || node.outputTokens !== undefined
-			? `${node.inputTokens ?? 0}→${node.outputTokens ?? 0}t`
+			? `${formatNumber(node.inputTokens ?? 0)}→${formatNumber(node.outputTokens ?? 0)}t`
 			: node.inputBytes !== undefined
-				? `${formatBytes(node.inputBytes)}B`
+				? `${formatBytes(node.inputBytes)} externalized`
 				: "";
-	const parts = [`├─ ${node.component}`, dur, io, node.visibility !== "root" ? `(${node.visibility})` : "", node.decision ? `→ ${node.decision}` : ""]
-		.filter(Boolean)
-		.join("  ");
-	return parts;
+	const provider = node.provider && node.model ? `${node.provider}/${node.model}` : node.model ?? node.provider;
+	const lines = [
+		`${indent}${prefix} ${statusGlyph(node.status)} ${node.component}`.padEnd(28) +
+			[dur, io, node.grantCount !== undefined ? `${node.grantCount} grants` : ""].filter(Boolean).join("  "),
+	];
+	if (provider) lines.push(`${indent}│    └─ ${provider}`);
+	if (node.decision) lines.push(`${indent}│    └─ ${node.decision}`);
+	if (node.reason && node.status === "skipped") lines.push(`${indent}│    └─ ${node.reason}`);
+	if (node.visibility !== "root") lines.push(`${indent}│    (${node.visibility})`);
+	return lines;
 }
 
 export function renderContextExplorerView(
@@ -104,9 +138,19 @@ function renderFlowView(flow: ContextFlowSnapshot): string {
 	if (turnNodes.length === 0) {
 		lines.push("(no instrumented stages this turn yet)");
 	} else {
+		const roots = turnNodes.filter(n => !n.parentId);
+		const children = new Map<string, ContextFlowNode[]>();
 		for (const node of turnNodes) {
-			lines.push(formatFlowNode(node));
+			if (!node.parentId) continue;
+			const bucket = children.get(node.parentId) ?? [];
+			bucket.push(node);
+			children.set(node.parentId, bucket);
 		}
+		const renderNode = (node: ContextFlowNode, depth = 0): void => {
+			lines.push(...formatFlowNode(node, depth));
+			for (const child of children.get(node.id) ?? []) renderNode(child, depth + 1);
+		};
+		for (const root of roots) renderNode(root, 0);
 	}
 	lines.push("");
 	lines.push("Research stack (static wiring):");

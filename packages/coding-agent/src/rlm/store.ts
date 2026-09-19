@@ -1,3 +1,5 @@
+import type { RlmFlowHooks } from "../context-flow/rlm-flow";
+
 import { createHash } from "node:crypto";
 
 /** Default spill threshold — matches nano-rlm's 20KB tool-result cap. */
@@ -119,6 +121,9 @@ export class RlmStore {
 		grantsSelected: 0,
 		workerCallsAvoided: 0,
 	};
+	/** Session owner for live context-flow emission. */
+	flowOwner?: object;
+	flowHooks?: RlmFlowHooks;
 
 	#disposed = false;
 	/** In-flight provider calls aborted by cancel / wall-clock / dispose. */
@@ -158,7 +163,7 @@ export class RlmStore {
 		this.records.set(id, record);
 		this.metrics.spills += 1;
 		this.metrics.bytesSpilled += record.bytes;
-		this.note("put", `handle=rlm://h/${id} bytes=${record.bytes}${source ? ` source=${source}` : ""}`);
+		this.flowHooks?.onSpill?.(record);
 		return record;
 
 	}
@@ -191,6 +196,8 @@ export class RlmStore {
 	search(handle: string, pattern: string, limit = 8, mode: "literal" | "regex" = "literal"): RlmHit[] {
 		const record = this.require(handle);
 		const hits: RlmHit[] = [];
+		this.flowHooks?.onSearchBegin?.(handle);
+		const started = Date.now();
 		this.metrics.searches += 1;
 		if (mode === "literal") {
 			let from = 0;
@@ -205,6 +212,7 @@ export class RlmStore {
 				});
 				from = index + Math.max(1, pattern.length);
 			}
+			this.flowHooks?.onSearch?.({ handle, hits: hits.length, durationMs: Date.now() - started });
 			return hits;
 		}
 		const regex = new RegExp(pattern, "g");
@@ -219,6 +227,7 @@ export class RlmStore {
 			});
 			if (match[0].length === 0) regex.lastIndex += 1;
 		}
+		this.flowHooks?.onSearch?.({ handle, hits: hits.length, durationMs: Date.now() - started });
 		return hits;
 	}
 

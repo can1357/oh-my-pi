@@ -1,6 +1,7 @@
 export type {
 	ContextFlowEconomics,
 	ContextFlowNode,
+	ContextFlowNodeStatus,
 	ContextFlowSnapshot,
 	ContextFlowStage,
 	ContextFlowVisibility,
@@ -16,7 +17,17 @@ export {
 	contextFlowRecordModelCall,
 	contextFlowSeedResearchStack,
 	contextFlowSyncRlmMetrics,
+	subscribeContextFlow,
 } from "./hooks";
+export { scheduleContextSnapshot, flushContextSnapshot } from "./emitter";
+export {
+	bindRlmContextFlow,
+	contextFlowRlmSpill,
+	contextFlowRootBegin,
+	contextFlowRootComplete,
+	contextFlowTurnFlush,
+	FLOW_KEYS,
+} from "./rlm-flow";
 export {
 	contextExplorerTitle,
 	cycleContextExplorerView,

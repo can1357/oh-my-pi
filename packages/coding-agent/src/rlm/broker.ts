@@ -1,3 +1,9 @@
+import {
+	contextFlowRlmWorkerBegin,
+	contextFlowRlmWorkerComplete,
+	FLOW_KEYS,
+	resolveRlmFlowOwner,
+} from "../context-flow/rlm-flow";
 import type { RlmCompleter } from "./query";
 import type { RlmLedger, RlmLease } from "./ledger";
 import type { RlmRuntime } from "./runtime";
@@ -186,6 +192,16 @@ export async function executeLeasedCompletion(
 		};
 	}
 
+	const owner = resolveRlmFlowOwner(runtime);
+	const workerComponent =
+		ctx.purpose === "rlm-evidence-packet" ? FLOW_KEYS.RLM_CODEC : FLOW_KEYS.RLM_WORKER;
+	if (owner) {
+		contextFlowRlmWorkerBegin(owner, {
+			component: workerComponent,
+			grantedBytes: ctx.grantedBytes,
+			inputTokens: approxTokens,
+		});
+	}
 	const startedAt = lease.startedAt;
 	try {
 		const raw = await complete(ctx.prompt, {
@@ -222,6 +238,21 @@ export async function executeLeasedCompletion(
 			status: reconciled.lease.status,
 			citations: ctx.citations ? ctx.citations.split("; ") : [],
 		});
+		if (owner) {
+			contextFlowRlmWorkerComplete(
+				owner,
+				{
+					component: workerComponent,
+					inputTokens,
+					outputTokens,
+					durationMs: Date.now() - startedAt,
+					provider: typeof raw !== "string" ? raw.provider : undefined,
+					model: typeof raw !== "string" ? raw.model : undefined,
+					failed: reconciled.overBudget,
+				},
+				runtime.store,
+			);
+		}
 
 		if (reconciled.overBudget) {
 			return {
@@ -261,6 +292,18 @@ export async function executeLeasedCompletion(
 			status: closed.status,
 			citations: ctx.citations ? ctx.citations.split("; ") : [],
 		});
+		if (owner) {
+			contextFlowRlmWorkerComplete(
+				owner,
+				{
+					component: workerComponent,
+					durationMs: Date.now() - startedAt,
+					failed: !aborted,
+					decision: msg,
+				},
+				runtime.store,
+			);
+		}
 		return {
 			text: `${msg} (fail-open)`,
 			citation: ctx.citations || ctx.viewId,

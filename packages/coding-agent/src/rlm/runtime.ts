@@ -1,6 +1,6 @@
 import { RlmLedger } from "./ledger";
-import { RlmStore, type RlmBudget } from "./store";
 import type { RlmTrajectoryRecord } from "./broker";
+import { RlmStore, type RlmBudget } from "./store";
 import { resolveRlmView, type RlmGrant, type RlmView } from "./view";
 
 export interface RlmRuntimeOptions extends Partial<RlmBudget> {
@@ -19,6 +19,8 @@ export class RlmRuntime {
 	readonly store: RlmStore;
 	readonly ledger: RlmLedger;
 	readonly ownerId?: string;
+	/** Session owner for live context-flow emission. */
+	flowOwner?: object;
 	/** Normalized trajectory records for observability / E3–E4. */
 	readonly records: RlmTrajectoryRecord[] = [];
 	#disposed = false;

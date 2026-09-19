@@ -2,6 +2,13 @@
  * Groq / semantic coprocessor path: search-driven grants → typed EvidencePacketV2.
  */
 
+import {
+	contextFlowEvidenceReintroduced,
+	contextFlowRlmGrants,
+	contextFlowRlmWorkerSkipped,
+	FLOW_KEYS,
+	resolveRlmFlowOwner,
+} from "../context-flow/rlm-flow";
 import { executeLeasedCompletion, type RlmWorkerMessage } from "./broker";
 import {
 	EVIDENCE_PACKET_V2_JSON_SCHEMA,
@@ -197,6 +204,8 @@ export async function rlmEvidenceQuery(
 			store.metrics.queries += 1;
 			store.metrics.workerCallsAvoided += 1;
 			const packet = emptyEvidencePacketV2("abstain");
+			const owner = resolveRlmFlowOwner(runtime);
+			if (owner) contextFlowRlmWorkerSkipped(owner, FLOW_KEYS.RLM_CODEC, "no search hits", store);
 			return {
 				text: formatEvidencePacketForRoot(packet),
 				citation: handle,
@@ -210,6 +219,18 @@ export async function rlmEvidenceQuery(
 		}
 		store.metrics.grantsSelected += selection.grants.length;
 		grants = selection.grants;
+		const grantOwner = resolveRlmFlowOwner(runtime);
+		if (grantOwner) {
+			contextFlowRlmGrants(
+				grantOwner,
+				{
+					grantedBytes: selection.grantedBytes,
+					grantCount: selection.grants.length,
+					grantedTokens: Math.round(selection.grantedBytes / 4),
+				},
+				store,
+			);
+		}
 	} else {
 		grants = [{ handle, start: args.start ?? 0, end: args.end }];
 	}
@@ -227,6 +248,12 @@ export async function rlmEvidenceQuery(
 		}
 		const validation = view ? validateEvidencePacket(store, view, deterministic) : undefined;
 		const packet = validation && !validation.ok ? rejectInvalidEvidencePacket(deterministic, validation, store, view) : deterministic;
+		const packetBytes = evidencePacketByteSize(packet);
+		const owner = resolveRlmFlowOwner(runtime);
+		if (owner) {
+			contextFlowRlmWorkerSkipped(owner, FLOW_KEYS.RLM_CODEC, "deterministic extraction", store);
+			contextFlowEvidenceReintroduced(owner, { packetTokens: Math.round(packetBytes / 4), grantedBytes: view?.grantedBytes }, store);
+		}
 		return {
 			text: formatEvidencePacketForRoot(packet),
 			citation: view?.grants.map(g => g.citation).join("; ") ?? handle,
@@ -236,7 +263,7 @@ export async function rlmEvidenceQuery(
 			packetValidation: validation,
 			validationFailed: validation ? !validation.ok : undefined,
 			workerSkipped: true,
-			packetBytes: evidencePacketByteSize(packet),
+			packetBytes,
 		};
 	}
 
@@ -287,7 +314,6 @@ export async function rlmEvidenceQuery(
 		parsed = normalizeEvidencePacketCitations(parsed, view);
 		parsed = supplementEvidencePacketFromGrants(store, view, parsed);
 	}
-
 	let validation: EvidenceValidationResult | undefined;
 	let validationFailed = false;
 	if (parsed && view) {
@@ -297,6 +323,11 @@ export async function rlmEvidenceQuery(
 			parsed = rejectInvalidEvidencePacket(parsed, validation, store, view);
 			store.note("evidence-query", `packet validation failed: ${validation.violations.length} violations`, true);
 		}
+	}
+	const packetBytes = parsed ? evidencePacketByteSize(parsed) : undefined;
+	const owner = resolveRlmFlowOwner(runtime);
+	if (owner && packetBytes !== undefined) {
+		contextFlowEvidenceReintroduced(owner, { packetTokens: Math.round(packetBytes / 4), grantedBytes: view.grantedBytes }, store);
 	}
 
 	const text = parsed ? formatEvidencePacketForRoot(parsed) : result.text;

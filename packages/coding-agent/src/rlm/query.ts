@@ -1,4 +1,10 @@
 import {
+	contextFlowRlmGrants,
+	contextFlowRlmWorkerSkipped,
+	FLOW_KEYS,
+	resolveRlmFlowOwner,
+} from "../context-flow/rlm-flow";
+import {
 	buildQueryWorkerContext,
 	buildQueryWorkerRequest,
 	executeLeasedCompletion,
@@ -134,6 +140,8 @@ export async function rlmQuery(
 			store.metrics.queries += 1;
 			store.metrics.workerCallsAvoided += 1;
 			store.note("query", `no search hits for patterns on ${handle}`, true);
+			const owner = resolveRlmFlowOwner(runtime);
+			if (owner) contextFlowRlmWorkerSkipped(owner, FLOW_KEYS.RLM_WORKER, "no search hits", store);
 			return {
 				text: "no matching evidence in spilled corpus — abstain rather than guess (fail-open)",
 				citation: handle,
@@ -144,6 +152,18 @@ export async function rlmQuery(
 		}
 		store.metrics.grantsSelected += selection.grants.length;
 		grants = selection.grants;
+		const owner = resolveRlmFlowOwner(runtime);
+		if (owner) {
+			contextFlowRlmGrants(
+				owner,
+				{
+					grantedBytes: selection.grantedBytes,
+					grantCount: selection.grants.length,
+					grantedTokens: Math.round(selection.grantedBytes / 4),
+				},
+				store,
+			);
+		}
 	} else {
 		grants = [{ handle, start: args.start ?? 0, end: args.end }];
 	}

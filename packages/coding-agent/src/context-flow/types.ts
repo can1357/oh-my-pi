@@ -23,6 +23,8 @@ export type ContextFlowStage =
 	| "economics"
 	| "offload";
 
+export type ContextFlowNodeStatus = "pending" | "running" | "complete" | "failed" | "skipped" | "not_wired";
+
 export interface ContextFlowNode {
 	id: string;
 	parentId?: string;
@@ -41,10 +43,11 @@ export interface ContextFlowNode {
 	outputBytes?: number;
 	startedAt: number;
 	durationMs?: number;
-	status: "ok" | "error" | "skipped" | "not_wired" | "idle";
+	status: ContextFlowNodeStatus;
 	decision?: string;
 	reason?: string;
 	evidenceHandles?: readonly string[];
+	grantCount?: number;
 }
 
 export interface OffloadSummary {

@@ -211,6 +211,8 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { renderFullContextExplorer } from "../context-flow/format";
+import { computeSessionContextBreakdown } from "../session/context-usage-runtime";
 import { ContextExplorerOverlay } from "@oh-my-pi/pi-tui/overlays/context-explorer";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
@@ -961,6 +963,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#contextExplorerOverlayHandle: OverlayHandle | undefined;
+	#contextExplorerOverlay: ContextExplorerOverlay | undefined;
+	#contextFlowUnsub: (() => void) | undefined;
+	#contextFlowRenderScheduled = false;
 	#planReviewCancel: (() => void) | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
@@ -5848,23 +5853,48 @@ export class InteractiveMode implements InteractiveModeContext {
 	showContextExplorer(body: string): void {
 		this.#hideContextExplorer();
 		const overlay = new ContextExplorerOverlay(this.ui, body, () => this.#hideContextExplorer());
+		this.#contextExplorerOverlay = overlay;
 		this.#contextExplorerOverlayHandle = this.ui.showOverlay(overlay, {
 			anchor: "bottom-center",
 			width: "100%",
 			maxHeight: "100%",
 			margin: 0,
 		});
+		this.#contextFlowUnsub = this.session.subscribeContextFlow?.(() => this.#scheduleContextExplorerRefresh());
 		this.ui.setFocus(overlay);
 		this.ui.requestRender();
 	}
 
 	#hideContextExplorer(): void {
+		this.#contextFlowUnsub?.();
+		this.#contextFlowUnsub = undefined;
+		this.#contextExplorerOverlay = undefined;
+		this.#contextFlowRenderScheduled = false;
 		const handle = this.#contextExplorerOverlayHandle;
 		this.#contextExplorerOverlayHandle = undefined;
 		if (!handle) return;
 		handle.hide();
 		this.#selectorController.focusActiveEditorArea();
 		this.ui.requestRender();
+	}
+
+	#scheduleContextExplorerRefresh(): void {
+		if (!this.#contextExplorerOverlay || this.#contextFlowRenderScheduled) return;
+		this.#contextFlowRenderScheduled = true;
+		queueMicrotask(() => {
+			this.#contextFlowRenderScheduled = false;
+			const overlay = this.#contextExplorerOverlay;
+			if (!overlay) return;
+			try {
+				const breakdown = computeSessionContextBreakdown(this.session, { snapcompactSavings: true });
+				const flow = this.session.getContextFlowSnapshot(breakdown);
+				overlay.setBody(renderFullContextExplorer(breakdown, flow));
+				this.statusLine.invalidate();
+				this.ui.requestRender();
+			} catch {
+				/* fail-open */
+			}
+		});
 	}
 
 	#hideSessionInfo(): void {

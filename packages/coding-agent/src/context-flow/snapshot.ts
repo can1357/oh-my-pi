@@ -30,10 +30,14 @@ export function mergeRlmMetricsIntoOffload(
 	const externalBytes = metrics.bytesSpilled ?? 0;
 	const granted = metrics.bytesReintroduced ?? 0;
 	registry.updateOffload({
-		externalBytes,
-		reintroducedTokens: reintroducedTokens ?? Math.max(0, Math.round(granted / 4)),
-		grantedTokens: metrics.grantsSelected ? metrics.grantsSelected * 1024 : undefined,
-		active: externalBytes > 0 || (metrics.queries ?? 0) > 0 || (metrics.searches ?? 0) > 0,
+		...(externalBytes > 0 ? { externalBytes } : {}),
+		...(reintroducedTokens !== undefined ? { reintroducedTokens } : {}),
+		...(metrics.grantsSelected ? { grantedTokens: metrics.grantsSelected * 1024 } : {}),
+		active:
+			externalBytes > 0 ||
+			(metrics.queries ?? 0) > 0 ||
+			(metrics.searches ?? 0) > 0 ||
+			registry.snapshot().offload.active,
 	});
 }
 
