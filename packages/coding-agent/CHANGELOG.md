@@ -2,11 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `history.scope` (`session` | `cwd` | `repo` | `global`, default `global`) to scope what the `Up` arrow recalls to a conversation, a folder or a repository, and `history.searchScope` (default `global`) for what `Ctrl+R` opens on, with `Tab`/`Shift+Tab` changing scope inside the history panel ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+
 ### Breaking Changes
 
 - Removed support for the env parameter in the bash tool
 
 ### Fixed
+
+- Fixed the `edit` tool splicing a literal `…` into the file when a `<SM:FIND>` opened or closed with an ellipsis (a line-end `…` spanning the rest of a line, or a whole-line `…` at either edge) and `<SM:PUT>` re-emitted it. An edge gap captures nothing, so the matching `<SM:PUT>` ellipsis now re-emits nothing and the anchor keeps its own newline; an identical `<SM:FIND>`/`<SM:PUT>` pair reports no change instead of writing the marker. A leading gap combined with an inner gap no longer panics.
+- Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
+- Prompt history reads are no longer always global: `Up` and `Ctrl+R` can be scoped to the current conversation, folder or repository, so a project's prompts stop appearing in another once a scope is configured ([#4331](https://github.com/can1357/oh-my-pi/issues/4331); [#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Collab guests no longer run or recall host-only commands: a command the guest gates refuse is neither recorded in `Up` history nor executed on the Ctrl+Enter path (`/new`, `/model …`, `/skill:…`) ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
 - Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.

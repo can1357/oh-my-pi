@@ -1,7 +1,15 @@
-import type { Database, Statement } from "bun:sqlite";
+import type { Database, SQLQueryBindings, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { checkpointWal, getHistoryDbPath, logger, openSqliteDatabaseSync, postmortem } from "@oh-my-pi/pi-utils";
+import {
+	checkpointWal,
+	getHistoryDbPath,
+	logger,
+	normalizePathForComparison,
+	openSqliteDatabaseSync,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
+import { primaryRootOrCwd } from "../utils/active-repo-context";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -17,6 +25,33 @@ export interface HistoryEntry {
 	sessionId?: string;
 }
 
+/**
+ * Recall scopes, narrowest first. Single source for the settings enum, the Ctrl+R scope ring
+ * and the labels both render, so they never drift apart.
+ */
+export const HISTORY_SCOPE_KINDS = ["session", "cwd", "repo", "global"] as const;
+
+export type HistoryScopeKind = (typeof HISTORY_SCOPE_KINDS)[number];
+
+/** Human-facing name of each scope, phrased to read mid-sentence (`History (this session)`). */
+export const HISTORY_SCOPE_LABELS: Record<HistoryScopeKind, string> = {
+	session: "this session",
+	cwd: "current folder",
+	repo: "this repository",
+	global: "all projects",
+};
+
+/**
+ * Recall filter for {@link HistoryStorage.getRecent} / {@link HistoryStorage.search}.
+ * Omitting the scope, or passing `global`, reads the whole table (the pre-#4331 behavior).
+ */
+export interface HistoryScope {
+	/** `session`: one conversation; `cwd`: one directory; `repo`: one repository; `global`: everything. */
+	kind: HistoryScopeKind;
+	/** Session id (`session`), directory (`cwd`), or primary repository root (`repo`). */
+	value?: string;
+}
+
 type HistoryRow = {
 	id: number;
 	prompt: string;
@@ -24,6 +59,17 @@ type HistoryRow = {
 	cwd: string | null;
 	session_id: string | null;
 };
+
+/** Rendered scope predicate: `where` for statements without a `WHERE`, `and` for the others. */
+type ScopeClause = { where: string; and: string; params: SQLQueryBindings[] };
+
+const EMPTY_SCOPE_CLAUSE: ScopeClause = { where: "", and: "", params: [] };
+
+// A bare directory is not a list, so directory scopes expand to stored spellings and bind them
+// with `json_each`; the array travels as JSON, keeping the statement text (and its cache key)
+// constant no matter how many directories match.
+const DIRS_WHERE = "WHERE cwd IN (SELECT value FROM json_each(?))";
+const DIRS_AND = "AND cwd IN (SELECT value FROM json_each(?))";
 
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
 
@@ -70,10 +116,22 @@ export class HistoryStorage {
 
 	// Prepared statements
 	#upsertRowStmt: Statement;
-	#recentStmt: Statement;
-	#searchStmt: Statement;
-	// Cache substring-fallback prepared statements keyed by token count.
-	#substringStmts = new Map<number, Statement>();
+	// Only constant SQL texts are cached — scope values travel as bound parameters inside the
+	// text, never as text — so this map is bounded by the number of query shapes in this file,
+	// not by user input. `#searchSubstring` builds one LIKE term per token, so it prepares its
+	// statement per call instead of growing a key per token count ever searched.
+	#stmts = new Map<string, Statement>();
+	// Directory scopes resolve stored `cwd` spellings per read. Repository topology and stored
+	// spellings can change while the process runs (a nested `git init`, a moved worktree, a new
+	// prompt from another session), so every memo is dropped on any write: ours in `#insertBatch`,
+	// or another connection's commit, seen through `PRAGMA data_version`. A change that commits
+	// nothing — a bare `git init` run by another process — stays invisible until the next write.
+	// `cwd` needs only the physical spelling; the repository root is resolved on demand, `repo` only.
+	#physicalByStored = new Map<string, string>();
+	#rootByPhysical = new Map<string, string>();
+	#dirsByTarget = new Map<string, string[]>();
+	/** `PRAGMA data_version` last observed; it moves only for commits by another connection. */
+	#dataVersion = 0;
 
 	private constructor(db: Database) {
 		this.#db = db;
@@ -102,12 +160,6 @@ END;
 				logger.warn("HistoryStorage FTS rebuild failed", { error: String(error) });
 			}
 		}
-		this.#recentStmt = this.#db.prepare(
-			"SELECT id, prompt, created_at, cwd, session_id FROM history ORDER BY created_at DESC, id DESC LIMIT ?",
-		);
-		this.#searchStmt = this.#db.prepare(
-			"SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ORDER BY h.created_at DESC, h.id DESC LIMIT ?",
-		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
 VALUES (?, ${SQLITE_NOW_EPOCH}, ?, ?)
@@ -116,6 +168,8 @@ ON CONFLICT(prompt) DO UPDATE SET
 	cwd = excluded.cwd,
 	session_id = excluded.session_id
 		`);
+		// A fresh connection's version is a baseline, not a delta.
+		this.#dataVersion = this.#readDataVersion();
 	}
 
 	/** Opens the process-wide prompt history database, quarantining a corrupt store once. */
@@ -152,15 +206,16 @@ ON CONFLICT(prompt) DO UPDATE SET
 
 	#close(): void {
 		checkpointWal(this.#db);
-		for (const stmt of this.#substringStmts.values()) stmt.finalize();
-		this.#substringStmts.clear();
+		for (const stmt of this.#stmts.values()) stmt.finalize();
+		this.#stmts.clear();
 		this.#upsertRowStmt.finalize();
-		this.#recentStmt.finalize();
-		this.#searchStmt.finalize();
 		this.#db.close();
 	}
 
 	#insertBatch(rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>): void {
+		this.#physicalByStored.clear();
+		this.#rootByPhysical.clear();
+		this.#dirsByTarget.clear();
 		this.#db.transaction((rows: Array<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>) => {
 			for (const row of rows) {
 				this.#upsertRowStmt.run(row.prompt, row.cwd ?? null, row.sessionId ?? null);
@@ -195,27 +250,42 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return Promise.resolve();
 	}
 
-	/** Returns unique prompts ordered by their most recent submission. */
-	getRecent(limit: number): HistoryEntry[] {
+	/**
+	 * Returns unique prompts ordered by their most recent submission, restricted to `scope`.
+	 *
+	 * Throws when the handle is unusable or the statement fails, so a caller that can recover
+	 * does: the editor's history seed retries on the next browse instead of replacing the list
+	 * with an empty one. {@link search} deliberately keeps degrading to no results — its
+	 * `matchingSessionIds` caller ranks a picker and has nothing to retry.
+	 */
+	getRecent(limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
-		try {
-			const rows = this.#recentStmt.all(safeLimit) as HistoryRow[];
-			return rows.map(row => this.#toEntry(row));
-		} catch (error) {
-			logger.error("HistoryStorage getRecent failed", { error: String(error) });
-			return [];
-		}
+		const clause = this.#scopeClause(scope);
+		const rows = this.#prepare(
+			`SELECT id, prompt, created_at, cwd, session_id FROM history ${clause.where} ORDER BY created_at DESC, id DESC LIMIT ?`,
+		).all(...clause.params, safeLimit) as HistoryRow[];
+		return rows.map(row => this.#toEntry(row));
 	}
 
-	/** Finds unique prompts matching every query token, newest first. */
-	search(query: string, limit: number): HistoryEntry[] {
+	/** Finds unique prompts matching every query token, newest first, restricted to `scope`. */
+	search(query: string, limit: number, scope?: HistoryScope): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
 		const tokens = this.#tokenize(query);
 		if (tokens.length === 0) return [];
+
+		// Resolved before the query paths, like `getRecent`: a scope that cannot be rendered
+		// means an unusable handle, and reading unscoped is never an option — fail closed.
+		let clause: ScopeClause;
+		try {
+			clause = this.#scopeClause(scope);
+		} catch (error) {
+			logger.error("HistoryStorage search scope failed", { error: String(error) });
+			return [];
+		}
 
 		// 1. FTS5 prefix match (token AND, prefix-wildcard per token).
 		//    Handles punctuation by tokenizing query the same way unicode61 tokenizer
@@ -223,7 +293,9 @@ ON CONFLICT(prompt) DO UPDATE SET
 		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
-			ftsRows = this.#searchStmt.all(ftsQuery, safeLimit) as HistoryRow[];
+			ftsRows = this.#prepare(
+				`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ? ${clause.and} ORDER BY h.created_at DESC, h.id DESC LIMIT ?`,
+			).all(ftsQuery, ...clause.params, safeLimit) as HistoryRow[];
 		} catch (error) {
 			// Malformed FTS expression - fall through to substring path.
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
@@ -234,7 +306,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		//    by safeLimit, ordered by recency - no full-table load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit);
+			subRows = this.#searchSubstring(tokens, safeLimit, clause);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -352,21 +424,133 @@ ON CONFLICT(prompt) DO UPDATE SET
 			.filter(tok => tok.length > 0);
 	}
 
-	#searchSubstring(tokens: string[], limit: number): HistoryRow[] {
-		const stmt = this.#getSubstringStmt(tokens.length);
-		const params: unknown[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
-		params.push(limit);
-		return stmt.all(...(params as [string, ...unknown[]])) as HistoryRow[];
+	#searchSubstring(tokens: string[], limit: number, clause: ScopeClause): HistoryRow[] {
+		const whereClause = tokens.map(() => "prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
+		// One LIKE term per token, so this text — and any cache key built from it — grows with the
+		// query. Prepared per call and finalized right after: measured 8-34 us against the 1.5-29 ms
+		// this scan already costs, so caching it bought nothing and retained a statement per token
+		// count ever searched.
+		const stmt = this.#db.prepare(
+			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${whereClause} ${clause.and} ORDER BY created_at DESC, id DESC LIMIT ?`,
+		);
+		try {
+			const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+			params.push(...clause.params, limit);
+			return stmt.all(...params) as HistoryRow[];
+		} finally {
+			stmt.finalize();
+		}
 	}
 
-	#getSubstringStmt(tokenCount: number): Statement {
-		let stmt = this.#substringStmts.get(tokenCount);
-		if (stmt) return stmt;
-		const whereClause = Array(tokenCount).fill("prompt LIKE ? ESCAPE '\\' COLLATE NOCASE").join(" AND ");
-		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
-		);
-		this.#substringStmts.set(tokenCount, stmt);
+	/**
+	 * SQL fragment (and its bound values) restricting a read to `scope`.
+	 * `undefined` and `global` read the whole table; every other kind either filters or
+	 * matches nothing — a configured scope never silently widens to the full history.
+	 */
+	#scopeClause(scope?: HistoryScope): ScopeClause {
+		if (!scope || scope.kind === "global") return EMPTY_SCOPE_CLAUSE;
+		switch (scope.kind) {
+			case "session":
+				return { where: "WHERE session_id = ?", and: "AND session_id = ?", params: [scope.value ?? ""] };
+			case "cwd":
+			case "repo":
+				return {
+					where: DIRS_WHERE,
+					and: DIRS_AND,
+					params: [JSON.stringify(this.#scopeDirs(scope.kind, scope.value))],
+				};
+			default:
+				return { where: "WHERE 1 = 0", and: "AND 1 = 0", params: [] };
+		}
+	}
+
+	/**
+	 * Stored directories a scope reads: the ones denoting `target` itself (`cwd`), or every
+	 * one belonging to the repository rooted at `target` (`repo`).
+	 *
+	 * `cwd` holds the raw submission directory, so neither a plain equality nor a path prefix
+	 * works: a subdirectory or a linked worktree shares only its primary root with the
+	 * repository, and the same directory can be stored under two spellings (a symlinked
+	 * checkout keeps its symlink spelling, since `setProjectDir` resolves lexically). Each read
+	 * therefore filters the stored set, comparing normalized spellings on both sides — off the
+	 * memo described above, which the next write rebuilds.
+	 */
+	#scopeDirs(kind: "cwd" | "repo", target?: string): string[] {
+		if (!target) return [];
+		this.#dropMemosIfExternallyChanged();
+		const normalized = normalizePathForComparison(target);
+		const cacheKey = `${kind}\u0000${normalized}`;
+		const cached = this.#dirsByTarget.get(cacheKey);
+		if (cached) return cached;
+		const dirs = this.#storedDirs().filter(dir => {
+			const physical = this.#physicalOf(dir);
+			return kind === "cwd" ? physical === normalized : this.#rootOf(physical) === normalized;
+		});
+		this.#dirsByTarget.set(cacheKey, dirs);
+		return dirs;
+	}
+
+	#storedDirs(): string[] {
+		return (
+			this.#prepare("SELECT DISTINCT cwd FROM history WHERE cwd IS NOT NULL AND cwd <> ''").all() as Array<{
+				cwd: string;
+			}>
+		).map(row => row.cwd);
+	}
+
+	/** Current `PRAGMA data_version`, which another connection's commit alone moves. */
+	#readDataVersion(): number {
+		const row = this.#db.query("PRAGMA data_version").get() as { data_version?: number } | null;
+		return row?.data_version ?? 0;
+	}
+
+	/**
+	 * Drop every scope memo when another process committed to the shared database.
+	 *
+	 * `PRAGMA data_version` moves only for foreign commits, so this complements — never replaces
+	 * — the unconditional clear in `#insertBatch`, which covers our own writes. All three memos
+	 * go: a commit by another process is the only signal that both the stored set and the tree it
+	 * was resolved against may have moved, and one rebuild per foreign commit — measured 1-4 ms
+	 * for 73 stored directories against ~0.4 ms memoized — is cheaper than serving a scope that
+	 * another process just changed.
+	 */
+	#dropMemosIfExternallyChanged(): void {
+		const version = this.#readDataVersion();
+		if (version === this.#dataVersion) return;
+		this.#dataVersion = version;
+		this.#physicalByStored.clear();
+		this.#rootByPhysical.clear();
+		this.#dirsByTarget.clear();
+	}
+
+	/** Normalized physical spelling of a stored directory, memoized until the next write. */
+	#physicalOf(dir: string): string {
+		const cached = this.#physicalByStored.get(dir);
+		if (cached !== undefined) return cached;
+		const physical = normalizePathForComparison(dir);
+		this.#physicalByStored.set(dir, physical);
+		return physical;
+	}
+
+	/**
+	 * Normalized primary root of a physical directory, memoized until the next write. Resolved
+	 * on demand — `cwd` compares physical spellings alone — and keyed by the physical path so
+	 * two spellings of one directory share a single repository lookup.
+	 */
+	#rootOf(physical: string): string {
+		const cached = this.#rootByPhysical.get(physical);
+		if (cached !== undefined) return cached;
+		const root = normalizePathForComparison(primaryRootOrCwd(physical));
+		this.#rootByPhysical.set(physical, root);
+		return root;
+	}
+
+	#prepare(sql: string): Statement {
+		let stmt = this.#stmts.get(sql);
+		if (!stmt) {
+			stmt = this.#db.prepare(sql);
+			this.#stmts.set(sql, stmt);
+		}
 		return stmt;
 	}
 
