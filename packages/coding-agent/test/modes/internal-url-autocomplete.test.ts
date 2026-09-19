@@ -155,6 +155,7 @@ describe("internal-url-autocomplete", () => {
 				"local",
 				"memory",
 				"omp",
+				"rlm",
 				"rule",
 				"security",
 				"skill",
