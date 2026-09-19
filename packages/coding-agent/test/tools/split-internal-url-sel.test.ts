@@ -139,6 +139,19 @@ describe("splitInternalUrlSel", () => {
 	it("still peels authority-trailing selectors for non-ssh schemes (artifact://5:1-50)", () => {
 		expect(splitInternalUrlSel("artifact://5:1-50")).toEqual({ path: "artifact://5", sel: "1-50" });
 	});
+
+	it("peels selectors from xd:// device URLs", () => {
+		expect(splitInternalUrlSel("xd://propose:raw")).toEqual({ path: "xd://propose", sel: "raw" });
+		expect(splitInternalUrlSel("xd://lsp:1-20")).toEqual({ path: "xd://lsp", sel: "1-20" });
+	});
+
+	it("keeps the xd:// root and colon-free device names intact", () => {
+		expect(splitInternalUrlSel("xd://")).toEqual({ path: "xd://" });
+		expect(splitInternalUrlSel("xd://raw")).toEqual({ path: "xd://raw" });
+		expect(splitInternalUrlSel("xd://mcp__trino_mcp_list_catalogs")).toEqual({
+			path: "xd://mcp__trino_mcp_list_catalogs",
+		});
+	});
 });
 
 describe("peelWriteUrlSelector (write/read selector parity)", () => {
@@ -172,6 +185,11 @@ describe("peelWriteUrlSelector (write/read selector parity)", () => {
 		expect(() => peelWriteUrlSelector("ssh://h/f:-10")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:raw:1-20")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:conflicts:1-20")).toThrow(/whole file/);
+	});
+
+	it("peels a whole-file selector from an xd:// device write", () => {
+		expect(peelWriteUrlSelector("xd://propose:raw")).toBe("xd://propose");
+		expect(() => peelWriteUrlSelector("xd://propose:1-20")).toThrow(/whole file/);
 	});
 });
 
