@@ -227,6 +227,109 @@ describe("job renderer task-result preview", () => {
 			expect(output).toContain("waiting on 2 of 3 jobs");
 		});
 
+		it("renders a job progress retune as a job frame that keeps running rows", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: {
+					op: "monitor" as const,
+					jobs: [
+						{
+							id: "bg_1",
+							type: "bash" as const,
+							status: "running" as const,
+							label: "sleep 30",
+							durationMs: 1_234,
+							progress: "ambient" as const,
+						},
+					],
+					retuned: [
+						{ id: "bg_1", status: "retuned" as const, progress: "ambient" as const },
+						{ id: "bg_missing", status: "not_found" as const },
+					],
+				},
+			};
+			const component = hubToolRenderer.renderResult(
+				result,
+				{ expanded: true, isPartial: false } as Parameters<typeof hubToolRenderer.renderResult>[1],
+				theme,
+				{ op: "monitor", ids: ["bg_1", "bg_missing"], progress: "ambient" },
+			);
+			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+			expect(output).toContain("2 job progress updates");
+			expect(output).toContain("bg_1 → ambient");
+			expect(output).toContain("bg_missing not your job");
+			// A running job row survives: the retune result is not a poll snapshot.
+			expect(output).toContain("sleep 30");
+			expect(output).not.toContain("Launch monitor");
+		});
+
+		it("routes a named process monitor to the launch renderer, jobs by id to the job frame", () => {
+			const byId = Bun.stripANSI(
+				(
+					hubToolRenderer
+						.renderCall(
+							{ op: "monitor", ids: ["bg_1"], progress: "ambient" },
+							{ expanded: true, isPartial: true, spinnerFrame: 0 },
+							theme,
+						)
+						.render(120) as readonly string[]
+				).join("\n"),
+			);
+			expect(byId).toContain("monitor bg_1");
+			expect(byId).not.toContain("Launch monitor");
+			expect(hubToolRenderer.activitySummary({ op: "monitor", ids: ["bg_1", "bg_2"], progress: "wake" })).toEqual({
+				label: "Hub",
+				detail: "monitor 2 jobs",
+			});
+			expect(hubToolRenderer.animatedPendingPreview?.({ op: "monitor", ids: ["bg_1"], progress: "wake" })).toBe(
+				false,
+			);
+
+			const byName = Bun.stripANSI(
+				(
+					hubToolRenderer
+						.renderCall(
+							{ op: "monitor", name: "watcher", progress: "wake" },
+							{ expanded: true, isPartial: true, spinnerFrame: 0 },
+							theme,
+						)
+						.render(120) as readonly string[]
+				).join("\n"),
+			);
+			expect(byName).toContain("watcher");
+			expect(hubToolRenderer.animatedPendingPreview?.({ op: "monitor", name: "watcher", progress: "wake" })).toBe(
+				true,
+			);
+		});
+
+		it("shows the progress mode on an ordinary job snapshot", () => {
+			const result = {
+				content: [{ type: "text" as const, text: "" }],
+				details: {
+					op: "jobs" as const,
+					jobs: [
+						{
+							id: "bg_2",
+							type: "bash" as const,
+							status: "running" as const,
+							label: "build assets",
+							durationMs: 2_000,
+							progress: "wake" as const,
+						},
+					],
+				},
+			};
+			const component = hubToolRenderer.renderResult(
+				result,
+				{ expanded: true, isPartial: false } as Parameters<typeof hubToolRenderer.renderResult>[1],
+				theme,
+				{ op: "jobs" },
+			);
+			const output = Bun.stripANSI((component.render(120) as readonly string[]).join("\n"));
+			expect(output).toContain("bg_2");
+			expect(output).toContain("wake");
+		});
+
 		it("renders agent rows for running agents outside job control", () => {
 			const result = {
 				content: [{ type: "text" as const, text: "" }],
