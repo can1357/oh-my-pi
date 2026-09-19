@@ -812,6 +812,37 @@ describe("system prompt tool inventory", () => {
 		expect(systemPrompt.join("\n\n")).toContain("`skill://<name>`");
 	});
 
+	it("includes typed carrier guidance for matching skills and domain rules", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "mounted-skill",
+					description: "Readable through mounted fetch",
+					filePath: path.join(tempDir, "SKILL.md"),
+					baseDir: tempDir,
+					source: "test",
+				},
+			],
+			rules: [
+				{
+					name: "domain-rule",
+					description: "Domain guidance",
+					path: path.join(tempDir, "rule.mdc"),
+					globs: ["**/*.ts"],
+				},
+			],
+			toolNames: ["read"],
+			tools: TOOLS,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("Matching skill → MUST read `skill://<name>` first.");
+		expect(text).toContain("Matching domain rule → MUST read `rule://<name>` before use.");
+	});
+
 	it("keeps visible skills when no tools map is provided", async () => {
 		const { systemPrompt } = await buildSystemPrompt({
 			cwd: tempDir,

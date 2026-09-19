@@ -45,6 +45,7 @@ Matching skill → MUST read `skill://<name>` first.
 {{/if}}
 
 {{#if rules.length}}
+Matching domain rule → MUST read `rule://<name>` before use.
 <domain-rules>
 {{#each rules}}
 - {{name}} ({{#list globs join=", "}}{{this}}{{/list}}): {{description}}
