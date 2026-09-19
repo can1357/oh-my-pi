@@ -729,12 +729,12 @@ describe("extension transcript presenters", () => {
 		await mode.renderInitialMessages();
 		for (const type of ["advisor", "skill-prompt", "async-result"]) expect(chat()).toContain(`MSG-${type}`);
 		expect(chat()).not.toContain("ADVISOR-NOTE");
-		expect(chat()).not.toContain("Background job completed");
+		expect(chat()).not.toContain("Background command completed");
 
 		mode.setToolsExpanded(true);
 		expect(chat()).not.toContain("MSG-");
 		expect(chat()).toContain("ADVISOR-NOTE");
-		expect(chat()).toContain("Background job completed");
+		expect(chat()).toContain("Background command completed");
 	});
 
 	/** Answer every `!` run with `LIVE-OUT` instead of running a shell, once `ready` (if any) resolves. */

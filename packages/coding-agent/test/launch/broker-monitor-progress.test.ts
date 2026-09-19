@@ -118,6 +118,193 @@ async function openRawBrokerSocket(endpoint: string): Promise<RawBrokerSocket> {
 }
 
 describe("daemon broker live output monitoring", () => {
+	it("expires a monitor after draining output when a live service becomes detached", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-mode-detached-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const artifactPath = path.join(tempDir.path(), "progress.log");
+		await Bun.write(
+			scriptPath,
+			`import { writeSync } from "node:fs";
+process.on("SIGTERM", () => { writeSync(1, "FINAL_PARTIAL"); process.exit(0); });
+writeSync(1, "LIVE\\n");
+setInterval(() => {}, 1000);
+`,
+		);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const notifications: DaemonMonitorNotification[] = [];
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const expired = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{ id: "mode-monitor", name: "mode", owner: "owner", artifactPath },
+			async notification => {
+				if (notification.event === "daemon-output" && notification.seq === 1) {
+					entered.resolve();
+					await release.promise;
+				}
+				notifications.push(notification);
+				if (notification.event === "daemon-monitor-expired") expired.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+		try {
+			await unregister.ready;
+			await client.request({
+				op: "start",
+				spec: {
+					name: "mode",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			await entered.promise;
+			await Bun.write(scriptPath, 'process.stdout.write("DETACHED\\n"); setInterval(() => {}, 1000);\n');
+			await client.request({ op: "mode", name: "mode", mode: "detached" });
+			const ready = await client.request({
+				op: "wait",
+				name: "mode",
+				for: "ready",
+				pattern: "DETACHED",
+				timeoutMs: 5_000,
+			});
+			if (ready.op !== "wait") throw new Error("unexpected wait result");
+			expect(ready.timedOut).toBeFalse();
+			const listed = await client.request({ op: "list" });
+			if (listed.op !== "list") throw new Error("unexpected list result");
+			expect(listed.monitors).toEqual([]);
+			release.resolve();
+			await expired.promise;
+			expect(notifications.map(notification => notification.event)).toEqual([
+				"daemon-output",
+				"daemon-output",
+				"daemon-monitor-expired",
+			]);
+			expect(
+				notifications
+					.filter(notification => notification.event === "daemon-output")
+					.map(notification => notification.text),
+			).toEqual(["LIVE", "FINAL_PARTIAL"]);
+			expect(await Bun.file(artifactPath).text()).toBe("LIVE\nFINAL_PARTIAL");
+		} finally {
+			release.resolve();
+			unregister();
+			await client.request({ op: "stop", name: "mode", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("binds a pending monitor only to its initiating start even with a concurrent same-owner start", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-start-identity-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const artifactPath = path.join(tempDir.path(), "progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const competitor = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const startId = crypto.randomUUID();
+		let restored: DaemonOutputUnregister | undefined;
+		const unregister = client.onOutput?.(
+			{ id: "pending-monitor", name: "race", owner: "owner", artifactPath, startPending: true, startId },
+			notification => {
+				notifications.push(notification);
+				if (notification.event === "daemon-monitor-completed") completed.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+		const spec = (source: string): DaemonSpec => ({
+			name: "race",
+			application: process.execPath,
+			args: ["-e", source],
+			env: {},
+			cwd: projectDir,
+			pty: false,
+			restart: "no",
+			persist: false,
+			detached: false,
+			ready: { log: "READY", timeoutMs: 5_000 },
+		});
+		try {
+			// Publication is the barrier: the competing request runs while A's
+			// registration exists but A's own launch has not been dispatched.
+			await unregister.ready;
+			await competitor.request({
+				op: "start",
+				owner: "owner",
+				spec: spec('process.stdout.write("UNRELATED_READY\\n"); setInterval(() => {}, 1000);'),
+			});
+			const listed = await client.request({ op: "list" });
+			if (listed.op !== "list") throw new Error("unexpected list result");
+			expect(listed.monitors?.[0]?.daemonId).toBeUndefined();
+			expect(notifications).toEqual([]);
+			const started = await client.request({
+				op: "start",
+				owner: "owner",
+				replace: true,
+				startId,
+				spec: spec('process.stdout.write("MATCHED_READY\\n");'),
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			await completed.promise;
+			expect(notifications.map(notification => notification.event)).toEqual([
+				"daemon-output",
+				"daemon-monitor-completed",
+			]);
+			expect(notifications[0]).toMatchObject({ daemonId: started.daemon.id, text: "MATCHED_READY" });
+			expect(notifications[1]).toMatchObject({ daemon: { id: started.daemon.id } });
+			expect(await Bun.file(artifactPath).text()).toBe("MATCHED_READY\n");
+			// Rollback can restore A's pending registration after its record has
+			// already been published (even settled). Its identity still selects A.
+			unregister();
+			const restoredCompletion = Promise.withResolvers<DaemonMonitorNotification>();
+			restored = client.onOutput?.(
+				{
+					id: "restored-monitor",
+					name: "race",
+					owner: "owner",
+					artifactPath: `${artifactPath}.restored`,
+					startPending: true,
+					startId,
+				},
+				notification => {
+					restoredCompletion.resolve(notification);
+				},
+			);
+			if (!restored) throw new Error("Expected restored registration");
+			await restored.ready;
+			expect(await restoredCompletion.promise).toMatchObject({
+				event: "daemon-monitor-completed",
+				daemon: { id: started.daemon.id },
+			});
+		} finally {
+			unregister();
+			restored?.();
+			await client.request({ op: "stop", name: "race", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			competitor.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
 	it("synchronously rejects output registration after the client is closed", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-closed-");
 		const projectDir = path.join(tempDir.path(), "project");
@@ -244,6 +431,79 @@ process.stdin.once("data", () => {
 			releaseFirst.resolve();
 			unregister();
 			await client.request({ op: "stop", name: "watched", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("replays terminal state after its sink rejects without acknowledging the registration", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-terminal-retry-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const monitorArtifactPath = path.join(tempDir.path(), "terminal-retry.log");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.resume();
+process.stdin.once("data", () => process.exit(0));
+`,
+		);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		const terminalAttempts: DaemonMonitorNotification[] = [];
+		const retried = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{
+				id: "terminal-retry-monitor",
+				name: "terminal-retry",
+				owner: "terminal-retry-owner",
+				artifactPath: monitorArtifactPath,
+			},
+			notification => {
+				if (notification.event !== "daemon-monitor-completed") return;
+				terminalAttempts.push(notification);
+				if (terminalAttempts.length === 1) throw new Error("completion receipt failed");
+				retried.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+
+		try {
+			await unregister.ready;
+			const started = await client.request({
+				op: "start",
+				owner: "terminal-retry-owner",
+				spec: {
+					name: "terminal-retry",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			await client.request({ op: "send", name: "terminal-retry", data: "finish\n" });
+			await retried.promise;
+
+			expect(terminalAttempts).toHaveLength(2);
+			expect(terminalAttempts[1]).toEqual(terminalAttempts[0]);
+			expect(terminalAttempts[1]).toMatchObject({
+				event: "daemon-monitor-completed",
+				daemon: { name: "terminal-retry", state: "exited", exitCode: 0 },
+				ownerNotified: false,
+			});
+		} finally {
+			unregister();
+			await client.request({ op: "stop", name: "terminal-retry", timeoutMs: 2_000 }).catch(() => undefined);
 			await client.request({ op: "shutdown" }).catch(() => undefined);
 			client.close();
 			await broker;
@@ -853,6 +1113,7 @@ process.stdin.once("data", () => {
 				owner: "owner-1",
 				artifactPath,
 				startPending: true,
+				startId: "replacement-start",
 			};
 			raw.socket.write(envelope("attach-next-start", "future-client", [futureSubscription]));
 			await raw.waitFor(message => message.id === "attach-next-start");
@@ -890,6 +1151,8 @@ process.stdin.once("data", () => {
 
 			const secondStart = await client.request({
 				op: "start",
+				startId: futureSubscription.startId,
+				owner: futureSubscription.owner,
 				spec: spec(process.execPath, [secondScriptPath]),
 			});
 			if (secondStart.op !== "start") throw new Error("unexpected start result");
@@ -993,6 +1256,7 @@ process.stdin.once("data", () => process.stdout.write("OLD_LATE\\n"));
 				owner: "terminal-owner",
 				artifactPath: newArtifactPath,
 				startPending: true,
+				startId: "terminal-new-start",
 			};
 			newMonitor = await openRawBrokerSocket(endpoint);
 			newMonitor.socket.write(register("register-new", "terminal-new-client", newSubscription));
@@ -1009,7 +1273,12 @@ process.stdin.once("data", () => process.stdout.write("OLD_LATE\\n"));
 			expect(await Bun.file(newArtifactPath).exists()).toBeFalse();
 
 			await client.request({ op: "stop", name: "terminal-restart", timeoutMs: 2_000 });
-			const restarted = await client.request({ op: "start", spec: daemonSpec });
+			const restarted = await client.request({
+				op: "start",
+				spec: daemonSpec,
+				startId: newSubscription.startId,
+				owner: newSubscription.owner,
+			});
 			if (restarted.op !== "start") throw new Error("unexpected start result");
 			expect(restarted.daemon.id).not.toBe(started.daemon.id);
 			await newMonitor.waitFor(
@@ -5147,8 +5416,8 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		const requests: BrokerRequest[] = [];
 		const firstRequest = Promise.withResolvers<BrokerRequest>();
 		const acknowledgeCapabilities = Promise.withResolvers<void>();
-		// Pre-v4 broker: authenticates and answers pings but advertises no
-		// output-monitor capability.
+		// A v4 broker can monitor output but cannot isolate pending starts by
+		// operation identity, so it must not accept this client's registrations.
 		const server = net.createServer(socket => {
 			let buffer = "";
 			socket.on("data", chunk => {
@@ -5166,7 +5435,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 								`${JSON.stringify({
 									id: request.id,
 									ok: true,
-									result: { op: "ping", projectDir, capabilities: [] },
+									result: { op: "ping", projectDir, capabilities: ["output-monitor-v4"] },
 								})}\n`,
 							);
 						});

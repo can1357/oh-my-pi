@@ -161,6 +161,7 @@ describe("launch logs compatibility", () => {
 					owner: "session-owner",
 					artifactPath: "/tmp/monitor.log",
 					startPending: true,
+					startId: "start-1",
 				},
 			],
 			outputSubscriptionId: "output-subscription-1",
