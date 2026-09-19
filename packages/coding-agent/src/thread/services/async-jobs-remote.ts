@@ -36,7 +36,9 @@ import type {
 	AsyncJobRun,
 	AsyncJobRunResult,
 	AsyncJobType,
+	ProgressDeliveryCoverage,
 } from "../../async/job-manager";
+import type { ProgressStreamProvenance } from "../../async/progress-lines";
 import type { JobTextSource, JobWidgetInputs, JobWidgetRegistry } from "../../job-widgets/types";
 import type { RemoteObject } from "../rpc";
 import {
@@ -390,8 +392,17 @@ export class RemoteAsyncJobManager implements AsyncJobManagerApi {
 		);
 	}
 
-	activateProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery): boolean {
-		return this.#remote.callSync("activateProgressDelivery", jobId, delivery);
+	activateProgressDelivery(
+		jobId: string,
+		delivery: AsyncJobProgressDelivery,
+		foregroundStreamProvenance?: ProgressStreamProvenance,
+		coverage?: ProgressDeliveryCoverage,
+	): boolean {
+		return this.#remote.callSync("activateProgressDelivery", jobId, delivery, foregroundStreamProvenance, coverage);
+	}
+
+	setProgressArtifact(jobId: string, artifactId: string | undefined): boolean {
+		return this.#remote.callSync("setProgressArtifact", jobId, artifactId);
 	}
 
 	retuneProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery, ownerId?: string): JobRetuneStatus {
