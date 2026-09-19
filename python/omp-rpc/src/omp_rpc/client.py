@@ -1966,10 +1966,7 @@ class RpcClient:
 
                 event = cast(RpcAgentEvent, notification)
                 self._append_event(payload)
-                if (
-                    isinstance(event, AgentEndEvent)
-                    and event.is_terminal is not False
-                ):
+                if isinstance(event, AgentEndEvent) and event.is_terminal is not False:
                     self._mark_agent_run_completed()
                 self._dispatch_listeners(
                     "event", event.type, self._event_listeners, event

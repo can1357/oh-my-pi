@@ -822,6 +822,7 @@ async def handle_review(
     except GitHubError as exc:
         log.warning("review fetch failed", extra={"err": str(exc)})
         return
+    thread = await _fetch_thread(github, repo_full, pr_number, is_pr=True)
     clone_url = repo.clone_url
     workspace = await _run_workspace_op(
         sandbox.ensure_workspace,
@@ -873,6 +874,7 @@ async def handle_review(
         inputs=inputs,
         pr_number=pr_number,
         review_payload=review_payload,
+        thread=thread,
     )
 
 
