@@ -2,7 +2,7 @@
  * OpenAI Codex Web Search Provider
  *
  * Uses the configured Codex Responses transport for proxy/API-key setups and
- * the official ChatGPT backend for OAuth logins.
+ * the official ChatGPT backend for stored OAuth logins or OPENAI_CODEX_OAUTH_TOKEN.
  */
 import { type AuthStorage, type FetchImpl, type Model, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -775,31 +775,48 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		const seed = await params.authStorage.getOAuthAccess("openai-codex", params.sessionId, {
 			signal: params.signal,
 		});
-		if (!seed) {
-			throw new Error(
-				"No Codex OAuth credentials found. Login with 'omp /login openai-codex' to enable Codex web search.",
+		if (seed) {
+			result = await withOAuthAccess(
+				params.authStorage,
+				"openai-codex",
+				async access => {
+					// A refreshed/rotated credential can carry a different bearer and
+					// ChatGPT account id than the seed used to select the first attempt.
+					const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
+					const requestTransport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
+					return runCodexSearchCandidates({
+						auth: { accessToken: access.accessToken, accountId },
+						params,
+						query,
+						modelCandidates,
+						modelWasConfigured: configuredModel !== undefined,
+						transport: requestTransport,
+					});
+				},
+				{ sessionId: params.sessionId, signal: params.signal, seed },
 			);
+		} else {
+			// Same cascade as Codex inference: env OPENAI_CODEX_OAUTH_TOKEN (and
+			// other AuthStorage.getApiKey sources) when no stored /login OAuth exists.
+			const accessToken = await params.authStorage.getApiKey("openai-codex", params.sessionId, {
+				signal: params.signal,
+			});
+			if (!accessToken) {
+				throw new Error(
+					"No Codex OAuth credentials found. Login with 'omp /login openai-codex' to enable Codex web search.",
+				);
+			}
+			const accountId = getCodexAccountId(accessToken);
+			const requestTransport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
+			result = await runCodexSearchCandidates({
+				auth: { accessToken, accountId },
+				params,
+				query,
+				modelCandidates,
+				modelWasConfigured: configuredModel !== undefined,
+				transport: requestTransport,
+			});
 		}
-
-		result = await withOAuthAccess(
-			params.authStorage,
-			"openai-codex",
-			async access => {
-				// A refreshed/rotated credential can carry a different bearer and
-				// ChatGPT account id than the seed used to select the first attempt.
-				const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
-				const requestTransport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
-				return runCodexSearchCandidates({
-					auth: { accessToken: access.accessToken, accountId },
-					params,
-					query,
-					modelCandidates,
-					modelWasConfigured: configuredModel !== undefined,
-					transport: requestTransport,
-				});
-			},
-			{ sessionId: params.sessionId, signal: params.signal, seed },
-		);
 	}
 
 	let sources = result.sources;
