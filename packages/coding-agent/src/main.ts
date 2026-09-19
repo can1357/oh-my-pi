@@ -211,6 +211,9 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"advisor.syncBacklog",
 	"advisor.immuneTurns",
 	"advisor.maxNotesPerUpdate",
+	"advisor.reassessOnAdvice",
+	"advisor.maxCheckInTurns",
+	"advisor.maxToolCallsPerReview",
 	"tier.advisor",
 ];
 

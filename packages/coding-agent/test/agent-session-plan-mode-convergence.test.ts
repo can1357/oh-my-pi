@@ -241,16 +241,17 @@ describe("AgentSession plan-mode convergence", () => {
 		};
 	}
 
-	it("T1: an advisor concern does not wake the primary in plan mode", async () => {
+	it("T1: an opt-in advisor nit stays a visible card and does not wake primary in plan mode", async () => {
 		const harness = await createPlanSession([], {
 			advisorResponses: [
 				{
 					content: [
-						{ type: "toolCall", name: "advise", arguments: { note: "tighten the plan", severity: "concern" } },
+						{ type: "toolCall", name: "advise", arguments: { note: "tighten the plan", severity: "nit" } },
 					],
 				},
 			],
 		});
+		harness.session.settings.set("advisor.reassessOnAdvice", true);
 		harness.session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
 		expect(harness.session.setAdvisorEnabled(true)).toBe(true);
 		const advisor = harness.session.getAdvisorAgent();

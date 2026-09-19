@@ -379,17 +379,20 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
 
 ### Advisor
 
-The advisor is a second model that reviews each completed turn and can inject advice into the primary session. Assign a model with `modelRoles.advisor`, then enable it with `advisor.enabled`, `/advisor on`, or by launching with the `--advisor` flag.
+The advisor is a second model that reviews each completed turn and can inject advice into the primary session. Assign a model with `modelRoles.advisor`, then enable it with `advisor.enabled`, `/advisor on`, or by launching with the `--advisor` flag. By default it checks in on the next primary turn; it may use its built-in `check_in` tool to defer a review when the watched agent should make more progress first.
 
-See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, and bounded catch-up semantics.
+See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, bounded catch-up semantics, and self-scheduled check-ins.
 
-| Key                   | Type    | Default | Notes                                                                                                                                                |
-| --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `advisor.enabled`     | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                 |
-| `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
-| `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
-| `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
-| `advisor.maxNotesPerUpdate` | number | `4` | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
+| Key                            | Type    | Default | Notes                                                                                                                                                                                                                                   |
+| ------------------------------ | ------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `advisor.enabled`              | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                                                                                                |
+| `task.agentAdvisor`            | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
+| `advisor.syncBacklog`          | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold.                                                                                |
+| `advisor.immuneTurns`          | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.                                                                                              |
+| `advisor.maxNotesPerUpdate`    | number  | `4`     | Non-blocker notes accepted per advisor review: `0` means unlimited distinct non-blockers; positive values are capped at 32. Noise/duplicates remain filtered, and higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
+| `advisor.reassessOnAdvice`     | boolean | `false` | When true, every accepted advisor note, including omitted/`nit`, requests primary reassessment when delivery permits. User-interrupt, plan-mode, ACP deferred-turn, and abort safety preservation still applies. |
+| `advisor.maxCheckInTurns`      | number  | `5`     | Safety bound for the advisor's self-scheduled delay. `1` means the next primary turn; larger values let the watched agent make more moves before review.                                      |
+| `advisor.maxToolCallsPerReview` | number | `1`     | Hard cap on investigative tool calls per advisor review. `0` means transcript-only; otherwise the advisor may make at most this many investigative calls, then must use `advise` or `check_in`. |
 
 ### Thinking
 

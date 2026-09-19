@@ -1,4 +1,6 @@
+import { ADVISOR_DEFAULT_MAX_CHECK_IN_TURNS } from "../advisor/check-in";
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
+import { ADVISOR_DEFAULT_MAX_TOOL_CALLS_PER_REVIEW } from "../advisor/tool-budget";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
 import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -424,13 +426,64 @@ export const SETTINGS_SCHEMA = {
 			group: "Advisor",
 			label: "Advisor Max Notes Per Update",
 			description:
-				"Maximum non-blocker advice notes accepted per advisor prompt update (1–32; UI offers 1–5 quick picks). Blockers are exempt.",
+				"Maximum non-blocker advice notes accepted per advisor prompt update (0 = unlimited; 1–32 otherwise; UI offers quick picks). Blockers are exempt, and noise/duplicates remain filtered.",
 			options: [
+				{
+					value: "0",
+					label: "Unlimited",
+					description: "Accept any number of distinct non-blocker notes per update.",
+				},
 				{ value: "1", label: "1 note", description: "Anti-flood (strict)." },
 				{ value: "2", label: "2 notes" },
 				{ value: "3", label: "3 notes" },
 				{ value: "4", label: "4 notes", description: "Default." },
 				{ value: "5", label: "5 notes" },
+			],
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.reassessOnAdvice": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Reassess On Advisor Advice",
+			description:
+				"Make every accepted advisor note request primary reassessment, including omitted/nit notes; user-interrupt, plan-mode, ACP, and abort/unwind safety preservation still applies.",
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.maxCheckInTurns": {
+		type: "number",
+		default: ADVISOR_DEFAULT_MAX_CHECK_IN_TURNS,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Max Check-In Delay",
+			description: "Maximum number of primary turns the advisor may defer its next review; 1 means the next turn.",
+			options: [
+				{ value: "1", label: "1 turn", description: "Review every turn." },
+				{ value: "2", label: "2 turns" },
+				{ value: "3", label: "3 turns" },
+				{ value: "5", label: "5 turns", description: "Default safety bound." },
+			],
+			condition: "advisorEnabled",
+		},
+	},
+	"advisor.maxToolCallsPerReview": {
+		type: "number",
+		default: ADVISOR_DEFAULT_MAX_TOOL_CALLS_PER_REVIEW,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Verification Calls",
+			description: "Maximum investigative tool calls per advisor review; 0 is observe-only.",
+			options: [
+				{ value: "0", label: "0 calls", description: "Observe transcript only." },
+				{ value: "1", label: "1 call", description: "Default." },
+				{ value: "2", label: "2 calls" },
+				{ value: "3", label: "3 calls" },
 			],
 			condition: "advisorEnabled",
 		},
