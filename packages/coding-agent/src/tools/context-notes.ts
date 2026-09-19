@@ -119,17 +119,27 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 		}
 
 		const ownerId = this.session.getSessionId?.();
-		const branchLeafId = manager.getBranch().at(-1)?.id;
+		const branchBefore = manager.getBranch();
+		const branchLeafId = branchBefore.at(-1)?.id;
 		await manager.ensureOnDisk();
 		throwIfAborted(signal);
 		const currentManager = getExperimentalContextSession(this.session);
+		// A forward-moving leaf is not a branch change: the journal legitimately
+		// grows while the first disk write materializes a fresh session, and each
+		// new entry is parented under the previously captured leaf. Only a
+		// re-rooted lineage (reset/checkpoint) drops that leaf from the branch and
+		// must abort the save.
+		const lineageChanged =
+			branchLeafId !== undefined
+				? !manager.getBranch().some(entry => entry.id === branchLeafId)
+				: manager.getBranch().length > 0;
 		if (
 			currentManager !== manager ||
 			this.session.isDisposed?.() ||
 			!ownerId ||
 			this.session.getSessionId?.() !== ownerId ||
 			manager.getSessionId?.() !== ownerId ||
-			manager.getBranch().at(-1)?.id !== branchLeafId
+			lineageChanged
 		) {
 			throw new ToolError("Experimental context notes were not saved because the session branch changed.");
 		}
