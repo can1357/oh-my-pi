@@ -1,5 +1,5 @@
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, logger, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 
 // =============================================================================
@@ -62,6 +62,8 @@ export interface OutputSummary {
 export interface OutputSinkOptions {
 	artifactPath?: string;
 	artifactId?: string;
+	/** `mirror` writes every raw chunk to the artifact; `spill` opens it only when inline output loses bytes. */
+	artifactWriteMode?: "spill" | "mirror";
 	/**
 	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
 	 * window and rolling tail window share this budget, so a composed
@@ -82,7 +84,20 @@ export interface OutputSinkOptions {
 	 * writes still respect the budget. Default 0 = no per-line cap.
 	 */
 	maxColumns?: number;
-	onChunk?: (chunk: string) => void;
+	onChunk?: (chunk: string, stamp: number) => void;
+	/**
+	 * Sampled when a chunk's first byte enters the sink and passed to the
+	 * matching (possibly delayed) `onChunk` call. Mirror mode and chunk
+	 * throttling can deliver a chunk after the caller has crossed a boundary;
+	 * the stamp lets the consumer identify that source boundary. Deliveries
+	 * default to stamp 0 when omitted.
+	 */
+	chunkStamp?: () => number;
+	/**
+	 * Invoked exactly once after the matching sampled `onChunk` delivery
+	 * succeeds or fails.
+	 */
+	onChunkSettled?: (stamp: number) => void;
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
 	chunkThrottleMs?: number;
 	/**
@@ -816,7 +831,13 @@ export class OutputSink {
 	#lastChunkTime = 0;
 	#pendingChunk = "";
 	#pendingCarriageReturn = false;
+	/** `chunkStamp()` captured when the first held-back byte entered the sink. */
+	#pendingChunkStamp: number | undefined;
 	#pendingChunkTimer: Timer | undefined;
+	/** Settled-in-order mirror deliveries; never rejects — failures land in {@link #chunkDeliveryError}. */
+	#chunkDeliveryTail: Promise<void> | undefined;
+	/** First mirror delivery failure since the last dump()/dispose() settlement. */
+	#chunkDeliveryError: Error | undefined;
 
 	// Per-line column cap streaming state (persists across `push` calls so a
 	// long line split across chunks still trips the same trigger).
@@ -843,9 +864,12 @@ export class OutputSink {
 
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
+	readonly #artifactWriteMode: "spill" | "mirror";
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
-	readonly #onChunk?: (chunk: string) => void;
+	readonly #onChunk?: (chunk: string, stamp: number) => void;
+	readonly #chunkStamp?: () => number;
+	readonly #onChunkSettled?: (stamp: number) => void;
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
 
@@ -867,20 +891,26 @@ export class OutputSink {
 		const {
 			artifactPath,
 			artifactId,
+			artifactWriteMode = "spill",
 			spillThreshold = DEFAULT_MAX_BYTES,
 			headBytes = 0,
 			maxColumns = 0,
 			onChunk,
+			chunkStamp,
+			onChunkSettled,
 			chunkThrottleMs = 0,
 			artifactMaxBytes = ARTIFACT_DEFAULT_MAX_BYTES,
 			artifactHeadBytes = ARTIFACT_DEFAULT_HEAD_BYTES,
 		} = options ?? {};
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
+		this.#artifactWriteMode = artifactWriteMode;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
 		this.#onChunk = onChunk;
+		this.#chunkStamp = chunkStamp;
+		this.#onChunkSettled = onChunkSettled;
 		this.#chunkThrottleMs = chunkThrottleMs;
 		this.#artifactMaxBytes = Math.max(0, artifactMaxBytes);
 		this.#artifactHeadBudget = Math.max(0, Math.min(artifactHeadBytes, this.#artifactMaxBytes));
@@ -945,6 +975,7 @@ export class OutputSink {
 			if (now - this.#lastChunkTime >= this.#chunkThrottleMs) {
 				this.#emitPendingChunkWith(inlineChunk, now);
 			} else {
+				this.#pendingChunkStamp ??= this.#chunkStamp?.() ?? 0;
 				this.#pendingChunk += inlineChunk;
 				this.#schedulePendingChunkFlush();
 			}
@@ -967,12 +998,18 @@ export class OutputSink {
 		const cappedThisChunk = cappedBytes < inlineBytes;
 		if (substituted) this.#truncated = true;
 
-		// Mirror the complete chunk to the artifact file whenever the inline
-		// representation differs, overflows memory, hits the column cap, or a
-		// prior chunk already opened the artifact.
+		// Mirror the RAW chunk to the artifact file so the on-disk record is the
+		// full uncapped stream. Mirror triggers on: an explicit mirror write mode
+		// OR the inline representation differing OR in-memory overflow OR this
+		// chunk's column cap dropping bytes (otherwise we'd lose data) OR the file
+		// already being open.
 		if (
 			this.#artifactPath &&
-			(this.#file != null || substituted || cappedThisChunk || this.#willOverflow(cappedBytes))
+			(this.#artifactWriteMode === "mirror" ||
+				this.#file != null ||
+				substituted ||
+				cappedThisChunk ||
+				this.#willOverflow(cappedBytes))
 		) {
 			this.#writeToFile(chunk);
 		}
@@ -1298,6 +1335,7 @@ export class OutputSink {
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
 		this.#pendingChunk = "";
+		this.#pendingChunkStamp = undefined;
 		this.#pendingCarriageReturn = false;
 	}
 
@@ -1310,9 +1348,49 @@ export class OutputSink {
 	#emitPendingChunkWith(chunk: string, now: number): void {
 		this.#clearPendingChunkTimer();
 		this.#lastChunkTime = now;
+		// The stamp travels with the bytes: a merged chunk keeps the stamp of its
+		// earliest byte so consumers can preserve the source boundary.
+		const stamp = this.#pendingChunkStamp ?? this.#chunkStamp?.() ?? 0;
+		this.#pendingChunkStamp = undefined;
 		const merged = this.#pendingChunk + chunk;
 		this.#pendingChunk = "";
-		this.#onChunk?.(merged);
+		if (this.#artifactWriteMode !== "mirror") {
+			try {
+				this.#onChunk?.(merged, stamp);
+			} finally {
+				this.#onChunkSettled?.(stamp);
+			}
+			return;
+		}
+		const deliver = async () => {
+			try {
+				// push() finishes routing the raw chunk to the file before this microtask
+				// resumes, then flushArtifact makes it readable before model-facing progress.
+				await Promise.resolve();
+				await this.flushArtifact();
+				this.#onChunk?.(merged, stamp);
+			} catch (error) {
+				this.#recordChunkDeliveryError(error);
+			} finally {
+				// The settlement callback is a consumer hook too (bash's promotion
+				// barrier); a throw here must not escape the tail either.
+				try {
+					this.#onChunkSettled?.(stamp);
+				} catch (error) {
+					this.#recordChunkDeliveryError(error);
+				}
+			}
+		};
+		this.#chunkDeliveryTail = this.#chunkDeliveryTail?.then(deliver) ?? deliver();
+	}
+
+	/**
+	 * The delivery tail is awaited only by dump()/dispose(); a rejection left on
+	 * it while the command still runs would be unhandled and fatal. Record the
+	 * first failure for settlement instead so later chunks keep delivering.
+	 */
+	#recordChunkDeliveryError(error: unknown): void {
+		this.#chunkDeliveryError ??= error instanceof Error ? error : new Error(String(error));
 	}
 
 	#flushPendingChunk(): void {
@@ -1321,6 +1399,19 @@ export class OutputSink {
 			return;
 		}
 		this.#emitPendingChunkWith("", Date.now());
+	}
+
+	async #settleChunkDelivery(): Promise<void> {
+		// A caller may finish before the throttle window expires. Deliver that
+		// accepted tail, then wait for every serialized mirror flush/callback
+		// before closing the artifact they observe. A delivery that failed
+		// meanwhile surfaces here, once.
+		this.#flushPendingChunk();
+		await this.#chunkDeliveryTail;
+		const error = this.#chunkDeliveryError;
+		if (!error) return;
+		this.#chunkDeliveryError = undefined;
+		throw error;
 	}
 
 	#schedulePendingChunkFlush(): void {
@@ -1376,12 +1467,15 @@ export class OutputSink {
 		}
 		const noticeLine = notice ? `[${notice}]\n` : "";
 
-		// Flush any chunk still held back by the throttle so the live preview
-		// ends with the complete stream.
-		this.#flushPendingChunk();
+		// A rejected mirror delivery still surfaces to the caller, but the
+		// artifact descriptor must close first — otherwise one preview failure
+		// leaks the fd and the tail replay never lands.
+		try {
+			await this.#settleChunkDelivery();
+		} finally {
+			await this.#finalizeFile();
+		}
 		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
-
-		await this.#finalizeFile();
 
 		// Compose the visible output. With head retention, splice head + marker
 		// + tail when content was elided. Otherwise return the rolling buffer.
@@ -1492,8 +1586,28 @@ export class OutputSink {
 	 * leaked until a later unrelated read hits `EMFILE` (issue #6463).
 	 */
 	async dispose(): Promise<void> {
-		this.#clearPendingChunkTimer();
-		await this.#finalizeFile();
+		try {
+			await this.#settleChunkDelivery();
+		} catch (error) {
+			// Progress delivery is best-effort; dispose() runs from `finally`
+			// blocks and must not replace the caller's original error.
+			logger.warn("Mirror chunk delivery failed during output sink disposal", {
+				artifactId: this.#artifactId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			await this.#finalizeFile();
+		}
+	}
+
+	/** Make mirrored bytes readable without closing the stable artifact. */
+	async flushArtifact(): Promise<void> {
+		if (this.#fileCreation) await this.#fileCreation.catch(() => undefined);
+		try {
+			await this.#file?.sink.flush();
+		} catch {
+			/* Artifact persistence is best-effort, matching finalization. */
+		}
 	}
 }
 
