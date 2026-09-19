@@ -306,10 +306,12 @@ import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 import {
 	cfgArchiveEnabled,
+	cfgAsyncEnabled,
 	cfgAsyncMaxJobs,
 	cfgComputerEnabled,
 	cfgRatchetEnabled,
 	cfgGenerateImageEnabled,
+	cfgLaunchEnabled,
 	cfgSecurityEnabled,
 	cfgSpeechgenEnabled,
 	cfgToolsAbortOnFabricatedResult,
@@ -2246,6 +2248,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
 			settingsApproval: options.settingsApproval === true && !isSubagentSession,
+			processProgressMode: "session",
 			// Explicit resolvers retain their existing pass-through contract. Ordinary
 			// sessions inherit stored affinity into the child's own provider session.
 			getApiKey: options.getApiKey,
@@ -2336,8 +2339,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			emitBeforeSubagentSpawn: (event, signal) =>
 				session?.extensionRunner?.emitBeforeSubagentSpawn(event, signal) ?? Promise.resolve(undefined),
 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
-			queueLaunchCompletion: notification =>
-				session?.queueLaunchCompletion(notification) ??
+			queueLaunchCompletion: (notification, epoch) =>
+				session?.queueLaunchCompletion(notification, epoch) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
 			captureLaunchProgressEpoch: () => session?.captureLaunchProgressEpoch() ?? 0,
 			queueLaunchProgress: (notification, delivery, startedAt, epoch, artifactId) =>
@@ -3931,6 +3934,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
+				// Same-named extension replacements and inactive built-ins cannot
+				// provide the harness progress surfaces described by this policy.
+				asyncProgress: {
+					bash:
+						cfgAsyncEnabled.get(settings) &&
+						scopedAsyncJobManager !== undefined &&
+						builtInRegistryToolNames.has("bash") &&
+						toolNames.includes("bash"),
+					service:
+						cfgLaunchEnabled.get(settings) &&
+						toolSession.processProgressMode === "session" &&
+						builtInRegistryToolNames.has("bash") &&
+						toolNames.includes("bash"),
+					procWrite:
+						builtInRegistryToolNames.has("write") &&
+						toolNames.includes("write") &&
+						(toolSession.deviceOnlyWrite !== true || toolSession.pendingFullWriteDescription === true),
+				},
 				secretsEnabled: obfuscator?.obfuscates() === true,
 				workspaceTree: workspaceTreePromise ?? emptyWorkspaceTree,
 				includeWorkspaceTree,
@@ -4482,6 +4503,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			hasEditTool: true,
 			requireYieldTool: false,
+			processProgressMode: "unavailable",
 			getSessionId: () => {
 				const id = sessionManager.getSessionId?.();
 				return id ? `${id}-advisor` : null;
@@ -4492,8 +4514,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// and eval reject explicit background modes and run unmarked calls
 			// inline instead of auto-backgrounding them.
 			asyncJobManager: undefined,
-			queueLaunchCompletion: notification =>
-				session?.queueLaunchCompletion(notification) ??
+			queueLaunchCompletion: (notification, epoch) =>
+				session?.queueLaunchCompletion(notification, epoch) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
 			captureLaunchProgressEpoch: () => session?.captureLaunchProgressEpoch() ?? 0,
 			queueLaunchProgress: (notification, delivery, startedAt, epoch, artifactId) =>
