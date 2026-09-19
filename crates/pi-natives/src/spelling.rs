@@ -45,13 +45,80 @@ mod platform {
 	static APP_KIT_LOADED: LazyLock<bool> = LazyLock::new(|| {
 		// SAFETY: AppKit documents `NSApplicationLoad` as process-global and
 		// idempotent; `LazyLock` guarantees this process calls it at most once.
-		unsafe { NSApplicationLoad() }
+		let loaded = unsafe { NSApplicationLoad() };
+		if loaded {
+			// `NSApplicationLoad` initializes the shared application object
+			// with `NSApplicationActivationPolicyRegular`, so the process
+			// checks in with LaunchServices as a regular foreground app.
+			// This binary has no bundle of its own, so LaunchServices adopts
+			// it into the bundle of the app that owns its controlling TTY —
+			// the terminal — producing one extra Dock tile wearing the
+			// terminal's icon per running TUI session. Spell checking needs
+			// no Dock presence, menu bar, or activation; demoting the policy
+			// to `Prohibited` removes the Dock tile and the ⌘Tab entry while
+			// leaving `NSSpellChecker` fully functional. The oauth callback
+			// helper (`src/oauth_callback/darwin-helper.m`) already uses the
+			// same policy for the same reason.
+			demote_activation_policy();
+		}
+		loaded
 	});
 	const NS_NOT_FOUND: usize = isize::MAX as usize;
 
 	#[link(name = "AppKit", kind = "framework")]
 	unsafe extern "C" {
 		fn NSApplicationLoad() -> bool;
+	}
+
+	/// Demote the shared application's activation policy to
+	/// `NSApplicationActivationPolicyProhibited` (== 2), so the bundle-less CLI
+	/// is not adopted into the controlling terminal's app identity (which
+	/// would otherwise take a Dock tile and a ⌘Tab entry per TUI session).
+	///
+	/// Raw `objc_msgSend` FFI, the same idiom as `devicecheck.rs`, avoids a
+	/// new `objc2-app-kit` feature dependency for one call.
+	fn demote_activation_policy() {
+		type Id = *mut std::ffi::c_void;
+		type Sel = *mut std::ffi::c_void;
+
+		#[allow(
+			clashing_extern_declarations,
+			reason = "objc_msgSend is an assembly trampoline that forwards to the method IMP; each \
+			          alias types the same symbol for a distinct call signature"
+		)]
+		#[link(name = "objc")]
+		unsafe extern "C" {
+			fn objc_getClass(name: *const std::ffi::c_char) -> Id;
+			fn sel_registerName(name: *const std::ffi::c_char) -> Sel;
+			#[link_name = "objc_msgSend"]
+			fn msg_send_noarg_ret_id(receiver: Id, selector: Sel) -> Id;
+			#[link_name = "objc_msgSend"]
+			fn msg_send_policy(receiver: Id, selector: Sel, policy: i64);
+		}
+
+		// SAFETY: `NSApplicationLoad()` already ran, so the `NSApplication`
+		// class is registered and the shared application object exists.
+		// `sel_registerName` interns its string, and both selectors below are
+		// real `NSApplication` methods, so the calls dispatch to AppKit.
+		unsafe {
+			let app_class = objc_getClass(c"NSApplication".as_ptr());
+			if app_class.is_null() {
+				return;
+			}
+			let shared = msg_send_noarg_ret_id(
+				app_class,
+				sel_registerName(c"sharedApplication".as_ptr()),
+			);
+			if shared.is_null() {
+				return;
+			}
+			// `NSApplicationActivationPolicyProhibited` == 2.
+			msg_send_policy(
+				shared,
+				sel_registerName(c"setActivationPolicy:".as_ptr()),
+				2,
+			);
+		}
 	}
 
 	fn checker() -> Result<Retained<NSSpellChecker>> {
