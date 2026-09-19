@@ -1,8 +1,77 @@
 // Provider-wire compat for "meta"; regenerated from the frozen census using deployment contract selectors.
 
 provider "meta" {
+	default-model "muse-spark-1.1"
+	env "MODEL_API_KEY" "META_API_KEY"
+	discovery label="Meta Model API"
+
+	// Muse Spark revisions served by Meta's first-party Responses API. Meta's
+	// `/v1/models` lists bare ids with no capability metadata, so every revision
+	// must be seeded here or discovery yields a text-only, non-reasoning model
+	// with an unknown context window.
+	seed api="openai-responses" base-url="https://api.meta.ai/v1" bundle="always" precedence="seed" {
+		model "muse-spark-1.1" name="Muse Spark 1.1" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.25 output=4.25 cache-read=0.15 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
+		model "muse-spark-1.2" name="Muse Spark 1.2" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.25 output=4.25 cache-read=0.15 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
+		// Contributor SKUs (`-contributor`): same model, discounted because prompts
+		// are used for training.
+		model "muse-spark-1.2-contributor" name="Muse Spark 1.2 (C)" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.1 output=0.2 cache-read=0.002 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
+		// Meta documents the `max` effort tier for Muse Spark 1.3 (standard) only;
+		// contributor tiers and other revisions stay on the 5-tier ladder.
+		model "muse-spark-1.3" name="Muse Spark 1.3" {
+			reasoning #true
+			input "text" "image"
+			cost input=1.25 output=4.25 cache-read=0.15 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
+		model "muse-spark-1.3-contributor" name="Muse Spark 1.3 (C)" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.1 output=0.2 cache-read=0.002 cache-write=0
+			limits context=1048576 max-tokens=131072
+			thinking-mode "effort"
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			supports-reasoning-effort #true
+			include-encrypted-reasoning #true
+		}
+	}
+
 	include-encrypted-reasoning #true
 	supports-reasoning-effort #true
+	clamp-output-to-model-max #true
+	// api.meta.ai/v1 accepts only tool_choice "auto"; "none", "required" and named
+	// choices are rejected with 400 (verified 2026-09-10), so omit the field.
+	supports-tool-choice #false
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		thinking-mode "effort"

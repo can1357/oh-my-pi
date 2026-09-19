@@ -158,16 +158,20 @@ export function mapCredentials(
 			break;
 		case "seconds": {
 			const seconds = jsonPath(body, expiry.path);
-			if (typeof seconds !== "number" || !Number.isFinite(seconds)) {
-				throw new AIError.OAuthError(`${provider} token response missing ${expiry.path}`, {
-					kind: "validation",
-					provider,
-				});
+			if (typeof seconds === "number" && Number.isFinite(seconds)) {
+				const from = expiry.fromPath ? jsonPath(body, expiry.fromPath) : undefined;
+				const base = typeof from === "number" && Number.isFinite(from) ? from * 1000 : Date.now();
+				expires = base + seconds * 1000 - expiry.skewMs;
+				break;
 			}
-			const from = expiry.fromPath ? jsonPath(body, expiry.fromPath) : undefined;
-			const base = typeof from === "number" && Number.isFinite(from) ? from * 1000 : Date.now();
-			expires = base + seconds * 1000 - expiry.skewMs;
-			break;
+			if (expiry.fallbackMs !== undefined) {
+				expires = Date.now() + expiry.fallbackMs;
+				break;
+			}
+			throw new AIError.OAuthError(`${provider} token response missing ${expiry.path}`, {
+				kind: "validation",
+				provider,
+			});
 		}
 	}
 	const credentials: OAuthCredentials = {
@@ -263,10 +267,11 @@ export async function applyUserinfo(
 	userinfo: CompiledUserinfo | undefined,
 	credentials: OAuthCredentials,
 	context: RequestContext,
+	vars: TemplateVars = {},
 ): Promise<OAuthCredentials> {
 	if (!userinfo) return credentials;
 	try {
-		const response = await context.fetch(userinfo.url, {
+		const response = await context.fetch(template(userinfo.url, vars), {
 			headers: { ...context.headers, Authorization: `Bearer ${credentials.access}` },
 			signal: context.signal,
 		});

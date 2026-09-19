@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "../src/usage/opencode-go";
 
 const DEFAULT_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
@@ -91,6 +92,11 @@ describe("opencode-go usage provider", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.url).toBe(DEFAULT_USAGE_URL);
 		expect(calls[0]?.headers.authorization).toBe("Bearer sk-test");
+		// Attribution headers: omp UA instead of Bun's default, stable
+		// install id as the session (required from 09/06).
+		expect(calls[0]?.headers["User-Agent"]).toBe(USER_AGENT);
+		expect(typeof calls[0]?.headers["x-opencode-session"]).toBe("string");
+		expect(calls[0]?.headers["x-opencode-session"]?.length).toBeGreaterThan(0);
 	});
 
 	it("normalizes both catalog baseUrl forms onto the usage route", async () => {

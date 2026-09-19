@@ -216,6 +216,17 @@ describe("searchCodex model selection", () => {
 			return true;
 		},
 	} as unknown as AuthStorage;
+	const emailOnlyAuthStorage = {
+		async getOAuthAccess() {
+			return {
+				accessToken: "email-only-access-token",
+				email: "user@example.com",
+			};
+		},
+		hasOAuth() {
+			return true;
+		},
+	} as unknown as AuthStorage;
 	const proxyAuthStorage = {
 		hasAuth(provider: string) {
 			return provider === "openai-codex";
@@ -246,8 +257,11 @@ describe("searchCodex model selection", () => {
 		getProviderBaseUrl() {
 			return "https://proxy.example/backend-api";
 		},
-		getProviderHeaders() {
+		async getProviderHeaders() {
 			return { "X-Proxy-Tenant": "tenant-1" };
+		},
+		async resolveModelHeaders(model: { headers?: Record<string, string> }) {
+			return model.headers;
 		},
 		hasCommandBackedApiKey() {
 			return false;
@@ -305,6 +319,18 @@ describe("searchCodex model selection", () => {
 		expect(capturedRequest?.body?.model).toBe("gpt-5.6-luna");
 		expect(result.model).toBe("gpt-5.6-luna");
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
+	});
+
+	it("uses email-only OAuth credentials without an account header", async () => {
+		const result = await searchCodex({
+			...makeSearchParams("email-only Codex search", mockCodexFetch("gpt-5.6-luna")),
+			authStorage: emailOnlyAuthStorage,
+		});
+
+		const headers = new Headers(capturedRequest?.headers);
+		expect(headers.get("authorization")).toBe("Bearer email-only-access-token");
+		expect(headers.has("chatgpt-account-id")).toBe(false);
+		expect(result.answer).toBe("Codex answer");
 	});
 
 	it("applies the configured request timeout to Codex search", async () => {

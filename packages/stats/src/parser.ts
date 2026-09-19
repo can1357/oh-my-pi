@@ -1,3 +1,4 @@
+import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -14,7 +15,7 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getSessionsDir, isEnoent, readLines } from "@oh-my-pi/pi-utils";
 import type {
 	AgentType,
-	MessageStats,
+	MessageStatsInput,
 	SessionEntry,
 	SessionMessageEntry,
 	SessionModelUsageEntry,
@@ -28,6 +29,9 @@ import { computeUserMessageMetrics } from "./user-metrics";
 
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
 const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
+
+/** Characters a persisted tool name may consist of without sanitization. */
+const TOOL_NAME_PATTERN = /^[\w.:-]+$/;
 
 /**
  * Classify which agent produced a transcript from its path within the sessions
@@ -151,6 +155,61 @@ function extractUserStats(sessionFile: string, folder: string, entry: SessionMes
 }
 
 /**
+ * Session JSONL is written by older versions and foreign producers, so a token
+ * counter is whatever was persisted, not what `Usage` declares. A non-numeric
+ * bucket (`input: "10"`) must never be parsed and must never be summed: `+`
+ * would concatenate it into the derived total and SQLite would coerce the
+ * resulting string to a different, far larger number. A non-finite one
+ * (`input: 1e999` is legal JSON) must not reach a NOT NULL column either.
+ * Malformed input counts as absent.
+ */
+function isFiniteCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function finiteTokenCount(value: unknown): number {
+	return isFiniteCount(value) ? value : 0;
+}
+
+/**
+ * Token-bucket view for total derivation. Persisted session payloads are
+ * outside-controlled (old versions, foreign producers), so every counter is
+ * `unknown` and validated at read time.
+ */
+export interface UsageBucketView {
+	totalTokens?: unknown;
+	input?: unknown;
+	output?: unknown;
+	cacheRead?: unknown;
+	cacheWrite?: unknown;
+	orchestration?: { input?: unknown; output?: unknown; cacheRead?: unknown } | null;
+}
+
+/**
+ * Total tokens for one usage payload, per the documented contract: the
+ * conversation buckets plus provider-reported orchestration tokens. A present
+ * finite provider total stays authoritative; a missing or malformed one
+ * (absent, string, NaN) is derived from the buckets, which would otherwise
+ * persist a zero total next to real token counts. Shared by ingest and the
+ * trace builder so stored and displayed totals cannot disagree.
+ */
+export function resolveUsageTotal(usage: UsageBucketView | null | undefined): number {
+	if (typeof usage?.totalTokens === "number" && Number.isFinite(usage.totalTokens)) return usage.totalTokens;
+	if (!usage || typeof usage !== "object") return 0;
+	const orchestration =
+		usage.orchestration && typeof usage.orchestration === "object" ? usage.orchestration : undefined;
+	return (
+		finiteTokenCount(usage.input) +
+		finiteTokenCount(usage.output) +
+		finiteTokenCount(usage.cacheRead) +
+		finiteTokenCount(usage.cacheWrite) +
+		finiteTokenCount(orchestration?.input) +
+		finiteTokenCount(orchestration?.output) +
+		finiteTokenCount(orchestration?.cacheRead)
+	);
+}
+
+/**
  * Extract stats from an assistant message entry.
  *
  * Session JSONL on disk is not guaranteed to match the current
@@ -167,7 +226,7 @@ function extractStats(
 	entry: SessionMessageEntry,
 	currentServiceTier: ServiceTierByFamily | undefined,
 	agentType: AgentType,
-): MessageStats | null {
+): MessageStatsInput | null {
 	const msg = entry.message as AssistantMessage;
 	if (msg?.role !== "assistant") return null;
 	if (typeof msg.model !== "string" || typeof msg.provider !== "string" || typeof msg.api !== "string") return null;
@@ -189,22 +248,27 @@ function extractStats(
 	const tier = resolveModelServiceTier(currentServiceTier, model);
 	const derived = recorded > 0 ? recorded : getPriorityPremiumRequests(tier, model);
 	const wellFormed =
-		typeof rawUsage.input === "number" &&
-		typeof rawUsage.output === "number" &&
-		typeof rawUsage.cacheRead === "number" &&
-		typeof rawUsage.cacheWrite === "number" &&
-		typeof rawUsage.totalTokens === "number";
-	const usage: Usage =
+		isFiniteCount(rawUsage.input) &&
+		isFiniteCount(rawUsage.output) &&
+		isFiniteCount(rawUsage.cacheRead) &&
+		isFiniteCount(rawUsage.cacheWrite) &&
+		isFiniteCount(rawUsage.totalTokens);
+	const usage: MessageStatsInput["usage"] =
 		wellFormed && derived === recorded
 			? (rawUsage as Usage)
 			: {
 					...rawUsage,
-					input: rawUsage.input ?? 0,
-					output: rawUsage.output ?? 0,
-					cacheRead: rawUsage.cacheRead ?? 0,
-					cacheWrite: rawUsage.cacheWrite ?? 0,
-					totalTokens: rawUsage.totalTokens ?? 0,
-					cost: rawUsage.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					input: finiteTokenCount(rawUsage.input),
+					output: finiteTokenCount(rawUsage.output),
+					cacheRead: finiteTokenCount(rawUsage.cacheRead),
+					cacheWrite: finiteTokenCount(rawUsage.cacheWrite),
+					// A present finite provider total stays authoritative; a missing
+					// or malformed one (absent, string, NaN) is derived from the buckets.
+					totalTokens: resolveUsageTotal(rawUsage),
+					// An omitted `cost` must stay omitted: `resolveStoredCost` reads
+					// absence as "no recorded price" and estimates the request, while
+					// a zero would read as an explicitly free request.
+					cost: rawUsage.cost,
 					premiumRequests: derived,
 				};
 
@@ -232,7 +296,7 @@ function extractModelUsageStats(
 	folder: string,
 	entry: SessionModelUsageEntry,
 	agentType: AgentType,
-): MessageStats | null {
+): MessageStatsInput | null {
 	const timestamp = Date.parse(entry.timestamp);
 	return extractStats(
 		sessionFile,
@@ -261,7 +325,9 @@ function extractModelUsageStats(
 
 /** Message timestamp, falling back to the entry's ISO timestamp, then 0. */
 function coerceEntryTimestamp(timestamp: number | undefined, entry: SessionMessageEntry): number {
-	if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+	// A stored zero is the "no timestamp" sentinel, not 1970: fall through to
+	// the entry envelope so a recoverable ISO time still selects its tariff.
+	if (typeof timestamp === "number" && Number.isFinite(timestamp) && timestamp > 0) return timestamp;
 	const ts = Date.parse(entry.timestamp);
 	return Number.isFinite(ts) ? ts : 0;
 }
@@ -292,27 +358,51 @@ function extractToolCalls(
 	);
 	if (blocks.length === 0) return [];
 
-	return blocks.map(block => {
+	const calls: ToolCallStats[] = [];
+	for (const block of blocks) {
+		// Names reduced to nothing by sanitization carry no tool identity:
+		// skip them rather than attributing usage to garbage (see
+		// sanitizeToolName). callsInTurn still counts the raw block total.
+		const toolName = sanitizeToolName(block.name);
+		if (toolName === null) continue;
 		let argsChars = 0;
 		try {
 			argsChars = JSON.stringify(block.arguments ?? {}).length;
 		} catch {
 			// Non-serializable arguments (shouldn't happen in persisted JSONL); size unknown.
 		}
-		return {
+		calls.push({
 			sessionFile,
 			entryId: entry.id,
 			toolCallId: block.id,
 			folder,
-			toolName: block.name,
+			toolName,
 			model: msg.model,
 			provider: msg.provider,
 			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
-		};
-	});
+		});
+	}
+	return calls;
+}
+
+/**
+ * Tool names as persisted can be polluted by provider-side parse garbage — a
+ * gateway may hand the model's whole invocation text back as the function
+ * name (e.g. `bash command="ls -la …"` with a stray in-band closer), which
+ * then shows up verbatim in every `GROUP BY tool_name` aggregate and the
+ * dashboard tool filter. Reduce such names to their leading identifier token;
+ * names that yield no identifier at all carry no tool identity and are
+ * returned as `null` so the row is skipped.
+ */
+function sanitizeToolName(name: string): string | null {
+	const trimmed = name.trim();
+	if (trimmed.length === 0) return null;
+	if (TOOL_NAME_PATTERN.test(trimmed)) return trimmed;
+	const candidate = trimmed.split(/[^\w.:-]/)[0] ?? "";
+	return candidate.length > 0 ? candidate : null;
 }
 
 /**
@@ -392,34 +482,99 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
-/**
- * Parse a session file and extract all assistant message stats.
- * Uses incremental reading with offset tracking.
- *
- * Service-tier carry-over: `currentServiceTier` is a session-scoped piece of
- * state derived from `service_tier_change` entries that affects whether
- * subsequent OpenAI assistant replies count as premium requests. Incremental
- * syncs that resume past the most-recent tier change would otherwise lose
- * that state and silently record `premiumRequests = 0` for priority traffic
- * (the coding-agent stopped folding the tier into `usage.premiumRequests`
- * after 13f59162e — the parser is now the sole source of truth). When
- * `fromOffset > 0` we therefore scan the bytes preceding `fromOffset`
- * for the latest service-tier value before parsing the unprocessed tail.
- * The scan only keeps the current tier and does not materialize prefix
- * entries, preserving offset-based memory behavior for large sessions.
- */
+export interface SessionParserState {
+	version: 1;
+	offset: number;
+	dev: number;
+	ino: number;
+	birthtimeMs: number;
+	size: number;
+	mtimeMs: number;
+	checkpoint: string;
+	serviceTier: ServiceTierByFamily | null;
+}
+
 export interface ParseSessionResult {
-	stats: MessageStats[];
+	stats: MessageStatsInput[];
 	userStats: UserMessageStats[];
 	userLinks: UserMessageLink[];
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
+	parserState?: SessionParserState;
+	reset?: boolean;
 }
-export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
+
+const CHECKPOINT_BYTES = 256;
+
+async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8Array> {
+	// Positional reads keep the descriptor at zero for Bun.file(fd)'s subsequent tail read.
+	const start = Math.max(0, end - CHECKPOINT_BYTES);
+	const bytes = new Uint8Array(end - start);
+	let read = 0;
+	while (read < bytes.length) {
+		const result = await handle.read(bytes, read, bytes.length - read, start + read);
+		if (result.bytesRead === 0) break;
+		read += result.bytesRead;
+	}
+	return bytes.subarray(0, read);
+}
+
+export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
+	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+}
+
+/** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
+export async function parseSessionFile(
+	sessionPath: string,
+	fromOffset = 0,
+	state?: SessionParserState,
+	replay = false,
+): Promise<ParseSessionResult> {
 	let bytes: Uint8Array;
+	let start = fromOffset;
+	let reset = false;
+	let currentServiceTier: ServiceTierByFamily | undefined;
+	let info: nodeFs.Stats;
+	let checkpoint: string;
+	let read: number;
+	let entries: SessionEntry[];
 	try {
-		bytes = await Bun.file(sessionPath).bytes();
+		const handle = await fs.open(sessionPath, "r");
+		try {
+			info = await handle.stat();
+			const file = Bun.file(handle.fd);
+			let resume = state?.version === 1 && state.offset === fromOffset;
+			if (resume && state) {
+				reset =
+					!matchesSessionFile(state, info) ||
+					info.size < state.size ||
+					(info.size === state.size && info.mtimeMs !== state.mtimeMs);
+				if (!reset) {
+					const previous = await readCheckpoint(handle, fromOffset);
+					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
+				}
+				resume = !reset;
+			}
+			if (fromOffset > info.size) reset = true;
+			if (replay) resume = false;
+			start = reset || replay ? 0 : Math.max(0, fromOffset);
+			const readStart = resume ? start : 0;
+			bytes = await file.slice(readStart, info.size).bytes();
+			currentServiceTier = resume
+				? (state?.serviceTier ?? undefined)
+				: scanLastServiceTier(bytes.subarray(0, start));
+			({ entries, read } = parseSessionEntriesLenient(bytes.subarray(start - readStart)));
+			const newOffset = start + read;
+			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
+			const previous =
+				checkpointStart >= readStart
+					? bytes.subarray(checkpointStart - readStart, newOffset - readStart)
+					: await readCheckpoint(handle, newOffset);
+			checkpoint = Bun.hash(previous).toString(16);
+		} finally {
+			await handle.close();
+		}
 	} catch (err) {
 		if (isEnoent(err))
 			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
@@ -428,19 +583,12 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 
 	const folder = extractFolderFromPath(sessionPath);
 	const agentType = classifyAgentType(sessionPath);
-	const stats: MessageStats[] = [];
+	const stats: MessageStatsInput[] = [];
 	const userStats: UserMessageStats[] = [];
 	const userLinks: UserMessageLink[] = [];
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
-	const start = Math.max(0, Math.min(fromOffset, bytes.length));
-	const unprocessed = bytes.subarray(start);
-	const { entries, read } = parseSessionEntriesLenient(unprocessed);
-	let currentServiceTier: ServiceTierByFamily | undefined;
-	if (start > 0) {
-		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
-	}
 	for (const entry of entries) {
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
@@ -490,7 +638,27 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		}
 	}
 
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+	const newOffset = start + read;
+	return {
+		stats,
+		userStats,
+		userLinks,
+		toolCalls,
+		toolResults,
+		newOffset,
+		reset,
+		parserState: {
+			version: 1,
+			offset: newOffset,
+			dev: info.dev,
+			ino: info.ino,
+			birthtimeMs: info.birthtimeMs,
+			size: info.size,
+			mtimeMs: info.mtimeMs,
+			checkpoint,
+			serviceTier: currentServiceTier ?? null,
+		},
+	};
 }
 
 /**

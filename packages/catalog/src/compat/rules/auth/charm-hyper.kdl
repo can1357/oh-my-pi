@@ -1,0 +1,19 @@
+// Validation targets `/v1/credits`, not `/v1/models`: the models endpoint is
+// public and answers 200 with no credentials or a bogus key (verified
+// 2026-09-11), so a models-endpoint probe against it could never reject a bad
+// key. `/v1/credits` is an authenticated, non-billable GET that returns the
+// account balance on success and 401 `{"error":"authentication failed"}`
+// otherwise — the same trick cline-pass uses to validate against its own
+// `/users/me`, and cheaper than a chat-completions probe that would bill the
+// key on every login.
+auth "charm-hyper" {
+	name "Charm Hyper"
+	env "CHARM_HYPER_API_KEY" "HYPER_API_KEY"
+	login "api-key" {
+		auth-url "https://hyper.charm.land/"
+		instructions "Create or copy an API key from the Charm Hyper dashboard"
+		prompt "Paste your Charm Hyper API key" placeholder="sk-hyper-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="Charm Hyper" url="https://hyper.charm.land/v1/credits"
+	}
+}

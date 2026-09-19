@@ -85,7 +85,11 @@ impl GitRepo {
 	///
 	/// Empty `files` matches `git add -A`: refresh tracked paths and add
 	/// untracked files that survive the standard ignore stack (nested
-	/// `.gitignore`, exclude files). When `core.precomposeUnicode` is set,
+	/// `.gitignore`, exclude files). Content goes through the worktree-to-git
+	/// filter pipeline (`.gitattributes` `text`/`eol`, `core.autocrlf`, clean
+	/// drivers) so the index blob matches what `git add` would store — a
+	/// `*.cmd text eol=crlf` file stages as LF even though the checkout is
+	/// CRLF. When `core.precomposeUnicode` is set,
 	/// a worktree path that is a unicode-composition equivalent of an
 	/// existing index path (macOS NFD dirent vs NFC index name) is stored
 	/// under the index name. Unrelated names that share an inode (hardlinks)
@@ -121,8 +125,11 @@ impl GitRepo {
 					.any(|wanted| stage_path_matches(&path, wanted)))
 				&& !selected.contains(path.as_ref())
 		});
+		let (mut filter, filter_index) = repo
+			.filter_pipeline(None)
+			.map_err(|err| Error::backend("git add", err))?;
 		for path in selected {
-			stage_one(&repo, self.root(), &mut index, &path)?;
+			stage_one(&mut filter, &filter_index, &mut index, &path)?;
 		}
 		index.sort_entries();
 		index
@@ -849,7 +856,7 @@ fn run_commit_hook(
 			},
 		);
 	let hook = hooks_dir.join(name);
-	if !hook_is_executable(&hook)? {
+	if !hook_is_executable(&hook) {
 		return Ok(());
 	}
 	let output = Command::new(&hook)
@@ -877,23 +884,24 @@ fn run_commit_hook(
 	})
 }
 
-fn hook_is_executable(path: &Path) -> Result<bool> {
-	let metadata = match fs::metadata(path) {
-		Ok(metadata) => metadata,
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-		Err(err) => return Err(err.into()),
+/// Mirrors git's `find_hook`: any failure to stat the hook (missing, or
+/// `core.hooksPath` pointing at a non-directory such as `/dev/null`) means
+/// "no hook", never a commit failure.
+fn hook_is_executable(path: &Path) -> bool {
+	let Ok(metadata) = fs::metadata(path) else {
+		return false;
 	};
 	if !metadata.is_file() {
-		return Ok(false);
+		return false;
 	}
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::PermissionsExt;
-		Ok(metadata.permissions().mode() & 0o111 != 0)
+		metadata.permissions().mode() & 0o111 != 0
 	}
 	#[cfg(not(unix))]
 	{
-		Ok(true)
+		true
 	}
 }
 
@@ -1199,57 +1207,45 @@ fn same_worktree_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::missing_const_for_fn, reason = "matches non-const unix signature")]
 fn same_worktree_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
 	false
 }
 
+/// Write the filtered worktree content at `path` into the object database and
+/// replace its index entry. A path that vanished or is untrackable (socket,
+/// plain directory) is left out of the index, as `git add` would.
 fn stage_one(
-	repo: &gix::Repository,
-	root: &Path,
+	filter: &mut gix::filter::Pipeline<'_>,
+	filter_index: &gix::index::State,
 	index: &mut gix::index::File,
 	path: &str,
 ) -> Result<()> {
-	let full = root.join(path);
-	let metadata = fs::symlink_metadata(&full)?;
-	let (data, mode) = if metadata.file_type().is_symlink() {
-		(
-			fs::read_link(&full)?
-				.to_string_lossy()
-				.into_owned()
-				.into_bytes(),
-			gix::index::entry::Mode::SYMLINK,
-		)
-	} else {
-		let mode = if is_executable(&metadata) {
-			gix::index::entry::Mode::FILE_EXECUTABLE
-		} else {
-			gix::index::entry::Mode::FILE
-		};
-		(fs::read(&full)?, mode)
+	use gix::objs::tree::EntryKind;
+	let rela_path = path.as_bytes().as_bstr();
+	let Some((id, kind, _)) = filter
+		.worktree_file_to_object(rela_path, filter_index)
+		.map_err(|err| Error::backend("git add", err))?
+	else {
+		index.remove_entries(|_, p, _| p == rela_path);
+		return Ok(());
 	};
-	let id = repo
-		.write_blob(&data)
-		.map_err(|e| Error::backend("git add", e))?
-		.detach();
-	index.remove_entries(|_, p, _| p == path.as_bytes().as_bstr());
+	let mode = match kind {
+		EntryKind::Blob => gix::index::entry::Mode::FILE,
+		EntryKind::BlobExecutable => gix::index::entry::Mode::FILE_EXECUTABLE,
+		EntryKind::Link => gix::index::entry::Mode::SYMLINK,
+		EntryKind::Commit => gix::index::entry::Mode::COMMIT,
+		EntryKind::Tree => return Ok(()),
+	};
+	index.remove_entries(|_, p, _| p == rela_path);
 	index.dangerously_push_entry(
 		Default::default(),
 		id,
 		gix::index::entry::Flags::empty(),
 		mode,
-		path.as_bytes().as_bstr(),
+		rela_path,
 	);
 	Ok(())
-}
-
-#[cfg(unix)]
-fn is_executable(meta: &fs::Metadata) -> bool {
-	use std::os::unix::fs::PermissionsExt;
-	meta.permissions().mode() & 0o111 != 0
-}
-#[cfg(not(unix))]
-fn is_executable(_: &fs::Metadata) -> bool {
-	false
 }
 
 fn copy_index_paths(dest: &mut gix::index::File, source: &gix::index::File, files: &[String]) {
@@ -1839,6 +1835,28 @@ mod tests {
 	}
 
 	#[test]
+	fn stage_applies_worktree_to_git_filters() {
+		// Regression: staging stored raw worktree bytes, so under
+		// `*.cmd text eol=crlf` a CRLF checkout staged a CRLF blob over the LF
+		// HEAD blob. `stage_files(&[])` re-stages every tracked path, so every
+		// untouched .cmd file surfaced as modified in both index and worktree.
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitattributes"), "*.cmd text eol=crlf\n").unwrap();
+		fs::write(temp.path().join("run.cmd"), "echo one\r\necho two\r\n").unwrap();
+		git(temp.path(), &["add", "."]);
+		git(temp.path(), &["commit", "-qm", "crlf"]);
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+
+		repo.stage_files(&[]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+
+		fs::write(temp.path().join("run.cmd"), "echo one\r\necho three\r\n").unwrap();
+		repo.stage_files(&["run.cmd".into()]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  run.cmd");
+		assert_eq!(git(temp.path(), &["show", ":run.cmd"]), "echo one\necho three");
+	}
+
+	#[test]
 	fn stage_all_skips_nested_gitignore_like_git_add() {
 		let (temp, repo) = fixture();
 		fs::create_dir_all(temp.path().join("tests/e2e/screenshots")).unwrap();
@@ -2300,7 +2318,8 @@ mod tests {
 		assert!(nested.join("secret.env").exists());
 		assert_eq!(fs::read_to_string(nested.join("secret.env")).unwrap(), "secret\n");
 
-		// Global excluded file MUST SURVIVE (config set after the handle was cached)
+		// Global excluded file MUST SURVIVE (config set after the handle was
+		// cached)
 		assert!(temp.path().join("global.env").exists());
 		assert_eq!(fs::read_to_string(temp.path().join("global.env")).unwrap(), "global-secret\n");
 
@@ -2322,7 +2341,8 @@ mod tests {
 		// Untracked nested repo MUST SURVIVE
 		assert!(untracked_repo.join(".git").exists());
 		assert!(untracked_repo.join("nested.txt").exists());
-		// Symlink to directory: symlink is removed, target directory content survives
+		// Symlink to directory: symlink is removed, target directory content
+		// survives
 		#[cfg(unix)]
 		{
 			assert!(!temp.path().join("symlink-to-dir").exists());

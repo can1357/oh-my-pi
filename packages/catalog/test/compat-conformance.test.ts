@@ -17,8 +17,19 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"synthetic-search",
 	"llama.cpp",
 	"lm-studio",
+	"litellm",
 	"vllm",
 	"openai-codex-device",
+	// Public gateway discovery via charmHyperModelManagerOptions: every row,
+	// including its tariff and effort ladder, comes from the live /v1/models
+	// snapshot, so no bundled rows are frozen into models.json.
+	"charm-hyper",
+	// User-configured LiteLLM proxy (models.yml provider or litellm auth flow;
+	// PROXY_OPENAI_COMPAT_PROVIDERS) that forwards upstream chat templates.
+	"litellm",
+	// User-configured models.yml provider pointing at
+	// https://inference-api.nousresearch.com/v1 (NousResearch inference API).
+	"nous",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {
@@ -52,8 +63,10 @@ function collectReferencedProviders(): Map<string, string> {
 		behavior.hostedDefaults,
 		behavior.apiRoutes,
 		behavior.modelLimits,
+		behavior.excludeDiscoveryModes,
 		behavior.excludeModels,
 		behavior.planRequirements,
+		behavior.retryResetTimezones,
 		behavior.pricingPeers,
 	];
 	for (const list of lists) {

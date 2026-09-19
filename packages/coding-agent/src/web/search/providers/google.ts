@@ -1,6 +1,6 @@
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatScraperQuery } from "../query";
 import { clampNumResults } from "../utils";
@@ -8,7 +8,7 @@ import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import type { LoadedHtmlPage } from "./browser-page";
 import { browserFetch } from "./browser-page";
-import { withHardTimeout } from "./utils";
+import { normalizeSearchText, withHardTimeout } from "./utils";
 
 const GOOGLE_HOME_URL = "https://www.google.com/";
 const GOOGLE_SEARCH_URL = "https://www.google.com/search";
@@ -37,7 +37,7 @@ interface ParsedResult {
 }
 
 function normalizeText(value: string | null | undefined): string {
-	return (value ?? "").replace(/\s+/g, " ").trim();
+	return normalizeSearchText(value) ?? "";
 }
 
 function unwrapResultUrl(href: string): string | undefined {

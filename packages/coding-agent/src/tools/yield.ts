@@ -104,14 +104,16 @@ function parseYieldType(value: unknown): string | string[] | undefined {
 	if (isYieldType(value)) return value;
 	throw new Error("type must be a string or non-empty array of strings");
 }
-/** Parse a `{`/`[`-leading JSON string; undefined on non-container or parse failure. */
-function parseJsonContainerString(value: string): unknown {
-	const trimmed = value.trim();
-	if (!(trimmed.startsWith("{") || trimmed.startsWith("["))) return undefined;
+/** Parse any JSON-encoded string value (`"correct"`, `42`, `{"n":4}` …).
+ * Returns a `{parsed:true,value}` sentinel — never `undefined`-as-failure —
+ * so decoded `null`/`false` stay distinguishable from a parse error.
+ * Runs only after raw validation already failed, and the caller adopts the
+ * value only if it revalidates. */
+function parseJsonEncodedValue(value: string): { parsed: true; value: unknown } | { parsed: false } {
 	try {
-		return JSON.parse(trimmed);
+		return { parsed: true, value: JSON.parse(value) };
 	} catch {
-		return undefined;
+		return { parsed: false };
 	}
 }
 
@@ -121,10 +123,12 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * Read the optional `error` argument. Strict-mode providers (OpenAI/Codex) send
- * omitted optionals as `null`, so null and undefined both mean "no error".
+ * omitted optionals as `null`; non-strict OpenAI-compatible backends routinely
+ * fill the optional string with `""` next to a valid `data` payload. Both mean
+ * "no error" — an empty string is never a usable failure reason.
  */
 function parseYieldError(value: unknown): string | undefined {
-	if (value === undefined || value === null) return undefined;
+	if (value === undefined || value === null || value === "") return undefined;
 	if (typeof value === "string") return value;
 	throw new Error("error must be a string");
 }
@@ -356,6 +360,22 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#parameters = parameters;
 	}
 
+	/**
+	 * Clear per-run accumulator state before a kept-alive session continues with a
+	 * new monitored turn. The tool instance is stored once in the session's tool
+	 * registry and reused across follow-up turns (`runSubagentFollowUpTurn`), so a
+	 * prior run's incremental-section flag and retry counters would otherwise leak
+	 * forward: a later thinking-only `{type:"result"}` would skip the empty-last-
+	 * turn and schema guards (which require `!#hasIncrementalSections`) and fail
+	 * the run post-mortem. Workpool submission state resets separately via the
+	 * batch key in {@link #workPoolItems}.
+	 */
+	resetTurnState(): void {
+		this.#hasIncrementalSections = false;
+		this.#schemaValidationFailures = 0;
+		this.#emptyResultFailures = 0;
+	}
+
 	#workPoolItems(): readonly WorkPoolYieldItem[] {
 		const items = this.#session.getWorkPoolYieldItems?.() ?? [];
 		const key = items.map(item => `${item.index}:${item.id}`).join("\0");
@@ -427,6 +447,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 		const status = errorMessage !== undefined ? "aborted" : "success";
 		let schemaValidationOverridden = false;
+		let schemaValidationFailureCount = 0;
 		// Unknown incremental labels are a hard contract mismatch with the closed caller
 		// schema. Reject before the last-turn short-circuit too: `type: ["findings"], result: {}`
 		// would otherwise be accepted as a typed last-turn incremental yield, then a sibling
@@ -453,6 +474,44 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 					`Submit the full object: {"data":<object matching the schema>}.`,
 			);
 		}
+		// A data-less `useLastTurn` yield resolves to the last assistant turn's
+		// text. A thinking-only turn carries none, so accepting an incremental
+		// call records an empty section and accepting a terminal call with no
+		// accumulated sections records an empty result. Finalization would fail
+		// either run post-mortem with SUBAGENT_WARNING_NULL_YIELD, after the child
+		// can no longer correct it. Reject at the boundary so the reminder ladder
+		// re-prompts for `data`. A terminal data-less yield after valid incremental
+		// sections still closes that flow without reading last-turn text.
+		if (
+			status === "success" &&
+			useLastTurn &&
+			(isIncremental || !this.#hasIncrementalSections) &&
+			this.#session.getLastAssistantText !== undefined
+		) {
+			const lastTurnText = this.#session.getLastAssistantText();
+			if (lastTurnText === undefined || lastTurnText.trim().length === 0) {
+				this.#emptyResultFailures++;
+				if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
+					const attemptCount = this.#emptyResultFailures;
+					this.#emptyResultFailures = 0;
+					const error = `yield resolved to an empty last-turn result after ${attemptCount} consecutive attempt(s); aborting child instead of retrying forever. ${YIELD_FORMAT_HINT}`;
+					return {
+						content: [{ type: "text", text: `Task aborted: ${error}` }],
+						details: {
+							data: undefined,
+							status: "aborted",
+							error,
+							type: yieldType,
+						},
+					};
+				}
+				const remaining = MAX_EMPTY_RESULT_RETRIES - this.#emptyResultFailures;
+				throw new Error(
+					`yield used the last assistant turn as the result, but that turn contains no text (thinking only). ` +
+						`Put your result in \`data\`: ${YIELD_FORMAT_HINT} Empty last-turn result retries remaining before abort: ${remaining}.`,
+				);
+			}
+		}
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				workPoolItemId !== undefined
@@ -467,12 +526,16 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				// Lossless recovery: a JSON-encoded payload string parses to exactly
 				// the intended value (executor finalization already parses terminal
 				// yields the same way). Never the reverse — stringifying objects to
-				// fit string-typed fields is silent corruption.
-				const parsed = parseJsonContainerString(data);
-				if (parsed !== undefined) {
-					const revalidated = validateData(parsed);
+				// fit string-typed fields is silent corruption. The sentinel keeps
+				// decoded `false` distinct from a parse error. Decoded `null` is
+				// never adopted: finalization treats null data as missing
+				// (`resolveYieldPayload`), so accepting it here would report success
+				// and then warn post-mortem instead of giving a retryable error.
+				const decoded = parseJsonEncodedValue(data);
+				if (decoded.parsed && decoded.value !== null) {
+					const revalidated = validateData(decoded.value);
 					if (revalidated === undefined || revalidated.success) {
-						data = parsed;
+						data = decoded.value;
 						sectionFailure = revalidated;
 					}
 				}
@@ -490,7 +553,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						`${scope} does not match schema: ${formatAllValidationIssues(sectionFailure.issues)}.${retryHint}`,
 					);
 				}
+				// Budget exhausted: capture the count for the message, accept, and
+				// reset so the next independent submission starts fresh.
+				schemaValidationFailureCount = this.#schemaValidationFailures;
+				this.#schemaValidationFailures = 0;
 				schemaValidationOverridden = true;
+			} else {
+				// Schema-valid submission: the documented budget is consecutive,
+				// so a success resets it for the next independent section.
+				this.#schemaValidationFailures = 0;
 			}
 		}
 
@@ -513,7 +584,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						? `Item ${completedWorkPoolItem.index} submitted. All workpool items are complete; ending this turn.`
 						: `Item ${completedWorkPoolItem.index} submitted. Remaining item(s): ${remainingWorkPoolItems.map(item => item.index).join(", ")}.`
 					: schemaValidationOverridden
-						? `Result submitted (schema validation overridden after ${this.#schemaValidationFailures} failed attempt(s)).`
+						? `Result submitted (schema validation overridden after ${schemaValidationFailureCount} failed attempt(s)).`
 						: "Result submitted.";
 		return {
 			content: [{ type: "text", text: responseText }],
@@ -561,6 +632,21 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		}
 		return undefined;
 	}
+}
+interface TurnStateResettable {
+	resetTurnState(): void;
+}
+
+function canResetTurnState(tool: AgentTool): tool is AgentTool & TurnStateResettable {
+	return "resetTurnState" in tool && typeof tool.resetTurnState === "function";
+}
+
+/**
+ * Reset per-run yield state through either a native tool or an
+ * `ExtensionToolWrapper` proxy.
+ */
+export function resetYieldTurnState(tool: AgentTool | undefined): void {
+	if (tool && canResetTurnState(tool)) tool.resetTurnState();
 }
 
 // Register subprocess tool handler for extraction + termination.

@@ -212,6 +212,8 @@ function expiry(node: KdlNodeView): CompiledCredentialExpiry {
 				if (!from) malformed(node);
 				result.fromPath = from;
 			}
+			const fallback = propInt(node, "fallback-ms");
+			if (fallback !== undefined) result.fallbackMs = fallback;
 			return result;
 		}
 		case "jwt": {
@@ -435,6 +437,12 @@ function oauthCodeLogin(node: KdlNodeView): CompiledOAuthCodeLogin {
 				break;
 			case "client-secret":
 				login.clientSecret = authValue(child);
+				break;
+			case "base-url":
+				login.baseUrl = authValue(child);
+				break;
+			case "auth-url":
+				login.authUrl = authValue(child);
 				break;
 			case "authorize-url":
 				login.authorizeUrl = authValue(child);
@@ -695,6 +703,13 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "allows-missing-api-key":
 				result.allowsMissingApiKey = singleBool(child);
 				break;
+			case "native-auth-api": {
+				leaf(child, []);
+				const apis = positionalStrings(child);
+				if (apis.length === 0 || apis.some(api => !api)) malformed(child);
+				result.nativeAuthApis = apis;
+				break;
+			}
 			case "available":
 				result.available = singleBool(child);
 				break;

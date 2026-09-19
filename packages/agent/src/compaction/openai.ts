@@ -66,14 +66,14 @@ export * from "./compaction-v2-streaming";
 export const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
 
 /**
- * Hard ceiling on remote compaction HTTP requests. Unlike every provider
- * stream (guarded by first-event/idle watchdogs in pi-ai), these are raw
- * fetches awaiting one non-streamed JSON body — a connection silently dropped
- * by a middlebox would otherwise hang the whole compaction pipeline forever
- * (frozen "Auto context-full maintenance…" spinner, manual /compact queueing
- * behind it). On timeout the caller falls back to local summarization.
+ * Hard ceiling on remote compaction HTTP requests (5 minutes). Unlike every
+ * provider stream (guarded by first-event/idle watchdogs in pi-ai), these are
+ * raw fetches awaiting one non-streamed JSON body — a connection silently
+ * dropped by a middlebox would otherwise hang the whole compaction pipeline
+ * forever (frozen "Auto context-full maintenance…" spinner, manual /compact
+ * queueing behind it). On timeout the caller falls back to local summarization.
  */
-export const REMOTE_COMPACTION_TIMEOUT_MS = 180_000;
+export const REMOTE_COMPACTION_TIMEOUT_MS = 300_000;
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 
@@ -282,15 +282,22 @@ export interface RemoteCompactionResponse {
 // OpenAI provider gating + endpoint resolution
 // ============================================================================
 
-function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
+export function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
 	return api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses";
 }
 
 export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 	if (model.remoteCompaction?.enabled === false) return false;
-	if (model.provider === "openai" || model.provider === "openai-codex") return true;
+	const compactionApi = model.remoteCompaction?.api ?? model.api;
+	// ChatGPT's Codex backend exposes V2 compaction on /codex/responses, but
+	// does not expose the OpenAI V1 /responses/compact endpoint. Only use the
+	// V1 path for Codex when an explicit compatible endpoint was configured.
+	if (model.provider === "openai-codex") {
+		return (model.remoteCompaction?.endpoint?.trim().length ?? 0) > 0;
+	}
+	if (model.provider === "openai") return true;
 	if (model.remoteCompaction?.enabled !== true) return false;
-	return isOpenAiRemoteCompactionApi(model.remoteCompaction.api ?? model.api);
+	return isOpenAiRemoteCompactionApi(compactionApi);
 }
 
 function resolveOpenAiCompactEndpoint(model: Model): string {

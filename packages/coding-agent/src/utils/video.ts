@@ -8,19 +8,10 @@
  * anything timestamp-shaped is a seek position.
  */
 import * as path from "node:path";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { $which, TempDir, untilAborted } from "@oh-my-pi/pi-utils";
-
-/** Container extensions treated as video. Mirrors the video subset of the local-protocol binary list. */
-const VIDEO_EXTENSION_LOOKUP: Record<string, true> = {
-	".mp4": true,
-	".mov": true,
-	".mkv": true,
-	".webm": true,
-	".m4v": true,
-	".avi": true,
-	".wmv": true,
-};
+import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
+import { untilAborted } from "@oh-my-pi/pi-utils/abortable";
+import { TempDir } from "@oh-my-pi/pi-utils/temp";
+import { $which } from "@oh-my-pi/pi-utils/which";
 
 const VIDEO_MIME_BY_EXT: Record<string, string> = {
 	".mp4": "video/mp4",
@@ -31,11 +22,6 @@ const VIDEO_MIME_BY_EXT: Record<string, string> = {
 	".avi": "video/x-msvideo",
 	".wmv": "video/x-ms-wmv",
 };
-
-/** True when the path names a video container we handle through ffmpeg. */
-export function isVideoPath(filePath: string): boolean {
-	return VIDEO_EXTENSION_LOOKUP[path.extname(filePath).toLowerCase()] === true;
-}
 
 /** Container MIME for a video path, or undefined for non-video. */
 export function videoMimeForPath(filePath: string): string | undefined {
@@ -119,35 +105,6 @@ export interface VideoMetadata {
 
 /** Raised when ffmpeg/ffprobe is missing or a video operation fails. Message is user-facing. */
 export class VideoError extends Error {}
-
-/**
- * Original local source path stored on a generated contact-sheet image. Symbol
- * metadata stays out of serialized/model-bound image data while traveling with
- * the draft object until AgentSession creates its hidden companion message.
- */
-const kVideoPreviewSource = Symbol("video.previewSource");
-
-/** A contact-sheet image tagged with the original local video path. */
-export type VideoPreviewImage = ImageContent & {
-	readonly [kVideoPreviewSource]: string;
-};
-
-/** Create a model-ready contact-sheet image tagged with its original video path. */
-export function createVideoPreviewImage(preview: ImageContent, sourcePath: string): VideoPreviewImage {
-	return {
-		type: "image",
-		data: preview.data,
-		mimeType: preview.mimeType,
-		[kVideoPreviewSource]: sourcePath,
-	};
-}
-
-/** Return the original video path associated with a generated contact-sheet image. */
-export function videoPreviewSource(preview: ImageContent): string | undefined {
-	if (!(kVideoPreviewSource in preview)) return undefined;
-	const sourcePath = preview[kVideoPreviewSource];
-	return typeof sourcePath === "string" ? sourcePath : undefined;
-}
 
 let cachedFpsModeFlag: string[] | null = null;
 

@@ -1,6 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { scheduler } from "node:timers/promises";
 import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { ApiKeyResolveContext, AssistantMessage, AssistantRetryRecovery, Usage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -8,13 +7,14 @@ import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { resolveAssistantErrorPresentation } from "@oh-my-pi/pi-coding-agent/modes/utils/transcript-render-helpers";
+import { resolveAssistantErrorPresentation } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 
@@ -208,7 +208,7 @@ describe("AgentSession retry recovery", () => {
 		});
 		sessions.push(session);
 
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
@@ -220,6 +220,77 @@ describe("AgentSession retry recovery", () => {
 
 		return { session, sessionManager, retryEndEvents, requestedKeys };
 	}
+
+	it("waitForIdle waits for retry recovery event delivery", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const mock = createMockModel({
+			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { content: ["Recovered after retry."], stopReason: "stop" }],
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => modelRegistry.resolver(requestedModel, agent.sessionId),
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": true,
+				"retry.baseDelayMs": 5,
+				"retry.maxDelayMs": 100,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": false,
+				"features.unexpectedStopDetection": "none",
+			}),
+			modelRegistry,
+		});
+		sessions.push(session);
+		mockSchedulerWaitWithClock();
+
+		const rewriteStarted = Promise.withResolvers<void>();
+		const resumeRewrite = Promise.withResolvers<void>();
+		const rewriteEntries = sessionManager.rewriteEntries.bind(sessionManager);
+		vi.spyOn(sessionManager, "rewriteEntries").mockImplementation(async () => {
+			rewriteStarted.resolve();
+			await resumeRewrite.promise;
+			await rewriteEntries();
+		});
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+		let idleResolved = false;
+		const completion = (async () => {
+			await session.prompt("Recover from the transient failure.");
+			await session.waitForIdle();
+			idleResolved = true;
+			unsubscribe();
+		})();
+
+		try {
+			await Promise.race([rewriteStarted.promise, completion]);
+			// Drain runnable work without releasing the recovery persistence gate.
+			const nextImmediate = Promise.withResolvers<void>();
+			setImmediate(nextImmediate.resolve);
+			await nextImmediate.promise;
+			expect(idleResolved).toBe(false);
+			expect(retryEndEvents).toEqual([]);
+		} finally {
+			resumeRewrite.resolve();
+			try {
+				await completion;
+			} finally {
+				unsubscribe();
+			}
+		}
+
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
+	});
 
 	it("marks a recovered retry error, emits it, persists it, and excludes only model-context replay", async () => {
 		const { sessionManager, retryEndEvents, requestedKeys } = await runCredentialRecovery();
@@ -324,7 +395,7 @@ describe("AgentSession retry recovery", () => {
 			modelRegistry,
 		});
 		sessions.push(session);
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);
@@ -382,7 +453,8 @@ describe("AgentSession retry recovery", () => {
 			modelRegistry,
 		});
 		sessions.push(session);
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
+		vi.spyOn(Date, "now").mockReturnValue(1_750_000_000_000);
 		const retryEndEvents: AutoRetryEndEvent[] = [];
 		session.subscribe(event => {
 			if (event.type === "auto_retry_end") retryEndEvents.push(event);

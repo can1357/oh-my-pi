@@ -111,6 +111,15 @@ pub enum Error {
 		/// Backend that lacks it.
 		backend:   crate::VcsKind,
 	},
+	/// The rendered output crossed the caller's byte cap
+	/// (`DiffOptions::max_bytes`); the operation stopped without producing it.
+	#[error("`{operation}` output exceeds the {limit}-byte cap")]
+	OutputTooLarge {
+		/// Operation name as exposed to JS (camelCase).
+		operation: &'static str,
+		/// The cap that was crossed, in bytes.
+		limit:     usize,
+	},
 }
 
 impl Error {
@@ -135,6 +144,7 @@ impl Error {
 			Self::Backend { .. } => "Backend",
 			Self::Canceled => "Canceled",
 			Self::Unsupported { .. } => "Unsupported",
+			Self::OutputTooLarge { .. } => "OutputTooLarge",
 		}
 	}
 }

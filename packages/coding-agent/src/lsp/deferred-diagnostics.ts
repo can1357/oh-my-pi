@@ -1,6 +1,7 @@
 import type { DeferredDiagnosticsEntry, ToolSession } from "../tools";
 import { getDiagnosticsLedger } from "./diagnostics-ledger";
-import type { FileDiagnosticsResult, WritethroughDeferredHandle } from "./index";
+import type { FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import type { WritethroughDeferredHandle } from "./index";
 
 /** Coordinates late LSP diagnostics for one mutation tool instance. */
 export class DeferredDiagnostics {
