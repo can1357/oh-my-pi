@@ -416,6 +416,32 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.steerSeverity": {
+		type: "enum",
+		values: ["blocker", "concern", "both"] as const,
+		default: "both",
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Steering Severity",
+			description:
+				"Which advisor severities may interrupt the primary through the steering channel. Severities outside the threshold ride the non-interrupting aside queue that lands at the next step boundary; a plain nit never steers regardless.",
+			options: [
+				{
+					value: "blocker",
+					label: "Blocker only",
+					description: "Only blockers interrupt; concerns ride the aside queue.",
+				},
+				{
+					value: "concern",
+					label: "Concern only",
+					description: "Only concerns interrupt; blockers ride the aside queue instead of steering.",
+				},
+				{ value: "both", label: "Blocker and concern", description: "Default." },
+			],
+			condition: "advisorEnabled",
+		},
+	},
 	"advisor.maxNotesPerUpdate": {
 		type: "number",
 		default: ADVISOR_DEFAULT_BUDGET_PER_UPDATE,

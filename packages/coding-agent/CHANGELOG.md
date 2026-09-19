@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `advisor.steerSeverity` setting (`blocker` / `concern` / `both`, default `both`) controlling which advisor severities may interrupt the primary through the steering channel; severities outside the threshold ride the non-interrupting aside queue, and a plain `nit` never steers.
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
