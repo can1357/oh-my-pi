@@ -362,6 +362,7 @@ import {
 	isUserQueuedMessage,
 	queueChipText,
 	toRestoredQueuedMessage,
+	VIDEO_ATTACHMENT_TYPE,
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import {
@@ -1294,6 +1295,10 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.tokenRate = new TokenRateMeter(text => this.agent.tokenizer.countTokens(text));
 		this.#reseedTokenRate();
+		this.agent.setQueuedMessageGrouping(
+			(previous, next) =>
+				isHiddenUserCompanion(previous) && (isHiddenUserCompanion(next) || isUserQueuedMessage(next)),
+		);
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
@@ -6205,7 +6210,7 @@ export class AgentSession {
 			if (!sourcePath) continue;
 			notices.push({
 				role: "custom",
-				customType: "video-attachment",
+				customType: VIDEO_ATTACHMENT_TYPE,
 				content: prompt.render(videoAttachmentPrompt, { index: String(index + 1), path: sourcePath }),
 				display: false,
 				attribution: "user",
@@ -6392,14 +6397,14 @@ export class AgentSession {
 				throw new AgentBusyError();
 			}
 
-			// Steer/follow-up/aside the keyword notices BEFORE the queued user message so the
-			// model reads the steering notice ahead of the prompt it modifies.
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
+			// Queue the keyword notices atomically with the user message so
+			// image normalization cannot leave a notice stranded in the queue.
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
+				preprocessed: {
+					keywordNotices,
+				},
 			});
 			outcome.sessionClaimed = true;
 			return true;
@@ -6447,15 +6452,13 @@ export class AgentSession {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
 				preprocessed: {
 					images: normalizedImages,
 					descriptionNotice: imageDescriptionNotice,
+					keywordNotices,
 				},
 			});
 			outcome.sessionClaimed = true;
@@ -6611,10 +6614,7 @@ export class AgentSession {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
 
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
-			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
+			await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText, keywordNotices);
 			outcome.sessionClaimed = true;
 			return true;
 		}
@@ -6627,10 +6627,7 @@ export class AgentSession {
 				throw new AgentBusyError();
 			}
 
-			for (const notice of keywordNotices) {
-				await this.#queueCustomMessage(notice, streamingBehavior);
-			}
-			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
+			await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, keywordNotices);
 			outcome.sessionClaimed = true;
 			return true;
 		}
@@ -7252,7 +7249,11 @@ export class AgentSession {
 		options?: {
 			timestamp?: number;
 			attribution?: MessageAttribution;
-			preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined };
+			preprocessed?: {
+				images?: ImageContent[];
+				descriptionNotice?: CustomMessage;
+				keywordNotices?: readonly CustomMessage[];
+			};
 		},
 	): Promise<void> {
 		const attribution = options?.attribution ?? "user";
@@ -7287,9 +7288,12 @@ export class AgentSession {
 			: normalizedImages?.length
 				? await this.#buildImageDescriptionNotice(normalizedImages)
 				: undefined;
+		const keywordNotices = preprocessed?.keywordNotices ?? [];
 		if (mode === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			const records: AgentMessage[] = [];
+			for (const notice of keywordNotices) records.push(notice);
+			for (const notice of videoAttachmentNotices) records.push(notice);
 			if (imageDescriptionNotice) records.push(imageDescriptionNotice);
 			records.push({ role: "user", content, attribution, timestamp: timestamp ?? Date.now() });
 			this.#irc.queueAside(records);
@@ -7302,6 +7306,7 @@ export class AgentSession {
 		}
 		this.#allowQueuedMessageDrainRetry();
 		if (mode === "followUp") {
+			for (const notice of keywordNotices) this.agent.followUp(notice);
 			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
@@ -7311,6 +7316,7 @@ export class AgentSession {
 				timestamp: timestamp ?? Date.now(),
 			});
 		} else {
+			for (const notice of keywordNotices) this.agent.steer(notice);
 			for (const notice of videoAttachmentNotices) this.agent.steer(notice);
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
 			this.agent.steer({
@@ -7516,6 +7522,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
+		prependNotices?: readonly CustomMessage[],
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
@@ -7544,7 +7551,12 @@ export class AgentSession {
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
-			this.#irc.queueAside([normalizedAppMessage]);
+			const records: AgentMessage[] = [];
+			if (prependNotices?.length) {
+				for (const notice of prependNotices) records.push(notice);
+			}
+			records.push(normalizedAppMessage);
+			this.#irc.queueAside(records);
 			// The image-normalization await above can span the run's settle, so the run may
 			// already be idle by the time the record lands in the aside queue with no loop
 			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
@@ -7554,8 +7566,14 @@ export class AgentSession {
 		}
 		this.#allowQueuedMessageDrainRetry();
 		if (deliverAs === "followUp") {
+			if (prependNotices?.length) {
+				for (const notice of prependNotices) this.agent.followUp(notice);
+			}
 			this.agent.followUp(normalizedAppMessage);
 		} else {
+			if (prependNotices?.length) {
+				for (const notice of prependNotices) this.agent.steer(notice);
+			}
 			this.agent.steer(normalizedAppMessage);
 		}
 		this.#scheduleIdleQueueDrain();
@@ -7855,6 +7873,38 @@ export class AgentSession {
 			steering: this.agent.peekSteeringQueue().filter(isUserQueuedMessage).map(queueChipText),
 			followUp: this.agent.peekFollowUpQueue().filter(isUserQueuedMessage).map(queueChipText),
 		};
+	}
+
+	/**
+	 * Move the first matching user follow-up into steering without preprocessing it again.
+	 * Matches queue-chip text or its prompt-template expansion. Repeated calls may
+	 * promote further occurrences of the same text; a missing target changes nothing.
+	 */
+	promoteQueuedMessage(text: string): boolean {
+		const followUp = this.agent.peekFollowUpQueue();
+		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
+		const index = followUp.findIndex(message => {
+			if (!isUserQueuedMessage(message)) return false;
+			const chipText = queueChipText(message);
+			return chipText === text || chipText === expandedText;
+		});
+		if (index < 0) return false;
+
+		let start = index;
+		while (start > 0 && isHiddenUserCompanion(followUp[start - 1])) start--;
+		const remaining = followUp.slice();
+		const promoted = remaining.splice(start, index - start + 1);
+		const message = promoted[promoted.length - 1];
+		// Plain user turns opt into model-side emphasis. Collab prompts are already
+		// recognized by customType in wrapSteeringForModel; other custom types keep
+		// their existing rendering semantics. Queue membership controls interruption.
+		if (message.role === "user") message.steering = true;
+		// Await-free removal and insertion preserves the original payload and companion
+		// order. replaceQueues also wakes the agent's in-flight steering watchers.
+		this.agent.replaceQueues([...this.agent.peekSteeringQueue(), ...promoted], remaining);
+		this.#allowQueuedMessageDrainRetry();
+		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	/**

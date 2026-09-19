@@ -8,6 +8,9 @@
 
 - Improved agent performance by reducing redundant tool-schema processing during repeated model calls and optimizing streamed tool-call argument parsing.
 
+### Added
+
+- Added `Agent.setQueuedMessageGrouping()` so hosts can deliver adjacent companion records and their prompt together in `one-at-a-time` queue modes ([#11618](https://github.com/can1357/oh-my-pi/pull/11618) by [@andrebrait](https://github.com/andrebrait)).
 ## [18.2.1] - 2026-09-15
 
 ### Added
@@ -22,7 +25,6 @@
 - Native replay compatibility checks the active provider and Responses API independently of whether future native compaction is enabled. ([#11525](https://github.com/can1357/oh-my-pi/pull/11525) by [@rpie9](https://github.com/rpie9))
 - Fixed compaction retaining oversized older steps beyond the recent-history budget and skipping previously retained history on later passes, preventing long tool loops from freeing enough context ([#11365](https://github.com/can1357/oh-my-pi/issues/11365)).
 - Fixed Codex remote compaction retries for both Bun and proxy socket-closure messages and stopped falling back to the unsupported `/responses/compact` endpoint after V2 failures.
-
 ## [18.1.19] - 2026-09-12
 
 ### Added
