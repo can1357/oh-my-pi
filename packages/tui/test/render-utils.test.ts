@@ -273,6 +273,51 @@ describe("shortenPath", () => {
 		const home = "/Users/alice";
 		expect(shortenEmbeddedPaths(`{"cwd":"${home}","next":1}`, home)).toBe('{"cwd":"~","next":1}');
 		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
+		expect(shortenEmbeddedPaths(`prefix${home}/report`, home)).toBe(`prefix${home}/report`);
+	});
+
+	it("preserves every URI verbatim so link targets never change", () => {
+		const home = "/home/alice";
+		const uris = [
+			`file://${home}/x`,
+			`file://localhost${home}/x`,
+			`FILE://${home}/x`,
+			`https://example.com${home}/report`,
+			`vscode://file${home}/report`,
+		];
+
+		for (const uri of uris) expect(shortenEmbeddedPaths(`open ${uri} now`, home)).toBe(`open ${uri} now`);
+		expect(shortenEmbeddedPaths(`[log](file://${home}/x) at ${home}/x`, home)).toBe(`[log](file://${home}/x) at ~/x`);
+	});
+
+	it("keeps URI authorities intact for a UNC home while shortening the bare UNC path", () => {
+		const home = String.raw`\\server\share`;
+		const text = "see file://server/share/x, https://server/share/x and smb://server/share/y";
+
+		expect(shortenEmbeddedPaths(text, home)).toBe(text);
+		expect(shortenEmbeddedPaths(String.raw`see \\server\share\x`, home)).toBe("see ~/x");
+	});
+
+	it("preserves Windows drive file URIs while shortening the bare drive path", () => {
+		const home = String.raw`C:\Users\me`;
+		expect(shortenEmbeddedPaths(String.raw`file:///C:/Users/me/a.log C:\Users\me\a.log`, home)).toBe(
+			"file:///C:/Users/me/a.log ~/a.log",
+		);
+	});
+
+	it("leaves relative and non-root spellings of the home path alone", () => {
+		const home = "/home/alice";
+		for (const prefix of [".", "..", "~", "foo/", "@"]) {
+			const text = `${prefix}${home}/report`;
+			expect(shortenEmbeddedPaths(text, home)).toBe(text);
+		}
+	});
+
+	it("shortens homes delimited by colons in PATH lists and path:line locations", () => {
+		const home = "/home/alice";
+		expect(shortenEmbeddedPaths(`PATH=/usr/bin:${home}:${home}/bin:/opt`, home)).toBe("PATH=/usr/bin:~:~/bin:/opt");
+		expect(shortenEmbeddedPaths(`${home}:12: error`, home)).toBe("~:12: error");
+		expect(shortenEmbeddedPaths(`/home/alice2:${home}2/bin`, home)).toBe(`/home/alice2:${home}2/bin`);
 	});
 });
 
