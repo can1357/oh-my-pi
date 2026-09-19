@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** Crossover report for evals/rlm/results/codec-invocation.jsonl */
+/** Replicated crossover report for evals/rlm/results/codec-invocation.jsonl */
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -28,17 +28,11 @@ function num(row: Row, key: string): number {
 	return typeof v === "number" ? v : 0;
 }
 
-function cost(row: Row): number {
-	const u = row.usage as { costUsd?: number } | null | undefined;
-	return u?.costUsd ?? 0;
-}
-
 function verified(row: Row): boolean {
 	const label = String(row.evidenceLabel ?? "");
 	return label === "SUPPORTED" || label === "PARTIAL_OK";
 }
 
-/** Composite quality: label gate + atom/relation recall. */
 function qualityScore(row: Row): number {
 	const label = String(row.evidenceLabel ?? "");
 	const labelScore =
@@ -51,28 +45,32 @@ function rootTokens(row: Row): number {
 	return num(row, "rootTokensEst");
 }
 
-/** D earns invocation when verified quality is not worse and root load drops materially. */
-function dWorthInvoking(c: Row, d: Row, minRootSavings = 0.12): boolean {
-	const qDelta = qualityScore(d) - qualityScore(c);
-	if (qualityScore(d) < 0.5) return false;
-	if (qDelta < -0.08) return false;
-	const cRoot = rootTokens(c);
-	const dRoot = rootTokens(d);
-	if (cRoot <= 0) return false;
-	const rootSavings = (cRoot - dRoot) / cRoot;
-	return rootSavings >= minRootSavings && verified(d);
+function percentile(values: number[], p: number): number {
+	if (values.length === 0) return 0;
+	const sorted = [...values].sort((a, b) => a - b);
+	const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1));
+	return sorted[idx] ?? 0;
 }
 
-/** C dominates when same-or-better quality with lower latency or cost and no root penalty. */
-function cDominates(c: Row, d: Row): boolean {
-	const qDelta = qualityScore(c) - qualityScore(d);
-	if (qDelta < -0.05) return false;
-	const cRoot = rootTokens(c);
-	const dRoot = rootTokens(d);
-	const rootOk = cRoot <= dRoot * 1.05;
-	const faster = num(c, "e2eLatencyMs") < num(d, "e2eLatencyMs") * 0.85;
-	const cheaper = cost(c) < cost(d) * 0.85 || (cost(d) === 0 && cost(c) === 0 && faster);
-	return rootOk && (faster || cheaper) && verified(c);
+function knownCost(row: Row): number | null {
+	if (row.usageKnown === false) return null;
+	const u = row.usage as { costUsd?: number } | null;
+	if (!u) return row.usageSource === "worker_skipped" ? 0 : null;
+	return u.costUsd ?? 0;
+}
+
+function complexityPolicyVerdict(complexity: string, cVerifiedRate: number, dVerifiedRate: number): string {
+	switch (complexity) {
+		case "simple":
+			return cVerifiedRate >= dVerifiedRate ? "C_default" : "mixed";
+		case "multi_region":
+			return dVerifiedRate >= 0.66 ? "D_invoke" : "mixed";
+		case "dense_contradictory":
+			if (String(complexity).includes("contradict") || dVerifiedRate > cVerifiedRate) return dVerifiedRate >= 0.66 ? "D_quality" : "mixed";
+			return dVerifiedRate >= cVerifiedRate ? "D_invoke" : "mixed";
+		default:
+			return "mixed";
+	}
 }
 
 function main(): void {
@@ -82,115 +80,144 @@ function main(): void {
 	const dRows = rows.filter(r => r.phase === "c_vs_d" && r.arm === "D-packet");
 	const tok = rows.find(r => r.phase === "tokenomics");
 
-	console.log("=== Codec Invocation Threshold Report (post P0.2) ===\n");
+	console.log("=== Codec Invocation Report (replicated, post P0.2) ===\n");
 	console.log(`P0.2 SHA: ${meta?.p02_sha ?? "unknown"}`);
 	console.log(`Model:    ${meta?.model ?? "unknown"}  reasoning=${meta?.reasoning ?? "?"}`);
-	console.log(`Fixtures: ${meta?.fixtureCount ?? cRows.length}\n`);
+	console.log(`Runs:     ${meta?.totalRuns ?? cRows.length} pair-seeds across ${meta?.fixtureCount ?? "?"} fixtures\n`);
 
-	type Pair = { fixture: string; bucket: string; grantedBytes: number; c: Row; d: Row };
+	type Pair = { fixture: string; seed: number; tier: string; complexity: string; grantedBytes: number; c: Row; d: Row };
 	const pairs: Pair[] = [];
 	for (const c of cRows) {
-		const d = dRows.find(r => r.fixture === c.fixture);
+		const seed = num(c, "seed");
+		const d = dRows.find(r => r.fixture === c.fixture && num(r, "seed") === seed);
 		if (!d) continue;
 		pairs.push({
 			fixture: String(c.fixture),
-			bucket: String(c.bucket ?? "unknown"),
+			seed,
+			tier: String(c.replicationTier ?? "unknown"),
+			complexity: String(c.complexity ?? "unknown"),
 			grantedBytes: num(c, "grantedBytes"),
 			c,
 			d,
 		});
 	}
-	pairs.sort((a, b) => a.grantedBytes - b.grantedBytes);
 
-	console.log("--- Per-fixture C vs D (sorted by granted bytes) ---");
-	console.log(
-		"fixture                      bucket   grantB  C_Q  D_Q  C_root D_root save  C_ms   D_ms   C_$    D_$    verdict",
-	);
-	console.log("-".repeat(120));
+	// --- Economics: known vs unknown ---
+	let cKnown = 0;
+	let cUnknown = 0;
+	let dKnown = 0;
+	let dUnknown = 0;
+	let knownCostSumC = 0;
+	let knownCostSumD = 0;
 	for (const p of pairs) {
-		const cRoot = rootTokens(p.c);
-		const dRoot = rootTokens(p.d);
-		const save = cRoot > 0 ? (cRoot - dRoot) / cRoot : 0;
-		const verdict = dWorthInvoking(p.c, p.d)
-			? "D_invoke"
-			: cDominates(p.c, p.d)
-				? "C_default"
-				: "mixed";
-		console.log(
-			`${p.fixture.padEnd(28)} ${p.bucket.padEnd(8)} ${String(p.grantedBytes).padStart(6)} ` +
-				`${pct(qualityScore(p.c)).padStart(4)} ${pct(qualityScore(p.d)).padStart(4)} ` +
-				`${String(cRoot).padStart(6)} ${String(dRoot).padStart(6)} ${pct(save).padStart(5)} ` +
-				`${String(Math.round(num(p.c, "e2eLatencyMs"))).padStart(6)} ` +
-				`${String(Math.round(num(p.d, "e2eLatencyMs"))).padStart(6)} ` +
-				`${cost(p.c).toFixed(5).padStart(6)} ${cost(p.d).toFixed(5).padStart(6)}  ${verdict}`,
-		);
+		const cc = knownCost(p.c);
+		const dc = knownCost(p.d);
+		if (cc === null) cUnknown += 1;
+		else {
+			cKnown += 1;
+			knownCostSumC += cc;
+		}
+		if (dc === null) dUnknown += 1;
+		else {
+			dKnown += 1;
+			knownCostSumD += dc;
+		}
 	}
+	console.log("--- Economics (missing D usage = unknown, NOT zero) ---");
+	console.log(`C cost: known=${cKnown} unknown=${cUnknown} sum=$${knownCostSumC.toFixed(5)}`);
+	console.log(`D cost: known=${dKnown} unknown=${dUnknown} sum=$${knownCostSumD.toFixed(5)}`);
+	if (dUnknown > 0) console.log(`  ⚠ D unknown bucket: ${dUnknown}/${pairs.length} rows — do not treat as $0\n`);
+	else console.log("");
 
-	const byBucket = new Map<string, Pair[]>();
+	// --- Aggregate by fixture ---
+	const byFixture = new Map<string, Pair[]>();
 	for (const p of pairs) {
-		const list = byBucket.get(p.bucket) ?? [];
+		const list = byFixture.get(p.fixture) ?? [];
 		list.push(p);
-		byBucket.set(p.bucket, list);
+		byFixture.set(p.fixture, list);
 	}
 
-	console.log("\n--- Bucket summary ---");
-	for (const bucket of ["small", "medium", "large", "unknown"]) {
-		const list = byBucket.get(bucket);
-		if (!list?.length) continue;
-		const dWins = list.filter(p => dWorthInvoking(p.c, p.d)).length;
-		const cWins = list.filter(p => cDominates(p.c, p.d)).length;
-		const avgSave =
-			list.reduce((acc, p) => {
-				const cR = rootTokens(p.c);
-				return acc + (cR > 0 ? (cR - rootTokens(p.d)) / cR : 0);
-			}, 0) / list.length;
+	console.log("--- Per-fixture replication summary ---");
+	console.log(
+		"fixture                      tier       seeds grantB  C_verified D_verified C_atom D_atom C_root D_root save   C_p50  D_p50  policy",
+	);
+	console.log("-".repeat(130));
+
+	const tierStats = new Map<string, { cWins: number; dWins: number; n: number }>();
+
+	for (const [fixture, list] of [...byFixture.entries()].sort((a, b) => a[1][0]!.grantedBytes - b[1][0]!.grantedBytes)) {
+		const grantedBytes = list[0]!.grantedBytes;
+		const tier = list[0]!.tier;
+		const complexity = list[0]!.complexity;
+		const cVerifiedRate = list.filter(p => verified(p.c)).length / list.length;
+		const dVerifiedRate = list.filter(p => verified(p.d)).length / list.length;
+		const cAtom = list.reduce((a, p) => a + num(p.c, "atomRecall"), 0) / list.length;
+		const dAtom = list.reduce((a, p) => a + num(p.d, "atomRecall"), 0) / list.length;
+		const cRoot = list.reduce((a, p) => a + rootTokens(p.c), 0) / list.length;
+		const dRoot = list.reduce((a, p) => a + rootTokens(p.d), 0) / list.length;
+		const save = cRoot > 0 ? (cRoot - dRoot) / cRoot : 0;
+		const cLat = list.map(p => num(p.c, "e2eLatencyMs"));
+		const dLat = list.map(p => num(p.d, "e2eLatencyMs"));
+		const policy =
+			complexity === "simple"
+				? cVerifiedRate >= dVerifiedRate && dRoot > cRoot
+					? "C_default"
+					: cVerifiedRate >= dVerifiedRate
+						? "C_default"
+						: "mixed"
+				: complexity === "multi_region"
+					? dVerifiedRate >= 0.66 && dAtom >= cAtom
+						? "D_invoke"
+						: "mixed"
+					: complexity === "dense_contradictory"
+						? dVerifiedRate > cVerifiedRate
+							? "D_quality"
+							: "mixed"
+						: "mixed";
+
+		const stats = tierStats.get(tier) ?? { cWins: 0, dWins: 0, n: 0 };
+		stats.n += 1;
+		if (policy === "C_default") stats.cWins += 1;
+		if (policy.startsWith("D")) stats.dWins += 1;
+		tierStats.set(tier, stats);
+
 		console.log(
-			`${bucket.padEnd(8)} n=${list.length}  C_default=${cWins}  D_invoke=${dWins}  avg_root_save=${pct(avgSave)}`,
+			`${fixture.padEnd(28)} ${tier.padEnd(10)} ${String(list.length).padStart(5)} ${String(grantedBytes).padStart(6)} ` +
+				`${pct(cVerifiedRate).padStart(10)} ${pct(dVerifiedRate).padStart(10)} ` +
+				`${cAtom.toFixed(2).padStart(6)} ${dAtom.toFixed(2).padStart(6)} ` +
+				`${Math.round(cRoot).toString().padStart(6)} ${Math.round(dRoot).toString().padStart(6)} ${pct(save).padStart(5)} ` +
+				`${Math.round(percentile(cLat, 0.5)).toString().padStart(6)} ${Math.round(percentile(dLat, 0.5)).toString().padStart(6)}  ${policy}`,
 		);
 	}
 
-	const crossover = pairs.filter(p => dWorthInvoking(p.c, p.d)).sort((a, b) => a.grantedBytes - b.grantedBytes)[0];
-
-	console.log("\n--- Crossover hypothesis ---");
-	if (crossover) {
-		console.log(
-			`First D_invoke at grantedBytes=${crossover.grantedBytes} (${crossover.fixture}, bucket=${crossover.bucket})`,
-		);
-		console.log(
-			`  C: ${crossover.c.evidenceLabel} q=${pct(qualityScore(crossover.c))} root=${rootTokens(crossover.c)} ` +
-				`${Math.round(num(crossover.c, "e2eLatencyMs"))}ms`,
-		);
-		console.log(
-			`  D: ${crossover.d.evidenceLabel} q=${pct(qualityScore(crossover.d))} root=${rootTokens(crossover.d)} ` +
-				`compress=${num(crossover.d, "compressionRatio").toFixed(1)}x ` +
-				`${Math.round(num(crossover.d, "e2eLatencyMs"))}ms`,
-		);
-	} else {
-		console.log("No fixture met D_invoke threshold (verified quality + ≥12% root savings). C remains default.");
+	console.log("\n--- Tier rollup (complexity-first policy draft) ---");
+	for (const tier of ["boundary", "small", "medium", "dense_log", "contradiction"]) {
+		const s = tierStats.get(tier);
+		if (!s) continue;
+		console.log(`${tier.padEnd(14)} fixtures=${s.n}  C_default=${s.cWins}  D_invoke/quality=${s.dWins}`);
 	}
 
-	const smallPairs = pairs.filter(p => p.bucket === "small");
-	const largePairs = pairs.filter(p => p.bucket === "large");
-	if (smallPairs.length && largePairs.length) {
-		const smallCDefault = smallPairs.filter(p => cDominates(p.c, p.d)).length / smallPairs.length;
-		const largeDInvoke = largePairs.filter(p => dWorthInvoking(p.c, p.d)).length / largePairs.length;
+	console.log("\n--- Complexity-first gate (NOT grantedBytes >= 550) ---");
+	console.log("  simple + single-fact           → C (prose)");
+	console.log("  multi_region causal            → D (evidence_packet)");
+	console.log("  dense log / structured extract → D");
+	console.log("  contradictory evidence         → D (quality, not compression)");
+	console.log("  everything else                → C");
+	console.log("  grant size is telemetry only — crossover ~549B observed where complexity kicks in");
+
+	const boundaryPairs = pairs.filter(p => p.tier === "boundary");
+	if (boundaryPairs.length) {
+		const dBetter = boundaryPairs.filter(p => verified(p.d) && !verified(p.c)).length;
+		const cBetter = boundaryPairs.filter(p => verified(p.c) && !verified(p.d)).length;
 		console.log(
-			`\nHypothesis check: small bucket C_default rate=${pct(smallCDefault)} | large bucket D_invoke rate=${pct(largeDInvoke)}`,
+			`\n--- Boundary band (~400–700B) seed consistency ---`,
 		);
+		console.log(`  pair-seeds=${boundaryPairs.length}  D-only-verified=${dBetter}  C-only-verified=${cBetter}`);
 	}
 
-	const flake = pairs.filter(p => {
-		const d = p.d;
-		return d.validationFailed === true || (d.usage === null && String(d.evidenceLabel) !== "PARTIAL_OK");
-	});
-	if (flake.length) {
-		console.log(`\nTool-call / validation flake rows: ${flake.length}/${pairs.length} (track, do not reopen P0.2 unless verified outcomes shift)`);
-	}
-
-	console.log("\n--- Tokenomics (session) ---");
+	console.log("\n--- Tokenomics (session, known only) ---");
 	console.log(JSON.stringify(tok?.summary ?? {}, null, 2));
-
-	console.log("\nPolicy draft (pre-Kerdoios): invoke codec when grantedBytes ≥ crossover AND task needs structured retention; else C.");
+	console.log("\nNext: if tier rollup holds, enable rlm.workerMode=auto (log-only) — still no Kerdoios.");
 }
 
 main();

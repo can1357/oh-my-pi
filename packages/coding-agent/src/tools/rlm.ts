@@ -5,7 +5,12 @@ import { buildRlmSessionAccounting, formatRlmAccountingSummary, exportRlmExperim
 import { rlmEvidenceQuery } from "../rlm/evidence-query";
 import { rlmQuery } from "../rlm/query";
 import { parseGrantRanges, selectGrantsFromSearch } from "../rlm/select-grants";
-import { getRlmRuntime, rlmEnabled, rlmWorkerMode } from "../rlm/session";
+import {
+	formatWorkerModeDecisionLine,
+	resolveEffectiveWorkerMode,
+	workerModeInputFromSelection,
+} from "../rlm/worker-mode-policy";
+import { getRlmRuntime, rlmEnabled, rlmWorkerModeOverride, rlmWorkerModeSetting } from "../rlm/session";
 import { parseRlmGrants, rlmSubcall } from "../rlm/subcall";
 import type { ToolSession } from ".";
 import { toolResult } from "./tool-result";
@@ -246,11 +251,60 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 						}
 					: undefined,
 			};
-			const useEvidence = rlmWorkerMode(this.session) === "evidence-packet";
+			const workerModeSetting = rlmWorkerModeSetting(this.session);
+			let useEvidence = workerModeSetting === "evidence-packet";
+			let autoDecisionHeader = "";
+			if (workerModeSetting === "auto") {
+				let policyInput;
+				if (rangeGrants.length > 0) {
+					const grantedBytes = rangeGrants.reduce((acc, g) => {
+						const rec = store.get(g.handle.replace(/^rlm:\/\/h\//, ""));
+						if (!rec) return acc;
+						const start = g.start ?? 0;
+						const end = g.end ?? rec.text.length;
+						return acc + Math.max(0, end - start);
+					}, 0);
+					policyInput = {
+						grantedBytes,
+						grantCount: rangeGrants.length,
+						patternCount: params.pattern ? 1 : 0,
+						patterns: params.pattern ? [params.pattern] : [],
+						question: params.question,
+					};
+				} else if (params.pattern) {
+					const selected = selectGrantsFromSearch(store, params.handle, params.pattern, queryArgs.selectPolicy);
+					const sample = selected.hits.map(h => h.text).join("\n").slice(0, 4096);
+					policyInput = workerModeInputFromSelection(
+						selected,
+						params.question,
+						Array.isArray(params.pattern) ? params.pattern : [params.pattern],
+						sample,
+					);
+				} else {
+					const peek = store.peek(params.handle, params.start ?? 0, params.end);
+					policyInput = {
+						grantedBytes: Buffer.byteLength(peek.text, "utf8"),
+						grantCount: 1,
+						patternCount: 0,
+						patterns: [],
+						question: params.question,
+						grantTextSample: peek.text.slice(0, 4096),
+					};
+				}
+				const decision = resolveEffectiveWorkerMode(
+					workerModeSetting,
+					policyInput,
+					rlmWorkerModeOverride(this.session),
+				);
+				useEvidence = decision.mode === "evidence-packet";
+				autoDecisionHeader = `${formatWorkerModeDecisionLine(decision)}\n`;
+				store.note("worker-mode-auto", decision.reason, false);
+			}
 			const result = useEvidence
 				? await rlmEvidenceQuery(runtime, queryArgs)
 				: await rlmQuery(runtime, queryArgs);
 			const headerParts: string[] = [];
+			if (autoDecisionHeader) headerParts.push(autoDecisionHeader.trimEnd());
 			if (result.grantedBytes !== undefined) headerParts.push(`grantedBytes=${result.grantedBytes}`);
 			if ("packet" in result && result.packet) {
 				headerParts.push(`packet.status=${result.packet.status}`);

@@ -142,7 +142,24 @@ export {
 	rlmSessionKey,
 	rlmSpillBytes,
 	rlmWorkerMode,
+	rlmWorkerModeOverride,
+	rlmWorkerModeSetting,
 } from "./session";
+export {
+	classifyGrantComplexity,
+	formatWorkerModeDecisionLine,
+	resolveAutoWorkerMode,
+	resolveEffectiveWorkerMode,
+	workerModeInputFromSelection,
+} from "./worker-mode-policy";
+export type {
+	GrantComplexityClass,
+	RlmWorkerModeEffective,
+	RlmWorkerModeOverride as RlmWorkerModeOverridePolicy,
+	RlmWorkerModeSetting,
+	WorkerModeAutoDecision,
+	WorkerModePolicyInput,
+} from "./worker-mode-policy";
 export type { ContextEngine, RlmSessionHost } from "./session";
 export { appendRlmRuntimeGuide, RLM_RUNTIME_GUIDE, rlmGuideIsAppendOnly } from "./guide";
 export { wrapToolWithRlmSpill } from "./wrap";

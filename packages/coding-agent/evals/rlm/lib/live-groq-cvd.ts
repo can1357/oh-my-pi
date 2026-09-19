@@ -1,13 +1,13 @@
 /**
  * Shared C vs D pair runner — identical frozen grants, comparable quality rubric on both arms.
  */
+import type { RlmRuntime } from "../../../src/rlm";
 import { rlmEvidenceQuery, rlmQuery } from "../../../src/rlm";
 import { evidencePacketByteSize } from "../../../src/rlm/evidence-packet-v2";
 import { resolveRlmView } from "../../../src/rlm/view";
 import { computeCodecMetrics, computeProseMetrics } from "./evidence-codec-rubric";
 import {
 	createEvidenceCompleter,
-	createLiveGroqHost,
 	createProseCompleter,
 	estimateTokens,
 	labelEvidencePacket,
@@ -21,17 +21,32 @@ import {
 	workerUsageFromResult,
 	type LiveFixture,
 	type LiveGroqHost,
+	type WorkerUsageRow,
 } from "./live-groq-common";
 
 export type CvDRow = Record<string, unknown>;
 
-function baseRow(fixture: LiveFixture, arm: "C-prose" | "D-packet", grantedBytes: number): CvDRow {
+export interface CvDPairOptions {
+	seed?: number;
+	armOrderFirst?: "C" | "D";
+}
+
+function baseRow(
+	fixture: LiveFixture,
+	arm: "C-prose" | "D-packet",
+	grantedBytes: number,
+	meta: { seed: number; armOrder: string; runId: string },
+): CvDRow {
 	return {
 		phase: "c_vs_d",
 		arm,
 		fixture: fixture.id,
+		seed: meta.seed,
+		runId: meta.runId,
+		armOrder: meta.armOrder,
 		bucket: fixture.bucket ?? "unknown",
 		complexity: fixture.complexity ?? "unknown",
+		replicationTier: (fixture as { replicationTier?: string }).replicationTier ?? "unknown",
 		grantCapTarget: fixture.grantCapTarget ?? null,
 		grantsFrozen: true,
 		grantedBytes,
@@ -39,51 +54,145 @@ function baseRow(fixture: LiveFixture, arm: "C-prose" | "D-packet", grantedBytes
 	};
 }
 
-export async function runCvDPair(host: LiveGroqHost, fixture: LiveFixture): Promise<{ c: CvDRow; d: CvDRow }> {
-	const runtime = buildRuntime();
-	const { handle } = spillFixture(runtime, fixture);
-	const selection = selectGrantsForFixture(runtime.store, handle, fixture);
-	if (selection.empty) {
-		const err = { error: "no grants selected", ts: Date.now() };
+function armOrderForSeed(seed: number, fixtureId: string, prefer?: "C" | "D"): ["C", "D"] | ["D", "C"] {
+	if (prefer === "C") return ["C", "D"];
+	if (prefer === "D") return ["D", "C"];
+	let h = seed + 1;
+	for (const ch of fixtureId) h = (h * 33 + ch.charCodeAt(0)) >>> 0;
+	return h % 2 === 0 ? ["C", "D"] : ["D", "C"];
+}
+
+interface UsageCapture {
+	usage: WorkerUsageRow | null;
+	usageKnown: boolean;
+	usageSource: "completer" | "query_result" | "worker_skipped" | "unknown";
+	completerCalled: boolean;
+}
+
+function captureUsage(
+	completerCalled: boolean,
+	completerRaw: unknown,
+	queryResult: { tokens?: number; cost?: number; workerSkipped?: boolean },
+	latencyMs: number,
+): UsageCapture {
+	if (queryResult.workerSkipped) {
+		return { usage: null, usageKnown: true, usageSource: "worker_skipped", completerCalled: false };
+	}
+	if (completerCalled && typeof completerRaw !== "string") {
+		const row = workerUsageFromResult({ ...(completerRaw as object), latencyMs } as never);
+		if (row.inputTokens > 0 || row.outputTokens > 0 || row.costUsd > 0 || row.totalTokens > 0) {
+			return { usage: row, usageKnown: true, usageSource: "completer", completerCalled: true };
+		}
+	}
+	if (queryResult.tokens !== undefined || queryResult.cost !== undefined) {
 		return {
-			c: { ...baseRow(fixture, "C-prose", 0), ...err },
-			d: { ...baseRow(fixture, "D-packet", 0), ...err },
+			usage: {
+				inputTokens: 0,
+				outputTokens: queryResult.tokens ?? 0,
+				cacheReadTokens: 0,
+				reasoningTokens: 0,
+				totalTokens: queryResult.tokens ?? 0,
+				costUsd: queryResult.cost ?? 0,
+				latencyMs,
+			},
+			usageKnown: true,
+			usageSource: "query_result",
+			completerCalled,
 		};
 	}
-	const grants = selection.grants;
-	const grantedBytes = selection.grantedBytes;
-	const prose = createProseCompleter(host);
-	const evidence = createEvidenceCompleter(host);
-	let cUsage: ReturnType<typeof workerUsageFromResult> | null = null;
-	let dUsage: ReturnType<typeof workerUsageFromResult> | null = null;
-	const proseTrack: typeof prose = async (prompt, options) => {
-		const raw = await prose(prompt, options);
-		if (typeof raw !== "string") cUsage = workerUsageFromResult(raw as never);
-		return raw;
+	return {
+		usage: completerCalled && typeof completerRaw !== "string"
+			? workerUsageFromResult({ ...(completerRaw as object), latencyMs } as never)
+			: null,
+		usageKnown: false,
+		usageSource: "unknown",
+		completerCalled,
 	};
-	const evidenceTrack: typeof evidence = async (prompt, options) => {
-		const raw = await evidence(prompt, options);
-		if (typeof raw !== "string") dUsage = workerUsageFromResult(raw as never);
-		return raw;
+}
+
+async function runProseArm(
+	host: LiveGroqHost,
+	runtime: RlmRuntime,
+	fixture: LiveFixture,
+	handle: string,
+	grants: ReturnType<typeof selectGrantsForFixture>["grants"],
+	grantedBytes: number,
+	meta: { seed: number; armOrder: string; runId: string },
+): Promise<CvDRow> {
+	const prose = createProseCompleter(host);
+	let completerRaw: unknown;
+	let completerCalled = false;
+	const proseTrack: typeof prose = async (prompt, options) => {
+		completerCalled = true;
+		completerRaw = await prose(prompt, options);
+		return completerRaw as never;
 	};
 
-	const tC0 = performance.now();
-	const cResult = await rlmQuery(runtime, {
+	const t0 = performance.now();
+	const result = await rlmQuery(runtime, {
 		handle,
 		question: fixture.question,
 		grants,
 		complete: proseTrack,
 	});
-	const cMs = performance.now() - tC0;
+	const e2eMs = performance.now() - t0;
+	const usageCapture = captureUsage(completerCalled, completerRaw, result, e2eMs);
+	const cMetrics = computeProseMetrics(result.text, fixture, grantedBytes);
+	const cAnswerBytes = Buffer.byteLength(result.text, "utf8");
 
-	const tD0 = performance.now();
+	return {
+		...baseRow(fixture, "C-prose", grantedBytes, meta),
+		answerBytes: cAnswerBytes,
+		rootTokensEst: estimateTokens(cAnswerBytes),
+		usage: usageCapture.usageKnown ? usageCapture.usage : null,
+		usageKnown: usageCapture.usageKnown,
+		usageSource: usageCapture.usageSource,
+		completerCalled: usageCapture.completerCalled,
+		workerSkipped: false,
+		e2eLatencyMs: e2eMs,
+		evidenceLabel: labelProseAnswer(fixture, result.text, cMetrics),
+		semanticRetention: cMetrics.semanticRetention,
+		atomRecall: cMetrics.atomRecall,
+		relationRecall: cMetrics.relationRecall,
+		structuralValid: cMetrics.structuralValid,
+		compressionRatio: cMetrics.compressionRatio,
+		validationFailed: false,
+		ts: Date.now(),
+	};
+}
+
+async function runPacketArm(
+	host: LiveGroqHost,
+	runtime: RlmRuntime,
+	fixture: LiveFixture,
+	handle: string,
+	grants: ReturnType<typeof selectGrantsForFixture>["grants"],
+	grantedBytes: number,
+	meta: { seed: number; armOrder: string; runId: string },
+): Promise<CvDRow> {
+	const evidence = createEvidenceCompleter(host);
+	let completerRaw: unknown;
+	let completerCalled = false;
+	const evidenceTrack: typeof evidence = async (prompt, options) => {
+		completerCalled = true;
+		completerRaw = await evidence(prompt, options);
+		return completerRaw as never;
+	};
+
+	const t0 = performance.now();
 	const dResult = await rlmEvidenceQuery(runtime, {
 		handle,
 		question: fixture.question,
 		grants,
 		complete: evidenceTrack,
 	});
-	const dMs = performance.now() - tD0;
+	const e2eMs = performance.now() - t0;
+	const usageCapture = captureUsage(
+		completerCalled,
+		completerRaw,
+		{ tokens: dResult.tokens, cost: dResult.cost, workerSkipped: dResult.workerSkipped },
+		e2eMs,
+	);
 
 	const view = resolveRlmView(runtime.store, grants);
 	const packet = dResult.packet ?? parsePacketFromResult(undefined, dResult.text);
@@ -93,32 +202,11 @@ export async function runCvDPair(host: LiveGroqHost, fixture: LiveFixture): Prom
 	const citations = packet
 		? validateCitations(runtime.store, view, packet)
 		: { validCount: 0, invalidCount: 0, wrongCitation: true };
-
-	const cMetrics = computeProseMetrics(cResult.text, fixture, grantedBytes);
 	const dMetrics = computeCodecMetrics(packet, fixture, runtime.store, view, validation, grantedBytes);
 	const dPacketBytes = packet ? evidencePacketByteSize(packet) : Buffer.byteLength(dResult.text, "utf8");
-	const cAnswerBytes = Buffer.byteLength(cResult.text, "utf8");
-	const cLabel = labelProseAnswer(fixture, cResult.text, cMetrics);
-	const dLabel = labelEvidencePacket(fixture, packet, dMetrics, validation);
 
-	const cRow: CvDRow = {
-		...baseRow(fixture, "C-prose", grantedBytes),
-		answerBytes: cAnswerBytes,
-		rootTokensEst: estimateTokens(cAnswerBytes),
-		usage: cUsage,
-		e2eLatencyMs: cMs,
-		evidenceLabel: cLabel,
-		semanticRetention: cMetrics.semanticRetention,
-		atomRecall: cMetrics.atomRecall,
-		relationRecall: cMetrics.relationRecall,
-		structuralValid: cMetrics.structuralValid,
-		compressionRatio: cMetrics.compressionRatio,
-		validationFailed: false,
-		ts: Date.now(),
-	};
-
-	const dRow: CvDRow = {
-		...baseRow(fixture, "D-packet", grantedBytes),
+	return {
+		...baseRow(fixture, "D-packet", grantedBytes, meta),
 		packetBytes: dPacketBytes,
 		rootTokensEst: estimateTokens(dPacketBytes),
 		compressionRatio: dMetrics.compressionRatio,
@@ -128,16 +216,58 @@ export async function runCvDPair(host: LiveGroqHost, fixture: LiveFixture): Prom
 		structuralValid: dMetrics.structuralValid,
 		citationValidity: dMetrics.citationValidity,
 		validationFailed: dResult.validationFailed ?? false,
-		evidenceLabel: dLabel,
+		evidenceLabel: labelEvidencePacket(fixture, packet, dMetrics, validation),
 		citationValidCount: citations.validCount,
 		citationInvalidCount: citations.invalidCount,
 		packetStatus: packet?.status,
-		usage: dUsage,
-		e2eLatencyMs: dMs,
+		usage: usageCapture.usageKnown ? usageCapture.usage : null,
+		usageKnown: usageCapture.usageKnown,
+		usageSource: usageCapture.usageSource,
+		completerCalled: usageCapture.completerCalled,
+		workerSkipped: dResult.workerSkipped ?? false,
+		e2eLatencyMs: e2eMs,
 		ts: Date.now(),
 	};
+}
 
-	return { c: cRow, d: dRow };
+export async function runCvDPair(
+	host: LiveGroqHost,
+	fixture: LiveFixture,
+	options?: CvDPairOptions,
+): Promise<{ c: CvDRow; d: CvDRow }> {
+	const seed = options?.seed ?? 0;
+	const runtime = buildRuntime();
+	const { handle } = spillFixture(runtime, fixture);
+	const selection = selectGrantsForFixture(runtime.store, handle, fixture);
+	if (selection.empty) {
+		const err = { error: "no grants selected", ts: Date.now() };
+		const meta = {
+			seed,
+			armOrder: "n/a",
+			runId: `${fixture.id}#s${seed}`,
+		};
+		return {
+			c: { ...baseRow(fixture, "C-prose", 0, meta), ...err },
+			d: { ...baseRow(fixture, "D-packet", 0, meta), ...err },
+		};
+	}
+
+	const grants = selection.grants;
+	const grantedBytes = selection.grantedBytes;
+	const order = armOrderForSeed(seed, fixture.id, options?.armOrderFirst);
+	const meta = { seed, armOrder: order.join("→"), runId: `${fixture.id}#s${seed}` };
+
+	let c: CvDRow;
+	let d: CvDRow;
+	if (order[0] === "D") {
+		d = await runPacketArm(host, runtime, fixture, handle, grants, grantedBytes, meta);
+		c = await runProseArm(host, runtime, fixture, handle, grants, grantedBytes, meta);
+	} else {
+		c = await runProseArm(host, runtime, fixture, handle, grants, grantedBytes, meta);
+		d = await runPacketArm(host, runtime, fixture, handle, grants, grantedBytes, meta);
+	}
+
+	return { c, d };
 }
 
 export type LiveGroqHostType = LiveGroqHost;

@@ -166,10 +166,23 @@ export function rlmSubModel(session: Pick<RlmSessionHost, "settings">): string |
 }
 
 export type RlmWorkerMode = "prose" | "evidence-packet";
+export type RlmWorkerModeSetting = "prose" | "evidence-packet" | "auto";
+export type RlmWorkerModeOverride = "prose" | "evidence-packet" | "";
 
-export function rlmWorkerMode(session: Pick<RlmSessionHost, "settings">): RlmWorkerMode {
+export function rlmWorkerModeSetting(session: Pick<RlmSessionHost, "settings">): RlmWorkerModeSetting {
 	const value = session.settings.get("rlm.workerMode");
-	return value === "evidence-packet" ? "evidence-packet" : "prose";
+	if (value === "evidence-packet" || value === "auto") return value;
+	return "prose";
+}
+
+export function rlmWorkerModeOverride(session: Pick<RlmSessionHost, "settings">): RlmWorkerModeOverride {
+	const value = session.settings.get("rlm.workerModeOverride");
+	return value === "prose" || value === "evidence-packet" ? value : "";
+}
+
+/** Legacy helper: fixed modes only (auto → prose for callers that have not resolved grants). */
+export function rlmWorkerMode(session: Pick<RlmSessionHost, "settings">): RlmWorkerMode {
+	return rlmWorkerModeSetting(session) === "evidence-packet" ? "evidence-packet" : "prose";
 }
 
 export function rlmKernelBindEnabled(session: Pick<RlmSessionHost, "settings">): boolean {

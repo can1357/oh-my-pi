@@ -409,7 +409,9 @@ export function deriveContextPolicy(settings?: {
 	// Fixed-grant arm is selected only when OMP_RLM_POLICY=fixed.
 	const env = process.env.OMP_RLM_POLICY?.trim().toLowerCase();
 	if (env === "fixed" || env === "rlm-fixed-grant" || env === "b") return "rlm-fixed-grant";
-	if (settings?.get?.("rlm.workerMode") === "evidence-packet") return "rlm-search-grants-groq";
+	const workerMode = settings?.get?.("rlm.workerMode");
+	if (workerMode === "evidence-packet") return "rlm-search-grants-groq";
+	if (workerMode === "auto") return "rlm-search-grants";
 	return "rlm-search-grants";
 }
 

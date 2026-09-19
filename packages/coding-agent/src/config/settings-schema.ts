@@ -2663,14 +2663,25 @@ export const SETTINGS_SCHEMA = {
 	},
 	"rlm.workerMode": {
 		type: "enum",
-		values: ["prose", "evidence-packet"],
+		values: ["prose", "evidence-packet", "auto"],
 		default: "prose",
 		ui: {
 			tab: "context",
 			group: "RLM",
 			label: "RLM worker mode",
 			description:
-				"prose = legacy isolated completion answer; evidence-packet = typed EvidencePacketV2 via rlm.subModel (Groq coprocessor path)",
+				"prose = legacy isolated completion; evidence-packet = typed EvidencePacketV2; auto = deterministic complexity gate (logs decision)",
+		},
+	},
+	"rlm.workerModeOverride": {
+		type: "enum",
+		values: ["", "prose", "evidence-packet"],
+		default: "",
+		ui: {
+			tab: "context",
+			group: "RLM",
+			label: "RLM worker mode override",
+			description: "When set, forces C or D under auto mode (empty = no override)",
 		},
 	},
 	"rlm.kernelBind": {
