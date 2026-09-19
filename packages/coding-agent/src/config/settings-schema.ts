@@ -2570,7 +2570,7 @@ export const SETTINGS_SCHEMA = {
 
 	"context.engine": {
 		type: "string",
-		default: "native",
+		default: "rlm",
 		ui: {
 			tab: "context",
 			group: "RLM",
