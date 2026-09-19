@@ -1,5 +1,14 @@
 #!/usr/bin/env bun
 
+// Live model behavioral eval for the async-progress policy prompt. It is
+// manual and opt-in on purpose: it needs real provider credentials, spends
+// tokens on every run, and scores stochastic model behavior, so it is wired
+// only as `bun run eval:async-progress` and must never be added to a `ci:*`
+// script. Deterministic batching/queue/wake semantics stay in `bun test`.
+//
+//   bun run eval:async-progress [--surface bash|service|all] [--model <pattern>] [--runs N]
+//   bun run eval:async-progress --case quick [--model <pattern>] [--runs N]
+
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { cfgAutolearnEnabled } from "../src/autolearn/settings";
@@ -48,11 +57,12 @@ interface BashCall {
 
 interface EvalCriteria {
 	selectedWake?: boolean;
-	selectedForeground?: boolean;
+	selectedAutoInline?: boolean;
 	onlyExpectedTool: boolean;
 	selectedService?: boolean;
 	singleToolCall?: boolean;
 	singleStart?: boolean;
+	noProcessPolling?: boolean;
 	noAsyncNotification?: boolean;
 	reportedQuickResult?: boolean;
 	notificationDelivered?: boolean;
@@ -95,6 +105,9 @@ function parseArgs(argv: string[]): EvalConfig {
 		throw new Error("--surface must be bash, service, or all");
 	}
 	const caseValue = valueFor("--case");
+	if (argv.includes("--case") && caseValue === undefined) {
+		throw new Error("--case requires wake or quick");
+	}
 	const evalCase = caseValue ?? "wake";
 	if (evalCase !== "wake" && evalCase !== "quick") throw new Error("--case must be wake or quick");
 	if (evalCase === "quick" && surfaceValue !== undefined && surface !== "bash") {
@@ -160,8 +173,12 @@ function scoreMessages(
 	if (evalCase === "quick") {
 		const [call] = toolCalls;
 		return {
-			selectedForeground:
-				toolCalls.length === 1 && call !== undefined && call.name === undefined && call.async === undefined,
+			selectedAutoInline:
+				toolCalls.length === 1 &&
+				call !== undefined &&
+				call.name === undefined &&
+				call.async === "auto" &&
+				call.progress === "wake",
 			onlyExpectedTool: executedTools.length === 1 && executedTools[0] === "bash",
 			singleToolCall: toolCalls.length === 1,
 			noAsyncNotification: messages.every(message => !isProgressMessage(message) && !isCompletionMessage(message)),
@@ -196,8 +213,9 @@ function scoreMessages(
 			? {
 					selectedService: serviceCalls.length > 0,
 					singleStart: serviceCalls.length === 1,
+					noProcessPolling: toolCalls.length === 1,
 				}
-			: { singleToolCall: toolCalls.length === 1 }),
+			: { singleToolCall: toolCalls.length === 1, noProcessPolling: toolCalls.length === 1 }),
 		notificationDelivered: progressIndex >= 0,
 		completionObserved: completionIndex >= 0,
 		notificationBeforeCompletion: progressIndex >= 0 && completionIndex >= 0 && progressIndex < completionIndex,

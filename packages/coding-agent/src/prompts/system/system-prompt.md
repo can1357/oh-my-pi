@@ -122,6 +122,10 @@ File edits: MUST use `{{toolRefs.edit}}`{{#ifAny (includes tools "bash") (includ
 {{/has}}
 {{/if}}
 
+{{#if asyncProgressPrompt}}
+{{asyncProgressPrompt}}
+{{/if}}
+
 {{#if autoQaEnabled}}
 {{#has tools "write"}}
 <critical>
@@ -222,6 +226,7 @@ Run the narrowest check that exercises the change, once. Investigation: the outp
 {{#if subagent}}Permanent{{else}}After smoke proof: permanent{{/if}} fix/feature: update docs/changelog; delete throwaway scripts.
 
 ⁂ Delivery
+- Ending the turn on a running `progress: "wake"` job/monitor is NOT a yield: the wake resumes the task. Name what you await; stop.
 - NEVER fabricate output; unobserved claims = `[INFERENCE]`; report only verification you ran.
 - Solve the real ask: no extra scope (retries, validation, abstraction "while you're at it"), no symptom fixes (suppressed errors, special-cased input).
 - Clean cutover: migrate every caller; remove obsolete code, comments, aliases, re-exports; no shims.
@@ -231,7 +236,7 @@ Run the narrowest check that exercises the change, once. Investigation: the outp
 
 ⁂ Critical
 <critical>
-- NEVER yield while actionable work remains; a finished phase or todo is not a stop.
+- NEVER yield while actionable work remains; a finished phase or todo is not a stop. Only a running `progress: "wake"` job/monitor ends a turn early: NEVER `wait` on it.
 - NEVER narrate or weigh session limits, token budgets, or effort estimates.
 - NEVER re-audit applied edits or run git to validate them; tool results are verification.
 </critical>
