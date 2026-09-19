@@ -22,7 +22,7 @@ import { type EditMode, type PerFileDiffPreview, renderStreamingFallback } from 
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../tools/eval";
 import { taskCardAgentIds } from "../tools/task";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../tools/todo";
-import { isWaitingPollDetails } from "../tools/hub";
+import { isLiveHubPollDetails, isWaitingPollDetails } from "../tools/hub";
 import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
@@ -605,7 +605,11 @@ export class ToolExecutionComponent extends Container {
 			this.#toolName !== "todo" &&
 			!isBackgroundAsyncRunning &&
 			(pendingCallConsumesSpinner || partialResultConsumesSpinner);
-		const needsSpinner = isStreamingArgs || isLivePartialTool || this.#displaceableByToolName === "hub";
+		const needsSpinner =
+			isStreamingArgs ||
+			isLivePartialTool ||
+			this.#displaceableByToolName === "hub" ||
+			(!this.#sealed && this.#toolName === "hub" && isLiveHubPollDetails(this.#result?.details));
 		if (needsSpinner && !this.#spinnerActive) {
 			const frameCount = theme.spinnerFrames.length;
 			const frame = sharedSpinnerFrame(frameCount);

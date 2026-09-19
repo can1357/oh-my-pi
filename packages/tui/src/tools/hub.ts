@@ -44,6 +44,13 @@ export function isWaitingPollDetails(details: unknown): boolean {
 	if (d.cancelled?.length) return false;
 	return d.jobs.every(job => job?.status === "running");
 }
+
+/** Whether a hub wait snapshot still has at least one running job. */
+export function isLiveHubPollDetails(details: unknown): boolean {
+	const d = details as CoordinationDetails | undefined;
+	if (!d || d.op !== "wait" || !Array.isArray(d.jobs) || d.jobs.length === 0) return false;
+	return d.jobs.some(job => job?.status === "running");
+}
 /**
  * Hub operations: messaging (`send`/`wait`/`inbox`/`list`), jobs
  * (`wait`/`cancel`/`jobs`), and process supervision (`start`/`ps`/`logs`/
@@ -460,7 +467,8 @@ export function jobsRenderResult(
 	hubArgs?: HubRenderArgs,
 ): Component {
 	const args = toJobRenderArgs(hubArgs);
-	let jobs = result.details?.jobs ?? [];
+	const originalJobs = result.details?.jobs ?? [];
+	let jobs = originalJobs;
 	const agents = result.details?.agents ?? [];
 
 	if (jobs.length === 0 && agents.length === 0) {
@@ -470,14 +478,20 @@ export function jobsRenderResult(
 	}
 
 	const isPollCall = args ? !args.list && (!args.cancel || args.cancel.length === 0 || args.poll !== undefined) : true;
+	const livePoll = options.spinnerFrame !== undefined;
 
 	// Agent-carrying results (jobs snapshot / empty-wait roster) are real
 	// snapshots, not displaceable waiting frames — only agentless waits
-	// collapse their still-running rows once sealed.
-	if (!options.isPartial && isPollCall && agents.length === 0) {
+	// collapse their still-running rows once sealed. A live (still-spinning)
+	// wait keeps the running rows so the title can track the current count.
+	if (!options.isPartial && !livePoll && isPollCall && agents.length === 0) {
 		jobs = jobs.filter(job => job.status !== "running");
 		if (jobs.length === 0) {
-			return new Text("", 0, 0);
+			const n = originalJobs.length;
+			if (n === 0) return new Text("", 0, 0);
+			const jobsNoun = n === 1 ? "job" : "jobs";
+			const header = renderStatusLine({ icon: "info", title: `waited on ${n} ${jobsNoun}` }, uiTheme);
+			return new Text(header, 0, 0);
 		}
 	}
 
