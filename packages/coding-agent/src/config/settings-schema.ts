@@ -6402,6 +6402,9 @@ export interface StatusLineSettings {
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];
 	segmentOptions: Record<string, unknown>;
+	sessionAccent?: boolean;
+	transparent?: boolean;
+	compactThinkingLevel?: boolean;
 }
 
 export interface ThinkingBudgetsSettings {

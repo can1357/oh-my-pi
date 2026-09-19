@@ -471,6 +471,7 @@ export interface StatusLinePreviewSettings {
 	sessionAccent?: boolean;
 	transparent?: boolean;
 	compactThinkingLevel?: boolean;
+	segmentOptions?: Record<string, unknown>;
 }
 
 export interface SettingsCallbacks {
