@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AnthropicServerToolContent,
@@ -774,6 +775,53 @@ describe("wrapLeakedThinkingStream", () => {
 
 		expect(result.content.map(b => b.type)).toEqual(["text", "thinking", "text"]);
 		expect(texts(result)).toEqual(["Partial.", "Recovered."]);
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("does not restore discarded ThinkingLoop reasoning from streamed deltas", async () => {
+		const thinking = "?!".repeat(32);
+		const { result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({
+				type: "thinking_delta",
+				contentIndex: 0,
+				delta: thinking,
+				partial: msg({ content: [{ type: "thinking", thinking }] }),
+			});
+			inner.push({
+				type: "error",
+				reason: "error",
+				error: msg({
+					content: [],
+					stopReason: "error",
+					errorId: AIError.create(AIError.Flag.ThinkingLoop),
+					errorMessage: "Thinking loop detected",
+				}),
+			});
+		});
+
+		expect(result.content).toEqual([]);
+		expect(AIError.is(result.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
+	});
+
+	it("keeps streamed thinking on ordinary errors with empty terminal content", async () => {
+		const thinking = "partial reasoning";
+		const { result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({
+				type: "thinking_delta",
+				contentIndex: 0,
+				delta: thinking,
+				partial: msg({ content: [{ type: "thinking", thinking }] }),
+			});
+			inner.push({
+				type: "error",
+				reason: "error",
+				error: msg({ content: [], stopReason: "error", errorMessage: "connection reset" }),
+			});
+		});
+
+		expect(thinks(result).map(b => b.thinking)).toEqual([thinking]);
 		expect(result.stopReason).toBe("error");
 	});
 });

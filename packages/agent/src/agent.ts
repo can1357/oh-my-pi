@@ -23,6 +23,7 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -1769,15 +1770,20 @@ export class Agent {
 			const bufferedCursorResults = this.#cursorToolResultBuffer.map(({ toolResult }) => toolResult);
 			const retainedToolCallIds = new Set(completedToolCallIds);
 			for (const { toolCallId } of bufferedCursorResults) retainedToolCallIds.add(toolCallId);
+			const thrownErrorId = stoppedForAbort ? undefined : AIError.classify(err);
+			const thinkingLoop = AIError.is(thrownErrorId, AIError.Flag.ThinkingLoop);
+			const thinkingLoopErrorId = thinkingLoop ? thrownErrorId : undefined;
 			const errorMsg: AssistantMessage =
 				shouldEmitVisibleError && assistantPartial
 					? {
 							...assistantPartial,
-							content: assistantPartial.content.filter(
-								block => block.type !== "toolCall" || retainedToolCallIds.has(block.id),
-							),
+							content: assistantPartial.content.filter(block => {
+								if (block.type === "toolCall") return retainedToolCallIds.has(block.id);
+								return !thinkingLoop;
+							}),
 							stopReason: "error",
 							errorMessage,
+							errorId: thinkingLoopErrorId ?? assistantPartial.errorId,
 						}
 					: {
 							role: "assistant",
