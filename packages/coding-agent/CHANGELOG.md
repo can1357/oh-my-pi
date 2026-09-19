@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `omp update` hanging on Homebrew installs waiting for an interactive confirmation prompt ([#12489](https://github.com/can1357/oh-my-pi/issues/12489)).
+- Fixed `omp update` hanging on Homebrew installs waiting for an interactive confirmation prompt ([#12493](https://github.com/can1357/oh-my-pi/pull/12493) by [@Frank-zhu0404](https://github.com/Frank-zhu0404)).
 
 ## [18.2.6] - 2026-09-18
 
