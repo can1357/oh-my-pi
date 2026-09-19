@@ -379,6 +379,25 @@ function sanitizeRequestMetadata(raw: unknown): Record<string, string> | undefin
 	return kept > 0 ? out : undefined;
 }
 
+const BEDROCK_STREAM_ERROR_STATUS: Record<string, number> = {
+	internalServerException: 500,
+	InternalServerException: 500,
+	serviceUnavailableException: 503,
+	ServiceUnavailableException: 503,
+	throttlingException: 429,
+	ThrottlingException: 429,
+	modelNotReadyException: 429,
+	ModelNotReadyException: 429,
+	modelTimeoutException: 408,
+	ModelTimeoutException: 408,
+	modelStreamErrorException: 424,
+	ModelStreamErrorException: 424,
+	modelErrorException: 424,
+	ModelErrorException: 424,
+	validationException: 400,
+	ValidationException: 400,
+};
+
 export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 	model: Model<"bedrock-converse-stream">,
 	context: Context,
@@ -605,12 +624,22 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 					const payload = safeParsePayload(message.payload) as { message?: string } | undefined;
 					const errorMessage = payload?.message || new TextDecoder().decode(message.payload);
 					const text = `${exceptionType}: ${errorMessage}`;
-					throw new AIError.BedrockApiError(text, 400, { code: exceptionType });
+					throw new AIError.BedrockApiError(
+						text,
+						Object.hasOwn(BEDROCK_STREAM_ERROR_STATUS, exceptionType)
+							? BEDROCK_STREAM_ERROR_STATUS[exceptionType]
+							: 400,
+						{ code: exceptionType },
+					);
 				}
 				if (messageType === "error") {
 					const code = message.headers[":error-code"] || "UnknownError";
 					const errorMessage = message.headers[":error-message"] || new TextDecoder().decode(message.payload);
-					throw new AIError.BedrockApiError(`${code}: ${errorMessage}`, 400, { code });
+					throw new AIError.BedrockApiError(
+						`${code}: ${errorMessage}`,
+						Object.hasOwn(BEDROCK_STREAM_ERROR_STATUS, code) ? BEDROCK_STREAM_ERROR_STATUS[code] : 400,
+						{ code },
+					);
 				}
 				if (messageType !== "event") continue;
 

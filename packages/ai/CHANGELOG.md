@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed temporary Bedrock eventstream failures being classified as terminal HTTP 400 errors. Known service exceptions now retain their status and retry eligibility.
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

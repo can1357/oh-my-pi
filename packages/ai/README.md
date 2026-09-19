@@ -564,6 +564,8 @@ if (message.stopReason === "error" || message.stopReason === "aborted") {
 }
 ```
 
+Known temporary Bedrock eventstream failures retain the service's error status and retry eligibility, including HTTP 424 model-processing failures. Validation and unknown eventstream errors remain terminal.
+
 ### Aborting Requests
 
 The abort signal allows you to cancel in-progress requests. Aborted requests have `stopReason === 'aborted'`:

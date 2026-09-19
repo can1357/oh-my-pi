@@ -213,6 +213,16 @@ export class AnthropicStreamEnvelopeError extends Error {
 export class BedrockApiError extends ProviderHttpError {
 	override readonly name = "BedrockApiError";
 }
+const BEDROCK_MODEL_PROCESSING_ERROR_CODES: Record<string, true> = {
+	modelErrorException: true,
+	ModelErrorException: true,
+	modelStreamErrorException: true,
+	ModelStreamErrorException: true,
+};
+
+export function isBedrockModelProcessingErrorCode(code: unknown): code is string {
+	return typeof code === "string" && Object.hasOwn(BEDROCK_MODEL_PROCESSING_ERROR_CODES, code);
+}
 
 /** Non-2xx response (or in-stream error chunk) from the Cloud Code Assist API. */
 export class GeminiCliApiError extends ProviderHttpError {

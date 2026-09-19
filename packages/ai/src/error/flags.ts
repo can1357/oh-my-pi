@@ -4,6 +4,8 @@ import { AwsCredentialsError } from "./aws";
 import {
 	AnthropicConnectionError,
 	AnthropicConnectionTimeoutError,
+	BedrockApiError,
+	isBedrockModelProcessingErrorCode,
 	ProviderHttpError,
 	STREAM_ENVELOPE_ERROR_PREFIX,
 } from "./classes";
@@ -503,6 +505,15 @@ function classifyText(
 		const cleanMessage = errorMessage;
 		const isOpaque = isOpaqueStatusBody(cleanMessage);
 
+		const bedrockCodeDelimiter = errorMessage.indexOf(":");
+		const bedrockCode = (
+			bedrockCodeDelimiter === -1 ? errorMessage : errorMessage.slice(0, bedrockCodeDelimiter)
+		).trim();
+		const isBedrockModelProcessingError =
+			(provider === "amazon-bedrock" || api === "bedrock-converse-stream") &&
+			statusClean === 424 &&
+			isBedrockModelProcessingErrorCode(bedrockCode);
+		if (isBedrockModelProcessingError) kinds |= Flag.Transient;
 		const isLimitStatus = isUsageLimitStatus(statusClean);
 		const reason = parseRateLimitReason(cleanMessage);
 		const is402BillingCap = statusClean === 402 && is402BillingCapBody(cleanMessage);
@@ -645,6 +656,9 @@ export function classify(error: unknown, api?: Api): number {
 					linkKinds |= Flag.Transient;
 				}
 			} else if (codeStatus >= 500) {
+				linkKinds |= Flag.Transient;
+			}
+			if (link instanceof BedrockApiError && codeStatus === 424 && isBedrockModelProcessingErrorCode(code)) {
 				linkKinds |= Flag.Transient;
 			}
 			kinds |= linkKinds;
