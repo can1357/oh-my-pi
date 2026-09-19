@@ -8,7 +8,7 @@
  * - re-exported `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
 import { createHash } from "node:crypto";
-import { planRequirementFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { planRequirementFor, quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
@@ -1038,7 +1038,7 @@ function isAbortSignalOption(
 	return typeof value === "object" && value !== null && "aborted" in value && "addEventListener" in value;
 }
 
-type OpenAICodexPlanRequirement = "none" | "paid" | "pro";
+type OpenAICodexPlanRequirement = "none" | "paid" | "pro" | "spark";
 type OpenAICodexPlanClass = "free" | "paid" | "pro" | "unknown";
 
 const OPENAI_CODEX_PRO_PLAN_TOKENS: Record<string, true> = {
@@ -1071,7 +1071,10 @@ const OPENAI_CODEX_FREE_PLAN_TOKENS: Record<string, true> = {
  */
 function resolveOpenAICodexPlanRequirement(provider: string, modelId: string | undefined): OpenAICodexPlanRequirement {
 	if (provider !== "openai-codex" || typeof modelId !== "string") return "none";
-	return (planRequirementFor("openai-codex", modelId) as OpenAICodexPlanRequirement | undefined) ?? "none";
+	const requirement =
+		(planRequirementFor("openai-codex", modelId) as OpenAICodexPlanRequirement | undefined) ?? "none";
+	// Carry Spark's entitlement scope through both credential ranking and model health.
+	return requirement === "pro" && quotaTierFor("openai-codex", modelId) === "spark" ? "spark" : requirement;
 }
 
 const MODEL_ACCOUNT_POLICY_BLOCK_SCOPE_PREFIX = "model-policy:";
@@ -1129,6 +1132,13 @@ function getOpenAICodexPlanEligibility(
 	requirement: OpenAICodexPlanRequirement,
 ): boolean | undefined {
 	if (requirement === "none") return true;
+	const meterStates = report?.metadata?.meterStates;
+	if (requirement === "spark" && meterStates !== null && typeof meterStates === "object") {
+		const spark = (meterStates as Record<string, { allowed?: boolean; limitReached?: boolean } | undefined>).spark;
+		if (spark?.allowed === true) return true;
+		// Exhaustion is handled by quota routing, not evidence of a missing entitlement.
+		if (spark?.allowed === false && spark.limitReached !== true) return false;
+	}
 	const planClass = classifyOpenAICodexPlan(report);
 	if (planClass === "unknown") return undefined;
 	return requirement === "paid" ? planClass !== "free" : planClass === "pro";
