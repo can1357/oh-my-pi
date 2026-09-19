@@ -32,6 +32,8 @@ import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
+	buildAsyncProgressBlock,
+	buildAsyncProgressDisplayMessage,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
@@ -538,6 +540,12 @@ export class ChatTranscriptBuilder {
 			this.container.addChild(component);
 			return;
 		}
+		if (message.customType === "async-progress") {
+			const component = buildAsyncProgressBlock(message);
+			this.#trackExpandable(component);
+			this.container.addChild(component);
+			return;
+		}
 		if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
 			const details = (message as CustomMessage<{ files?: LateDiagnosticsFile[] }>).details;
 			const component = new LateDiagnosticsMessageComponent(details?.files ?? []);
@@ -583,8 +591,9 @@ export class ChatTranscriptBuilder {
 			this.container.addChild(handoffComponent);
 			return;
 		}
+		const displayMessage = buildAsyncProgressDisplayMessage(message);
 		const component = new CustomMessageComponent(
-			message as CustomMessage<unknown>,
+			displayMessage as CustomMessage<unknown>,
 			this.#deps.getMessageRenderer?.(message.customType),
 		);
 		this.#trackExpandable(component);

@@ -115,6 +115,62 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).toContain("→ grep() ⇒ ok · 1 line");
 	});
 
+	it("uses retained async-progress details instead of truncating the model-facing XML prefix", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "custom",
+				customType: "async-progress",
+				content: '<job-progress id="bash_1" type="bash" elapsed="1s"><output>unhelpful XML body</output>',
+				details: {
+					jobs: [
+						{
+							jobId: "bash_1",
+							text: "tick 12\ntick 13",
+							truncated: true,
+							suppressedEvents: 4,
+							artifactId: "art-9",
+						},
+					],
+				},
+				timestamp: 1,
+			},
+		]);
+
+		expect(output).toContain("bash_1: tick 12 tick 13");
+		expect(output).toContain("[4 progress events suppressed]");
+		expect(output).toContain("[full output: artifact://art-9]");
+		expect(output).not.toContain("<job-progress");
+	});
+
+	it("keeps both ends of a bounded async-progress head/tail split", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "custom",
+				customType: "async-progress",
+				content: "",
+				details: {
+					jobs: [
+						{
+							jobId: "bash_2",
+							head: `first ${"a".repeat(300)}`,
+							tail: `last ${"z".repeat(300)}`,
+							truncated: true,
+							artifactId: "art-10",
+						},
+					],
+				},
+				timestamp: 1,
+			},
+		]);
+		const progressLine = output.split("\n").find(line => line.startsWith("[async-progress]"));
+		if (!progressLine) throw new Error("Expected async-progress history line");
+
+		expect(progressLine).toContain("bash_2: first ");
+		expect(progressLine).toContain(" … last ");
+		expect(progressLine).toContain("[full output: artifact://art-10]");
+		expect(progressLine.length).toBeLessThan(250);
+	});
+
 	it("renders find paths without falling back to JSON arguments", () => {
 		const output = formatSessionHistoryMarkdown([
 			{

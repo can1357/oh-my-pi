@@ -1,7 +1,17 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { JobRetuneStatus } from "@oh-my-pi/pi-tui/tools/hub";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import {
+	buildLineSnappedPreview,
+	buildProgressPreview,
+	flattenPreviewText,
+	mergeProgressPreviews,
+	type ProgressPreview,
+} from "../session/progress-preview";
+import { type ProgressBatch, ProgressBatcher, type ProgressReminder } from "./progress-batcher";
+import { type ProgressStreamProvenance, progressStreamProvenanceForText } from "./progress-lines";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -64,12 +74,6 @@ interface PollEscalationState {
 
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
 export type AsyncJobType = "bash" | "task" | "eval";
-
-/** Settled job-body payload: delivery text plus its parsed structured output. */
-export interface AsyncJobRunResult {
-	text: string;
-	structured?: StructuredSubagentOutput;
-}
 
 /**
  * Job-body failure that still carries the run's structured output, so a
@@ -140,10 +144,166 @@ export interface AsyncJob {
 	 * outlive the job row it was kept alive for.
 	 */
 	retainedArtifactsCleanup?: () => Promise<void>;
+	/** How intentional progress reaches the owning agent; undefined keeps the channel off. */
+	progressDelivery?: AsyncJobProgressDelivery;
+	/** Raw-stream deliveries the agent saw through progress or a caller-managed foreground result. */
+	progressDeliveredCount?: number;
+	/** Undelivered progress captured at settlement, folded into the completion delivery. */
+	completionLeftover?: AsyncJobCompletionLeftover;
+	/** Stable artifact containing the complete raw output behind bounded progress previews. */
+	progressArtifactId?: string;
+	/**
+	 * Whether the successful terminal result was derived from the exact raw
+	 * stream already covered by progress, or contains terminal-only
+	 * post-processing that must remain in the completion.
+	 */
+	terminalTextProvenance?: "progress" | "terminal";
+}
+export type ProgressDeliveryCoverage = "continuous" | "gapped";
+
+interface ManagedAsyncJob extends AsyncJob {
+	/** Manager-local generation key; rotated whenever progress suppression ends. */
+	progressKey: string;
+	/** Whether delivered progress still continuously covers the job's raw stream. */
+	progressDeliveryCoverage: ProgressDeliveryCoverage;
+	/** Cumulative raw output already returned by a caller-managed foreground phase. */
+	foregroundStreamProvenance?: ProgressStreamProvenance;
+}
+
+/** Progress content that never reached the agent before the job settled. */
+export interface AsyncJobCompletionLeftover extends ProgressPreview {
+	suppressedEvents?: number;
+}
+
+export type AsyncJobProgressDelivery = "ambient" | "wake";
+
+export interface AsyncJobProgressInfo {
+	artifactId?: string;
+	truncated?: boolean;
+	suppressedEvents?: number;
+	reminder?: ProgressReminder;
+	/**
+	 * Fixed-size cumulative identity of the exact raw stream represented through
+	 * this sample. Producers should omit it when their preview is transformed.
+	 */
+	streamProvenance?: ProgressStreamProvenance;
+}
+
+interface AsyncJobProgressRecord extends AsyncJobProgressInfo {
+	text: string;
+}
+
+interface DeliveredAgentProgress {
+	/** Bounded model-facing batch text retained for legacy exact comparisons. */
+	text: string;
+	/** Cumulative raw-stream identity at the end of this delivered batch. */
+	streamProvenance?: ProgressStreamProvenance;
+}
+
+function laterStreamProvenance(
+	left: ProgressStreamProvenance | undefined,
+	right: ProgressStreamProvenance | undefined,
+): ProgressStreamProvenance | undefined {
+	if (!left) return right;
+	if (!right) return left;
+	return right.codeUnits >= left.codeUnits ? right : left;
+}
+
+function streamProvenanceMatchesText(provenance: ProgressStreamProvenance | undefined, text: string): boolean {
+	if (!provenance || provenance.codeUnits !== text.length) return false;
+	return provenance.sha256 === progressStreamProvenanceForText(text).sha256;
+}
+
+function mergeAsyncJobProgressRecords(
+	left: AsyncJobProgressRecord,
+	right: AsyncJobProgressRecord,
+): AsyncJobProgressRecord {
+	const preview = mergeProgressPreviews(
+		buildProgressPreview(left.text, left.truncated),
+		buildProgressPreview(right.text, right.truncated),
+	);
+	const suppressedEvents = (left.suppressedEvents ?? 0) + (right.suppressedEvents ?? 0);
+	return {
+		text: flattenPreviewText(preview),
+		artifactId: right.artifactId ?? left.artifactId,
+		truncated: preview.truncated,
+		suppressedEvents: suppressedEvents || undefined,
+		reminder: right.reminder ?? left.reminder,
+		streamProvenance: laterStreamProvenance(left.streamProvenance, right.streamProvenance),
+	};
+}
+
+/**
+ * Preserve metadata from a suppressed value displaced out of the bounded
+ * outer-text window. `kept.text` is deliberately untouched: only the manager's
+ * delivery boundary joins retained outer values.
+ */
+function mergeAsyncJobProgressMetadata(
+	kept: AsyncJobProgressRecord,
+	displaced: AsyncJobProgressRecord,
+): AsyncJobProgressRecord {
+	const suppressedEvents = (kept.suppressedEvents ?? 0) + (displaced.suppressedEvents ?? 0);
+	return {
+		...kept,
+		artifactId: kept.artifactId ?? displaced.artifactId,
+		truncated: kept.truncated === true || displaced.truncated === true || undefined,
+		suppressedEvents: suppressedEvents || undefined,
+		streamProvenance: laterStreamProvenance(kept.streamProvenance, displaced.streamProvenance),
+		reminder: kept.reminder ?? displaced.reminder,
+	};
 }
 
 /** Delivery callback for a settled job's result text. */
 export type AsyncJobDeliverySink = (jobId: string, text: string, job?: AsyncJob) => void | Promise<void>;
+
+/** Best-effort owner-routed delivery for progress from a still-running job. */
+export interface AsyncJobProgressSink {
+	deliver(jobId: string, text: string, job: AsyncJob, seq: number, info: AsyncJobProgressInfo): void | Promise<void>;
+	/** Permanently discard progress that the owner already queued before this job was acknowledged. */
+	acknowledge?(jobId: string): void;
+	/** Re-route progress already queued for `jobId` after its delivery mode changed. */
+	retune?(jobId: string, delivery: AsyncJobProgressDelivery): void;
+}
+
+/**
+ * Terminal payload a job's run callback may resolve with instead of a plain
+ * string. `structured` carries the parsed structured output of a subagent
+ * yield. `details` carries executor metadata (`exitCode`, `timedOut`, …)
+ * that the manager merges into {@link AsyncJob.latestDetails} at settlement.
+ * Tools overwrite `latestDetails` with render payloads on every
+ * `reportProgress` call, so without this merge a completion delivery would
+ * read whatever the last progress report happened to contain.
+ */
+export interface AsyncJobRunResult {
+	text: string;
+	structured?: StructuredSubagentOutput;
+	details?: AsyncJobDetails;
+	/**
+	 * Pre-format source represented by `text`. Bash uses this to exclude
+	 * completion-only timing notices from raw-stream comparison while still
+	 * detecting minimizer, truncation, and other output transformations.
+	 */
+	terminalTextSource?: string;
+}
+
+/**
+ * Failure-path counterpart of {@link AsyncJobRunResult}: a run callback that
+ * throws this error attaches executor metadata (`exitCode`, `timedOut`, …)
+ * which the manager merges into {@link AsyncJob.latestDetails} at settlement.
+ * `terminalTextSource` identifies raw output already represented by progress,
+ * allowing the completion to retain only terminal leftovers.
+ */
+export class AsyncJobRunError extends Error {
+	readonly details: AsyncJobDetails;
+	readonly terminalTextSource: string | undefined;
+
+	constructor(message: string, details: AsyncJobDetails, options?: ErrorOptions, terminalTextSource?: string) {
+		super(message, options);
+		this.name = "AsyncJobRunError";
+		this.details = details;
+		this.terminalTextSource = terminalTextSource;
+	}
+}
 
 export interface AsyncJobManagerOptions {
 	/**
@@ -222,6 +382,8 @@ export interface AsyncJobRegisterOptions {
 	onProgress?: (text: string, details?: AsyncJobDetails) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
+	/** Opt into model-facing progress and choose whether it wakes an idle agent. */
+	progressDelivery?: AsyncJobProgressDelivery;
 }
 
 /**
@@ -251,15 +413,26 @@ export class AsyncJobManager {
 		AsyncJobManager.#instance = undefined;
 	}
 
-	readonly #jobs = new Map<string, AsyncJob>();
+	readonly #jobs = new Map<string, ManagedAsyncJob>();
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
+	readonly #suppressedProgressDeliveries = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
+	readonly #progressSinks = new Map<string, AsyncJobProgressSink>();
+	readonly #lastDeliveredAgentProgress = new Map<string, DeliveredAgentProgress>();
+	readonly #progressJobs = new Map<string, ManagedAsyncJob>();
+	readonly #progressBatcher = new ProgressBatcher<AsyncJobProgressRecord>(
+		(progressKey, batch) => this.#deliverAgentProgress(progressKey, batch),
+		{
+			merge: mergeAsyncJobProgressRecords,
+			mergeDisplacedMetadata: mergeAsyncJobProgressMetadata,
+		},
+	);
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
@@ -269,6 +442,7 @@ export class AsyncJobManager {
 	#deliveryLoop: Promise<void> | undefined;
 	#deliveryQueueChanged = Promise.withResolvers<void>();
 	#disposed = false;
+	#nextProgressGeneration = 0;
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		const ownerId = filter?.ownerId;
@@ -316,6 +490,8 @@ export class AsyncJobManager {
 			jobId: string;
 			signal: AbortSignal;
 			reportProgress: (text: string, details?: AsyncJobDetails) => Promise<void>;
+			/** Report intentional progress to the owning model, separately from TUI updates. */
+			reportAgentProgress: (text: string, info?: AsyncJobProgressInfo) => void;
 			/** Clear the queued flag once the job actually starts executing. */
 			markRunning: () => void;
 		}) => Promise<string | AsyncJobRunResult>,
@@ -338,11 +514,12 @@ export class AsyncJobManager {
 
 		const id = this.#resolveJobId(options?.id);
 		this.#suppressedDeliveries.delete(id);
+		this.#suppressedProgressDeliveries.delete(id);
 		this.#consumedJobResults.delete(id);
 		const abortController = new AbortController();
 		const startTime = Date.now();
 
-		const job: AsyncJob = {
+		const job: ManagedAsyncJob = {
 			id,
 			type,
 			status: "running",
@@ -353,7 +530,11 @@ export class AsyncJobManager {
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
 			queued: options?.queued === true,
+			progressDelivery: options?.progressDelivery,
+			progressKey: `${id}\0${++this.#nextProgressGeneration}`,
+			progressDeliveryCoverage: "continuous",
 		};
+		this.#progressJobs.set(job.progressKey, job);
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
 			if (details) job.latestDetails = details;
@@ -373,6 +554,7 @@ export class AsyncJobManager {
 					jobId: id,
 					signal: abortController.signal,
 					reportProgress,
+					reportAgentProgress: (text, info) => this.#recordAgentProgress(job, text, info),
 					markRunning: () => {
 						job.queued = false;
 					},
@@ -380,32 +562,71 @@ export class AsyncJobManager {
 				const text = typeof outcome === "string" ? outcome : outcome.text;
 				const structured = typeof outcome === "string" ? undefined : outcome.structured;
 				if (structured) job.structured = structured;
-				if (job.status === "cancelled") {
+				const terminalTextSource = typeof outcome === "string" ? text : (outcome.terminalTextSource ?? text);
+				// Settlement metadata wins over the last reportProgress payload:
+				// tools overwrite latestDetails with render details on every
+				// progress call, so the completion delivery must read the
+				// executor's real exitCode/timedOut from here.
+				if (typeof outcome !== "string") this.#mergeSettledDetails(job, outcome.details);
+				if (this.#isCancelled(job)) {
 					job.resultText = text;
-					this.#scheduleEviction(id);
+					this.#scheduleEviction(job);
+					return;
+				}
+				await this.#settleAgentProgress(job, text, terminalTextSource);
+				// Cancellation may win while final progress is awaiting its
+				// asynchronous sink. Never overwrite that terminal state or
+				// enqueue a completion after cancel() returned true.
+				if (this.#isCancelled(job)) {
+					job.resultText = text;
+					this.#scheduleEviction(job);
 					return;
 				}
 				job.status = "completed";
 				job.resultText = text;
 				this.#enqueueDelivery(id, text);
-				this.#scheduleEviction(id);
+				this.#scheduleEviction(job);
 			} catch (error) {
 				if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
-				if (job.status === "cancelled") {
-					job.errorText = error instanceof Error ? error.message : String(error);
-					this.#scheduleEviction(id);
+				if (error instanceof AsyncJobRunError) this.#mergeSettledDetails(job, error.details);
+				const errorText = error instanceof Error ? error.message : String(error);
+				const terminalTextSource = error instanceof AsyncJobRunError ? error.terminalTextSource : undefined;
+				job.terminalTextProvenance = "terminal";
+				if (this.#isCancelled(job)) {
+					job.errorText = errorText;
+					this.#scheduleEviction(job);
 					return;
 				}
-				const errorText = error instanceof Error ? error.message : String(error);
+				await this.#settleAgentProgress(
+					job,
+					terminalTextSource === undefined ? undefined : errorText,
+					terminalTextSource,
+				);
+				// Mirror the success-path guard: cancellation can occur while
+				// the failure waits for its final progress sink to drain.
+				if (this.#isCancelled(job)) {
+					job.errorText = errorText;
+					this.#scheduleEviction(job);
+					return;
+				}
 				job.status = "failed";
 				job.errorText = errorText;
 				this.#enqueueDelivery(id, errorText);
-				this.#scheduleEviction(id);
+				this.#scheduleEviction(job);
 			}
 		})();
 
 		this.#jobs.set(id, job);
 		return id;
+	}
+
+	#mergeSettledDetails(job: AsyncJob, details: AsyncJobDetails | undefined): void {
+		if (!details) return;
+		job.latestDetails = { ...job.latestDetails, ...details };
+	}
+
+	#isCancelled(job: AsyncJob): boolean {
+		return job.status === "cancelled";
 	}
 
 	/**
@@ -418,8 +639,12 @@ export class AsyncJobManager {
 		if (!job) return false;
 		if (filter?.ownerId && job.ownerId !== filter.ownerId) return false;
 		if (job.status !== "running") return false;
+		this.acknowledgeDeliveries([id]);
 		job.status = "cancelled";
 		job.abortController.abort();
+		// Zero retention allows immediate public-id reuse while the cancelled run drains.
+		if (this.#retentionMs === 0) this.#evictJob(job);
+
 		return true;
 	}
 
@@ -466,6 +691,8 @@ export class AsyncJobManager {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
 		for (const jobId of uniqueJobIds) {
 			this.#watchedJobs.add(jobId);
+			const job = this.#jobs.get(jobId);
+			if (job) this.#clearAgentProgress(job);
 		}
 		this.#notifyDeliveryQueueChanged();
 		return uniqueJobIds.length;
@@ -475,9 +702,10 @@ export class AsyncJobManager {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
 		let removed = 0;
 		for (const jobId of uniqueJobIds) {
-			if (this.#watchedJobs.delete(jobId)) {
-				removed += 1;
-			}
+			if (!this.#watchedJobs.delete(jobId)) continue;
+			removed += 1;
+			const job = this.#jobs.get(jobId);
+			if (job) this.#resumeAgentProgress(job);
 		}
 		return removed;
 	}
@@ -513,7 +741,11 @@ export class AsyncJobManager {
 		if (uniqueJobIds.length === 0) return 0;
 
 		for (const jobId of uniqueJobIds) {
+			const job = this.#jobs.get(jobId);
+			if (job?.ownerId !== undefined) this.#progressSinks.get(job.ownerId)?.acknowledge?.(jobId);
 			this.#suppressedDeliveries.add(jobId);
+			this.#suppressedProgressDeliveries.add(jobId);
+			if (job) this.#clearAgentProgress(job);
 		}
 
 		const before = this.#deliveries.length;
@@ -548,17 +780,21 @@ export class AsyncJobManager {
 	}
 
 	/**
-	 * Lift a foreground-wait suppression set via `acknowledgeDeliveries`. If the
-	 * job already finished while suppressed (its delivery enqueue was skipped),
-	 * re-enqueue the completion so the result is still delivered exactly once.
+	 * Lift foreground-wait completion and progress suppression. If the job
+	 * already finished while completion was suppressed (its enqueue was
+	 * skipped), re-enqueue the result exactly once.
 	 */
 	resumeDeliveries(jobIds: string[]): void {
 		for (const rawId of jobIds) {
 			const jobId = rawId.trim();
 			if (!jobId) continue;
-			if (!this.#suppressedDeliveries.delete(jobId)) continue;
+			const completionWasSuppressed = this.#suppressedDeliveries.delete(jobId);
+			const progressWasSuppressed = this.#suppressedProgressDeliveries.delete(jobId);
+			if (!completionWasSuppressed && !progressWasSuppressed) continue;
 			const job = this.#jobs.get(jobId);
-			if (!job || (job.status !== "completed" && job.status !== "failed")) continue;
+			if (!job) continue;
+			if (progressWasSuppressed) this.#resumeAgentProgress(job);
+			if (!completionWasSuppressed || (job.status !== "completed" && job.status !== "failed")) continue;
 			const queued =
 				this.#deliveries.some(delivery => delivery.jobId === jobId) ||
 				this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId);
@@ -582,7 +818,13 @@ export class AsyncJobManager {
 	}
 
 	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
-		for (const job of this.getRunningJobs(filter)) {
+		const jobs: ManagedAsyncJob[] = [];
+		for (const publicJob of this.getRunningJobs(filter)) {
+			const job = this.#jobs.get(publicJob.id);
+			if (job === publicJob) jobs.push(job);
+		}
+		this.acknowledgeDeliveries(jobs.map(job => job.id));
+		for (const job of jobs) {
 			job.status = "cancelled";
 			job.abortController.abort(reason);
 		}
@@ -600,10 +842,11 @@ export class AsyncJobManager {
 	 */
 	evictCompletedJobs(filter?: AsyncJobFilter): number {
 		let evicted = 0;
-		for (const job of this.#filterJobs(this.#jobs.values(), filter)) {
-			if (job.status !== "completed" && job.status !== "failed") continue;
+		for (const publicJob of this.#filterJobs(this.#jobs.values(), filter)) {
+			const job = this.#jobs.get(publicJob.id);
+			if (job !== publicJob || (job.status !== "completed" && job.status !== "failed")) continue;
 			this.acknowledgeDeliveries([job.id]);
-			if (this.#evictJob(job.id)) evicted += 1;
+			if (this.#evictJob(job)) evicted += 1;
 		}
 		return evicted;
 	}
@@ -630,6 +873,246 @@ export class AsyncJobManager {
 	}
 
 	/**
+	 * Route progress for jobs owned by `ownerId`. The newest registration wins,
+	 * matching completion delivery ownership.
+	 */
+	registerProgressSink(ownerId: string, sink: AsyncJobProgressSink): () => void {
+		this.#progressSinks.set(ownerId, sink);
+		return () => {
+			if (this.#progressSinks.get(ownerId) === sink) this.#progressSinks.delete(ownerId);
+		};
+	}
+
+	/**
+	 * Lift only model-facing progress suppression for a running job after a
+	 * caller-managed foreground phase. Completion remains suppressed until
+	 * `resumeDeliveries`. `foregroundStreamProvenance` records raw output
+	 * already returned inline so terminal settlement does not deliver it again;
+	 * `coverage: "gapped"` records that the foreground phase lost output the
+	 * caller could not return, so completion keeps the terminal text.
+	 */
+	activateProgressDelivery(
+		jobId: string,
+		delivery: AsyncJobProgressDelivery,
+		foregroundStreamProvenance?: ProgressStreamProvenance,
+		coverage: ProgressDeliveryCoverage = "continuous",
+	): boolean {
+		const job = this.#jobs.get(jobId);
+		if (job?.status !== "running") return false;
+		job.progressDelivery = delivery;
+		this.#suppressedProgressDeliveries.delete(jobId);
+		this.#resumeAgentProgress(job);
+		job.foregroundStreamProvenance = foregroundStreamProvenance;
+		job.progressDeliveryCoverage = coverage;
+		if (foregroundStreamProvenance) {
+			job.progressDeliveredCount = Math.max(job.progressDeliveredCount ?? 0, 1);
+		}
+		return true;
+	}
+
+	/** Replace the provisional progress artifact with the producer's settlement-time result. */
+	setProgressArtifact(jobId: string, artifactId: string | undefined): boolean {
+		const job = this.#jobs.get(jobId);
+		if (job?.status !== "running") return false;
+		job.progressArtifactId = artifactId;
+		return true;
+	}
+
+	/**
+	 * Retune a running job's already-monitored progress channel, changing where
+	 * its progress is delivered and nothing else. This is deliberately not
+	 * {@link activateProgressDelivery}: activation resumes suppressed delivery,
+	 * which would push into a job a `hub wait` is deliberately watching, and
+	 * resets the settlement bookkeeping an already-monitored job has accrued.
+	 */
+	retuneProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery, ownerId?: string): JobRetuneStatus {
+		const job = this.#jobs.get(jobId);
+		if (!job) return "not_found";
+		if (ownerId !== undefined && job.ownerId !== ownerId) return "not_found";
+		if (job.status !== "running") return "not_running";
+		if (job.progressDelivery === undefined) return "unmonitored";
+		if (this.isDeliverySuppressed(jobId)) return "suppressed";
+		if (job.progressDelivery === delivery) return "unchanged";
+		job.progressDelivery = delivery;
+		if (job.ownerId !== undefined) this.#progressSinks.get(job.ownerId)?.retune?.(jobId, delivery);
+		return "retuned";
+	}
+
+	#recordAgentProgress(job: ManagedAsyncJob, text: string, info: AsyncJobProgressInfo = {}): void {
+		if (this.#disposed || job.status !== "running" || job.progressDelivery === undefined) return;
+		if (this.#isProgressDeliverySuppressed(job.id)) {
+			job.progressDeliveryCoverage = "gapped";
+			return;
+		}
+		if (job.ownerId === undefined || !this.#progressSinks.has(job.ownerId)) return;
+		if (info.artifactId) job.progressArtifactId = info.artifactId;
+		// Registration can report synchronously before the public map is populated.
+		// Otherwise the public map must still identify this exact generation.
+		const currentJob = this.#jobs.get(job.id);
+		if (currentJob === undefined && this.#progressJobs.get(job.progressKey) !== job) return;
+		if (currentJob !== undefined && currentJob !== job) return;
+		// Upstream producers (e.g. broker monitor batches) may arrive already
+		// rate-limited: carry their suppression metadata into the record so this
+		// second batcher's merge preserves the suppressed-event count and any
+		// chatty-monitor reminder instead of silently dropping them.
+		this.#progressBatcher.push(job.progressKey, { text, ...info });
+	}
+
+	async #deliverAgentProgress(progressKey: string, batch: ProgressBatch<AsyncJobProgressRecord>): Promise<void> {
+		const job = this.#progressJobs.get(progressKey);
+		const currentJob = job ? this.#jobs.get(job.id) : undefined;
+		if (!job || (currentJob !== undefined && currentJob !== job) || job.status !== "running") return;
+		if (this.#isProgressDeliverySuppressed(job.id)) return;
+		if (batch.kind === "artifact-only") return;
+		const sink = job.ownerId === undefined ? undefined : this.#progressSinks.get(job.ownerId);
+		if (!sink) return;
+		const recordSuppressedEvents = batch.values.reduce((total, record) => total + (record.suppressedEvents ?? 0), 0);
+		const suppressedEvents = batch.suppressedEvents + recordSuppressedEvents;
+		const info: AsyncJobProgressInfo = {
+			artifactId:
+				batch.values.findLast(record => record.artifactId !== undefined)?.artifactId ?? job.progressArtifactId,
+			truncated: suppressedEvents > 0 || batch.values.some(record => record.truncated === true),
+			suppressedEvents: suppressedEvents || undefined,
+			reminder: batch.reminder ?? batch.values.findLast(record => record.reminder !== undefined)?.reminder,
+		};
+		const deliveredText = batch.values.map(record => record.text).join("\n");
+		try {
+			await sink.deliver(job.id, deliveredText, job, batch.seq, info);
+			if (this.#jobs.get(job.id) !== job || this.#progressJobs.get(progressKey) !== job) return;
+			// Retain fixed-size cumulative raw-stream provenance, plus only this
+			// bounded delivery for callers without provenance. Multi-batch Bash
+			// output can therefore be recognized despite line framing/newline
+			// normalization, while minimized or otherwise transformed output does
+			// not match and remains terminal-visible.
+			this.#lastDeliveredAgentProgress.set(progressKey, {
+				text: deliveredText,
+				streamProvenance: batch.values.reduce<ProgressStreamProvenance | undefined>(
+					(latest, record) => laterStreamProvenance(latest, record.streamProvenance),
+					undefined,
+				),
+			});
+			// An ambient sink may only ENQUEUE this batch while the owner is
+			// idle; that still counts as delivered because the owner folds any
+			// still-queued ambient progress into the completion-triggered flush
+			// ahead of the result (AgentSession's async-result sink), so a
+			// completion never outruns output this counter claims was delivered.
+			job.progressDeliveredCount = (job.progressDeliveredCount ?? 0) + 1;
+		} catch (error) {
+			job.progressDeliveryCoverage = "gapped";
+			logger.warn("Async job progress delivery failed", {
+				jobId: job.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	#flushAgentProgress(job: ManagedAsyncJob): Promise<void> {
+		return this.#progressBatcher.finish(job.progressKey);
+	}
+
+	/**
+	 * Settle the progress channel at job completion. Once the agent has seen
+	 * live output and an artifact holds the complete stream, the completion
+	 * delivery only needs the never-delivered remainder — capture the pending
+	 * window instead of racing one last progress message ahead of the result.
+	 * Jobs whose progress never reached the agent keep the old flush so their
+	 * recorded output is not lost.
+	 */
+	async #settleAgentProgress(
+		job: ManagedAsyncJob,
+		terminalText?: string,
+		terminalTextSource = terminalText,
+	): Promise<void> {
+		try {
+			await this.#settleAgentProgressInner(job, terminalText, terminalTextSource);
+		} catch (error) {
+			logger.warn("Async job progress settlement failed", {
+				jobId: job.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			if (this.#jobs.get(job.id) !== job) return;
+			if (terminalText !== undefined && terminalTextSource !== undefined) {
+				job.terminalTextProvenance = "terminal";
+			}
+			this.#clearAgentProgress(job);
+		}
+	}
+
+	async #settleAgentProgressInner(
+		job: ManagedAsyncJob,
+		terminalText?: string,
+		terminalTextSource = terminalText,
+	): Promise<void> {
+		let pendingCoversTerminal = false;
+		if (
+			job.progressDelivery === undefined ||
+			(job.progressDeliveredCount ?? 0) === 0 ||
+			job.progressArtifactId === undefined
+		) {
+			await this.#flushAgentProgress(job);
+		} else {
+			const pending = await this.#progressBatcher.takePending(job.progressKey);
+			if (this.#jobs.get(job.id) !== job) return;
+			if (pending) {
+				const record =
+					pending.values.length === 0 ? undefined : pending.values.reduce(mergeAsyncJobProgressRecords);
+				const suppressedEvents =
+					pending.suppressedEvents +
+					pending.values.reduce((total, value) => total + (value.suppressedEvents ?? 0), 0);
+				const sourceTruncated = suppressedEvents > 0 || pending.values.some(value => value.truncated === true);
+				const preview = record ? buildLineSnappedPreview(record.text, sourceTruncated) : { truncated: true };
+				job.completionLeftover = { ...preview, suppressedEvents: suppressedEvents || undefined };
+				pendingCoversTerminal =
+					terminalText !== undefined &&
+					terminalTextSource !== undefined &&
+					(streamProvenanceMatchesText(record?.streamProvenance, terminalTextSource) ||
+						record?.text === terminalText ||
+						pending.values.some(value => value.text === terminalText));
+			}
+		}
+		if (this.#jobs.get(job.id) !== job) return;
+		if (terminalText !== undefined && terminalTextSource !== undefined) {
+			const delivered = this.#lastDeliveredAgentProgress.get(job.progressKey);
+			job.terminalTextProvenance =
+				job.progressDeliveryCoverage === "continuous" &&
+				(pendingCoversTerminal ||
+					streamProvenanceMatchesText(job.foregroundStreamProvenance, terminalTextSource) ||
+					streamProvenanceMatchesText(delivered?.streamProvenance, terminalTextSource) ||
+					delivered?.text === terminalText)
+					? "progress"
+					: "terminal";
+		}
+		this.#lastDeliveredAgentProgress.delete(job.progressKey);
+		job.foregroundStreamProvenance = undefined;
+	}
+
+	#resumeAgentProgress(job: ManagedAsyncJob): void {
+		if (
+			this.#jobs.get(job.id) !== job ||
+			job.status !== "running" ||
+			job.progressDelivery === undefined ||
+			this.#isProgressDeliverySuppressed(job.id) ||
+			this.#progressJobs.get(job.progressKey) === job
+		)
+			return;
+		job.progressKey = `${job.id}\0${++this.#nextProgressGeneration}`;
+		this.#progressJobs.set(job.progressKey, job);
+	}
+
+	#clearAgentProgress(job: ManagedAsyncJob): void {
+		job.progressDeliveryCoverage = "gapped";
+		this.#progressBatcher.clear(job.progressKey);
+		this.#lastDeliveredAgentProgress.delete(job.progressKey);
+		this.#progressJobs.delete(job.progressKey);
+	}
+
+	#clearAllAgentProgress(): void {
+		this.#progressBatcher.dispose();
+		this.#lastDeliveredAgentProgress.clear();
+		this.#progressJobs.clear();
+	}
+
+	/**
 	 * Wait until every job owned by `ownerId` has settled — its run promise
 	 * resolved, which for cancelled jobs means the underlying process actually
 	 * exited. Jobs registered while waiting (e.g. by a follow-up turn) are
@@ -646,13 +1129,13 @@ export class AsyncJobManager {
 	): Promise<boolean> {
 		const deadline =
 			options?.timeoutMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + Math.max(0, options.timeoutMs);
-		const awaited = new Set<string>();
+		const awaited = new Set<AsyncJob>();
 		for (;;) {
 			const pending = this.#filterJobs(this.#jobs.values(), { ownerId }).filter(
-				job => !awaited.has(job.id) && (options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
+				job => !awaited.has(job) && (options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
 			);
 			if (pending.length === 0) return true;
-			for (const job of pending) awaited.add(job.id);
+			for (const job of pending) awaited.add(job);
 			const settled = await this.#waitForDeliveryPromise(
 				Promise.all(pending.map(job => job.promise)).then(() => {}),
 				deadline,
@@ -766,10 +1249,13 @@ export class AsyncJobManager {
 		this.#notifyDeliveryQueueChanged();
 		this.#inFlightDeliveries.length = 0;
 		this.#suppressedDeliveries.clear();
+		this.#suppressedProgressDeliveries.clear();
 		this.#watchedJobs.clear();
 		this.#consumedJobResults.clear();
 		this.#pollEscalation.clear();
 		this.#deliverySinks.clear();
+		this.#progressSinks.clear();
+		this.#clearAllAgentProgress();
 		return jobsSettled && drained;
 	}
 
@@ -793,7 +1279,7 @@ export class AsyncJobManager {
 			this.#deliveries.some(delivery => delivery.jobId === jobId) ||
 			this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId);
 		if (!deliveryPending) {
-			this.#scheduleEviction(jobId, this.#consumedResultEvictionMs);
+			this.#scheduleEviction(job, this.#consumedResultEvictionMs);
 		}
 		return true;
 	}
@@ -916,15 +1402,17 @@ export class AsyncJobManager {
 		}
 	}
 
-	#evictJob(jobId: string): boolean {
-		clearTimeout(this.#evictionTimers.get(jobId));
-		this.#evictionTimers.delete(jobId);
-		this.#suppressedDeliveries.delete(jobId);
-		this.#watchedJobs.delete(jobId);
-		this.#consumedJobResults.delete(jobId);
-		const job = this.#jobs.get(jobId);
-		if (job) this.#runRetainedArtifactsCleanup(job);
-		return this.#jobs.delete(jobId);
+	#evictJob(job: ManagedAsyncJob): boolean {
+		if (this.#jobs.get(job.id) !== job) return false;
+		clearTimeout(this.#evictionTimers.get(job.id));
+		this.#evictionTimers.delete(job.id);
+		this.#suppressedDeliveries.delete(job.id);
+		this.#suppressedProgressDeliveries.delete(job.id);
+		this.#watchedJobs.delete(job.id);
+		this.#consumedJobResults.delete(job.id);
+		this.#clearAgentProgress(job);
+		this.#runRetainedArtifactsCleanup(job);
+		return this.#jobs.delete(job.id);
 	}
 
 	/**
@@ -933,19 +1421,21 @@ export class AsyncJobManager {
 	 * {@link #consumedResultEvictionMs}. The delay is clamped to the configured
 	 * retention so an explicit short retention always stays the effective cap.
 	 */
-	#scheduleEviction(jobId: string, delayMs: number = this.#retentionMs): void {
+	#scheduleEviction(job: ManagedAsyncJob, delayMs: number = this.#retentionMs): void {
+		if (this.#jobs.get(job.id) !== job) return;
+		this.#clearAgentProgress(job);
 		if (this.#disposed) return;
 		if (this.#retentionMs <= 0) {
-			this.#evictJob(jobId);
+			this.#evictJob(job);
 			return;
 		}
 		const delay = Math.max(0, Math.min(this.#retentionMs, delayMs));
-		clearTimeout(this.#evictionTimers.get(jobId));
+		clearTimeout(this.#evictionTimers.get(job.id));
 		const timer = setTimeout(() => {
-			this.#evictJob(jobId);
+			this.#evictJob(job);
 		}, delay);
 		timer.unref();
-		this.#evictionTimers.set(jobId, timer);
+		this.#evictionTimers.set(job.id, timer);
 	}
 
 	#clearEvictionTimers(): void {
@@ -1007,6 +1497,10 @@ export class AsyncJobManager {
 
 	isDeliverySuppressed(jobId: string): boolean {
 		return this.#suppressedDeliveries.has(jobId) || this.#watchedJobs.has(jobId);
+	}
+
+	#isProgressDeliverySuppressed(jobId: string): boolean {
+		return this.#suppressedProgressDeliveries.has(jobId) || this.#watchedJobs.has(jobId);
 	}
 
 	#enqueueDelivery(jobId: string, text: string): void {
@@ -1118,8 +1612,9 @@ export class AsyncJobManager {
 				// A foreground snapshot may have consumed this result while the
 				// sink receipt was parked. The receipt has now settled, so the
 				// suppression tombstone no longer needs the full retention window.
-				if (this.#consumedJobResults.has(delivery.jobId) && this.#jobs.has(delivery.jobId)) {
-					this.#scheduleEviction(delivery.jobId, this.#consumedResultEvictionMs);
+				const consumedJob = this.#jobs.get(delivery.jobId);
+				if (consumedJob && this.#consumedJobResults.has(delivery.jobId)) {
+					this.#scheduleEviction(consumedJob, this.#consumedResultEvictionMs);
 				}
 			} catch (error) {
 				delivery.attempt += 1;

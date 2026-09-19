@@ -27,6 +27,8 @@ import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import activeRepoContextTemplate from "./prompts/system/active-repo-context.md" with { type: "text" };
+import asyncProgressTemplate from "./prompts/system/async-progress.md" with { type: "text" };
+import chattyProgressGuidanceTemplate from "./prompts/system/chatty-progress-guidance.md" with { type: "text" };
 import computerSafetyPrompt from "./prompts/system/computer-safety.md" with { type: "text" };
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
@@ -684,6 +686,11 @@ export interface BuildSystemPromptOptions {
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
+	/** Which active tools can push background output to the model. */
+	asyncProgress?: {
+		bash?: boolean;
+		hub?: boolean;
+	};
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -775,6 +782,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		writeTransportOnly = false,
+		asyncProgress = {},
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -1033,6 +1041,29 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		...contextPromptSources,
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
+	const asyncProgressCapabilities = {
+		bash: asyncProgress.bash === true && toolNames.includes("bash"),
+		hub: asyncProgress.hub === true && toolNames.includes("hub"),
+	};
+	const asyncProgressPrompt =
+		asyncProgressCapabilities.bash || asyncProgressCapabilities.hub
+			? prompt
+					.render(asyncProgressTemplate, {
+						...asyncProgressCapabilities,
+						toolRefs,
+						chattyGuidance: prompt
+							.render(chattyProgressGuidanceTemplate, {
+								...asyncProgressCapabilities,
+								// In the system prompt both flags already mean "this tool is
+								// available"; the same template also renders as a live
+								// reminder, where `hub` narrows to "a chatty process is in
+								// this batch" and only `hubTool` still means availability.
+								hubTool: asyncProgressCapabilities.hub,
+							})
+							.trim(),
+					})
+					.trim()
+			: "";
 
 	const environment = getEnvironmentInfo(cpuModel, gpu);
 	const data = {
@@ -1080,6 +1111,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs,
 		autoQaEnabled,
 		writeTransportOnly,
+		asyncProgressPrompt,
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];
