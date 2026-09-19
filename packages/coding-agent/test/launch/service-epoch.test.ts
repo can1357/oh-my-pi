@@ -146,7 +146,7 @@ function fixture() {
 		},
 		boundary: (boundary: LaunchContextBoundary) => {
 			epoch++;
-			for (const callback of [...boundaries]) callback(boundary);
+			for (const callback of boundaries) callback(boundary);
 		},
 		sink: () => {
 			if (!completionSink) throw new Error("No completion sink");
@@ -183,7 +183,7 @@ describe("service operation epochs and completion replay", () => {
 		await listServices(f.session);
 		await f.sink()(completed());
 		expect(f.queued).toEqual([{ id: daemon.id, epoch: 11 }]);
-		for (const dispose of [...f.disposals]) dispose();
+		for (const dispose of f.disposals) dispose();
 		expect(f.preserved).toEqual([true]);
 	});
 
@@ -230,7 +230,7 @@ describe("service operation epochs and completion replay", () => {
 			await startService(f.session, { name: daemon.name, command: "echo old" });
 			f.boundary("reset");
 			if (boundary === "dispose") {
-				for (const dispose of [...f.disposals]) dispose();
+				for (const dispose of f.disposals) dispose();
 				f.advance();
 			} else f.boundary(boundary);
 			await listServices(f.session);
@@ -245,7 +245,7 @@ describe("service operation epochs and completion replay", () => {
 		f.changeOwner();
 		await f.sink()(completed());
 		expect(f.queued).toEqual([{ id: daemon.id, epoch: 11 }]);
-		for (const dispose of [...f.disposals]) dispose();
+		for (const dispose of f.disposals) dispose();
 		expect(f.preserved).toEqual([true]);
 	});
 

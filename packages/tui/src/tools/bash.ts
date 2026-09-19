@@ -11,6 +11,7 @@ import {
 	previewWindowRows,
 	replaceTabs,
 } from "../render/render-utils";
+import { displayDaemonExitReason } from "./daemon";
 import {
 	formatStyledTruncationWarning,
 	type OutputMeta,
@@ -27,7 +28,7 @@ import type {
 } from "./renderer";
 import { ansi, compact, keyed } from "../native/describe";
 import type { NativeChild } from "../native/node";
-import { footnoteText, resultText } from "./native-view";
+import { footnoteText, noteText, resultText } from "./native-view";
 
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
@@ -73,6 +74,8 @@ export interface BashToolDetails {
 		ready: boolean;
 		timedOut: boolean;
 		pid?: number;
+		/** Terminal launch diagnostic, independent of the output preview. */
+		exitReason?: string;
 		/** Live output monitor delivery attached at start; absent when unmonitored. */
 		progress?: "wake" | "ambient";
 		/** Reason live output monitoring stopped; progress is absent once stopped. */
@@ -579,6 +582,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						uiTheme,
 					);
 					const outputLines: string[] = [...formatted.lines];
+					const serviceReason = displayDaemonExitReason(details?.service?.exitReason);
+					if (serviceReason) outputLines.push(uiTheme.fg("error", `Reason: ${serviceReason}`));
+					const monitorStopped = displayDaemonExitReason(details?.service?.monitorStopped);
+					if (monitorStopped) {
+						outputLines.push(uiTheme.fg("warning", `Progress monitoring stopped: ${monitorStopped}`));
+					}
 					if (timeoutLine) outputLines.push(timeoutLine);
 					if (warningLine) outputLines.push(warningLine);
 
@@ -653,9 +662,13 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 			// Wall time is the head timer, the timeout a note only when hit, the exit a head chip:
 			// what is left (service state, artifact, truncation) is one quiet final line.
 			const meta = details?.meta;
+			const serviceReason = displayDaemonExitReason(details?.service?.exitReason);
+			const monitorStopped = displayDaemonExitReason(details?.service?.monitorStopped);
 			const body: NativeChild[] = compact([
 				output.trim().length > 0 &&
 					keyed(ansi(output, { follow: isPartial, role: "omp.tool.bash.output" }), "output"),
+				serviceReason ? noteText(`Reason: ${serviceReason}`, "error") : undefined,
+				monitorStopped ? noteText(`Progress monitoring stopped: ${monitorStopped}`, "warning") : undefined,
 				footnoteText(shellFootParts(details, stripped.artifactId), {
 					...meta,
 					truncation: showingFullOutput ? undefined : meta?.truncation,
