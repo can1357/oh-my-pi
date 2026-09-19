@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { formatBytes, logger, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
@@ -64,6 +65,11 @@ export interface OutputSinkOptions {
 	artifactId?: string;
 	/** `mirror` writes every raw chunk to the artifact; `spill` opens it only when inline output loses bytes. */
 	artifactWriteMode?: "spill" | "mirror";
+	/**
+	 * Open the artifact for appending so an existing capture at `artifactPath`
+	 * survives this sink (broker monitor reattach). Default false: truncate.
+	 */
+	artifactAppend?: boolean;
 	/**
 	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
 	 * window and rolling tail window share this budget, so a composed
@@ -816,6 +822,52 @@ export class TailBuffer {
 // OutputSink — line-buffered output with file spill support
 // =============================================================================
 
+/**
+ * Converts carriage-return progress updates into line boundaries while
+ * collapsing CRLF to one newline. A trailing CR is held until the next
+ * chunk so split CRLF sequences do not create blank lines.
+ */
+export class CarriageReturnNormalizer {
+	#pendingCarriageReturn = false;
+
+	/** True when the last chunk ended in a bare CR awaiting its line boundary. */
+	get pending(): boolean {
+		return this.#pendingCarriageReturn;
+	}
+
+	reset(): void {
+		this.#pendingCarriageReturn = false;
+	}
+
+	normalize(text: string): string {
+		if (text.length === 0 || (!this.#pendingCarriageReturn && !text.includes(CR))) return text;
+
+		let cursor = 0;
+		let normalized = "";
+		if (this.#pendingCarriageReturn) {
+			this.#pendingCarriageReturn = false;
+			normalized = NL;
+			if (text.startsWith(NL)) cursor = 1;
+		}
+
+		while (cursor < text.length) {
+			const carriageReturn = text.indexOf(CR, cursor);
+			if (carriageReturn === -1) {
+				normalized += text.substring(cursor);
+				break;
+			}
+			normalized += text.substring(cursor, carriageReturn);
+			if (carriageReturn === text.length - 1) {
+				this.#pendingCarriageReturn = true;
+				break;
+			}
+			normalized += NL;
+			cursor = text.startsWith(NL, carriageReturn + 1) ? carriageReturn + 2 : carriageReturn + 1;
+		}
+		return normalized;
+	}
+}
+
 /** Captures bounded inline output while optionally preserving a full artifact. */
 export class OutputSink {
 	#buffer = "";
@@ -830,7 +882,7 @@ export class OutputSink {
 	#truncated = false;
 	#lastChunkTime = 0;
 	#pendingChunk = "";
-	#pendingCarriageReturn = false;
+	readonly #crNormalizer = new CarriageReturnNormalizer();
 	/** `chunkStamp()` captured when the first held-back byte entered the sink. */
 	#pendingChunkStamp: number | undefined;
 	#pendingChunkTimer: Timer | undefined;
@@ -860,11 +912,20 @@ export class OutputSink {
 	#finalized = false;
 	#fileFinalization?: Promise<void>;
 	#artifactError?: OutputArtifactError;
+	/** First artifact persistence failure, retained until {@link flushArtifact} surfaces it. */
+	#artifactErrorCause?: unknown;
 	#pendingArtifactWrites?: Set<Promise<void>>;
+	/** Set only after the artifact has been flushed or finalized without error. */
+	#artifactAvailable = false;
+	/** Bytes handed to the artifact writer while streaming; excludes the capped-mode tail replay at finalize. */
+	#artifactBytesWritten = 0;
 
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
 	readonly #artifactWriteMode: "spill" | "mirror";
+	readonly #artifactAppend: boolean;
+	/** Descriptor backing an append-mode sink; Bun's fd writer does not own it. */
+	#appendFd?: number;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string, stamp: number) => void;
@@ -892,6 +953,7 @@ export class OutputSink {
 			artifactPath,
 			artifactId,
 			artifactWriteMode = "spill",
+			artifactAppend = false,
 			spillThreshold = DEFAULT_MAX_BYTES,
 			headBytes = 0,
 			maxColumns = 0,
@@ -905,6 +967,7 @@ export class OutputSink {
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
 		this.#artifactWriteMode = artifactWriteMode;
+		this.#artifactAppend = artifactAppend;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
@@ -918,39 +981,6 @@ export class OutputSink {
 	}
 
 	/**
-	 * Converts carriage-return progress updates into line boundaries while
-	 * collapsing CRLF to one newline. A trailing CR is held until the next
-	 * chunk so split CRLF sequences do not create blank lines.
-	 */
-	#normalizeCarriageReturns(text: string): string {
-		if (text.length === 0 || (!this.#pendingCarriageReturn && !text.includes(CR))) return text;
-
-		let cursor = 0;
-		let normalized = "";
-		if (this.#pendingCarriageReturn) {
-			this.#pendingCarriageReturn = false;
-			normalized = NL;
-			if (text.startsWith(NL)) cursor = 1;
-		}
-
-		while (cursor < text.length) {
-			const carriageReturn = text.indexOf(CR, cursor);
-			if (carriageReturn === -1) {
-				normalized += text.substring(cursor);
-				break;
-			}
-			normalized += text.substring(cursor, carriageReturn);
-			if (carriageReturn === text.length - 1) {
-				this.#pendingCarriageReturn = true;
-				break;
-			}
-			normalized += NL;
-			cursor = text.startsWith(NL, carriageReturn + 1) ? carriageReturn + 2 : carriageReturn + 1;
-		}
-		return normalized;
-	}
-
-	/**
 	 * Push a chunk of output. The buffer management and onChunk callback run
 	 * synchronously. File sink writes are deferred and serialized internally.
 	 *
@@ -960,7 +990,7 @@ export class OutputSink {
 	 */
 	push(chunk: string, options?: { inline?: string; emitInline?: boolean }): void {
 		if (this.#finalized) return;
-		chunk = sanitizeWithOptionalSixelPassthrough(chunk, text => sanitizeText(this.#normalizeCarriageReturns(text)));
+		chunk = sanitizeWithOptionalSixelPassthrough(chunk, text => sanitizeText(this.#crNormalizer.normalize(text)));
 		const inline = options?.inline;
 		const substituted = inline !== undefined;
 		const inlineChunk = inline === undefined ? chunk : sanitizeText(inline);
@@ -1150,6 +1180,8 @@ export class OutputSink {
 	#writeToFile(chunk: string): void {
 		if (this.#artifactError) return;
 		if (this.#fileReady && this.#file) {
+			// Every sink write flows through #writeArtifact, which records its own
+			// failure (with the causing error) instead of throwing.
 			this.#emitToSink(chunk);
 			return;
 		}
@@ -1177,15 +1209,17 @@ export class OutputSink {
 	 */
 	#emitToSink(chunk: string): void {
 		if (!this.#file || this.#artifactError || chunk.length === 0) return;
+		const chunkBytes = Buffer.byteLength(chunk, "utf-8");
 		if (this.#artifactMaxBytes === 0) {
 			this.#writeArtifact(chunk);
+			this.#artifactBytesWritten += chunkBytes;
 			return;
 		}
-		const chunkBytes = Buffer.byteLength(chunk, "utf-8");
 		const room = this.#artifactHeadClosed ? 0 : this.#artifactHeadBudget - this.#artifactHeadBytesWritten;
 		if (room >= chunkBytes) {
 			this.#writeArtifact(chunk);
 			this.#artifactHeadBytesWritten += chunkBytes;
+			this.#artifactBytesWritten += chunkBytes;
 			return;
 		}
 		let overflow = chunk;
@@ -1194,6 +1228,7 @@ export class OutputSink {
 			if (headSlice.bytes > 0) {
 				this.#writeArtifact(headSlice.text);
 				this.#artifactHeadBytesWritten += headSlice.bytes;
+				this.#artifactBytesWritten += headSlice.bytes;
 			}
 			// Even when UTF-8 boundary safety leaves a few bytes of nominal room,
 			// this chunk has already overflowed the head window. Close it now so a
@@ -1232,11 +1267,24 @@ export class OutputSink {
 		}
 	}
 
-	#recordArtifactError(operation: OutputArtifactError): void {
+	/**
+	 * Record the first artifact persistence failure. `operation` classifies it for
+	 * the output summary; `cause` (when the failure came with an error value) is
+	 * retained so {@link flushArtifact} can reject with the original error.
+	 */
+	#recordArtifactError(operation: OutputArtifactError, cause?: unknown): void {
 		this.#artifactError ??= operation;
+		if (cause !== undefined) this.#artifactErrorCause ??= cause;
+		this.#artifactAvailable = false;
 		this.#pendingFileWrites = undefined;
 		this.#artifactTailRing = "";
 		this.#artifactTailRingBytes = 0;
+	}
+
+	/** The retained failure cause, or a synthesized error for a cause-less failure. */
+	#artifactFailureError(): unknown {
+		if (this.#artifactErrorCause !== undefined) return this.#artifactErrorCause;
+		return new Error(`Artifact ${this.#artifactError ?? "write"} failed: ${this.#artifactPath}`);
 	}
 
 	#writeArtifact(chunk: string, operation: OutputArtifactError = "write"): void {
@@ -1249,22 +1297,38 @@ export class OutputSink {
 					() => {
 						writes.delete(pending);
 					},
-					() => {
+					(error: unknown) => {
 						writes.delete(pending);
-						this.#recordArtifactError(operation);
+						this.#recordArtifactError(operation, error);
 					},
 				);
 				writes.add(pending);
 			}
-		} catch {
-			this.#recordArtifactError(operation);
+		} catch (error) {
+			this.#recordArtifactError(operation, error);
 		}
 	}
 
 	async #createFileSink(): Promise<void> {
 		if (!this.#artifactPath || this.#fileReady || this.#artifactError) return;
 		try {
-			const sink = Bun.file(this.#artifactPath).writer();
+			// Bun.file(path).writer() overwrites an existing file in place: it
+			// neither truncates (oven-sh/bun#25968) nor appends. Both fixes run
+			// synchronously so creation stays atomic with the buffer replay below —
+			// an await here would let new pushes land in both #buffer and
+			// #pendingFileWrites and duplicate them on drain.
+			let sink: Bun.FileSink;
+			if (this.#artifactAppend) {
+				// Append via an "a" descriptor. The fd writer does not take
+				// ownership; #finalizeFile closes it.
+				this.#appendFd = fs.openSync(this.#artifactPath, "a", 0o600);
+				sink = Bun.file(this.#appendFd).writer();
+			} else {
+				// Start the capture empty so a shorter capture never keeps a stale
+				// tail from whatever previously lived at this path.
+				fs.writeFileSync(this.#artifactPath, "", { mode: 0o600 });
+				sink = Bun.file(this.#artifactPath).writer();
+			}
 			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };
 			this.#fileReady = true;
 
@@ -1287,8 +1351,17 @@ export class OutputSink {
 				}
 				this.#pendingFileWrites = undefined;
 			}
-		} catch {
-			this.#recordArtifactError("open");
+		} catch (error) {
+			this.#recordArtifactError("open", error);
+			try {
+				await this.#file?.sink?.end();
+			} catch {
+				/* ignore */
+			}
+			this.#closeAppendFd();
+			this.#file = undefined;
+			this.#pendingFileWrites = undefined;
+			this.#fileReady = false;
 		}
 	}
 
@@ -1336,7 +1409,7 @@ export class OutputSink {
 		this.#columnTruncatedLines = 0;
 		this.#pendingChunk = "";
 		this.#pendingChunkStamp = undefined;
-		this.#pendingCarriageReturn = false;
+		this.#crNormalizer.reset();
 	}
 
 	#clearPendingChunkTimer(): void {
@@ -1461,10 +1534,7 @@ export class OutputSink {
 	}
 
 	async dump(notice?: string): Promise<OutputSummary> {
-		if (this.#pendingCarriageReturn) {
-			this.#pendingCarriageReturn = false;
-			this.push(NL);
-		}
+		if (this.#crNormalizer.pending) this.push(NL);
 		const noticeLine = notice ? `[${notice}]\n` : "";
 
 		// A rejected mirror delivery still surfaces to the caller, but the
@@ -1535,7 +1605,7 @@ export class OutputSink {
 			columnDroppedBytes: this.#columnDroppedBytes > 0 ? this.#columnDroppedBytes : undefined,
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
-			artifactId: this.#artifactError ? undefined : this.#file?.artifactId,
+			artifactId: this.#artifactAvailable ? this.#file?.artifactId : undefined,
 			artifactError: this.#artifactError,
 		};
 	}
@@ -1560,22 +1630,38 @@ export class OutputSink {
 		}
 		if (this.#pendingArtifactWrites?.size) await Promise.all(this.#pendingArtifactWrites);
 		const file = this.#file;
-		if (!file) return;
+		if (!file) {
+			this.#closeAppendFd();
+			return;
+		}
 		// Capture failures must not replace the command's result. Always close,
 		// even when tail replay or flushing fails, and never advertise that file.
 		try {
 			this.#flushArtifactTailIfCapped();
 			if (this.#pendingArtifactWrites?.size) await Promise.all(this.#pendingArtifactWrites);
 			if (!this.#artifactError) await file.sink.flush();
-		} catch {
-			this.#recordArtifactError("flush");
+		} catch (error) {
+			this.#recordArtifactError("flush", error);
 		} finally {
 			try {
 				await file.sink.end();
-			} catch {
-				this.#recordArtifactError("end");
+			} catch (error) {
+				this.#recordArtifactError("end", error);
 			}
+			this.#closeAppendFd();
 		}
+		if (!this.#artifactError) this.#artifactAvailable = true;
+	}
+
+	/** Release the append-mode descriptor; Bun's fd writer never closes it. */
+	#closeAppendFd(): void {
+		if (this.#appendFd === undefined) return;
+		try {
+			fs.closeSync(this.#appendFd);
+		} catch {
+			/* ignore */
+		}
+		this.#appendFd = undefined;
 	}
 
 	/**
@@ -1600,13 +1686,34 @@ export class OutputSink {
 		}
 	}
 
-	/** Make mirrored bytes readable without closing the stable artifact. */
-	async flushArtifact(): Promise<void> {
-		if (this.#fileCreation) await this.#fileCreation.catch(() => undefined);
+	/**
+	 * Bytes this sink has streamed into its artifact so far. An append-mode
+	 * sink does not count the file's prior content; the capped-mode tail
+	 * replay written at finalize is not included either.
+	 */
+	get artifactBytes(): number {
+		return this.#artifactBytesWritten;
+	}
+
+	/** Make mirrored bytes readable and return the verified artifact id. */
+	async flushArtifact(): Promise<string | undefined> {
+		if (!this.#artifactPath) return undefined;
+		if (this.#fileCreation) await this.#fileCreation;
+		if (this.#pendingArtifactWrites?.size) await Promise.all(this.#pendingArtifactWrites);
+		if (this.#artifactError) throw this.#artifactFailureError();
+		const file = this.#file;
+		if (!file) {
+			const error = new Error(`Artifact sink unavailable: ${this.#artifactPath}`);
+			this.#recordArtifactError("open", error);
+			throw error;
+		}
 		try {
-			await this.#file?.sink.flush();
-		} catch {
-			/* Artifact persistence is best-effort, matching finalization. */
+			await file.sink.flush();
+			this.#artifactAvailable = true;
+			return file.artifactId;
+		} catch (error) {
+			this.#recordArtifactError("flush", error);
+			throw error;
 		}
 	}
 }

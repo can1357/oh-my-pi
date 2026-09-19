@@ -187,6 +187,30 @@ describe("shortenPath", () => {
 		const home = "/Users/alice";
 		expect(shortenEmbeddedPaths(`{"cwd":"${home}","next":1}`, home)).toBe('{"cwd":"~","next":1}');
 		expect(shortenEmbeddedPaths(`{"cwd":"${home}.backup","next":1}`, home)).toBe(`{"cwd":"${home}.backup","next":1}`);
+		expect(shortenEmbeddedPaths(`prefix${home}/report`, home)).toBe(`prefix${home}/report`);
+	});
+
+	it("keeps shortened home paths inside file URLs syntactically valid", () => {
+		const home = "/home/alice";
+		const shortened = shortenEmbeddedPaths(`file://${home}/project/output.log`, home);
+
+		expect(shortened).toBe("file:///~/project/output.log");
+		expect(new URL(shortened).protocol).toBe("file:");
+	});
+
+	it("keeps shortened UNC homes inside file URLs syntactically valid", () => {
+		const home = String.raw`\\server\share`;
+		const shortened = shortenEmbeddedPaths("file://server/share/project/output.log", home);
+
+		expect(shortened).toBe("file:///~/project/output.log");
+		expect(new URL(shortened).protocol).toBe("file:");
+	});
+
+	it("preserves non-file URI paths when shortening embedded homes", () => {
+		const home = "/home/alice";
+
+		expect(shortenEmbeddedPaths(`https://example.com${home}/report`, home)).toBe("https://example.com/~/report");
+		expect(shortenEmbeddedPaths(`vscode://file${home}/report`, home)).toBe("vscode://file/~/report");
 	});
 });
 
