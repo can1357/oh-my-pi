@@ -34,6 +34,7 @@ import {
 	parseRequestIdFormat,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
+	toLocalSiblingName,
 } from "./helpers";
 
 const PROVIDER_ID = "native";
@@ -919,6 +920,17 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 			level: "user",
 			_source: createSourceMeta(PROVIDER_ID, userPath, "user"),
 		});
+		const userLocalPath = path.join(getAgentDir(), toLocalSiblingName("AGENTS.md"));
+		const userLocalContent = await readFile(userLocalPath);
+		if (userLocalContent) {
+			items.push({
+				path: userLocalPath,
+				content: userLocalContent,
+				level: "user",
+				localSiblingOf: userPath,
+				_source: createSourceMeta(PROVIDER_ID, userLocalPath, "user"),
+			});
+		}
 	}
 
 	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
@@ -933,6 +945,18 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 				depth: nearestProjectConfigDir.depth,
 				_source: createSourceMeta(PROVIDER_ID, projectPath, "project"),
 			});
+			const projectLocalPath = path.join(nearestProjectConfigDir.dir, toLocalSiblingName("AGENTS.md"));
+			const projectLocalContent = await readFile(projectLocalPath);
+			if (projectLocalContent) {
+				items.push({
+					path: projectLocalPath,
+					content: projectLocalContent,
+					level: "project",
+					depth: nearestProjectConfigDir.depth,
+					localSiblingOf: projectPath,
+					_source: createSourceMeta(PROVIDER_ID, projectLocalPath, "project"),
+				});
+			}
 			return { items, warnings };
 		}
 	}
