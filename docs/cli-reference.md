@@ -237,6 +237,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `shell` | Interactive shell console. | |
 | `read` | Show what the read tool will return for a path, URL, or internal URI. (The [`read` tool](./tools/read.md) is a separate agent tool.) | |
 | `render` | Draw a session's entire thread through the production transcript pipeline (with repaint timing). | |
+| `skills` | List discovered skills for a directory, exactly as a session resolves them (`--json` for machines). | |
 | `ssh` | Manage SSH host configurations. | |
 | `stats` | View usage statistics. | |
 | `update` | Check for and install updates; `--canary`/`--stable` switch release channels. | |

@@ -110,6 +110,10 @@ export const setupHelp = {
 
 export const shellHelp = { description: "Interactive shell console" } satisfies CommandMetadata;
 
+export const skillsHelp = {
+	description: "List discovered skills for a directory, exactly as a session resolves them (--json for machines)",
+} satisfies CommandMetadata;
+
 export const sshHelp = { description: "Manage SSH host configurations" } satisfies CommandMetadata;
 
 export const statsHelp = { description: "View usage statistics" } satisfies CommandMetadata;

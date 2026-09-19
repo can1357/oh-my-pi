@@ -197,6 +197,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.renderHelp,
 	},
 	{
+		name: "skills",
+		load: () => import("./commands/skills").then(m => m.default),
+		help: commandHelp.skillsHelp,
+	},
+	{
 		name: "ssh",
 		load: () => import("./commands/ssh").then(m => m.default),
 		help: commandHelp.sshHelp,

@@ -102,6 +102,9 @@
 - Configured discovery models retain request-time credentials after offline cache reloads and failed refreshes.
 - Runtime API-key overrides retain precedence over configured credentials.
 - Element handles returned by `tab.waitForSelector`, `tab.$`, and related selector helpers can now be passed as arguments to `tab.evaluate` inside `tab.run` instead of failing with "JSHandles can be evaluated only in the context they were created".
+### Added
+
+- Added the `omp skills` command listing discovered skills for a directory exactly as a session resolves them (`--json` for machine-readable output with discovery warnings), so tools can query skill listings without drift-prone reimplementations ([#12273](https://github.com/can1357/oh-my-pi/pull/12273) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.2.2] - 2026-09-16
 
