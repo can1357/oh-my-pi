@@ -3483,13 +3483,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// `mountedNames`) while staying in the canonical `tools` map, so the
 					// enabled set is the union of both layers.
 					const activeNames = new Set([...toolNames, ...(toolSession.xdev?.mountedNames ?? [])]);
+					// Read BOTH live sources: when two servers mint the same public tool
+					// name only the dedup winner survives `tools`, but the loser still
+					// owns a tool (`ownsAnyTool` reads the manager's list), so judging
+					// it from the deduped set alone would scope its instructions out on
+					// an unrelated pattern. The manager's tools carry their own
+					// `mcpServerName`, so the same per-tool scope check covers them.
+					const judgedServerNames = new Map<string, string>();
 					for (const [name, tool] of tools) {
+						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
+						if (typeof mcpServerName === "string") judgedServerNames.set(name, mcpServerName);
+					}
+					for (const tool of mcpManager?.getTools() ?? []) {
+						// A manager tool whose minted name lost the registry's dedup still
+						// owns its server's instructions (see `ownsAnyTool` below); judge
+						// it like any registry tool. Registry entries keep precedence.
+						if (!judgedServerNames.has(tool.name)) {
+							const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
+							if (typeof mcpServerName === "string") judgedServerNames.set(tool.name, mcpServerName);
+						}
+					}
+					for (const [name, mcpServerName] of judgedServerNames) {
 						if (!activeNames.has(name)) continue;
-						// Metadata-aware disallow: pass the registered tool's raw
+						// Metadata-aware disallow: pass the tool's raw
 						// `mcpServerName` so `mcp__<server>_*` still matches
 						// length-capped minted names (the name prefix alone is
 						// truncated + hashed and would silently retain the server).
-						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
 						const isBuiltIn = builtInRegistryToolNames.has(name);
 						if (
 							!isToolScopedIn(
@@ -3500,11 +3519,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 									allowedToolNames: explicitlyRequestedToolNameSet,
 									isBuiltIn,
 								},
-								typeof mcpServerName === "string" ? mcpServerName : undefined,
+								mcpServerName,
 							)
 						)
 							continue;
-						if (typeof mcpServerName === "string") scopedInServerNames.add(mcpServerName);
+						scopedInServerNames.add(mcpServerName);
 					}
 				}
 				const keptServerInstructions: [string, string][] = [];
