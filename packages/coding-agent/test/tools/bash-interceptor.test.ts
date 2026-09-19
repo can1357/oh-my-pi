@@ -61,6 +61,21 @@ describe("BashTool interception", () => {
 			} as AgentToolContext),
 		).rejects.toThrow(`Use read instead.\n\nOriginal command: ${command}`);
 	});
+
+	it("includes structured recovery data in a blocked command error", async () => {
+		const command = "grep pattern path";
+		const replacement = { tool: "grep", command };
+		const interception = checkBashInterception(command, ["grep"], DEFAULT_BASH_INTERCEPTOR_RULES);
+		expect(interception).toMatchObject({ block: true, replacement });
+		const tool = createBashTool(DEFAULT_BASH_INTERCEPTOR_RULES);
+		const error = await tool
+			.execute("tool-call", { command }, undefined, undefined, { toolNames: ["grep"] } as AgentToolContext)
+			.then(() => undefined, caught => caught);
+
+		expect(error).toMatchObject({ context: { replacement } });
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain(`Structured recovery: ${JSON.stringify(replacement)}`);
+	});
 });
 
 describe("compound command interception", () => {

@@ -348,10 +348,12 @@ fn split_raw_sections(
 	let first = lines.first().copied().unwrap_or("");
 	if parse_header_line(first, options.cwd)?.is_none() {
 		if is_unified_header(first.trim_end()) {
-			return Err(EditError::parse(
+			let message = super::messages::unified_hunk_recovery_message(first.trim_end()).unwrap_or_else(|| {
 				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. File sections \
-				 start with `[path#HASH]`; use `replace`, `delete`, or `insert` ops.",
-			));
+					start with `[path#HASH]`; use `replace`, `delete`, or `insert` ops."
+					.to_string()
+			});
+			return Err(EditError::parse(message));
 		}
 		let preview: String = first.chars().take(120).collect();
 		return Err(EditError::parse(format!(

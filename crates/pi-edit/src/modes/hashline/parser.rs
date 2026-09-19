@@ -755,11 +755,11 @@ fn contamination_message(text: &str) -> Option<String> {
 	}
 	if trimmed.starts_with("@@") {
 		if UNIFIED_HUNK_RE.is_match(trimmed) {
-			return Some(
+			return Some(messages::unified_hunk_recovery_message(trimmed).unwrap_or_else(|| {
 				"unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. Use `PUT \
-				 N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
-					.to_string(),
-			);
+					N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
+					.to_string()
+			}));
 		}
 		let preview = if trimmed.chars().count() > 48 {
 			format!("{}…", trimmed.chars().take(48).collect::<String>())

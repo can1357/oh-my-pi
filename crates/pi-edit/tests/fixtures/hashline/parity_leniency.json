@@ -870,7 +870,7 @@
 			"parse": [
 				{
 					"input": "@@ -1,3 +1,3 @@\nPUT 2-2:\n+X",
-					"error": "Error: line 1: unified-diff hunk header (`@@ -N,M +N,M @@`) is not valid in hashline. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` ops."
+					"error": "Error: line 1: Recognized unified-diff hunk header \"@@ -1,3 +1,3 @@\". Hashline does not apply unified hunks; rewrite it as `PUT 1.=3:` and prefix final body rows with `+TEXT`."
 				}
 			]
 		},
