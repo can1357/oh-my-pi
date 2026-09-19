@@ -15,6 +15,8 @@ export const BUILTIN_TOOL_NAMES = [
 	"rewind",
 	"context_notes",
 	"new_context",
+	"rlm",
+
 	"security_scan",
 	"task",
 	"hub",
