@@ -2581,7 +2581,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"rlm.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "context",
 			group: "RLM",
