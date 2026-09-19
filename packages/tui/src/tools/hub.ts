@@ -359,10 +359,12 @@ export interface LaunchToolDetails {
 	matched?: string;
 	/** describe: immutable launch spec backing the command/cwd detail lines. */
 	spec?: DaemonSpec;
-	/** monitor: progress delivery mode this call resulted in. */
+	/** start/monitor: progress delivery mode this call resulted in; "off" when no monitor is live. */
 	monitoring?: "wake" | "ambient" | "off";
 	/** monitor off: whether an active monitor was actually detached. */
 	monitorDetached?: boolean;
+	/** start with progress: why the requested monitor is no longer live although the process started. */
+	monitorStopped?: string;
 	/** list/describe: live output monitors per process, absent when the broker predates watcher reporting. */
 	monitors?: DaemonMonitorWatcher[];
 }
@@ -973,6 +975,14 @@ export function launchRenderResult(
 			case "start": {
 				meta.push(...launchCallMeta(params));
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
+				if (details?.monitoring === "off") {
+					const monitorStopped = details.monitorStopped !== undefined;
+					meta.push(
+						theme.fg(monitorStopped ? "warning" : "muted", monitorStopped ? "monitor stopped" : "monitor off"),
+					);
+				} else if (details?.monitoring) {
+					meta.push(theme.fg("accent", `monitor ${details.monitoring}`));
+				}
 				if (daemon?.readyMatch) body.push(theme.fg("dim", `log matched: ${replaceTabs(daemon.readyMatch)}`));
 				if (daemon?.state === "failed" && daemon.exitReason)
 					body.push(theme.fg("error", replaceTabs(daemon.exitReason)));
@@ -988,6 +998,9 @@ export function launchRenderResult(
 					);
 				} else if (params.ready && daemon && daemon.readyAt === undefined && TERMINAL_STATES[daemon.state]) {
 					body.push(theme.fg("warning", "Process exited before readiness was observed."));
+				}
+				if (details?.monitorStopped) {
+					body.push(theme.fg("warning", `Progress monitoring stopped: ${replaceTabs(details.monitorStopped)}.`));
 				}
 				break;
 			}

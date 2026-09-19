@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import * as path from "node:path";
 import type { DaemonBrokerClient, DaemonCompletionUnregisterOptions } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
@@ -13,6 +14,7 @@ import { DAEMON_OUTPUT_MONITOR_CAPABILITY } from "../../../src/launch/protocol";
 import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
 import type { LaunchContextBoundary, ToolSession } from "../../../src/tools";
 import { executeLaunch } from "../../../src/tools/hub/launch";
+import { launchRenderResult } from "@oh-my-pi/pi-tui/tools/hub";
 import { PROGRESS_LIMITS } from "../../../src/async/progress-limits";
 
 const OWNER = "owner-session";
@@ -351,9 +353,27 @@ describe("hub process output monitoring", () => {
 		});
 		expect(harness.requests).toEqual([expect.objectContaining({ op: "start", owner: undefined })]);
 		expect(harness.getSubscription()).toBeUndefined();
+		expect(unmonitored.details).toMatchObject({ op: "start", monitoring: "off" });
 		expect(unmonitored.content).toEqual([
 			expect.objectContaining({ type: "text", text: expect.stringContaining("Started") }),
 		]);
+
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("Expected an initialized theme");
+		const rendered = Bun.stripANSI(
+			launchRenderResult(unmonitored, { expanded: false, isPartial: false }, uiTheme, {
+				op: "start",
+				name: daemon.name,
+				application: process.execPath,
+				pty: false,
+				progress: "off",
+			})
+				.render(120)
+				.join("\n"),
+		);
+		expect(rendered).toContain("monitor off");
+		expect(rendered).not.toContain("monitor stopped");
 	});
 
 	it("never replays output that predates a successful monitor attach", async () => {
@@ -1375,6 +1395,87 @@ describe("hub process output monitoring", () => {
 		expect(harness.progress.map(item => item.notification.text)).toEqual(["early"]);
 		expect(harness.getSubscription()?.startPending).toBeUndefined();
 		expect(harness.unregisterCount()).toBe(0);
+	});
+
+	it("reports a started process whose monitor expired during the start instead of claiming live progress", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			const subscription = harness.getSubscription();
+			const sink = harness.getOutputSink();
+			if (!subscription || !sink) throw new Error("Expected output subscription");
+			// The broker could not persist the output artifact: it buffers early
+			// output followed by an expiry while the start RPC is still pending.
+			await sink({
+				event: "daemon-output",
+				monitorId: subscription.id,
+				name: daemon.name,
+				daemonId: daemon.id,
+				seq: 1,
+				text: "early",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			});
+			await sink({
+				event: "daemon-monitor-expired",
+				monitorId: subscription.id,
+				name: daemon.name,
+				daemonId: daemon.id,
+			});
+			return { op: "start", daemon, readyTimedOut: false };
+		});
+
+		const result = await executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			persist: true,
+			progress: "wake",
+		});
+		await drainMicrotasks();
+
+		// The process did start: the call succeeds and the pre-expiry output is not lost.
+		expect(result.isError).toBeUndefined();
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text.split("\n")[0]).toMatch(/^Started web/);
+		expect(text).toMatch(
+			/Progress monitoring for web stopped: the broker disabled the monitor .*\. Read its output with logs \(follow: true\)\./,
+		);
+		expect(result.details).toMatchObject({ op: "start", monitoring: "off" });
+		expect(result.details?.monitorStopped).toMatch(/broker disabled the monitor/);
+		expect(harness.progress.map(item => item.notification.text)).toEqual(["early"]);
+		// No live monitor state survives: subscription torn down and the session told.
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: expect.any(String), delivery: "wake", active: false });
+		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
+	});
+
+	it("reports the delivery mode of a start whose monitor stays live", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		const result = await executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			persist: true,
+			progress: "ambient",
+		});
+
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).not.toContain("Progress monitoring");
+		expect(result.details).toMatchObject({ op: "start", monitoring: "ambient" });
+		expect(result.details?.monitorStopped).toBeUndefined();
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: expect.any(String), delivery: "ambient", active: true });
 	});
 
 	it("bounds and coalesces speculative progress during a delayed monitored start", async () => {
