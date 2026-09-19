@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Beijing Token Plan quota reporting for accounts outside the previously hard-coded workspace and logged gateway rejection codes ([#12260](https://github.com/can1357/oh-my-pi/issues/12260), [#12395](https://github.com/can1357/oh-my-pi/pull/12395) by [@Dante-dan](https://github.com/Dante-dan)).
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
