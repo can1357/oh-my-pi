@@ -27,6 +27,7 @@ const didOpen: Record<string, number> = {};
 const didChange: Record<string, number[]> = {};
 const didClose: string[] = [];
 const notifications: string[] = [];
+const watchedFiles: Array<{ uri: string; type: number }> = [];
 const documents = new Map<string, { version: number; text: string }>();
 let nextServerRequestId = 1;
 const pendingServerRequests = new Map<
@@ -99,6 +100,7 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 				didChange: didChangeSnapshot,
 				didClose: [...didClose],
 				notifications: [...notifications],
+				watchedFiles: [...watchedFiles],
 			});
 			break;
 		}
@@ -129,6 +131,11 @@ function handleNotification(message: JsonRpcMessage): void {
 	notifications.push(message.method);
 
 	switch (message.method) {
+		case "workspace/didChangeWatchedFiles": {
+			const params = message.params as { changes: Array<{ uri: string; type: number }> };
+			watchedFiles.push(...params.changes);
+			break;
+		}
 		case "textDocument/didOpen": {
 			const params = message.params as OpenDocumentParams;
 			const { uri, version, text } = params.textDocument;

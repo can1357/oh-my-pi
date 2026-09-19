@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Svelte language-server startup exhausting filesystem watches in monorepos with nested worktrees, and refreshed language intelligence after external dependency edits ([#11245](https://github.com/can1357/oh-my-pi/pull/11245) by [@imbibur](https://github.com/imbibur)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
