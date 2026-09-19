@@ -9,7 +9,7 @@
  */
 import { createHash } from "node:crypto";
 import { planRequirementFor, quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
-import { $env, $envExact, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, $envExact, asRecord, getAgentDbPath, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	isSqliteCorruptionError,
 	resolveCredentialIdentityKey,
@@ -1132,9 +1132,8 @@ function getOpenAICodexPlanEligibility(
 	requirement: OpenAICodexPlanRequirement,
 ): boolean | undefined {
 	if (requirement === "none") return true;
-	const meterStates = report?.metadata?.meterStates;
-	if (requirement === "spark" && meterStates !== null && typeof meterStates === "object") {
-		const spark = (meterStates as Record<string, { allowed?: boolean; limitReached?: boolean } | undefined>).spark;
+	if (requirement === "spark") {
+		const spark = asRecord(asRecord(report?.metadata?.meterStates)?.spark);
 		if (spark?.allowed === true) return true;
 		// Exhaustion is handled by quota routing, not evidence of a missing entitlement.
 		if (spark?.allowed === false && spark.limitReached !== true) return false;
