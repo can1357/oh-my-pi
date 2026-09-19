@@ -2,7 +2,7 @@
  * Built-in model roles and role metadata helpers.
  */
 
-import { isValidThemeColor, type ThemeColor } from "../modes/theme/theme";
+import { isValidThemeColor, type ThemeColor } from "@oh-my-pi/pi-tui/theme";
 import type { Settings } from "./settings";
 
 /** Canonical prefix for a configured model role selector. */
@@ -19,7 +19,8 @@ export function formatModelRoleAlias(role: string): string {
 	return `${MODEL_ROLE_ALIAS_PREFIX}${role}`;
 }
 
-export type ModelRole = "default" | "smol" | "slow" | "vision" | "plan" | "commit" | "tiny" | "task" | "advisor";
+import type { ModelRole } from "@oh-my-pi/pi-tui/overlays/model-browser";
+export type { ModelRole } from "@oh-my-pi/pi-tui/overlays/model-browser";
 
 export interface ModelRoleInfo {
 	tag?: string;
@@ -41,17 +42,8 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	advisor: { tag: "ADVISOR", name: "Advisor", color: "accent" },
 };
 
-export const MODEL_ROLE_IDS: ModelRole[] = [
-	"default",
-	"smol",
-	"slow",
-	"vision",
-	"plan",
-	"commit",
-	"tiny",
-	"task",
-	"advisor",
-];
+import { MODEL_ROLE_IDS } from "@oh-my-pi/pi-tui/overlays/model-browser";
+export { MODEL_ROLE_IDS } from "@oh-my-pi/pi-tui/overlays/model-browser";
 
 export type RoleInfo = ModelRoleInfo;
 

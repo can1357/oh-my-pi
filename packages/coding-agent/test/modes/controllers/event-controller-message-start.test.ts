@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { UserMessage } from "@oh-my-pi/pi-ai";
+import type { ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -24,6 +24,7 @@ function createContext(options: {
 	editorText: string;
 	optimisticSignature?: string;
 	locallySubmittedSignatures?: string[];
+	pendingImages?: ImageContent[];
 }) {
 	let currentEditorText = options.editorText;
 	const setText = vi.fn((text: string) => {
@@ -32,19 +33,10 @@ function createContext(options: {
 	const editor = {
 		setText,
 		getText: () => currentEditorText,
+		pendingImages: [...(options.pendingImages ?? [])],
 	};
 	const ctx = createInteractiveModeContext({
 		editor,
-		getUserMessageText: message =>
-			typeof message.content === "string"
-				? message.content
-				: message.content
-						.map(content =>
-							content.type === "text" && "text" in content && typeof content.text === "string"
-								? content.text
-								: "",
-						)
-						.join(""),
 		optimisticUserMessageSignature: options.optimisticSignature,
 		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
 	});
@@ -92,23 +84,34 @@ describe("EventController message_start (user role)", () => {
 		expect(addMessageToChat).toHaveBeenCalledWith(message);
 		// Pending list always refreshes so the dequeued entry disappears.
 		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
-		// Signature is consumed so a future external message with the same shape still clears.
+		// Signature is consumed so a future external message with the same shape is
+		// not matched to this local submission again. The composer is never cleared
+		// on message_start, so consumption no longer affects the draft.
 		expect(ctx.locallySubmittedUserSignatures.has(signature)).toBe(false);
 	});
 
-	it("clears the editor for user messages that did not originate from this session", async () => {
-		// Counter-case: an external/programmatic user message must still trigger the
-		// defensive editor reset so the next prompt starts clean.
-		const message = createUserMessage("external prompt");
-		const { ctx, setText, addMessageToChat } = createContext({
-			editorText: "stale text",
+	it("preserves the in-progress draft for a user message from an extension", async () => {
+		// Regression: a user message this session never submitted locally is a real,
+		// non-synthetic prompt (an extension delivering `sendUserMessage`, e.g. HCOM).
+		// "Not local" must not mean "reset the editor": the draft being typed — text
+		// and pasted images — has to survive the delivery.
+		const message = createUserMessage("inbound from an extension");
+		const draftImage: ImageContent = { type: "image", data: "AAAA", mimeType: "image/png" };
+		const { ctx, editor, setText, addMessageToChat, updatePendingMessagesDisplay } = createContext({
+			editorText: "hello",
+			pendingImages: [draftImage],
 		});
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "message_start", message });
 
-		expect(setText).toHaveBeenCalledWith("");
+		expect(setText).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("hello");
+		expect(editor.pendingImages).toEqual([draftImage]);
+		// The inbound message still reaches the transcript.
 		expect(addMessageToChat).toHaveBeenCalledWith(message);
+		// The pending list still refreshes.
+		expect(updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 	});
 
 	it("preserves the editor for an optimistic submission and skips the duplicate chat add", async () => {

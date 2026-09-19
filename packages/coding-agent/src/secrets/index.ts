@@ -1,10 +1,10 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SENSITIVE_TOKEN_RE } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { getSecretPlaceholderKeyPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { type SecretEntry, SecretObfuscator } from "./obfuscator";
+import { CREDENTIAL_PATTERNS } from "./patterns";
 import { sanitizeSecretFriendlyName, secretEntriesNeedPlaceholderKey } from "./placeholder";
 import { compileSecretRegex } from "./regex";
 import { regexHasUnresolvableShortMatchFallback } from "./replacement";
@@ -156,6 +156,7 @@ export {
 	obfuscateProviderContext,
 } from "./message-transform";
 export { type SecretEntry, SecretObfuscator } from "./obfuscator";
+export * from "./patterns";
 export { secretEntriesNeedPlaceholderKey, secretEntryNeedsPlaceholderKey } from "./placeholder";
 
 /**
@@ -184,6 +185,9 @@ const MIN_ENV_VALUE_LENGTH = 8;
 /** Env var name patterns that indicate secret values. */
 const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
 
+/** Extracts the password group from a `scheme://user:password@host` value. */
+const CONNECTION_URL_PASSWORD_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/:@?#\s]*:([^/?#\s]+)@/i;
+
 /** Collect environment variable values that look like secrets. */
 export function collectEnvSecrets(): SecretEntry[] {
 	const entries: SecretEntry[] = [];
@@ -195,12 +199,33 @@ export function collectEnvSecrets(): SecretEntry[] {
 		seen.add(value);
 		entries.push({ type: "plain", content: value, mode: "obfuscate" });
 	}
+	// Second pass: extract passwords embedded in connection-URL values
+	// (e.g. scheme://user:password@host) regardless of the variable name.
+	for (const [, value] of Object.entries(process.env)) {
+		const match = CONNECTION_URL_PASSWORD_RE.exec(value ?? "");
+		if (!match) continue;
+		const password = match[1];
+		if (password.length >= MIN_ENV_VALUE_LENGTH && !seen.has(password)) {
+			seen.add(password);
+			entries.push({ type: "plain", content: password, mode: "obfuscate" });
+		}
+		try {
+			const decoded = decodeURIComponent(password);
+			if (decoded !== password && decoded.length >= MIN_ENV_VALUE_LENGTH && !seen.has(decoded)) {
+				seen.add(decoded);
+				entries.push({ type: "plain", content: decoded, mode: "obfuscate" });
+			}
+		} catch {
+			// Malformed percent-encoding — the raw password is already registered.
+		}
+	}
 	return entries;
 }
 
 /**
- * Built-in entries covering credential-shaped tokens (GitHub/GitLab/OpenAI-style
- * API keys) that are NOT configured via secrets.yml or the environment. Without
+ * Built-in entries covering the credential-shaped tokens declared in
+ * `patterns.ts` (GitHub/GitLab/OpenAI-style API keys and other vendor-prefixed
+ * credentials) that are NOT configured via secrets.yml or the environment. Without
  * these, such a token in a tool result falls through to pi-ai's irreversible
  * provider-boundary redaction (`[openai_token_redacted]`); the model then echoes
  * that placeholder into edit-tool `old_string`, which can never match the real
@@ -212,15 +237,13 @@ export function collectEnvSecrets(): SecretEntry[] {
  * transparent because the round trip is lossless.
  */
 export function builtinCredentialSecretEntries(): SecretEntry[] {
-	return [
-		{
-			type: "regex",
-			content: SENSITIVE_TOKEN_RE.source,
-			flags: "i",
-			mode: "obfuscate",
-			friendlyName: "Credential",
-		},
-	];
+	return CREDENTIAL_PATTERNS.map(pattern => ({
+		type: "regex",
+		content: pattern.source,
+		flags: pattern.flags,
+		mode: "obfuscate",
+		friendlyName: pattern.name,
+	}));
 }
 
 /**

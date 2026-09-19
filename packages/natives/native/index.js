@@ -39,7 +39,7 @@ export const VcsRepo = nativeBindings.VcsRepo;
 
 // functions
 export const __ompInstallTokioRuntime = nativeBindings.__ompInstallTokioRuntime;
-export const __piNativesV18_1_14 = nativeBindings.__piNativesV18_1_14;
+export const __piNativesV18_2_6 = nativeBindings.__piNativesV18_2_6;
 export const astEdit = nativeBindings.astEdit;
 export const astGrep = nativeBindings.astGrep;
 export const astMatch = nativeBindings.astMatch;
@@ -73,6 +73,7 @@ export const hashlineCountOps = nativeBindings.hashlineCountOps;
 export const hashlineFileHash = nativeBindings.hashlineFileHash;
 export const hashlineFormatHeader = nativeBindings.hashlineFormatHeader;
 export const hashlineFormatNumberedLines = nativeBindings.hashlineFormatNumberedLines;
+export const hashlineIsReadTruncationNotice = nativeBindings.hashlineIsReadTruncationNotice;
 export const hashlineStripPrefixes = nativeBindings.hashlineStripPrefixes;
 export const hasMatch = nativeBindings.hasMatch;
 export const highlightCode = nativeBindings.highlightCode;
@@ -113,6 +114,7 @@ export const supportsLanguage = nativeBindings.supportsLanguage;
 export const truncateToWidth = nativeBindings.truncateToWidth;
 export const vcsDetachGitDir = nativeBindings.vcsDetachGitDir;
 export const vcsDiscover = nativeBindings.vcsDiscover;
+export const vcsDiscoverForDisplay = nativeBindings.vcsDiscoverForDisplay;
 export const vcsGitClone = nativeBindings.vcsGitClone;
 export const vcsGitDiscover = nativeBindings.vcsGitDiscover;
 export const vcsGitRepoInfo = nativeBindings.vcsGitRepoInfo;

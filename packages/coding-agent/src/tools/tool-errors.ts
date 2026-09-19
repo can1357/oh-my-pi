@@ -5,24 +5,7 @@
  * The agent loop catches and renders them appropriately.
  */
 
-/**
- * Base error for tool execution failures.
- * Override render() for custom LLM-facing formatting.
- */
-export class ToolError extends Error {
-	constructor(
-		message: string,
-		readonly context?: Record<string, unknown>,
-	) {
-		super(message);
-		this.name = "ToolError";
-	}
-
-	/** Render error for LLM consumption. Override for custom formatting. */
-	render(): string {
-		return this.message;
-	}
-}
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /**
  * Error thrown when a tool operation is aborted (e.g., via AbortSignal).

@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, it } from "bun:test";
+import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -8,7 +9,7 @@ import {
 	__rewriteLegacyExtensionSourceForTests,
 	loadLegacyPiModule,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { isRecord, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 // Issue #1674: legacy Pi extensions load browser-UI assets (HTML/CSS) at module
 // init via `readFileSync(join(__dirname, "ui.html"))`. The compat layer must run
@@ -37,6 +38,61 @@ async function writePackage(files: Record<string, string>): Promise<string> {
 }
 
 describe("legacy-pi in-place module loading (issue #1674)", () => {
+	it("resolves package patterns by prefix specificity before suffix length", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({
+				name: "pattern-extension",
+				type: "module",
+				imports: {
+					"#a*long": "./wrong.js",
+					"#abc*": "./prefix.js",
+					"#abc*x": "./suffix.js",
+					"#abcexact": "./exact.js",
+				},
+			}),
+			"wrong.js": 'export default "wrong";',
+			"prefix.js": 'export default "prefix";',
+			"suffix.js": 'export default "suffix";',
+			"exact.js": 'export default "exact";',
+			"node_modules/pattern-dep/package.json": JSON.stringify({
+				name: "pattern-dep",
+				type: "module",
+				exports: { "./a*long": "./wrong.js", "./abc*": "./right.js" },
+			}),
+			"node_modules/pattern-dep/wrong.js": 'export default "wrong";',
+			"node_modules/pattern-dep/right.js": 'export default "dependency";',
+			"index.ts": [
+				'export { default as prefix } from "#abclong";',
+				'export { default as suffix } from "#abctailx";',
+				'export { default as exact } from "#abcexact";',
+				'export { default as dependency } from "pattern-dep/abclong";',
+			].join("\n"),
+		});
+
+		const loaded = await loadLegacyPiModule(path.join(dir, "index.ts"));
+		assert(isRecord(loaded));
+		expect([loaded.prefix, loaded.suffix, loaded.exact, loaded.dependency]).toEqual([
+			"prefix",
+			"suffix",
+			"exact",
+			"dependency",
+		]);
+	});
+
+	it("does not fall back to a broader package pattern when the specific target is excluded", async () => {
+		const dir = await writePackage({
+			"package.json": JSON.stringify({
+				name: "excluded-pattern-extension",
+				type: "module",
+				imports: { "#*": "./fallback.js", "#private/*": null },
+			}),
+			"fallback.js": 'export default "must not load";',
+			"index.ts": 'export { default as value } from "#private/secret";',
+		});
+
+		await expect(loadLegacyPiModule(path.join(dir, "index.ts"))).rejects.toThrow(/excluded/);
+	});
+
 	it("loads in place with ESM-to-CommonJS default, named, and require interop", async () => {
 		const dir = await writePackage({
 			"package.json": JSON.stringify({ name: "asset-ext", version: "1.0.0" }),
@@ -506,6 +562,69 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 		expect(mod.value).toBe("named-reexport-ok");
 	});
 
+	it("loads runtime-computed named exports from a CommonJS entry", async () => {
+		const dir = await writePackage({
+			"index.cjs": ['const key = "answer";', "Object.assign(exports, { [key]: 42 });"].join("\n"),
+		});
+
+		const mod = await loadLegacyPiModule(path.join(dir, "index.cjs"));
+
+		expect(mod).toMatchObject({ answer: 42 });
+	});
+
+	it("discovers dynamic CommonJS exports while preserving import/require identity across reloads", async () => {
+		const directSourceV1 = [
+			'const key = "answer";',
+			'Object.assign(exports, { [key]: 42, token: { version: "v1" } });',
+		].join("\n");
+		const directSourceV2 = [
+			'const key = "answer";',
+			'Object.assign(exports, { [key]: 84, token: { version: "v2" } });',
+		].join("\n");
+		const dir = await writePackage({
+			"package.json": JSON.stringify({ name: "dynamic-cjs-export-ext", version: "1.0.0", type: "module" }),
+			"node_modules/direct/package.json": JSON.stringify({
+				name: "direct",
+				version: "1.0.0",
+				main: "index.cjs",
+			}),
+			"node_modules/direct/index.cjs": directSourceV1,
+			"required.cjs": 'module.exports = require("direct");\n',
+			"index.ts": [
+				'import imported, { answer, token } from "direct";',
+				'import required from "./required.cjs";',
+				"export { answer };",
+				"export const sameObject = imported === required;",
+				"export const sameToken = token === required.token;",
+				"export const importedObject = imported;",
+				"export const version = token.version;",
+				"export default function (pi) { void pi; }",
+			].join("\n"),
+		});
+		const entry = path.join(dir, "index.ts");
+		const direct = path.join(dir, "node_modules", "direct", "index.cjs");
+
+		const first = await loadLegacyPiModule(entry);
+		assert(isRecord(first));
+		expect(first.answer).toBe(42);
+		expect(first.sameObject).toBe(true);
+		expect(first.sameToken).toBe(true);
+		expect(first.version).toBe("v1");
+
+		const firstDirectStat = await fs.stat(direct);
+		await fs.writeFile(direct, directSourceV2, "utf8");
+		const bumpedDirectMtime = new Date(Math.ceil(firstDirectStat.mtimeMs) + 2_000);
+		await fs.utimes(direct, bumpedDirectMtime, bumpedDirectMtime);
+
+		const second = await loadLegacyPiModule(entry);
+		assert(isRecord(second));
+		expect(second.answer).toBe(84);
+		expect(second.sameObject).toBe(true);
+		expect(second.sameToken).toBe(true);
+		expect(second.version).toBe("v2");
+		expect(second.importedObject).not.toBe(first.importedObject);
+	});
+
 	it("preserves named imports from CommonJS defineProperty and exportStar patterns", async () => {
 		const dir = await writePackage({
 			"package.json": JSON.stringify({ name: "cjs-export-helper-ext", version: "1.0.0", type: "module" }),
@@ -515,7 +634,7 @@ describe("legacy-pi in-place module loading (issue #1674)", () => {
 				main: "index.js",
 			}),
 			"node_modules/direct/index.js": [
-				'Object.defineProperty(exports, "local", { enumerable: true, get: () => "local-ok" });',
+				'Object.defineProperty(exports, "local", { enumerable: false, get: () => "local-ok" });',
 				"const __exportStar = (mod, target) => {",
 				"  for (const key in mod) {",
 				'    if (key !== "default" && !Object.prototype.hasOwnProperty.call(target, key)) {',

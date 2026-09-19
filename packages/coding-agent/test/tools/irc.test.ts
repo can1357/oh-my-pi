@@ -5,15 +5,18 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool, isIrcEnabled } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import { type CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { HubTool, isIrcEnabled } from "@oh-my-pi/pi-coding-agent/tools/hub";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface FakeSession {
@@ -171,6 +174,7 @@ describe("IRC", () => {
 	});
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		vi.useRealTimers();
 		for (const session of sessions.splice(0)) {
 			await session.dispose();
 		}
@@ -832,14 +836,15 @@ describe("IRC", () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const session = makeToolSession(registry, "0-Main");
+			session.settings.set("irc.timeoutMs", 5);
+			const tool = new HubTool(session);
 			const result = await tool.execute("call-1", {
 				op: "send",
 				to: "0-Sub",
 				message: "ping",
 				// Real 5ms timeout — exercises the timeout path; no reply ever arrives.
 				await: true,
-				timeoutMs: 5,
 			});
 			expect(result.isError).toBeFalsy();
 			const details = result.details as CoordinationDetails | undefined;
@@ -865,7 +870,7 @@ describe("IRC", () => {
 
 			const result = await tool.execute(
 				"call-1",
-				{ op: "send", to: "0-Sub", message: "ping", await: true, timeoutMs: 30_000 },
+				{ op: "send", to: "0-Sub", message: "ping", await: true },
 				controller.signal,
 			);
 
@@ -900,7 +905,6 @@ describe("IRC", () => {
 				to: "0-Sub",
 				message: "ping",
 				await: true,
-				timeoutMs: 120_000,
 			});
 
 			expect(result.isError).toBeFalsy();
@@ -929,7 +933,6 @@ describe("IRC", () => {
 				to: "0-Sub",
 				message: "ping",
 				await: true,
-				timeoutMs: 120_000,
 			});
 
 			const details = result.details as CoordinationDetails | undefined;
@@ -993,7 +996,6 @@ describe("IRC", () => {
 					to: "0-Sub",
 					message: "answer on the side channel",
 					await: true,
-					timeoutMs: 5_000,
 				});
 				let settled = false;
 				void resultP.then(() => {
@@ -1090,11 +1092,21 @@ describe("IRC", () => {
 			expect(details?.receipts?.[0]?.outcome).toBe("failed");
 		});
 
-		it("op=wait returns a clean non-error timeout result", async () => {
+		it("op=wait returns a clean non-error timeout after the ladder floor", async () => {
 			const fake = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "sub", kind: "sub", session: fake.session, status: "running" });
 			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 5 });
+			vi.useFakeTimers();
+			let settled = false;
+			const pending = tool.execute("call-1", { op: "wait" }).then(result => {
+				settled = true;
+				return result;
+			});
+			vi.advanceTimersByTime(4_999);
+			for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+			expect(settled).toBe(false);
+			vi.advanceTimersByTime(1);
+			const result = await pending;
 			expect(result.isError).toBeFalsy();
 			const details = result.details as CoordinationDetails | undefined;
 			expect(details?.waited).toBeNull();
@@ -1104,7 +1116,7 @@ describe("IRC", () => {
 
 		it("op=wait returns a clean result if no active agents exist", async () => {
 			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 5 });
+			const result = await tool.execute("call-1", { op: "wait" });
 			expect(result.isError).toBeFalsy();
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("No running background jobs to wait for.");
@@ -1113,7 +1125,7 @@ describe("IRC", () => {
 		it("op=wait returns an error if the requested specific 'from' agent is not active", async () => {
 			registry.register({ id: "0-Sub", displayName: "sub", kind: "sub", session: null, status: "parked" });
 			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "wait", from: "0-Sub", timeoutMs: 5 });
+			const result = await tool.execute("call-1", { op: "wait", from: "0-Sub" });
 			expect(result.isError).toBe(true);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain('agent "0-Sub" is not running');
@@ -1137,7 +1149,7 @@ describe("IRC", () => {
 			const tool = new HubTool(makeToolSession(registry, "0-Running"));
 			const controller = new AbortController();
 			controller.abort(new Error("queued IRC interrupt"));
-			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 30_000 }, controller.signal);
+			const result = await tool.execute("call-1", { op: "wait" }, controller.signal);
 
 			expect(result.isError).toBeFalsy();
 			const details = result.details as CoordinationDetails | undefined;
@@ -1254,6 +1266,57 @@ describe("IRC", () => {
 
 			const event = await ircEvent;
 			expect(event.type).toBe("irc_message");
+		});
+		it("defers an idle wake while a pooled yield contract is installed", async () => {
+			const { session } = createRealSession();
+			sessions.push(session);
+			vi.spyOn(session, "refreshBaseSystemPrompt").mockResolvedValue(undefined);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			let observations = 0;
+			session.setIrcWakeTurnObserver(() => () => {
+				observations++;
+			});
+			await session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
+			const queueDeferredWake = vi.spyOn(IrcBridge.prototype, "queueDeferredWake");
+			queueDeferredWake.mockClear();
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-pooled",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "status?",
+				ts: Date.now(),
+			});
+			expect(outcome).toBe("woken");
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+			// An ordinary wake under pooled items would emit keyed yields against
+			// another turn's items, so no turn starts while the contract is pooled.
+			expect(promptSpy).not.toHaveBeenCalled();
+			// The deferral must not re-arm itself through the idle drain: the
+			// records stay parked until the contract clears instead of chaining
+			// wake observers indefinitely.
+			// Yield the event loop repeatedly: a re-armed chain would schedule more
+			// parking calls per turn of the loop, while fixed code schedules
+			// nothing further, so extra yields cannot flake this assertion.
+			for (let i = 0; i < 20; i++) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setImmediate(resolve);
+				await promise;
+			}
+			expect(queueDeferredWake).toHaveBeenCalledTimes(1);
+			// No turn ran, so the wake observer must never have attached: otherwise
+			// it would finalize the next turn's output as this wake's reply.
+			expect(observations).toBe(0);
+			// Clearing publishes the ordinary contract; the resume drain must turn
+			// the parked record into a monitored wake with no later message.
+			promptSpy.mockClear();
+			await session.setWorkPoolYieldItems([]);
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+			for (let i = 0; i < 20; i++) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setImmediate(resolve);
+				await promise;
+			}
+			expect(promptSpy).toHaveBeenCalled();
 		});
 
 		it("queues peer IRC as an interrupt while a turn is streaming", async () => {
