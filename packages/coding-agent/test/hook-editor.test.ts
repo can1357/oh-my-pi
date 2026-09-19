@@ -81,6 +81,25 @@ function createControllerContext() {
 }
 
 describe("HookEditorComponent default (hook) mode", () => {
+	it("configures spelling provider on the inner editor with default or custom options", () => {
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const tui = createTui();
+		const component = new HookEditorComponent(tui, "Prompt", undefined, onSubmit, onCancel);
+		expect(typeof component.editor.onTextAssistApplied).toBe("function");
+		component.editor.onTextAssistApplied?.();
+		expect(tui.requestRender).toHaveBeenCalled();
+
+		const componentCustom = new HookEditorComponent(createTui(), "Prompt", undefined, onSubmit, onCancel, {
+			spellingFeatures: {
+				typoDetection: false,
+				autocomplete: true,
+				autocorrect: false,
+			},
+		});
+		expect(componentCustom.spellingProvider).toBeDefined();
+	});
+
 	it("inserts a newline on Enter instead of submitting immediately", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();

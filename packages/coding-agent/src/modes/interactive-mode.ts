@@ -2603,11 +2603,13 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	syncEditorSpelling(): void {
-		this.editor.setSpellingFeatures({
+		const features = {
 			typoDetection: this.settings.get("spelling.typoDetection"),
 			autocomplete: this.settings.get("spelling.autocomplete"),
 			autocorrect: this.settings.get("spelling.autocorrect"),
-		});
+		};
+		this.editor.setSpellingFeatures(features);
+		this.hookEditor?.setSpellingFeatures(features);
 	}
 
 	#syncStatusLineSettings(): void {

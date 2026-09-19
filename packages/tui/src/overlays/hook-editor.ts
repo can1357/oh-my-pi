@@ -14,6 +14,7 @@ import { matchesAppExternalEditor, matchesAppFollowUp, matchesAppInterrupt } fro
 import { formTheme } from "../chrome/form-theme";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { FormField } from "../components/form";
+import { MacOSSpellingProvider, type SpellingFeatures } from "../prompt/macos-spelling";
 
 export interface HookEditorOptions {
 	/** Edit text with the host's configured external editor. */
@@ -27,12 +28,15 @@ export interface HookEditorOptions {
 	 * hint out of view.
 	 */
 	maxHeight?: number;
+	/** Optional spelling assistance feature flags. When omitted, all features default to enabled. */
+	spellingFeatures?: Partial<SpellingFeatures>;
 }
 
 /** Interactive multiline dialog used by hooks and the ask tool's Other response. */
 export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#editor: Editor;
 	#field: FormField;
+	#spelling = new MacOSSpellingProvider();
 	#onSubmitCallback: (value: string) => void;
 	#onCancelCallback: () => void;
 	#tui: TUI;
@@ -67,6 +71,20 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
+		this.#spelling.onUpdate = () => {
+			this.#editor.invalidate();
+			this.#tui.requestRender();
+		};
+		this.#editor.onTextAssistApplied = () => {
+			this.#editor.invalidate();
+			this.#tui.requestRender();
+		};
+		this.#editor.setTextAssistProvider(this.#spelling);
+		this.#spelling.setFeatures({
+			typoDetection: options?.spellingFeatures?.typoDetection ?? true,
+			autocomplete: options?.spellingFeatures?.autocomplete ?? true,
+			autocorrect: options?.spellingFeatures?.autocorrect ?? true,
+		});
 		if (this.#promptStyle) {
 			this.#editor.setBorderVisible(false);
 			this.#editor.setPromptGutter("> ");
@@ -94,6 +112,11 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		});
 		this.addChild(this.#field);
 		this.addChild(new Spacer(1));
+	}
+
+	/** Configure spelling features for the inner editor. */
+	setSpellingFeatures(features: SpellingFeatures): void {
+		this.#spelling.setFeatures(features);
 	}
 
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */
@@ -251,6 +274,16 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 
 		// Forward to editor
 		this.#editor.handleInput(keyData);
+	}
+
+	/** Inner editor accessor for testing and integration. */
+	get editor(): Editor {
+		return this.#editor;
+	}
+
+	/** Spelling provider accessor for testing and integration. */
+	get spellingProvider(): MacOSSpellingProvider {
+		return this.#spelling;
 	}
 
 	async #openExternalEditor(): Promise<void> {

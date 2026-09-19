@@ -704,7 +704,15 @@ export class ExtensionUiController {
 					prefill,
 					value => finishPrompt(value),
 					() => finishPrompt(undefined),
-					{ promptStyle: true, externalEditor: editDialogExternally },
+					{
+						promptStyle: true,
+						externalEditor: editDialogExternally,
+						spellingFeatures: {
+							typoDetection: this.ctx.settings?.get("spelling.typoDetection") ?? true,
+							autocomplete: this.ctx.settings?.get("spelling.autocomplete") ?? true,
+							autocorrect: this.ctx.settings?.get("spelling.autocorrect") ?? true,
+						},
+					},
 				);
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(promptEditor);
@@ -1066,7 +1074,15 @@ export class ExtensionUiController {
 				prefill,
 				value => settle(value),
 				() => settle(undefined),
-				{ ...editorOptions, externalEditor: editDialogExternally },
+				{
+					...editorOptions,
+					externalEditor: editDialogExternally,
+					spellingFeatures: {
+						typoDetection: this.ctx.settings?.get("spelling.typoDetection") ?? true,
+						autocomplete: this.ctx.settings?.get("spelling.autocomplete") ?? true,
+						autocorrect: this.ctx.settings?.get("spelling.autocorrect") ?? true,
+					},
+				},
 			);
 			this.ctx.editorContainer.clear();
 			this.ctx.editorContainer.addChild(this.ctx.hookEditor);
