@@ -423,7 +423,7 @@ async function cleanupProviderInFlightLeases(providerDir: string): Promise<numbe
 		}
 		if (!isDirectory) continue;
 		if (await isProviderInFlightDirStale(leaseDir, PROVIDER_INFLIGHT_LEASE_STALE_MS)) {
-			await fs.rm(leaseDir, { recursive: true, force: true });
+			await removeProviderInFlightLeaseDir(leaseDir);
 			continue;
 		}
 		active++;

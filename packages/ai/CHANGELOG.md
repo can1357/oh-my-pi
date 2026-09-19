@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed temporary stale provider-lease cleanup failures stopping requests before dispatch. Stale cleanup now uses the same bounded removal retries as normal lease release.
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
