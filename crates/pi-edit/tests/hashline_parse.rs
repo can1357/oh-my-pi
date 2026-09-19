@@ -668,17 +668,22 @@ fn prefix_helpers_strip_read_and_diff_shapes() {
 	assert!(is_read_metadata_line("..."));
 }
 
+/// The notice shapes `read` emits, shared with the TypeScript consumer.
+///
+/// `packages/coding-agent/test/hashline-truncation-notice.test.ts` asserts the
+/// same file against `isReadTruncationNotice`, which calls this predicate
+/// through the `hashlineIsReadTruncationNotice` napi wrapper. Add a shape here
+/// and both sides must handle it or a suite fails.
+const READ_TRUNCATION_NOTICES: &str = include_str!("fixtures/hashline/read-truncation-notices.txt");
+
 #[test]
 fn read_truncation_notice_covers_emitted_shapes() {
-	for notice in [
-		"[Showing lines 1-20 of 60 (50.0KB limit). Use :21 to continue]",
-		"[Showing last 50.0KB across lines 4-8 of 8; line 4 is partial]",
-		"[40 more lines in notebook. Use :21 to continue]",
-		"[More lines in file (1.2MB total; not scanned to EOF). Use :21 to continue]",
-		"[...30ln elided; re-read needed ranges, e.g. a.ts:5-16,40-80]",
-		"[Line 1 is 60.0KB, exceeds 50.0KB limit. Hashline output requires full lines; cannot emit \
-		 an editable numbered preview for a truncated line.]",
-	] {
+	let notices: Vec<&str> = READ_TRUNCATION_NOTICES
+		.lines()
+		.filter(|line| !line.is_empty())
+		.collect();
+	assert!(!notices.is_empty(), "notice fixture is empty");
+	for notice in notices {
 		assert!(is_read_truncation_notice(notice), "notice was not recognized: {notice}");
 	}
 	assert!(!is_read_truncation_notice("[Showing files 1-20 of 60. Use skip=20 for the next page]"));

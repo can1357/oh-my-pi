@@ -48,7 +48,15 @@ export function stripHashlinePrefixes(lines: string[]): string[] {
 	return hashlineStripPrefixes(lines);
 }
 
-/** Whether a row is a truncation notice emitted by `read`. */
+/**
+ * Whether a row is a truncation notice emitted by `read`.
+ *
+ * Single-sourced in `crates/pi-edit/src/modes/hashline/prefixes.rs::is_read_truncation_notice`,
+ * reached through the `hashlineIsReadTruncationNotice` napi wrapper. The inline
+ * port that used to stand here existed only because PR CI resolves
+ * `@oh-my-pi/pi-natives` from the latest published release; the 18.2.4 leaf
+ * ships this export, so the release boundary no longer forces a second copy.
+ */
 export function isReadTruncationNotice(line: string): boolean {
 	return hashlineIsReadTruncationNotice(line);
 }
