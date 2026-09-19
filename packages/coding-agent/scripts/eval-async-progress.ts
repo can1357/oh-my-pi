@@ -21,7 +21,8 @@ import { ASYNC_PROGRESS_MESSAGE_TYPE, ASYNC_RESULT_MESSAGE_TYPE } from "../src/s
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../src/session/launch-completion";
 import { SessionManager } from "../src/session/session-manager";
 import { cfgAutolearnEnabled } from "../src/autolearn/settings";
-import { cfgAsyncEnabled, cfgBashAutoBackgroundEnabled, cfgLaunchEnabled, cfgToolsApprovalMode } from "../src/tools/settings";
+import { cfgBashAutoBackgroundEnabled } from "../src/exec/settings";
+import { cfgAsyncEnabled, cfgLaunchEnabled, cfgToolsApprovalMode } from "../src/tools/settings";
 
 const DEFAULT_RUNS = 1;
 const DEFAULT_TIMEOUT_MS = 90_000;
@@ -53,7 +54,6 @@ interface BashCall {
 	async?: boolean | "auto";
 	progress?: string;
 }
-
 
 interface EvalCriteria {
 	selectedWake?: boolean;
@@ -140,7 +140,6 @@ function parseBashCall(value: unknown): BashCall {
 		progress: typeof value.progress === "string" ? value.progress : undefined,
 	};
 }
-
 
 function messageText(message: unknown): string {
 	if (!isRecord(message)) return "";

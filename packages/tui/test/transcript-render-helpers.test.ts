@@ -3,7 +3,11 @@ import * as os from "node:os";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { assistantUsageIsBilled, buildLaunchCompletionBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
+import {
+	assistantUsageIsBilled,
+	buildAsyncProgressBlock,
+	buildLaunchCompletionBlock,
+} from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
 import type { CustomMessage } from "@oh-my-pi/pi-tui/chat/messages";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 
@@ -19,7 +23,10 @@ function usage(overrides: Partial<Usage> = {}): Usage {
 	};
 }
 
-function launchCompletionMessage(name: string): CustomMessage<{ daemons: DaemonSnapshot[] }> {
+function launchCompletionMessage(
+	name: string,
+	overrides: Partial<DaemonSnapshot> = {},
+): CustomMessage<{ daemons: DaemonSnapshot[] }> {
 	return {
 		role: "custom",
 		customType: "launch-completion",
@@ -38,6 +45,7 @@ function launchCompletionMessage(name: string): CustomMessage<{ daemons: DaemonS
 					outputBytes: 0,
 					persist: false,
 					detached: false,
+					...overrides,
 				},
 			],
 		},
@@ -99,5 +107,98 @@ describe("buildLaunchCompletionBlock", () => {
 		const rendered = Bun.stripANSI(buildLaunchCompletionBlock(message).render(120).join("\n"));
 
 		expect(rendered).toContain("Supervised process completed unnamed (exit 0)");
+	});
+
+	it("sanitizes the runtime reason without changing persisted details", () => {
+		const rawReason = "\u001b[31mfirst\r\n\tsecond\u001b[0m";
+		const message = launchCompletionMessage("watcher", {
+			state: "failed",
+			exitCode: 58,
+			exitReason: rawReason,
+			exitedAt: 3,
+		});
+		const rendered = Bun.stripANSI(buildLaunchCompletionBlock(message).render(120).join("\n"));
+
+		expect(rendered).toContain("reason: first second");
+		expect(rendered).not.toContain("\u001b");
+		expect(rendered).not.toContain("\r");
+		expect(rendered).not.toContain("\t");
+		expect(message.details?.daemons[0]?.exitReason).toBe(rawReason);
+	});
+
+	it("truncates the complete supervised-process row to the viewport", () => {
+		const message = launchCompletionMessage("worker", {
+			state: "failed",
+			exitCode: 58,
+			exitReason: "diagnostic ".repeat(200),
+			exitedAt: 3,
+		});
+		const rendered = Bun.stripANSI(buildLaunchCompletionBlock(message).render(80).join("\n"));
+		const processLines = rendered.split("\n").filter(line => line.includes("Supervised process"));
+		const processLine = processLines[0] ?? "";
+
+		expect(processLines).toHaveLength(1);
+		expect(Bun.stringWidth(processLine)).toBeLessThanOrEqual(80);
+		expect(processLine).toContain("reason:");
+	});
+});
+
+describe("buildAsyncProgressBlock", () => {
+	it("expands retained progress without mutating the persisted payload", () => {
+		const text = Array.from({ length: 30 }, (_, index) => `progress-row-${index}`).join("\n");
+		const message: CustomMessage = {
+			role: "custom",
+			customType: "async-progress",
+			content: "model-facing progress",
+			display: true,
+			timestamp: 1,
+			details: {
+				jobs: [{ jobId: "build", type: "bash", elapsedMs: 1_000, text, hasOutput: true }],
+			},
+		};
+		const persisted = structuredClone(message);
+		const component = buildAsyncProgressBlock(message);
+		const collapsed = Bun.stripANSI(component.render(120).join("\n"));
+		expect(collapsed).toContain("progress-row-29");
+		expect(collapsed).not.toContain("progress-row-0");
+		expect(collapsed).toContain("earlier lines");
+		component.setExpanded(true);
+		const expanded = Bun.stripANSI(component.render(120).join("\n"));
+		expect(expanded).toContain("progress-row-0");
+		expect(expanded).toContain("progress-row-29");
+		expect(expanded).not.toContain("earlier lines");
+		component.setExpanded(false);
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toBe(collapsed);
+		expect(message).toEqual(persisted);
+	});
+
+	it("preserves a fitting source-truncated window without inventing a head-tail split", () => {
+		const component = buildAsyncProgressBlock({
+			role: "custom",
+			customType: "async-progress",
+			content: "model-facing progress",
+			display: true,
+			timestamp: 1,
+			details: {
+				jobs: [
+					{
+						jobId: "server",
+						type: "process",
+						elapsedMs: 500,
+						text: `\x1b[31m${os.homedir()}/server ready\x1b[0m`,
+						hasOutput: true,
+						truncated: true,
+						artifactId: "capture-1",
+						suppressedEvents: 7,
+					},
+				],
+			},
+		});
+		const output = Bun.stripANSI(component.render(160).join("\n"));
+		expect(output).toContain("~/server ready");
+		expect(output).not.toContain(os.homedir());
+		expect(output).not.toContain("[…progress truncated…]");
+		expect(output).toContain("7 progress events suppressed");
+		expect(output).toContain("artifact://capture-1");
 	});
 });

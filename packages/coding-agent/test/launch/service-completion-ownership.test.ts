@@ -102,72 +102,76 @@ describe("session-owned supervised services", () => {
 		}
 	}, 15_000);
 
-	it.each(["switch", "new"] as const)("replays a completion to its session when resumed after %s", async boundary => {
-		using tempDir = TempDir.createSync("@omp-service-transition-");
-		const projectDir = path.join(tempDir.path(), "project");
-		const runtimeDir = path.join(tempDir.path(), "runtime");
-		await fs.mkdir(projectDir);
-		const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
-		const previousTitle = process.title;
-		const broker = await startBroker(projectDir, runtimeDir);
-		let sessionId = "old-session";
-		const callbacks: Array<(boundary: LaunchContextBoundary) => void> = [];
-		const deliveries: Array<[string, DaemonCompletionNotification]> = [];
-		const session: ToolSession = {
-			cwd: projectDir,
-			hasUI: false,
-			settings: Settings.isolated(),
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-			getAgentId: () => "Main",
-			getSessionId: () => sessionId,
-			registerContextBoundaryCallback: callback => {
-				callbacks.push(callback);
-			},
-			queueLaunchCompletion: notification => {
-				deliveries.push([sessionId, notification]);
-				return Promise.resolve();
-			},
-		};
-		const switchTo = (nextSessionId: string): void => {
-			sessionId = nextSessionId;
-			for (const callback of callbacks.splice(0)) callback(boundary);
-		};
-		try {
-			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
-			await startService(session, {
-				name: "old-service",
-				command: "echo service-ready; read answer; exit 3",
-				ready: { log: "service-ready", timeout: 5 },
-			});
-			switchTo("new-session");
-			await listServices(session);
-			await sendService(session, "old-service", "go\n");
-			const exited = await client.request({ op: "wait", name: "old-service", for: "exit", timeoutMs: 5_000 });
-			if (exited.op !== "wait") throw new Error("Expected daemon exit wait");
-			expect(exited.daemon.state).toBe("failed");
-			expect(deliveries).toEqual([]);
-
-			switchTo("old-session");
-			// The broker writes the replay before the list response, so the sink has already run.
-			await listServices(session);
-			expect(
-				deliveries.map(([receiver, { owner, daemon }]) => [receiver, owner, daemon.name, daemon.state]),
-			).toEqual([["old-session", "old-session", "old-service", "failed"]]);
-			await client.request({ op: "shutdown" });
-			await broker.finished;
-			const metadata = (await Bun.file(path.join(runtimeDir, "daemons", "old-service", "meta.json")).json()) as {
-				pendingCompletions: DaemonCompletionNotification[];
+	it.each(["switch", "new"] as const)(
+		"replays a completion to its session when resumed after %s",
+		async boundary => {
+			using tempDir = TempDir.createSync("@omp-service-transition-");
+			const projectDir = path.join(tempDir.path(), "project");
+			const runtimeDir = path.join(tempDir.path(), "runtime");
+			await fs.mkdir(projectDir);
+			const client = await brokerClients.createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+			const previousTitle = process.title;
+			const broker = await startBroker(projectDir, runtimeDir);
+			let sessionId = "old-session";
+			const callbacks: Array<(boundary: LaunchContextBoundary) => void> = [];
+			const deliveries: Array<[string, DaemonCompletionNotification]> = [];
+			const session: ToolSession = {
+				cwd: projectDir,
+				hasUI: false,
+				settings: Settings.isolated(),
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				getAgentId: () => "Main",
+				getSessionId: () => sessionId,
+				registerContextBoundaryCallback: callback => {
+					callbacks.push(callback);
+				},
+				queueLaunchCompletion: notification => {
+					deliveries.push([sessionId, notification]);
+					return Promise.resolve();
+				},
 			};
-			expect(metadata.pendingCompletions).toEqual([]);
-		} finally {
-			vi.restoreAllMocks();
-			await client.request({ op: "shutdown" }).catch(() => undefined);
-			client.close();
-			await broker.finished;
-			process.title = previousTitle;
-		}
-	}, 15_000);
+			const switchTo = (nextSessionId: string): void => {
+				sessionId = nextSessionId;
+				for (const callback of callbacks.splice(0)) callback(boundary);
+			};
+			try {
+				vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
+				await startService(session, {
+					name: "old-service",
+					command: "echo service-ready; read answer; exit 3",
+					ready: { log: "service-ready", timeout: 5 },
+				});
+				switchTo("new-session");
+				await listServices(session);
+				await sendService(session, "old-service", "go\n");
+				const exited = await client.request({ op: "wait", name: "old-service", for: "exit", timeoutMs: 5_000 });
+				if (exited.op !== "wait") throw new Error("Expected daemon exit wait");
+				expect(exited.daemon.state).toBe("failed");
+				expect(deliveries).toEqual([]);
+
+				switchTo("old-session");
+				// The broker writes the replay before the list response, so the sink has already run.
+				await listServices(session);
+				expect(
+					deliveries.map(([receiver, { owner, daemon }]) => [receiver, owner, daemon.name, daemon.state]),
+				).toEqual([["old-session", "old-session", "old-service", "failed"]]);
+				await client.request({ op: "shutdown" });
+				await broker.finished;
+				const metadata = (await Bun.file(path.join(runtimeDir, "daemons", "old-service", "meta.json")).json()) as {
+					pendingCompletions: DaemonCompletionNotification[];
+				};
+				expect(metadata.pendingCompletions).toEqual([]);
+			} finally {
+				vi.restoreAllMocks();
+				await client.request({ op: "shutdown" }).catch(() => undefined);
+				client.close();
+				await broker.finished;
+				process.title = previousTitle;
+			}
+		},
+		15_000,
+	);
 
 	it("replays a detached service exit only when its original session resumes after broker restart", async () => {
 		using tempDir = TempDir.createSync("@omp-service-detached-");
@@ -203,9 +207,11 @@ describe("session-owned supervised services", () => {
 		});
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockImplementation(async () => client);
-			await listServices(makeSession("original-session", [], callback => {
-				disposeOriginal.push(callback);
-			}));
+			await listServices(
+				makeSession("original-session", [], callback => {
+					disposeOriginal.push(callback);
+				}),
+			);
 			const started = await client.request({
 				op: "start",
 				owner: "original-session",

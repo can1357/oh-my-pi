@@ -257,8 +257,6 @@ describe("async batch message boundaries", () => {
 });
 
 describe("async progress chatty guidance", () => {
-
-
 	test("omits the reminder element for unsupported sources", () => {
 		const message = buildAsyncProgressBatchMessage([
 			progressEntry({
@@ -364,6 +362,44 @@ describe("async result terminal-only content for artifact-backed jobs", () => {
 
 		expect(message).not.toBeNull();
 		expect(message!.content).not.toContain("<result>");
+	});
+
+	test("does not repeat raw progress in a failed completion payload", () => {
+		const rawResult =
+			"stdout-1\nstdout-2\nASYNC_ERROR_MESSAGE\n\nWall time: 5.01 seconds\n\nCommand exited with code 7";
+		const leftover = "ASYNC_ERROR_MESSAGE";
+		const message = buildAsyncResultBatchMessage([
+			resultEntry({
+				result: rawResult,
+				job: fakeJob({ status: "failed", terminalTextProvenance: "progress" }),
+				progressSummary: {
+					artifactId: "art-failed",
+					leftover: { text: leftover, truncated: false },
+				},
+			}),
+		]);
+
+		expect(message).not.toBeNull();
+		expect(message!.content).toContain(`<output>\n${leftover}\n</output>`);
+		expect(message!.content).not.toContain("stdout-1");
+		expect(message!.content).not.toContain("<result>");
+		expect(message!.details?.jobs[0]?.terminalText).toBe(leftover);
+	});
+	test("does not repeat raw progress when no artifact exists", () => {
+		const rawResult =
+			"stdout-1\nstdout-2\nASYNC_ERROR_MESSAGE\n\nWall time: 5.01 seconds\n\nCommand exited with code 7";
+		const message = buildAsyncResultBatchMessage([
+			resultEntry({
+				result: rawResult,
+				job: fakeJob({ status: "failed", terminalTextProvenance: "progress" }),
+			}),
+		]);
+
+		expect(message).not.toBeNull();
+		expect(message!.content).not.toContain("stdout-1");
+		expect(message!.content).not.toContain("ASYNC_ERROR_MESSAGE");
+		expect(message!.content).not.toContain("<result>");
+		expect(message!.details?.jobs[0]?.terminalText).toBeUndefined();
 	});
 });
 

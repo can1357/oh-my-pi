@@ -1228,6 +1228,7 @@ describe("AgentSession owner-routed async delivery", () => {
 				live.queueLaunchCompletion(notification, epoch),
 			setLaunchMonitorActive: (monitorId: string, delivery: "wake" | "ambient", active: boolean, epoch: number) =>
 				live.setLaunchMonitorActive(monitorId, delivery, active, epoch),
+			discardLaunchProgress: (monitorId: string, epoch: number) => live.discardLaunchProgress(monitorId, epoch),
 			registerDisposeCallback: () => () => {},
 			registerContextBoundaryCallback: (callback: (boundary: LaunchContextBoundary) => void) =>
 				live.registerContextBoundaryCallback(callback),
@@ -1572,8 +1573,8 @@ describe("AgentSession owner-routed async delivery", () => {
 		const resultQueued = observeAsyncResultEnqueue(session);
 
 		// Complete a job while no turn is available to inject its queued result.
-		// The job body stays retained until either the queue commits it or a hub
-		// snapshot recovers it.
+		// The job body stays retained until either the queue commits it or a wait
+		// result recovers it.
 		manager.register("task", "prior session", async () => "STALE ASYNC RESULT", {
 			id: "prior-session-job",
 			ownerId: "Main",
@@ -1756,6 +1757,213 @@ describe("AgentSession owner-routed async delivery", () => {
 		manager.watchJobs([job.id]);
 		gate.resolve("done");
 		await manager.waitForAll();
+	});
+
+	it("drops queued ambient and wake progress when their jobs are cancelled before flush", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const busyStarted = Promise.withResolvers<void>();
+		const releaseBusy = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			handler: async () => {
+				busyStarted.resolve();
+				await releaseBusy.promise;
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+
+		const ambientGate = Promise.withResolvers<string>();
+		const wakeGate = Promise.withResolvers<string>();
+		manager.register("bash", "cancelled ambient progress", () => ambientGate.promise, {
+			id: "cancelled-ambient-progress",
+			ownerId: "Main",
+			progressDelivery: "ambient",
+		});
+		manager.register("bash", "cancelled wake progress", () => wakeGate.promise, {
+			id: "cancelled-wake-progress",
+			ownerId: "Main",
+			progressDelivery: "wake",
+		});
+		const ambientJob = manager.getJob("cancelled-ambient-progress");
+		const wakeJob = manager.getJob("cancelled-wake-progress");
+		if (!ambientJob || !wakeJob) throw new Error("Expected registered cancellation jobs");
+
+		const activeTurn = session.sendUserMessage("hold the progress flush");
+		await busyStarted.promise;
+		session.yieldQueue.enqueue<AsyncProgressEntry>("async-progress", {
+			jobId: ambientJob.id,
+			text: "CANCELLED AMBIENT PROGRESS",
+			job: ambientJob,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+			delivery: "ambient",
+		});
+		session.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, {
+			jobId: wakeJob.id,
+			text: "CANCELLED WAKE PROGRESS",
+			job: wakeJob,
+			seq: 1,
+			elapsedMs: 10,
+			epoch: 0,
+			delivery: "wake",
+		});
+		expect(session.yieldQueue.has("async-progress")).toBe(true);
+		expect(session.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND)).toBe(true);
+
+		expect(manager.cancel(ambientJob.id)).toBe(true);
+		expect(manager.cancel(wakeJob.id)).toBe(true);
+		releaseBusy.resolve();
+		await activeTurn;
+		await session.sendUserMessage("continue after cancellation");
+
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).not.toContain("CANCELLED AMBIENT PROGRESS");
+		expect(observedText).not.toContain("CANCELLED WAKE PROGRESS");
+
+		ambientGate.resolve("cancelled");
+		wakeGate.resolve("cancelled");
+		await manager.waitForAll();
+	});
+
+	it("discards queued wake and ambient progress only for the detached process monitor", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const busyStarted = Promise.withResolvers<void>();
+		const releaseBusy = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			handler: async () => {
+				busyStarted.resolve();
+				await releaseBusy.promise;
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+
+		const epoch = session.captureLaunchProgressEpoch();
+		const activeTurn = session.sendUserMessage("hold process progress");
+		await busyStarted.promise;
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "detached-monitor",
+				name: "watched",
+				daemonId: "shared-daemon",
+				seq: 1,
+				text: "DETACHED AMBIENT PROGRESS",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			epoch,
+		);
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "detached-monitor",
+				name: "watched",
+				daemonId: "shared-daemon",
+				seq: 2,
+				text: "DETACHED WAKE PROGRESS",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"wake",
+			Date.now(),
+			epoch,
+		);
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "unrelated-monitor",
+				name: "watched",
+				daemonId: "shared-daemon",
+				seq: 1,
+				text: "UNRELATED PROCESS PROGRESS",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			epoch,
+		);
+
+		session.promoteLaunchProgress("shared-daemon", epoch);
+		session.discardLaunchProgress("detached-monitor", epoch);
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "reattached-monitor",
+				name: "watched",
+				daemonId: "shared-daemon",
+				seq: 1,
+				text: "REATTACHED PROCESS PROGRESS",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			epoch,
+		);
+
+		releaseBusy.resolve();
+		await activeTurn;
+		await session.sendUserMessage("flush remaining process progress");
+
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).not.toContain("DETACHED AMBIENT PROGRESS");
+		expect(observedText).not.toContain("DETACHED WAKE PROGRESS");
+		expect(observedText).toContain("UNRELATED PROCESS PROGRESS");
+		expect(observedText).toContain("REATTACHED PROCESS PROGRESS");
 	});
 
 	it("acknowledges managed ambient progress without deleting a colliding process source", async () => {

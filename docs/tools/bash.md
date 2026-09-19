@@ -183,13 +183,15 @@ Change the calling session's subscription with `write`:
 ```
 
 - `wake` or `ambient` attaches to a running service or retunes an existing subscription. A new attachment captures future output only; it does not replay earlier logs.
-- `off` detaches this session's monitor without stopping the service or affecting other watchers. A service started without monitoring can gain a monitor later.
+- `off` detaches this session's monitor and discards its queued progress without stopping the service or affecting other watchers. A service started without monitoring can gain a monitor later.
 - `read proc://` and `read proc://web` show watchers, their delivery modes, and capture artifacts.
 - Monitoring and lifetime are independent: `proc://web/mode` changes service survival, not progress delivery. Fully detached services cannot be live-monitored; read their output through `proc://web`, or relaunch with named `bash` service mode when safe.
 - Complete non-empty merged output lines are batched over a trailing 200 ms window. A final partial line is flushed before completion. Progress is rate-limited; truncated or suppressed previews link the raw capture at `artifact://<id>`.
 - Inline progress is not an exhaustive log. Read the artifact or service output before concluding that no error or state transition occurred.
 - Progress and completion are separate. Do not poll `proc://` or call `wait` to keep a turn alive for wake progress; finish other work, then end the turn and let the harness resume it. Use `ready` at launch when readiness must be observed before continuing.
-- For noisy progress, lower source verbosity on a safe relaunch (calling named `bash` again replaces the live service with the new command). To keep it running, write `ambient` or `off` to its progress URL. Output queued before a mode change can still arrive afterward.
+- For noisy progress, lower source verbosity on a safe relaunch (calling named `bash` again replaces the live service with the new command). To keep it running, write `ambient` or `off` to its progress URL. Queued output survives `wake`/`ambient` retunes; explicit `off` discards it. Terminal cleanup preserves the final progress batch before completion.
+
+When a supervised service exits with a nonzero code without an explicit diagnostic, the broker records `exitReason` as `process exited with code <n> without a reported termination reason`. Named Bash results, `proc://` state/output, and owner completion notices include this neutral diagnostic; it does not infer whether the child or an external terminator supplied the code. If the runtime provides a signal, the reason names that signal instead.
 
 ### Background-job retuning
 

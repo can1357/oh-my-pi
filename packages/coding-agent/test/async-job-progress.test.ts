@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import {
 	type AsyncJob,
 	AsyncJobManager,
+	AsyncJobRunError,
 	type AsyncJobProgressDelivery,
 	type AsyncJobProgressInfo,
 	type AsyncJobProgressSink,
@@ -1073,7 +1074,7 @@ describe("AsyncJobManager model progress", () => {
 		expect(newId).toBe(oldId);
 		const newJob = manager.getJob(newId);
 		const reportNew = await newStarted.promise;
-		reportNew("new progress");
+		reportNew("new progress", { artifactId: "new-generation-artifact" });
 		vi.advanceTimersByTime(200);
 		for (let iteration = 0; iteration < 5; iteration++) await Promise.resolve();
 		expect(delivered).toEqual(["old first", "new progress"]);
@@ -1113,6 +1114,37 @@ describe("AsyncJobManager model progress", () => {
 			status: "failed",
 			errorText: "synchronous failure",
 			progressDeliveredCount: 1,
+		});
+	});
+
+	test("classifies a failed raw result as progress when failure carries stream provenance", async () => {
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const rawOutput = "stdout-1\nstdout-2\nASYNC_ERROR_MESSAGE\n";
+		const terminalText = `${rawOutput}\nWall time: 5.01 seconds\n\nCommand exited with code 7`;
+		const jobId = manager.register(
+			"bash",
+			"failure with streamed output",
+			async ({ reportAgentProgress }) => {
+				reportAgentProgress(rawOutput, {
+					artifactId: "failed-output",
+					streamProvenance: progressStreamProvenanceForText(rawOutput),
+				});
+				throw new AsyncJobRunError(terminalText, { exitCode: 7 }, undefined, rawOutput);
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+
+		await manager.waitForAll();
+
+		expect(recorder.seen.map(item => item.text)).toEqual([rawOutput]);
+		expect(manager.getJob(jobId)).toMatchObject({
+			status: "failed",
+			errorText: terminalText,
+			progressDeliveredCount: 1,
+			progressArtifactId: "failed-output",
+			terminalTextProvenance: "progress",
 		});
 	});
 

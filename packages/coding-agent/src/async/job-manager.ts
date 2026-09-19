@@ -142,9 +142,9 @@ export interface AsyncJob {
 	/** Stable artifact containing the complete raw output behind bounded progress previews. */
 	progressArtifactId?: string;
 	/**
-	 * Whether the successful terminal result was derived from the exact raw
-	 * stream already covered by progress, or contains terminal-only
-	 * post-processing that must remain in the completion.
+	 * Whether the terminal result matches raw progress backed by a confirmed
+	 * complete capture artifact. Without that capture, or for terminal-only
+	 * post-processing, the completion must retain the terminal text.
 	 */
 	terminalTextProvenance?: "progress" | "terminal";
 }
@@ -279,14 +279,18 @@ export interface AsyncJobRunResult {
  * Failure-path counterpart of {@link AsyncJobRunResult}: a run callback that
  * throws this error attaches executor metadata (`exitCode`, `timedOut`, …)
  * which the manager merges into {@link AsyncJob.latestDetails} at settlement.
+ * `terminalTextSource` identifies raw output already represented by progress,
+ * allowing the completion to retain only terminal leftovers.
  */
 export class AsyncJobRunError extends Error {
 	readonly details: AsyncJobDetails;
+	readonly terminalTextSource: string | undefined;
 
-	constructor(message: string, details: AsyncJobDetails, options?: ErrorOptions) {
+	constructor(message: string, details: AsyncJobDetails, options?: ErrorOptions, terminalTextSource?: string) {
 		super(message, options);
 		this.name = "AsyncJobRunError";
 		this.details = details;
+		this.terminalTextSource = terminalTextSource;
 	}
 }
 
@@ -592,10 +596,17 @@ export class AsyncJobManager {
 				if (error instanceof AsyncJobError && error.structured) job.structured = error.structured;
 				if (error instanceof AsyncJobRunError) this.#mergeSettledDetails(job, error.details);
 				const errorText = error instanceof Error ? error.message : String(error);
+				const terminalTextSource = error instanceof AsyncJobRunError ? error.terminalTextSource : undefined;
 				job.terminalTextProvenance = "terminal";
 				// Mirror the success-path guard: cancellation can occur while
 				// the failure waits for its final progress sink to drain.
-				if (!this.#isCancelled(job)) await this.#settleAgentProgress(job);
+				if (!this.#isCancelled(job)) {
+					await this.#settleAgentProgress(
+						job,
+						terminalTextSource === undefined ? undefined : errorText,
+						terminalTextSource,
+					);
+				}
 				job.errorText = errorText;
 				if (!this.#isCancelled(job)) {
 					job.status = "failed";
@@ -1061,7 +1072,11 @@ export class AsyncJobManager {
 		if (this.#jobs.get(job.id) !== job) return;
 		if (terminalText !== undefined && terminalTextSource !== undefined) {
 			const delivered = this.#lastDeliveredAgentProgress.get(job.progressKey);
+			// Raw-stream identity survives bounded previews and rate limiting;
+			// it does not prove every byte was visible. Only a confirmed capture
+			// makes suppressing the terminal copy recoverable.
 			job.terminalTextProvenance =
+				job.progressArtifactId !== undefined &&
 				job.progressDeliveryCoverage === "continuous" &&
 				(pendingCoversTerminal ||
 					streamProvenanceMatchesText(job.foregroundStreamProvenance, terminalTextSource) ||
@@ -1495,7 +1510,11 @@ export class AsyncJobManager {
 	}
 
 	#isProgressDeliverySuppressed(jobId: string): boolean {
-		return this.#jobs.get(jobId)?.foreground === true || this.#suppressedProgressDeliveries.has(jobId) || this.#watchedJobs.has(jobId);
+		return (
+			this.#jobs.get(jobId)?.foreground === true ||
+			this.#suppressedProgressDeliveries.has(jobId) ||
+			this.#watchedJobs.has(jobId)
+		);
 	}
 
 	#enqueueDelivery(jobId: string, text: string): void {

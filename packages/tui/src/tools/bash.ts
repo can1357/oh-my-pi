@@ -11,6 +11,7 @@ import {
 	previewWindowRows,
 	replaceTabs,
 } from "../render/render-utils";
+import { displayDaemonExitReason } from "./daemon";
 import {
 	formatStyledTruncationWarning,
 	type OutputMeta,
@@ -64,6 +65,8 @@ export interface BashToolDetails {
 		ready: boolean;
 		timedOut: boolean;
 		pid?: number;
+		/** Terminal launch diagnostic, independent of the output preview. */
+		exitReason?: string;
 		/** Live output monitor delivery attached at start; absent when unmonitored. */
 		progress?: "wake" | "ambient";
 		/** Reason live output monitoring stopped; progress is absent once stopped. */
@@ -458,6 +461,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						uiTheme,
 					);
 					const outputLines: string[] = [...formatted.lines];
+					const serviceReason = displayDaemonExitReason(details?.service?.exitReason);
+					if (serviceReason) outputLines.push(uiTheme.fg("error", `Reason: ${serviceReason}`));
+					const monitorStopped = displayDaemonExitReason(details?.service?.monitorStopped);
+					if (monitorStopped) {
+						outputLines.push(uiTheme.fg("warning", `Progress monitoring stopped: ${monitorStopped}`));
+					}
 					if (timeoutLine) outputLines.push(timeoutLine);
 					if (warningLine) outputLines.push(warningLine);
 

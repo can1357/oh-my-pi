@@ -59,6 +59,7 @@ interface MonitorHarness {
 	active: Array<{ monitorId: string; delivery: string; active: boolean }>;
 	completionPreservePending: boolean[];
 	epochs: number[];
+	discarded: Array<{ monitorId: string; epoch: number }>;
 	disposeCallbacks: Array<() => void>;
 	contextBoundaryCallbacks: Set<(boundary: LaunchContextBoundary) => void>;
 	getOutputSink(): ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
@@ -72,6 +73,7 @@ interface MonitorHarness {
 function createHarness(
 	artifact?: { id: string; path: string },
 	outputReady: Promise<void> = Promise.resolve(),
+	daemonSnapshot: DaemonSnapshot = daemon,
 ): MonitorHarness {
 	const allocatedArtifact =
 		artifact ??
@@ -86,6 +88,7 @@ function createHarness(
 	const active: MonitorHarness["active"] = [];
 	const completionPreservePending: boolean[] = [];
 	const epochs: number[] = [];
+	const discarded: MonitorHarness["discarded"] = [];
 	const disposeCallbacks: Array<() => void> = [];
 	const contextBoundaryCallbacks = new Set<(boundary: LaunchContextBoundary) => void>();
 	let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
@@ -130,8 +133,8 @@ function createHarness(
 			}
 			if (operation.op === "start") {
 				// Starts subscribe before the launch so no early lines are missed.
-				expect(subscription).toMatchObject({ name: daemon.name, owner: OWNER });
-				return { op: "start", daemon, readyTimedOut: false };
+				expect(subscription).toMatchObject({ name: daemonSnapshot.name, owner: OWNER });
+				return { op: "start", daemon: daemonSnapshot, readyTimedOut: false };
 			}
 			if (operation.op === "describe") return { op: "describe", daemon, spec };
 			if (operation.op === "logs") {
@@ -159,6 +162,9 @@ function createHarness(
 			epochs.push(epoch);
 			progress.push({ notification, delivery, artifactId });
 		},
+		discardLaunchProgress: (monitorId: string, epoch: number) => {
+			discarded.push({ monitorId, epoch });
+		},
 		queueLaunchCompletion: async (notification: DaemonCompletionNotification, epoch: number) => {
 			completions.push(notification);
 			completionEpochs.push(epoch);
@@ -184,6 +190,7 @@ function createHarness(
 		completionEpochs,
 		active,
 		completionPreservePending,
+		discarded,
 		disposeCallbacks,
 		contextBoundaryCallbacks,
 		epochs,
@@ -210,7 +217,12 @@ describe("service output monitoring", () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 
-		await startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" });
+		await startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "wake",
+		});
 
 		expect(harness.requests.map(operation => operation.op)).toEqual(["ping", "start", "logs"]);
 		const subscription = harness.getSubscription();
@@ -251,7 +263,11 @@ describe("service output monitoring", () => {
 		const harness = createHarness(undefined, publication.promise);
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 
-		const starting = startService(harness.session, { name: daemon.name, command: "echo service-ready", progress: "wake", });
+		const starting = startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			progress: "wake",
+		});
 		await drainMicrotasks();
 		expect(harness.requests.map(operation => operation.op)).toEqual(["ping", "start"]);
 		expect(harness.registrationCount()).toBe(1);
@@ -323,8 +339,12 @@ describe("service output monitoring", () => {
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 
 		await expect(
-			startService(harness.session, { name: daemon.name, command: "echo service-ready", ready: { log: "(" },
-				progress: "wake", }),
+			startService(harness.session, {
+				name: daemon.name,
+				command: "echo service-ready",
+				ready: { log: "(" },
+				progress: "wake",
+			}),
 		).rejects.toThrow("Invalid readiness regex");
 
 		expect(harness.requests).toEqual([]);
@@ -334,31 +354,34 @@ describe("service output monitoring", () => {
 		expect(harness.active).toEqual([]);
 	});
 
-	it.each(["unavailable", undefined] as const)("rejects progress without session delivery (%s) but allows monitor off", async mode => {
-		const harness = createHarness();
-		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
-		const advisorSession = { ...harness.session, processProgressMode: mode } as ToolSession;
+	it.each(["unavailable", undefined] as const)(
+		"rejects progress without session delivery (%s) but allows monitor off",
+		async mode => {
+			const harness = createHarness();
+			const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+			const advisorSession = { ...harness.session, processProgressMode: mode } as ToolSession;
 
-		await expect(
-			startService(advisorSession, {
-				name: daemon.name,
-				command: "echo ready",
-				progress: "wake",
-			}),
-		).rejects.toThrow("Live process progress monitoring is unavailable in this tool session");
-		await expect(
-			monitorService(advisorSession, daemon.name, "ambient"),
-		).rejects.toThrow("Live process progress monitoring is unavailable in this tool session");
+			await expect(
+				startService(advisorSession, {
+					name: daemon.name,
+					command: "echo ready",
+					progress: "wake",
+				}),
+			).rejects.toThrow("Live process progress monitoring is unavailable in this tool session");
+			await expect(monitorService(advisorSession, daemon.name, "ambient")).rejects.toThrow(
+				"Live process progress monitoring is unavailable in this tool session",
+			);
 
-		expect(broker).not.toHaveBeenCalled();
-		expect(harness.requests).toEqual([]);
-		expect(harness.getSubscription()).toBeUndefined();
+			expect(broker).not.toHaveBeenCalled();
+			expect(harness.requests).toEqual([]);
+			expect(harness.getSubscription()).toBeUndefined();
 
-		const unmonitored = await monitorService(advisorSession, daemon.name, "off");
-		expect(unmonitored.detached).toBe(false);
-		expect(broker).toHaveBeenCalledTimes(1);
-		expect(harness.requests).toEqual([expect.objectContaining({ op: "describe" })]);
-	});
+			const unmonitored = await monitorService(advisorSession, daemon.name, "off");
+			expect(unmonitored.detached).toBe(false);
+			expect(broker).toHaveBeenCalledTimes(1);
+			expect(harness.requests).toEqual([expect.objectContaining({ op: "describe" })]);
+		},
+	);
 
 	it("rejects a monitored start without a session owner but accepts explicit off", async () => {
 		const harness = createHarness();
@@ -374,7 +397,7 @@ describe("service output monitoring", () => {
 		});
 
 		await expect(
-			startService(session, { name: daemon.name, command: "echo service-ready", progress: "wake", }),
+			startService(session, { name: daemon.name, command: "echo service-ready", progress: "wake" }),
 		).rejects.toThrow("Live progress monitoring requires a session owner");
 
 		expect(harness.requests).toEqual([]);
@@ -525,7 +548,6 @@ describe("service output monitoring", () => {
 		expect(harness.republishCount()).toBe(1);
 	});
 
-
 	it("rejects monitoring a detached service without registering an output sink", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
@@ -536,9 +558,7 @@ describe("service output monitoring", () => {
 			if (operation.op === "describe") return { op: "describe", daemon: { ...daemon, detached: true }, spec };
 			throw new Error(`Unexpected operation: ${operation.op}`);
 		});
-		await expect(
-			monitorService(harness.session, daemon.name, "ambient"),
-		).rejects.toBeInstanceOf(ToolError);
+		await expect(monitorService(harness.session, daemon.name, "ambient")).rejects.toBeInstanceOf(ToolError);
 		expect(harness.registrationCount()).toBe(0);
 		expect(harness.active).toEqual([]);
 	});
@@ -806,9 +826,9 @@ describe("service output monitoring", () => {
 			})
 			.mockImplementation((subscription, sink) => onOutput.call(harness.client, subscription, sink));
 
-		await expect(
-			monitorService(harness.session, daemon.name, "wake"),
-		).rejects.toThrow("client closed during publication");
+		await expect(monitorService(harness.session, daemon.name, "wake")).rejects.toThrow(
+			"client closed during publication",
+		);
 
 		const restored = harness.getSubscription();
 		const restoredSink = harness.getOutputSink();
@@ -897,13 +917,25 @@ describe("service output monitoring", () => {
 		]);
 	});
 
-	it("detaches with progress off without stopping the process", async () => {
+	it("detaches with progress off and invalidates output queued by that monitor", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 
 		await monitorService(harness.session, daemon.name, "wake");
 		const subscription = harness.getSubscription();
 		if (!subscription) throw new Error("Expected output subscription");
+		const sink = harness.getOutputSink();
+		if (!sink) throw new Error("Expected output sink");
+		await sink({
+			event: "daemon-output",
+			monitorId: subscription.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "QUEUED BEFORE DETACH",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
 		const detached = await monitorService(harness.session, daemon.name, "off");
 		const alreadyDetached = await monitorService(harness.session, daemon.name, "off");
 
@@ -911,6 +943,7 @@ describe("service output monitoring", () => {
 		expect(harness.requests.map(operation => operation.op)).toEqual(["ping", "describe", "describe", "describe"]);
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
 		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
+		expect(harness.discarded).toEqual([{ monitorId: subscription.id, epoch: 17 }]);
 		expect(detached.detached).toBe(true);
 		expect(alreadyDetached.detached).toBe(false);
 		expect(detached.daemon.state).toBe("running");
@@ -922,11 +955,10 @@ describe("service output monitoring", () => {
 
 		await monitorService(harness.session, daemon.name, "wake");
 		vi.spyOn(harness.client, "request").mockRejectedValue(new Error("broker unavailable"));
-		await expect(
-			monitorService(harness.session, daemon.name, "off"),
-		).rejects.toThrow("broker unavailable");
+		await expect(monitorService(harness.session, daemon.name, "off")).rejects.toThrow("broker unavailable");
 
 		expect(harness.unregisterCount()).toBe(0);
+		expect(harness.discarded).toEqual([]);
 		expect(harness.getOutputSink()).toBeDefined();
 		expect(harness.active.at(-1)?.active).toBe(true);
 	});
@@ -937,12 +969,12 @@ describe("service output monitoring", () => {
 		vi.spyOn(harness.client, "request").mockResolvedValue({
 			op: "ping",
 			projectDir: process.cwd(),
-			capabilities: ["output-monitor-v1"],
+			capabilities: ["output-monitor-v4"],
 		});
 
-		await expect(
-			monitorService(harness.session, daemon.name, "wake"),
-		).rejects.toThrow("restart it with this omp build");
+		await expect(monitorService(harness.session, daemon.name, "wake")).rejects.toThrow(
+			"restart it with this omp build",
+		);
 		// The capability check fails before the attach, so no subscription was
 		// ever registered and no monitor state was touched.
 		expect(harness.unregisterCount()).toBe(0);
@@ -970,9 +1002,9 @@ describe("service output monitoring", () => {
 			throw new Error("process exited during retune");
 		});
 
-		await expect(
-			monitorService(harness.session, daemon.name, "ambient"),
-		).rejects.toThrow("process exited during retune");
+		await expect(monitorService(harness.session, daemon.name, "ambient")).rejects.toThrow(
+			"process exited during retune",
+		);
 
 		expect(harness.unregisterCount()).toBe(1);
 		// The retune fails before its registration exists, so the last state
@@ -1157,6 +1189,49 @@ describe("service output monitoring", () => {
 		expect(harness.completionEpochs).toEqual([17]);
 	});
 
+	it("retains terminal monitor state until synthesized completion delivery succeeds on retry", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const attempts: DaemonCompletionNotification[] = [];
+		const committed: DaemonCompletionNotification[] = [];
+		vi.spyOn(harness.session, "queueLaunchCompletion").mockImplementation(async notification => {
+			attempts.push(notification);
+			if (attempts.length === 1) throw new Error("idle completion injection failed");
+			committed.push(notification);
+		});
+
+		await monitorService(harness.session, daemon.name, "wake");
+		const subscription = harness.getSubscription();
+		const sink = harness.getOutputSink();
+		if (!subscription || !sink) throw new Error("Expected output subscription");
+		const stopped: DaemonSnapshot = { ...daemon, state: "exited", pid: undefined, exitCode: 143 };
+		const clock = vi.spyOn(Date, "now").mockReturnValue(100);
+		const terminal: DaemonMonitorNotification = {
+			event: "daemon-monitor-completed",
+			monitorId: subscription.id,
+			daemon: stopped,
+			ownerNotified: false,
+		};
+
+		await expect(sink(terminal)).rejects.toThrow("idle completion injection failed");
+
+		expect(harness.getSubscription()).toBe(subscription);
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.unregisterCount()).toBe(0);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: true });
+
+		clock.mockReturnValue(200);
+		await sink(terminal);
+
+		expect(attempts).toHaveLength(2);
+		expect(attempts[1]).toEqual(attempts[0]);
+		expect(committed).toEqual([attempts[1]]);
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
+	});
+
 	it("suppresses the synthesized completion when the monitoring session stopped the process itself", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
@@ -1257,9 +1332,7 @@ describe("service output monitoring", () => {
 		});
 
 		await monitorService(harness.session, daemon.name, "wake");
-		await expect(stopService(harness.session, daemon.name)).rejects.toThrow(
-			"stop transport failed",
-		);
+		await expect(stopService(harness.session, daemon.name)).rejects.toThrow("stop transport failed");
 		const subscription = harness.getSubscription();
 		const sink = harness.getOutputSink();
 		if (!subscription || !sink) throw new Error("Expected output subscription");
@@ -1290,7 +1363,13 @@ describe("service output monitoring", () => {
 	it("buffers speculative progress until the start is retained, then flushes it", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
-		vi.spyOn(harness.client, "request").mockImplementation(async operation => { if (operation.op === "ping") { return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] }; } if (operation.op === "logs") return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state }; if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`); // The subscription advertised ahead of the start request is marked
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "logs")
+				return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state };
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`); // The subscription advertised ahead of the start request is marked
 			// start-pending so the broker defers stale terminal replay.
 			expect(harness.getSubscription()?.startPending).toBeTrue();
 			const subscription = harness.getSubscription();
@@ -1307,9 +1386,15 @@ describe("service output monitoring", () => {
 			});
 			// Still speculative: nothing may wake the session before validation.
 			expect(harness.progress).toEqual([]);
-			return { op: "start", daemon, readyTimedOut: false }; });
+			return { op: "start", daemon, readyTimedOut: false };
+		});
 
-		await startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" });
+		await startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "wake",
+		});
 		await drainMicrotasks();
 
 		expect(harness.progress.map(item => item.notification.text)).toEqual(["early"]);
@@ -1397,6 +1482,7 @@ describe("service output monitoring", () => {
 		const order: string[] = [];
 		let deliveredProgress: Extract<DaemonMonitorNotification, { event: "daemon-output" }> | undefined;
 		let deliveredTerminal: DaemonCompletionNotification | undefined;
+		const completionReceipt = Promise.withResolvers<void>();
 		vi.spyOn(harness.session, "queueLaunchProgress").mockImplementation(notification => {
 			deliveredProgress = notification;
 			order.push("progress");
@@ -1404,10 +1490,12 @@ describe("service output monitoring", () => {
 		vi.spyOn(harness.session, "queueLaunchCompletion").mockImplementation(notification => {
 			deliveredTerminal = notification;
 			order.push(`terminal:${notification.daemon.state}`);
-			return Promise.resolve();
+			return completionReceipt.promise;
 		});
 		const startBuffered = Promise.withResolvers<void>();
 		const releaseStart = Promise.withResolvers<void>();
+		let terminalReceipt: Promise<void> | undefined;
+		let terminalAcknowledged = false;
 		const exited: DaemonSnapshot = {
 			...daemon,
 			state: "exited",
@@ -1423,7 +1511,14 @@ describe("service output monitoring", () => {
 			else if (index === batchCount - 1) marker = "LAST";
 			return `${marker}:${"x".repeat(220)}`;
 		});
-		vi.spyOn(harness.client, "request").mockImplementation(async operation => { if (operation.op === "ping") { return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] }; } if (operation.op === "logs") return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state }; if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`); const subscription = harness.getSubscription();
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "logs")
+				return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state };
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			const subscription = harness.getSubscription();
 			const sink = harness.getOutputSink();
 			if (!subscription || !sink) throw new Error("Expected output subscription");
 			for (const [index, text] of progressText.entries()) {
@@ -1438,25 +1533,41 @@ describe("service output monitoring", () => {
 					suppressedEvents: 1,
 				});
 			}
-			await sink({
-				event: "daemon-monitor-completed",
-				monitorId: subscription.id,
-				daemon: exited,
-				ownerNotified: false,
+			terminalReceipt = Promise.resolve(
+				sink({
+					event: "daemon-monitor-completed",
+					monitorId: subscription.id,
+					daemon: exited,
+					ownerNotified: false,
+				}),
+			).then(() => {
+				terminalAcknowledged = true;
 			});
 			startBuffered.resolve();
 			await releaseStart.promise;
-			return { op: "start", daemon: exited, readyTimedOut: false }; });
+			return { op: "start", daemon: exited, readyTimedOut: false };
+		});
 
-		const launch = startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" }).then(result => {
+		const launch = startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "wake",
+		}).then(result => {
 			order.push("resolved");
 			return result;
 		});
 		await startBuffered.promise;
 		expect(order).toEqual([]);
+		expect(terminalAcknowledged).toBeFalse();
 
 		releaseStart.resolve();
 		await launch;
+		expect(terminalAcknowledged).toBeFalse();
+		expect(harness.unregisterCount()).toBe(0);
+		completionReceipt.resolve();
+		await terminalReceipt;
+		expect(terminalAcknowledged).toBeTrue();
 
 		expect(order).toEqual(["progress", "terminal:exited", "resolved"]);
 		expect(Buffer.byteLength(deliveredProgress?.text ?? "", "utf8")).toBeLessThanOrEqual(
@@ -1472,12 +1583,19 @@ describe("service output monitoring", () => {
 		expect(deliveredProgress?.text).toContain("LAST:");
 		expect(deliveredTerminal?.daemon).toMatchObject({ state: "exited", exitCode: 0 });
 		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.discarded).toEqual([]);
 	});
 
 	it("discards coalesced speculative progress and terminal completion when the start fails", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
-		vi.spyOn(harness.client, "request").mockImplementation(async operation => { if (operation.op === "ping") { return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] }; } if (operation.op === "logs") return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state }; if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`); const subscription = harness.getSubscription();
+		let terminalReceipt: Promise<void> | undefined;
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			const subscription = harness.getSubscription();
 			const sink = harness.getOutputSink();
 			if (!subscription || !sink) throw new Error("Expected output subscription");
 			// Output and a terminal signal arrive while the start is pending,
@@ -1494,17 +1612,26 @@ describe("service output monitoring", () => {
 					suppressedEvents: 1,
 				});
 			}
-			await sink({
-				event: "daemon-monitor-completed",
-				monitorId: subscription.id,
-				daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
-				ownerNotified: false,
-			});
-			throw new Error("start transport failed"); });
+			terminalReceipt = Promise.resolve(
+				sink({
+					event: "daemon-monitor-completed",
+					monitorId: subscription.id,
+					daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+					ownerNotified: false,
+				}),
+			);
+			throw new Error("start transport failed");
+		});
 
 		await expect(
-			startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" }),
+			startService(harness.session, {
+				name: daemon.name,
+				command: "echo service-ready",
+				pty: false,
+				progress: "wake",
+			}),
 		).rejects.toThrow("start transport failed");
+		await terminalReceipt;
 		await drainMicrotasks();
 
 		expect(harness.progress).toEqual([]);
@@ -1512,7 +1639,6 @@ describe("service output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(1);
 		expect(harness.active.at(-1)?.active).toBe(false);
 	});
-
 
 	it("replaces a stale registration when a monitored start reuses the name", async () => {
 		const harness = createHarness();
@@ -1522,15 +1648,27 @@ describe("service output monitoring", () => {
 		const stale = harness.getSubscription();
 		if (!stale) throw new Error("Expected output subscription");
 
-		vi.spyOn(harness.client, "request").mockImplementation(async operation => { if (operation.op === "ping") { return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] }; } if (operation.op === "logs") return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state }; if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`); // The start must advertise a fresh start-pending subscription — never
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "logs")
+				return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state };
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`); // The start must advertise a fresh start-pending subscription — never
 			// the stale one — so the broker cannot replay the old daemon's
 			// terminal notification and tear the monitor down before launch.
 			const advertised = harness.getSubscription();
 			expect(advertised?.id).not.toBe(stale.id);
 			expect(advertised?.startPending).toBeTrue();
-			return { op: "start", daemon, readyTimedOut: false }; });
+			return { op: "start", daemon, readyTimedOut: false };
+		});
 
-		await startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" });
+		await startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "wake",
+		});
 		await drainMicrotasks();
 
 		// The stale registration was torn down; the new one carries the start.
@@ -1561,7 +1699,14 @@ describe("service output monitoring", () => {
 		await monitorService(harness.session, daemon.name, "ambient");
 		const prior = harness.getSubscription();
 		if (!prior) throw new Error("Expected output subscription");
-		vi.spyOn(harness.client, "request").mockImplementation(async operation => { if (operation.op === "ping") { return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] }; } if (operation.op === "logs") return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state }; if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`); const advertised = harness.getSubscription();
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "logs")
+				return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state };
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			const advertised = harness.getSubscription();
 			if (!advertised) throw new Error("Expected output subscription");
 			expect(advertised.id).not.toBe(prior.id);
 			// Output emitted while the failing start is still validating belongs
@@ -1576,10 +1721,16 @@ describe("service output monitoring", () => {
 				batchKind: "progress",
 				suppressedEvents: 0,
 			});
-			throw new Error("start transport failed"); });
+			throw new Error("start transport failed");
+		});
 
 		await expect(
-			startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" }),
+			startService(harness.session, {
+				name: daemon.name,
+				command: "echo service-ready",
+				pty: false,
+				progress: "wake",
+			}),
 		).rejects.toThrow("start transport failed");
 		await drainMicrotasks();
 
@@ -1629,9 +1780,125 @@ describe("service output monitoring", () => {
 		});
 
 		await expect(
-			startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" }),
+			startService(harness.session, {
+				name: daemon.name,
+				command: "echo service-ready",
+				pty: false,
+				progress: "wake",
+			}),
 		).rejects.toThrow("start transport failed");
 		expect(allocationCount).toBe(3);
+	});
+
+	it("restores a replaced start-pending registration as start-pending when the replacement fails publication", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const startEntered = Promise.withResolvers<void>();
+		const releaseStart = Promise.withResolvers<void>();
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "describe") return { op: "describe", daemon, spec };
+			if (operation.op === "logs") {
+				return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state };
+			}
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			startEntered.resolve();
+			await releaseStart.promise;
+			return { op: "start", daemon, readyTimedOut: false };
+		});
+		const onOutput = harness.client.onOutput;
+		if (!onOutput) throw new Error("Expected output monitoring support");
+		let publicationCount = 0;
+		vi.spyOn(harness.client, "onOutput").mockImplementation((subscription, sink) => {
+			publicationCount++;
+			const unregister = onOutput.call(harness.client, subscription, sink);
+			if (!unregister) throw new Error("Expected output registration");
+			return Object.assign(unregister, {
+				ready: publicationCount === 2 ? Promise.reject(new Error("publication failed")) : Promise.resolve(),
+			});
+		});
+
+		const start = startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "wake",
+		});
+		await startEntered.promise;
+		expect(harness.getSubscription()?.startPending).toBeTrue();
+
+		// A monitor call for the same name while the start is still validating
+		// replaces the start-pending registration; when its publication fails,
+		// the restored registration must still be waiting for the start rather
+		// than bound to whatever incarnation `describe` reported.
+		await expect(monitorService(harness.session, daemon.name, "ambient")).rejects.toThrow("publication failed");
+		const restored = harness.getSubscription();
+		if (!restored) throw new Error("Expected restored output subscription");
+		expect(restored.startPending).toBeTrue();
+		expect(restored.daemonId).toBeUndefined();
+
+		releaseStart.resolve();
+		await start;
+		const attached = harness.getSubscription();
+		expect(attached?.id).toBe(restored.id);
+		expect(attached?.daemonId).toBe(daemon.id);
+		expect(attached?.startPending).toBeUndefined();
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: restored.id, delivery: "wake", active: true });
+	});
+
+	it("releases a restored start-pending registration when the original start fails", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const startEntered = Promise.withResolvers<void>();
+		const failStart = Promise.withResolvers<void>();
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "describe") return { op: "describe", daemon, spec };
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			startEntered.resolve();
+			await failStart.promise;
+			throw new Error("spawn failed");
+		});
+		const onOutput = harness.client.onOutput;
+		if (!onOutput) throw new Error("Expected output monitoring support");
+		let publicationCount = 0;
+		vi.spyOn(harness.client, "onOutput").mockImplementation((subscription, sink) => {
+			publicationCount++;
+			const unregister = onOutput.call(harness.client, subscription, sink);
+			if (!unregister) throw new Error("Expected output registration");
+			return Object.assign(unregister, {
+				ready: publicationCount === 2 ? Promise.reject(new Error("publication failed")) : Promise.resolve(),
+			});
+		});
+
+		const start = startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "wake",
+		});
+		await startEntered.promise;
+		await expect(monitorService(harness.session, daemon.name, "ambient")).rejects.toThrow("publication failed");
+		const restored = harness.getSubscription();
+		if (!restored) throw new Error("Expected restored output subscription");
+		expect(restored.startPending).toBeTrue();
+		expect(harness.active.at(-1)).toEqual({ monitorId: restored.id, delivery: "wake", active: true });
+
+		// The restored registration only exists on behalf of the in-flight
+		// start. When that start fails there is no process to monitor, so the
+		// restored slot must be released with it instead of staying active and
+		// start-pending forever (which would pin pending async work).
+		failStart.resolve();
+		await expect(start).rejects.toThrow("spawn failed");
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.active.at(-1)).toEqual({ monitorId: restored.id, delivery: "wake", active: false });
 	});
 
 	it("restores start-pending state when an overlapping replacement start fails", async () => {
@@ -1640,15 +1907,28 @@ describe("service output monitoring", () => {
 		const firstStartEntered = Promise.withResolvers<void>();
 		const releaseFirstStart = Promise.withResolvers<void>();
 		let startCount = 0;
-		vi.spyOn(harness.client, "request").mockImplementation(async operation => { if (operation.op === "ping") { return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] }; } if (operation.op === "logs") return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state }; if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`); startCount++;
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "logs")
+				return { op: "logs", name: daemon.name, text: "", cursor: 0, timedOut: false, state: daemon.state };
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			startCount++;
 			if (startCount === 1) {
 				firstStartEntered.resolve();
 				await releaseFirstStart.promise;
 				return { op: "start", daemon, readyTimedOut: false };
 			}
-			throw new Error("start transport failed"); });
+			throw new Error("start transport failed");
+		});
 		const start = () =>
-			startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" });
+			startService(harness.session, {
+				name: daemon.name,
+				command: "echo service-ready",
+				pty: false,
+				progress: "wake",
+			});
 
 		const first = start();
 		await firstStartEntered.promise;
@@ -1696,7 +1976,12 @@ describe("service output monitoring", () => {
 			throw new Error(`Unexpected operation: ${operation.op}`);
 		});
 
-		const replacement = startService(harness.session, { name: daemon.name, command: "echo service-ready", pty: false, progress: "wake" });
+		const replacement = startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "wake",
+		});
 		const settlement = replacement.then(
 			() => ({ ok: true as const }),
 			(error: unknown) => ({ ok: false as const, error }),
@@ -1755,9 +2040,7 @@ describe("service output monitoring", () => {
 			throw new Error("broker unavailable");
 		});
 
-		await expect(
-			monitorService(harness.session, daemon.name, "ambient"),
-		).rejects.toThrow("broker unavailable");
+		await expect(monitorService(harness.session, daemon.name, "ambient")).rejects.toThrow("broker unavailable");
 
 		expect(harness.progress.map(item => item.delivery)).toEqual(["wake"]);
 		expect(harness.unregisterCount()).toBe(0);

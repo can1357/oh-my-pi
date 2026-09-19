@@ -23,16 +23,33 @@ import type { LaunchContextBoundary, ToolSession } from "../../src/tools";
 
 const OWNER = "service-owner";
 const daemon: DaemonSnapshot = {
-	name: "web", id: "old-id", state: "running", createdAt: 1, startedAt: 1,
-	restartCount: 0, outputBytes: 0, owner: OWNER, persist: false, detached: false,
+	name: "web",
+	id: "old-id",
+	state: "running",
+	createdAt: 1,
+	startedAt: 1,
+	restartCount: 0,
+	outputBytes: 0,
+	owner: OWNER,
+	persist: false,
+	detached: false,
 };
 const spec: DaemonSpec = {
-	name: daemon.name, application: process.execPath, args: [], cwd: process.cwd(),
-	env: {}, pty: false, restart: "no", persist: false, detached: false,
+	name: daemon.name,
+	application: process.execPath,
+	args: [],
+	cwd: process.cwd(),
+	env: {},
+	pty: false,
+	restart: "no",
+	persist: false,
+	detached: false,
 };
 function completed(snapshot = daemon): DaemonCompletionNotification {
 	return {
-		event: "daemon-completed", completionId: `completed-${snapshot.id}`, owner: OWNER,
+		event: "daemon-completed",
+		completionId: `completed-${snapshot.id}`,
+		owner: OWNER,
 		daemon: { ...snapshot, state: "exited", exitedAt: 3, exitCode: 0 },
 	};
 }
@@ -60,46 +77,76 @@ function fixture() {
 		onOutput: (registered, sink) => {
 			subscription = registered;
 			outputSink = sink;
-			return Object.assign(() => {
-				if (outputSink === sink) outputSink = undefined;
-				if (subscription === registered) subscription = undefined;
-			}, { ready: Promise.resolve(), republish() {} });
+			return Object.assign(
+				() => {
+					if (outputSink === sink) outputSink = undefined;
+					if (subscription === registered) subscription = undefined;
+				},
+				{ ready: Promise.resolve(), republish() {} },
+			);
 		},
 		request: async operation => {
-			if (operation.op === "ping") return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
-			if (operation.op === "start") return { op: "start", daemon: { ...daemon, name: operation.spec.name }, readyTimedOut: false };
+			if (operation.op === "ping")
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			if (operation.op === "start")
+				return { op: "start", daemon: { ...daemon, name: operation.spec.name }, readyTimedOut: false };
 			if (operation.op === "list") return { op: "list", daemons: [daemon] };
 			if (operation.op === "describe") return { op: "describe", daemon, spec };
 			if (operation.op === "stop") return { op: "stop", daemon: completed().daemon };
-			if (operation.op === "logs") return { op: "logs", name: daemon.name, text: "ready", cursor: 5, timedOut: false, state: "running" };
+			if (operation.op === "logs")
+				return { op: "logs", name: daemon.name, text: "ready", cursor: 5, timedOut: false, state: "running" };
 			throw new Error(`Unexpected operation: ${operation.op}`);
 		},
 		close() {},
 	};
 	const session: ToolSession = {
-		cwd: process.cwd(), hasUI: false, settings: Settings.isolated(), processProgressMode: "session",
-		getSessionFile: () => null, getSessionSpawns: () => "*", getSessionId: () => owner,
+		cwd: process.cwd(),
+		hasUI: false,
+		settings: Settings.isolated(),
+		processProgressMode: "session",
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		getSessionId: () => owner,
 		captureLaunchProgressEpoch: () => epoch,
 		allocateOutputArtifact: async () => ({ id: "service-progress", path: "/tmp/service-epoch-progress.log" }),
-		queueLaunchProgress: notification => { progress.push(notification.text); },
-		queueLaunchCompletion: async (notification, capturedEpoch) => { queued.push({ id: notification.daemon.id, epoch: capturedEpoch }); },
+		queueLaunchProgress: notification => {
+			progress.push(notification.text);
+		},
+		queueLaunchCompletion: async (notification, capturedEpoch) => {
+			queued.push({ id: notification.daemon.id, epoch: capturedEpoch });
+		},
 		registerContextBoundaryCallback: callback => {
 			boundaries.add(callback);
-			return () => { boundaries.delete(callback); };
+			return () => {
+				boundaries.delete(callback);
+			};
 		},
 		registerDisposeCallback: callback => {
 			disposals.add(callback);
-			return () => { disposals.delete(callback); };
+			return () => {
+				disposals.delete(callback);
+			};
 		},
 	};
 	vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
 	return {
-		client, session, queued, progress, preserved, boundaries, disposals,
-		advance: () => { epoch++; },
-		changeOwner: () => { owner = "other-session"; epoch++; },
+		client,
+		session,
+		queued,
+		progress,
+		preserved,
+		boundaries,
+		disposals,
+		advance: () => {
+			epoch++;
+		},
+		changeOwner: () => {
+			owner = "other-session";
+			epoch++;
+		},
 		boundary: (boundary: LaunchContextBoundary) => {
 			epoch++;
-			for (const callback of [...boundaries]) callback(boundary);
+			for (const callback of boundaries) callback(boundary);
 		},
 		sink: () => {
 			if (!completionSink) throw new Error("No completion sink");
@@ -112,7 +159,9 @@ function fixture() {
 	};
 }
 
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 describe("service operation epochs and completion replay", () => {
 	it.each(["list", "logs", "stop"] as const)("restores the owner sink before resumed %s requests", async operation => {
@@ -134,7 +183,7 @@ describe("service operation epochs and completion replay", () => {
 		await listServices(f.session);
 		await f.sink()(completed());
 		expect(f.queued).toEqual([{ id: daemon.id, epoch: 11 }]);
-		for (const dispose of [...f.disposals]) dispose();
+		for (const dispose of f.disposals) dispose();
 		expect(f.preserved).toEqual([true]);
 	});
 
@@ -168,21 +217,27 @@ describe("service operation epochs and completion replay", () => {
 		});
 		await startService(f.session, { name: daemon.name, command: "echo fresh" });
 		await f.sink()(completed(fresh));
-		expect(f.queued).toEqual([{ id: daemon.id, epoch: 11 }, { id: fresh.id, epoch: 12 }]);
+		expect(f.queued).toEqual([
+			{ id: daemon.id, epoch: 11 },
+			{ id: fresh.id, epoch: 12 },
+		]);
 	});
 
-	it.each(["switch", "new", "dispose"] as const)("releases reset provenance on a later %s without a service call in between", async boundary => {
-		const f = fixture();
-		await startService(f.session, { name: daemon.name, command: "echo old" });
-		f.boundary("reset");
-		if (boundary === "dispose") {
-			for (const dispose of [...f.disposals]) dispose();
-			f.advance();
-		} else f.boundary(boundary);
-		await listServices(f.session);
-		await f.sink()(completed());
-		expect(f.queued).toEqual([{ id: daemon.id, epoch: 13 }]);
-	});
+	it.each(["switch", "new", "dispose"] as const)(
+		"releases reset provenance on a later %s without a service call in between",
+		async boundary => {
+			const f = fixture();
+			await startService(f.session, { name: daemon.name, command: "echo old" });
+			f.boundary("reset");
+			if (boundary === "dispose") {
+				for (const dispose of f.disposals) dispose();
+				f.advance();
+			} else f.boundary(boundary);
+			await listServices(f.session);
+			await f.sink()(completed());
+			expect(f.queued).toEqual([{ id: daemon.id, epoch: 13 }]);
+		},
+	);
 
 	it("keeps the initiating epoch if the ToolSession changes before completion", async () => {
 		const f = fixture();
@@ -190,7 +245,7 @@ describe("service operation epochs and completion replay", () => {
 		f.changeOwner();
 		await f.sink()(completed());
 		expect(f.queued).toEqual([{ id: daemon.id, epoch: 11 }]);
-		for (const dispose of [...f.disposals]) dispose();
+		for (const dispose of f.disposals) dispose();
 		expect(f.preserved).toEqual([true]);
 	});
 
@@ -279,7 +334,10 @@ describe("service operation epochs and completion replay", () => {
 		await starting;
 		await replay;
 		await f.sink()(completed(fresh));
-		expect(f.queued).toEqual([{ id: "older-replay-id", epoch: 11 }, { id: fresh.id, epoch: 12 }]);
+		expect(f.queued).toEqual([
+			{ id: "older-replay-id", epoch: 11 },
+			{ id: fresh.id, epoch: 12 },
+		]);
 	});
 
 	it.each(["local", "rejected"] as const)("does not leave bindings behind after %s start failures", async failure => {
@@ -308,12 +366,16 @@ describe("service operation epochs and completion replay", () => {
 			onDispatch?.("written");
 			throw new Error("Broker accepted start but response was lost");
 		});
-		await expect(startService(f.session, { name: daemon.name, command: "echo ready" })).rejects.toThrow("response was lost");
+		await expect(startService(f.session, { name: daemon.name, command: "echo ready" })).rejects.toThrow(
+			"response was lost",
+		);
 		await f.sink()(completed());
 		await f.sink()(completed({ ...daemon, id: "fresh-id" }));
 		await f.sink()(completed({ ...daemon, id: "unrelated-id" }));
 		expect(f.queued).toEqual([
-			{ id: daemon.id, epoch: 11 }, { id: "fresh-id", epoch: 12 }, { id: "unrelated-id", epoch: 11 },
+			{ id: daemon.id, epoch: 11 },
+			{ id: "fresh-id", epoch: 12 },
+			{ id: "unrelated-id", epoch: 11 },
 		]);
 	});
 
@@ -356,8 +418,13 @@ describe("legacy broker log compatibility", () => {
 	it("renders raw terminal text from an already-running broker", async () => {
 		const f = fixture();
 		vi.spyOn(f.client, "request").mockResolvedValue({
-			op: "logs", name: daemon.name, text: "ready", terminalText: "old\r\x1b[2K\x1b[1;32mready\x1b[0m",
-			cursor: 42, timedOut: false, state: "running",
+			op: "logs",
+			name: daemon.name,
+			text: "ready",
+			terminalText: "old\r\x1b[2K\x1b[1;32mready\x1b[0m",
+			cursor: 42,
+			timedOut: false,
+			state: "running",
 		});
 		const result = await serviceLogsWithRows(f.session, daemon.name);
 		expect(result.terminalRows).toEqual(["\x1b[0m\x1b[1;38;5;2mready"]);
@@ -366,10 +433,18 @@ describe("legacy broker log compatibility", () => {
 	it("keeps sanitized logs when optional terminal replay fails", async () => {
 		const f = fixture();
 		vi.spyOn(f.client, "request").mockResolvedValue({
-			op: "logs", name: daemon.name, text: "ready", terminalText: "raw", cursor: 42, timedOut: false, state: "running",
+			op: "logs",
+			name: daemon.name,
+			text: "ready",
+			terminalText: "raw",
+			cursor: 42,
+			timedOut: false,
+			state: "running",
 		});
 		class CleanExitWorker extends EventTarget {
-			postMessage(): void { this.dispatchEvent(new Event("close")); }
+			postMessage(): void {
+				this.dispatchEvent(new Event("close"));
+			}
 			terminate(): void {}
 		}
 		const original = Object.getOwnPropertyDescriptor(globalThis, "Worker");

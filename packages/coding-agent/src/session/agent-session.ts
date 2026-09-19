@@ -1916,6 +1916,7 @@ export class AgentSession implements SettingsScope {
 			skipIdleFlush: true,
 			isStale: entry =>
 				entry.epoch !== (entry.source?.type === "process" ? this.#launchProgressEpoch : this.#asyncDeliveryEpoch) ||
+				entry.job?.status === "cancelled" ||
 				(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
 			// Ambient entries accumulate for as long as the owner stays idle; fold
 			// them into one bounded window per job so the queue cannot grow (and
@@ -1940,6 +1941,7 @@ export class AgentSession implements SettingsScope {
 				isStale: entry =>
 					entry.epoch !==
 						(entry.source?.type === "process" ? this.#launchProgressEpoch : this.#asyncDeliveryEpoch) ||
+					entry.job?.status === "cancelled" ||
 					(entry.job !== undefined && this.#asyncJobManager?.isDeliverySuppressed(entry.jobId) === true),
 				idleTurnBudget: this.#wakeTurnBudget,
 				coalesceKey: asyncProgressCoalesceKey,
@@ -2813,6 +2815,19 @@ export class AgentSession implements SettingsScope {
 			queued.push(...this.yieldQueue.take<AsyncProgressEntry>(targetKind, matchesSource));
 		}
 		queued.sort((left, right) => left.seq - right.seq);
+		if (identity.source?.type === "process") {
+			// A daemon can retain output from more than one registration. Move all
+			// of it together, but keep each registration independently discardable.
+			const monitors = new Map<string | undefined, AsyncProgressEntry>();
+			for (const entry of queued) {
+				const previous = monitors.get(entry.monitorId);
+				monitors.set(entry.monitorId, previous ? mergeAsyncProgressEntries(previous, entry) : entry);
+			}
+			for (const entry of monitors.values()) {
+				this.yieldQueue.enqueue<AsyncProgressEntry>(targetKind, { ...entry, delivery });
+			}
+			return;
+		}
 		let merged = queued[0]!;
 		for (let index = 1; index < queued.length; index++) {
 			merged = mergeAsyncProgressEntries(merged, queued[index]!);
@@ -2834,10 +2849,11 @@ export class AgentSession implements SettingsScope {
 		// must not enqueue — the suppression marker alone is unreliable because
 		// job-id reuse clears it.
 		const epoch = this.#asyncDeliveryEpoch;
-		// A job whose live output already reached this agent (and whose complete
-		// stream sits in a stable artifact) must not re-send that output with the
-		// completion: point at the artifact and carry only the never-delivered
-		// remainder captured at settlement.
+		// A job whose live output already reached this agent must not re-send
+		// that output with completion, whether or not it has a stable artifact.
+		// Artifact-backed jobs carry only the never-delivered settlement
+		// remainder; artifact-less jobs rely on the progress message already
+		// present in the transcript.
 		const progressSummary =
 			job?.progressDelivery !== undefined &&
 			(job.progressDeliveredCount ?? 0) > 0 &&
@@ -2849,7 +2865,7 @@ export class AgentSession implements SettingsScope {
 		// leftover). Successful post-processing such as Bash minimization is
 		// terminal-only provenance and must remain visible just like failure text.
 		const formatted =
-			progressSummary && job?.terminalTextProvenance === "progress"
+			job?.terminalTextProvenance === "progress"
 				? ""
 				: await this.#formatAsyncResultForFollowUp(text, job?.latestDetails?.meta);
 		if (this.#isDisposed) return;
@@ -8052,6 +8068,7 @@ export class AgentSession implements SettingsScope {
 				label: notification.name,
 				startedAt,
 			},
+			monitorId: notification.monitorId,
 			seq: notification.seq,
 			elapsedMs: Math.max(0, Date.now() - startedAt),
 			epoch,
@@ -8062,6 +8079,13 @@ export class AgentSession implements SettingsScope {
 			reminder: notification.reminder,
 		});
 		this.#signalLaunchMonitorChanged();
+	}
+
+	discardLaunchProgress(monitorId: string, epoch: number): void {
+		const matchesMonitor = (entry: AsyncProgressEntry): boolean =>
+			entry.epoch === epoch && entry.source?.type === "process" && entry.monitorId === monitorId;
+		this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, matchesMonitor);
+		this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, matchesMonitor);
 	}
 
 	#signalLaunchMonitorChanged(): void {
