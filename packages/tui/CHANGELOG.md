@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+- TUI terminal detection now resolves the emulator behind tmux from the attached client's terminal-type reply instead of degrading to the color-depth fallback
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

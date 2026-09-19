@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import {
 	detectStyledUnderlineSupport,
 	detectTerminalId,
@@ -76,6 +79,91 @@ describe("detectTerminalId", () => {
 		const env = { TERM: "xterm-256color", TERM_PROGRAM: "", COLORTERM: "truecolor", VTE_VERSION: "8400" };
 
 		expect(detectTerminalId(env)).toBe("trueColor");
+	});
+});
+
+/**
+ * The probe and the identity merge it feeds, exercised end-to-end: a fake `tmux`
+ * on PATH, a child process that is not a test runtime, and the pane env of the
+ * reported stack (WezTerm over ssh into a tmux session). The child resolves its
+ * client once and then answers the merge questions from synthetic envs, so the
+ * assertions stay about what a consumer sees — the resolved id.
+ */
+describe("tmux client terminal probe", () => {
+	const DETECT_REPORT = `import { TERMINAL_ID, detectTerminalId } from "@oh-my-pi/pi-tui/terminal-capabilities";
+const pane = { ...Bun.env };
+console.log(JSON.stringify({
+	pane: TERMINAL_ID,
+	nested: detectTerminalId({ ...pane, KITTY_WINDOW_ID: "7" }),
+	noSession: detectTerminalId({ ...pane, TMUX: undefined }),
+}));`;
+
+	async function detectIdReport(termtype: string | null): Promise<Record<string, string>> {
+		const binDir = termtype === null ? null : await fs.mkdtemp(path.join(os.tmpdir(), "omp-tmux-client-"));
+		try {
+			if (binDir !== null && termtype !== null) {
+				const shim = path.join(binDir, "tmux");
+				await Bun.write(shim, `#!/bin/sh\nprintf "%s\\n" ${JSON.stringify(termtype)}\n`);
+				await fs.chmod(shim, 0o755);
+			}
+			const env = subprocessEnv({
+				// Not a test runtime: the resolver refuses to probe under `bun test`.
+				PI_TEST_RUNTIME: undefined,
+				BUN_ENV: undefined,
+				NODE_ENV: undefined,
+				TERM: "tmux-256color",
+				TERM_PROGRAM: "tmux",
+				TERM_PROGRAM_VERSION: "3.6b",
+				COLORTERM: "truecolor",
+				TMUX: "/tmp/tmux-1000/default,4242,0",
+				PATH: binDir === null ? "" : `${binDir}${path.delimiter}${Bun.env.PATH ?? ""}`,
+			});
+
+			const proc = Bun.spawn({
+				cmd: [process.execPath, "--eval", DETECT_REPORT],
+				env,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(proc.stdout).text(),
+				new Response(proc.stderr).text(),
+				proc.exited,
+			]);
+
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			return JSON.parse(stdout) as Record<string, string>;
+		} finally {
+			if (binDir !== null) await fs.rm(binDir, { force: true, recursive: true });
+		}
+	}
+
+	it.skipIf(process.platform === "win32")("resolves the emulator tmux recorded for its client", async () => {
+		const report = await detectIdReport("WezTerm 20260905-175422-0f4b5596");
+
+		expect(report.pane).toBe("wezterm");
+		// A pane-local emulator owns the keys, not the outside client.
+		expect(report.nested).toBe("kitty");
+		// `TERM_PROGRAM=tmux` without a session to ask (leaked env, inspection
+		// scripts) has no client identity to fall back on.
+		expect(report.noSession).toBe("trueColor");
+	});
+
+	it.skipIf(process.platform === "win32")("keeps the pane env in charge when the client type is unknown", async () => {
+		// `XTerm(370)` is the parenthesized spelling outside this table; it must
+		// not displace the pane env's own answer (color-depth fallback).
+		const report = await detectIdReport("XTerm(370)");
+
+		expect(report.pane).toBe("trueColor");
+	});
+
+	it.skipIf(process.platform === "win32")("keeps the pane env in charge when no tmux binary answers", async () => {
+		// No `tmux` on PATH: the probe fails, and the pane's own identity (the
+		// color-depth fallback) still decides instead of the process crashing.
+		const report = await detectIdReport(null);
+
+		expect(report.pane).toBe("trueColor");
 	});
 });
 
