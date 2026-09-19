@@ -1990,6 +1990,20 @@ function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: C
 	}
 }
 
+/**
+ * Joins text-only `content` arrays into one string (`\n`); arrays with a non-text part are kept.
+ * Runs last in {@link convertMessages}, before the prompt-cache annotators re-inflate strings.
+ */
+function collapseTextOnlyMessageContent(messages: ChatCompletionMessageParam[]): void {
+	for (const message of messages) {
+		const content = message.content;
+		if (!Array.isArray(content)) continue;
+		const textParts = content.filter(part => part.type === "text");
+		if (textParts.length !== content.length) continue;
+		message.content = textParts.map(part => part.text).join("\n");
+	}
+}
+
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -2477,6 +2491,8 @@ export function convertMessages(
 					: "system"
 				: msg.role;
 	}
+
+	if (compat.requiresStringMessageContent) collapseTextOnlyMessageContent(params);
 
 	return params;
 }

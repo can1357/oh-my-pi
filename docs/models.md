@@ -553,6 +553,7 @@ Request shaping:
 - `supportsStore` — emit `store: false` on requests. Default: auto (off for non-standard endpoints).
 - `supportsDeveloperRole` — use the `developer` system role for reasoning models instead of `system`. Default: auto.
 - `supportsMultipleSystemMessages` — preserve separate leading system/developer messages instead of coalescing them. Default: auto (known OpenAI-compatible hosted APIs preserve; strict-template/local hosts coalesce).
+- `requiresStringMessageContent` — send text-only `messages[].content` as one string (joined by `\n`) for endpoints that reject multi-part arrays. Default: `false`.
 - `supportsUsageInStreaming` — send `stream_options: { include_usage: true }` to receive token usage on streaming responses. Default: `true`.
 - `maxTokensField` — `"max_completion_tokens"` or `"max_tokens"`. Default: auto.
 - `supportsToolChoice` — emit the `tool_choice` parameter when the caller forces a specific tool. Default: `true`. Set `false` for endpoints that 400 on `tool_choice` (e.g. DeepSeek when reasoning is on).
