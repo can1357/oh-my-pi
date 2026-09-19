@@ -13,11 +13,11 @@ The theme system drives:
 - syntax highlighting colors used by native highlighter (`@oh-my-pi/pi-natives`)
 - status line segment colors
 
-Primary implementation: `src/modes/theme/theme.ts`.
+Primary implementation: `packages/tui/src/theme/theme.ts`.
 
 ## Theme JSON shape
 
-Theme files are JSON objects validated against the runtime schema in `theme.ts` (`themeJsonSchema`) and mirrored by `src/modes/theme/theme-schema.json`.
+Theme files are JSON objects validated against the runtime schema in `theme.ts` (`themeJsonSchema`) and mirrored by `packages/tui/src/theme/theme-schema.json`.
 
 Top-level fields:
 
@@ -361,6 +361,6 @@ Use this workflow:
 
 - All `colors` tokens are required for custom themes except optional `thinkingMax`, which falls back to `thinkingXhigh`.
 - `export` and `symbols` are optional.
-- `$schema` in theme JSON is informational; runtime validation is enforced by the ArkType-compatible schema in code (`themeJsonSchema` in `src/modes/theme/schema.ts`).
+- `$schema` in theme JSON is informational; runtime validation is enforced by the ArkType-compatible schema in code (`themeJsonSchema` in `packages/tui/src/theme/schema.ts`).
 - `setTheme` failure falls back to `dark`; `previewTheme` failure does not replace current theme.
 - File watcher reload errors or temporary missing files keep the current loaded theme until a successful reload or explicit theme switch.

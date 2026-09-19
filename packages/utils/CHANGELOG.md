@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [18.2.5] - 2026-09-17
+
+### Added
+
+- Added utilities for reading dotenv-sourced environment values, customizing filtered child-shell environment values, converting color palettes to RGB, cleaning trailing spaces from YAML block headers, and counting newlines in text.
+
+### Fixed
+
+- Improved rotating file logging performance by reusing an append file descriptor for each active log file.
+- Improved JSON serialization performance by avoiding unnecessary bigint handling when serializing values without bigints.
+- Fixed `$which` cache collisions for lookups using different PATH or working-directory options.
+- SSE token reads now expose raw wire-line data only when explicitly requested; the default token path no longer includes per-line raw slices.
+
 ## [18.2.3] - 2026-09-17
 
 ### Fixed

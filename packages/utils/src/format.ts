@@ -59,6 +59,22 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * Count `\n` code units via native `indexOf` — no split array, roughly an
+ * order of magnitude cheaper than a per-code-unit loop on multi-MiB text.
+ * Line-count semantics are the caller's (empty text is 0 or 1 lines
+ * depending on the contract).
+ */
+export function countNewlines(text: string): number {
+	let count = 0;
+	let pos = text.indexOf("\n");
+	while (pos !== -1) {
+		count++;
+		pos = text.indexOf("\n", pos + 1);
+	}
+	return count;
+}
+
+/**
  * Truncate a string to maxLen characters, appending an ellipsis if truncated.
  * For display-width-aware truncation (terminals), use truncateToWidth from @oh-my-pi/pi-tui.
  */

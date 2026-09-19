@@ -98,6 +98,8 @@ const PRELUDE_GLOBAL_KEYS = [
 	"wait",
 	"AgentHandle",
 	"CompletionHandle",
+	"judge",
+	"JudgmentHandle",
 	"workpool",
 	"WorkPool",
 	"log",

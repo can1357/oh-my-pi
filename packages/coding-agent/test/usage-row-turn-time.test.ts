@@ -15,10 +15,10 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { ChatTranscriptBuilder } from "@oh-my-pi/pi-coding-agent/modes/components/chat-transcript-builder";
-import { formatUsageRow } from "@oh-my-pi/pi-coding-agent/modes/components/usage-row";
+import { ChatTranscriptBuilder } from "@oh-my-pi/pi-tui/chat/chat-transcript-builder";
+import { formatUsageRow } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -282,8 +282,6 @@ describe("UiHelpers.renderSessionContext turn elapsed", () => {
 				get: (key: string) =>
 					key === "display.showTokenUsage" ? true : key === "display.showTurnTime" ? turnTimeOn : false,
 			},
-			getUserMessageText: (message: { content?: unknown }) =>
-				typeof message.content === "string" ? message.content : "",
 			addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
 			session: {
 				retryAttempt: 0,
@@ -337,7 +335,6 @@ describe("focus-attach mid-turn keeps the prompt→yield delta", () => {
 					return streamState.isStreaming;
 				},
 			},
-			getUserMessageText: message => (typeof message.content === "string" ? message.content : ""),
 		});
 		ctx.chatContainer.setToolActivityVisible(true);
 		const helpers = new UiHelpers(ctx);

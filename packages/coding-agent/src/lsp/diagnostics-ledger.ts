@@ -1,4 +1,4 @@
-import type { FileDiagnosticsResult } from "./index";
+import type { FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { summarizeDiagnosticMessages } from "./utils";
 
 const DIAGNOSTIC_LOCATION_PREFIX_RE = /^.*?:\d+:\d+\s+/;

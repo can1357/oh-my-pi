@@ -15,9 +15,9 @@ import {
 	resolveBenchTargets,
 	type StreamSimpleFn,
 } from "../cli/bench-runtime";
-import type { LiveBoardOutput } from "../cli/live-board";
+import type { LiveBoardOutput } from "@oh-my-pi/pi-tui/chrome/live-board";
 import { initialArray } from "./actions";
-import { createIfBenchBoard, formatIfBenchScoreboard } from "./board";
+import { createIfBenchBoard, formatIfBenchScoreboard } from "@oh-my-pi/pi-tui/apps/if-bench-board";
 import { DEFAULT_NYA_MAX } from "./protocol";
 import { type IfBenchSummary, runIfBench } from "./runner";
 
