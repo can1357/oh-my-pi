@@ -265,7 +265,9 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 					retune: retune ? (jobId, delivery) => ignoreSettle(retune(jobId, delivery)) : undefined,
 				}),
 			),
-		activateProgressDelivery: (manager, jobId, delivery) => manager.activateProgressDelivery(jobId, delivery),
+		activateProgressDelivery: (manager, jobId, delivery, foregroundStreamProvenance, coverage) =>
+			manager.activateProgressDelivery(jobId, delivery, foregroundStreamProvenance, coverage),
+		setProgressArtifact: (manager, jobId, artifactId) => manager.setProgressArtifact(jobId, artifactId),
 		retuneProgressDelivery: (manager, jobId, delivery, ownerId) =>
 			manager.retuneProgressDelivery(jobId, delivery, ownerId),
 		waitForOwnerJobs: (manager, ownerId, options) => manager.waitForOwnerJobs(ownerId, options),

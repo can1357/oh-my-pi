@@ -29,7 +29,9 @@ import {
 	type AsyncJobReapResult,
 	type AsyncJobRunResult,
 	type AsyncJobType,
+	type ProgressDeliveryCoverage,
 } from "../../async/job-manager";
+import type { ProgressStreamProvenance } from "../../async/progress-lines";
 import type { JobWidgetBrief } from "../../job-widgets/types";
 import type { RpcMethod } from "../rpc";
 import type { WireCallback, WireUnsubscribe } from "./support";
@@ -178,7 +180,16 @@ export type AsyncJobManagerProtocol = {
 		],
 		WireUnsubscribe
 	>;
-	activateProgressDelivery: RpcMethod<[jobId: string, delivery: AsyncJobProgressDelivery], boolean>;
+	activateProgressDelivery: RpcMethod<
+		[
+			jobId: string,
+			delivery: AsyncJobProgressDelivery,
+			foregroundStreamProvenance: ProgressStreamProvenance | undefined,
+			coverage: ProgressDeliveryCoverage | undefined,
+		],
+		boolean
+	>;
+	setProgressArtifact: RpcMethod<[jobId: string, artifactId: string | undefined], boolean>;
 	retuneProgressDelivery: RpcMethod<
 		[jobId: string, delivery: AsyncJobProgressDelivery, ownerId: string | undefined],
 		JobRetuneStatus
