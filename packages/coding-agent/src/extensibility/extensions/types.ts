@@ -745,7 +745,10 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	/** Already-normalized user images in delivery order. */
 	images?: ImageContent[];
-	systemPrompt: string[];
+	/** Serialized single string, matching the upstream Pi extension contract. */
+	systemPrompt: string;
+	/** The same prompt as ordered content blocks, for omp-native extensions that append/move blocks for prefix caching. Mutate this, not `systemPrompt`, to preserve block structure. */
+	systemPromptBlocks: string[];
 }
 
 export type {
@@ -1129,8 +1132,8 @@ export type { ToolResultEventResult } from "../shared-events";
 
 export interface BeforeAgentStartEventResult {
 	message?: CustomMessagePayload;
-	/** Replace policy for the next request and its continuations, until the next preparation. Extensions chain in order. */
-	systemPrompt?: string[];
+	/** Replace policy for the next request and its continuations, until the next preparation. Extensions chain in order. Accepts the upstream string contract or the internal content-block array. */
+	systemPrompt?: string | string[];
 }
 
 export type {
