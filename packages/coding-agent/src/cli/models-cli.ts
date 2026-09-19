@@ -289,6 +289,8 @@ export interface RunModelsListingOptions {
 	additionalExtensionPaths?: string[];
 	/** Extension paths configured under `extensions:` in user settings. */
 	settingsExtensions?: string[];
+	/** Effective settings instance for extension contexts and lifecycle hooks. */
+	settings?: Settings;
 	/** Disabled extension ids from settings (`disabledExtensions`). */
 	disabledExtensionIds?: string[];
 	/** When true, exclude ambient factories and resolve only `additionalExtensionPaths`. */
@@ -304,6 +306,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		json = false,
 		additionalExtensionPaths = [],
 		settingsExtensions = [],
+		settings,
 		disabledExtensionIds = [],
 		disableExtensionDiscovery = false,
 	} = options;
@@ -327,6 +330,8 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 					cwd,
 					SessionManager.inMemory(cwd),
 					modelRegistry,
+					undefined,
+					settings,
 				)
 			: undefined;
 
@@ -392,6 +397,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 			json,
 			additionalExtensionPaths: cliExtensionPaths,
 			settingsExtensions: settings.get("extensions") ?? [],
+			settings,
 			disabledExtensionIds: settings.get("disabledExtensions") ?? [],
 			disableExtensionDiscovery: Boolean(command.flags.noExtensions),
 		});
