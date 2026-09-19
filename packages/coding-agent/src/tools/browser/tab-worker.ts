@@ -85,12 +85,20 @@ declare module "puppeteer-core" {
 
 declare global {
 	interface Element extends HTMLElement {}
+	/** Minimal shape of the transient overlay divs created by {@link flashActionHighlight}. */
+	interface ActionHighlightBox {
+		style: { cssText: string; opacity: string; transform: string };
+		readonly offsetWidth: number;
+		remove(): void;
+	}
 	function getComputedStyle(element: Element): Record<string, unknown>;
 	var innerWidth: number;
 	var innerHeight: number;
 	var document: {
 		elementFromPoint(x: number, y: number): Element | null;
 		readonly visibilityState: "visible" | "hidden";
+		createElement(tagName: string): ActionHighlightBox;
+		readonly documentElement: { appendChild(node: ActionHighlightBox): void };
 	};
 }
 
@@ -902,6 +910,108 @@ async function isClickActionable(handle: ElementHandle): Promise<ActionabilityRe
 	})) as ActionabilityResult;
 }
 
+/**
+ * Best-effort visual cue for user-driven (relay/connected) tabs: briefly
+ * outlines the element about to be acted on and drops a virtual cursor +
+ * click-ripple at its center, so a human watching the real browser can see
+ * where the agent is working — mirroring the highlight and simulated
+ * pointer Claude in Chrome shows before each action. Purely cosmetic — a
+ * detached handle, closed page, or CSP that blocks the inline style is
+ * swallowed and never affects the underlying click/type/fill.
+ */
+function flashActionHighlight(handle: ElementHandle): void {
+	void handle
+		.evaluate(el => {
+			const element = el as HTMLElement;
+			const rect = element.getBoundingClientRect();
+			if (rect.width < 1 || rect.height < 1) return;
+			const cx = rect.left + rect.width / 2;
+			const cy = rect.top + rect.height / 2;
+
+			const box = globalThis.document.createElement("div");
+			box.style.cssText = [
+				"position:fixed",
+				`left:${rect.left}px`,
+				`top:${rect.top}px`,
+				`width:${rect.width}px`,
+				`height:${rect.height}px`,
+				"border:2px solid #ff5722",
+				"border-radius:3px",
+				"background:rgba(255,87,34,0.15)",
+				"pointer-events:none",
+				"z-index:2147483647",
+				"transition:opacity 250ms ease-out",
+			].join(";");
+			globalThis.document.documentElement.appendChild(box);
+
+			// Virtual cursor: a small arrow glyph pinned to the interaction point,
+			// plus an expanding "click ripple" centered on the same point.
+			const cursor = globalThis.document.createElement("div");
+			cursor.style.cssText = [
+				"position:fixed",
+				`left:${cx}px`,
+				`top:${cy}px`,
+				"width:20px",
+				"height:20px",
+				"margin:-2px 0 0 -2px",
+				"background:#ff5722",
+				"clip-path:polygon(0% 0%, 0% 70%, 27% 55%, 42% 92%, 58% 85%, 43% 50%, 75% 48%)",
+				"filter:drop-shadow(0 1px 2px rgba(0,0,0,0.6))",
+				"pointer-events:none",
+				"z-index:2147483647",
+				"transition:opacity 250ms ease-out",
+			].join(";");
+			globalThis.document.documentElement.appendChild(cursor);
+
+			const ripple = globalThis.document.createElement("div");
+			ripple.style.cssText = [
+				"position:fixed",
+				`left:${cx}px`,
+				`top:${cy}px`,
+				"width:10px",
+				"height:10px",
+				"margin:-5px 0 0 -5px",
+				"border-radius:50%",
+				"border:2px solid #ff5722",
+				"pointer-events:none",
+				"z-index:2147483646",
+				"transform:scale(1)",
+				"opacity:0.9",
+				"transition:transform 450ms ease-out, opacity 450ms ease-out",
+			].join(";");
+			globalThis.document.documentElement.appendChild(ripple);
+			// Force layout before flipping the transform/opacity, otherwise the
+			// browser coalesces both states into one paint and the transition
+			// (the ripple's expansion) never plays.
+			void ripple.offsetWidth;
+			ripple.style.transform = "scale(4)";
+			ripple.style.opacity = "0";
+
+			setTimeout(() => {
+				box.style.opacity = "0";
+				cursor.style.opacity = "0";
+				setTimeout(() => {
+					box.remove();
+					cursor.remove();
+					ripple.remove();
+				}, 250);
+			}, 300);
+		})
+		.catch(() => undefined);
+}
+
+/** {@link flashActionHighlight} for actions addressed by CSS selector rather than an already-resolved handle. */
+function flashActionHighlightAt(page: Page, selector: string): void {
+	void page
+		.$(selector)
+		.then(async handle => {
+			if (!handle) return;
+			flashActionHighlight(handle);
+			await handle.dispose().catch(() => undefined);
+		})
+		.catch(() => undefined);
+}
+
 async function clickQueryHandlerText(
 	page: Page,
 	selector: string,
@@ -1027,6 +1137,9 @@ export class WorkerCore {
 	#dialogPolicy?: DialogPolicy;
 	#dialogHandler?: (dialog: Dialog) => void;
 	#openDialog?: OpenDialogInfo;
+	/** In-flight action depth for the tab-group "⏳" busy indicator; see {@link #beginBusy}. */
+	#busyDepth = 0;
+	#busySession?: CDPSession;
 
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
@@ -1218,6 +1331,38 @@ export class WorkerCore {
 			// Not the omp relay; nothing to claim.
 		} finally {
 			await session?.detach().catch(() => undefined);
+		}
+	}
+
+	/**
+	 * Increment/decrement the in-flight action depth for this tab and mirror
+	 * 0↔1 transitions to the relay, so it can flag the "omp" tab group as
+	 * busy (a transient "⏳" suffix on the group title) while — and only
+	 * while — this worker is actively driving the page. Mirrors the
+	 * in-progress indicator Claude in Chrome shows on its own tab group.
+	 */
+	#beginBusy(): void {
+		this.#busyDepth++;
+		if (this.#busyDepth === 1) void this.#sendRelayBusy(true);
+	}
+
+	#endBusy(): void {
+		this.#busyDepth = Math.max(0, this.#busyDepth - 1);
+		if (this.#busyDepth === 0) void this.#sendRelayBusy(false);
+	}
+
+	/** Best-effort; mirrors {@link #claimRelayTarget}'s relay-private-method tolerance. */
+	async #sendRelayBusy(busy: boolean): Promise<void> {
+		const page = this.#page;
+		if (!page) return;
+		try {
+			if (!this.#busySession) this.#busySession = await page.createCDPSession();
+			const raw = this.#busySession as unknown as {
+				send(method: string, params?: Record<string, unknown>): Promise<unknown>;
+			};
+			await raw.send("OMP.setBusy", { busy });
+		} catch {
+			// Not the omp relay, or the session died; nothing to signal.
 		}
 	}
 
@@ -1623,6 +1768,22 @@ export class WorkerCore {
 		active: ActiveRun,
 	): TabApi {
 		const page = this.#requirePage();
+		// Only flash for user-driven (relay/connected/spawned) backends — a
+		// human might actually be watching a headless, project-shared page.
+		const showHighlight = this.#mode === "attach";
+		// Reused for the tab-group "⏳" busy indicator (#beginBusy/#endBusy);
+		// both are cosmetic, relay-only signals gated on the same condition.
+		const busyOp =
+			<T>(fn: (sig: AbortSignal) => Promise<T>): ((sig: AbortSignal) => Promise<T>) =>
+			async sig => {
+				if (!showHighlight) return fn(sig);
+				this.#beginBusy();
+				try {
+					return await fn(sig);
+				} finally {
+					this.#endBusy();
+				}
+			};
 		const { budgetBound, quickOpMs, actionOpMs } = resolveOpTimeouts(timeoutMs);
 		const waitMs = (explicit?: number): number => resolveWaitTimeout(timeoutMs, explicit);
 		const INF = Number.POSITIVE_INFINITY;
@@ -1652,27 +1813,31 @@ export class WorkerCore {
 			url: () => page.url(),
 			title: () => op("tab.title()", INF, sig => untilAborted(sig, () => page.title())),
 			goto: (url, opts) =>
-				op(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
-					this.#clearElementCache();
-					try {
-						// Default to "load" because dev servers with HMR/WS never reach networkidle.
-						// budgetBound (not the full cell) so a hung navigation fails named and
-						// catchable inside the run instead of dying with the whole cell.
-						await untilAborted(sig, () =>
-							page.goto(url, { waitUntil: opts?.waitUntil ?? "load", timeout: budgetBound }),
-						);
-					} catch (err) {
-						if (err instanceof Error && err.name === "TimeoutError") {
-							// Abandon the hung navigation NOW — a still-pending load stalls every
-							// later op on this page and cascades into more opaque timeouts.
-							await this.#stopLoading();
-							throw new ToolError(
-								`tab.goto(${JSON.stringify(url)}) timed out after ${budgetBound}ms; pending navigation stopped — retry with a longer tool timeout or waitUntil:"domcontentloaded"`,
+				op(
+					`tab.goto(${JSON.stringify(url)})`,
+					INF,
+					busyOp(async sig => {
+						this.#clearElementCache();
+						try {
+							// Default to "load" because dev servers with HMR/WS never reach networkidle.
+							// budgetBound (not the full cell) so a hung navigation fails named and
+							// catchable inside the run instead of dying with the whole cell.
+							await untilAborted(sig, () =>
+								page.goto(url, { waitUntil: opts?.waitUntil ?? "load", timeout: budgetBound }),
 							);
+						} catch (err) {
+							if (err instanceof Error && err.name === "TimeoutError") {
+								// Abandon the hung navigation NOW — a still-pending load stalls every
+								// later op on this page and cascades into more opaque timeouts.
+								await this.#stopLoading();
+								throw new ToolError(
+									`tab.goto(${JSON.stringify(url)}) timed out after ${budgetBound}ms; pending navigation stopped — retry with a longer tool timeout or waitUntil:"domcontentloaded"`,
+								);
+							}
+							throw err;
 						}
-						throw err;
-					}
-				}),
+					}),
+				),
 			observe: opts => op("tab.observe()", quickOpMs, sig => this.#collectObservation({ ...opts, signal: sig })),
 			ariaSnapshot: (selector, opts) =>
 				op(
@@ -1721,10 +1886,11 @@ export class WorkerCore {
 				op(
 					`tab.click(${JSON.stringify(selector)})`,
 					actionOpMs,
-					async sig => {
+					busyOp(async sig => {
 						if (parseAriaRefSelector(selector) !== null) {
 							const handle = await this.#resolveAriaRef(selector);
 							try {
+								if (showHighlight) flashActionHighlight(handle);
 								await untilAborted(sig, () => handle.click());
 							} finally {
 								await handle.dispose().catch(() => undefined);
@@ -1732,68 +1898,84 @@ export class WorkerCore {
 							return;
 						}
 						const resolved = normalizeSelector(selector);
+						if (showHighlight) flashActionHighlightAt(page, resolved);
 						if (resolved.startsWith("text/")) await clickQueryHandlerText(page, resolved, actionOpMs, sig);
 						else
 							await untilAborted(sig, () =>
 								page.locator(resolved).setTimeout(actionOpMs).click({ signal: sig }),
 							);
-					},
+					}),
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			type: (selector, text) =>
 				op(
 					`tab.type(${JSON.stringify(selector)})`,
 					actionOpMs,
-					async sig => {
+					busyOp(async sig => {
 						const handle = await this.#resolveActionHandle(selector, actionOpMs, sig);
 						try {
+							if (showHighlight) flashActionHighlight(handle);
 							await untilAborted(sig, () => handle.type(text, { delay: 0 }));
 						} finally {
 							await handle.dispose().catch(() => undefined);
 						}
-					},
+					}),
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			fill: (selector, value) =>
 				op(
 					`tab.fill(${JSON.stringify(selector)})`,
 					actionOpMs,
-					async sig => {
+					busyOp(async sig => {
 						if (parseAriaRefSelector(selector) !== null) {
 							const handle = await this.#resolveAriaRef(selector);
 							try {
+								if (showHighlight) flashActionHighlight(handle);
 								await fillViaHandle(handle, value, sig);
 							} finally {
 								await handle.dispose().catch(() => undefined);
 							}
 							return;
 						}
+						const resolved = normalizeSelector(selector);
+						if (showHighlight) flashActionHighlightAt(page, resolved);
 						await untilAborted(sig, () =>
-							page.locator(normalizeSelector(selector)).setTimeout(actionOpMs).fill(value, { signal: sig }),
+							page.locator(resolved).setTimeout(actionOpMs).fill(value, { signal: sig }),
 						);
-					},
+					}),
 					{ selector, zeroMatchAfterMs: ZERO_MATCH_FAIL_FAST_MS },
 				),
 			press: (key, opts) =>
-				op(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
-					const selector = opts?.selector;
-					if (selector) {
-						if (parseAriaRefSelector(selector) !== null) {
-							const handle = await this.#resolveAriaRef(selector);
-							try {
-								await untilAborted(sig, () => handle.focus());
-							} finally {
-								await handle.dispose().catch(() => undefined);
+				op(
+					`tab.press(${JSON.stringify(key)})`,
+					actionOpMs,
+					busyOp(async sig => {
+						const selector = opts?.selector;
+						if (selector) {
+							if (parseAriaRefSelector(selector) !== null) {
+								const handle = await this.#resolveAriaRef(selector);
+								try {
+									if (showHighlight) flashActionHighlight(handle);
+									await untilAborted(sig, () => handle.focus());
+								} finally {
+									await handle.dispose().catch(() => undefined);
+								}
+							} else {
+								const resolved = normalizeSelector(selector);
+								if (showHighlight) flashActionHighlightAt(page, resolved);
+								await untilAborted(sig, () => page.focus(resolved));
 							}
-						} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
-					}
-					await untilAborted(sig, () => page.keyboard.press(key));
-				}),
-			scroll: (deltaX, deltaY) =>
-				op("tab.scroll()", actionOpMs, sig =>
-					untilAborted(sig, () => dispatchScroll(() => page.mouse.wheel({ deltaX, deltaY }))),
+						}
+						await untilAborted(sig, () => page.keyboard.press(key));
+					}),
 				),
-			drag: (from, to) => op("tab.drag()", actionOpMs, sig => this.#drag(from, to, sig)),
+			scroll: (deltaX, deltaY) =>
+				op(
+					"tab.scroll()",
+					actionOpMs,
+					busyOp(sig => untilAborted(sig, () => dispatchScroll(() => page.mouse.wheel({ deltaX, deltaY })))),
+				),
+			drag: (from, to) => op("tab.drag()", actionOpMs, busyOp(sig => this.#drag(from, to, sig))),
 			waitFor: (selector, opts) => {
 				const w = waitMs(opts?.timeout);
 				return op(
@@ -2258,6 +2440,7 @@ export class WorkerCore {
 		const page = this.#page;
 		if (this.#dialogHandler && page && !page.isClosed()) page.off("dialog", this.#dialogHandler);
 		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
+		await this.#busySession?.detach().catch(() => undefined);
 		if (this.#browser?.connected) this.#browser.disconnect();
 		this.#transport.send({ type: "closed" });
 		this.#transport.close();
