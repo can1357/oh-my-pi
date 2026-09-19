@@ -30,6 +30,12 @@ describe("CmuxTab.waitFor duration form", () => {
 		expect(Date.now() - start).toBeLessThan(250);
 	});
 
+	it("reserves deadline slack when the requested duration reaches the run budget", async () => {
+		const tab = unconnectedTab();
+		tab.setRunContext({ signal: AbortSignal.timeout(20), timeoutMs: 20 } as never);
+		await expect(tab.waitFor(20)).resolves.toBeUndefined();
+	});
+
 	it("rejects negative and non-finite durations with a named error before any transport use", async () => {
 		const tab = unconnectedTab();
 		for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {

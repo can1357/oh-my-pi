@@ -29,6 +29,7 @@ import {
 	markHandled,
 	observeBrowserRunPromise,
 	resolvePredicateTimeout,
+	resolveDurationTimeout,
 	type WaitPredicateOptions,
 	waitForRun,
 	withBrowserPromiseCombinatorTracking,
@@ -386,10 +387,7 @@ export function resolveWaitTimeout(cellTimeoutMs: number, explicit?: number): nu
  * positive values clamp to the cell budget, and garbage rejects instead of guessing.
  */
 export function resolveWaitDuration(cellTimeoutMs: number, requested: number): number {
-	if (!Number.isFinite(requested) || requested < 0) {
-		throw new ToolError(`tab.waitFor(ms) takes a non-negative duration in ms, got ${JSON.stringify(requested)}`);
-	}
-	return Math.min(requested, resolveOpTimeouts(cellTimeoutMs).budgetBound);
+	return resolveDurationTimeout(cellTimeoutMs, requested);
 }
 interface TabApi {
 	readonly name: string;

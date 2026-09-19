@@ -12,6 +12,7 @@ import {
 	isBrowserRunOwnedRejection,
 	markBrowserRunRejection,
 	observeBrowserRunPromise,
+	resolveDurationTimeout,
 	resolvePredicateTimeout,
 	type WaitPredicateOptions,
 	waitForRun,
@@ -1101,10 +1102,7 @@ export class CmuxTab {
 		// NOT Puppeteer's "disable timeout" sentinel); positive durations clamp to
 		// the run timeout; garbage rejects instead of hitting assertSelectorString.
 		if (typeof selector === "number") {
-			if (!Number.isFinite(selector) || selector < 0) {
-				throw new ToolError(`tab.waitFor(ms) takes a non-negative duration in ms, got ${JSON.stringify(selector)}`);
-			}
-			const ms = Math.min(selector, this.#runContext?.timeoutMs ?? 30_000);
+			const ms = resolveDurationTimeout(this.#runContext?.timeoutMs ?? 30_000, selector);
 			if (this.#runContext) {
 				await waitForRun(ms, this.#runContext.signal);
 			} else {
