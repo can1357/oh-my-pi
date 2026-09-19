@@ -6372,6 +6372,7 @@ export class AgentSession {
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
 		if (options?.userInitiated ?? !options?.synthetic) {
 			this.#advisors.autoResumeSuppressed = false;
+			this.#advisors.resetCheckConcernsBudget();
 			this.#planModeReminderCount = 0;
 			this.#planModeReminderAwaitingProgress = false;
 			// A user turn owns the next decision; drop a queued forced choice from
@@ -7270,7 +7271,10 @@ export class AgentSession {
 		// user-driven (folds into context via #resumeStrandedIrcAsides's post-interrupt
 		// branch) until the next deliberate steer/follow-up/prompt, matching the
 		// sendCustomMessage aside path (queueAside), which never touches this flag.
-		if (mode !== "aside") this.#advisors.autoResumeSuppressed = false;
+		if (mode !== "aside") {
+			this.#advisors.autoResumeSuppressed = false;
+			this.#advisors.resetCheckConcernsBudget();
+		}
 		// The pre-dispatch re-check in prompt() arrives with normalization and the
 		// vision description already done — reuse them instead of paying a second
 		// vision-model request for the same attachment.

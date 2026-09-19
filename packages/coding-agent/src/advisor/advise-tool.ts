@@ -91,7 +91,9 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *   exception: it means the agent handed off broken or unexercised work, so it
  *   still steers a triggered turn to force the primary to acknowledge and continue
  *   before the turn is considered done (#5628) — deferring it to the next user
- *   turn is the bug.
+ *   turn is the bug. With the `checkConcerns` flag, an eligible late `concern`
+ *   takes that same blocker path: the turn is not done until the agent has judged
+ *   the concern.
  * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
  *   not auto-resume the stopped run. While the agent is idle — or still tearing
  *   the interrupted turn down (`aborting`) — the note is preserved as a visible
@@ -103,7 +105,11 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  * - During the post-interrupt immune-turn window, further `concern` notes are
  *   downgraded to asides; preservation still wins. A `blocker` is exempt: it
  *   means the agent handed off broken or unexercised work, so it still steers a
- *   triggered turn even right after a prior interrupt (#5628).
+ *   triggered turn even right after a prior interrupt (#5628). An eligible
+ *   `checkConcerns` concern is likewise exempt: it interrupts nothing (the
+ *   primary is already idle after a terminal answer) and carries its own budget,
+ *   so without the exemption later check turns would degrade to asides that sit
+ *   in the yield queue until the next human prompt.
  */
 export function resolveAdvisorDeliveryChannel(opts: {
 	severity: AdvisorSeverity | undefined;
@@ -113,13 +119,26 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	terminalAnswerNoQueuedWork?: boolean;
 	interruptImmuneTurnActive?: boolean;
 	preserveOnly?: boolean;
+	checkConcerns?: boolean;
 }): AdvisorDeliveryChannel {
+	const checkConcernTurn =
+		opts.checkConcerns === true &&
+		opts.severity === "concern" &&
+		opts.terminalAnswerNoQueuedWork === true &&
+		!opts.streaming &&
+		!opts.aborting;
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
-	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
+	if (
+		opts.terminalAnswerNoQueuedWork &&
+		opts.severity !== "blocker" &&
+		!checkConcernTurn &&
+		!opts.streaming &&
+		!opts.aborting
+	)
 		return "preserve";
 	if (!isInterruptingSeverity(opts.severity)) return "aside";
 	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
-	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
+	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker" && !checkConcernTurn) return "aside";
 	return "steer";
 }
 

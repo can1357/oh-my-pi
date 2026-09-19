@@ -26,6 +26,15 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	advisorCheckConcerns: () => {
+		try {
+			return (
+				Settings.instance.get("advisor.enabled") === true && Settings.instance.get("advisor.checkConcerns") === true
+			);
+		} catch {
+			return false;
+		}
+	},
 	vimModeEnabled: () => {
 		try {
 			return Settings.instance.get("tui.vimMode") === true;

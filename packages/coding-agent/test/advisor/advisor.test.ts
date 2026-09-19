@@ -6528,6 +6528,106 @@ describe("advisor", () => {
 			}
 		});
 	});
+	describe("checkConcerns late terminal-answer concern", () => {
+		it("steers an eligible late concern instead of preserving it, and preserves when the flag is off", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					checkConcerns: true,
+				}),
+			).toBe("steer");
+			for (const checkConcerns of [undefined, false] as const) {
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity: "concern",
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+						terminalAnswerNoQueuedWork: true,
+						checkConcerns,
+					}),
+				).toBe("preserve");
+			}
+		});
+
+		it("still steers an eligible late concern inside the immune-turn window, while a normal concern degrades", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					interruptImmuneTurnActive: true,
+					checkConcerns: true,
+				}),
+			).toBe("steer");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					interruptImmuneTurnActive: true,
+				}),
+			).toBe("preserve");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+					interruptImmuneTurnActive: true,
+				}),
+			).toBe("aside");
+		});
+
+		it("keeps preserveOnly and idle autoResumeSuppressed ahead of the check-concerns path", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					preserveOnly: true,
+					checkConcerns: true,
+				}),
+			).toBe("preserve");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: true,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					checkConcerns: true,
+				}),
+			).toBe("preserve");
+		});
+
+		it("does not convert live-turn or aborting concerns: those keep the normal steer path", () => {
+			for (const opts of [
+				{ streaming: true, aborting: false, terminalAnswerNoQueuedWork: true },
+				{ streaming: false, aborting: true, terminalAnswerNoQueuedWork: true },
+				{ streaming: false, aborting: false, terminalAnswerNoQueuedWork: false },
+			] as const) {
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity: "concern",
+						autoResumeSuppressed: false,
+						checkConcerns: true,
+						...opts,
+					}),
+				).toBe("steer");
+			}
+		});
+	});
 	describe("advisor transcript filenames", () => {
 		it("derives default and named transcript filenames", () => {
 			expect(advisorTranscriptFilename("")).toBe("__advisor.jsonl");
