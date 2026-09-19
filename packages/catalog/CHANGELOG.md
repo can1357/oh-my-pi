@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Local OpenAI-compatible backends (llama.cpp, LM Studio, vLLM, local Ollama, and loopback/LAN custom hosts) now honor `maxTokens` above 64k instead of silently clamping output to the hosted OpenAI ceiling ([#12433](https://github.com/can1357/oh-my-pi/pull/12433) by [@ton-anywhere](https://github.com/ton-anywhere)).
+
 ### Added
 
 - Added `buildDiscoveredModel` helper for custom providers

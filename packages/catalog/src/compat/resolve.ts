@@ -562,7 +562,7 @@ function detectOpenAICompat(
 		dropThinkingWhenReasoningEffort: false,
 		nativeKimiK3Reasoning: false,
 		zaiReasoningEffortDialect: false,
-		clampOutputToModelMax: false,
+		clampOutputToModelMax: d.isLocalOpenAICompatBackend,
 		stripImageInput: false,
 		thinkingLoopGuard: undefined,
 		rejectRootObjectUnion: false,
@@ -765,7 +765,9 @@ function resolveOpenAIResponsesPolicy(
 		wireModelIdMode: isOpenRouter ? "openrouter" : "raw",
 		toolSchemaFlavor: facts.is("kimi") ? "moonshot-mfjs" : undefined,
 		alwaysSendMaxTokens: facts.is("kimi"),
-		clampOutputToModelMax: false,
+		clampOutputToModelMax:
+			PROXY_OPENAI_COMPAT_PROVIDERS[provider] !== true &&
+			(LOCAL_OPENAI_COMPAT_PROVIDERS[provider] === true || hasLocalLoopbackBaseUrl(baseUrl)),
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
 		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
 		harmonyLeakMitigation: false,
