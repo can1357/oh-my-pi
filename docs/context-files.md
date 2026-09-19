@@ -122,6 +122,25 @@ Starting in `repo/packages/api`:
 - The two kept files are ordered root-first, package-last, so `packages/api`'s file is the more prominent one.
 - If you add `repo/packages/api/.omp/AGENTS.md`, `native` (priority 100) wins depth 0 outright, shadowing both lower-priority files.
 
+## Local `.local.md` siblings
+
+The native, claude, and standalone context files can carry a **local sibling**: insert `.local` before the `.md` extension (`AGENTS.md` → `AGENTS.local.md`, `CLAUDE.md` → `CLAUDE.local.md`) and gitignore it — omp does not create or ignore the file for you. Use it for machine-specific or personal context — local paths, personal tool aliases, sandbox quirks — that you do not want committed. Supported locations:
+
+| Base file                                          | Local sibling                                            |
+| -------------------------------------------------- | -------------------------------------------------------- |
+| `~/.omp/agent/AGENTS.md`                           | `AGENTS.local.md` in the same directory                  |
+| `<nearest-non-empty>/.omp/AGENTS.md`               | `AGENTS.local.md` in the same `.omp/` directory          |
+| `~/.claude/CLAUDE.md`                              | `CLAUDE.local.md` in the same directory                  |
+| `<cwd>/.claude/CLAUDE.md`                          | `CLAUDE.local.md` in the same `.claude/` directory       |
+| Standalone `AGENTS.md` (ancestor walk-up)          | `AGENTS.local.md` next to each discovered `AGENTS.md`    |
+| Standalone `CLAUDE.md` (ancestor walk-up)          | `CLAUDE.local.md` next to each discovered `CLAUDE.md`    |
+
+This is the same shape as `CLAUDE.local.md` in Claude Code and `.env.local` more generally:
+
+- **Purely additive.** The sibling is injected as an additional `<file>` element directly after its base. The base file's content, priority, and shadowing behavior are unchanged.
+- **Rides on its base.** A sibling loads only when its base is the file that survived at that scope. If `AGENTS.md` shadows `CLAUDE.md` at the same depth, `CLAUDE.local.md` does not load either; a sibling never claims a scope slot of its own. If the base is removed by `disabledProviders` or `disabledExtensions`, the sibling is dropped with it.
+- **Same rules otherwise.** An empty sibling contributes nothing. `@` imports inside a sibling resolve relative to the sibling's own directory. To drop a sibling while keeping its base, disable its own extension id, e.g. `context-file:project:CLAUDE.local.md`.
+
 ## Injection behavior
 
 With the default prompt template, discovered context files are injected into the opening project prompt as one `<repo-rules>` block, with one `<file>` element per surviving file in the sort order above:
@@ -263,6 +282,7 @@ Browse the ids interactively with `/extensions`, which lists every discovered co
 - `.claude/CLAUDE.md`, `.gemini/GEMINI.md`, and `.github/copilot-instructions.md` are read only from the current working directory's config directory — not from every ancestor.
 - `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md` are user-level only and have no project equivalent.
 - Empty files contribute nothing for the native and standalone providers.
+- A `.local.md` sibling loads only where its base file loads — the base must exist at that location and survive shadowing and disabling.
 - A disabled discovery provider contributes nothing — check `disabledProviders` across your global, project, and `--config` layers.
 - A single file can also be turned off on its own — check `disabledExtensions` for a matching `context-file:<level>:<basename>` entry, and remember that a project entry applies at every depth. `/extensions` shows the file as `disabled` when this is the cause.
 

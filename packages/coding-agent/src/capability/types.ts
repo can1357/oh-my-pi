@@ -189,6 +189,20 @@ export interface Capability<T> {
 	 */
 	key(item: T): string | undefined;
 
+	/**
+	 * Identity other items can attach to via {@link Capability.attachTo}.
+	 * Attachments ride on a survivor instead of competing for a dedup key.
+	 */
+	attachmentId?(item: T): string | undefined;
+
+	/**
+	 * Return the {@link Capability.attachmentId} this item is attached to, if any.
+	 * Attached items never claim a dedup key: they survive only when the item
+	 * carrying the matching identity survived deduplication, and are marked
+	 * `_shadowed` otherwise.
+	 */
+	attachTo?(item: T): string | undefined;
+
 	/** Treat items with different keys as aliases; the first equivalent item wins. */
 	equivalent?(left: T, right: T): boolean;
 

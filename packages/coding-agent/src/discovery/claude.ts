@@ -30,6 +30,7 @@ import {
 	getExtensionNameFromPath,
 	loadFilesFromDir,
 	scanSkillsFromDir,
+	toLocalSiblingName,
 } from "./helpers";
 
 const PROVIDER_ID = "claude";
@@ -157,13 +158,24 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 	const userClaudeMd = userBase ? path.join(userBase, "CLAUDE.md") : null;
 
 	const userContent = userClaudeMd ? await readFile(userClaudeMd) : null;
-	if (userContent !== null && userClaudeMd) {
+	if (userContent !== null && userBase && userClaudeMd) {
 		items.push({
 			path: userClaudeMd,
 			content: userContent,
 			level: "user",
 			_source: createSourceMeta(PROVIDER_ID, userClaudeMd, "user"),
 		});
+		const userLocalMd = path.join(userBase, toLocalSiblingName("CLAUDE.md"));
+		const userLocalContent = await readFile(userLocalMd);
+		if (userLocalContent !== null && userLocalContent !== "") {
+			items.push({
+				path: userLocalMd,
+				content: userLocalContent,
+				level: "user",
+				localSiblingOf: userClaudeMd,
+				_source: createSourceMeta(PROVIDER_ID, userLocalMd, "user"),
+			});
+		}
 	}
 
 	const projectBase = getProjectClaude(ctx);
@@ -178,6 +190,18 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 			depth,
 			_source: createSourceMeta(PROVIDER_ID, projectClaudeMd, "project"),
 		});
+		const projectLocalMd = path.join(projectBase, toLocalSiblingName("CLAUDE.md"));
+		const projectLocalContent = await readFile(projectLocalMd);
+		if (projectLocalContent !== null && projectLocalContent !== "") {
+			items.push({
+				path: projectLocalMd,
+				content: projectLocalContent,
+				level: "project",
+				depth,
+				localSiblingOf: projectClaudeMd,
+				_source: createSourceMeta(PROVIDER_ID, projectLocalMd, "project"),
+			});
+		}
 	}
 
 	return { items, warnings };
