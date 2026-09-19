@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import subprocess
 import threading
@@ -126,6 +127,7 @@ def _ctx() -> HostToolContext[Any]:
 def test_repo_command_env_scrubs_secrets_and_uses_workspace_cache(
     db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("FORGEJO_TOKEN", "secret-forgejo")
     monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret-webhook")
     monkeypatch.setenv("ROBOMP_GH_PROXY_HMAC_KEY", "secret-proxy")
@@ -137,6 +139,7 @@ def test_repo_command_env_scrubs_secrets_and_uses_workspace_cache(
     finally:
         _stop_loop(loop, thread)
 
+    assert env["FORGEJO_TOKEN"] == ""
     assert env["GITHUB_TOKEN"] == ""
     assert env["GITHUB_WEBHOOK_SECRET"] == ""
     assert env["ROBOMP_GH_PROXY_HMAC_KEY"] == ""
@@ -1161,6 +1164,7 @@ def _review_bindings(
         inbound_thread_number=99,
         inbound_is_pr=True,
         review_mode=True,
+        block_git_push=True,
     )
     db.upsert_issue(
         key=bindings.issue_key,
@@ -1917,6 +1921,41 @@ def test_review_mode_rejects_push_and_open_pr_before_repo_commands(db: Database,
         _stop_loop(loop, t)
 
     assert calls == []
+
+
+def test_review_mode_without_block_git_push_allows_push_and_open_pr(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review_mode and block_git_push are separate flags: with review_mode=True
+    but block_git_push=False, gh_push_branch/gh_open_pr must proceed past the
+    read-only gate and reach the repo commands (instead of raising the read-only
+    refusal). This is what lets handle_review push fixes while review_pr stays locked."""
+    calls: list[list[str] | tuple[str, ...]] = []
+
+    def record_repo_command(_bindings: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None):
+        del timeout
+        calls.append(cmd)
+        raise AssertionError("reached repo command past the block_git_push gate")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    db.set_issue_classification(bindings.issue_key, "bug")
+    bindings = dataclasses.replace(bindings, review_mode=True, block_git_push=False)
+    try:
+        monkeypatch.setattr(host_tools, "_run_repo_command", record_repo_command)
+        monkeypatch.setattr(host_tools, "_run_pre_publish_bun_fix", lambda *a, **k: None)
+        monkeypatch.setattr(host_tools, "_run_pre_publish_bun_check", lambda *a, **k: None)
+        push = next(x for x in build(bindings) if x.name == "gh_push_branch")
+        with pytest.raises(AssertionError, match="reached repo command"):
+            push.execute({}, _ctx())
+
+        open_pr = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nr\n\n## Cause\nc\n\n## Fix\nf\n\n## Verification\nv\n\nFixes #42\n"
+        with pytest.raises(AssertionError, match="reached repo command"):
+            open_pr.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert calls, "review_mode alone must NOT block push; repo command should be reached"
 
 
 @pytest.mark.parametrize("classification", ["enhancement", "proposal"])

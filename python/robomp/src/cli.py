@@ -20,6 +20,7 @@ from robomp.manual_triage import (
     enqueue_manual_triage,
     parse_issue_ref,
 )
+from robomp.platform_utils import proxy_credentials
 from robomp.proxy_client import GitHubProxyClient
 from robomp.sandbox import SandboxManager
 from robomp.server import create_app
@@ -44,7 +45,7 @@ def _require_proxy_mode(cfg: Settings) -> tuple[str, bytes]:
             "robomp orchestrator requires ROBOMP_GH_PROXY_URL and "
             "ROBOMP_GH_PROXY_HMAC_KEY (run gh-proxy in a sibling container)."
         )
-    return cfg.gh_proxy_url, cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+    return proxy_credentials(cfg)
 
 
 def _build_github(cfg: Settings) -> GitHubProxyClient:

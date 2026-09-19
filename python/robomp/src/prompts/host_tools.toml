@@ -90,10 +90,10 @@ reason = "Internal diagnosis for the operator. Concrete, specific, blameless. NE
 description = "Refetch the originating issue and its comments. Use sparingly."
 
 [gh_search_issues]
-description = "Search issues AND pull requests in the current repo. Served from a local index of every issue/PR (webhook-fed, periodically reconciled), so calls are free — search liberally during triage to find duplicates and already-merged fixes before classifying."
+description = "Search issues and pull requests in the current repo for keywords that must ALL appear in the title or body (AND, case-insensitive). Use one distinctive keyword at a time for best recall; retry synonyms. Qualifiers: is:pr/is:issue are always honored; other qualifiers (is:open/is:closed, label:, author:) are honored only when results come from the local index. Results are ranked by relevance for local-index hits and newest-first for the live-API fallback."
 
 [gh_search_issues.parameters]
-query = "GitHub issue-search syntax: bare keywords plus qualifiers like `is:pr`, `is:closed`, `is:merged`, `label:bug`, `author:<login>`. NEVER include a `repo:` qualifier — scope is applied automatically."
+query = "Bare keywords (AND, case-insensitive, title or body) plus qualifiers. is:pr/is:issue are always honored; is:open/is:closed, label:, author: only apply to local-index results. NEVER include a `repo:` qualifier — scope is applied automatically."
 limit = "Max results, 1-20. Default 10."
 
 [search_commits]

@@ -127,6 +127,7 @@ def _resolve_pragma_overrides(
 _SCRUBBED_ENV_KEYS: tuple[str, ...] = (
     # Secrets that MUST NOT reach the agent subprocess; an agent with the
     # `bash` tool could otherwise `printenv` them out of roboomp's env.
+    "FORGEJO_TOKEN",
     "GITHUB_TOKEN",
     "GITHUB_WEBHOOK_SECRET",
     "ROBOMP_REPLAY_TOKEN",
@@ -531,6 +532,7 @@ def _build_prompt(
             line_range = ""
         body = str(review_payload.get("body") or "")
         author = str(review_payload.get("author") or "")
+        comment_ref = f"{path}{line_range}" if path else "review summary"
         return persona.followup_review(
             repo=inputs.repo,
             workspace=inputs.workspace,
@@ -539,6 +541,8 @@ def _build_prompt(
             comment_body=body,
             comment_path=path,
             comment_line_range=line_range,
+            comment_ref=comment_ref,
+            thread=thread,
         )
     raise ValueError(f"unknown task kind: {task_kind!r}")
 
@@ -802,7 +806,8 @@ async def run_task(
     thread: tuple[ThreadMessage, ...] = (),
 ) -> str | None:
     """Async wrapper that runs the synchronous RPC driver on a worker thread."""
-    review_mode = task_kind == "review_pr" or inputs.workspace.branch.startswith("review/pr-")
+    review_mode = task_kind in ("review_pr", "handle_review") or inputs.workspace.branch.startswith("review/pr-")
+    block_git_push = task_kind == "review_pr"
     loop = asyncio.get_running_loop()
     release_binding: ReleaseToolContext | None = None
     if inputs.release is not None:
@@ -832,6 +837,7 @@ async def run_task(
         inbound_thread_number=pr_number,
         inbound_is_pr=pr_number is not None,
         review_mode=review_mode,
+        block_git_push=block_git_push,
         impl_authorized=bool(directive is not None and directive.authorizes_impl),
         slot_uid=inputs.slot_uid,
         abort=AbortController(),

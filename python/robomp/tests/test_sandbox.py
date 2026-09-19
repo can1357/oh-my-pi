@@ -2470,3 +2470,122 @@ def test_reclaim_all_caches_sweeps_workspaces_not_pool(tmp_path: Path) -> None:
         assert not list(ws_root.glob(".trash-*"))
     assert pool_marker.exists(), "sweep must never touch the shared clone pool"
     assert mgr.reclaim_all_caches() == 0
+
+
+# ---- transport parameterization ----
+
+
+def test_ensure_clone_uses_provided_transport(tmp_path: Path) -> None:
+    """ensure_clone with explicit transport= uses it rather than self.transport."""
+    from unittest.mock import Mock
+
+    # Mock(spec=[]) denies all attributes, so only the explicitly-attached
+    # methods (clone_pool/fetch_pool) are callable — any other transport method
+    # the sandbox reaches for fails loudly instead of silently succeeding.
+    mock_tr = Mock(spec=[])
+    mock_tr.clone_pool = Mock()
+    mock_tr.fetch_pool = Mock()
+    default_tr = Mock(spec=[])
+    default_tr.clone_pool = Mock()
+    default_tr.fetch_pool = Mock()
+
+    mgr = SandboxManager(tmp_path / "ws", transport=default_tr)
+
+    # First call: pool dir does not exist yet → clone_pool on explicit transport.
+    mgr.ensure_clone(
+        repo="octo/widget",
+        clone_url="https://github.com/octo/widget.git",
+        default_branch="main",
+        transport=mock_tr,
+    )
+    assert mock_tr.clone_pool.called, "clone_pool should be called on explicit transport"
+    assert not default_tr.clone_pool.called, "default transport should NOT be used"
+
+    # Idempotent path (pool has .git marker) also routes to explicit transport.
+    pool_path = mgr.pool_path("octo/widget")
+    _git(["init", "--bare"], pool_path)
+    mock_tr.reset_mock()
+    default_tr.reset_mock()
+    mgr.ensure_clone(
+        repo="octo/widget",
+        clone_url="https://github.com/octo/widget.git",
+        default_branch="main",
+        transport=mock_tr,
+    )
+    assert mock_tr.fetch_pool.called, "fetch_pool should be called on explicit transport (idempotent)"
+    assert not default_tr.fetch_pool.called, "default transport should NOT be used"
+
+
+def test_ensure_workspace_threads_transport_to_ensure_clone(tmp_path: Path) -> None:
+    """ensure_workspace passes transport= through to ensure_clone."""
+    from unittest.mock import Mock, patch
+
+    mock_tr = Mock(spec=[])
+    mock_tr.clone_pool = Mock()
+    mock_tr.fetch_pool = Mock()
+    mock_tr.fetch_base_ref = Mock()
+    mock_tr.fetch_pr_head = Mock()
+
+    mgr = SandboxManager(tmp_path / "ws", transport=Mock())
+    pool_dir = mgr.pool_path("octo/widget")
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    _git(["init"], pool_dir)
+    _git(["config", "user.email", "bot@test"], pool_dir)
+    _git(["config", "user.name", "Bot"], pool_dir)
+    _git(["commit", "--allow-empty", "-m", "root"], pool_dir)
+    _git(["branch", "-m", "main"], pool_dir)
+
+    with patch.object(mgr, "ensure_clone", return_value=pool_dir) as mock_ec:
+        try:
+            mgr.ensure_workspace(
+                repo="octo/widget",
+                number=1,
+                title="Fix bug",
+                clone_url="https://github.com/octo/widget.git",
+                default_branch="main",
+                author_name="bot",
+                author_email="bot@example.com",
+                transport=mock_tr,
+            )
+        except GitCommandError:
+            pass  # ensure_clone was already called before the git op failed
+    assert mock_ec.called
+    _, kwargs = mock_ec.call_args
+    assert kwargs.get("transport") is mock_tr, "ensure_clone should receive the explicit transport"
+
+
+def test_ensure_workspace_falls_back_to_self_transport(tmp_path: Path) -> None:
+    """ensure_workspace without explicit transport uses self.transport."""
+    from unittest.mock import Mock, patch
+
+    default_tr = Mock(spec=[])
+    default_tr.clone_pool = Mock()
+    default_tr.fetch_pool = Mock()
+    default_tr.fetch_base_ref = Mock()
+    default_tr.fetch_pr_head = Mock()
+
+    mgr = SandboxManager(tmp_path / "ws", transport=default_tr)
+    pool_dir = mgr.pool_path("octo/widget")
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    _git(["init"], pool_dir)
+    _git(["config", "user.email", "bot@test"], pool_dir)
+    _git(["config", "user.name", "Bot"], pool_dir)
+    _git(["commit", "--allow-empty", "-m", "root"], pool_dir)
+    _git(["branch", "-m", "main"], pool_dir)
+
+    with patch.object(mgr, "ensure_clone", return_value=pool_dir) as mock_ec:
+        try:
+            mgr.ensure_workspace(
+                repo="octo/widget",
+                number=2,
+                title="Another fix",
+                clone_url="https://github.com/octo/widget.git",
+                default_branch="main",
+                author_name="bot",
+                author_email="bot@example.com",
+            )
+        except GitCommandError:
+            pass  # ensure_clone was already called before the git op failed
+    assert mock_ec.called
+    _, kwargs = mock_ec.call_args
+    assert kwargs.get("transport") is None, "ensure_clone should receive transport=None when omitted"
