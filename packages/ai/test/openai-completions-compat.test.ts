@@ -987,6 +987,37 @@ describe("openai-completions compatibility", () => {
 		expect(payload?.thinking_budget).toBeUndefined();
 	});
 
+	it("sends reasoning_effort for a discovered Qwen 3.8 sibling without curated metadata", async () => {
+		// Regression for #12376: the wire contract was exact-id scoped, so a
+		// discovered `qwen3.8-plus` fell back to the Qwen dialect and silently
+		// dropped every effort selection. The revision-scoped class rule now
+		// routes siblings through the OpenAI dialect too.
+		const model = buildModel({
+			id: "qwen3.8-plus",
+			name: "Qwen3.8 Plus",
+			api: "openai-completions",
+			provider: "alibaba-token-plan",
+			baseUrl: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
+		} satisfies ModelSpec<"openai-completions">);
+		expect(getSupportedEfforts(model).length).toBeGreaterThan(0);
+		const payload = toObject(
+			await captureOpenAICompletionsPayload(model, undefined, {
+				apiKey: alibabaTokenPlanApiKey,
+				reasoning: Effort.Low,
+			}),
+		);
+
+		expect(payload?.enable_thinking).toBe(true);
+		expect(payload?.reasoning_effort).toBe("low");
+		const templateKwargs = getNestedObject(payload, "chat_template_kwargs");
+		expect(getNestedBoolean(templateKwargs, "reasoning_effort")).toBeUndefined();
+	});
+
 	it("replays Alibaba Qwen 3.8 Flash reasoning history", async () => {
 		const model = alibabaQwen38Flash;
 		const priorAssistant: AssistantMessage = {

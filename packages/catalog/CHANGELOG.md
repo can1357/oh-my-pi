@@ -7,6 +7,10 @@
 - Added `buildDiscoveredModel` helper for custom providers
 - Added support for glob-based patterns in identity overrides
 
+### Fixed
+
+- Fixed QwenCloud Token Plan dropping every effort selection on discovered Qwen 3.8 models that lack curated rows (e.g. `qwen3.8-plus`): the OpenAI `reasoning_effort` dialect and reasoning-history replay now apply to the whole Qwen 3.8 revision instead of only the exact `qwen3.8-max`/`qwen3.8-flash` ids, with `qwen3.8-max-preview` still pinned to the binary `enable_thinking` toggle ([#12376](https://github.com/can1357/oh-my-pi/issues/12376)).
+
 ### Changed
 
 - Centralized llama.cpp Qwen routing and thinking policy in KDL, with reviewed Bonsai lineage aliases and shared backend policy for custom provider names.
@@ -20,6 +24,9 @@
 ### Fixed
 
 - Corrected Yolo-Auto metadata for Qwen Flash: `qwen3.8-flash` and the paid `yolo` route now report the documented 256K context window and use the Qwen chat-template reasoning dialect, with `qwen3.8-flash` as the provider default.
+- Discovery validators reuse hoisted module-scope schemas instead of constructing a fresh schema per property per row.
+- Model identity classification now uses a prebuilt override index and a bounded per-id memo instead of re-scanning the taxonomy on every call.
+- Compat glob patterns reuse cached wildcard segments instead of re-splitting on every match.
 
 ## [18.2.4] - 2026-09-17
 
