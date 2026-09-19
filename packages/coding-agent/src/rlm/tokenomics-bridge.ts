@@ -350,8 +350,20 @@ export class OmpTokenomicsBridge {
 		complexityClass: string;
 		errorClass?: string;
 		reason?: string;
+		runtime?: {
+			residency?: string;
+			backendLoaded?: boolean;
+			backendLoadMs?: number;
+			inferenceMs?: number;
+			queueMs?: number;
+			ipcMs?: number;
+			bridgeGeneration?: number;
+			bridgeBuildId?: string;
+			bridgeInstanceId?: string;
+		};
 	}): Promise<TokenomicsEvent | null> {
 		if (!this.enabled) return null;
+		const runtime = input.runtime;
 		const experiment = {
 			experiment_id: "omp-shadow-rlm-worker-needed-v1",
 			pair_id: input.pairId,
@@ -392,12 +404,24 @@ export class OmpTokenomicsBridge {
 					"omp.granted_bytes": input.grantedBytes,
 					"omp.complexity_class": input.complexityClass,
 					"tokenomics.context.policy": this.contextPolicy,
+					"shadow.backend": input.armId,
+					"shadow.runtime": runtime?.residency === "warm" ? "resident" : (runtime?.residency ?? "unknown"),
+					"shadow.backend_loaded": Boolean(runtime?.backendLoaded),
+					...(runtime?.bridgeGeneration !== undefined
+						? { "shadow.bridge_generation": runtime.bridgeGeneration }
+						: {}),
+					...(runtime?.bridgeBuildId ? { "shadow.bridge_build_id": runtime.bridgeBuildId } : {}),
+					...(runtime?.backendLoadMs !== undefined ? { "shadow.backend_load_ms": runtime.backendLoadMs } : {}),
+					...(runtime?.inferenceMs !== undefined ? { "shadow.inference_ms": runtime.inferenceMs } : {}),
+					...(runtime?.queueMs !== undefined ? { "shadow.queue_ms": runtime.queueMs } : {}),
+					...(runtime?.ipcMs !== undefined ? { "shadow.ipc_ms": runtime.ipcMs } : {}),
 					...(input.errorClass ? { "benchmark.error_class": input.errorClass } : {}),
 				},
 				extra: {
 					"decision.probabilities": input.probabilities ?? {},
 					"benchmark.reason": input.reason,
 					source: "live_shadow",
+					"shadow.bridge_instance_id": runtime?.bridgeInstanceId,
 				},
 			}),
 		);

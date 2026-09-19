@@ -13,7 +13,9 @@ import { buildContextFlowSnapshot } from "../src/context-flow/snapshot";
 import {
 	actualPolicyToLabel,
 	buildWorkerNeededFeatureState,
+	createBridgeDeciderPredictor,
 	createMockShadowPredictor,
+	registerZ0intBridgeTransport,
 	runShadowWorkerNeeded,
 	setShadowPredictorForTest,
 	SHADOW_EXPERIMENT_ID,
@@ -219,6 +221,7 @@ describe("context flow shadow rendering", () => {
 			confidence: 0.87,
 			latencyMs: 54,
 			status: "ok",
+			runtime: { residency: "warm", inferenceMs: 57 },
 		});
 		const snap = buildContextFlowSnapshot({
 			registry: getContextFlowRegistry(owner),
@@ -231,6 +234,148 @@ describe("context flow shadow rendering", () => {
 		const text = renderCurrentTurnFlow(snap);
 		expect(text).toContain("Decider shadow");
 		expect(text).toContain("SHADOW");
+		expect(text).toContain("resident");
 		expect(text).not.toMatch(/Decider shadow.*caused/i);
+	});
+});
+
+describe("bridge transport shadow client", () => {
+	test("absent bridge is unavailable without spawning python", async () => {
+		registerZ0intBridgeTransport(null);
+		setShadowPredictorForTest(null);
+		const predictor = createBridgeDeciderPredictor();
+		const pred = await predictor(
+			{
+				schema: "omp.shadow.rlm.worker_needed.features.v1",
+				capability: "rlm.worker_needed",
+				contract: "decision-capability-v1",
+				state: {
+					granted_bytes: 100,
+					pattern_hits: 1,
+					grant_count: 1,
+					complexity: "low",
+					complexity_class: "simple_single_fact",
+					question_sha256: "a".repeat(64),
+					question_chars: 3,
+				},
+				question: {
+					id: "decision",
+					type: "choice",
+					instructions: "x",
+					options: [
+						{ id: "native", description: "n" },
+						{ id: "worker", description: "w" },
+						{ id: "abstain", description: "a" },
+					],
+				},
+			},
+			{ timeoutMs: 200 },
+		);
+		expect(pred.status).toBe("unavailable");
+		expect(pred.runtime?.residency).toBe("absent");
+	});
+
+	test("warming status is fail-open and non-authoritative", async () => {
+		registerZ0intBridgeTransport({
+			kind: "z0int-bridge",
+			request: async () => ({
+				ok: false,
+				status: "warming",
+				backend: "decider_2b",
+				error: "backend_warming",
+				generation: 3,
+				build_id: "deadbeef",
+				runtime: { residency: "warming", queue_ms: 0 },
+			}),
+		});
+		setShadowPredictorForTest(null);
+		const bridge = createTokenomicsBridge({
+			sessionId: "shadow-warm",
+			memoryOnly: true,
+			enabled: true,
+		});
+		const result = await runShadowWorkerNeeded({
+			host: {
+				getTokenomicsBridge: () => bridge,
+				settings: { get: () => true },
+				getSessionId: () => "shadow-warm",
+			},
+			policyInput: {
+				grantedBytes: 100,
+				grantCount: 1,
+				patternCount: 0,
+				patterns: [],
+				question: "x",
+			},
+			useEvidencePacket: true,
+			handle: "rlm://h/w",
+		});
+		expect(result.launched).toBe(true);
+		expect(result.prediction?.status).toBe("warming");
+		expect(result.actualPolicy).toBe("worker");
+		const shadow = bridge.events.find(e => e.name === "omp.shadow.rlm.worker_needed");
+		expect(shadow?.attributes?.["shadow.runtime"]).toBe("warming");
+		registerZ0intBridgeTransport(null);
+	});
+
+	test("resident ok path records inference diagnostics", async () => {
+		registerZ0intBridgeTransport({
+			kind: "z0int-bridge",
+			request: async () => ({
+				ok: true,
+				status: "ok",
+				backend: "decider_2b",
+				generation: 2,
+				build_id: "abc123",
+				result: {
+					answers: [
+						{
+							value: "native",
+							confidence: 0.81,
+							probabilities: { native: 0.81, worker: 0.1, abstain: 0.09 },
+						},
+					],
+					revision: "rev",
+					diagnostics: { device: "cuda" },
+				},
+				runtime: {
+					residency: "warm",
+					backend_loaded: true,
+					inference_ms: 57,
+					queue_ms: 1.2,
+					load_ms: 34000,
+				},
+			}),
+		});
+		setShadowPredictorForTest(null);
+		const bridge = createTokenomicsBridge({
+			sessionId: "shadow-resident",
+			memoryOnly: true,
+			enabled: true,
+		});
+		const result = await runShadowWorkerNeeded({
+			host: {
+				getTokenomicsBridge: () => bridge,
+				settings: { get: () => true },
+				getSessionId: () => "shadow-resident",
+			},
+			policyInput: {
+				grantedBytes: 8000,
+				grantCount: 1,
+				patternCount: 1,
+				patterns: ["root_cause"],
+				question: "exact",
+			},
+			useEvidencePacket: false,
+			handle: "rlm://h/r",
+		});
+		expect(result.prediction?.status).toBe("ok");
+		expect(result.prediction?.runtime?.residency).toBe("warm");
+		expect(result.prediction?.runtime?.inferenceMs).toBe(57);
+		const shadow = bridge.events.find(e => e.name === "omp.shadow.rlm.worker_needed");
+		expect(shadow?.attributes?.["shadow.runtime"]).toBe("resident");
+		expect(shadow?.attributes?.["shadow.inference_ms"]).toBe(57);
+		expect(shadow?.attributes?.["shadow.bridge_generation"]).toBe(2);
+		registerZ0intBridgeTransport(null);
 	});
 });

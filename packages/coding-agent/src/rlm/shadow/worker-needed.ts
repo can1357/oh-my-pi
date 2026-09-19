@@ -6,7 +6,7 @@
 import type { OmpTokenomicsBridge } from "../tokenomics-bridge";
 import type { WorkerModeAutoDecision, WorkerModePolicyInput } from "../worker-mode-policy";
 import { classifyGrantComplexity } from "../worker-mode-policy";
-import { getShadowPredictor, type ShadowPrediction } from "./decider-client";
+import { getShadowPredictor, requestShadowDeciderWarm, type ShadowPrediction } from "./decider-client";
 import { enqueueShadowReplayCandidate, scoreReplayPriority } from "./replay-queue";
 import {
 	actualPolicyToLabel,
@@ -44,6 +44,7 @@ export interface LaunchShadowWorkerNeededInput {
 		latencyMs: number;
 		status: ShadowPrediction["status"];
 		reason?: string;
+		runtime?: ShadowPrediction["runtime"];
 	}) => void;
 	signal?: AbortSignal;
 }
@@ -73,7 +74,8 @@ function shadowTimeoutMs(host: ShadowWorkerNeededHost): number {
 	if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) return raw;
 	const env = Number(process.env.OMP_SHADOW_TIMEOUT_MS);
 	if (Number.isFinite(env) && env > 0) return env;
-	return 1500;
+	// Warm resident Decider should answer in tens–hundreds of ms; keep fail-open.
+	return 500;
 }
 
 /**
@@ -100,6 +102,8 @@ export async function runShadowWorkerNeeded(input: LaunchShadowWorkerNeededInput
 	const pairId = shadowPairId({ sessionId, handle: input.handle, featureHash });
 	const actualPolicy = actualPolicyToLabel(input.useEvidencePacket);
 	const timeoutMs = shadowTimeoutMs(input.host);
+	// Background prewarm — never awaited on the hot path.
+	requestShadowDeciderWarm();
 
 	const prediction = await getShadowPredictor()(request, {
 		signal: input.signal,
@@ -112,6 +116,7 @@ export async function runShadowWorkerNeeded(input: LaunchShadowWorkerNeededInput
 		latencyMs: prediction.latencyMs,
 		status: prediction.status,
 		reason: prediction.reason,
+		runtime: prediction.runtime,
 	});
 
 	const treatment = shadowTreatmentHash({
@@ -127,7 +132,10 @@ export async function runShadowWorkerNeeded(input: LaunchShadowWorkerNeededInput
 		taskSnapshotId: featureHash,
 		armId: SHADOW_BACKEND_ID,
 		treatmentHash: treatment,
-		status: prediction.status === "unavailable" ? "unknown" : prediction.status,
+		status:
+			prediction.status === "unavailable" || prediction.status === "warming"
+				? "unknown"
+				: prediction.status,
 		prediction: prediction.prediction,
 		probabilities: prediction.probabilities,
 		confidence: prediction.confidence,
@@ -140,6 +148,7 @@ export async function runShadowWorkerNeeded(input: LaunchShadowWorkerNeededInput
 		complexityClass: featureState.complexity_class,
 		errorClass: prediction.errorClass,
 		reason: prediction.reason,
+		runtime: prediction.runtime,
 	});
 
 	const disagreed =

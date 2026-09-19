@@ -130,17 +130,32 @@ export function contextFlowDeciderShadow(
 		prediction?: string;
 		confidence?: number;
 		latencyMs: number;
-		status: "ok" | "error" | "cancelled" | "unavailable" | "unknown";
+		status: "ok" | "error" | "cancelled" | "unavailable" | "unknown" | "warming";
 		reason?: string;
+		runtime?: { residency?: string; inferenceMs?: number };
 	},
 	store?: RlmStore,
 ): void {
-	const pred = args.prediction ?? "—";
-	const conf =
-		args.confidence !== undefined && Number.isFinite(args.confidence)
-			? ` · ${args.confidence.toFixed(2)}`
-			: "";
-	const decision = `SHADOW ${pred}${conf}`;
+	let decision: string;
+	if (args.status === "warming") {
+		decision = "SHADOW warming";
+	} else if (args.status === "cancelled") {
+		decision = "SHADOW timeout";
+	} else if (args.status === "ok") {
+		const pred = args.prediction ?? "—";
+		const conf =
+			args.confidence !== undefined && Number.isFinite(args.confidence)
+				? ` · ${args.confidence.toFixed(2)}`
+				: "";
+		const ms =
+			args.runtime?.inferenceMs !== undefined
+				? args.runtime.inferenceMs
+				: args.latencyMs;
+		const resident = args.runtime?.residency === "warm" ? " · resident" : "";
+		decision = `SHADOW ${pred}${conf} · ${Math.round(ms)}ms${resident}`;
+	} else {
+		decision = `SHADOW ${args.status}`;
+	}
 	getContextFlowRegistry(owner).recordInstant({
 		stage: "classifier",
 		component: FLOW_KEYS.DECIDER_SHADOW,
@@ -150,7 +165,12 @@ export function contextFlowDeciderShadow(
 		decision,
 		reason: args.reason ?? `decider_2b ${args.status}`,
 		durationMs: args.latencyMs,
-		status: args.status === "ok" ? "complete" : args.status === "cancelled" ? "skipped" : "failed",
+		status:
+			args.status === "ok"
+				? "complete"
+				: args.status === "cancelled" || args.status === "warming"
+					? "skipped"
+					: "failed",
 		provider: "local",
 		model: "decider_2b",
 	});

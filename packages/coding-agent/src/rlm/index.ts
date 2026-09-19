@@ -200,8 +200,12 @@ export {
 	launchShadowWorkerNeeded,
 	runShadowWorkerNeeded,
 	createMockShadowPredictor,
+	createBridgeDeciderPredictor,
 	setShadowPredictorForTest,
+	requestShadowDeciderWarm,
+	registerZ0intBridgeTransport,
+	getZ0intBridgeTransport,
 	WORKER_NEEDED_CAPABILITY,
 	SHADOW_EXPERIMENT_ID,
 } from "./shadow";
-export type { ShadowPrediction, ShadowWorkerNeededResult } from "./shadow";
+export type { ShadowPrediction, ShadowWorkerNeededResult, Z0intBridgeTransport } from "./shadow";

@@ -1,4 +1,10 @@
 export {
+	registerZ0intBridgeTransport,
+	getZ0intBridgeTransport,
+} from "./bridge-transport";
+export type { Z0intBridgeTransport } from "./bridge-transport";
+
+export {
 	WORKER_NEEDED_CAPABILITY,
 	WORKER_NEEDED_FEATURE_SCHEMA,
 	WORKER_NEEDED_CONTRACT,
@@ -19,9 +25,11 @@ export type {
 
 export {
 	createZ0intDeciderPredictor,
+	createBridgeDeciderPredictor,
 	createMockShadowPredictor,
 	setShadowPredictorForTest,
 	getShadowPredictor,
+	requestShadowDeciderWarm,
 } from "./decider-client";
 export type { ShadowPrediction, ShadowPredictor } from "./decider-client";
 

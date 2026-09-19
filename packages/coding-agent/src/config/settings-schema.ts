@@ -2697,7 +2697,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"rlm.shadow.timeoutMs": {
 		type: "number",
-		default: 1500,
+		default: 500,
 		ui: {
 			tab: "context",
 			group: "RLM",

@@ -1,18 +1,28 @@
 /**
  * Pluggable Decider-2B client for observe-only shadow predictions.
  *
- * Default adapter shells out to `z0int backends eval` (fail-open).
- * Tests inject a mock predictor — never invents Decider-looking answers on failure.
+ * Default path: resident z0int bridge (`decision` / `decision_warm` ops).
+ * Tests inject a mock predictor. Never invents Decider-looking answers on failure.
+ * RLM does not own a Python child process.
  */
-import { spawn } from "node:child_process";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { WorkerNeededDecisionRequest, WorkerNeededLabel } from "./worker-needed-features";
 import { SHADOW_BACKEND_ID, WORKER_NEEDED_QUESTION } from "./worker-needed-features";
+import { getZ0intBridgeTransport } from "./bridge-transport";
+
+export interface ShadowRuntimeDiagnostics {
+	residency?: "warm" | "warming" | "failed" | "unloaded" | "absent";
+	backendLoaded?: boolean;
+	backendLoadMs?: number;
+	inferenceMs?: number;
+	queueMs?: number;
+	ipcMs?: number;
+	bridgeGeneration?: number;
+	bridgeBuildId?: string;
+	bridgeInstanceId?: string;
+}
 
 export interface ShadowPrediction {
-	status: "ok" | "error" | "cancelled" | "unavailable";
+	status: "ok" | "error" | "cancelled" | "unavailable" | "warming";
 	prediction?: WorkerNeededLabel;
 	probabilities?: Record<string, number>;
 	confidence?: number;
@@ -23,6 +33,7 @@ export interface ShadowPrediction {
 	errorClass?: string;
 	reason?: string;
 	backendId: string;
+	runtime?: ShadowRuntimeDiagnostics;
 }
 
 export type ShadowPredictor = (
@@ -35,37 +46,7 @@ function asLabel(value: unknown): WorkerNeededLabel | undefined {
 	return undefined;
 }
 
-function parseZ0intEvalPayload(raw: unknown, latencyMs: number): ShadowPrediction {
-	const obj = raw as {
-		answers?: Array<{ value?: unknown; probabilities?: Record<string, number>; confidence?: number }>;
-		diagnostics?: { revision?: string; device?: string };
-	};
-	const ans = obj.answers?.[0];
-	const prediction = asLabel(ans?.value);
-	if (!prediction) {
-		return {
-			status: "error",
-			latencyMs,
-			backendId: SHADOW_BACKEND_ID,
-			errorClass: "MalformedResult",
-			reason: "decider returned no choice label",
-		};
-	}
-	const probabilities = ans?.probabilities ?? {};
-	return {
-		status: "ok",
-		prediction,
-		probabilities,
-		confidence: typeof ans?.confidence === "number" ? ans.confidence : probabilities[prediction],
-		abstained: prediction === "abstain",
-		latencyMs,
-		revision: obj.diagnostics?.revision,
-		device: obj.diagnostics?.device,
-		backendId: SHADOW_BACKEND_ID,
-	};
-}
-
-function toZ0intRequest(request: WorkerNeededDecisionRequest): Record<string, unknown> {
+function toBridgeDecisionRequest(request: WorkerNeededDecisionRequest): Record<string, unknown> {
 	return {
 		state: request.state,
 		questions: [
@@ -79,144 +60,155 @@ function toZ0intRequest(request: WorkerNeededDecisionRequest): Record<string, un
 	};
 }
 
-export function createZ0intDeciderPredictor(options?: {
-	bin?: string;
-	pythonPath?: string;
-	pythonBin?: string;
-}): ShadowPredictor {
-	const pythonBin = options?.pythonBin ?? process.env.OMP_Z0INT_PYTHON ?? "python3";
+function parseBridgeDecisionResponse(raw: Record<string, unknown>, ipcMs: number): ShadowPrediction {
+	const runtimeRaw = (raw.runtime && typeof raw.runtime === "object" ? raw.runtime : {}) as Record<
+		string,
+		unknown
+	>;
+	const runtime: ShadowRuntimeDiagnostics = {
+		residency:
+			runtimeRaw.residency === "warm" ||
+			runtimeRaw.residency === "warming" ||
+			runtimeRaw.residency === "failed" ||
+			runtimeRaw.residency === "unloaded"
+				? runtimeRaw.residency
+				: undefined,
+		backendLoaded: runtimeRaw.backend_loaded === true,
+		backendLoadMs: typeof runtimeRaw.load_ms === "number" ? runtimeRaw.load_ms : undefined,
+		inferenceMs: typeof runtimeRaw.inference_ms === "number" ? runtimeRaw.inference_ms : undefined,
+		queueMs: typeof runtimeRaw.queue_ms === "number" ? runtimeRaw.queue_ms : undefined,
+		ipcMs,
+		bridgeGeneration: typeof raw.generation === "number" ? raw.generation : undefined,
+		bridgeBuildId: typeof raw.build_id === "string" ? raw.build_id : undefined,
+		bridgeInstanceId: typeof raw.instance_id === "string" ? raw.instance_id : undefined,
+	};
+
+	const status = typeof raw.status === "string" ? raw.status : raw.ok === true ? "ok" : "error";
+	if (status === "warming" || raw.status === "warming") {
+		return {
+			status: "warming",
+			latencyMs: ipcMs,
+			backendId: SHADOW_BACKEND_ID,
+			errorClass: "Warming",
+			reason: typeof raw.error === "string" ? raw.error : "backend_warming",
+			runtime: { ...runtime, residency: "warming" },
+		};
+	}
+
+	if (raw.ok !== true) {
+		return {
+			status: status === "cancelled" ? "cancelled" : "error",
+			latencyMs: ipcMs,
+			backendId: typeof raw.backend === "string" ? raw.backend : SHADOW_BACKEND_ID,
+			errorClass: "BridgeDecisionError",
+			reason: typeof raw.error === "string" ? raw.error : "decision_failed",
+			runtime,
+		};
+	}
+
+	const result = raw.result as
+		| {
+				answers?: Array<{ value?: unknown; probabilities?: Record<string, number>; confidence?: number }>;
+				revision?: string;
+				diagnostics?: { device?: string };
+		  }
+		| undefined;
+	const ans = result?.answers?.[0];
+	const prediction = asLabel(ans?.value);
+	if (!prediction) {
+		return {
+			status: "error",
+			latencyMs: ipcMs,
+			backendId: SHADOW_BACKEND_ID,
+			errorClass: "MalformedResult",
+			reason: "decider returned no choice label",
+			runtime,
+		};
+	}
+	const probabilities = ans?.probabilities ?? {};
+	const inferenceMs = runtime.inferenceMs ?? 0;
+	return {
+		status: "ok",
+		prediction,
+		probabilities,
+		confidence: typeof ans?.confidence === "number" ? ans.confidence : probabilities[prediction],
+		abstained: prediction === "abstain",
+		latencyMs: inferenceMs > 0 ? inferenceMs : ipcMs,
+		revision: result?.revision ?? (typeof runtimeRaw.revision === "string" ? runtimeRaw.revision : undefined),
+		device: result?.diagnostics?.device ?? (typeof runtimeRaw.device === "string" ? runtimeRaw.device : undefined),
+		backendId: typeof raw.backend === "string" ? raw.backend : SHADOW_BACKEND_ID,
+		runtime: { ...runtime, residency: "warm", backendLoaded: true },
+	};
+}
+
+export function createBridgeDeciderPredictor(): ShadowPredictor {
 	return async (request, { signal, timeoutMs }) => {
 		const started = Date.now();
-		let dir: string | undefined;
-		try {
-			dir = await mkdtemp(join(tmpdir(), "omp-shadow-decider-"));
-			const inputPath = join(dir, "request.json");
-			const scriptPath = join(dir, "eval_decider.py");
-			await writeFile(inputPath, JSON.stringify(toZ0intRequest(request)), "utf8");
-			// Direct DeciderBackend import — z0int CLI registry may not list decider_2b yet.
-			await writeFile(
-				scriptPath,
-				[
-					"import json, sys",
-					"from pathlib import Path",
-					"from z0int.backends.base import request_from_mapping, result_to_dict",
-					"from z0int.backends.decider import DeciderBackend",
-					"req = request_from_mapping(json.loads(Path(sys.argv[1]).read_text(encoding='utf-8')))",
-					"backend = DeciderBackend.for_manifest_id('decider_2b')",
-					"print(json.dumps(result_to_dict(backend.evaluate(req)), default=str))",
-				].join("\n") + "\n",
-				"utf8",
-			);
-
-			const args = [scriptPath, inputPath];
-			const child = spawn(pythonBin, args, {
-				stdio: ["ignore", "pipe", "pipe"],
-				env: {
-					...process.env,
-					...(options?.pythonPath ? { PYTHONPATH: options.pythonPath } : {}),
-					Z0INT_DECIDER_DEVICE: process.env.Z0INT_DECIDER_DEVICE ?? "cuda",
-				},
-			});
-
-			let stdout = "";
-			let stderr = "";
-			child.stdout?.setEncoding("utf8");
-			child.stderr?.setEncoding("utf8");
-			child.stdout?.on("data", (chunk: string) => {
-				stdout += chunk;
-			});
-			child.stderr?.on("data", (chunk: string) => {
-				stderr += chunk;
-			});
-
-			const result = await new Promise<ShadowPrediction>(resolve => {
-				let settled = false;
-				const finish = (pred: ShadowPrediction) => {
-					if (settled) return;
-					settled = true;
-					resolve(pred);
-				};
-
-				const timer = setTimeout(() => {
-					child.kill("SIGKILL");
-					finish({
-						status: "cancelled",
-						latencyMs: Date.now() - started,
-						backendId: SHADOW_BACKEND_ID,
-						errorClass: "Timeout",
-						reason: `shadow decider exceeded ${timeoutMs}ms`,
-					});
-				}, timeoutMs);
-
-				const onAbort = () => {
-					child.kill("SIGKILL");
-					finish({
-						status: "cancelled",
-						latencyMs: Date.now() - started,
-						backendId: SHADOW_BACKEND_ID,
-						errorClass: "Aborted",
-						reason: "shadow cancelled",
-					});
-				};
-				signal?.addEventListener("abort", onAbort, { once: true });
-
-				child.on("error", err => {
-					clearTimeout(timer);
-					signal?.removeEventListener("abort", onAbort);
-					const msg = err.message || String(err);
-					finish({
-						status: msg.includes("ENOENT") ? "unavailable" : "error",
-						latencyMs: Date.now() - started,
-						backendId: SHADOW_BACKEND_ID,
-						errorClass: err.name || "SpawnError",
-						reason: msg.slice(0, 500),
-					});
-				});
-
-				child.on("close", code => {
-					clearTimeout(timer);
-					signal?.removeEventListener("abort", onAbort);
-					const latencyMs = Date.now() - started;
-					if (settled) return;
-					if (code !== 0) {
-						finish({
-							status: "error",
-							latencyMs,
-							backendId: SHADOW_BACKEND_ID,
-							errorClass: "ExitNonZero",
-							reason: (stderr || stdout || `exit ${code}`).slice(0, 500),
-						});
-						return;
-					}
-					try {
-						const json = JSON.parse(stdout);
-						finish(parseZ0intEvalPayload(json, latencyMs));
-					} catch (err) {
-						finish({
-							status: "error",
-							latencyMs,
-							backendId: SHADOW_BACKEND_ID,
-							errorClass: "ParseError",
-							reason: err instanceof Error ? err.message : String(err),
-						});
-					}
-				});
-			});
-			return result;
-		} catch (err) {
+		const transport = getZ0intBridgeTransport();
+		if (!transport) {
 			return {
-				status: "error",
+				status: "unavailable",
 				latencyMs: Date.now() - started,
 				backendId: SHADOW_BACKEND_ID,
-				errorClass: err instanceof Error ? err.name : "Error",
-				reason: err instanceof Error ? err.message : String(err),
+				errorClass: "BridgeAbsent",
+				reason: "z0int bridge transport not registered (extension not loaded)",
+				runtime: { residency: "absent", ipcMs: Date.now() - started },
+			};
+		}
+		if (signal?.aborted) {
+			return {
+				status: "cancelled",
+				latencyMs: 0,
+				backendId: SHADOW_BACKEND_ID,
+				errorClass: "Aborted",
+				reason: "shadow cancelled",
+			};
+		}
+
+		const onAbort = () => {
+			/* request layer times out / rejects; fail-open */
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		try {
+			const ipcStarted = Date.now();
+			const raw = await transport.request(
+				{
+					op: "decision",
+					payload: {
+						backend: SHADOW_BACKEND_ID,
+						capability_id: request.capability,
+						request: toBridgeDecisionRequest(request),
+					},
+				},
+				timeoutMs,
+			);
+			const ipcMs = Date.now() - ipcStarted;
+			return parseBridgeDecisionResponse(raw, ipcMs);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			const timedOut = /timeout/i.test(msg);
+			return {
+				status: timedOut ? "cancelled" : "error",
+				latencyMs: Date.now() - started,
+				backendId: SHADOW_BACKEND_ID,
+				errorClass: timedOut ? "Timeout" : err instanceof Error ? err.name : "BridgeError",
+				reason: msg.slice(0, 500),
+				runtime: { residency: "warm", ipcMs: Date.now() - started },
 			};
 		} finally {
-			if (dir) {
-				void rm(dir, { recursive: true, force: true });
-			}
+			signal?.removeEventListener("abort", onAbort);
 		}
 	};
+}
+
+/** Fire-and-forget Decider prewarm via registered bridge. */
+export function requestShadowDeciderWarm(): void {
+	const transport = getZ0intBridgeTransport();
+	if (!transport) return;
+	void (transport.warm?.(SHADOW_BACKEND_ID) ??
+		transport.request({ op: "decision_warm", payload: { backend: SHADOW_BACKEND_ID } }, 5_000)).catch(() => {
+		/* fail-open */
+	});
 }
 
 /** Deterministic test predictor — NOT for production claims. */
@@ -261,14 +253,10 @@ export function setShadowPredictorForTest(predictor: ShadowPredictor | null): vo
 }
 
 export function getShadowPredictor(): ShadowPredictor {
-	if (activePredictor) return activePredictor;
-	const pythonPath =
-		process.env.OMP_Z0INT_PYTHONPATH ??
-		process.env.PYTHONPATH ??
-		(process.env.HOME ? `${process.env.HOME}/tmp/openjev/src` : undefined);
-	const pythonBin = process.env.OMP_Z0INT_PYTHON;
-	return createZ0intDeciderPredictor({
-		pythonPath,
-		pythonBin: pythonBin || undefined,
-	});
+	return activePredictor ?? createBridgeDeciderPredictor();
+}
+
+/** @deprecated Use createBridgeDeciderPredictor — per-call Python spawn removed. */
+export function createZ0intDeciderPredictor(): ShadowPredictor {
+	return createBridgeDeciderPredictor();
 }
