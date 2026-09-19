@@ -12,6 +12,7 @@ import {
 	previewWindowRows,
 	replaceTabs,
 } from "../render/render-utils";
+import { displayDaemonExitReason } from "./daemon";
 import {
 	formatMinimizedMeta,
 	formatStyledTruncationWarning,
@@ -31,6 +32,7 @@ import { INTENT_FIELD, type ShellTrace, type ShellVizPresentation, type TspTone 
 import type { SpotlightDetails } from "../chat/spotlight";
 import { plainText } from "../native/spans";
 import {
+	noteText,
 	RUN_INPUT_PREVIEW_LINES,
 	resultText,
 	runBox,
@@ -107,6 +109,8 @@ export interface BashToolDetails {
 		ready: boolean;
 		timedOut: boolean;
 		pid?: number;
+		/** Terminal launch diagnostic, independent of the output preview. */
+		exitReason?: string;
 		/** Live output monitor delivery attached at start; absent when unmonitored. */
 		progress?: "wake" | "ambient";
 		/** Reason live output monitoring stopped; progress is absent once stopped. */
@@ -700,6 +704,12 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 						uiTheme,
 					);
 					const outputLines: string[] = [...formatted.lines];
+					const serviceReason = displayDaemonExitReason(details?.service?.exitReason);
+					if (serviceReason) outputLines.push(uiTheme.fg("error", `Reason: ${serviceReason}`));
+					const monitorStopped = displayDaemonExitReason(details?.service?.monitorStopped);
+					if (monitorStopped) {
+						outputLines.push(uiTheme.fg("warning", `Progress monitoring stopped: ${monitorStopped}`));
+					}
 					if (warningLine) outputLines.push(warningLine);
 
 					const snapshot: ToolCardSnapshot = {
@@ -828,6 +838,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				executedScriptArgs(renderArgs, details).cwd,
 				getProjectDir(),
 			);
+			const serviceReason = displayDaemonExitReason(details?.service?.exitReason);
+			const monitorStopped = displayDaemonExitReason(details?.service?.monitorStopped);
 			const box = runBox(
 				[
 					presentation
@@ -847,6 +859,8 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 							)
 						: runInput(command, SHELL_INPUT),
 					shownOutput.trim().length > 0 && runOutput(shownOutput, { role: "omp.tool.bash.output", previewLines }),
+					serviceReason ? noteText(`Reason: ${serviceReason}`, "error") : undefined,
+					monitorStopped ? noteText(`Progress monitoring stopped: ${monitorStopped}`, "warning") : undefined,
 					runFoot({
 						state,
 						exitCode: details?.exitCode,

@@ -77,6 +77,8 @@ export interface AsyncProgressEntry {
 	text: string;
 	job: AsyncJob | undefined;
 	source?: AsyncProgressSource;
+	/** Broker output registration that produced this process entry. */
+	monitorId?: string;
 	seq: number;
 	elapsedMs: number;
 	epoch: number;
@@ -112,9 +114,12 @@ export function asyncProgressSourceKey(entry: AsyncProgressIdentity): string {
 	return entry.source ? `${entry.source.type}:${entry.source.id}` : `job:${entry.jobId}`;
 }
 
-/** Coalesce key for enqueue-time folding: one bounded queue entry per source per delivery generation. */
+/** Coalesce per source and generation, without mixing independently detachable process registrations. */
 export function asyncProgressCoalesceKey(entry: AsyncProgressEntry): string {
-	return `${entry.epoch}:${asyncProgressSourceKey(entry)}`;
+	const sourceKey = `${entry.epoch}:${asyncProgressSourceKey(entry)}`;
+	return entry.source?.type === "process" && entry.monitorId !== undefined
+		? `${sourceKey}:${entry.monitorId}`
+		: sourceKey;
 }
 
 /**
@@ -284,6 +289,11 @@ export type AsyncResultJobDetails = {
 	schema?: StructuredSubagentOutput;
 	exitCode?: number;
 	timedOut?: boolean;
+	/** Bounded, sanitized terminal result copy for transcript rendering. */
+	terminalText?: string;
+	terminalHead?: string;
+	terminalTail?: string;
+	terminalTruncated?: boolean;
 };
 
 export type AsyncResultDetails = {
@@ -373,12 +383,26 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 		// that share a prefix would otherwise read the same in the notice that delivers them.
 		const command = entry.job?.type === "bash" ? entry.job.process?.command : undefined;
 		const headerLabel = command === undefined ? entry.job?.label : commandIdentity(command);
+		// A failed Bash result can contain the complete raw stream plus terminal
+		// notices. Provenance suppresses it only with a confirmed capture artifact;
+		// otherwise bounded live previews cannot replace recoverable terminal text.
+		const terminalResult = entry.job?.terminalTextProvenance === "progress" ? "" : entry.result;
+		const terminalPreview = terminalResult
+			? buildLineSnappedPreview(sanitizeText(terminalResult))
+			: leftover
+				? {
+						text: leftover.text ? sanitizeText(leftover.text) : undefined,
+						head: leftover.head ? sanitizeText(leftover.head) : undefined,
+						tail: leftover.tail ? sanitizeText(leftover.tail) : undefined,
+						truncated: leftover.truncated,
+					}
+				: undefined;
 		return {
 			jobId: entry.jobId,
 			agentUrlId,
 			showAgentUrl: handles === "agent",
 			showHistoryUrl: handles === "history",
-			result: escapeHarnessTags(entry.result),
+			result: escapeHarnessTags(terminalResult),
 			type: entry.job?.type,
 			status: entry.job?.status,
 			agentId: entry.job?.agentId,
@@ -403,7 +427,8 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			// Preserve tabs in the model-facing completion payload. Transcript
 			// renderers normalize tabs at the TUI boundary.
 			terminalText:
-				entry.progressSummary && entry.result ? escapeHarnessTags(sanitizeText(entry.result)) : undefined,
+				entry.progressSummary && terminalResult ? escapeHarnessTags(sanitizeText(terminalResult)) : undefined,
+			terminalPreview,
 			artifactId: entry.progressSummary?.artifactId,
 			leftoverText: leftover?.text ? escapeHarnessTags(sanitizeText(leftover.text)) : undefined,
 			leftoverTruncated: leftover?.truncated === true,
@@ -426,6 +451,14 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			...(job.structured ? { schema: job.structured } : {}),
 			exitCode: job.exitCode,
 			timedOut: job.timedOut,
+			...(job.terminalPreview
+				? {
+						terminalText: job.terminalPreview.text,
+						terminalHead: job.terminalPreview.head,
+						terminalTail: job.terminalPreview.tail,
+						terminalTruncated: job.terminalPreview.truncated,
+					}
+				: {}),
 		})),
 	};
 	const text = prompt.render(asyncResultTemplate, {
