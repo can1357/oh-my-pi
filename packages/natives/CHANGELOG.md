@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Resolved macOS word language for completions, spelling guesses, and autocorrection through the text's script orthography map so multi-lingual input does not revert to the primary system language ([#12475](https://github.com/can1357/oh-my-pi/pull/12475) by [@aleister1102](https://github.com/aleister1102)).
+- Limited macOS autocorrection to words the spelling pass flags, so a word the checker accepts (e.g. `artifacts`) is no longer rewritten to a variant it would flag (`artefacts`) ([#12475](https://github.com/can1357/oh-my-pi/pull/12475) by [@aleister1102](https://github.com/aleister1102)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

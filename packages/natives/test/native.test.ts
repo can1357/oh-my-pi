@@ -22,6 +22,7 @@ import {
 	htmlToMarkdown,
 	invalidateFsScanCache,
 	listWorkspace,
+	macOSAutocorrectWord,
 	macOSCheckSpelling,
 	macOSSpellCheckerAvailable,
 	matchesKey,
@@ -57,6 +58,26 @@ describe("macOS spelling", () => {
 		// range doubled editor text under the undercurl renderer.
 		const text = "hello qzxvplmokn world ";
 		expect(await macOSCheckSpelling(text)).toEqual([{ start: 6, length: 10 }]);
+	});
+	it("resolves language per word script for autocorrection", async () => {
+		if (process.platform !== "darwin") return;
+		// With automatic language identification, autocorrection should consult
+		// the language matched by the text's orthography.
+		const text = "Bonjour le monde, je suis recu";
+		expect(await macOSAutocorrectWord(text, 26, 4)).toBe("reçu");
+	});
+	it("only corrects a word the spelling pass flags", async () => {
+		if (process.platform !== "darwin") return;
+		// `artifacts` is accepted by the pass, whose run dictionary is the generic
+		// `en`; the word-level lookup used to fall back to the checker's preferred
+		// language and propose `artefacts`, so the undercurl and the rewrite
+		// contradicted each other on a Mac whose preferred English is British.
+		expect(await macOSCheckSpelling("artifacts")).toEqual([]);
+		expect(await macOSAutocorrectWord("artifacts", 0, 9)).toBeNull();
+		expect(await macOSAutocorrectWord("alpha bravo\nartifacts ", 11, 9)).toBeNull();
+		// A flagged word still gets its correction.
+		expect(await macOSCheckSpelling("recieved")).not.toEqual([]);
+		expect(await macOSAutocorrectWord("recieved ", 0, 8)).toBe("received");
 	});
 });
 
