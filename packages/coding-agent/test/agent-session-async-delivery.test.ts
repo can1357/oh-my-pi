@@ -627,7 +627,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		sessionManager.appendMessage({ role: "user", content: "old session", timestamp: 1 });
 		await sessionManager.flush();
@@ -742,7 +742,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.create(sourceDir.path(), sourceDir.path());
 		sessionManager.appendMessage({ role: "user", content: "source session", timestamp: 1 });
 		await sessionManager.flush();
@@ -804,6 +804,64 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(observedText).toContain("QUEUED AFTER ROLLED-BACK SWITCH");
 	});
 
+	it("drops artifact-only launch progress batches without queueing or waking", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		const epoch = session.captureLaunchProgressEpoch();
+		const notification = (seq: number, batchKind: "artifact-only" | "progress", text: string) => ({
+			event: "daemon-output" as const,
+			monitorId: "monitor",
+			name: "process",
+			daemonId: "daemon",
+			seq,
+			text,
+			batchKind,
+			suppressedEvents: 0,
+		});
+
+		// Rate-limited broker windows arrive as artifact-only batches: they exist
+		// to advance artifact delivery and carry nothing the model should see.
+		session.queueLaunchProgress(notification(1, "artifact-only", ""), "ambient", Date.now(), epoch);
+		session.queueLaunchProgress(notification(2, "artifact-only", ""), "wake", Date.now(), epoch);
+		expect(session.yieldQueue.has("async-progress")).toBe(false);
+		expect(session.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND)).toBe(false);
+		await session.yieldQueue.idleFlushSettled();
+		expect(mock.calls).toHaveLength(0);
+
+		// The next permitted window still reaches the model.
+		session.queueLaunchProgress(notification(3, "progress", "ambient"), "ambient", Date.now(), epoch);
+		expect(session.yieldQueue.has("async-progress")).toBe(true);
+		session.queueLaunchProgress(notification(4, "progress", "WAKE AFTER ARTIFACT-ONLY"), "wake", Date.now(), epoch);
+		await session.yieldQueue.idleFlushSettled();
+		await session.waitForIdle();
+		expect(mock.calls.length).toBeGreaterThan(0);
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).toContain("WAKE AFTER ARTIFACT-ONLY");
+	});
+
 	it("fences process progress and completions while resetting the session context", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
@@ -815,7 +873,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const sessionManager = SessionManager.inMemory();
 		session = new AgentSession({
 			agent,
@@ -1130,7 +1188,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
@@ -1190,7 +1248,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
@@ -1257,7 +1315,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
@@ -1334,7 +1392,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
@@ -1410,7 +1468,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
@@ -1468,7 +1526,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
@@ -1589,7 +1647,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
@@ -1657,7 +1715,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
@@ -1723,7 +1781,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
 
