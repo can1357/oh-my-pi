@@ -17,6 +17,33 @@ export function progressStreamProvenanceForText(text: string): ProgressStreamPro
 		sha256: crypto.createHash("sha256").update(text, "utf16le").digest("base64"),
 	};
 }
+/** Keep at most `maxChars` UTF-16 code units from either edge, moving inward rather than splitting a surrogate pair. */
+function boundedSlice(text: string, maxChars: number, fromEnd = false, precedingCodeUnit?: number): string {
+	if (!fromEnd) {
+		if (text.length <= maxChars) return text;
+		let end = maxChars;
+		const beforeEnd = text.charCodeAt(end - 1);
+		const atEnd = text.charCodeAt(end);
+		if (beforeEnd >= 0xd800 && beforeEnd <= 0xdbff && atEnd >= 0xdc00 && atEnd <= 0xdfff) {
+			end--;
+		}
+		return text.slice(0, end);
+	}
+
+	let start = Math.max(0, text.length - maxChars);
+	const beforeStart = start === 0 ? precedingCodeUnit : text.charCodeAt(start - 1);
+	const atStart = text.charCodeAt(start);
+	if (
+		beforeStart !== undefined &&
+		beforeStart >= 0xd800 &&
+		beforeStart <= 0xdbff &&
+		atStart >= 0xdc00 &&
+		atStart <= 0xdfff
+	) {
+		start++;
+	}
+	return start === 0 ? text : text.slice(start);
+}
 
 export interface ProgressLine {
 	text: string;
@@ -99,19 +126,22 @@ export class ProgressLines {
 		if (this.#truncated) {
 			this.#tail =
 				segment.length >= ProgressLines.#TAIL_CHARS
-					? segment.slice(-ProgressLines.#TAIL_CHARS)
-					: `${this.#tail.slice(-(ProgressLines.#TAIL_CHARS - segment.length))}${segment}`;
+					? boundedSlice(segment, ProgressLines.#TAIL_CHARS, true, this.#tail.charCodeAt(this.#tail.length - 1))
+					: `${boundedSlice(this.#tail, ProgressLines.#TAIL_CHARS - segment.length, true)}${segment}`;
 			return;
 		}
 		if (this.#partial.length + segment.length <= PROGRESS_LIMITS.LINE_CHARS) {
 			this.#partial += segment;
 			return;
 		}
-		this.#head = `${this.#partial}${segment.slice(0, ProgressLines.#HEAD_CHARS)}`.slice(0, ProgressLines.#HEAD_CHARS);
+		this.#head = boundedSlice(
+			`${this.#partial}${boundedSlice(segment, ProgressLines.#HEAD_CHARS)}`,
+			ProgressLines.#HEAD_CHARS,
+		);
 		this.#tail =
 			segment.length >= ProgressLines.#TAIL_CHARS
-				? segment.slice(-ProgressLines.#TAIL_CHARS)
-				: `${this.#partial.slice(-(ProgressLines.#TAIL_CHARS - segment.length))}${segment}`;
+				? boundedSlice(segment, ProgressLines.#TAIL_CHARS, true, this.#partial.charCodeAt(this.#partial.length - 1))
+				: `${boundedSlice(this.#partial, ProgressLines.#TAIL_CHARS - segment.length, true)}${segment}`;
 		this.#partial = "";
 		this.#truncated = true;
 	}
