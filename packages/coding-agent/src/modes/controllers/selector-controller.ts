@@ -656,6 +656,19 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply memory backend: ${err}`);
 				});
 				break;
+			// Only the paired leg. Nothing caches what `resolveMemoryBackend` returns,
+			// so status and search read the flag on their own; what a live toggle has
+			// to move is this session's Sharpshooter resources and the prompt its
+			// decision files are injected into. A full apply would also dispose the
+			// selected store and build a new one, and a fresh `HindsightSessionState`
+			// re-retains the whole conversation on the next `agent_end` and recalls
+			// for the first turn again. Sharpshooter selected as the backend is left
+			// alone inside, where the reason for it is written down.
+			case "sharpshooter.enabled":
+				void this.ctx.session.applyPairedMemoryBackend("start").catch(err => {
+					this.ctx.showError(`Failed to apply Sharpshooter pairing: ${err}`);
+				});
+				break;
 			case "externalThinking":
 				void this.ctx.session.setThinkToolEnabled(value as boolean).catch(err => {
 					this.ctx.showError(`Failed to apply external thinking: ${err}`);

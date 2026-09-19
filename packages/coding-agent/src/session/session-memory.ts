@@ -6,7 +6,8 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { HindsightSessionState } from "../hindsight/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
-import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import type { MemoryBackendStartOptions, MemoryBackendStartReason } from "../memory-backend/types";
+import { startSharpshooterLeg } from "../memory-backend/with-sharpshooter";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { releaseSharpshooterSession } from "../sharpshooter/backend";
 
@@ -181,9 +182,13 @@ export class SessionMemory {
 	 * Concurrent settings changes run in order and settle before the next turn.
 	 * Cwd rebinding can disable Mnemopi auto-retention without skipping its drain.
 	 */
-	async applyMemoryBackend(options: { retainMnemopi?: boolean } = {}): Promise<void> {
+	async applyMemoryBackend(
+		options: { retainMnemopi?: boolean; reason?: MemoryBackendStartReason } = {},
+	): Promise<void> {
 		if (this.#host.isDisposed()) return;
-		const transition = this.#memoryBackendTransition.then(() => this.#applyMemoryBackend(options.retainMnemopi));
+		const transition = this.#memoryBackendTransition.then(() =>
+			this.#applyMemoryBackend(options.retainMnemopi, options.reason),
+		);
 		this.#memoryBackendTransition = transition.then(
 			() => undefined,
 			() => undefined,
@@ -191,7 +196,66 @@ export class SessionMemory {
 		await transition;
 	}
 
-	async #applyMemoryBackend(retainMnemopi = true): Promise<void> {
+	/**
+	 * Start, restart or release only the paired decision backend, leaving the
+	 * selected store's live state untouched.
+	 *
+	 * Two callers, and for both a full `applyMemoryBackend` would be wrong rather
+	 * than merely heavy, because it disposes the selected store and builds a new
+	 * one. A fresh `HindsightSessionState` starts at `lastRetainedTurn: 0` with an
+	 * empty transcript cache and `hasRecalledForFirstTurn: false`, so the next
+	 * `agent_end` re-retains the whole conversation under a new document and
+	 * first-turn recall fires a second time.
+	 *
+	 * A cwd move is one caller. `rebindMemoryBackendForCwd` skips the full apply
+	 * while a Hindsight transition owns the backend, so that it does not retry a
+	 * partially torn-down store outside its own task, and Sharpshooter still has
+	 * to follow: it keys its decision bank and its per-bank scheduler on cwd, so
+	 * skipping leaves it consolidating the project the session just left and
+	 * ignoring the destination project's own `sharpshooter.enabled`. The
+	 * destination decides both ways, and a destination that turns pairing off has
+	 * to take the source's subscription and scheduler with it.
+	 *
+	 * A live `sharpshooter.enabled` toggle is the other. Nothing caches what
+	 * `resolveMemoryBackend` returns, so search and status pick the flag up on
+	 * their own; what needs doing is exactly this, the session resources and the
+	 * prompt.
+	 *
+	 * Sharpshooter selected as the backend is left alone either way. The flag is
+	 * documented as ignored there, and it rebinds through the normal apply.
+	 *
+	 * Every branch that changed anything ends with a prompt rebuild. Sharpshooter's
+	 * decision files are injected as developer instructions, and the Hindsight
+	 * rebuild a move runs beside this refreshes the base prompt only when its own
+	 * bank scope changed, which a `global` scope or an unchanged bank never does.
+	 */
+	async applyPairedMemoryBackend(reason: MemoryBackendStartReason): Promise<void> {
+		if (this.#host.isDisposed()) return;
+		if (!this.#memoryAgentDir || this.#memoryTaskDepth !== 0) return;
+		const settings = this.#host.settings;
+		const backend = settings.get("memory.backend");
+		if (backend === "sharpshooter") return;
+		const session = this.#host.memoryBackendSession();
+		if (settings.get("sharpshooter.enabled")) {
+			startSharpshooterLeg(
+				{
+					session,
+					settings,
+					modelRegistry: this.#host.modelRegistry,
+					agentDir: this.#memoryAgentDir,
+					taskDepth: this.#memoryTaskDepth,
+					reason,
+				},
+				backend ?? "off",
+			);
+		} else {
+			releaseSharpshooterSession(session);
+		}
+		if (this.#host.isDisposed()) return;
+		await this.#host.refreshBaseSystemPrompt();
+	}
+
+	async #applyMemoryBackend(retainMnemopi = true, reason: MemoryBackendStartReason = "start"): Promise<void> {
 		if (this.#host.isDisposed()) return;
 		try {
 			await this.#disposeMemoryBackendState(true, retainMnemopi);
@@ -203,6 +267,7 @@ export class SessionMemory {
 					modelRegistry: this.#host.modelRegistry,
 					agentDir: this.#memoryAgentDir,
 					taskDepth: this.#memoryTaskDepth,
+					reason,
 				});
 			}
 			if (this.#host.isDisposed()) return;

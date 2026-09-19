@@ -106,6 +106,22 @@ describe("selector setting side effects", () => {
 
 		expect(applyMemoryBackend).toHaveBeenCalledTimes(1);
 	});
+	it("toggles Sharpshooter pairing without restarting the selected store", () => {
+		// The selected store does not read this flag, and restarting it resets the
+		// Hindsight retain counters and transcript cache, so the next `agent_end`
+		// would re-retain the whole conversation under a new document.
+		const applyMemoryBackend = vi.fn(async () => {});
+		const applyPairedMemoryBackend = vi.fn(async () => {});
+		const controller = new SelectorController({
+			session: { applyMemoryBackend, applyPairedMemoryBackend },
+			showError: vi.fn(),
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("sharpshooter.enabled", true);
+
+		expect(applyPairedMemoryBackend).toHaveBeenCalledWith("start");
+		expect(applyMemoryBackend).not.toHaveBeenCalled();
+	});
 	it("stops the live advisor runtime when advisor.enabled is turned off in /settings", () => {
 		const setAdvisorEnabled = vi.fn();
 		const invalidate = vi.fn();

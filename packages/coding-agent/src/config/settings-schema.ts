@@ -3051,6 +3051,16 @@ export const SETTINGS_SCHEMA = {
 	},
 	"sharpshooter.intervalMinutes": { type: "number", default: 5 },
 	"sharpshooter.injectionTokenLimit": { type: "number", default: 15000 },
+	"sharpshooter.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Sharpshooter",
+			label: "Run Sharpshooter Alongside",
+			description: "Also run Sharpshooter next to the selected memory backend; ignored when it is the backend",
+		},
+	},
 
 	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
 	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.

@@ -67,6 +67,10 @@ function makeFakeSession(deps: FakeSessionDeps) {
 			return () => listeners.delete(listener);
 		},
 		refreshBaseSystemPrompt: vi.fn().mockResolvedValue(undefined),
+		// `rebindMemoryBackendForCwd` calls this on the branch where a Hindsight
+		// transition owns the backend, to re-point a paired decision backend at the
+		// project the session moved to.
+		applyPairedMemoryBackend: vi.fn().mockResolvedValue(undefined),
 		getHindsightSessionState: () => hindsightState,
 		setHindsightSessionState(state: HindsightSessionState | undefined) {
 			const previous = hindsightState;

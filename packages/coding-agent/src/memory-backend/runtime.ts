@@ -49,12 +49,32 @@ export function createMemoryRuntimeContext(context: MemoryBackendOperationContex
 	};
 }
 
+/**
+ * The session's memory runtime context.
+ *
+ * `cwd` is read from the session manager on every access rather than captured,
+ * because the caller's `cwd` is fixed at session creation while `/move` changes
+ * the session's working directory under it. A backend that scopes on
+ * `context.cwd` would otherwise keep answering for the project the session
+ * started in: sharpshooter keys its decision bank on cwd, so a moved session
+ * could surface the source project's decisions through `context.memory.search()`.
+ * Backends that resolve scope from live session state instead, as mnemopi does,
+ * were never affected; this makes the field agree with them.
+ *
+ * `cwd` is the fallback for a session manager that cannot report one.
+ */
 export function createSessionMemoryRuntimeContext(
 	session: AgentSession,
 	agentDir: string,
 	cwd: string,
 ): MemoryRuntimeContext {
-	return createMemoryRuntimeContext({ agentDir, cwd, session });
+	return createMemoryRuntimeContext({
+		agentDir,
+		get cwd() {
+			return session.sessionManager.getCwd() || cwd;
+		},
+		session,
+	});
 }
 
 function unavailableSearch(backend: MemoryBackendId, query: string, message: string) {
