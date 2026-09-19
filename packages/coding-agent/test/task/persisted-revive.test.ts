@@ -4,6 +4,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ArtifactProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/artifact-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -214,6 +217,56 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it("cold revival keeps producer-scoped reads and completion bound to the restored child", async () => {
+		const cwd = makeTempDir("@pi-revive-producer-");
+		const sessionFile = await createPersistedSession(cwd);
+		const saved = await SessionManager.open(sessionFile);
+		const childSessionId = saved.getSessionId();
+		await saved.close();
+		const dir = path.join(cwd, "shared-artifacts");
+		const artifacts = new ArtifactManager(dir);
+		const parentId = await artifacts.save("parent secret", "read", "parent-session");
+		const childId = await artifacts.save("child output", "read", childSessionId);
+		let reopened: SessionManager | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			reopened = options!.sessionManager!;
+			const handler = new ArtifactProtocolHandler();
+			const context = { sessionId: reopened.getSessionId(), localProtocolOptions: options!.localProtocolOptions };
+			expect((await handler.resolve(parseInternalUrl(`artifact://${childId}`), context)).content).toBe(
+				"child output",
+			);
+			await expect(handler.resolve(parseInternalUrl(`artifact://${parentId}`), context)).rejects.toThrow(
+				"not found",
+			);
+			expect(await handler.complete("", context)).toEqual([{ value: childId }]);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		const parentSession = {
+			sessionManager: { getCwd: () => cwd, getArtifactManager: () => artifacts },
+			localProtocolOptions: {
+				getArtifactsDir: () => dir,
+				getSessionId: () => "parent-session",
+				artifactResolutionScope: "producer",
+			},
+		} as unknown as AgentSession;
+		const factory = createPersistedSubagentReviverFactory({
+			session: parentSession,
+			authStorage: {} as never,
+			modelRegistry: { authStorage: {} } as ModelRegistry,
+			settings: Settings.isolated(),
+			enableLsp: false,
+		});
+		const ref = createRef(sessionFile);
+		const reviver = await factory(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		try {
+			await reviver(ref);
+		} finally {
+			await reopened?.close();
+		}
+	});
+
 	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
 		const cwd = makeTempDir("@pi-revive-ext-init-");
 		const sessionFile = await createPersistedSession(cwd);

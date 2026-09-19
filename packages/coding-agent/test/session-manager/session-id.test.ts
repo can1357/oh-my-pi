@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
+import { readArtifactProvenance } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -49,6 +50,8 @@ describe("SessionManager session ids", () => {
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		await session.flush();
 		const firstId = expectUuidV7SessionId(session);
+		const artifactId = await session.saveArtifact("inherited output", "read");
+		expect(artifactId).toBe("0");
 
 		const forkResult = await session.fork();
 		if (!forkResult) throw new Error("Expected fork result");
@@ -56,6 +59,12 @@ describe("SessionManager session ids", () => {
 		const forkedId = expectUuidV7SessionId(session);
 		expect(forkedId).not.toBe(firstId);
 		expect(session.getHeader()?.parentSession).toBe(firstId);
+		const forkArtifactsDir = forkResult.newSessionFile.slice(0, -".jsonl".length);
+		expect(await Bun.file(path.join(forkArtifactsDir, "0.read.log")).text()).toBe("inherited output");
+		expect(await readArtifactProvenance(forkArtifactsDir, "0")).toEqual({
+			version: 1,
+			producerSessionId: forkedId,
+		});
 	});
 
 	it("preserves existing session ids when reopening a saved session", async () => {

@@ -12,6 +12,8 @@ import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, Ur
 export interface LocalProtocolOptions {
 	getArtifactsDir?: () => string | null;
 	getSessionId?: () => string | null;
+	/** Restrict artifact:// resolution to files produced by the calling session. */
+	artifactResolutionScope?: "shared" | "producer";
 }
 
 function parseLocalUrl(input: string): InternalUrl {

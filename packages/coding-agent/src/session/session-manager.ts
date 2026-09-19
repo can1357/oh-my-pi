@@ -26,7 +26,7 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
-import { ArtifactManager } from "./artifacts";
+import { ArtifactManager, rebindArtifactProvenance } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
 import type { CompactionMethod } from "./compaction-methods";
 import {
@@ -121,8 +121,13 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 	return sessionFile.slice(0, -JSONL_SUFFIX_LENGTH);
 }
 
-/** Copy a session's artifact directory to another session, matching interactive `/fork`. */
-export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
+/** Copy a session's artifacts into a fork and bind their provenance to its fresh session id. */
+export async function copySessionArtifacts(
+	sourceSessionFile: string,
+	destinationSessionFile: string,
+	destinationSessionId: string,
+	sourceSessionId: string | undefined,
+): Promise<void> {
 	const sourceArtifactsDir = artifactsDirectoryFor(sourceSessionFile);
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
 	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
@@ -132,6 +137,7 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 		const sourceStat = await fs.promises.stat(sourceArtifactsDir);
 		if (sourceStat.isDirectory()) {
 			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, { recursive: true });
+			await rebindArtifactProvenance(destinationArtifactsDir, sourceSessionId, destinationSessionId);
 		}
 	} catch (error) {
 		if (!isEnoent(error)) {
@@ -147,6 +153,11 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 /** The numeric id an artifact file name (`<id>.<tool>.log`) carries, if any. */
 function artifactIdOf(name: string): string | undefined {
 	return /^(\d+)\./.exec(name)?.[1];
+}
+
+/** The artifact id carried by a provenance sidecar (`.artifact-<id>.json`), if any. */
+function artifactProvenanceIdOf(name: string): string | undefined {
+	return /^\.artifact-(\d+)\.json$/.exec(name)?.[1];
 }
 
 /**
@@ -206,29 +217,57 @@ async function mergeDirectoryInto(
 ): Promise<string[]> {
 	let { occupants, takenIds } = await destinationOccupancy(destination);
 	const strandedBefore = stranded.length;
-	for (const entry of await fs.promises.readdir(source, { withFileTypes: true })) {
+	const movedArtifactIds = new Set<string>();
+	const strandedArtifactIds = new Set<string>();
+	const entries = await fs.promises.readdir(source, { withFileTypes: true });
+	// A sidecar must follow its log's outcome. Process logs first so a collision
+	// cannot strand the log while accidentally authorizing the destination's
+	// existing artifact with provenance copied from the source.
+	entries.sort(
+		(a, b) =>
+			Number(artifactProvenanceIdOf(a.name) !== undefined) - Number(artifactProvenanceIdOf(b.name) !== undefined),
+	);
+	for (const entry of entries) {
 		const from = path.join(source, entry.name);
 		const to = path.join(destination, entry.name);
 		const label = prefix + entry.name;
 		const id = artifactIdOf(entry.name);
+		const provenanceId = artifactProvenanceIdOf(entry.name);
 		try {
 			// A writer can publish another `<id>.*` file while earlier entries move,
 			// and a different file name slips past link(2)'s EEXIST; list again right
 			// before an id-bearing move so the check is one syscall old, not the
 			// whole merge. Inside the boundary: a failed listing strands this entry
 			// like a failed move would, instead of aborting a merge already under way.
-			if (id !== undefined) ({ occupants, takenIds } = await destinationOccupancy(destination));
+			if (id !== undefined || provenanceId !== undefined) {
+				({ occupants, takenIds } = await destinationOccupancy(destination));
+			}
 			const occupant = occupants.get(entry.name);
-			if (occupant === undefined && (id === undefined || !takenIds.has(id))) {
+			const canMoveProvenance =
+				provenanceId !== undefined &&
+				movedArtifactIds.has(provenanceId) &&
+				!strandedArtifactIds.has(provenanceId) &&
+				occupant === undefined;
+			if (
+				canMoveProvenance ||
+				(provenanceId === undefined && occupant === undefined && (id === undefined || !takenIds.has(id)))
+			) {
 				await moveEntryWithoutReplacing(from, to, entry.isDirectory());
+				if (id !== undefined) movedArtifactIds.add(id);
 			} else if (occupant?.isDirectory() && entry.isDirectory()) {
 				await mergeDirectoryInto(from, to, stranded, `${label}/`);
 			} else {
-				stranded.push(`${label} (${occupant === undefined ? "id" : "name"} taken)`);
+				if (id !== undefined) strandedArtifactIds.add(id);
+				stranded.push(
+					`${label} (${provenanceId !== undefined && occupant === undefined ? "artifact" : occupant === undefined ? "id" : "name"} taken)`,
+				);
 			}
 		} catch (err) {
 			// ENOENT: the entry vanished under us (a writer's temp file); nothing to move.
-			if (!isEnoent(err)) stranded.push(`${label} (${isFsError(err) ? err.code : String(err)})`);
+			if (!isEnoent(err)) {
+				if (id !== undefined) strandedArtifactIds.add(id);
+				stranded.push(`${label} (${isFsError(err) ? err.code : String(err)})`);
+			}
 		}
 	}
 	try {
@@ -1925,6 +1964,7 @@ export class SessionManager {
 		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 
 		await this.#rewriteAtomically();
+		await copySessionArtifacts(oldSessionFile, this.#sessionFile, this.#sessionId, parentSessionId);
 		return { oldSessionFile, newSessionFile: this.#sessionFile };
 	}
 
@@ -2537,12 +2577,12 @@ export class SessionManager {
 	}
 
 	async allocateArtifactPath(toolType: string): Promise<{ id?: string; path?: string }> {
-		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
+		return (await this.#artifactManagerForSession()?.allocatePath(toolType, this.#sessionId)) ?? {};
 	}
 
 	async saveArtifact(content: string, toolType: string): Promise<string | undefined> {
 		const manager = this.#artifactManagerForSession();
-		if (manager) return manager.save(content, toolType);
+		if (manager) return manager.save(content, toolType, this.#sessionId);
 
 		// Non-persistent session: keep an in-memory copy so spill truncation works.
 		this.#inMemoryArtifacts ??= new Map();
@@ -3353,7 +3393,7 @@ export class SessionManager {
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
 		if (options?.copyArtifacts !== false) {
-			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+			await copySessionArtifacts(sourcePath, manager.#sessionFile!, manager.#sessionId, sourceHeader?.id);
 		}
 		return manager;
 	}

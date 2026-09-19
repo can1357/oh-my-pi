@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readArtifactProvenance } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -634,8 +635,13 @@ describe("SessionManager.moveTo", () => {
 		);
 		expect((await fsp.readdir(homeArtifactsDir)).sort()).toEqual([`${id}.bash.log`, "Sub", "unique.md"]);
 		expect(await fsp.readFile(path.join(homeArtifactsDir, "Sub", "same.md"), "utf8")).toBe("home copy");
-		expect((await fsp.readdir(awayArtifactsDir)).sort()).toEqual([`${id}.bash.log`, "Sub"]);
+		expect((await fsp.readdir(awayArtifactsDir)).sort()).toEqual([`.artifact-${id}.json`, `${id}.bash.log`, "Sub"]);
 		expect(await fsp.readFile(path.join(awayArtifactsDir, `${id}.bash.log`), "utf8")).toBe("written while away");
+		expect(await readArtifactProvenance(homeArtifactsDir, id)).toBeNull();
+		expect(await readArtifactProvenance(awayArtifactsDir, id)).toEqual({
+			version: 1,
+			producerSessionId: session.getSessionId(),
+		});
 		expect(await fsp.readdir(path.join(awayArtifactsDir, "Sub"))).toEqual(["same.md"]);
 	});
 
@@ -651,7 +657,7 @@ describe("SessionManager.moveTo", () => {
 
 		expect(await session.getArtifactPath(id)).toBe(path.join(homeArtifactsDir, `${id}.read.log`));
 		expect(await fsp.readdir(homeArtifactsDir)).toEqual([`${id}.read.log`]);
-		expect(await fsp.readdir(awayArtifactsDir)).toEqual([`${id}.bash.log`]);
+		expect((await fsp.readdir(awayArtifactsDir)).sort()).toEqual([`.artifact-${id}.json`, `${id}.bash.log`]);
 	});
 
 	it("finishes the merge and keeps the session at the destination when one entry cannot move", async () => {
@@ -719,7 +725,7 @@ describe("SessionManager.moveTo", () => {
 
 		expect((await fsp.readdir(homeArtifactsDir)).sort()).toEqual([`${id}.read.log`, "stale.md"]);
 		expect(await session.getArtifactPath(id)).toBe(path.join(homeArtifactsDir, `${id}.read.log`));
-		expect(await fsp.readdir(awayArtifactsDir)).toEqual([`${id}.bash.log`]);
+		expect((await fsp.readdir(awayArtifactsDir)).sort()).toEqual([`.artifact-${id}.json`, `${id}.bash.log`]);
 	});
 
 	it("does not merge through a symlink on either side", async () => {
@@ -779,7 +785,7 @@ describe("SessionManager.moveTo", () => {
 
 		expect(session.getSessionFile()!.slice(0, -6)).toBe(homeArtifactsDir);
 		expect((await fsp.readdir(homeArtifactsDir)).sort()).toEqual(["stale.md", "unique.md"]);
-		expect(await fsp.readdir(awayArtifactsDir)).toEqual([`${id}.bash.log`]);
+		expect((await fsp.readdir(awayArtifactsDir)).sort()).toEqual([`.artifact-${id}.json`, `${id}.bash.log`]);
 	});
 
 	it("keeps the no-replace guarantee when hard links are unavailable", async () => {
