@@ -88,6 +88,7 @@ import {
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
+	buildAsyncProgressBlock,
 	buildAsyncProgressDisplayMessage,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
@@ -289,6 +290,12 @@ export class UiHelpers {
 				if (message.display) {
 					if (message.customType === "async-result") {
 						const component = buildAsyncResultBlock(message);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === "async-progress") {
+						const component = buildAsyncProgressBlock(message);
+						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}

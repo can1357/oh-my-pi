@@ -1,3 +1,6 @@
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { shortenEmbeddedPaths } from "../render/render-utils";
+
 /** Launch-broker daemon types shared by services, `proc://`, and `omp ps`. */
 
 /** Stable lifecycle states exposed by the launch broker. */
@@ -71,4 +74,26 @@ export interface DaemonMonitorWatcher {
 	daemonId?: string;
 	/** False while the registering client is disconnected inside the reconnect grace. */
 	connected: boolean;
+}
+
+/** Maximum sanitized diagnostic text retained in daemon snapshots and display. */
+const MAX_EXIT_REASON_LENGTH = 1_024;
+
+/**
+ * Mirrors the coding-agent launch exit-reason normalization without importing
+ * that package. Durable normalization bounds runtime text; display also hides
+ * the home directory.
+ */
+export function normalizeDaemonExitReason(reason: string | undefined): string | undefined {
+	if (reason === undefined) return undefined;
+	const normalized = sanitizeText(reason).replace(/\s+/g, " ").trim();
+	if (!normalized) return undefined;
+	return normalized.length > MAX_EXIT_REASON_LENGTH
+		? `${normalized.slice(0, MAX_EXIT_REASON_LENGTH - 1)}…`
+		: normalized;
+}
+
+export function displayDaemonExitReason(reason: string | undefined): string | undefined {
+	const normalized = normalizeDaemonExitReason(reason);
+	return normalized ? shortenEmbeddedPaths(normalized) : undefined;
 }

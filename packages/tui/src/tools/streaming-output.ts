@@ -125,7 +125,7 @@ export interface OutputSinkOptions {
 	/**
 	 * Invoked exactly once after the matching sampled `onChunk` delivery
 	 * succeeds or fails. Callers use this to release entry-time barriers even
-	 * when artifact flushing prevents `onChunk` from running.
+	 * when artifact flushing fails and the delivery omits artifact metadata.
 	 */
 	onChunkSettled?: (stamp: number) => void;
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
@@ -1622,7 +1622,6 @@ export class OutputSink {
 					logger.warn("Output artifact delivery failed", {
 						error: error instanceof Error ? error.message : String(error),
 					});
-					return;
 				}
 				const ready = this.#chunkReady?.(stamp);
 				if (ready) await ready;

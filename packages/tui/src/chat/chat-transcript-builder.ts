@@ -37,6 +37,7 @@ import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
+	buildAsyncProgressBlock,
 	buildAsyncProgressDisplayMessage,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
@@ -571,6 +572,12 @@ export class ChatTranscriptBuilder {
 		if (!message.display) return;
 		if (message.customType === "async-result") {
 			const component = buildAsyncResultBlock(message);
+			this.container.addChild(component);
+			return;
+		}
+		if (message.customType === "async-progress") {
+			const component = buildAsyncProgressBlock(message);
+			this.#trackExpandable(component);
 			this.container.addChild(component);
 			return;
 		}

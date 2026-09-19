@@ -19,6 +19,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
+	AsyncJobRunError,
 	type AsyncJobProgressDelivery,
 	formatJobLabel,
 	raceJobSettlement,
@@ -49,6 +50,7 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { type ServiceProgress, type ServiceReady, serviceLogs, startService } from "../launch/services";
+import { displayExitReason } from "../launch/exit-reason";
 import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -1031,10 +1033,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					// the job's terminal state.
 					settleCompletion({ kind: "completed", result: finalResult });
 					if (finalResult.isError === true) {
-						// A non-zero exit is a completed command that failed. Re-enter
-						// the failure path so the job manager records it as failed and
-						// delivers the error text, matching prior throw-based behavior.
-						throw new ToolError(finalText);
+						// Re-enter the failure path so the job manager records a
+						// completed Bash error result as failed while retaining the
+						// raw stream provenance for progress deduplication.
+						const failureDetails = { ...latestProgressDetails };
+						throw new AsyncJobRunError(finalText, failureDetails, undefined, result.output);
 					}
 					await report(finalText, {
 						...latestProgressDetails,
@@ -1323,7 +1326,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				lines.push(
 					`NOT ready — readiness timed out after ${ready?.timeout ?? 30}s; process state: ${daemon.state}.`,
 				);
-			if (daemon.exitReason) lines.push(`Reason: ${daemon.exitReason}`);
+			const exitReason = displayExitReason(daemon.exitReason);
+			if (exitReason) lines.push(`Reason: ${exitReason}`);
 			if (monitored)
 				lines.push(
 					`Live progress: ${monitored}; retune or detach with write proc://${daemon.name}/progress (wake, ambient, off).`,
@@ -1344,6 +1348,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						ready: daemon.readyAt !== undefined || daemon.state === "running",
 						timedOut: service.readyTimedOut,
 						pid: daemon.pid,
+						...(exitReason ? { exitReason } : {}),
 						...(monitored ? { progress: monitored } : {}),
 						...(service.monitorStopped ? { monitorStopped: service.monitorStopped } : {}),
 					},
