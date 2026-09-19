@@ -8,6 +8,7 @@
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
 - Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues under one session-wide wake-turn budget, and completion notices that lead with the full-output artifact and carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
 - Daemon broker clients can subscribe to live, rate-limited output previews for supervised processes while the broker mirrors the complete raw stream into a session artifact. Replay after a reconnect is bounded by time, batch count, and bytes; evicted batches are reported as an explicit gap, each batch carries the artifact size it is backed by, and a republished subscription continues its capture only past the size it acknowledged. A subscription replaced on the same artifact path waits for the previous sink to close before its capture opens, and a fresh capture truncates the file instead of overwriting it in place.
+- Added live progress monitoring for supervised services through Bash's `progress` option and `proc://<name>/progress`: attach or retune `wake`/`ambient` delivery, detach with `off`, and inspect watchers through `proc://`. Running background jobs with existing progress channels can also switch between `wake` and `ambient` through `proc://<job-id>/progress`; jobs reject `off` and cannot gain a channel after launch.
 
 ### Fixed
 
@@ -36,6 +37,9 @@
 - Fixed the `eval` tool telling sessions with only the Python runtime to call `tool.<name>(args)` without `await`, which returns a coroutine and never runs the tool ([#16578](https://github.com/can1357/oh-my-pi/pull/16578) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed daemon broker idle shutdown closing newly accepted clients before authentication under load; unauthenticated sockets now close after the client authentication timeout.
 - Fixed supervised image tunnels rejecting a published URL when the child exits between the startup log read and exit check; each tunnel child now uses a private temporary log directory.
+- Fixed a failed progress preview delivery leaving its mirrored output artifact unfinalized.
+- Service monitors are released at every conversation boundary, including same-id `/clear`; retained service completion survives a session switch or exit, but not reset or a new session.
+- Fixed a supervised process's progress arriving out of order after its monitor was retuned between `wake` and `ambient`: output sampled before the switch now stays ahead of later output instead of landing behind it — or on a later turn — when the process completes.
 
 ## [18.12.6] - 2026-10-21
 

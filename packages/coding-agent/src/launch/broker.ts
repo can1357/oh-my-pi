@@ -32,7 +32,7 @@ import {
 	readStoredDaemonRecord,
 	writeDaemonScopeMeta,
 } from "./paths";
-import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { DaemonMonitorWatcher, DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -138,6 +138,13 @@ interface ManagedDaemon {
 	pty?: PtySession;
 	generation: number;
 	stopRequested: boolean;
+	/**
+	 * True when the record's last settlement emitted (or queued) a
+	 * `daemon-completed` notification for its owner; forwarded on
+	 * `daemon-monitor-completed` so owner-session monitors know whether a
+	 * separate owner completion covers the terminal state.
+	 */
+	ownerCompletionEmitted: boolean;
 	logReady: boolean;
 	portReady: boolean;
 	readinessBuffer: string;
@@ -223,6 +230,7 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	artifactDisposal?: Promise<void>;
 	/** Bytes already on disk when this registration's sink opened; its own capture appends past them. */
 	artifactBase: number;
+	/** Reconnect-grace cleanup for registrations without an attached live client. */
 	offlineTimer?: NodeJS.Timeout;
 	/** Artifact persistence failed; retain only the terminal expiry until client cleanup. */
 	disabled?: boolean;
@@ -859,6 +867,7 @@ class DaemonBroker {
 				return {
 					op: "list",
 					daemons: orderDaemonsForListing([...this.#records.values()].map(record => record.snapshot)),
+					monitors: this.#monitorWatchers(),
 				};
 			}
 			case "logs":
@@ -888,11 +897,36 @@ class DaemonBroker {
 			case "describe": {
 				const record = this.#record(operation.name);
 				await this.#refreshDetached(record);
-				return { op: "describe", daemon: record.snapshot, spec: record.spec };
+				return {
+					op: "describe",
+					daemon: record.snapshot,
+					spec: record.spec,
+					monitors: this.#monitorWatchers(operation.name),
+				};
 			}
 			case "shutdown":
 				return { op: "shutdown" };
 		}
+	}
+
+	/** Live output monitors, so `ps`/`describe` can show who is watching a process and how. */
+	#monitorWatchers(name?: string): DaemonMonitorWatcher[] {
+		const watchers: DaemonMonitorWatcher[] = [];
+		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.disabled) continue;
+			if (name !== undefined && registration.name !== name) continue;
+			watchers.push({
+				name: registration.name,
+				id: registration.id,
+				owner: registration.owner,
+				delivery: registration.delivery,
+				since: registration.since,
+				artifactId: registration.artifactId,
+				daemonId: registration.daemonId,
+				connected: registration.socket !== undefined && !registration.socket.closed,
+			});
+		}
+		return watchers;
 	}
 
 	async #start(spec: DaemonSpec, owner?: string, replace = false, awaitReady = true): Promise<DaemonRpcResult> {
@@ -956,6 +990,7 @@ class DaemonBroker {
 				log: await DaemonLog.create(dir),
 				generation: 0,
 				stopRequested: false,
+				ownerCompletionEmitted: false,
 				logReady: !spec.ready?.log,
 				portReady: spec.ready?.port === undefined,
 				readinessBuffer: "",
@@ -1002,6 +1037,7 @@ class DaemonBroker {
 		record.generation++;
 		const generation = record.generation;
 		record.stopRequested = false;
+		record.ownerCompletionEmitted = false;
 		record.snapshot.state = record.spec.ready ? "starting" : "running";
 		record.snapshot.persist = record.spec.persist;
 		record.snapshot.detached = record.spec.detached;
@@ -1328,8 +1364,10 @@ class DaemonBroker {
 						clearTimeout(existing.offlineTimer);
 						existing.offlineTimer = undefined;
 						existing.owner = subscription.owner;
+						existing.delivery = subscription.delivery;
 						existing.startPending = subscription.startPending;
 						const reconnected = existing.socket !== socket;
+						existing.startPending = subscription.startPending;
 						existing.socket = socket;
 						this.#acknowledgeOutput(existing, subscription);
 						if (reconnected) {
@@ -1379,14 +1417,29 @@ class DaemonBroker {
 						existingArtifactBytes = await this.#artifactSize(subscription.artifactPath);
 						if (!current()) return;
 					}
+					const currentDaemonId = subscription.startPending === true ? undefined : record?.snapshot.id;
 					const registration = createOutputRegistration(
 						subscription,
 						socket,
 						subscriptionId,
-						subscription.startPending === true ? undefined : record?.snapshot.id,
+						subscription.daemonId ?? currentDaemonId,
 						existingArtifactBytes,
 					);
 					this.#outputRegistrations.set(key, registration);
+					if (
+						subscription.startPending !== true &&
+						subscription.daemonId !== undefined &&
+						subscription.daemonId !== currentDaemonId
+					) {
+						this.#sendMonitorNotification(registration, {
+							event: "daemon-monitor-expired",
+							monitorId: registration.id,
+							registrationId: registration.registrationId,
+							name: registration.name,
+							daemonId: subscription.daemonId,
+						});
+						return;
+					}
 					if (
 						record &&
 						terminalState(record.snapshot.state) &&
@@ -1583,11 +1636,14 @@ class DaemonBroker {
 		} catch (error) {
 			if (this.#outputRegistrations.get(key) === registration) {
 				// The retained expiry stays replayable for a reconnecting client, but
-				// only through the reconnect grace already running for an offline
-				// registration: its cleanup timer is deliberately left armed.
+				// only through one reconnect grace: an offline registration keeps (or
+				// regains) its cleanup timer instead of pinning itself forever.
 				registration.disabled = true;
 				this.#progressBatcher.clear(registration.batchKey);
 				void this.#disposeOutputArtifact(registration);
+				if (!registration.socket || registration.socket.closed) {
+					this.#scheduleOutputRegistrationCleanup(key, registration);
+				}
 				this.#sendMonitorNotification(registration, {
 					event: "daemon-monitor-expired",
 					monitorId: registration.id,
@@ -1646,6 +1702,7 @@ class DaemonBroker {
 				monitorId: registration.id,
 				registrationId: registration.registrationId,
 				daemon: { ...record.snapshot },
+				ownerNotified: record.ownerCompletionEmitted,
 			});
 		}
 	}
@@ -1870,6 +1927,7 @@ class DaemonBroker {
 					} satisfies DaemonCompletionNotification)
 				: undefined;
 		if (completion) record.pendingCompletions.push(completion);
+		record.ownerCompletionEmitted = completion !== undefined;
 		this.#persist(record);
 		await record.log?.close();
 		record.log = undefined;
@@ -2153,6 +2211,7 @@ class DaemonBroker {
 			daemon: { ...record.snapshot },
 			completionEvents: record.completionCapable,
 			completionSubscriptionId: record.completionSubscriptionId,
+			ownerNotified: record.ownerCompletionEmitted,
 			completionPending: record.pendingCompletions.length > 0,
 			pendingCompletion: record.pendingCompletions.at(-1)?.daemon,
 			pendingCompletions: record.pendingCompletions.map(completion => ({
@@ -2250,6 +2309,7 @@ class DaemonBroker {
 					dir,
 					generation: 0,
 					stopRequested: !detached || snapshot.state === "stopping",
+					ownerCompletionEmitted: "ownerNotified" in decoded && decoded.ownerNotified === true,
 					logReady: detached && (!spec.ready?.log || snapshot.state === "ready"),
 					portReady: detached && (spec.ready?.port === undefined || snapshot.state === "ready"),
 					readinessBuffer: "",
@@ -2307,6 +2367,7 @@ class DaemonBroker {
 						daemon: { ...snapshot },
 					});
 				}
+				if (record.pendingCompletions.length > 0) record.ownerCompletionEmitted = true;
 				syncReadyPending(record);
 				this.#records.set(snapshot.name, record);
 				if (snapshot.owner && record.completionCapable && (detached || record.pendingCompletions.length > 0)) {
