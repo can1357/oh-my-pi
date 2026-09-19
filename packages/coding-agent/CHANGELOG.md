@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a "Review a specific PR" option to the interactive `/review` menu that lists open pull requests with search and PR-number fast-path ([#12399](https://github.com/can1357/oh-my-pi/pull/12399) by [@oldschoola](https://github.com/oldschoola))
 
 ### Breaking Changes
 
