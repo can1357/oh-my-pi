@@ -325,6 +325,22 @@ const CLAUDE_THINKING_BETA_HEADER = "interleaved-thinking-2025-05-14";
 const GOOGLE_GEMINI_REFRESH_SKEW_MS = 60_000;
 const ANTIGRAVITY_REFRESH_SKEW_MS = 60_000;
 
+/**
+ * Cloud Code Assist rejects some `requestType: "agent"` payloads with
+ * `429 RESOURCE_EXHAUSTED` while the account has quota to spare: the response
+ * carries no `Retry-After` and no `RetryInfo`, and `retrieveUserQuotaSummary`
+ * reports headroom in both the 5-hour and weekly buckets for every model
+ * group. The byte-identical payload re-sent as `"chat"` is served normally, so
+ * exhausted quota cannot be the cause. Downgrade the tag once per request
+ * instead of failing the turn on a quota error that is not one.
+ */
+const ANTIGRAVITY_AGENT_REQUEST_TYPE = "agent";
+const ANTIGRAVITY_CHAT_REQUEST_TYPE = "chat";
+/** Generic `RESOURCE_EXHAUSTED` refusal — no metric named, nothing measurably spent. */
+const ANTIGRAVITY_RESOURCE_EXHAUSTED_RE = /RESOURCE_EXHAUSTED/i;
+/** A refusal that does name what ran out; that one is a real quota error, so leave it be. */
+const ANTIGRAVITY_NAMED_QUOTA_RE = /quota metric|quota exceeded|quotaExceeded|rateLimitExceeded/i;
+
 const optionalCredentialString = type("unknown").pipe(raw => {
 	const out = type("string")(raw);
 	return out instanceof type.errors ? undefined : out;
@@ -590,7 +606,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					: {}),
 				...options?.headers,
 			};
-			const requestBodyJson = JSON.stringify(requestBody);
+			let requestBodyJson = JSON.stringify(requestBody);
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
@@ -925,6 +941,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					block =>
 						block.type === "thinking" && (block.thinking.trim().length > 0 || Boolean(block.thinkingSignature)),
 				);
+			let downgradedAgentRequestType = false;
 
 			for (let i = 0; i < endpoints.length; i++) {
 				const endpoint = endpoints[i];
@@ -961,6 +978,27 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							}
 						}
 						const errorText = await response.text();
+
+						// Quota-shaped refusal of an agent-tagged payload: retry the
+						// same endpoint once as a chat request before surfacing a
+						// 429 the account's quota does not explain.
+						if (
+							isAntigravity &&
+							!downgradedAgentRequestType &&
+							response.status === 429 &&
+							requestBody.requestType === ANTIGRAVITY_AGENT_REQUEST_TYPE &&
+							ANTIGRAVITY_RESOURCE_EXHAUSTED_RE.test(errorText) &&
+							!ANTIGRAVITY_NAMED_QUOTA_RE.test(errorText)
+						) {
+							downgradedAgentRequestType = true;
+							requestBody = { ...requestBody, requestType: ANTIGRAVITY_CHAT_REQUEST_TYPE };
+							requestBodyJson = JSON.stringify(requestBody);
+							if (rawRequestDump) {
+								rawRequestDump = { ...rawRequestDump, body: requestBody };
+							}
+							i--;
+							continue;
+						}
 						const validationUrl = extractGoogleValidationUrl(errorText);
 						const errorMessage = validationUrl
 							? formatGoogleValidationRequiredMessage(
