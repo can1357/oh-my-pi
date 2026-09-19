@@ -43,6 +43,7 @@ const EXTRA_SYNTAXES: &[&str] = &[
 	include_str!("syntaxes/Mermaid.sublime-syntax"),
 	include_str!("syntaxes/TypeScript.sublime-syntax"),
 	include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
+	include_str!("syntaxes/Astro.sublime-syntax"),
 ];
 
 fn get_syntax_set() -> &'static SyntaxSet {
@@ -222,7 +223,8 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 	(&["php"], "PHP"),
 	(&["sh", "bash", "zsh", "shell"], "Bash"),
 	(&["ps1", "powershell"], "PowerShell"),
-	(&["html", "htm", "astro", "vue", "svelte"], "HTML"),
+	(&["html", "htm", "vue", "svelte"], "HTML"),
+	(&["astro"], "Astro"),
 	(&["css"], "CSS"),
 	(&["scss"], "SCSS"),
 	(&["sass"], "Sass"),
@@ -697,5 +699,40 @@ mod tests {
 		assert!(last.contains("<k>const"), "trailing code lost keyword highlighting: {last}");
 		assert!(last.contains("<n>1"), "trailing code lost number highlighting: {last}");
 		assert!(!last.contains("<s>const"), "string scope leaked past template literal: {last}");
+	}
+
+	/// Regression: `.astro` resolved to the HTML grammar, which treats the
+	/// `---` TypeScript frontmatter as plain text, so component scripts
+	/// rendered without any highlighting in the write/edit previews.
+	#[test]
+	fn highlights_astro_vendored_syntax() {
+		assert!(get_supported_languages().contains(&"Astro".to_string()));
+		assert!(supports_language_impl("astro"));
+
+		let code = "---\nimport { Menu } from '@lucide/astro';\nconst locale = \
+		            localeOf(path);\n---\n\n<a class=\"nav\">{locale === 'tr' ? 'EN' : 'TR'}</a>\n";
+		let out = highlight_code_impl(code, Some("astro"), &test_colors());
+		let lines: Vec<&str> = out.lines().collect();
+		assert!(
+			lines[1].contains("<k>import"),
+			"frontmatter lost keyword highlighting: {}",
+			lines[1]
+		);
+		assert!(
+			lines[1].contains("<s>@lucide/astro"),
+			"frontmatter lost string highlighting: {}",
+			lines[1]
+		);
+		assert!(
+			lines[2].contains("<f>localeOf"),
+			"frontmatter lost function highlighting: {}",
+			lines[2]
+		);
+		assert!(lines[5].contains("<v>a"), "template lost HTML tag highlighting: {}", lines[5]);
+		assert!(
+			lines[5].contains("<s>tr"),
+			"template expression lost TypeScript highlighting: {}",
+			lines[5]
+		);
 	}
 }

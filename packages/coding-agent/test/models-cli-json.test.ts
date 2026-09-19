@@ -61,17 +61,14 @@ async function listAsJson(models: Model<Api>[]): Promise<ListedModel[]> {
 
 describe("omp models --json catalog metrics", () => {
 	it("prints the catalog intelligence score and output speed the model browser shows", async () => {
-		const model = bundled("anthropic", "claude-fable-5");
-		// Guard: an unscored fixture would let the assertions below pass vacuously.
-		expect(model.int).toBeGreaterThan(0);
-		expect(model.tps).toBeGreaterThan(0);
+		const model = { ...bundled("anthropic", "claude-fable-5"), int: 65.7, tps: 66.2 } as Model<Api>;
 
 		const [listed] = await listAsJson([model]);
 		expect(listed).toMatchObject({
 			provider: model.provider,
 			id: model.id,
-			int: model.int,
-			tps: model.tps,
+			int: 65.7,
+			tps: 66.2,
 		});
 	});
 

@@ -13,6 +13,8 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type {
 	ClientBridge,
@@ -234,6 +236,66 @@ it("explicit yolo still gates tools whose per-tool policy requires a prompt", as
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
+});
+
+/**
+ * Minimal runner for wrapping a tool exactly as an ACP session does: no
+ * interactive UI (so the inner tier gate fails closed) and no event handlers.
+ */
+function noUiRunner(): ExtensionRunner {
+	return {
+		hasHandlers: () => false,
+		consumeToolCallEmitted: () => false,
+		hasUI: () => false,
+		sessionId: "acp-permission-test",
+		runScoped<T>(fn: () => T): T {
+			return fn();
+		},
+	} as unknown as ExtensionRunner;
+}
+
+it("always-ask: an ACP grant satisfies the inner wrapper's explicit prompt policy", async () => {
+	// In a real ACP session every registry tool is wrapped by ExtensionToolWrapper,
+	// then again by the ACP permission gate. The client has answered the explicit
+	// prompt, so the inner wrapper must not request the unavailable interactive UI.
+	const bashTool = makeFakeTool("bash");
+	const wrapped = new ExtensionToolWrapper(bashTool, noUiRunner()) as unknown as AgentTool;
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	const approvalSettings: Partial<Record<SettingPath, unknown>> = {
+		"tools.approvalMode": "always-ask",
+		"tools.approval": { bash: "prompt" },
+	};
+	session = await createSession([wrapped], bridge, approvalSettings);
+
+	await session.setActiveToolsByName(["bash"]);
+	const gatedBash = session.agent.state.tools.find(t => t.name === "bash");
+	const ctx = { settings: Settings.isolated(approvalSettings) } as never;
+
+	await gatedBash!.execute("call-1", { command: "echo hi" }, undefined, undefined as never, ctx);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("always-ask: an ordinary edit without an ACP grant still faces the inner approval gate", async () => {
+	const editTool = makeFakeTool("edit");
+	editTool.approval = "write";
+	const wrapped = new ExtensionToolWrapper(editTool, noUiRunner()) as unknown as AgentTool;
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([wrapped], bridge, { "tools.approvalMode": "always-ask" });
+
+	await session.setActiveToolsByName(["edit"]);
+	const gatedEdit = session.agent.state.tools.find(t => t.name === "edit");
+	const ctx = { settings: Settings.isolated({ "tools.approvalMode": "always-ask" }) } as never;
+
+	await expect(
+		gatedEdit!.execute("call-edit", { path: "/tmp/foo.ts" }, undefined, undefined as never, ctx),
+	).rejects.toThrow(/requires approval but no interactive UI/);
+
+	expect(permissionSpy).not.toHaveBeenCalled();
+	expect(editTool.executeCalls).toBe(0);
 });
 
 it("delete and move tools request ACP permission before executing", async () => {

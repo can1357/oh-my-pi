@@ -1,7 +1,7 @@
 // Gallery fixtures for the agentic orchestration tools (task, hub, goal).
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { TaskToolDetails } from "../../task/types";
-import type { HubDetails } from "../../tools/hub";
+import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { HubDetails } from "@oh-my-pi/pi-tui/tools/hub";
 import type { GalleryFixture } from "./types";
 
 /** Message/activity timestamps are offsets from load time so gallery ages stay plausible. */

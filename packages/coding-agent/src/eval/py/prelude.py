@@ -4,10 +4,9 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import asyncio, collections.abc, inspect, os, json, math, re, types, typing
+    import asyncio, collections.abc, contextvars, inspect, os, json, math, re, types, typing
     from urllib.parse import unquote
 
-    INTENT_FIELD = "i"
 
     # __omp_display is injected by runner.py before the prelude executes; it
     # mirrors IPython's display() semantics with the same MIME bundle output.
@@ -382,6 +381,33 @@ if "__omp_prelude_loaded__" not in globals():
     # host-owned loopback endpoint must always connect directly.
     _BRIDGE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
+    _OMP_CALL_IDENTITY = contextvars.ContextVar("omp_call_identity", default=None)
+    _OMP_CALL_OCCURRENCES = contextvars.ContextVar("omp_call_occurrences", default=None)
+
+    def __omp_reset_call_occurrences__():
+        _OMP_CALL_OCCURRENCES.set(None)
+
+    async def __omp_with_call_site__(site_id: str, action, args):
+        occurrences = dict(_OMP_CALL_OCCURRENCES.get() or {})
+        occurrence = occurrences.get(site_id, 0)
+        occurrences[site_id] = occurrence + 1
+        _OMP_CALL_OCCURRENCES.set(occurrences)
+        token = _OMP_CALL_IDENTITY.set(
+            {"siteId": site_id, "occurrence": occurrence}
+        )
+        try:
+            # `action` is the async `_ToolCallable.__call__`: calling it only
+            # builds the coroutine, so the identity must stay set until the
+            # coroutine body reaches `_bridge_call`. Awaiting here keeps the
+            # ContextVar alive across the await (and into `asyncio.to_thread`,
+            # which propagates the current context).
+            result = action(args)
+            if inspect.isawaitable(result):
+                return await result
+            return result
+        finally:
+            _OMP_CALL_IDENTITY.reset(token)
+
     def _bridge_call(name: str, args: dict):
         """POST one request to the host tool bridge and return its `value`."""
         base, token, session = _tool_proxy_from_env()
@@ -391,9 +417,16 @@ if "__omp_prelude_loaded__" not in globals():
             if callable(_run_id_getter)
             else globals().get("__omp_run_id__")
         )
-        payload = json.dumps(
-            {"session": session, "run": _run_id, "name": name, "args": args}
-        ).encode("utf-8")
+        payload = {
+            "session": session,
+            "run": _run_id,
+            "name": name,
+            "args": args,
+        }
+        identity = _OMP_CALL_IDENTITY.get()
+        if identity is not None:
+            payload["identity"] = identity
+        payload = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             f"{base}/v1/tool",
             data=payload,
@@ -473,8 +506,6 @@ if "__omp_prelude_loaded__" not in globals():
                     f"tool.{self._name}(...) expects a dict of arguments (got {type(args).__name__})"
                 )
             merged.update(kwargs)
-            if INTENT_FIELD not in merged:
-                merged[INTENT_FIELD] = "py prelude"
             value = await asyncio.to_thread(_bridge_call, self._name, merged)
             return _surface_bridged_tool_images(value)
 
@@ -595,6 +626,15 @@ if "__omp_prelude_loaded__" not in globals():
 
     class _ToolProxy:
         """Define kernel tools or invoke host-side tools by attribute."""
+
+        # Marker identifying the genuine prelude bridge to the Python shadow
+        # planner (runner.py): a retained user `tool` binding that is not
+        # JSON-safe is omitted from the shadow snapshot exactly like this
+        # proxy, so the planner consults the namespace directly and admits
+        # speculative reads only when the binding carries this marker.
+        # (`__slots__` is empty, so this lives on the class, not the
+        # instance; accidental user collision is out of threat model.)
+        __omp_tool_bridge__ = True
 
         __slots__ = ()
 
@@ -733,6 +773,14 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self):
             return f"<completion {self.id}>"
 
+    class JudgmentHandle(CompletionHandle):
+        """Typed judgment handle returned by ``judge()``; ``wait()`` yields ``{id: answer}`` (choice/bool/score)."""
+
+        __slots__ = ()
+
+        def __repr__(self):
+            return f"<judgment {self.id}>"
+
     def _handle_value(handle, snapshot):
         status = snapshot.get("status") if isinstance(snapshot, dict) else "failed"
         if status == "running":
@@ -801,6 +849,15 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
             raise RuntimeError("completion() did not return a handle")
         return CompletionHandle(result["id"], schema)
+
+    def judge(state, questions):
+        """Start a typed judgment over ``state`` and return its handle."""
+        if not isinstance(questions, dict):
+            raise TypeError("judge(state, questions) expects questions as a dict keyed by id")
+        result = _bridge_call("__judge__", {"state": state, "questions": questions})
+        if not isinstance(result, dict) or not isinstance(result.get("id"), str):
+            raise RuntimeError("judge() did not return a handle")
+        return JudgmentHandle(result["id"])
 
     def agent(
         prompt,

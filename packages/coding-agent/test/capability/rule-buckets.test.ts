@@ -36,6 +36,51 @@ describe("bucketRules", () => {
 		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual(["no-foo"]);
 	});
 
+	it("replaces an edited TTSR rule while preserving its injection state", () => {
+		const mgr = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "after-gap",
+			repeatGap: 0,
+		});
+		const original = makeRule({ name: "guard", condition: ["OLD"], content: "old content" });
+		bucketRules([original], mgr);
+		mgr.markInjected([original]);
+
+		const updated = makeRule({ name: "guard", condition: ["NEW"], content: "new content" });
+		bucketRules([updated], mgr, { replaceTtsrRules: true });
+
+		expect(mgr.getInjectedRuleNames()).toEqual(["guard"]);
+		expect(mgr.getRules()).toEqual([updated]);
+		expect(mgr.checkDelta("OLD", { source: "text" })).toEqual([]);
+		mgr.resetBuffer();
+		expect(mgr.checkDelta("NEW", { source: "text" })).toEqual([updated]);
+	});
+
+	it("removes stale TTSR registrations and injection state after rename or deletion", () => {
+		const mgr = new TtsrManager();
+		const original = makeRule({ name: "old-guard", condition: ["OLD"] });
+		bucketRules([original], mgr);
+		mgr.markInjected([original]);
+
+		const renamed = makeRule({ name: "new-guard", condition: ["NEW"] });
+		bucketRules([renamed], mgr, { replaceTtsrRules: true });
+
+		expect(mgr.getRules()).toEqual([renamed]);
+		expect(mgr.getInjectedRuleNames()).toEqual([]);
+		expect(mgr.checkDelta("OLD", { source: "text" })).toEqual([]);
+		mgr.resetBuffer();
+		expect(mgr.checkDelta("NEW", { source: "text" })).toEqual([renamed]);
+
+		mgr.markInjected([renamed]);
+		bucketRules([], mgr, { replaceTtsrRules: true });
+
+		expect(mgr.hasRules()).toBe(false);
+		expect(mgr.getInjectedRuleNames()).toEqual([]);
+		expect(mgr.checkDelta("NEW", { source: "text" })).toEqual([]);
+	});
+
 	it("registers an ast-only rule as TTSR and excludes it from rulebook/always buckets", () => {
 		const mgr = new TtsrManager();
 		const ttsr = makeRule({ name: "no-console", astCondition: ["console.log($A)"], description: "blocks console" });

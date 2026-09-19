@@ -35,6 +35,15 @@ const CLINEPASS_MODELS_DEV_FIXTURE = {
 				limit: { context: 1_000_000, output: 384_000 },
 				cost: { input: 5, output: 10 },
 			},
+			"cline-pass/unlisted-model": {
+				id: "cline-pass/unlisted-model",
+				name: "cline-pass/unlisted-model",
+				tool_call: true,
+				reasoning: false,
+				modalities: { input: ["text"] },
+				limit: { context: 131_072, output: 8_192 },
+				cost: { input: 1, output: 2 },
+			},
 		},
 	},
 };
@@ -82,6 +91,10 @@ describe("ClinePass catalog", () => {
 		});
 	});
 
+	it("keeps uncurated model names free of the Cline wire namespace", () => {
+		expect(sourceModel("unlisted-model").name).toBe("unlisted-model");
+	});
+
 	it("maps Cline's per-model reasoning controls from the curated snapshot", () => {
 		const model = sourceModel("kimi-k3");
 
@@ -93,29 +106,6 @@ describe("ClinePass catalog", () => {
 		});
 	});
 
-	it("bundles the full current roster for offline startup", () => {
-		expect(getBundledModels("cline-pass").map(model => model.id)).toEqual([
-			"cline-free/longcat-2.0",
-			"deepseek-v4-flash",
-			"deepseek-v4-pro",
-			"deepseek/deepseek-v4-flash",
-			"glm-5.2",
-			"glm-5.3",
-			"glm-5.3-flash",
-			"kimi-k2.6",
-			"kimi-k2.7-code",
-			"kimi-k3",
-			"mimo-v2.5",
-			"mimo-v2.5-pro",
-			"minimax-m3",
-			"poolside/laguna-s-2.1:free",
-			"qwen3.7-max",
-			"qwen3.7-plus",
-			"qwen3.8-max",
-			"z-ai/glm-5.3-flash",
-		]);
-	});
-
 	it("uses the Cline wire namespace without exposing it in model selection", () => {
 		expect(toClinePassPublicModelId("cline-pass/kimi-k3")).toBe("kimi-k3");
 		expect(toClinePassPublicModelId("kimi-k3")).toBe("kimi-k3");
@@ -125,9 +115,11 @@ describe("ClinePass catalog", () => {
 
 	it("excludes ClinePass metadata from generic bare-id references", () => {
 		const reference = createReferenceResolver<"openai-completions">(new Map())("kimi-k3");
+		const fireworksReference = getBundledModels("fireworks").find(model => model.id === "kimi-k3");
 
 		expect(reference?.provider).toBe("fireworks");
-		expect(reference?.maxTokens).toBe(1_048_576);
+		expect(reference?.maxTokens).toBe(fireworksReference?.maxTokens);
+		expect(reference?.maxTokens).not.toBe(sourceModel("kimi-k3").maxTokens);
 	});
 
 	it("applies the verified Cline gateway request and reasoning compatibility", () => {

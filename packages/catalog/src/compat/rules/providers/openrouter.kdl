@@ -1,6 +1,10 @@
 // Provider-wire compat for "openrouter"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openrouter" {
+	default-model "openai/gpt-5.5"
+	env "OPENROUTER_API_KEY"
+	discovery label="OpenRouter" allow-unauthenticated=#true
+
 	// Replaces the OpenRouter provider wire-model-id dispatch branch.
 	wire-model-id-mode "openrouter"
 	// Replaces the strict-mode provider whitelist entry.
@@ -12,6 +16,12 @@ provider "openrouter" {
 		// grammars; retry the turn without strict tools. Replaces the
 		// isOpenRouterAnthropicModel checks in the OpenAI request builders.
 		retry-without-strict-on-grammar-error #true
+	}
+	class "meta" {
+		family "muse-spark" {
+			filter-reasoning-history #true
+			allows-synthetic-reasoning-content-for-tool-calls #false
+		}
 	}
 	class "minimax" {
 		family "m3" {

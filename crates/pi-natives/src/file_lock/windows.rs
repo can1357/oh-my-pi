@@ -24,9 +24,11 @@ pub fn try_acquire(path: &str) -> io::Result<Option<PlatformFileLock>> {
 	// The name's existence, not thread-affine mutex ownership, is the lease.
 	// A handle can therefore be released from a different native worker thread.
 	// Contenders see ERROR_ALREADY_EXISTS and immediately close their handle.
+	// SAFETY: SetLastError(0) safely resets the thread-local error status before
+	// the call.
+	unsafe { SetLastError(0) };
 	// SAFETY: the attributes pointer is null, and `wide_name` is a live,
 	// NUL-terminated UTF-16 string for the duration of the call.
-	unsafe { SetLastError(0) };
 	let raw_handle = unsafe { CreateMutexW(ptr::null(), 0, wide_name.as_ptr()) };
 	if raw_handle.is_null() {
 		return Err(io::Error::last_os_error());

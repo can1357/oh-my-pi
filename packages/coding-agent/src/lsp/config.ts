@@ -520,6 +520,18 @@ export function loadConfig(cwd: string): LspConfig {
 	return { servers, idleTimeoutMs };
 }
 
+// Cache config per cwd to avoid repeated file I/O
+export const configCache = new Map<string, LspConfig>();
+
+export function getConfig(cwd: string): LspConfig {
+	let config = configCache.get(cwd);
+	if (!config) {
+		config = loadConfig(cwd);
+		configCache.set(cwd, config);
+	}
+	return config;
+}
+
 // =============================================================================
 // Server Selection
 // =============================================================================

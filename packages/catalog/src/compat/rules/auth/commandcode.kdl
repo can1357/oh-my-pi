@@ -1,0 +1,13 @@
+// No `validate` probe on purpose: GET /provider/v1/models is public (200
+// with no or bogus credentials, verified 2026-09-09), so a models-endpoint
+// probe could never reject a bad key. A chat-completions probe would bill
+// the key and 403 for Go-plan keys that are still valid CLI credentials.
+auth "commandcode" {
+	name "Command Code"
+	env "COMMAND_CODE_API_KEY" "COMMANDCODE_API_KEY"
+	login "api-key" {
+		auth-url "https://commandcode.ai/studio"
+		instructions "Create or copy a Provider API key from Command Code Studio"
+		prompt "Paste your Command Code API key" placeholder="user_..."
+	}
+}

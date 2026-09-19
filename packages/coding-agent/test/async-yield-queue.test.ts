@@ -9,7 +9,8 @@ import { type AsyncJob, AsyncJobManager, type AsyncJobType } from "@oh-my-pi/pi-
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool } from "../src/tools/hub";
+import { type CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { HubTool } from "../src/tools/hub";
 
 type AsyncEntry = {
 	jobId: string;
@@ -57,7 +58,7 @@ function createToolSession(asyncJobManager?: AsyncJobManager): ToolSession {
 		cwd: process.cwd(),
 		hasUI: false,
 		settings: {
-			get: (key: string) => (key === "async.pollWaitDuration" ? "5s" : undefined),
+			get: () => undefined,
 		},
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,

@@ -12,7 +12,7 @@ exec hosts. Replaces cargo-xwin.
 | `@xwin_sysroot` | `sysroot.bzl` | xwin 0.6.5 (pinned per-host sha256) runs `splat` in the repo rule. The ~1 GiB CRT/SDK payload comes from the Microsoft CDN via xwin itself and is **not** in Bazel's repo cache — a cold output base re-downloads it. Keep `sysroot.bzl` stable. |
 | `@msvc_cc` | `cc.bzl` | Wrapper scripts + `cc_toolchain` + MSVC feature config (copied from the resolved rules_cc, like `@local_config_cc`). Cheap to regenerate — iterate flags here. |
 | `toolchain()`s | `//bazel/toolchains` (`msvc-cc-from-*`) | One per exec host (linux-x64/arm64, darwin-arm64/x64), all pointing at `@msvc_cc//:cc_toolchain`; only the local host's variant can resolve. `target_compatible_with = [windows, x86_64]` ⇒ can never shadow zig on linux. |
-| MODULE.bazel | `# --- msvc cross toolchain ---` section | `rules_cc` 0.2.17 (= Bazel 9.2's builtin pin) + the three `use_repo_rule` instantiations. Plus one target-suffixed env key inside the existing `audiopus_sys` annotation (see below). |
+| MODULE.bazel | `# --- msvc cross toolchain ---` section | `rules_cc` 0.2.17 (= Bazel 9.2's builtin pin) + the three `use_repo_rule` instantiations. Plus the target-suffixed toolchain-file key in the `opusic-sys` annotation (see below). |
 
 ## Design decisions
 
@@ -36,13 +36,11 @@ exec hosts. Replaces cargo-xwin.
   clang-cl wrapper, which only ever targets win32-x64 (baseline = x86-64-v2 ⊇
   SSE4.2). This is the old build-native.ts CFLAGS hack, windows-only by
   construction.
-- **cmake generator via target-suffixed env**: `crate_universe` cannot select()
-  annotations per platform, and a second `crate.annotation` for the same crate
-  hard-fails the extension (`_insert_annotation` dupe check; `annotation_select`
-  is unused/broken in rules_rust 0.71.3). Instead the existing `audiopus_sys`
-  annotation carries `CMAKE_GENERATOR_x86_64_pc_windows_msvc=Ninja` — cmake-rs
-  reads `VAR_<triple>` before `VAR`, so the key is inert for all other targets.
-  cmake-rs sets `CMAKE_SYSTEM_NAME=Windows` itself when target ≠ host.
+- **Opus CMake configuration stays in one annotation**: `crate_universe` cannot
+  select annotations per platform, and a second `crate.annotation` for the same
+  crate hard-fails the extension. `opusic-sys` selects Ninja when it is on the
+  annotated PATH; the target-suffixed `CMAKE_TOOLCHAIN_FILE` key is inert for
+  other targets. cmake-rs sets `CMAKE_SYSTEM_NAME=Windows` when target ≠ host.
 - **cmake tool discovery**: wrappers are named bare `clang-cl`, `lld-link`,
   `llvm-lib`, `llvm-rc`, `llvm-mt` (no `.sh`) because CMake's
   `CMakeFindBinUtils`/`find_program` probes for those names next to
@@ -92,21 +90,13 @@ exec hosts. Replaces cargo-xwin.
   reaches the sandbox via the cc toolchain's `all_files`. NOTE: the PATH entry
   hardcodes @msvc_cc's canonical repo name — keep in sync if the repo rule or
   repo name changes. The generated crate graph includes this annotation.
-- audiopus_sys/opus cmake exe links (can.internal finding #2): cmake's
-  `vs_link_exe` demands rc/mt tools that `find_program` can't locate on a
-  linux/mac PATH. @msvc_cc now generates `toolchain.cmake` (self-locating via
-  `CMAKE_CURRENT_LIST_DIR`: compiler/linker/rc/mt = the wrappers) handed to
-  cmake-rs through `CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc` in the
-  audiopus_sys annotation (same `$${pwd}` + canonical-repo-path mechanism as
-  the blake3 shim). Second failure mode fixed in the same file: `try_compile`
-  defaults to the Debug config → `/MDd` → `msvcrtd.lib`, which the lean splat
-  (like cargo-xwin's) does not carry; toolchain.cmake pins
-  `CMAKE_TRY_COMPILE_CONFIGURATION=Release`, `CMAKE_POLICY_DEFAULT_CMP0091=NEW`
-  and `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` (static release `/MT`
-  everywhere, matching the addon's static-CRT policy — issue #8439).
-  Verified on darwin: scratch `project(C)` + `add_executable` configures with
-  "Clang 20.1.7 with MSVC-like command-line" and links a valid PE32+ exe
-  through vs_link_exe with the wrapper rc/mt/linker.
+- Opus CMake cross setup: `opusic-sys` selects Ninja, installs to `lib`, and
+  uses static-library `try_compile` checks itself. @msvc_cc's self-locating
+  `toolchain.cmake` is handed to cmake-rs through
+  `CMAKE_TOOLCHAIN_FILE_x86_64_pc_windows_msvc` in the `opusic-sys` annotation
+  (same `$${pwd}` + canonical-repo-path mechanism as the blake3 shim). It pins
+  compiler/linker/rc/mt to the wrappers and selects the static release `/MT`
+  runtime, matching the addon's static-CRT policy (issue #8439).
 
 ## What to verify on can.internal (linux-x64)
 
@@ -117,14 +107,10 @@ exec hosts. Replaces cargo-xwin.
 2. LLVM 20.1.7 Linux-X64 binaries are built on a newish Ubuntu: confirm the
    kata runner image's glibc is ≥ 2.35-ish and has `libtinfo6`/`libstdc++6`
    (usual LLVM release-binary runtime deps).
-3. `ninja` + `cmake` must be on the audiopus_sys build-script PATH
-   (`/usr/local/bin:/usr/bin:/bin`) on the kata image — same requirement the
-   old ensure-cmake action satisfied for cargo-xwin.
-4. audiopus_sys configure: cmake should report
-   "Clang with MSVC-like command-line", take `toolchain.cmake` (log shows the
-   vs_link_exe --rc/--mt pointing into the wrapper dir), and produce opus.lib
-   with /MD objects. If mt is ever asked to actually merge manifests, note
-   the official LLVM llvm-mt lacks libxml2 and would error — not hit today.
+3. `ninja` + `cmake` must be on the `opusic-sys` build-script PATH
+   (`/usr/local/bin:/usr/bin:/bin`) on the kata image.
+4. `opusic-sys` configure should report "Clang with MSVC-like command-line",
+   take `toolchain.cmake`, and produce `opus.lib` with `/MT` objects.
 5. tree-sitter grammar compiles via cc-rs: wrapper is picked up as `CC`
    (family detection needs the basename to contain `clang-cl` — it does).
 6. ring: no `nasm`/`perl` spawns in the build-script log; archive step uses

@@ -1,3 +1,4 @@
+import { createModelBrowserSource } from "../src/modes/model-browser-source";
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -8,8 +9,8 @@ import {
 	type ModelHubCallbacks,
 	ModelHubComponent,
 	resetProviderAutoRefreshGuard,
-} from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+} from "@oh-my-pi/pi-tui/overlays/model-hub";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 // Issue #2761: implicit local providers (ollama, llama.cpp, lm-studio) used to
@@ -74,7 +75,7 @@ function createHub(registry: ModelRegistry): ModelHubComponent {
 		onLoginRequest: () => {},
 		onCancel: () => {},
 	};
-	const hub = new ModelHubComponent(ui, settings, registry, [], callbacks);
+	const hub = new ModelHubComponent(ui, createModelBrowserSource(settings), registry, [], callbacks);
 	openHubs.push(hub);
 	return hub;
 }

@@ -33,19 +33,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAutoQaDbPath, getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
 import type { Settings } from "..";
-import type { Theme } from "../modes/theme/theme";
-import { renderStatusLine, truncateToWidth } from "../tui";
 import type { ToolSession } from "./index";
-import { replaceTabs } from "./render-utils";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { XdevDispatch } from "./xdev";
 
-export const REPORT_ISSUE_DEVICE_NAME = "report_issue";
-export const REPORT_ISSUE_DEVICE_PATH = `xd://${REPORT_ISSUE_DEVICE_NAME}`;
+import { REPORT_ISSUE_DEVICE_NAME, REPORT_ISSUE_DEVICE_PATH } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
 
 /** Usage text for `read xd://report_issue`. */
 export function reportIssueDeviceUsage(): string {
@@ -59,20 +53,6 @@ export function isReportIssueToolCall(toolCall: { name: string; arguments?: Reco
 	const path =
 		typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : undefined;
 	return path === REPORT_ISSUE_DEVICE_PATH || path === `${REPORT_ISSUE_DEVICE_PATH}/`;
-}
-
-/** Call preview for an `xd://report_issue` write. */
-export function renderReportIssueDeviceCall(content: unknown, uiTheme: Theme): Component {
-	const body = typeof content === "string" ? replaceTabs(content.trim().split("\n")[0] ?? "") : "";
-	const text = renderStatusLine(
-		{
-			icon: "pending",
-			title: "Report Tool Issue",
-			description: body ? truncateToWidth(body, 72) : undefined,
-		},
-		uiTheme,
-	);
-	return new Text(text, 0, 0);
 }
 
 function parseReportIssueBody(text: string): { tool: string; report: string } {

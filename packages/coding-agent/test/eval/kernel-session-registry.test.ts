@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { createKernelSessionRegistry, type KernelSession } from "../../src/eval/kernel-session-registry";
 
 interface TestOptions {
@@ -62,131 +62,94 @@ function createFakeRegistry(executeWithKernel: ExecuteFakeKernel, onStartKernel?
 }
 
 describe("kernel session recovery", () => {
-	it("replaces a kernel that dies while returning a cancelled result and retries once", async () => {
-		const executions: number[] = [];
-		const { kernels, registry } = createFakeRegistry(async kernel => {
-			executions.push(kernel.index);
+	it("preserves partial output without replaying side effects and recovers on the next call", async () => {
+		const effects: string[] = [];
+		const { kernels, registry } = createFakeRegistry(async (kernel, code) => {
+			effects.push(code);
 			if (kernel.index === 0) {
 				kernel.alive = false;
-				return { cancelled: true, value: "kernel died" };
+				return { cancelled: true, value: "partial output before death" };
 			}
-			return { cancelled: false, value: "recovered" };
+			return { cancelled: false, value: "new cell completed" };
 		});
-
 		try {
-			const result = await registry.executeOnSession("code", "/tmp", { sessionId: "recovery" });
-
-			expect(result).toEqual({ cancelled: false, value: "recovered" });
-			expect(executions).toEqual([0, 1]);
-			expect(kernels).toHaveLength(2);
+			expect(await registry.executeOnSession("first effect", "/tmp", { sessionId: "recovery" })).toEqual({
+				cancelled: true,
+				value: "partial output before death",
+			});
+			expect(effects).toEqual(["first effect"]);
+			expect(kernels).toHaveLength(1);
+			expect(await registry.executeOnSession("next effect", "/tmp", { sessionId: "recovery" })).toEqual({
+				cancelled: false,
+				value: "new cell completed",
+			});
+			expect(effects).toEqual(["first effect", "next effect"]);
 			expect(kernels[0]?.shutdowns).toBe(1);
 		} finally {
 			await registry.disposeAll();
 		}
 	});
 
-	it("coalesces concurrent recovery from the same dead kernel", async () => {
-		const bothDeadExecutionsStarted = Promise.withResolvers<void>();
-		const releaseDeadResults = Promise.withResolvers<void>();
+	it("coalesces concurrent recovery before dispatch to a dead kernel", async () => {
 		const replacementStarted = Promise.withResolvers<void>();
 		const releaseReplacement = Promise.withResolvers<void>();
-		const executions: Array<{ code: string; kernel: number }> = [];
-		let deadExecutions = 0;
+		const executions: string[] = [];
 		const { kernels, registry } = createFakeRegistry(
-			async (kernel, code) => {
-				executions.push({ code, kernel: kernel.index });
-				if (kernel.index === 0) {
-					deadExecutions += 1;
-					if (deadExecutions === 2) bothDeadExecutionsStarted.resolve();
-					await releaseDeadResults.promise;
-					kernel.alive = false;
-					return { cancelled: true, value: "kernel died" };
-				}
-				return { cancelled: false, value: `recovered ${code}` };
+			async (_kernel, code) => {
+				executions.push(code);
+				return { cancelled: false, value: code };
 			},
 			async kernel => {
+				if (kernel.index === 0) kernel.alive = false;
 				if (kernel.index !== 1) return;
 				replacementStarted.resolve();
 				await releaseReplacement.promise;
 			},
 		);
-
 		try {
-			const first = registry.executeOnSession("first", "/tmp", { sessionId: "concurrent-recovery" });
-			const second = registry.executeOnSession("second", "/tmp", { sessionId: "concurrent-recovery" });
-			await bothDeadExecutionsStarted.promise;
-			releaseDeadResults.resolve();
+			const first = registry.executeOnSession("first", "/tmp", { sessionId: "concurrent" });
 			await replacementStarted.promise;
-
-			expect(kernels).toHaveLength(2);
+			const second = registry.executeOnSession("second", "/tmp", { sessionId: "concurrent" });
 			releaseReplacement.resolve();
-			const results = await Promise.all([first, second]);
-
-			expect(results).toEqual([
-				{ cancelled: false, value: "recovered first" },
-				{ cancelled: false, value: "recovered second" },
+			expect(await Promise.all([first, second])).toEqual([
+				{ cancelled: false, value: "first" },
+				{ cancelled: false, value: "second" },
 			]);
-			expect(
-				executions
-					.filter(execution => execution.kernel === 0)
-					.map(execution => execution.code)
-					.sort(),
-			).toEqual(["first", "second"]);
-			expect(
-				executions
-					.filter(execution => execution.kernel === 1)
-					.map(execution => execution.code)
-					.sort(),
-			).toEqual(["first", "second"]);
+			expect(executions.sort()).toEqual(["first", "second"]);
+			expect(kernels).toHaveLength(2);
 			expect(kernels[0]?.shutdowns).toBe(1);
 		} finally {
-			releaseDeadResults.resolve();
 			releaseReplacement.resolve();
 			await registry.disposeAll();
 		}
 	});
 
-	it("recovers a newer dead kernel for a stale caller that has not retried", async () => {
-		const bothOldExecutionsStarted = Promise.withResolvers<void>();
-		const releaseSecondOldResult = Promise.withResolvers<void>();
-		const executions: Array<{ code: string; kernel: number }> = [];
-		let oldExecutions = 0;
-		const { kernels, registry } = createFakeRegistry(async (kernel, code) => {
-			executions.push({ code, kernel: kernel.index });
-			if (kernel.index === 0) {
-				oldExecutions += 1;
-				if (oldExecutions === 2) bothOldExecutionsStarted.resolve();
-				await bothOldExecutionsStarted.promise;
-				if (code === "second") await releaseSecondOldResult.promise;
+	it("does not replay a stale execution after a newer call replaces its dead kernel", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const effects: string[] = [];
+		const { registry } = createFakeRegistry(async (kernel, code) => {
+			effects.push(code);
+			if (code === "old") {
 				kernel.alive = false;
-				return { cancelled: true, value: "old kernel died" };
+				started.resolve();
+				await release.promise;
+				return { cancelled: true, value: "old partial output" };
 			}
-			if (kernel.index === 1) {
-				kernel.alive = false;
-				return { cancelled: true, value: "first replacement died" };
-			}
-			return { cancelled: false, value: `recovered ${code}` };
+			return { cancelled: false, value: "new result" };
 		});
-
 		try {
-			const first = registry.executeOnSession("first", "/tmp", { sessionId: "stale-caller" });
-			const second = registry.executeOnSession("second", "/tmp", { sessionId: "stale-caller" });
-			await bothOldExecutionsStarted.promise;
-
-			expect(await first).toEqual({ cancelled: true, value: "first replacement died" });
-			releaseSecondOldResult.resolve();
-			expect(await second).toEqual({ cancelled: false, value: "recovered second" });
-			expect(executions).toEqual([
-				{ code: "first", kernel: 0 },
-				{ code: "second", kernel: 0 },
-				{ code: "first", kernel: 1 },
-				{ code: "second", kernel: 2 },
-			]);
-			expect(kernels).toHaveLength(3);
-			expect(kernels[0]?.shutdowns).toBe(1);
-			expect(kernels[1]?.shutdowns).toBe(1);
+			const old = registry.executeOnSession("old", "/tmp", { sessionId: "stale" });
+			await started.promise;
+			expect(await registry.executeOnSession("new", "/tmp", { sessionId: "stale" })).toEqual({
+				cancelled: false,
+				value: "new result",
+			});
+			release.resolve();
+			expect(await old).toEqual({ cancelled: true, value: "old partial output" });
+			expect(effects).toEqual(["old", "new"]);
 		} finally {
-			releaseSecondOldResult.resolve();
+			release.resolve();
 			await registry.disposeAll();
 		}
 	});
@@ -207,6 +170,7 @@ describe("kernel session recovery", () => {
 				return { cancelled: false, value: `recovered ${code}` };
 			},
 			async (kernel, options) => {
+				if (kernel.index === 0) kernel.alive = false;
 				if (kernel.index !== 1) return;
 				replacementOptions = options;
 				replacementStarted.resolve();
@@ -238,10 +202,7 @@ describe("kernel session recovery", () => {
 
 			releaseReplacement.resolve();
 			expect(await second).toEqual({ cancelled: false, value: "recovered second" });
-			expect(executions).toEqual([
-				{ code: "first", kernel: 0 },
-				{ code: "second", kernel: 1 },
-			]);
+			expect(executions).toEqual([{ code: "second", kernel: 1 }]);
 			expect(kernels).toHaveLength(2);
 			expect(kernels[0]?.shutdowns).toBe(1);
 		} finally {
@@ -250,7 +211,7 @@ describe("kernel session recovery", () => {
 		}
 	});
 
-	it("does not execute a retry when the caller aborts during replacement", async () => {
+	it("does not dispatch a cell when the caller aborts during replacement", async () => {
 		const replacementStarted = Promise.withResolvers<void>();
 		const releaseReplacement = Promise.withResolvers<void>();
 		const controller = new AbortController();
@@ -262,6 +223,7 @@ describe("kernel session recovery", () => {
 				return { cancelled: true, value: "cancelled" };
 			},
 			async kernel => {
+				if (kernel.index === 0) kernel.alive = false;
 				if (kernel.index !== 1) return;
 				replacementStarted.resolve();
 				await releaseReplacement.promise;
@@ -285,29 +247,10 @@ describe("kernel session recovery", () => {
 			}
 			expect(rejection).toBeInstanceOf(TestCancelledError);
 			expect((rejection as TestCancelledError).timedOut).toBe(false);
-			expect(executions).toEqual([0]);
+			expect(executions).toEqual([]);
 			expect(kernels).toHaveLength(2);
 		} finally {
 			releaseReplacement.resolve();
-			await registry.disposeAll();
-		}
-	});
-
-	it("returns a cancelled replacement result without retrying again", async () => {
-		const executions: number[] = [];
-		const { kernels, registry } = createFakeRegistry(async kernel => {
-			executions.push(kernel.index);
-			if (kernel.index === 0) kernel.alive = false;
-			return { cancelled: true, value: kernel.index === 0 ? "kernel died" : "replacement cancelled" };
-		});
-
-		try {
-			const result = await registry.executeOnSession("code", "/tmp", { sessionId: "cancelled-retry" });
-
-			expect(result).toEqual({ cancelled: true, value: "replacement cancelled" });
-			expect(executions).toEqual([0, 1]);
-			expect(kernels).toHaveLength(2);
-		} finally {
 			await registry.disposeAll();
 		}
 	});
@@ -358,97 +301,64 @@ describe("kernel session recovery", () => {
 		}
 	});
 
-	it("preserves a dead-kernel result when its deadline expires during replacement", async () => {
-		vi.useFakeTimers();
+	it("times out while acquiring a replacement without dispatching the cell", async () => {
 		const replacementStarted = Promise.withResolvers<void>();
 		const releaseReplacement = Promise.withResolvers<void>();
-		const executions: number[] = [];
-		const { kernels, registry } = createFakeRegistry(
-			async kernel => {
-				executions.push(kernel.index);
-				kernel.alive = false;
-				return { cancelled: true, value: "partial output before replacement timeout" };
+		const executions: string[] = [];
+		const { registry } = createFakeRegistry(
+			async (_kernel, code) => {
+				executions.push(code);
+				return { cancelled: false, value: code };
 			},
 			async kernel => {
+				if (kernel.index === 0) kernel.alive = false;
 				if (kernel.index !== 1) return;
 				replacementStarted.resolve();
 				await releaseReplacement.promise;
 			},
 		);
-
 		try {
-			const execution = registry.executeOnSession("code", "/tmp", {
-				sessionId: "deadline-during-replacement",
-				deadlineMs: Date.now() + 60_000,
+			const execution = registry.executeOnSession("expired", "/tmp", {
+				sessionId: "deadline",
+				deadlineMs: Date.now() + 200,
 			});
 			await replacementStarted.promise;
-			vi.advanceTimersByTime(60_000);
-
-			expect(await execution).toEqual({
-				cancelled: true,
-				value: "partial output before replacement timeout",
+			await expect(execution).rejects.toMatchObject({ timedOut: true });
+			expect(executions).toEqual([]);
+			releaseReplacement.resolve();
+			expect(await registry.executeOnSession("next", "/tmp", { sessionId: "deadline" })).toEqual({
+				cancelled: false,
+				value: "next",
 			});
-			expect(executions).toEqual([0]);
-			expect(kernels).toHaveLength(2);
+			expect(executions).toEqual(["next"]);
 		} finally {
 			releaseReplacement.resolve();
-			vi.useRealTimers();
 			await registry.disposeAll();
 		}
 	});
 
-	it("preserves a dead-kernel result when the retry reaches its deadline", async () => {
-		vi.useFakeTimers();
-		const retryStarted = Promise.withResolvers<void>();
-		const releaseRetry = Promise.withResolvers<void>();
-		const executions: number[] = [];
-		const { kernels, registry } = createFakeRegistry(async kernel => {
-			executions.push(kernel.index);
+	it("surfaces uncertain completion after an exception without replaying effects", async () => {
+		const effects: string[] = [];
+		const failure = new Error("transport closed");
+		const { registry } = createFakeRegistry(async (kernel, code) => {
+			effects.push(code);
 			if (kernel.index === 0) {
 				kernel.alive = false;
-				return { cancelled: true, value: "original partial output" };
-			}
-			retryStarted.resolve();
-			await releaseRetry.promise;
-			return { cancelled: true, value: "replacement timeout without original output" };
-		});
-
-		try {
-			const execution = registry.executeOnSession("code", "/tmp", {
-				sessionId: "deadline-during-retry",
-				deadlineMs: Date.now() + 60_000,
-			});
-			await retryStarted.promise;
-			vi.advanceTimersByTime(60_000);
-			releaseRetry.resolve();
-
-			expect(await execution).toEqual({ cancelled: true, value: "original partial output" });
-			expect(executions).toEqual([0, 1]);
-			expect(kernels).toHaveLength(2);
-		} finally {
-			releaseRetry.resolve();
-			vi.useRealTimers();
-			await registry.disposeAll();
-		}
-	});
-
-	it("preserves retry for an exception thrown by a dead kernel", async () => {
-		const executions: number[] = [];
-		const { kernels, registry } = createFakeRegistry(async kernel => {
-			executions.push(kernel.index);
-			if (kernel.index === 0) {
-				kernel.alive = false;
-				throw new Error("transport closed");
+				throw failure;
 			}
 			return { cancelled: false, value: "recovered" };
 		});
-
 		try {
-			const result = await registry.executeOnSession("code", "/tmp", { sessionId: "throw" });
-
-			expect(result).toEqual({ cancelled: false, value: "recovered" });
-			expect(executions).toEqual([0, 1]);
-			expect(kernels).toHaveLength(2);
+			await expect(registry.executeOnSession("first", "/tmp", { sessionId: "throw" })).rejects.toMatchObject({
+				cause: failure,
+				message: expect.stringContaining("completion is uncertain"),
+			});
+			expect(effects).toEqual(["first"]);
+			expect(await registry.executeOnSession("next", "/tmp", { sessionId: "throw" })).toEqual({
+				cancelled: false,
+				value: "recovered",
+			});
+			expect(effects).toEqual(["first", "next"]);
 		} finally {
 			await registry.disposeAll();
 		}
@@ -459,11 +369,11 @@ describe("kernel session recovery", () => {
 		const releaseReplacement = Promise.withResolvers<void>();
 		const controller = new AbortController();
 		const { kernels, registry } = createFakeRegistry(
-			async kernel => {
-				if (kernel.index === 0) kernel.alive = false;
+			async () => {
 				return { cancelled: true, value: "kernel died" };
 			},
 			async kernel => {
+				if (kernel.index === 0) kernel.alive = false;
 				if (kernel.index !== 1) return;
 				replacementStarted.resolve();
 				await releaseReplacement.promise;
@@ -510,11 +420,11 @@ describe("kernel session recovery", () => {
 		const targetController = new AbortController();
 		const unrelatedController = new AbortController();
 		const { kernels, registry } = createFakeRegistry(
-			async kernel => {
-				if (kernel.index === 0 || kernel.index === 2) kernel.alive = false;
+			async () => {
 				return { cancelled: true, value: "kernel died" };
 			},
 			async kernel => {
+				if (kernel.index === 0 || kernel.index === 2) kernel.alive = false;
 				if (kernel.index === 1) {
 					targetReplacementStarted.resolve();
 					await releaseTargetReplacement.promise;

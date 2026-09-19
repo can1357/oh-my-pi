@@ -1,6 +1,37 @@
 // Provider-wire compat for "openai"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openai" {
+	default-model "gpt-5.5"
+	env "OPENAI_API_KEY"
+
+	// Daybreak models are approval-gated first-party Responses models that are
+	// not yet present in stencil.so. Seed the documented aliases and current
+	// Cyber snapshot so fresh installs expose them without credentialed
+	// discovery; upstream catalog rows outrank these once discovery serves them.
+	// Blue rides the standard GPT-5.6 Sol tariff, Red and Cyber the standard
+	// GPT-5.6 Cyber tariff. The >272K long-context tier is rule-owned
+	// (`providers/openai.kdl` long-context-cost) and baked at build time.
+	seed api="openai-responses" base-url="https://api.openai.com/v1" bundle="always" {
+		model "daybreak-blue-latest" name="Daybreak Blue" {
+			reasoning #true
+			input "text" "image"
+			cost input=5 output=30 cache-read=0.5 cache-write=6.25
+			limits context=1050000 max-tokens=128000
+		}
+		model "daybreak-red-latest" name="Daybreak Red" {
+			reasoning #true
+			input "text" "image"
+			cost input=12.5 output=75 cache-read=1.25 cache-write=15.625
+			limits context=400000 max-tokens=128000
+		}
+		model "gpt-5.6-cyber" name="GPT-5.6 Cyber" {
+			reasoning #true
+			input "text" "image"
+			cost input=12.5 output=75 cache-read=1.25 cache-write=15.625
+			limits context=400000 max-tokens=128000
+		}
+	}
+
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
 	// Replaces both OpenAI tool-call id-limit baselines.
@@ -70,6 +101,19 @@ provider "openai" {
 			output 18.0
 			cache-read 0.4
 			cache-write 5.0
+		}
+	}
+	// Astra API route bills the documented long-context tier above 272K input:
+	// 2x input and cache rates, 1.5x output for the full request; cache writes
+	// stay 1.25x the long input rate (25.0). The Codex subscription route stays
+	// exempt (credit-equivalent, free cache writes) — see openai-codex.kdl.
+	models "gpt-6-astra*" {
+		long-context-cost {
+			input-threshold 272000
+			input 20.0
+			output 75.0
+			cache-read 2.0
+			cache-write 25.0
 		}
 	}
 	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen

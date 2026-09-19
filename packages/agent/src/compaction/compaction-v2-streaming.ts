@@ -32,7 +32,7 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, logger, stringifyJson } from "@oh-my-pi/pi-utils";
+import { $env, isUnexpectedSocketCloseMessage, logger, stringifyJson } from "@oh-my-pi/pi-utils";
 
 // ============================================================================
 // Types & Configuration
@@ -44,8 +44,8 @@ export const V2_RETAINED_MESSAGE_TOKEN_BUDGET = 64_000;
 /** Max retries for V2 streaming compaction on transient stream errors. */
 export const V2_COMPACTION_MAX_RETRIES = 2;
 
-/** Timeout for V2 streaming compaction (3 minutes, same as V1). */
-export const V2_COMPACTION_TIMEOUT_MS = 180_000;
+/** Timeout for V2 streaming compaction (5 minutes, same as V1). */
+export const V2_COMPACTION_TIMEOUT_MS = 300_000;
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
@@ -651,6 +651,7 @@ function isRetryableCompactionError(error: Error): boolean {
 	}
 	const message = error.message.toLowerCase();
 	return (
+		isUnexpectedSocketCloseMessage(message) ||
 		message.includes("stream closed before response.completed") ||
 		message.includes("stream parse failed") ||
 		message.includes("server_error") ||

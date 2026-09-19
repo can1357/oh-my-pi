@@ -3,6 +3,38 @@
 // items and streams long reasoning turns without keepalives.
 
 provider "abliteration" {
+	default-model "abliterated-model"
+	env "ABLITERATION_API_KEY" "ABLIT_KEY"
+	dynamic-models-authoritative #true
+	discovery label="Abliteration"
+
+	// Documented abliteration.ai catalog (docs.abliteration.ai/models, 2026-09)
+	// bundled so the provider is usable when generation and first boot have no
+	// live key. The `/v1/models` response is authoritative once discovery runs.
+	// Rows carry only the documented limits and pricing; the per-model reasoning
+	// ladders, alias map and wire quirks are rule-owned by `rules/classes/glm.kdl`
+	// and `rules/providers/abliteration.kdl` via `buildModel`.
+	seed api="openai-responses" base-url="https://api.abliteration.ai/v1" bundle="fallback" {
+		model "abliterated-model" name="Abliterated Model" {
+			reasoning #true
+			input "text" "image"
+			cost input=3 output=3 cache-read=0.3 cache-write=0
+			limits context=262144 max-tokens=262134
+		}
+		model "abliterated-model-large-v2" name="Abliterated Model Large V2" {
+			reasoning #true
+			input "text"
+			cost input=5 output=5 cache-read=0.5 cache-write=0
+			limits context=1000000 max-tokens=999990
+		}
+		model "abliterated-model-large" name="Abliterated Model Large" {
+			reasoning #true
+			input "text"
+			cost input=5 output=5 cache-read=0.5 cache-write=0
+			limits context=1000000 max-tokens=999990
+		}
+	}
+
 	include-encrypted-reasoning #false
 	stream-idle-timeout-ms 0
 }

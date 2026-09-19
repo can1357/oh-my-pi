@@ -21,13 +21,8 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { $env } from "@oh-my-pi/pi-utils";
-import type {
-	AnthropicApiResponse,
-	AnthropicCitation,
-	SearchCitation,
-	SearchResponse,
-	SearchSource,
-} from "../../../web/search/types";
+import type { AnthropicApiResponse, AnthropicCitation } from "../../../web/search/types";
+import type { SearchCitation, SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import type { SearchParams } from "./base";

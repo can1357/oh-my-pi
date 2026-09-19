@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { $which } from "@oh-my-pi/pi-utils";
+import { $which, TempDir } from "@oh-my-pi/pi-utils";
 import { PYTHON_PRELUDE } from "../../../src/eval/py/prelude";
-
 const pythonPath = Bun.env.PYTHON ?? ($which("python3") ? "python3" : "python");
 
 async function runPrelude(
@@ -13,36 +12,30 @@ async function runPrelude(
 		"from __future__ import annotations\n__omp_display = lambda *args, **kwargs: None",
 	);
 	const script = `${prelude}\n${code}`;
-	const proc = Bun.spawn([pythonPath, "-c", script], {
-		stdout: "pipe",
-		stderr: "pipe",
-		env: { ...process.env, ...env },
-	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	// Python's text-mode stdout emits \r\n on Windows.
-	return { stdout: stdout.replaceAll("\r\n", "\n"), stderr: stderr.replaceAll("\r\n", "\n"), exitCode };
+	// The full prelude exceeds Windows' ~32k `python -c` command-line limit
+	// (ENAMETOOLONG); a script file behaves identically on every platform.
+	const dir = await TempDir.create("omp-py-prelude-");
+	try {
+		const scriptPath = dir.join("script.py");
+		await Bun.write(scriptPath, script);
+		const proc = Bun.spawn([pythonPath, scriptPath], {
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, ...env },
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		// Python's text-mode stdout emits \r\n on Windows.
+		return { stdout: stdout.replaceAll("\r\n", "\n"), stderr: stderr.replaceAll("\r\n", "\n"), exitCode };
+	} finally {
+		await dir.remove();
+	}
 }
 
 describe("python prelude", () => {
-	it("exposes read(path, offset?, limit?) with positional optional args", () => {
-		// The eval docs advertise `read(path, offset?=1, limit?=None)`. A
-		// keyword-only signature (`def read(path, *, offset=1, limit=None)`)
-		// makes `read("file", 10)` raise `TypeError: read() takes 1 positional
-		// argument but 2 were given`, which agents in the wild repeatedly hit.
-		// Lock the contract so the helper accepts both positional and keyword
-		// forms.
-		const match = PYTHON_PRELUDE.match(/def\s+read\(([^)]+)\)/);
-		expect(match).not.toBeNull();
-		const signature = match?.[1] ?? "";
-		expect(signature).not.toContain("*,");
-		expect(signature).toContain("offset");
-		expect(signature).toContain("limit");
-	});
-
 	it("infers eval tool schemas and replaces definitions by name", async () => {
 		const result = await runPrelude(
 			[

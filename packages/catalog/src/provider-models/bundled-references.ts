@@ -1,3 +1,4 @@
+import { isBareIdReferenceProvider } from "../compat/behavior";
 import { isZeroCostXaiOAuthReference } from "../identity/reference";
 import { getBundledModels, getBundledProviders } from "../models";
 import type { Api, Model, ModelSpec } from "../types";
@@ -45,9 +46,9 @@ function getGlobalReferences(): Map<string, Model<Api>> {
 	for (const provider of getBundledProviders()) {
 		for (const model of getBundledModels(provider as Parameters<typeof getBundledModels>[0])) {
 			const candidate = model as Model<Api>;
-			// ClinePass limits, pricing, and reasoning controls are gateway-specific;
-			// matching them by bare id would contaminate unrelated proxy models.
-			if (candidate.provider === "cline-pass" || isZeroCostXaiOAuthReference(candidate)) {
+			// Gateway-specific metadata must remain provider-local when proxy
+			// discovery resolves references by bare model id.
+			if (!isBareIdReferenceProvider(candidate.provider) || isZeroCostXaiOAuthReference(candidate)) {
 				continue;
 			}
 			const existing = references.get(candidate.id);

@@ -8,7 +8,8 @@ import { resolvePythonKernelIdentity } from "../eval/py";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../eval/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { ToolSession } from "../tools";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { schemaDeclaresIntentField } from "../utils/tool-schema";
 
 interface EvalToolQueryResult {
 	tools: EvalToolDescriptor[];
@@ -118,8 +119,7 @@ function stripHarnessIntent(
 	parameters: Record<string, unknown>,
 ): Record<string, unknown> {
 	if (!Object.hasOwn(params, INTENT_FIELD)) return params;
-	const properties = parameters.properties;
-	if (isUnknownRecord(properties) && Object.hasOwn(properties, INTENT_FIELD)) return params;
+	if (schemaDeclaresIntentField(parameters)) return params;
 	const { [INTENT_FIELD]: _intent, ...args } = params;
 	return args;
 }
@@ -138,6 +138,7 @@ function errorResult(
 	return {
 		content: [{ type: "text", text: error }],
 		details: { evalTool: name, language, isError: true },
+		isError: true,
 	};
 }
 

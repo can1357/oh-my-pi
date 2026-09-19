@@ -1,9 +1,10 @@
 import { beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
+import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
@@ -20,13 +21,8 @@ type FakeEditor = {
 	onCycleModelBackward?: () => void;
 	onSelectModelTemporary?: () => void;
 	onSelectModel?: () => void;
-	onHistorySearch?: () => void;
 	onPasteImage?: () => Promise<boolean>;
 	onCopyPrompt?: () => void;
-	onExpandTools?: () => void;
-	onToggleToolActivity?: () => void;
-	onToggleThinking?: () => void;
-	onExternalEditor?: () => void;
 	onRetry?: () => void;
 	onChange?: (text: string) => void;
 	onSubmit?: (text: string) => Promise<void>;
@@ -65,6 +61,9 @@ async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
 		"app.display.reset": ["ctrl+l"],
+		"app.thinking.toggle": ["ctrl+t"],
+		"app.history.search": ["ctrl+r"],
+		"app.editor.external": ["ctrl+g"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
@@ -117,6 +116,8 @@ async function createContext() {
 	const handleBtwCopyKey = vi.fn(async () => true);
 	const canBranchBtw = vi.fn(() => false);
 	const canCopyBtw = vi.fn(() => false);
+	const canFollowUpBtw = vi.fn(() => false);
+	const handleBtwFollowUpKey = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
 	const handlesBtwBranchKey = vi.fn(() => false);
 	const editor: FakeEditor = {
@@ -233,6 +234,8 @@ async function createContext() {
 		canBranchBtw,
 		canCopyBtw,
 		handleBtwCopyKey,
+		canFollowUpBtw,
+		handleBtwFollowUpKey,
 		showError,
 		showStatus: vi.fn(),
 	} as unknown as InteractiveModeContext;
@@ -270,6 +273,8 @@ async function createContext() {
 			handlesBtwBranchKey,
 			handleBtwCopyKey,
 			canCopyBtw,
+			canFollowUpBtw,
+			handleBtwFollowUpKey,
 			showError,
 		},
 	};
@@ -297,24 +302,6 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
-	});
-
-	it("registers the tool activity visibility action", async () => {
-		const { InputController, ctx, editor, spies } = await createContext();
-		const controller = new InputController(ctx);
-
-		controller.setupKeyHandlers();
-
-		expect(spies.setActionKeys).toHaveBeenCalledWith("app.tools.toggleVisibility", ["ctrl+shift+o"]);
-		expect(editor.onToggleToolActivity).toBeDefined();
-
-		editor.onToggleToolActivity?.();
-
-		expect(ctx.hideToolActivity).toBe(true);
-		expect(ctx.settings.set).toHaveBeenCalledWith("display.hideToolActivity", true);
-		expect(spies.clearInlineImages).toHaveBeenCalledTimes(1);
-		expect(spies.requestRender).toHaveBeenCalledWith(true);
-		expect(ctx.chatContainer.setToolActivityVisible).toHaveBeenCalledWith(false);
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {
@@ -530,6 +517,34 @@ describe("InputController keybinding setup", () => {
 		expect(editor.getText()).toBe("");
 	});
 
+	it("opens inline follow-up only with an empty focused editor and a ready BTW answer", async () => {
+		const { InputController, ctx, editor, setFocused, spies } = await createContext();
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(spies.addInputListener);
+
+		expect(dispatchInput(listeners, "f")).toBeUndefined();
+		spies.canFollowUpBtw.mockReturnValue(true);
+		editor.setText("finish this draft");
+		expect(dispatchInput(listeners, "f")).toBeUndefined();
+		editor.setText("");
+		setFocused({ pasteText: vi.fn() });
+		expect(dispatchInput(listeners, "f")).toBeUndefined();
+		expect(spies.handleBtwFollowUpKey).not.toHaveBeenCalled();
+
+		setFocused(ctx.editor);
+		expect(dispatchInput(listeners, "f")).toEqual({ consume: true });
+		expect(spies.handleBtwFollowUpKey).toHaveBeenCalledTimes(1);
+	});
+
+	it("leaves x as ordinary input while a BTW panel is active", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		spies.hasActiveBtw.mockReturnValue(true);
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+		expect(dispatchInput(registeredInputListeners(spies.addInputListener), "x")).toBeUndefined();
+	});
+
 	it("routes c to copy a copyable /btw panel when the editor is empty", async () => {
 		const { InputController, ctx, spies } = await createContext();
 		(ctx.canCopyBtw as unknown as { mockReturnValue(value: boolean): void }).mockReturnValue(true);
@@ -681,6 +696,107 @@ describe("InputController keybinding setup", () => {
 				userInitiated: true,
 			});
 		}
+	});
+});
+
+describe("InputController global editor actions", () => {
+	const CTRL_T = "\x14";
+	const CTRL_R = "\x12";
+	const CTRL_G = "\x07";
+	const CTRL_SHIFT_O = "\x1b[111;6u";
+
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	it("routes shortcuts while an ask dialog holds focus", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		const openExternalEditor = vi.spyOn(controller, "openExternalEditor").mockResolvedValue();
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const dialog = new AskDialogComponent([{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }], {
+			onSubmit: () => {},
+			onCancel: () => {},
+			onPrompt: async () => undefined,
+		});
+		context.setFocused(dialog);
+
+		expect(dispatchInput(listeners, CTRL_T)).toEqual({ consume: true });
+		expect(context.ctx.toggleThinkingBlockVisibility).toHaveBeenCalledTimes(1);
+		expect(dispatchInput(listeners, CTRL_R)).toEqual({ consume: true });
+		expect(context.ctx.showHistorySearch).toHaveBeenCalledTimes(1);
+		expect(dispatchInput(listeners, CTRL_G)).toEqual({ consume: true });
+		expect(openExternalEditor).toHaveBeenCalledTimes(1);
+		expect(dispatchInput(listeners, CTRL_SHIFT_O)).toEqual({ consume: true });
+		expect(context.ctx.hideToolActivity).toBe(true);
+	});
+
+	it("still routes transcript actions when the main editor holds focus", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_T)).toEqual({ consume: true });
+		expect(context.ctx.toggleThinkingBlockVisibility).toHaveBeenCalledTimes(1);
+	});
+
+	it("defers while an overlay owns the active surface", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		context.setOverlayVisible(true);
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_T)).toBeUndefined();
+		expect(context.ctx.toggleThinkingBlockVisibility).not.toHaveBeenCalled();
+	});
+
+	it("defers external editing to a focused ask-dialog prompt editor untracked by ctx.hookEditor", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		const openExternalEditor = vi.spyOn(controller, "openExternalEditor").mockResolvedValue();
+		controller.setupKeyHandlers();
+		const hookEditor = new HookEditorComponent(
+			context.ctx.ui,
+			"Edit",
+			undefined,
+			() => {},
+			() => {},
+		);
+		// The ask dialog's "Other" prompt focuses a HookEditorComponent without
+		// assigning ctx.hookEditor; the defer must recognize it structurally.
+		context.setFocused(hookEditor);
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_G)).toBeUndefined();
+		expect(openExternalEditor).not.toHaveBeenCalled();
+	});
+
+	it("defers the tree selector's Ctrl+Shift+O filter binding", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const tree = [
+			{
+				entry: { id: "root", type: "message", parentId: null, message: { role: "user", content: "hi" } },
+				children: [],
+			},
+		] as unknown as SessionTreeNode[];
+		context.setFocused(
+			new TreeSelectorComponent(
+				tree,
+				"root",
+				20,
+				() => {},
+				() => {},
+			),
+		);
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, CTRL_SHIFT_O)).toBeUndefined();
+		expect(context.ctx.hideToolActivity).toBe(false);
 	});
 });
 

@@ -1,7 +1,7 @@
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../../config/model-registry";
 import type { StructuredQuery } from "../query";
-import type { SearchProviderId, SearchResponse } from "../types";
+import type { SearchProviderId, SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
 
 /**
  * Shared web search parameters passed to providers.
@@ -66,6 +66,8 @@ export interface SearchParams {
 	authStorage: AuthStorage;
 	/** Provider/model transport settings used by native search endpoints. */
 	modelRegistry?: ModelRegistry;
+	/** Exact active model identifier, when the caller has trusted session metadata. */
+	modelName?: string;
 	/**
 	 * Optional session id used as the round-robin / sticky key when selecting
 	 * among multiple credentials for the same provider. Pass through from the
