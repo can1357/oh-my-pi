@@ -95,7 +95,16 @@ export interface AsyncProgressSource {
 	startedAt: number;
 }
 
-type AsyncProgressIdentity = Pick<AsyncProgressEntry, "jobId" | "source">;
+/**
+ * Enough of an entry to compute its queue identity. Structural on purpose: a
+ * completion or a retune knows a daemon id long before it has a full
+ * {@link AsyncProgressSource} (label and start time belong to the monitor
+ * registration), and {@link AsyncProgressEntry} satisfies this as-is.
+ */
+export type AsyncProgressIdentity = {
+	jobId: string;
+	source?: Pick<AsyncProgressSource, "id" | "type">;
+};
 
 /** Stable typed identity shared by queue folding, batch grouping, and completion promotion. */
 export function asyncProgressSourceKey(entry: AsyncProgressIdentity): string {
@@ -167,9 +176,20 @@ export type AsyncProgressDetails = {
 	jobs: AsyncProgressJobDetails[];
 };
 
+/**
+ * Tool availability at the moment a batch is built. The chatty-progress
+ * guidance advertises a `proc://<id>/progress` retune, so a batch built for a
+ * session without the `write` tool must not offer it — the batch's own
+ * contents cannot answer that question.
+ */
+export interface AsyncProgressCapabilities {
+	procWrite?: boolean;
+}
+
 /** Build one progress message, preserving every rate-limit-permitted event and grouping entries by typed source. */
 export function buildAsyncProgressBatchMessage(
 	entries: AsyncProgressEntry[],
+	capabilities?: AsyncProgressCapabilities,
 ): CustomMessage<AsyncProgressDetails> | null {
 	if (entries.length === 0) return null;
 	const entriesBySource = new Map<string, AsyncProgressEntry[]>();
@@ -221,7 +241,8 @@ export function buildAsyncProgressBatchMessage(
 			: prompt
 					.render(chattyProgressGuidanceTemplate, {
 						bash: chattyJobs.some(job => job.type === "bash"),
-						hub: chattyJobs.some(job => job.type === "process"),
+						service: chattyJobs.some(job => job.type === "process"),
+						procWrite: capabilities?.procWrite === true,
 					})
 					.trim();
 	return {

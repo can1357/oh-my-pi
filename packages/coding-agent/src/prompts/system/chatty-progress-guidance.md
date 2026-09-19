@@ -1,3 +1,3 @@
 Chatty progress → lower source verbosity (quiet or warning-only) or filter to actionable lines. If safe to retry, stop/cancel and relaunch with less output.
-{{#if hub}}Hub: retune the monitor to `ambient` or `off` without stopping the process.{{/if}}
-{{#if bash}}Bash: progress cannot be retuned; if retry is unsafe, let it finish.{{/if}}
+{{#if service}}Service: {{#if procWrite}}retune its monitor without stopping it — write `ambient` or `off` to `proc://<name>/progress`.{{else}}if relaunch is unsafe, let it run.{{/if}}{{/if}}
+{{#ifAll bash procWrite}}Bash: retune the job without stopping it — write `ambient` to `proc://<job-id>/progress`. Queued wake output still lands once; a job launched without `progress` cannot gain one, and a job's channel cannot be detached. If retry is unsafe, let it finish.{{else}}{{#if bash}}Bash: if retry is unsafe, let it finish.{{/if}}{{/ifAll}}

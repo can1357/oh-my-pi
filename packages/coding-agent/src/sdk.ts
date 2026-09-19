@@ -2117,11 +2117,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
+			captureLaunchProgressEpoch: () => session?.captureLaunchProgressEpoch() ?? 0,
+			queueLaunchProgress: (notification, delivery, startedAt, epoch, artifactId) =>
+				session?.queueLaunchProgress(notification, delivery, startedAt, epoch, artifactId),
+			promoteLaunchProgress: (daemonId, epoch) => session?.promoteLaunchProgress(daemonId, epoch),
+			setLaunchMonitorActive: (monitorId, delivery, active, epoch) =>
+				session?.setLaunchMonitorActive(monitorId, delivery, active, epoch),
 			registerDisposeCallback: callback => {
 				disposeCallbacks.add(callback);
 				return () => disposeCallbacks.delete(callback);
 			},
-			registerSessionChangeCallback: callback => session?.registerSessionChangeCallback(callback),
+			registerContextBoundaryCallback: callback => session?.registerContextBoundaryCallback(callback),
 			bumpFileMutationVersion: path => {
 				const next = (fileMutationVersions.get(path) ?? 0) + 1;
 				fileMutationVersions.set(path, next);
@@ -4201,6 +4207,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			queueLaunchCompletion: notification =>
 				session?.queueLaunchCompletion(notification) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
+			captureLaunchProgressEpoch: () => session?.captureLaunchProgressEpoch() ?? 0,
+			queueLaunchProgress: (notification, delivery, startedAt, epoch, artifactId) =>
+				session?.queueLaunchProgress(notification, delivery, startedAt, epoch, artifactId),
+			promoteLaunchProgress: (daemonId, epoch) => session?.promoteLaunchProgress(daemonId, epoch),
+			setLaunchMonitorActive: (monitorId, delivery, active, epoch) =>
+				session?.setLaunchMonitorActive(monitorId, delivery, active, epoch),
 			getAgentId: () => "advisor",
 			// The primary's availability signals are wrong for advisors: their tool
 			// slate is filtered separately at runtime (default read/grep/glob, no
