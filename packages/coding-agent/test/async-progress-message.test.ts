@@ -56,4 +56,23 @@ describe("async progress messages", () => {
 		expect(rendered).not.toContain("Resume your work");
 		expect(rendered).not.toContain("<system-reminder>");
 	});
+
+	test("offers the job retune in the Bash chatty clause only when proc:// writes are available", () => {
+		// A chatty *bash* job is the case the advice is for, and it never brings a
+		// service with it: tool availability, not batch contents, gates it.
+		const chatty: AsyncProgressEntry = {
+			...entry("bg_chatty", "", 62),
+			artifactId: "chatty-output",
+			suppressedEvents: 9,
+			reminder: "chatty-monitor",
+		};
+
+		const withWrite = content(buildAsyncProgressBatchMessage([chatty], { procWrite: true }));
+		expect(withWrite).toContain("`proc://<job-id>/progress`");
+		expect(withWrite).toContain("Queued wake output still lands once");
+
+		const withoutWrite = content(buildAsyncProgressBatchMessage([chatty]));
+		expect(withoutWrite).toContain("\nBash:");
+		expect(withoutWrite).not.toContain("proc://<job-id>/progress");
+	});
 });

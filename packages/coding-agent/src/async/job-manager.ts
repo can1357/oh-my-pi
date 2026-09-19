@@ -2,6 +2,7 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { PipeStreams } from "@oh-my-pi/pi-natives";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { JobRetuneStatus } from "@oh-my-pi/pi-tui/tools/wait";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { IrcBus } from "../irc/bus";
 import type { JobWidgetInputs, JobWidgetRegistry } from "../job-widgets/types";
@@ -307,6 +308,8 @@ export interface AsyncJobProgressSink {
 	deliver(jobId: string, text: string, job: AsyncJob, seq: number, info: AsyncJobProgressInfo): void | Promise<void>;
 	/** Permanently discard progress that the owner already queued before this job was acknowledged. */
 	acknowledge?(jobId: string): void;
+	/** Re-route progress already queued for `jobId` after its delivery mode changed. */
+	retune?(jobId: string, delivery: AsyncJobProgressDelivery): void;
 }
 
 /**
@@ -529,6 +532,8 @@ export interface AsyncJobManagerApi {
 	registerProgressSink(ownerId: string, sink: AsyncJobProgressSink): () => void;
 	/** Enable model-facing progress for a running job after a caller-managed foreground phase. */
 	activateProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery): boolean;
+	/** Flip a running job's progress delivery mode; `ownerId` scopes it to the caller's jobs. */
+	retuneProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery, ownerId?: string): JobRetuneStatus;
 	/** Wait until every job owned by `ownerId` settled; false when `timeoutMs` elapses first. */
 	waitForOwnerJobs(ownerId: string, options?: { timeoutMs?: number; excludeSuppressed?: boolean }): Promise<boolean>;
 	/** Cancel every job owned by `ownerId`, then wait until `deadlineAt`. */
@@ -1111,6 +1116,26 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		job.progressDelivery = delivery;
 		this.#resumeAgentProgress(job);
 		return true;
+	}
+
+	/**
+	 * Retune a running job's already-monitored progress channel, changing where
+	 * its progress is delivered and nothing else. This is deliberately not
+	 * {@link activateProgressDelivery}: activation resumes suppressed delivery,
+	 * which would push into a job a `hub wait` is deliberately watching, and
+	 * resets the settlement bookkeeping an already-monitored job has accrued.
+	 */
+	retuneProgressDelivery(jobId: string, delivery: AsyncJobProgressDelivery, ownerId?: string): JobRetuneStatus {
+		const job = this.#jobs.get(jobId);
+		if (!job) return "not_found";
+		if (ownerId !== undefined && job.ownerId !== ownerId) return "not_found";
+		if (job.status !== "running") return "not_running";
+		if (job.progressDelivery === undefined) return "unmonitored";
+		if (this.isDeliverySuppressed(jobId)) return "suppressed";
+		if (job.progressDelivery === delivery) return "unchanged";
+		job.progressDelivery = delivery;
+		if (job.ownerId !== undefined) this.#progressSinks.get(job.ownerId)?.retune?.(jobId, delivery);
+		return "retuned";
 	}
 
 	#recordAgentProgress(job: ManagedAsyncJob, text: string, info: AsyncJobProgressInfo = {}): void {

@@ -17,6 +17,7 @@
  */
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { JobWidgetView } from "@oh-my-pi/pi-tui/tools/job-widget";
+import type { JobRetuneStatus } from "@oh-my-pi/pi-tui/tools/wait";
 import {
 	ASYNC_JOB_MANAGER_SHUTDOWN_REASON,
 	type AsyncJob,
@@ -169,10 +170,19 @@ export type AsyncJobManagerProtocol = {
 	waitForAll: RpcMethod<[], void>;
 	registerDeliverySink: RpcMethod<[ownerId: string, sink: WireDeliverySink], WireUnsubscribe>;
 	registerProgressSink: RpcMethod<
-		[ownerId: string, deliver: WireProgressDeliver, acknowledge: WireCallback<[jobId: string]> | undefined],
+		[
+			ownerId: string,
+			deliver: WireProgressDeliver,
+			acknowledge: WireCallback<[jobId: string]> | undefined,
+			retune: WireCallback<[jobId: string, delivery: AsyncJobProgressDelivery]> | undefined,
+		],
 		WireUnsubscribe
 	>;
 	activateProgressDelivery: RpcMethod<[jobId: string, delivery: AsyncJobProgressDelivery], boolean>;
+	retuneProgressDelivery: RpcMethod<
+		[jobId: string, delivery: AsyncJobProgressDelivery, ownerId: string | undefined],
+		JobRetuneStatus
+	>;
 	waitForOwnerJobs: RpcMethod<
 		[ownerId: string, options: { timeoutMs?: number; excludeSuppressed?: boolean } | undefined],
 		boolean

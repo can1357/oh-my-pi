@@ -256,15 +256,18 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 					sink(jobId, text, job ? toJobWire(job) : undefined),
 				),
 			),
-		registerProgressSink: (manager, ownerId, deliver, acknowledge) =>
+		registerProgressSink: (manager, ownerId, deliver, acknowledge, retune) =>
 			cleanups.track(
 				threadId,
 				manager.registerProgressSink(ownerId, {
 					deliver: (jobId, text, job, seq, info) => deliver(jobId, text, toJobWire(job), seq, info),
 					acknowledge: acknowledge ? jobId => ignoreSettle(acknowledge(jobId)) : undefined,
+					retune: retune ? (jobId, delivery) => ignoreSettle(retune(jobId, delivery)) : undefined,
 				}),
 			),
 		activateProgressDelivery: (manager, jobId, delivery) => manager.activateProgressDelivery(jobId, delivery),
+		retuneProgressDelivery: (manager, jobId, delivery, ownerId) =>
+			manager.retuneProgressDelivery(jobId, delivery, ownerId),
 		waitForOwnerJobs: (manager, ownerId, options) => manager.waitForOwnerJobs(ownerId, options),
 		cancelAndReapOwnerJobs: (manager, ownerId, deadlineAt) => manager.cancelAndReapOwnerJobs(ownerId, deadlineAt),
 		drainDeliveries: (manager, options) => manager.drainDeliveries(options),

@@ -5,6 +5,8 @@ import {
 	type DaemonReadySpec,
 	type DaemonSpec,
 	type DaemonSnapshot,
+	type DaemonMonitorDelivery,
+	type DaemonMonitorWatcher,
 } from "@oh-my-pi/pi-tui/tools/daemon";
 /**
  * Cross-process daemon broker protocol shared by the tool, client, and broker.
@@ -76,7 +78,7 @@ export type DaemonOperation =
 export type DaemonRpcResult =
 	| { op: "ping"; projectDir: string; capabilities?: string[] }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
-	| { op: "list"; daemons: DaemonSnapshot[] }
+	| { op: "list"; daemons: DaemonSnapshot[]; monitors?: DaemonMonitorWatcher[] }
 	| {
 			op: "logs";
 			name: string;
@@ -94,7 +96,7 @@ export type DaemonRpcResult =
 	| { op: "stop"; daemon: DaemonSnapshot }
 	| { op: "restart"; daemon: DaemonSnapshot }
 	| { op: "mode"; daemon: DaemonSnapshot }
-	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
+	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec; monitors?: DaemonMonitorWatcher[] }
 	| { op: "cancel"; cancelled: boolean }
 	| { op: "shutdown" };
 
@@ -121,6 +123,12 @@ export interface DaemonOutputSubscription {
 	owner: string;
 	/** Session artifact written directly by the broker while the subscription is active. */
 	artifactPath: string;
+	/**
+	 * Daemon incarnation already accepted by this client. On republish after
+	 * broker-side registration expiry, the broker expires this subscription
+	 * instead of silently binding it to a different same-name process.
+	 */
+	daemonId?: string;
 	/** Client-managed cumulative ack: broker registration epoch of the last delivered output batch. */
 	lastEpoch?: string;
 	/** Client-managed cumulative ack: highest `seq` delivered for {@link lastEpoch}. */
@@ -138,6 +146,12 @@ export interface DaemonOutputSubscription {
 	 * record to it.
 	 */
 	startPending?: boolean;
+	/** Delivery mode the client attached; reported by `list`/`describe` watcher rows. */
+	delivery?: DaemonMonitorDelivery;
+	/** Epoch milliseconds when the client registered this subscription. */
+	since?: number;
+	/** Session artifact id the client allocated for the raw capture at {@link artifactPath}. */
+	artifactId?: string;
 }
 
 /** Wire form of a subscription, tagged by the exact client registration that advertised it. */
@@ -187,11 +201,19 @@ export interface DaemonOutputWireNotification extends DaemonOutputNotification {
 	registrationId: string;
 }
 
-/** Terminal process state for a monitor whose owner is not the process owner. */
+/** Terminal process state for a registered output monitor. */
 export interface DaemonMonitorCompletionNotification {
 	event: "daemon-monitor-completed";
 	monitorId: string;
 	daemon: DaemonSnapshot;
+	/**
+	 * True when the broker emitted (or queued) a `daemon-completed`
+	 * notification to the daemon's owner for this settlement. False when no
+	 * owner completion covered it (e.g. the daemon was stopped by another
+	 * client), so an owner-session monitor must synthesize its own terminal
+	 * notification instead of waiting for one that will never arrive.
+	 */
+	ownerNotified?: boolean;
 }
 
 /** Socket form of monitor completion, scoped to the exact advertised registration. */
@@ -304,6 +326,7 @@ function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
 			owner: stringValue(source.owner, `request.outputSubscriptions[${index}].owner`),
 			artifactPath: stringValue(source.artifactPath, `request.outputSubscriptions[${index}].artifactPath`),
 			registrationId: stringValue(source.registrationId, `request.outputSubscriptions[${index}].registrationId`),
+			daemonId: optionalString(source.daemonId, `request.outputSubscriptions[${index}].daemonId`),
 			lastEpoch: optionalString(source.lastEpoch, `request.outputSubscriptions[${index}].lastEpoch`),
 			lastSeq:
 				source.lastSeq === undefined
@@ -317,6 +340,38 @@ function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
 				source.startPending === undefined
 					? undefined
 					: booleanValue(source.startPending, `request.outputSubscriptions[${index}].startPending`),
+			delivery: optionalMonitorDelivery(source.delivery, `request.outputSubscriptions[${index}].delivery`),
+			since:
+				source.since === undefined
+					? undefined
+					: nonNegativeInteger(source.since, `request.outputSubscriptions[${index}].since`),
+			artifactId: optionalString(source.artifactId, `request.outputSubscriptions[${index}].artifactId`),
+		};
+	});
+}
+
+function optionalMonitorDelivery(value: unknown, label: string): DaemonMonitorDelivery | undefined {
+	if (value === undefined) return undefined;
+	const delivery = stringValue(value, label);
+	if (delivery === "wake" || delivery === "ambient") return delivery;
+	throw new Error(`Unknown monitor delivery: ${delivery}`);
+}
+
+function optionalMonitorWatchers(value: unknown): DaemonMonitorWatcher[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) throw new Error("result.monitors must be an array");
+	return value.map((item, index) => {
+		const label = `result.monitors[${index}]`;
+		const source = record(item, label);
+		return {
+			name: stringValue(source.name, `${label}.name`),
+			id: stringValue(source.id, `${label}.id`),
+			owner: stringValue(source.owner, `${label}.owner`),
+			delivery: optionalMonitorDelivery(source.delivery, `${label}.delivery`),
+			since: source.since === undefined ? undefined : nonNegativeInteger(source.since, `${label}.since`),
+			artifactId: optionalString(source.artifactId, `${label}.artifactId`),
+			daemonId: optionalString(source.daemonId, `${label}.daemonId`),
+			connected: booleanValue(source.connected, `${label}.connected`),
 		};
 	});
 }
@@ -488,6 +543,10 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			monitorId: stringValue(source.monitorId, "monitor completion.monitorId"),
 			registrationId: stringValue(source.registrationId, "monitor completion.registrationId"),
 			daemon: parseDaemonSnapshot(source.daemon),
+			ownerNotified:
+				source.ownerNotified === undefined
+					? undefined
+					: booleanValue(source.ownerNotified, "monitor completion.ownerNotified"),
 		};
 	}
 	if (source.event === "daemon-monitor-expired") {
@@ -594,7 +653,11 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			};
 		case "list": {
 			if (!Array.isArray(source.daemons)) throw new Error("result.daemons must be an array");
-			return { op: "list", daemons: source.daemons.map(parseDaemonSnapshot) };
+			return {
+				op: "list",
+				daemons: source.daemons.map(parseDaemonSnapshot),
+				monitors: optionalMonitorWatchers(source.monitors),
+			};
 		}
 		case "logs":
 			return {
@@ -629,6 +692,7 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 				op: "describe",
 				daemon: parseDaemonSnapshot(source.daemon),
 				spec: parseDaemonSpec(source.spec),
+				monitors: optionalMonitorWatchers(source.monitors),
 			};
 		case "cancel":
 			return { op: "cancel", cancelled: booleanValue(source.cancelled, "result.cancelled") };
