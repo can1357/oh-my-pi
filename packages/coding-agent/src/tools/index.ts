@@ -38,6 +38,7 @@ import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
+import { getRlmStore, rlmEnabled, rlmSpillBytes, wrapToolWithRlmSpill } from "../rlm";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
@@ -60,6 +61,7 @@ import { MemoryReflectTool } from "./memory-reflect";
 import { MemoryRetainTool } from "./memory-retain";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
+import { RlmTool } from "./rlm";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
@@ -129,6 +131,8 @@ export type {
 	SubmitReviewDetails,
 } from "@oh-my-pi/pi-tui/tools/task";
 export * from "./security-scan";
+export * from "./rlm";
+
 export * from "./think";
 export * from "./todo";
 export * from "./tts";
@@ -202,6 +206,19 @@ export interface ToolSession {
 	fetch?: FetchImpl;
 	/** Provider credential resolver forwarded unchanged to restricted child sessions. */
 	getApiKey?: AgentOptions["getApiKey"];
+	/**
+	 * Isolated RLM completer (query/subcall). Must not inherit root history.
+	 * Host passes AbortSignal from the store wall-clock/cancel lease.
+	 */
+	rlmComplete?: (
+		prompt: string,
+		options?: { signal?: AbortSignal },
+	) => Promise<string | { text: string; tokens?: number; cost?: number }>;
+	/** Session-owned RLM spill store (preferred over process-global map). */
+	rlmStore?: import("../rlm/store").RlmStore;
+	/** Stable RLM runtime id — never cwd. */
+	getRlmRuntimeId?: () => string | null;
+
 	/** Current session whose stored credential affinities should seed a child session. */
 	getCredentialSourceSessionId?: () => string | undefined;
 	/** Skip subprocess-kernel availability checks and warmup */
@@ -519,6 +536,8 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	rewind: RewindTool.createIf,
 	context_notes: ContextNotesTool.createIf,
 	new_context: NewContextTool.createIf,
+	rlm: RlmTool.createIf,
+
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
@@ -618,6 +637,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			if (!requestedTools.includes("context_notes")) requestedTools.push("context_notes");
 			if (!requestedTools.includes("new_context")) requestedTools.push("new_context");
 		}
+		if (rlmEnabled(session) && !requestedTools.includes("rlm")) {
+			requestedTools.push("rlm");
+		}
+
 		if (goalModeActive && !requestedTools.includes("goal")) {
 			requestedTools.push("goal");
 		}
@@ -718,6 +741,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
 		}
+		if (name === "rlm") return rlmEnabled(session);
+
 		return true;
 	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
@@ -836,6 +861,18 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		const finalActiveNames = new Set(tools.map(tool => tool.name));
 		if (session.setActiveToolNames) session.setActiveToolNames(finalActiveNames);
 		else session.isToolActive = name => finalActiveNames.has(name);
+	}
+
+	// Always wrap so `/rlm on` can arm spill without rebuilding the registry.
+	{
+		const store = getRlmStore(session);
+		const spillBytes = rlmSpillBytes(session);
+		tools = tools.map(tool =>
+			wrapToolWithRlmSpill(tool, store, spillBytes, {
+				enabled: () => rlmEnabled(session),
+				spillBytes: () => rlmSpillBytes(session),
+			}),
+		);
 	}
 
 	return tools;
