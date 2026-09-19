@@ -725,6 +725,67 @@ describe("AgentSession retry fallback", () => {
 		expect(session.messages.some(message => message.role === "user")).toBe(true);
 	});
 
+	it("keeps the primary inside reserve under confirm when no confirmer can be asked", async () => {
+		// A subagent (or a `-p` run) never gets a usage-fallback confirmer. Under
+		// `confirm` it must not quietly act as `auto` and hand the turn to the
+		// first `default` chain entry — a reviewer pinned to a frontier model
+		// silently reviewed on a flash model this way. Only `depleted` may cross.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled reserve fallback models");
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ responses: [{ content: ["continued on the primary"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePct": 10,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const usageHealth = vi
+			.spyOn(modelRegistry.authStorage, "getModelUsageHealth")
+			.mockImplementation(async provider =>
+				provider === primaryModel.provider
+					? {
+							state: "reserve",
+							accounts: [
+								{
+									credentialId: 1,
+									credentialType: "oauth",
+									selected: true,
+									state: "reserve",
+									remainingFraction: 0.02,
+								},
+							],
+						}
+					: { state: "healthy", accounts: [] },
+			);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		await session.prompt("Keep working on the same task");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(session.model?.id).toBe(primaryModel.id);
+		// The primary's health is all that gets consulted: with nobody to confirm,
+		// the chain is never walked, so no candidate health probes fire either.
+		expect(usageHealth.mock.calls.map(([provider]) => provider)).toEqual([primaryModel.provider]);
+	});
+
 	it("honors a live fail-closed policy after reserve spending was approved", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

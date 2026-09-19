@@ -52,6 +52,8 @@
 - Fixed subagent HUD labels and plan filenames being populated with example prompt text on smaller models.
 - Improved shell, file, session, and persistence operations to avoid unnecessary repeated work, improving responsiveness and resource usage.
 
+- Fixed `retry.usageReservePolicy: confirm` acting as `auto` wherever no one could confirm: a subagent (or `-p` run) whose coding-plan model entered the reserve margin was switched, without any signal, to the first entry of its inherited `default` chain — a reviewer pinned to a frontier model quietly ran on a flash model. Sessions with no confirmer now keep the primary until it is depleted; `auto` still switches on reserve.
+- The `<task-result>` envelope a parent reads now carries `fallback-model="<provider>/<id>"` when a retry chain or usage-reserve switch served the run on a model other than the one it asked for, so the parent can weigh the output accordingly instead of finding out from the session log.
 ## [18.2.4] - 2026-09-17
 
 ### Added

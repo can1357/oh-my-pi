@@ -878,6 +878,38 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("keeps a reserve coding-plan model when creating a noninteractive session under confirm", async () => {
+		// Startup used to treat `hasUI: false` as consent and step past a primary
+		// inside reserve; that decision belongs to a confirmer at prompt time, and a
+		// session that never gets one stays on the primary while it has quota.
+		const settings = Settings.isolated({
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "confirm",
+		});
+		settings.setModelRole("task", "runtime-provider/runtime-model,runtime-provider/runtime-fallback-model");
+		const options = buildSessionOptions("task");
+		vi.spyOn(options.authStorage, "getModelUsageHealth").mockImplementation(async (_provider, healthOptions) =>
+			healthOptions.modelId === "runtime-model"
+				? {
+						state: "reserve",
+						accounts: [{ credentialId: 1, credentialType: "oauth", state: "reserve", remainingFraction: 0.05 }],
+					}
+				: { state: "healthy", accounts: [{ credentialId: 2, credentialType: "oauth", state: "healthy" }] },
+		);
+		const { session } = await createAgentSession({
+			...options,
+			modelPatternFallbackRole: "subagent:usage-aware-reserve",
+			settings,
+			hasUI: false,
+		});
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("rejects a depleted terminal fallback after startup skips the primary", async () => {
 		const settings = Settings.isolated({
 			"retry.usageAwareFallback": true,
