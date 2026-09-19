@@ -32,6 +32,7 @@ import { createExtensionModelQuery } from "./model-api";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AfterProviderResponseEvent,
+	AgentIdentity,
 	AssistantThinkingRenderer,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -448,6 +449,7 @@ export class ExtensionRunner {
 	#isIdleFn: () => boolean = () => true;
 	#waitForIdleFn: () => Promise<void> = async () => {};
 	#abortFn: () => void = () => {};
+	#identity: AgentIdentity | undefined;
 	#hasPendingMessagesFn: () => boolean = () => false;
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
@@ -613,10 +615,21 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		agentIdentity?: AgentIdentity,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		this.#identity = agentIdentity
+			? Object.freeze({
+					kind: agentIdentity.kind,
+					depth: agentIdentity.depth,
+					agentId: agentIdentity.agentId,
+					displayName: agentIdentity.displayName,
+					...(agentIdentity.parentId !== undefined ? { parentId: agentIdentity.parentId } : {}),
+					parentChain: Object.freeze([...agentIdentity.parentChain]),
+				})
+			: undefined;
 	}
 
 	/**
@@ -1182,6 +1195,7 @@ export class ExtensionRunner {
 		},
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
+		const agentIdentity = this.#identity;
 		return {
 			ui: this.#uiContext,
 			mode: this.#mode,
@@ -1196,6 +1210,7 @@ export class ExtensionRunner {
 			get model() {
 				return getModel();
 			},
+			agentIdentity,
 			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ctx.agentIdentity` to extension contexts: tells a handler whether it runs in the main session or a subagent, its recursion depth, registry id, display name, and parent chain ([#10228](https://github.com/can1357/oh-my-pi/issues/10228)).
 ### Breaking Changes
 
 - Removed support for the env parameter in the bash tool
