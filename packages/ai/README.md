@@ -77,6 +77,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **QwenCloud Token Plan** (supports `/login alibaba-token-plan`, `ALIBABA_TOKEN_PLAN_API_KEY`, or `BAILIAN_TOKEN_PLAN_API_KEY`; interactive login first selects a region — International (Singapore, default), China (Beijing) for 百炼 Token Plan keys, or a custom base URL — since region keys are non-interchangeable, then optionally stores a `home.qwencloud.com` Cookie request header for best-effort 5-hour and 7-day quota reporting)
   To enable quota reporting, sign in to the Token Plan dashboard, copy the `Cookie` request-header value from a `home.qwencloud.com` request in browser developer tools, and paste it at the second login prompt. Press Enter to skip; the Cookie is sensitive and session-lived, so rerun login when it expires.
 - **Cloudflare AI Gateway** (supports `/login cloudflare-ai-gateway`, or `CLOUDFLARE_AI_GATEWAY_API_KEY` with `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_GATEWAY_ID`)
+- **Cloudflare Workers AI** (supports `/login cloudflare-workers-ai`, or `CLOUDFLARE_WORKERS_AI_API_KEY` / `CLOUDFLARE_API_TOKEN` with `CLOUDFLARE_ACCOUNT_ID`)
 - **Ollama** (local OpenAI-compatible runtime; optional `OLLAMA_API_KEY`)
 - **Ollama Cloud** (hosted native Ollama API; requires `OLLAMA_CLOUD_API_KEY`)
 - **llama.cpp** (local OpenAI and Anthropic compatible inference server)
@@ -961,9 +962,12 @@ In Node.js environments, you can set environment variables to avoid passing API 
 | ZenMux                | `ZENMUX_API_KEY`                                                                                                    |
 | vLLM                  | `VLLM_API_KEY`                                                                                                      |
 | Cloudflare AI Gateway | `CLOUDFLARE_AI_GATEWAY_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID`                                 |
+| Cloudflare Workers AI | `CLOUDFLARE_WORKERS_AI_API_KEY` (or `CLOUDFLARE_API_TOKEN`) + `CLOUDFLARE_ACCOUNT_ID`                               |
 | GitHub Copilot        | `COPILOT_GITHUB_TOKEN` or `GH_TOKEN` or `GITHUB_TOKEN`                                                              |
 
 `/login cloudflare-ai-gateway` collects and stores the gateway token, account ID, and gateway ID. For environment configuration, set all three Cloudflare values above. OMP derives provider endpoints from the account and gateway IDs.
+
+`/login cloudflare-workers-ai` stores an API token with the account ID; models are discovered live.
 
 For Anthropic Foundry routing, set `CLAUDE_CODE_USE_FOUNDRY=true` plus:
 `FOUNDRY_BASE_URL`, `ANTHROPIC_FOUNDRY_API_KEY`, optional `ANTHROPIC_CUSTOM_HEADERS`,
@@ -996,6 +1000,7 @@ Provider endpoint defaults for the current OpenAI-compatible integrations:
 - Ollama Cloud: native Ollama API host (`https://ollama.com/api`, configured here as base URL `https://ollama.com`)
 - LiteLLM: `http://localhost:4000/v1`
 - Cloudflare AI Gateway: native Anthropic, OpenAI, and Workers AI routes under `https://gateway.ai.cloudflare.com/v1/<account>/<gateway>`
+- Cloudflare Workers AI: account-scoped Chat Completions under `https://api.cloudflare.com/client/v4/accounts/<account>/ai/v1`
 - Qwen Portal: `https://portal.qwen.ai/v1`
   When set, the library automatically uses these keys:
 
@@ -1088,7 +1093,7 @@ If SQLite reports corruption during startup, the damaged database and remaining 
 
 `login` supports OAuth providers (Anthropic, OpenAI Codex, GitHub Copilot, Gemini CLI, Antigravity) and API-key onboarding flows.
 
-For the current API-key onboarding flows, the library covers Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Novita, DeepInfra, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.
+For the current API-key onboarding flows, the library covers Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Novita, DeepInfra, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Cloudflare Workers AI, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.
 
 ### Programmatic OAuth
 
