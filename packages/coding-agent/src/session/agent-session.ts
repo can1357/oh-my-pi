@@ -1678,6 +1678,8 @@ export class AgentSession {
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,
+			createRlmTool: config.createRlmTool,
+
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -5559,6 +5561,12 @@ export class AgentSession {
 		return this.#tools.setThinkToolEnabled(enabled);
 	}
 
+	/** Installs or removes the `rlm` tool when the session toggle flips. */
+	setRlmToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#tools.setRlmToolEnabled(enabled);
+	}
+
+
 	/** Cancels the local rollout-memory startup owned by this session. */
 	cancelLocalMemoryStartup(): void {
 		this.#memory.cancelLocalMemoryStartup();
@@ -9293,6 +9301,12 @@ export class AgentSession {
 	async runEphemeralTurn(args: {
 		promptText: string;
 		history?: readonly Message[];
+		/**
+		 * When true, build a worker-only snapshot: developer no-tools reminder +
+		 * optional history + prompt. Does **not** copy `this.messages` or the
+		 * streaming root assistant (RLM isolation membrane).
+		 */
+		isolated?: boolean;
 		/** Session-local key for serialized side turns; rotate after cancellation or failure. */
 		conversationKey?: string;
 		onTextDelta?: (delta: string) => void;
@@ -9304,7 +9318,7 @@ export class AgentSession {
 			throw new Error("No active model on session");
 		}
 		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText, args.history);
+		const snapshot = this.#buildEphemeralSnapshot(args.promptText, args.history, args.isolated === true);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		const context = await this.agent.buildSideRequestContext(llmMessages);
 		const options = this.prepareSimpleStreamOptions(
@@ -9385,39 +9399,50 @@ export class AgentSession {
 	}
 
 	/**
-	 * Build a message snapshot for an ephemeral side-channel turn.  Includes
-	 * the in-flight streaming assistant message (if any) so the model sees
-	 * the partial response in context, then appends detached side-channel history
+	 * Build a message snapshot for an ephemeral side-channel turn.
+	 *
+	 * Default (BTW/OMFG/IRC): includes root messages + in-flight streaming assistant
+	 * so the model sees the half-finished response, then appends detached history
 	 * and the current prompt after the no-tools reminder.
+	 *
+	 * `isolated: true` (RLM workers): **only** no-tools reminder + optional history
+	 * + prompt. Never copies root transcript or streaming root assistant.
 	 */
-	#buildEphemeralSnapshot(promptText: string, history?: readonly Message[]): AgentMessage[] {
-		const messages = [...this.messages];
-		const streaming = this.agent.state.streamMessage;
-		if (streaming && streaming.role === "assistant" && Array.isArray(streaming.content)) {
-			const preservedBlocks: AssistantMessage["content"] = [];
-			// Preserve thinking blocks: DeepSeek-class encoders replay them as
-			// `reasoning_content` and reject the request (HTTP 400) when the field
-			// goes missing on a turn that previously emitted thinking.
-			for (const c of streaming.content) {
-				if (c.type === "thinking") preservedBlocks.push(c);
-			}
-			const streamingText = streaming.content
-				.filter((c): c is TextContent => c.type === "text")
-				.map(c => c.text)
-				.join("");
-			if (streamingText) {
-				preservedBlocks.push({ type: "text", text: streamingText });
-			}
-			if (preservedBlocks.length > 0) {
-				const normalized: AssistantMessage = {
-					...streaming,
-					content: preservedBlocks,
-				};
-				const lastMessage = messages.at(-1);
-				if (lastMessage?.role === "assistant") {
-					messages[messages.length - 1] = normalized;
-				} else {
-					messages.push(normalized);
+	#buildEphemeralSnapshot(
+		promptText: string,
+		history?: readonly Message[],
+		isolated = false,
+	): AgentMessage[] {
+		const messages: AgentMessage[] = [];
+		if (!isolated) {
+			messages.push(...this.messages);
+			const streaming = this.agent.state.streamMessage;
+			if (streaming && streaming.role === "assistant" && Array.isArray(streaming.content)) {
+				const preservedBlocks: AssistantMessage["content"] = [];
+				// Preserve thinking blocks: DeepSeek-class encoders replay them as
+				// `reasoning_content` and reject the request (HTTP 400) when the field
+				// goes missing on a turn that previously emitted thinking.
+				for (const c of streaming.content) {
+					if (c.type === "thinking") preservedBlocks.push(c);
+				}
+				const streamingText = streaming.content
+					.filter((c): c is TextContent => c.type === "text")
+					.map(c => c.text)
+					.join("");
+				if (streamingText) {
+					preservedBlocks.push({ type: "text", text: streamingText });
+				}
+				if (preservedBlocks.length > 0) {
+					const normalized: AssistantMessage = {
+						...streaming,
+						content: preservedBlocks,
+					};
+					const lastMessage = messages.at(-1);
+					if (lastMessage?.role === "assistant") {
+						messages[messages.length - 1] = normalized;
+					} else {
+						messages.push(normalized);
+					}
 				}
 			}
 		}

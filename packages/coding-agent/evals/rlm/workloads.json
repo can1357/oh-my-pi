@@ -1,0 +1,52 @@
+{
+  "spillBytes": 20480,
+  "workloads": [
+    {
+      "id": "W0-smoke",
+      "description": "Toggle contract only",
+      "files": [],
+      "needles": []
+    },
+    {
+      "id": "W1-single-fat",
+      "description": "One oversized corpus with a midpoint needle",
+      "files": [{ "name": "corpus-256k.txt", "bytes": 262144, "needleEvery": 8192 }],
+      "needles": [{ "id": "mid", "offsetHint": 131072 }]
+    },
+    {
+      "id": "W2-multi-fat",
+      "description": "Five 64k files, five needles",
+      "files": [
+        { "name": "a.txt", "bytes": 65536, "needleId": "N0" },
+        { "name": "b.txt", "bytes": 65536, "needleId": "N1" },
+        { "name": "c.txt", "bytes": 65536, "needleId": "N2" },
+        { "name": "d.txt", "bytes": 65536, "needleId": "N3" },
+        { "name": "e.txt", "bytes": 65536, "needleId": "N4" }
+      ],
+      "needles": [
+        { "id": "N0" },
+        { "id": "N1" },
+        { "id": "N2" },
+        { "id": "N3" },
+        { "id": "N4" }
+      ]
+    },
+    {
+      "id": "W3-mixed",
+      "description": "Twenty small + three fat",
+      "files": [
+        { "name": "small-{i}.txt", "bytes": 512, "count": 20 },
+        { "name": "fat-0.txt", "bytes": 65536, "needleId": "F0" },
+        { "name": "fat-1.txt", "bytes": 65536, "needleId": "F1" },
+        { "name": "fat-2.txt", "bytes": 65536, "needleId": "F2" }
+      ],
+      "needles": [{ "id": "F0" }, { "id": "F1" }, { "id": "F2" }]
+    }
+  ],
+  "gates": {
+    "M1_spill_body_reduction_min": 0.9,
+    "M2_context_token_reduction_min": 0.3,
+    "C3_no_needle_in_stub": true,
+    "C5_fail_open": true
+  }
+}
