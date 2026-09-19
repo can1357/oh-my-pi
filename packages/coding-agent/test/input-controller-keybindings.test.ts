@@ -704,6 +704,7 @@ describe("InputController global editor actions", () => {
 	const CTRL_R = "\x12";
 	const CTRL_G = "\x07";
 	const CTRL_SHIFT_O = "\x1b[111;6u";
+	const CTRL_L = "\x0c";
 
 	beforeAll(async () => {
 		await initTheme(false);
@@ -730,6 +731,8 @@ describe("InputController global editor actions", () => {
 		expect(openExternalEditor).toHaveBeenCalledTimes(1);
 		expect(dispatchInput(listeners, CTRL_SHIFT_O)).toEqual({ consume: true });
 		expect(context.ctx.hideToolActivity).toBe(true);
+		expect(dispatchInput(listeners, CTRL_L)).toEqual({ consume: true });
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
 
 	it("still routes transcript actions when the main editor holds focus", async () => {
@@ -751,6 +754,33 @@ describe("InputController global editor actions", () => {
 
 		expect(dispatchInput(listeners, CTRL_T)).toBeUndefined();
 		expect(context.ctx.toggleThinkingBlockVisibility).not.toHaveBeenCalled();
+		expect(dispatchInput(listeners, CTRL_L)).toBeUndefined();
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
+	});
+
+	it("defers display reset to the tree selector's own Alt+L labeled-only filter", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const tree = [
+			{
+				entry: { id: "root", type: "message", parentId: null, message: { role: "user", content: "hi" } },
+				children: [],
+			},
+		] as unknown as SessionTreeNode[];
+		context.setFocused(
+			new TreeSelectorComponent(
+				tree,
+				"root",
+				20,
+				() => {},
+				() => {},
+			),
+		);
+
+		expect(dispatchInput(listeners, CTRL_L)).toBeUndefined();
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
 	});
 
 	it("defers external editing to a focused ask-dialog prompt editor untracked by ctx.hookEditor", async () => {
