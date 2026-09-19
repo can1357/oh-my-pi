@@ -29,6 +29,10 @@
 
 ### Added
 
+- Fixed the `security-reviewer` agent rejecting every valid finding: the finding schema's `optionalProperties` node sat inside `properties`, making a field literally named `optionalProperties` required and leaving `anchor` and `remediation` unreachable ([#12200](https://github.com/can1357/oh-my-pi/pull/12200) by [@dhofheinz](https://github.com/dhofheinz)).
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
+- GitHub tool approval policies can now target individual operations such as `github.pr_checkout`, while retaining the tool-wide `github` fallback ([#12066](https://github.com/can1357/oh-my-pi/issues/12066)).
+- Added `pulse` terminal-title spinner style to `tui.titleSpinner`: a moon that fills (○◔◑◕●) and empties, alongside the existing braille, dots, and ASCII line sets ([#12250](https://github.com/can1357/oh-my-pi/pull/12250) by [@H4vC](https://github.com/H4vC)).
 - Added `omp stream` for livestreaming terminal sessions at `live.omp.sh/<your Stencil username>`, with viewer chat, pane-per-session display for sessions in the same directory, screen redaction, and configurable `stream.serverUrl` and `stream.redactPatterns` settings. Use `--server` to override the stream server, `--title` to set a title, and `--no-tui` to retain the line-based log interface.
 - Added Stencil account support to `/login`. `omp stream` uses a signed-in Stencil account or `STENCIL_API_KEY` for channel ownership and authentication. Sensitive environment, dotenv, `secrets.yml`, credential-shaped, and configured pattern-matching values are redacted before screen data is transmitted.
 - Added faster keyless web search fallback by prioritizing the default keyless Parallel provider ahead of Perplexity.

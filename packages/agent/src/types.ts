@@ -960,6 +960,10 @@ export type ToolApprovalDecision =
 			 *  tool (e.g. `write` for an `xd://` device call) scope user allow/deny/
 			 *  prompt policies to the tool it dispatches into. */
 			policyKey?: string;
+			/** Intermediate user-policy fallback consulted after `policyKey` and before
+			 *  the invoking tool's own name. Dispatchers use this to preserve the mounted
+			 *  tool-wide policy when forwarding an operation-specific key. */
+			policyFallbackKey?: string;
 	  };
 export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprovalDecision);
 
