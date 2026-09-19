@@ -165,13 +165,41 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// Strict array-of-nonempty-strings; comma globs like "{a,b}_*" survive intact
 			// Tool-filter entries are patterns, not values, so `${VAR}` in them
 			// stays literal: the fields that DO expand are expanded one by one
-			// rather than by expanding the whole server object. This matches the
-			// standalone fallback and plugin loaders.
+			// rather than by expanding the whole server object. The scalar fields
+			// (enabled/timeout/requestIdFormat) expand too — their validation
+			// branches accept the string an expansion yields under the previous
+			// whole-object pass, and dropping the expansion would silently break
+			// `timeout: "${OMP_TIMEOUT_MS}"`.
+			const expandedEnabledRaw = expandEnvVarsDeep(serverConfig.enabled);
+			// The expanded `enabled` arrives as a string when it came from a
+			// `${VAR}` placeholder; the string branch above coerces a literal
+			// string the same way, so run the expanded value through the same
+			// accept-set here. Anything else stays undefined (fail-open).
+			const expandedEnabled =
+				typeof expandedEnabledRaw === "boolean"
+					? expandedEnabledRaw
+					: typeof expandedEnabledRaw === "string"
+						? expandedEnabledRaw === "true" || expandedEnabledRaw === "1"
+						: undefined;
+			// The expanded timeout arrives as a string when it came from a
+			// `${VAR}` placeholder; the string branch above coerces a literal
+			// string the same way, so coerce the expanded one here. A non-numeric
+			// expansion stays literal (`${UNSET}`), fails the coerce, and warns.
+			const expandedTimeoutRaw = expandEnvVarsDeep(serverConfig.timeout);
+			const expandedTimeout =
+				typeof expandedTimeoutRaw === "number" ? expandedTimeoutRaw : Number(expandedTimeoutRaw);
+			// The expanded requestIdFormat passes through the same parser the raw
+			// value does, so an unrecognized value is still dropped with a warn;
+			// the expansion only injects the `${VAR}` resolution a whole-object
+			// pass would have produced.
+			const expandedRequestIdFormat = parseRequestIdFormat(
+				serverConfig.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(serverConfig.requestIdFormat),
+			);
 			result.push({
 				name: serverName,
-				enabled,
-				timeout,
-				requestIdFormat,
+				enabled: expandedEnabled,
+				timeout: Number.isFinite(expandedTimeout) && expandedTimeout >= 0 ? expandedTimeout : undefined,
+				requestIdFormat: expandedRequestIdFormat,
 				...parseMCPToolFilters(serverName, serverConfig),
 				command: expandEnvVarsDeep(serverConfig.command) as string | undefined,
 				args: expandEnvVarsDeep(serverConfig.args) as string[] | undefined,

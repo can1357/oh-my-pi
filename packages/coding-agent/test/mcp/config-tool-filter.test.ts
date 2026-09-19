@@ -130,6 +130,45 @@ test("a non-array filter value is dropped rather than passed through", async () 
 	expect(configs.bogus?.enabledTools).toBeUndefined();
 });
 
+test("scalar shared fields still environment-expand under per-field expansion", async () => {
+	// Only the filter entries must stay literal; `timeout`/`enabled`/
+	// `requestIdFormat` expanded under the previous whole-object pass and their
+	// validation branches coerce the expanded string — dropping the expansion
+	// would silently fall back to the 30 s default and ignore an `enabled` flag.
+	// A placeholder resolving to `false` still suppresses the server, so the
+	// positive case carries the observable assertions.
+	process.env.OMP_TEST_TIMEOUT_MS = "5000";
+	process.env.OMP_TEST_MCP_DISABLED = "false";
+	process.env.OMP_TEST_RID_FORMAT = "string";
+	try {
+		const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+			timed: {
+				type: "http",
+				url: "https://mcp.slack.com/mcp",
+				timeout: "${OMP_TEST_TIMEOUT_MS}",
+				requestIdFormat: "${OMP_TEST_RID_FORMAT}",
+			},
+		});
+
+		expect(configs.timed).toBeDefined();
+		expect(configs.timed?.timeout).toBe(5000);
+		expect(configs.timed?.requestIdFormat).toBe("string");
+
+		const suppressed = await loadFrom(path.join(".omp", "mcp.json"), {
+			timed: {
+				type: "http",
+				url: "https://mcp.slack.com/mcp",
+				enabled: "${OMP_TEST_MCP_DISABLED}",
+			},
+		});
+		expect(suppressed.timed).toBeUndefined();
+	} finally {
+		delete process.env.OMP_TEST_TIMEOUT_MS;
+		delete process.env.OMP_TEST_MCP_DISABLED;
+		delete process.env.OMP_TEST_RID_FORMAT;
+	}
+});
+
 test("differing filter members prevent equivalence dedup from collapsing two aliases", async () => {
 	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
 		"slack-allow-search": { type: "http", url: "https://mcp.slack.com/mcp", enabledTools: ["search"] },

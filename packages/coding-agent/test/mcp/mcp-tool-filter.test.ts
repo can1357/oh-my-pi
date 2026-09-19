@@ -540,3 +540,48 @@ test("an escaped open bracket is a literal, so a slash after it is outside any c
 	// outside any class, and picomatch's own parser resolves the escape.
 	expect(run(["foo[/bar1", "foo[/bar2"], ["foo\\[/bar*"]).allowed).toEqual(["foo[/bar1", "foo[/bar2"]);
 });
+
+test("an entry beyond the wildcard bound degrades to unmatched instead of stalling", () => {
+	// picomatch's compiled regex can backtrack for seconds at MATCH time against
+	// a homogeneous server-chosen name (`*a*a*a*b` vs a 255-char `a` run
+	// measured 107 ms; six interleaved star+literal groups, seconds). The
+	// matcher refuses an entry with more than 6 unescaped wildcard tokens
+	// before compiling — the same never-matching direction the backslash-run
+	// guard takes, without touching any pattern a real config writes.
+	const result = run(["a".repeat(255) + "X"], ["*a*a*a*a*a*a*a*b"]);
+	expect(result.allowed).toEqual([]);
+	expect(result.unmatched).toEqual(["*a*a*a*a*a*a*a*b"]);
+	// Six tokens stay compilable and match what they spell.
+	expect(run(["a*b*c*d*e*f_x"], ["a*b*c*d*e*f_x"]).allowed).toEqual(["a*b*c*d*e*f_x"]);
+	// Escapes suppress the metacharacter and do not count toward the bound:
+	// `a\*b\*c` compiles to the regex `a\*b\*c` (literal star), matching `a*b*c`.
+	expect(run(["a*b*c"], ["a\\*b\\*c"]).allowed).toEqual(["a*b*c"]);
+});
+
+test("a glob match is refused for names beyond the length bound", () => {
+	// The compiled regex runs only against names up to 64 characters — the same
+	// ceiling the mint applies to registry names. Longer names stay addressable
+	// through the exact literal path; the glob path skips them instead of
+	// backtracking against server-controlled input.
+	const long = "web_search_tool_" + "x".repeat(100);
+	expect(run([long], [long]).allowed).toEqual([long]);
+	expect(run(["read", long], ["web_search_tool_*"]).allowed).toEqual([]);
+});
+
+test("a non-array filter value degrades to filter-off instead of throwing", () => {
+	// The `/mcp test` paths hand `connection.config` over from a bare
+	// JSON.parse: a malformed `enabledTools` — the exact typo the discovery
+	// loader tolerates with a warning — must not throw out of `listTools`,
+	// and a non-throwing malformed value must not contribute a skewed filter.
+	expect(filterMCPTools({ toolNames: NAMES, enabledTools: "read, write" as unknown as string[] }).allowed).toEqual(
+		NAMES,
+	);
+	expect(filterMCPTools({ toolNames: NAMES, disabledTools: "admin_*" as unknown as string[] }).allowed).toEqual(NAMES);
+	expect(
+		filterMCPTools({ toolNames: NAMES, enabledTools: [""], disabledTools: [1] as unknown as string[] }).allowed,
+	).toEqual(NAMES);
+	// Valid members of a mixed array still apply.
+	expect(filterMCPTools({ toolNames: NAMES, enabledTools: ["search", 1] as unknown as string[] }).allowed).toEqual([
+		"search",
+	]);
+});

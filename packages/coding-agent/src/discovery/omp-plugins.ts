@@ -327,8 +327,9 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				continue;
 			}
 			// `${...}` expansion covers exactly the fields discovery documents
-			// (`command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, `oauth`),
-			// never whole-server expansion: a filter entry is a tool-name pattern,
+			// (`command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, `oauth`,
+			// and the scalar `enabled`/`timeout`/`requestIdFormat`), never
+			// whole-server expansion: a filter entry is a tool-name pattern,
 			// so expanding `${TOOL}` there would make the same config select a
 			// different tool depending on which file it came from. Expansion runs
 			// before path rooting, so a placeholder resolving to an absolute path
@@ -338,11 +339,13 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// Root relative command/cwd at the plugin's config directory, not the
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command, cwd }, root.path);
-			const requestIdFormat = parseRequestIdFormat(cfg.requestIdFormat);
+			const requestIdFormat = parseRequestIdFormat(
+				cfg.requestIdFormat === undefined ? undefined : expandEnvVarsDeep(cfg.requestIdFormat),
+			);
 			items.push({
 				name: serverName,
-				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
-				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
+				...(cfg.enabled !== undefined && { enabled: expandEnvVarsDeep(cfg.enabled) }),
+				...(cfg.timeout !== undefined && { timeout: expandEnvVarsDeep(cfg.timeout) }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
 				...parseMCPToolFilters(serverName, cfg),
 				...(rooted.command !== undefined && { command: rooted.command }),

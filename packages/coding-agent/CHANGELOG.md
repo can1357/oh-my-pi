@@ -4,14 +4,17 @@
 
 ### Added
 
-- Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)).
-- MCP configs whose server entry relies on a shared field (`timeout`, `requestIdFormat`, `enabledTools`, `disabledTools`, …) now validate against the bundled JSON schema on every transport, instead of only when no transport-specific key is present.
+- Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)): per-server tool allow/deny lists (literal names or globs) are applied at the tool-reception boundary, so the session, `/mcp test`, `/ session`, and the persisted tool cache all see one consistent filtered catalog. Tool-filter entries stay literal (`${VAR}` never expands inside one); Codex `enabled_tools`/`disabled_tools` map onto the same feature.
+
 ### Breaking Changes
 
 - Removed support for the env parameter in the bash tool
 
 ### Fixed
 
+- Fixed MCP configs carrying a shared field (`timeout`, `requestIdFormat`, `enabledTools`, `disabledTools`, …) being rejected by the bundled JSON schema on every transport; such entries now validate.
+- Fixed `${VAR}` placeholders in MCP scalar fields (`timeout`, `enabled`, `requestIdFormat`) resolving to `undefined` in `.omp/mcp.json` and OMP extension configs; per-field expansion now covers them, and the expanded `timeout`/`enabled` strings coerce exactly as literal values did.
+- Fixed Exa stdio-endpoint URL arguments (`mcp-remote https://mcp.exa.ai/mcp?tools=…#fragment`) parsed without URL semantics, and Exa tool classification being case-insensitive and prototype-leaking: a server advertising `WEB_SEARCH_EXA` or `constructor` no longer reads as natively covered and is no longer dropped.
 - Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.

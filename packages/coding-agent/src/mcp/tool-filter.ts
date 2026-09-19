@@ -26,13 +26,14 @@ export interface MCPToolFilterResult {
 /**
  * Matching a config entry against an advertised tool name.
  *
- * A name is sanitized before matching: every character outside
- * `[A-Za-z0-9_-]` becomes one `_`, because every practical MCP server
- * advertises identifier-like names and picomatch's glob semantics are defined
- * for such strings. The raw name is kept everywhere else — the filter is a
- * filter, not a renamer — and a name outside the alphabet matches the pattern
- * written for its sanitized spelling. Distinct raw names sanitizing to the
- * same spelling collide by design: the same trade every major agent makes.
+ * A name is sanitized before matching: a run of characters outside
+ * `[A-Za-z0-9_-]` collapses to a single `_` (edge underscores trimmed),
+ * because every practical MCP server advertises identifier-like names and
+ * picomatch's glob semantics are defined for such strings. The raw name is
+ * kept everywhere else — the filter is a filter, not a renamer — and a name
+ * outside the alphabet matches the pattern written for its sanitized
+ * spelling. Distinct raw names sanitizing to the same spelling collide by
+ * design: the same trade every major agent makes.
  *
  * Matching itself is picomatch's, on both spellings of a name (raw and
  * sanitized — a pattern written for a name's literal spelling addresses that
@@ -75,10 +76,12 @@ const PARSE_OPTIONS = {
 } as const;
 
 /**
- * A name as the matcher sees it: the same identifier spelling the harness
- * itself normalizes when it mints `mcp__…` tool names, so a pattern written
- * against the model-visible spelling keeps working. Distinct raw names that
- * normalize to the same spelling are addressed together.
+ * A name as the matcher sees it: a filter-domain sanitization — every
+ * character outside `[A-Za-z0-9_-]` collapses to a run of `_`, runs
+ * collapsed, edge underscores trimmed — while case and hyphens are kept
+ * verbatim. This is deliberately NOT the `mcp__…` mint spelling (the mint
+ * folds case and hyphens): patterns address the raw advertised spelling and
+ * this sanitized second domain, never the minted registry key.
  */
 function sanitizeToolName(name: string): string {
 	return sanitizeMCPToolNamePart(name, name, true);
@@ -121,6 +124,44 @@ function backslashRun(pattern: string): boolean {
 	return /\\{4}/.test(pattern);
 }
 
+/**
+ * Match-time bounds mirroring the compile-time `backslashRun` refusal.
+ *
+ * Picomatch's compiled regex can stall at MATCH time instead, where neither
+ * the guard nor the surrounding try/catch reaches: an unescaped run of
+ * interleaved `*`+literal groups backtracks exponentially against a
+ * homogeneous name (`*a*a*a*b` vs `"a".repeat(255)` measured 107 ms on
+ * picomatch 4.0.7, six groups ~seconds, seven+ minutes — and the server owns
+ * the advertised name, `listTools` re-runs the filter on every
+ * `tools/list_changed`, and the regex is synchronous and unabortable on the
+ * main thread). Two cheap discrete bounds close the class without touching a
+ * pattern any real config writes: at most 6 unescaped wildcard tokens, and no
+ * name longer than 64 characters reaches the regex (the mint itself caps
+ * registry names at 64; longer names stay addressable through the exact
+ * literal path). Measured worst case inside both bounds: ~65 ms per
+ * (pattern, name).
+ */
+const MAX_WILDCARD_TOKENS = 6;
+const MAX_GLOB_NAME_LENGTH = 64;
+
+/** Count unescaped `*`, `?`, `[`, and `{` tokens in a pattern. */
+function wildcardTokenCount(pattern: string): number {
+	let count = 0;
+	let escaped = false;
+	for (const char of pattern) {
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (char === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (char === "*" || char === "?" || char === "[" || char === "{") count++;
+	}
+	return count;
+}
+
 /** Compile one filter entry into a matcher over sanitized tool names. */
 function compilePattern(pattern: string): ToolMatcher {
 	const cached = compiledPatterns.get(pattern);
@@ -136,6 +177,12 @@ function compilePattern(pattern: string): ToolMatcher {
 		// `/\\\\` and a bare `\\\\\\\\` all hang; every run of three compiles in
 		// microseconds.)
 		matcher = () => false;
+	} else if (wildcardTokenCount(pattern) > MAX_WILDCARD_TOKENS) {
+		// Beyond the wildcard bound the compiled regex can backtrack for seconds
+		// at match time against a homogeneous server-chosen name (see the
+		// constant's doc). The entry degrades to never-matching and surfaces as
+		// unmatched, the same direction the backslash-run refusal takes.
+		matcher = () => false;
 	} else if (/[*?[\]{}\\|()]/.test(pattern)) {
 		try {
 			// picomatch's own matcher factory; the `picomatch()` wrapper is
@@ -148,7 +195,11 @@ function compilePattern(pattern: string): ToolMatcher {
 			// sanitized spelling is the second domain a name outside the
 			// identifier alphabet is reached through.
 			const regex = picomatch.makeRe(quoteBareDoubles(pattern), PARSE_OPTIONS);
-			matcher = (name: string) => regex.test(name) || regex.test(sanitizeToolName(name));
+			matcher = (name: string) =>
+				(name.length <= MAX_GLOB_NAME_LENGTH && regex.test(name)) ||
+				// The sanitized spelling is never longer than the raw name, so the
+				// length bound covers the second domain without a second check.
+				(name.length <= MAX_GLOB_NAME_LENGTH && regex.test(sanitizeToolName(name)));
 		} catch {
 			// A pattern the engine rejects — a descending class range such as
 			// `[z-a]`, for instance — never matches anything, and degrading to
@@ -175,7 +226,19 @@ function compilePattern(pattern: string): ToolMatcher {
  * the allowlist when both are set.
  */
 export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
-	const { toolNames, enabledTools, disabledTools } = input;
+	const { toolNames } = input;
+	// `connection.config` can reach here unnormalized: the `/mcp test` paths read
+	// the config file with a bare JSON.parse and never pass through a discovery
+	// loader's `parseMCPToolFilters`. Degrade a malformed value to "filter off"
+	// exactly as `parseMCPToolFilterEntry` does at discovery time, so a config
+	// typo cannot throw out of `listTools` or hand the session a skewed filter.
+	const asFilterList = (list: unknown): string[] | undefined =>
+		Array.isArray(list)
+			? list.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+			: undefined;
+	const enabledTools = asFilterList(input.enabledTools);
+	const disabledTools = asFilterList(input.disabledTools);
+
 	const filterConfigured = Boolean(enabledTools?.length || disabledTools?.length);
 	if (!filterConfigured) {
 		return { allowed: [...toolNames], unmatched: [], filterEmpty: false };
@@ -204,7 +267,11 @@ export function filterMCPTools(input: MCPToolFilterInput): MCPToolFilterResult {
 		allowed = allowed.filter(name => !disabled.some(matcher => matcher(name)));
 	}
 
-	return { allowed, unmatched, filterEmpty: allowed.length === 0 && toolNames.length > 0 };
+	return {
+		allowed,
+		unmatched,
+		filterEmpty: allowed.length === 0 && toolNames.length > 0,
+	};
 }
 
 /**
