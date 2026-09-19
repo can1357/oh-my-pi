@@ -42,26 +42,21 @@ mod platform {
 			.expect("failed to spawn the native spelling thread");
 		sender
 	});
-	static APP_KIT_LOADED: LazyLock<bool> = LazyLock::new(|| {
-		// SAFETY: AppKit documents `NSApplicationLoad` as process-global and
-		// idempotent; `LazyLock` guarantees this process calls it at most once.
-		unsafe { NSApplicationLoad() }
-	});
-	const NS_NOT_FOUND: usize = isize::MAX as usize;
+const NS_NOT_FOUND: usize = isize::MAX as usize;
 
-	#[link(name = "AppKit", kind = "framework")]
-	unsafe extern "C" {
-		fn NSApplicationLoad() -> bool;
-	}
-
-	fn checker() -> Result<Retained<NSSpellChecker>> {
-		if !*APP_KIT_LOADED {
-			return Err(Error::new(Status::GenericFailure, "failed to initialize AppKit"));
-		}
-		let checker = NSSpellChecker::sharedSpellChecker();
-		checker.setAutomaticallyIdentifiesLanguages(true);
-		Ok(checker)
-	}
+fn checker() -> Retained<NSSpellChecker> {
+	// Deliberately does NOT call `NSApplicationLoad()` or touch
+	// `[NSApplication sharedApplication]`. Loading the application object
+	// registers the process with LaunchServices as a foreground app; a
+	// bundle-less CLI then gets adopted into the controlling terminal's
+	// identity and takes a Dock tile. The spell server protocol
+	// (`sharedSpellChecker`/`checkString`) works on the dedicated spelling
+	// thread without any NSApplication instance (verified: zero
+	// launchservicesd CHECKIN, spelling results unchanged).
+	let checker = NSSpellChecker::sharedSpellChecker();
+	checker.setAutomaticallyIdentifiesLanguages(true);
+	checker
+}
 
 	pub async fn run<T>(work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T>
 	where
@@ -89,7 +84,7 @@ mod platform {
 	}
 
 	pub fn check(text: &str) -> Result<Vec<SpellingRange>> {
-		let checker = checker()?;
+		let checker = checker();
 		let text = NSString::from_str(text);
 		let full = NSRange { location: 0, length: text.length() };
 		// `checkString:...` honors `automaticallyIdentifiesLanguages`, selecting
@@ -151,7 +146,7 @@ mod platform {
 	}
 
 	pub fn completions(text: &str, start: u32, length: u32) -> Result<Vec<String>> {
-		let checker = checker()?;
+		let checker = checker();
 		let text = NSString::from_str(text);
 		let range = ns_range(start, length)?;
 		let language = word_language(&checker, &text, range);
@@ -165,7 +160,7 @@ mod platform {
 	}
 
 	pub fn guesses(text: &str, start: u32, length: u32) -> Result<Vec<String>> {
-		let checker = checker()?;
+		let checker = checker();
 		let text = NSString::from_str(text);
 		let range = ns_range(start, length)?;
 		let language = word_language(&checker, &text, range);
@@ -179,7 +174,7 @@ mod platform {
 	}
 
 	pub fn correction(text: &str, start: u32, length: u32) -> Result<Option<String>> {
-		let checker = checker()?;
+		let checker = checker();
 		let text = NSString::from_str(text);
 		let range = ns_range(start, length)?;
 		let language = word_language(&checker, &text, range);
