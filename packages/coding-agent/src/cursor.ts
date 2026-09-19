@@ -67,9 +67,14 @@ interface CursorExecBridgeOptions {
 	/**
 	 * Scope gate for frame-driven tool resolution: a name it rejects resolves to
 	 * nothing (unadvertised-tool error), so scoped subagents cannot reach tools
-	 * that stay in the canonical registry but outside the active set.
+	 * that stay in the canonical registry but outside the active set. The
+	 * per-server scope probe passes the tool's own `mcpServerName` when known:
+	 * when two servers mint the same public name only the dedup winner survives
+	 * the registry, so judging the loser's shared name by the winner's metadata
+	 * would let a server wildcard targeting the loser evaluate against the
+	 * winner and expose the denied server's resources.
 	 */
-	isToolExecutable?: (name: string) => boolean;
+	isToolExecutable?: (name: string, mcpServerName?: string) => boolean;
 	/**
 	 * Live liveness of a tool in the owning session. Scope alone is not enough
 	 * for `todo`: the executor removes it as parent-owned bookkeeping after
@@ -273,11 +278,15 @@ export interface McpOwnedToolRef {
  */
 export function mcpServerScopedIn(
 	tools: Iterable<McpOwnedToolRef>,
-	isToolExecutable: ((name: string) => boolean) | undefined,
+	isToolExecutable: ((name: string, mcpServerName?: string) => boolean) | undefined,
 	serverName: string,
 ): boolean {
 	if (!isToolExecutable) return true;
-	return Array.from(tools).some(tool => tool.mcpServerName === serverName && isToolExecutable(tool.name ?? ""));
+	return Array.from(tools).some(
+		tool =>
+			tool.mcpServerName === serverName &&
+			isToolExecutable(tool.name ?? "", typeof tool.mcpServerName === "string" ? tool.mcpServerName : undefined),
+	);
 }
 
 /**

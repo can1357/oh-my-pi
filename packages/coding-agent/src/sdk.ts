@@ -3051,7 +3051,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// additions — yield, auto-learn, checkpoint/rewind — never name
 		// `edit`/`write`/`grep`, so the raw request matches the finalized set.)
 		const cursorRequestedToolNames = new Set(normalizeToolNames(options.toolNames ?? []));
-		const cursorScopeAllows = (name: string): boolean => {
+		const cursorScopeAllows = (name: string, sourceMcpServerName?: string): boolean => {
 			// The scope decides on the CANONICAL registered spelling, not the one
 			// the frame used: Cursor sends the supported Claude Code spelling
 			// (`mcp__srv-x__tool`) for a tool registered under the minted
@@ -3062,10 +3062,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// registered tool only when exactly one candidate matches, so an
 			// ambiguous or unknown spelling stays judged as itself.
 			const canonical = resolveMCPToolAlias(name, candidate => toolRegistry.get(candidate))?.name ?? name;
-			// Metadata-aware disallow: pass the registered tool's raw `mcpServerName`
+			// Metadata-aware disallow: pass the tool's raw `mcpServerName`
 			// so `mcp__<server>_*` still matches length-capped minted names (a plain
 			// name-prefix match misses the truncated + hashed registry key).
-			const mcpServerName = (toolRegistry.get(canonical) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+			// The per-server scope probe supplies the OWNED tool's server name: when
+			// two servers mint the same public name, the registry holds only the
+			// dedup winner, so judging the loser's shared name by the winner's
+			// metadata would let a server wildcard targeting the loser slip through
+			// — the override keeps each source owner judged by its own metadata.
+			const registeredMcpServerName = (toolRegistry.get(canonical) as { mcpServerName?: unknown } | undefined)
+				?.mcpServerName;
+			const mcpServerName =
+				typeof sourceMcpServerName === "string"
+					? sourceMcpServerName
+					: typeof registeredMcpServerName === "string"
+						? registeredMcpServerName
+						: undefined;
 			const isBuiltIn = builtInRegistryToolNames.has(canonical);
 			return isToolScopedIn(
 				canonical,
@@ -3075,7 +3087,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					allowedToolNames: cursorRequestedToolNames,
 					isBuiltIn,
 				},
-				typeof mcpServerName === "string" ? mcpServerName : undefined,
+				mcpServerName,
 			);
 		};
 		const editWasGranted = toolRegistry.has("edit") && cursorScopeAllows("edit");
