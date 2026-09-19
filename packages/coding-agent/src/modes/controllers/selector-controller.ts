@@ -613,6 +613,7 @@ export class SelectorController {
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
 				break;
 			case "composer.shape":
+			case "composer.pinToBottom":
 				this.ctx.syncComposerShape();
 				break;
 			case "advisor.enabled":

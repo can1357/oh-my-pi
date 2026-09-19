@@ -145,6 +145,14 @@ export interface TUIOptions {
 export interface ViewportSize {
 	readonly columns: number;
 	readonly rows: number;
+	/**
+	 * Screen row (0-based) where this frame's write begins: the current viewport
+	 * top, or 0 ahead of a destructive reset. Appended history rows land here and
+	 * push the viewport down by their count. A provider that pins chrome to the
+	 * bottom row sizes its viewport to `rows - anchor - appended history rows`.
+	 * Absent on the resize buffer, which always paints from row 0.
+	 */
+	readonly anchor?: number;
 }
 
 /** Immutable append or complete replay offered until the terminal accepts this identifier. */
@@ -1934,11 +1942,19 @@ export class TUI extends Container {
 			let viewport: string[];
 			do {
 				this.#imageBudget.beginPass();
-				plan = provider.renderFrame({ columns: width, rows: height });
+				plan = provider.renderFrame({ columns: width, rows: height, anchor: this.#nextFrameAnchor(height) });
 				viewport = Array.from(plan.viewport);
 				if (viewport.length > height) viewport = viewport.slice(0, height);
 			} while (this.#imageBudget.endPass());
-			if (plan.history === undefined) return;
+			if (plan.history === undefined) {
+				// A provider that padded its viewport to pin chrome to the bottom row
+				// drops the pad while flushing. With nothing left to retire, repaint
+				// once so the shell prompt lands under the content, not under the pad.
+				if (viewport.length < this.#providerWindow.length) {
+					this.#emitPlanFrame(width, height, viewport, undefined, provider);
+				}
+				return;
+			}
 			const acceptedBefore = this.#acceptedHistoryBatchId;
 			this.#emitPlanFrame(width, height, viewport, plan.history, provider);
 			if (plan.history.id > acceptedBefore && this.#acceptedHistoryBatchId === acceptedBefore) {
@@ -2636,6 +2652,12 @@ export class TUI extends Container {
 		}
 	}
 
+	/** Screen row where the next provider frame's write begins (see {@link ViewportSize.anchor}). */
+	#nextFrameAnchor(height: number): number {
+		if (this.#clearScrollbackOnNextRender) return 0;
+		return Math.min(this.#providerViewportTop, Math.max(0, height - 1));
+	}
+
 	#renderProviderFrame(width: number, height: number): void {
 		const provider = this.#frameProvider;
 		if (!provider || width <= 0 || height <= 0) return;
@@ -2644,7 +2666,7 @@ export class TUI extends Container {
 		let viewport: string[];
 		do {
 			this.#imageBudget.beginPass();
-			plan = provider.renderFrame({ columns: width, rows: height });
+			plan = provider.renderFrame({ columns: width, rows: height, anchor: this.#nextFrameAnchor(height) });
 			viewport = Array.from(plan.viewport);
 			if (viewport.length > height) {
 				const message = `Frame provider returned ${viewport.length} rows for a ${height}-row viewport`;
