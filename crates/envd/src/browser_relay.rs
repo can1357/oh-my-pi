@@ -3106,12 +3106,9 @@ mod tests {
 
 	#[test]
 	fn managed_relay_stays_up_until_its_last_consumer_lease_closes() {
-		let relay = RelayServer::start(RelayOptions {
-			port: 0,
-			managed: true,
-			..RelayOptions::default()
-		})
-		.expect("managed relay");
+		let relay =
+			RelayServer::start(RelayOptions { port: 0, managed: true, ..RelayOptions::default() })
+				.expect("managed relay");
 		let endpoint = format!("http://127.0.0.1:{}", relay.port());
 		let first =
 			acquire_relay_lease(&endpoint, Duration::from_secs(1)).expect("first consumer lease");
@@ -3135,12 +3132,10 @@ mod tests {
 
 	#[test]
 	fn manual_relay_remains_signal_owned_after_leases_close() {
-		let relay =
-			RelayServer::start(RelayOptions { port: 0, ..RelayOptions::default() })
-				.expect("manual relay");
+		let relay = RelayServer::start(RelayOptions { port: 0, ..RelayOptions::default() })
+			.expect("manual relay");
 		let endpoint = format!("http://127.0.0.1:{}", relay.port());
-		let lease =
-			acquire_relay_lease(&endpoint, Duration::from_secs(1)).expect("consumer lease");
+		let lease = acquire_relay_lease(&endpoint, Duration::from_secs(1)).expect("consumer lease");
 		drop(lease);
 		thread::sleep(Duration::from_millis(20));
 		assert!(!relay.managed_shutdown_requested());
@@ -3158,8 +3153,7 @@ mod tests {
 	#[test]
 	fn relay_probe_bypasses_proxy_environment() {
 		let relay =
-			RelayServer::start(RelayOptions { port: 0, ..RelayOptions::default() })
-				.expect("relay");
+			RelayServer::start(RelayOptions { port: 0, ..RelayOptions::default() }).expect("relay");
 		let endpoint = format!("http://127.0.0.1:{}", relay.port());
 		let proxy = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("unused proxy listener");
 		let proxy_url = format!("http://{}", proxy.local_addr().expect("proxy address"));

@@ -161,6 +161,23 @@ omp_con::var! {
 			"legacy.path": "sandbox.network_mode",
 		},
 	};
+	/// Cap CPU cores available to one sandboxed command tree; 0 is unlimited.
+	pub static SV_SANDBOX_CPU_CORES = sv_sandbox_cpu_cores: f64 {
+		default: 0.0,
+		validate: |_ctx, value| validate_cpu_cores(*value),
+		flags: archive,
+	};
+	/// Cap resident memory for one sandboxed command tree; 0 is unlimited.
+	pub static SV_SANDBOX_MEMORY_BYTES = sv_sandbox_memory_bytes: i64 {
+		default: 0,
+		validate: |_ctx, value| validate_non_negative(*value),
+		flags: archive,
+	};
+	/// Cap live processes in one sandboxed command tree; 0 is unlimited.
+	pub static SV_SANDBOX_PIDS = sv_sandbox_pids: u32 {
+		default: 0,
+		flags: archive,
+	};
 	/// Exact or leading wildcard domains allowed by scoped networking.
 	pub static SV_SANDBOX_ALLOW_DOMAINS = sv_sandbox_allow_domains: Vec<Str> {
 		default: Vec::new(),
@@ -327,6 +344,13 @@ pub struct SandboxSettings {
 	pub mode:               ExecSandboxMode,
 	/// Network authority granted to sandboxed commands.
 	pub network_mode:       SandboxNetworkMode,
+	/// CPU-core ceiling for one sandboxed command tree; zero is unlimited.
+	pub cpu_cores:          f64,
+	/// Resident-memory ceiling for one sandboxed command tree; zero is
+	/// unlimited.
+	pub memory_bytes:       i64,
+	/// Live-process ceiling for one sandboxed command tree; zero is unlimited.
+	pub pids:               u32,
 	/// Exact or leading `*.` wildcard domain names allowed in scoped mode.
 	pub allow_domains:      Vec<Str>,
 	/// Domain names denied before scoped allow rules.
@@ -372,6 +396,9 @@ impl Default for SandboxSettings {
 		Self {
 			mode:               ExecSandboxMode::Off,
 			network_mode:       SandboxNetworkMode::Disabled,
+			cpu_cores:          0.0,
+			memory_bytes:       0,
+			pids:               0,
 			allow_domains:      Vec::new(),
 			deny_domains:       Vec::new(),
 			allow_ports:        vec![80, 443],
@@ -414,6 +441,9 @@ impl SandboxSettings {
 		Self {
 			mode:               SV_SANDBOX_MODE.get(ctx),
 			network_mode:       SV_SANDBOX_NETWORK_MODE.get(ctx),
+			cpu_cores:          SV_SANDBOX_CPU_CORES.get(ctx),
+			memory_bytes:       SV_SANDBOX_MEMORY_BYTES.get(ctx),
+			pids:               SV_SANDBOX_PIDS.get(ctx),
 			allow_domains:      SV_SANDBOX_ALLOW_DOMAINS.get(ctx),
 			deny_domains:       SV_SANDBOX_DENY_DOMAINS.get(ctx),
 			allow_ports:        SV_SANDBOX_ALLOW_PORTS.get(ctx),
@@ -472,6 +502,27 @@ fn validate_ports(values: &[u16]) -> Result<(), Str> {
 		Err(validation_error("port zero is invalid"))
 	} else {
 		Ok(())
+	}
+}
+
+/// Rejects a CPU ceiling the sandbox layer would refuse anyway.
+///
+/// Catching it here means a bad `sv_sandbox_cpu_cores` fails when it is set,
+/// not on the first command that tries to run under it.
+fn validate_cpu_cores(value: f64) -> Result<(), Str> {
+	if value == 0.0 || (value.is_finite() && value > 0.0) {
+		Ok(())
+	} else {
+		Err(validation_error("cpu core ceiling must be positive and finite, or 0 for unlimited"))
+	}
+}
+
+/// Rejects a negative byte ceiling before it reaches the sandbox layer.
+fn validate_non_negative(value: i64) -> Result<(), Str> {
+	if value >= 0 {
+		Ok(())
+	} else {
+		Err(validation_error("byte ceiling must not be negative; use 0 for unlimited"))
 	}
 }
 
@@ -554,6 +605,56 @@ fn is_existing_unix_socket(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[test]
+	fn a_nonfinite_cpu_ceiling_is_refused_when_set() {
+		let ctx = Ctx::new();
+
+		assert!(
+			SV_SANDBOX_CPU_CORES.set(&ctx, f64::NAN).is_err(),
+			"an unrepresentable ceiling must fail at the setting, not at the first command"
+		);
+	}
+
+	#[test]
+	fn a_negative_cpu_ceiling_is_refused_when_set() {
+		let ctx = Ctx::new();
+
+		assert!(SV_SANDBOX_CPU_CORES.set(&ctx, -1.0).is_err());
+	}
+
+	#[test]
+	fn zero_means_unlimited_rather_than_invalid() {
+		let ctx = Ctx::new();
+
+		assert!(
+			SV_SANDBOX_CPU_CORES.set(&ctx, 0.0).is_ok(),
+			"zero is the documented spelling of `no ceiling`"
+		);
+		assert!(SV_SANDBOX_MEMORY_BYTES.set(&ctx, 0).is_ok());
+	}
+
+	#[test]
+	fn a_negative_byte_ceiling_is_refused_when_set() {
+		let ctx = Ctx::new();
+
+		assert!(SV_SANDBOX_MEMORY_BYTES.set(&ctx, -1).is_err());
+	}
+
+	#[test]
+	fn configured_ceilings_reach_resolved_settings() {
+		let ctx = Ctx::new();
+		SV_SANDBOX_CPU_CORES.set(&ctx, 2.5).expect("valid ceiling");
+		SV_SANDBOX_MEMORY_BYTES
+			.set(&ctx, 1 << 30)
+			.expect("valid ceiling");
+		SV_SANDBOX_PIDS.set(&ctx, 64).expect("valid ceiling");
+
+		let settings = SandboxSettings::from_con(&ctx);
+
+		assert_eq!(settings.cpu_cores, 2.5);
+		assert_eq!(settings.memory_bytes, 1 << 30);
+		assert_eq!(settings.pids, 64);
+	}
 
 	#[test]
 	fn default_sandbox_projects_off() {

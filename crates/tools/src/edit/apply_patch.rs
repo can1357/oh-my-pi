@@ -926,12 +926,18 @@ mod tests {
 
 	#[test]
 	fn repeated_sloppy_sections_merge_in_authored_order() {
-		let operations =
-			parse_operations(FreeformKind::Sloppy, "§a\nx\n»\ny\n§a\ny\n»\nz").expect("parse");
-		assert_eq!(operations.len(), 1);
+		let input = concat!(
+			"<SM:EDIT path=\"a.rs\">\n<SM:FIND>\nx\n</SM:FIND>\n<SM:PUT>\ny\n</SM:PUT>\n",
+			"<SM:EDIT path=\"a.rs\">\n<SM:FIND>\ny\n</SM:FIND>\n<SM:PUT>\nz\n</SM:PUT>",
+		);
+		let operations = parse_operations(FreeformKind::Sloppy, input).expect("parse");
+		assert_eq!(operations.len(), 1, "two sections for one path merge into one operation");
 		let AuthoredOperation::Sloppy { input, .. } = &operations[0] else {
 			panic!("sloppy")
 		};
-		assert!(input.contains("y\n»\nz"));
+		assert!(
+			input.find('z') > input.find('x'),
+			"the later section must merge after the earlier one, not replace it",
+		);
 	}
 }

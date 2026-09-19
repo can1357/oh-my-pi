@@ -1931,15 +1931,21 @@ async fn read_frame<R: AsyncBufRead + Unpin + Send, T: DeserializeOwned>(
 }
 
 fn resolve_omp_executable() -> io::Result<PathBuf> {
-	if let Some(path) = env::var_os("CARGO_BIN_EXE_omp") {
-		let path = PathBuf::from(path);
-		if path.is_file() {
-			return Ok(path);
-		}
-	}
-	let current = env::current_exe()?;
+	resolve_omp_executable_from(
+		env::current_exe()?,
+		env::var_os("CARGO_BIN_EXE_omp").map(PathBuf::from),
+	)
+}
+
+fn resolve_omp_executable_from(
+	current: PathBuf,
+	cargo_bin_exe: Option<PathBuf>,
+) -> io::Result<PathBuf> {
 	if current.file_stem().is_some_and(|name| name == "omp") {
 		return Ok(current);
+	}
+	if let Some(path) = cargo_bin_exe.filter(|path| path.is_file()) {
+		return Ok(path);
 	}
 	let mut directory = current
 		.parent()
@@ -2413,6 +2419,61 @@ mod tests {
 			validate_runtime_snapshot(RuntimeSnapshot::default()),
 			Err(ProcessError::MissingRuntimeCwd)
 		));
+	}
+
+	#[test]
+	fn installed_omp_executable_wins_over_cargo_test_override() {
+		let scratch = tempfile::tempdir().expect("resolver scratch");
+		let current = scratch
+			.path()
+			.join(format!("omp{}", env::consts::EXE_SUFFIX));
+		let cargo = scratch
+			.path()
+			.join(format!("cargo-omp{}", env::consts::EXE_SUFFIX));
+		fs::write(&current, "current").expect("current executable marker");
+		fs::write(&cargo, "cargo executable marker").expect("cargo executable marker");
+
+		let resolved = resolve_omp_executable_from(current.clone(), Some(cargo))
+			.expect("installed executable resolves");
+
+		assert_eq!(
+			resolved, current,
+			"a real running `omp` must re-enter itself, not a leaked Cargo override"
+		);
+	}
+
+	#[test]
+	fn cargo_test_override_is_only_for_non_omp_test_binaries() {
+		let scratch = tempfile::tempdir().expect("resolver scratch");
+		let current = scratch.path().join("process_tests");
+		let cargo = scratch
+			.path()
+			.join(format!("omp{}", env::consts::EXE_SUFFIX));
+		fs::write(&current, "test binary").expect("test executable marker");
+		fs::write(&cargo, "cargo executable marker").expect("cargo executable marker");
+
+		let resolved = resolve_omp_executable_from(current, Some(cargo.clone()))
+			.expect("cargo override resolves for tests");
+
+		assert_eq!(resolved, cargo);
+	}
+
+	#[test]
+	fn sibling_omp_remains_the_last_test_binary_fallback() {
+		let scratch = tempfile::tempdir().expect("resolver scratch");
+		let deps = scratch.path().join("deps");
+		fs::create_dir(&deps).expect("deps directory");
+		let current = deps.join("process_tests");
+		let sibling = scratch
+			.path()
+			.join(format!("omp{}", env::consts::EXE_SUFFIX));
+		fs::write(&current, "test binary").expect("test executable marker");
+		fs::write(&sibling, "sibling executable marker").expect("sibling executable marker");
+
+		let resolved = resolve_omp_executable_from(current, None)
+			.expect("sibling executable resolves for integration-style tests");
+
+		assert_eq!(resolved, sibling);
 	}
 
 	#[cfg(unix)]

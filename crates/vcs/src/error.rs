@@ -10,13 +10,28 @@ use std::path::PathBuf;
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Unified error for all VCS operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, strum::IntoStaticStr)]
+#[strum(const_into_str)]
 pub enum Error {
 	/// The directory is not inside a git repository / jj workspace.
 	#[error("not a repository: {path}")]
 	NotARepository {
 		/// Directory the lookup started from.
 		path: PathBuf,
+	},
+
+	/// A patch path resolves outside the worktree once symlinks are followed.
+	#[error("path escapes workspace root: {path}")]
+	PathEscapesRoot {
+		/// The path as the patch named it, relative to the worktree root.
+		path: String,
+	},
+
+	/// A patch path lands inside the repository's git store.
+	#[error("patch path must not touch the git store: {path}")]
+	PathInGitStore {
+		/// The path as the patch named it, relative to the worktree root.
+		path: String,
 	},
 
 	/// A named ref (branch, tag, `refs/...`) does not exist.
@@ -120,21 +135,15 @@ impl Error {
 	}
 
 	/// Stable machine-readable discriminant for this failure.
+	///
+	/// Derived, so a new variant cannot drift from its reported kind: the
+	/// variant name IS the discriminant.
+	#[must_use]
 	pub const fn kind(&self) -> &'static str {
-		match self {
-			Self::NotARepository { .. } => "NotARepository",
-			Self::RefNotFound { .. } => "RefNotFound",
-			Self::ObjectNotFound { .. } => "ObjectNotFound",
-			Self::EmptyCherryPick { .. } => "EmptyCherryPick",
-			Self::Conflict { .. } => "Conflict",
-			Self::PatchFailed { .. } => "PatchFailed",
-			Self::Cli { .. } => "Cli",
-			Self::CliTimeout { .. } => "CliTimeout",
-			Self::Io(_) => "Io",
-			Self::Backend { .. } => "Backend",
-			Self::Canceled => "Canceled",
-			Self::Unsupported { .. } => "Unsupported",
-		}
+		// `const_into_str` emits a const `into_str`; keeping `kind` const
+		// preserves the public API for callers classifying in a const or
+		// static initializer.
+		self.into_str()
 	}
 }
 

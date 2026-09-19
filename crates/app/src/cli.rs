@@ -3660,17 +3660,9 @@ mod tests {
 
 	#[test]
 	fn parses_hidden_managed_relay_mode_and_ipv6_bind() {
-		let Some(Command::BrowserRelay(args)) = parse(&[
-			"omp",
-			"browser-relay",
-			"serve",
-			"--managed",
-			"--bind",
-			"::1",
-			"--port",
-			"9333",
-		])
-		.command
+		let Some(Command::BrowserRelay(args)) =
+			parse(&["omp", "browser-relay", "serve", "--managed", "--bind", "::1", "--port", "9333"])
+				.command
 		else {
 			panic!("browser relay command");
 		};

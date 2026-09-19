@@ -1778,8 +1778,8 @@ fn bind_live_session_authority_snapshot(
 			.lookup(parent.as_str())
 			.and_then(|parent| parent.topology.parent_id);
 	}
-	let root = Url::from_file_path(root)
-		.map_or_else(|_| String::from("file:///"), |root| root.to_string());
+	let root =
+		Url::from_file_path(root).map_or_else(|_| String::from("file:///"), |root| root.to_string());
 	let started_at_ms = config
 		.session_started_at
 		.duration_since(UNIX_EPOCH)
@@ -1913,9 +1913,8 @@ fn production_control_authorities(
 		owners: vec![Arc::clone(&envd), parameters, workers, direct_filesystem, convars]
 			.into_boxed_slice(),
 	});
-	let artifacts: Arc<dyn ControlAuthorityFactory> = Arc::new(
-		FixedControlAuthorityFactory::new(Arc::new(UndeclaredControlAuthority)),
-	);
+	let artifacts: Arc<dyn ControlAuthorityFactory> =
+		Arc::new(FixedControlAuthorityFactory::new(Arc::new(UndeclaredControlAuthority)));
 	let persistence = PersistenceControlAuthorities::new(sessions, artifacts, credentials);
 	let policy = PolicyControlAuthorities::new(policy_owner, prompts);
 	let presentation = PresentationControlAuthorities::new(ui, telemetry_owner, jobs);
@@ -12568,8 +12567,7 @@ mod tests {
 		let hello = documents.hello().clone();
 		let exec = ExecHost::new();
 		let blobs = BlobHost::open(state.path().join("blobs")).expect("blob host");
-		let schedules =
-			DurableScheduleActor::spawn(state.path()).expect("durable schedule actor");
+		let schedules = DurableScheduleActor::spawn(state.path()).expect("durable schedule actor");
 		let workspace_ops = WorkspaceOperations::open(
 			workspace.clone(),
 			documents.clone(),

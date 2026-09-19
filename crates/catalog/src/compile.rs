@@ -20,9 +20,9 @@ use crate::{
 		ModalityBits, ModelCapabilities, OperationBits, OperationKind, PromptCacheCapabilities,
 		RealtimeCapabilities, RealtimeFeatureBits, ReasoningCapabilities, ReasoningEffort,
 		ReasoningFeatureBits, SearchCapabilities, SearchFeatureBits, SpeechCapabilities,
-		SpeechFeatureBits, TokenizationCapabilities, TokenizationFeatureBits, ToolCapabilities,
-		ToolFeatureBits, TranscriptionCapabilities, TranscriptionFeatureBits, VideoCapabilities,
-		VideoFeatureBits,
+		SpeechFeatureBits, StructuredOutputBits, TokenizationCapabilities, TokenizationFeatureBits,
+		ToolCapabilities, ToolFeatureBits, TranscriptionCapabilities, TranscriptionFeatureBits,
+		VideoCapabilities, VideoFeatureBits,
 	},
 	cascade::{AxisMap, CascadeError, CompatCascade, ResolveTarget},
 	classify::{
@@ -41,8 +41,8 @@ use crate::{
 	policy::{
 		ApplyPatchWireKind, CacheControlFormat, ComputerUseConfigSupport, ComputerUseWireSupport,
 		ExtendedContextMode, MaxOutputTokensEmission, NativeToolChoicePenalty, PromptCacheMode,
-		ReasoningBodyOverride, StreamWatchdog, ToolCallIdProfile, ToolPolicy, WhenThinkingPolicy,
-		WirePolicy,
+		ReasoningBodyOverride, StreamWatchdog, StructuredOutputPolicy, ToolCallIdProfile, ToolPolicy,
+		WhenThinkingPolicy, WirePolicy,
 	},
 	pricing::{PremiumMultiplier, Price, PriceTier, PriceUnit, Pricing, ServiceTierPrice},
 	provider::{
@@ -821,6 +821,8 @@ pub struct SourceWirePolicy {
 	pub supports_prompt_cache_key: Option<bool>,
 	/// Compiled `supports-reasoning-params` compatibility fact.
 	pub supports_reasoning_params: Option<bool>,
+	/// Compiled `supports-response-schema` compatibility fact.
+	pub supports_response_schema: Option<bool>,
 	/// Compiled `supports-strict-mode` compatibility fact.
 	pub supports_strict_mode: Option<bool>,
 	/// Compiled `supports-thinking-binding-controls` compatibility fact.
@@ -3786,7 +3788,6 @@ fn compile_models(
 					maximum_pixels:   None,
 				});
 			}
-			let has_wire_overrides = !resolved.wire.is_empty();
 			let wire_overrides = axis_map_to_source_wire_policy(resolved.wire)?;
 			let thinking_profile = if capabilities.chat.is_none()
 				|| !merged_row.reasoning
@@ -3797,11 +3798,12 @@ fn compile_models(
 			} else {
 				Some(axis_map_to_thinking_policy(resolved.thinking)?)
 			};
-			let mut wire_policy = if has_wire_overrides {
-				compile_wire_policy(WirePolicy::overrides(), &wire_overrides)?
-			} else {
-				WirePolicy::baseline()
-			};
+			// Cascade axes are additive: they name the axes a route differs on,
+			// and say nothing about the rest. Starting from `overrides()` would
+			// read that silence as "no baseline either", so declaring one axis
+			// used to erase every unrelated default — including the forced and
+			// named tool-choice bits that only the baseline supplies.
+			let mut wire_policy = compile_wire_policy(WirePolicy::baseline(), &wire_overrides)?;
 			// Verbatim source-stage compatibility metadata is authoritative for
 			// model-specific policy; the cascade supplies only absent defaults.
 			for (_, row, _) in &members {
@@ -3860,6 +3862,7 @@ fn compile_models(
 			};
 			if let Some(chat) = capabilities.chat.as_mut() {
 				chat.reasoning = reasoning_capabilities(merged_row.reasoning, thinking.as_ref());
+				chat.structured_output = response_output_capabilities(&wire_policy.structured);
 				chat.prompt_caching = prompt_cache_capabilities(&wire_policy, &pricing);
 				if let Availability::Native(tools) = &mut chat.tools {
 					tools.features = tool_feature_bits(&wire_policy.tool);
@@ -4544,6 +4547,9 @@ fn compile_wire_policy(
 	policy.reasoning.supports_params = source
 		.supports_reasoning_params
 		.or(policy.reasoning.supports_params);
+	policy.structured.response_schema = source
+		.supports_response_schema
+		.or(policy.structured.response_schema);
 	policy.tool.supports_strict_mode = source
 		.supports_strict_mode
 		.or(policy.tool.supports_strict_mode);
@@ -5316,6 +5322,21 @@ fn tool_feature_bits(policy: &ToolPolicy) -> ToolFeatureBits {
 		features |= ToolFeatureBits::PARALLEL;
 	}
 	features
+}
+
+/// Compiles the native response-schema capability from wire evidence.
+///
+/// Absence stays `Unknown`, never `Unsupported`: a route nobody has described
+/// is not the same as a route known to refuse schemas, and negotiation treats
+/// the two differently. Only `#false` is an affirmative refusal.
+const fn response_output_capabilities(
+	policy: &StructuredOutputPolicy,
+) -> Availability<StructuredOutputBits> {
+	match policy.response_schema {
+		Some(true) => Availability::Native(StructuredOutputBits::JSON_SCHEMA),
+		Some(false) => Availability::Unsupported,
+		None => Availability::Unknown,
+	}
 }
 
 fn prompt_cache_capabilities(
@@ -7078,6 +7099,109 @@ usage = true
 			policy.reasoning.thinking_format,
 			Some(crate::policy::ThinkingFormat::ChatTemplate)
 		);
+	}
+	/// Resolves one cascade declaration the way the compiler does.
+	fn resolved_wire_policy(kdl: &str) -> WirePolicy {
+		let cascade = CompatCascade::parse(&[("composition.kdl", kdl)]).expect("KDL parses");
+		let resolved = cascade
+			.resolve(&ResolveTarget {
+				provider:  "local",
+				class:     "qwen",
+				family:    None,
+				revision:  None,
+				model:     "qwen3.8-27b",
+				reasoning: false,
+			})
+			.expect("axes resolve");
+		let source = axis_map_to_source_wire_policy(resolved.wire).expect("axes deserialize");
+		// Same starting policy the compiler uses: declarations compose over the
+		// baseline rather than replacing it.
+		compile_wire_policy(WirePolicy::baseline(), &source).expect("axes compile")
+	}
+
+	#[test]
+	fn an_unrelated_wire_declaration_preserves_baseline_tool_choice() {
+		// `supports-sampling-params` has nothing to do with tool choice. A
+		// model that declares only it must keep the baseline selector bits;
+		// losing them is how a route silently stops being able to force a call.
+		let policy = resolved_wire_policy(r#"class "qwen" { supports-sampling-params #true }"#);
+
+		assert_eq!(policy.structured.sampling_params, Some(true));
+		let features = tool_feature_bits(&policy.tool);
+		assert!(
+			features.contains(ToolFeatureBits::REQUIRED_CHOICE),
+			"an unrelated declaration must not erase baseline forced tool choice",
+		);
+		assert!(features.contains(ToolFeatureBits::NAMED_CHOICE));
+	}
+
+	#[test]
+	fn an_explicit_declaration_overrides_the_corresponding_baseline_value() {
+		// Baseline says sampling params are accepted; an explicit `#false`
+		// must win, or a route that rejects them would be sent them anyway.
+		let policy = resolved_wire_policy(r#"class "qwen" { supports-sampling-params #false }"#);
+
+		assert_eq!(policy.structured.sampling_params, Some(false));
+	}
+
+	#[test]
+	fn a_negative_declaration_is_not_restored_from_baseline() {
+		let policy = resolved_wire_policy(r#"class "qwen" { supports-named-tool-choice #false }"#);
+
+		assert_eq!(
+			policy.tool.named_choice,
+			Some(false),
+			"baseline must supply defaults, never overwrite an explicit refusal",
+		);
+		assert!(!tool_feature_bits(&policy.tool).contains(ToolFeatureBits::NAMED_CHOICE));
+	}
+
+	#[test]
+	fn unrelated_baseline_axes_survive_a_declaration() {
+		let policy = resolved_wire_policy(r#"class "qwen" { supports-sampling-params #false }"#);
+		let baseline = WirePolicy::baseline();
+
+		assert_eq!(policy.structured.penalties, baseline.structured.penalties);
+		assert_eq!(policy.structured.stop_sequences, baseline.structured.stop_sequences);
+		assert_eq!(policy.role.multiple_system_messages, baseline.role.multiple_system_messages);
+		assert_eq!(policy.cache.control_format, baseline.cache.control_format);
+		assert_eq!(policy.streaming.protocol, baseline.streaming.protocol);
+	}
+
+	#[test]
+	fn multiple_declarations_compose_over_the_baseline() {
+		let policy = resolved_wire_policy(
+			r#"class "qwen" {
+				supports-sampling-params #false
+				supports-parallel-tool-calls #true
+				supports-response-schema #true
+			}"#,
+		);
+
+		assert_eq!(policy.structured.sampling_params, Some(false));
+		assert_eq!(policy.tool.supports_parallel_calls, Some(true));
+		assert_eq!(policy.structured.response_schema, Some(true));
+		// And the axes nobody mentioned still come from the baseline.
+		assert_eq!(policy.tool.forced_choice, Some(true));
+		assert_eq!(policy.structured.penalties, Some(true));
+	}
+
+	#[test]
+	fn an_absent_axis_stays_unknown_when_the_baseline_has_no_evidence() {
+		let policy = resolved_wire_policy(r#"class "qwen" { supports-sampling-params #true }"#);
+
+		assert_eq!(
+			policy.structured.response_schema, None,
+			"a baseline silent on an axis must leave it unknown, not assert support",
+		);
+		assert_eq!(policy.tool.supports_strict_mode, None);
+	}
+
+	#[test]
+	fn a_model_without_declarations_keeps_the_exact_baseline() {
+		let policy = resolved_wire_policy(r#"class "other" { supports-sampling-params #true }"#);
+
+		assert_eq!(policy, WirePolicy::baseline(), "an unmatched class must change nothing");
 	}
 
 	#[test]

@@ -82,7 +82,7 @@ pub struct BatchRequest {
 ///
 /// The flat form preserves the established single-child contract. The batch
 /// form adds shared context without forcing simple callers to wrap one item.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum Params {
 	/// One child request.

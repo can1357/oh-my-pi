@@ -17,6 +17,8 @@ pub mod word;
 
 mod error;
 mod program;
+#[cfg(test)]
+mod snapshot_names;
 mod source;
 mod tokenizer;
 

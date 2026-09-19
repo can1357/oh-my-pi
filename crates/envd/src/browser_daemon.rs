@@ -618,11 +618,9 @@ fn ensure_relay(
 		return wait_for_relay(&endpoint, cancellation, None);
 	}
 	if serving {
-		if let Some(acquired) = wait_for_relay_lease(
-			&endpoint,
-			cancellation,
-			Instant::now() + RELAY_ADOPTION_TIMEOUT,
-		)? {
+		if let Some(acquired) =
+			wait_for_relay_lease(&endpoint, cancellation, Instant::now() + RELAY_ADOPTION_TIMEOUT)?
+		{
 			return hold_relay_lease(&endpoint, relay, acquired, cancellation, None);
 		}
 		return Err(relay_fault(
@@ -638,13 +636,7 @@ fn ensure_relay(
 		}
 		if let Some(acquired) = try_acquire_relay(&endpoint) {
 			spawned.release_bootstrap();
-			return hold_relay_lease(
-				&endpoint,
-				relay,
-				acquired,
-				cancellation,
-				Some(&mut spawned),
-			);
+			return hold_relay_lease(&endpoint, relay, acquired, cancellation, Some(&mut spawned));
 		}
 		if let Some(status) = spawned.poll_exit()? {
 			// A concurrent launcher may have won the bind after our last

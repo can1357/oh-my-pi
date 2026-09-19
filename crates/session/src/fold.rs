@@ -307,6 +307,42 @@ impl Session {
 					},
 				]);
 			},
+			Some("receipt") => {
+				// Accounting, not presentation: projected as call properties so
+				// a budget reader can fold them without re-reading tool output.
+				let number = |key: &str| {
+					value
+						.get(key)
+						.and_then(serde_json::Value::as_u64)
+						.map(|bytes| Value::Str(Str::new(bytes.to_string())))
+				};
+				let mut ops = vec![Op::Set {
+					h:     call,
+					prop:  PropId::Order.into(),
+					value: Value::Str(Str::new(entry.id.to_string())),
+				}];
+				for (key, prop) in [
+					("source_bytes", "receipt-source-bytes"),
+					("inline_bytes", "receipt-inline-bytes"),
+					("elapsed_ms", "receipt-elapsed-ms"),
+				] {
+					if let Some(value) = number(key) {
+						ops.push(Op::Set {
+							h: call,
+							prop: PropKey::Custom(Str::new_static(prop)),
+							value,
+						});
+					}
+				}
+				if let Some(outcome) = value.get("outcome").and_then(serde_json::Value::as_str) {
+					ops.push(Op::Set {
+						h:     call,
+						prop:  PropKey::Custom(Str::new_static("receipt-outcome")),
+						value: Value::Str(Str::new(outcome)),
+					});
+				}
+				return self.apply_ops(entry, ops);
+			},
 			_ => {},
 		}
 		let mut ops = vec![Op::Set {

@@ -7569,6 +7569,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "omp-adw"
+version = "0.1.0"
+dependencies = [
+ "omp-core",
+ "serde",
+ "smallvec 2.0.0-alpha.13",
+ "strum",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "omp-agent"
 version = "0.1.0"
 dependencies = [
@@ -8900,10 +8911,14 @@ dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "omp-core",
+ "parking_lot",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-util",
+ "xutf",
 ]
 
 [[package]]

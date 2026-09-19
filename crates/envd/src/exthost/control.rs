@@ -2596,10 +2596,7 @@ fn append_dispatch_result_chunk(
 	if state.invocation.as_str() != invocation.as_str() || state.next_index != index {
 		return Err(ControlProtocolError::new(
 			"result_chunk_order",
-			format!(
-				"dispatch result chunk index {index} does not follow {}",
-				state.next_index
-			),
+			format!("dispatch result chunk index {index} does not follow {}", state.next_index),
 		));
 	}
 	let length = state.body.len().checked_add(data.len()).ok_or_else(|| {
@@ -2918,8 +2915,7 @@ impl ControlRuntime {
 			.get("authority")
 			.and_then(Value::as_object)
 			.ok_or_else(|| ControlProtocolError::malformed("dispatch frame authority is missing"))?;
-		let invocation =
-			dispatch_frame_invocation_for_identity(&self.shared.identity, authority)?;
+		let invocation = dispatch_frame_invocation_for_identity(&self.shared.identity, authority)?;
 		let expected = self
 			.shared
 			.dispatch_by_id
@@ -2943,7 +2939,10 @@ impl ControlRuntime {
 		Ok(expected)
 	}
 
-	fn accept_dispatch_progress(&self, mut frame: JsonControlFrame) -> Result<(), ControlRuntimeError> {
+	fn accept_dispatch_progress(
+		&self,
+		mut frame: JsonControlFrame,
+	) -> Result<(), ControlRuntimeError> {
 		let Some(correlation) = frame.correlation.filter(|id| *id != 0) else {
 			return Err(
 				ControlProtocolError::malformed("dispatch progress has no correlation").into(),
@@ -2980,11 +2979,13 @@ impl ControlRuntime {
 			)
 		})?;
 		if state.invocation != invocation {
-			return Err(ControlProtocolError::new(
-				"stale_invocation",
-				"dispatch progress state belongs to another invocation",
-			)
-			.into());
+			return Err(
+				ControlProtocolError::new(
+					"stale_invocation",
+					"dispatch progress state belongs to another invocation",
+				)
+				.into(),
+			);
 		}
 		let bytes = checked_progress_bytes(state, encoded.len())?;
 		let sender = state.sender.as_ref().ok_or_else(|| {
@@ -3056,8 +3057,7 @@ impl ControlRuntime {
 				ControlProtocolError::new(
 					"result_chunk_too_large",
 					format!(
-						"dispatch result chunk is {} bytes; limit is \
-						 {MAX_DISPATCH_RESULT_CHUNK_BYTES}",
+						"dispatch result chunk is {} bytes; limit is {MAX_DISPATCH_RESULT_CHUNK_BYTES}",
 						data.len()
 					),
 				)
@@ -3065,11 +3065,13 @@ impl ControlRuntime {
 			);
 		}
 		let mut chunks = self.shared.dispatch_chunks.lock();
-		let state = chunks.entry(correlation).or_insert_with(|| DispatchChunkState {
-			invocation: invocation.clone(),
-			next_index: 0,
-			body: Vec::new(),
-		});
+		let state = chunks
+			.entry(correlation)
+			.or_insert_with(|| DispatchChunkState {
+				invocation: invocation.clone(),
+				next_index: 0,
+				body:       Vec::new(),
+			});
 		append_dispatch_result_chunk(state, &invocation, index, &data)?;
 		Ok(())
 	}
@@ -3097,10 +3099,8 @@ impl ControlRuntime {
 		let body = if let Some(chunked) = frame.body.remove("chunked") {
 			if !frame.body.is_empty() {
 				return Err(
-					ControlProtocolError::malformed(
-						"chunked dispatch response has unexpected fields",
-					)
-					.into(),
+					ControlProtocolError::malformed("chunked dispatch response has unexpected fields")
+						.into(),
 				);
 			}
 			let chunked = chunked.as_object().ok_or_else(|| {
@@ -3130,7 +3130,13 @@ impl ControlRuntime {
 			}
 			serde_json::from_slice::<serde_json::Map<String, Value>>(&state.body)?
 		} else {
-			if self.shared.dispatch_chunks.lock().remove(&correlation).is_some() {
+			if self
+				.shared
+				.dispatch_chunks
+				.lock()
+				.remove(&correlation)
+				.is_some()
+			{
 				return Err(
 					ControlProtocolError::new(
 						"result_chunk_incomplete",
@@ -3346,12 +3352,16 @@ impl ControlHandle {
 			.dispatch_by_id
 			.lock()
 			.insert(id, invocation.clone());
-		self.shared.dispatch_progress.lock().insert(id, DispatchProgressState {
-			invocation: invocation.clone(),
-			sender: progress,
-			events: 0,
-			bytes: 0,
-		});
+		self
+			.shared
+			.dispatch_progress
+			.lock()
+			.insert(id, DispatchProgressState {
+				invocation: invocation.clone(),
+				sender:     progress,
+				events:     0,
+				bytes:      0,
+			});
 		let mut guard = LiveDispatchGuard {
 			shared: Arc::clone(&self.shared),
 			id,
@@ -3690,14 +3700,12 @@ mod convar_tests {
 
 	use super::{
 		CompositeControlAuthority, ControlAuthority, ControlAuthorityFactory,
-		ControlConnectionIdentity, ControlRequestContext, ConvarControlFactory,
-		DispatchChunkState, DispatchProgressState, MAX_DISPATCH_PROGRESS_BYTES,
-		MAX_DISPATCH_PROGRESS_EVENTS, append_dispatch_result_chunk, checked_progress_bytes,
-		dispatch_frame_invocation_for_identity, quota_protocol_error,
+		ControlConnectionIdentity, ControlRequestContext, ConvarControlFactory, DispatchChunkState,
+		DispatchProgressState, MAX_DISPATCH_PROGRESS_BYTES, MAX_DISPATCH_PROGRESS_EVENTS,
+		append_dispatch_result_chunk, checked_progress_bytes, dispatch_frame_invocation_for_identity,
+		quota_protocol_error,
 	};
-	use crate::exthost::{
-		QuotaError, QuotaExceeded, QuotaScope, QuotaStatus, ResourceReceipt,
-	};
+	use crate::exthost::{QuotaError, QuotaExceeded, QuotaScope, QuotaStatus, ResourceReceipt};
 
 	fn identity() -> Arc<ControlConnectionIdentity> {
 		Arc::new(ControlConnectionIdentity {
@@ -3733,26 +3741,24 @@ mod convar_tests {
 			"session_generation": 1,
 			"invocation": "call",
 		});
-		let error = dispatch_frame_invocation_for_identity(
-			&identity,
-			stale.as_object().expect("authority"),
-		)
-		.expect_err("stale generation");
+		let error =
+			dispatch_frame_invocation_for_identity(&identity, stale.as_object().expect("authority"))
+				.expect_err("stale generation");
 		assert_eq!(error.code.as_str(), "StaleGeneration");
 
 		let state = DispatchProgressState {
 			invocation: sf!("call"),
-			sender: None,
-			events: MAX_DISPATCH_PROGRESS_EVENTS,
-			bytes: 0,
+			sender:     None,
+			events:     MAX_DISPATCH_PROGRESS_EVENTS,
+			bytes:      0,
 		};
 		let error = checked_progress_bytes(&state, 1).expect_err("progress count overflow");
 		assert_eq!(error.code.as_str(), "progress_overflow");
 		let oversized = DispatchProgressState {
 			invocation: sf!("call"),
-			sender: None,
-			events: 0,
-			bytes: MAX_DISPATCH_PROGRESS_BYTES,
+			sender:     None,
+			events:     0,
+			bytes:      MAX_DISPATCH_PROGRESS_BYTES,
 		};
 		let error = checked_progress_bytes(&oversized, 1).expect_err("progress byte overflow");
 		assert_eq!(error.code.as_str(), "progress_overflow");
@@ -3764,10 +3770,9 @@ mod convar_tests {
 		let mut state = DispatchChunkState {
 			invocation: invocation.clone(),
 			next_index: 0,
-			body: Vec::new(),
+			body:       Vec::new(),
 		};
-		append_dispatch_result_chunk(&mut state, &invocation, 0, b"one")
-			.expect("first result chunk");
+		append_dispatch_result_chunk(&mut state, &invocation, 0, b"one").expect("first result chunk");
 		let error = append_dispatch_result_chunk(&mut state, &invocation, 2, b"three")
 			.expect_err("out-of-order result chunk");
 		assert_eq!(error.code.as_str(), "result_chunk_order");
@@ -3777,10 +3782,11 @@ mod convar_tests {
 	#[test]
 	fn hard_quota_error_carries_the_current_receipt() {
 		let receipt = ResourceReceipt {
-			quotas: BTreeMap::from([(
-				sf!("ui.updates"),
-				QuotaStatus { limit: 3, used: 3, window: None },
-			)]),
+			quotas:  BTreeMap::from([(sf!("ui.updates"), QuotaStatus {
+				limit:  3,
+				used:   3,
+				window: None,
+			})]),
 			dropped: BTreeMap::from([(sf!("ui.updates"), 1)]),
 		};
 		let error = quota_protocol_error(QuotaError::Exceeded(QuotaExceeded {

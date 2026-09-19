@@ -78,17 +78,15 @@ impl Peer {
 		}
 	}
 
-	async fn matching_for(
-		&mut self,
-		bound: Duration,
-		predicate: impl Fn(&Value) -> bool,
-	) -> Value {
+	async fn matching_for(&mut self, bound: Duration, predicate: impl Fn(&Value) -> bool) -> Value {
 		if let Some(index) = self.buffered.iter().position(&predicate) {
 			return self.buffered.remove(index).expect("buffered match");
 		}
 		let deadline = Instant::now() + bound;
 		loop {
-			let remaining = deadline.checked_duration_since(Instant::now()).expect("bounded matching receive");
+			let remaining = deadline
+				.checked_duration_since(Instant::now())
+				.expect("bounded matching receive");
 			let value = self.recv_json_for(remaining).await;
 			if predicate(&value) {
 				return value;
@@ -460,10 +458,7 @@ fn proxy_bypassed_probe() {
 	});
 	let mut child = Command::new(std::env::current_exe().expect("current test executable"))
 		.args(["--exact", "proxy_bypassed_probe", "--nocapture"])
-		.env(
-			"OMP_TEST_RELAY_PROBE_CHILD",
-			format!("http://127.0.0.1:{}", server.port()),
-		)
+		.env("OMP_TEST_RELAY_PROBE_CHILD", format!("http://127.0.0.1:{}", server.port()))
 		.env("HTTP_PROXY", format!("http://127.0.0.1:{proxy_port}"))
 		.env("http_proxy", format!("http://127.0.0.1:{proxy_port}"))
 		.env("NO_PROXY", "")
@@ -474,7 +469,12 @@ fn proxy_bypassed_probe() {
 		.expect("run isolated probe process");
 	let status = wait_child(&mut child, CHILD_BOUND);
 	let mut stderr = Vec::new();
-	child.stderr.take().expect("probe stderr").read_to_end(&mut stderr).expect("read probe stderr");
+	child
+		.stderr
+		.take()
+		.expect("probe stderr")
+		.read_to_end(&mut stderr)
+		.expect("read probe stderr");
 	done.store(true, Ordering::Release);
 	worker.join().expect("fake proxy worker");
 	assert!(status.success(), "{}", String::from_utf8_lossy(&stderr));
@@ -507,9 +507,17 @@ fn startup_child_exit_surfaces_stderr_and_operating_system_cause() {
 		.expect("run failing relay consumer");
 	let status = wait_child(&mut child, CHILD_BOUND);
 	assert!(!status.success(), "startup child must report failure");
-	assert!(started.elapsed() < CHILD_BOUND, "early child exit must not consume the readiness budget");
+	assert!(
+		started.elapsed() < CHILD_BOUND,
+		"early child exit must not consume the readiness budget"
+	);
 	let mut stderr = Vec::new();
-	child.stderr.take().expect("startup stderr").read_to_end(&mut stderr).expect("read startup stderr");
+	child
+		.stderr
+		.take()
+		.expect("startup stderr")
+		.read_to_end(&mut stderr)
+		.expect("read startup stderr");
 	let stderr = String::from_utf8_lossy(&stderr);
 	assert!(stderr.contains("browser relay could not bind"), "{stderr}");
 	assert!(stderr.contains(&port.to_string()), "{stderr}");
@@ -522,7 +530,9 @@ async fn managed_relay_lives_until_last_cross_project_lease_closes() {
 		println!("OMP_RELAY_LEASE_READY");
 		std::io::stdout().flush().expect("flush lease readiness");
 		let mut held = Vec::new();
-		std::io::stdin().read_to_end(&mut held).expect("hold lease until parent closes pipe");
+		std::io::stdin()
+			.read_to_end(&mut held)
+			.expect("hold lease until parent closes pipe");
 		return;
 	}
 	let server = start_server(RelayOptions { managed: true, ..RelayOptions::default() });
@@ -845,7 +855,12 @@ async fn extension_reconnect_regroups_claimed_tabs() {
 	let first = harness.ext.rpc("group").await;
 	ack(&mut harness.ext, &first, json!({"grouped":{"1":42}})).await;
 	settle().await;
-	harness.ext.socket.close(None).await.expect("close first extension");
+	harness
+		.ext
+		.socket
+		.close(None)
+		.await
+		.expect("close first extension");
 	let deadline = Instant::now() + IO_BOUND;
 	while harness._server.ready() {
 		assert!(Instant::now() < deadline, "relay did not observe extension disconnect");
@@ -1186,8 +1201,7 @@ async fn replacement_clears_pending_detach_without_retracting_successor() {
 		.await;
 	assert_eq!(
 		cdp.matching(|value| {
-			value["method"] == "Target.detachedFromTarget"
-				&& value["params"]["sessionId"] == successor
+			value["method"] == "Target.detachedFromTarget" && value["params"]["sessionId"] == successor
 		})
 		.await["params"]["sessionId"],
 		successor
@@ -1418,8 +1432,10 @@ async fn target_operation_matrix_matches_chromium_cdp_observables() {
 		.expect("nested page session")
 		.to_owned();
 	let resume = next_id();
-	cdp.send(json!({"id":resume,"sessionId":tab_session,"method":"Runtime.runIfWaitingForDebugger"}))
-		.await;
+	cdp.send(
+		json!({"id":resume,"sessionId":tab_session,"method":"Runtime.runIfWaitingForDebugger"}),
+	)
+	.await;
 	assert!(cdp.reply(resume).await.get("result").is_some());
 	let nested_detach = next_id();
 	cdp.send(json!({
@@ -1445,10 +1461,7 @@ async fn target_operation_matrix_matches_chromium_cdp_observables() {
 	let browser_info = next_id();
 	cdp.send(json!({"id":browser_info,"method":"Target.getTargetInfo"}))
 		.await;
-	assert_eq!(
-		cdp.reply(browser_info).await["result"]["targetInfo"]["targetId"],
-		"relay-browser"
-	);
+	assert_eq!(cdp.reply(browser_info).await["result"]["targetInfo"]["targetId"], "relay-browser");
 	let activate = next_id();
 	cdp.send(json!({"id":activate,"method":"Target.activateTarget","params":{"targetId":"PAGE1"}}))
 		.await;

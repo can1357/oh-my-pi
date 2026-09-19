@@ -1462,6 +1462,51 @@ impl LspControl for DocumentLspControl {
 			) {
 				data = Value::Array(navigation::normalize_locations(&data, usize::MAX));
 			}
+			if let Some(method) = actions::follow_up_method(params.action) {
+				// The prepared item is passed back verbatim: its `data` field is
+				// opaque server state, and reconstructing it would break servers
+				// that round-trip anything beyond the documented fields.
+				let items = data
+					.as_array()
+					.map_or_else(|| vec![data.clone()], Clone::clone);
+				let Some(item) = items.into_iter().find(|item| item.is_object()) else {
+					// No symbol at the position resolves to a call-hierarchy
+					// item. That is an empty answer, not a server failure.
+					return Ok(Payload {
+						action: params.action,
+						servers,
+						output: Str::new_static("No call hierarchy item at this position"),
+						data: Value::Array(Vec::new()),
+						omitted: 0,
+					});
+				};
+				let binding = selected.first().ok_or(Fault::Unavailable)?;
+				let response = self
+					.documents
+					.lsp_request(
+						pb::LspRequest {
+							server_id:    binding.server_id.clone(),
+							method:       method.into(),
+							params_json:  Bytes::from(
+								serde_json::to_vec(&json!({ "item": item }))
+									.map_err(|_| Fault::InvalidArguments)?,
+							),
+							document:     Some(lease_target(&lease)),
+							revision:     lease.head().revision.clone(),
+							stale_policy: pb::LspStalePolicy::Fail as i32,
+						},
+						&cancel,
+					)
+					.await
+					.map_err(|_| Fault::Server)?;
+				data = match response.outcome {
+					Some(lsp_response::Outcome::ResultJson(bytes)) => {
+						let calls: Value = serde_json::from_slice(&bytes).map_err(|_| Fault::Server)?;
+						Value::Array(navigation::normalize_calls(&calls))
+					},
+					_ => Value::Array(Vec::new()),
+				};
+			}
 			if params.action == Action::Rename {
 				refactor::validate_workspace_edit(&data).map_err(|_| Fault::WorkspaceEdit)?;
 				if params.apply.unwrap_or(true) {
@@ -1608,6 +1653,8 @@ impl LspControl for DocumentLspControl {
 				Action::TypeDefinition => navigation::render_locations("type definition", &data),
 				Action::Implementation => navigation::render_locations("implementation", &data),
 				Action::References => navigation::render_references(&data),
+				Action::IncomingCalls => navigation::render_calls("caller", "callers", &data),
+				Action::OutgoingCalls => navigation::render_calls("callee", "callees", &data),
 				Action::Request => render_raw_response(
 					servers.first().map_or("lsp", Str::as_str),
 					params.query.as_deref().unwrap_or_default(),

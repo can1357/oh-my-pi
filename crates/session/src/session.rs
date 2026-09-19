@@ -26,6 +26,23 @@ use crate::{
 	rewind::{LifecycleWork, diff},
 };
 
+/// What one tool call cost.
+///
+/// Byte counts measure context exposure, not tokens: `source_bytes` is what
+/// the tool produced, `inline_bytes` what survived bounding. The difference is
+/// what an artifact reference saved.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ToolReceipt {
+	/// Bytes the tool produced before bounding.
+	pub source_bytes: u64,
+	/// Bytes that reached the transcript after bounding.
+	pub inline_bytes: u64,
+	/// Wall time from execution start to terminal outcome.
+	pub elapsed_ms:   u64,
+	/// Terminal disposition: `"ok"`, `"error"`, or `"aborted"`.
+	pub outcome:      &'static str,
+}
+
 /// Failure to append, decode, or fold a session entry.
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -784,6 +801,33 @@ impl Session {
 		self.ensure_call(call)?;
 		let update = serde_json::value::to_raw_value(&serde_json::json!({
 			"kernel": "started",
+		}))?;
+		self.commit(KindName::ToolUpdate, Some(call), None, None, &ToolUpdate(update))
+	}
+
+	/// Records what one tool call cost, once its outcome is known.
+	///
+	/// Separate from [`Self::settle`] because the receipt is accounting, not
+	/// result: a caller sums these to enforce a budget without re-reading tool
+	/// output. Byte counts describe context exposure — how much the call could
+	/// have put in front of the model — and are deliberately not a token
+	/// estimate.
+	///
+	/// `source_bytes` is what the tool produced; `inline_bytes` is what
+	/// survived bounding. An older journal simply has no receipt, which reads
+	/// as unknown rather than zero.
+	pub fn call_receipt(
+		&mut self,
+		call: EntryId,
+		receipt: ToolReceipt,
+	) -> Result<EntryId, SessionError> {
+		self.ensure_call(call)?;
+		let update = serde_json::value::to_raw_value(&serde_json::json!({
+			"kernel": "receipt",
+			"source_bytes": receipt.source_bytes,
+			"inline_bytes": receipt.inline_bytes,
+			"elapsed_ms": receipt.elapsed_ms,
+			"outcome": receipt.outcome,
 		}))?;
 		self.commit(KindName::ToolUpdate, Some(call), None, None, &ToolUpdate(update))
 	}

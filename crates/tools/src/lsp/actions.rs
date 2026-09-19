@@ -13,9 +13,25 @@ pub const fn method(action: Action) -> Option<&'static str> {
 		Action::References => Some("textDocument/references"),
 		Action::Hover => Some("textDocument/hover"),
 		Action::Symbols => Some("textDocument/documentSymbol"),
+		// Both call-hierarchy actions prepare at a position first; the
+		// incoming/outgoing method is chosen once an item comes back.
+		Action::IncomingCalls | Action::OutgoingCalls => Some("textDocument/prepareCallHierarchy"),
 		Action::Rename => Some("textDocument/rename"),
 		Action::CodeActions => Some("textDocument/codeAction"),
 		Action::Diagnostics => Some("textDocument/diagnostic"),
+		_ => None,
+	}
+}
+
+/// Returns the follow-up method an action issues against a prepared item.
+///
+/// Call hierarchy is a two-step protocol: the position resolves to an item,
+/// and the item — carried verbatim, including its opaque `data` — is the
+/// argument to the second request.
+pub const fn follow_up_method(action: Action) -> Option<&'static str> {
+	match action {
+		Action::IncomingCalls => Some("callHierarchy/incomingCalls"),
+		Action::OutgoingCalls => Some("callHierarchy/outgoingCalls"),
 		_ => None,
 	}
 }

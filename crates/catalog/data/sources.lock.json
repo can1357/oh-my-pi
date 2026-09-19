@@ -1,6 +1,6 @@
 {
   "schema_version": 2,
-  "source_digest": "f6c24b11d18bf036557645be6908f8838b64d54f14420aef36bcd20172ac2321",
+  "source_digest": "af7abe6c92d92de84a0ec3fbabb4d08687c9168e478805b556fa668810280b63",
   "inputs": [
     {
       "id": "catalog.models.compressed.v1",
@@ -149,13 +149,13 @@
     {
       "id": "compat.cascade.classes.mimo.v1",
       "path": "crates/catalog/compat/classes/mimo.kdl",
-      "sha256": "4f223113dd65c18f46d75a15001c7379763e067c7d57f59282740bd6b2128d60",
+      "sha256": "f1acb6296e74ab4a03cbdc877aa6eb8fb3bb9130d781cfaadf2f93315a25f8ea",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
       "id": "compat.cascade.classes.minimax.v1",
       "path": "crates/catalog/compat/classes/minimax.kdl",
-      "sha256": "f4c06ab99c3976e23d2ad87d56146348cf651ec03106ca0d6cd522e82329a2bb",
+      "sha256": "a7fd93075aee3d90440312cc8ea2771d7ef71dbe750dd0c751b23afb469e4153",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {
@@ -239,7 +239,7 @@
     {
       "id": "compat.cascade.providers.anthropic.v1",
       "path": "crates/catalog/compat/providers/anthropic.kdl",
-      "sha256": "43db64c27b40c211d17b36f3b95dbdb379c625f2eb00f8e9822f27eb3066c592",
+      "sha256": "096293e564a6a84ec923a2535e921f5c84bf207187d3151429e98001c0948d14",
       "source": "census 2026-08: .omp/local/quirks + frozen oracle"
     },
     {

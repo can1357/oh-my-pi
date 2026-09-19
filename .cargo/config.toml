@@ -15,6 +15,13 @@ PYO3_CONFIG_FILE = { value = "vendor/python/pyo3-config.txt", relative = true }
 # lock queue). Ninja schedules itself and ignores make's jobserver protocol.
 CMAKE_GENERATOR = "Ninja"
 
+# audiopus_sys vendors an Opus tree whose CMakeLists declares a
+# `cmake_minimum_required` below 3.5; CMake 4 removed compatibility with those
+# and hard-errors during configure, failing the build script before a single
+# object compiles. The vendored sources build fine under modern policies, so
+# raise the policy floor rather than pinning the host toolchain to CMake 3.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"
+
 # Dev links go through ld64.lld as well: the 652 MB statically-linked CPython
 # images overflow ld64's compact-unwind fast path (__eh_frame > 16 MB), and
 # lld links them several times faster. Same shim the release tree uses.

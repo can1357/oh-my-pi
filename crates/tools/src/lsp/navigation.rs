@@ -104,6 +104,65 @@ mod tests {
 		assert_eq!(render_locations("definition", &serde_json::json!([])), "No definition found");
 		assert_eq!(render_references(&serde_json::json!([])), "No references found");
 	}
+
+	#[test]
+	fn incoming_calls_report_the_calling_symbol_not_the_call_site() {
+		let calls = serde_json::json!([{
+			"from": {
+				"name": "caller",
+				"uri": "file:///tmp/a.rs",
+				"range": {"start":{"line":10,"character":0},"end":{"line":20,"character":1}},
+				"selectionRange": {"start":{"line":10,"character":3},"end":{"line":10,"character":9}},
+			},
+			"fromRanges": [{"start":{"line":15,"character":8},"end":{"line":15,"character":14}}],
+		}]);
+
+		let rendered = render_calls("caller", "callers", &Value::Array(normalize_calls(&calls)));
+
+		assert!(
+			rendered.contains("/tmp/a.rs:11:4"),
+			"the caller's own selection range is the useful location, not its call site: {rendered}"
+		);
+	}
+
+	#[test]
+	fn outgoing_calls_read_the_callee_side() {
+		let calls = serde_json::json!([{
+			"to": {
+				"name": "callee",
+				"uri": "file:///tmp/b.rs",
+				"range": {"start":{"line":4,"character":0},"end":{"line":6,"character":1}},
+				"selectionRange": {"start":{"line":4,"character":7},"end":{"line":4,"character":13}},
+			},
+			"fromRanges": [],
+		}]);
+
+		let rendered = render_calls("callee", "callees", &Value::Array(normalize_calls(&calls)));
+
+		assert!(rendered.contains("/tmp/b.rs:5:8"), "unexpected rendering: {rendered}");
+	}
+
+	#[test]
+	fn a_symbol_without_a_selection_range_falls_back_to_its_full_range() {
+		let calls = serde_json::json!([{
+			"from": {
+				"name": "terse",
+				"uri": "file:///tmp/c.rs",
+				"range": {"start":{"line":0,"character":0},"end":{"line":1,"character":0}},
+			},
+		}]);
+
+		assert_eq!(
+			normalize_calls(&calls).len(),
+			1,
+			"a server that omits selectionRange must still yield a usable location"
+		);
+	}
+
+	#[test]
+	fn empty_call_results_render_a_plural_empty_state() {
+		assert_eq!(render_calls("caller", "callers", &serde_json::json!([])), "No callers found");
+	}
 }
 
 const fn is_word_byte(byte: u8) -> bool {
@@ -196,6 +255,34 @@ pub fn render_locations(noun: &str, value: &Value) -> Str {
 /// Renders reference results with a plural empty state.
 pub fn render_references(value: &Value) -> Str {
 	render_locations_with_empty("reference", "references", value)
+}
+
+/// Flattens call-hierarchy results into locations of the calling symbols.
+///
+/// An incoming call names the caller in `from`; an outgoing call names the
+/// callee in `to`. Both carry the symbol's own `uri` and `selectionRange`,
+/// which is the location worth reporting — `fromRanges` points at individual
+/// call sites inside it and is deliberately left out of the summary.
+pub fn normalize_calls(value: &Value) -> Vec<Value> {
+	value
+		.as_array()
+		.into_iter()
+		.flatten()
+		.filter_map(|call| {
+			let symbol = call.get("from").or_else(|| call.get("to"))?;
+			let uri = symbol.get("uri")?.clone();
+			let range = symbol
+				.get("selectionRange")
+				.or_else(|| symbol.get("range"))?
+				.clone();
+			Some(serde_json::json!({ "uri": uri, "range": range }))
+		})
+		.collect()
+}
+
+/// Renders call-hierarchy results with a plural empty state.
+pub fn render_calls(noun: &str, plural: &str, value: &Value) -> Str {
+	render_locations_with_empty(noun, plural, value)
 }
 
 fn render_locations_with_empty(noun: &str, empty_noun: &str, value: &Value) -> Str {

@@ -191,13 +191,41 @@ fn axis_vocabulary_is_literal_pi_parity() {
 		})
 		.collect::<Vec<_>>()
 		.join("\n");
-	assert_eq!(AXES.len(), 125, "pi defines exactly 125 compatibility axes");
+	// Axes omp declares beyond pi's vocabulary. Each entry is a deliberate
+	// divergence with a reason; everything else must still match upstream
+	// byte for byte, so an accidental drift is still a failing test.
+	//
+	// `supports-response-schema`: pi has no axis for native response-schema
+	// support, so `structured_output` could only ever compile to `Unknown` and
+	// every route was rejected before reaching a codec that implements it.
+	// The axis is provider-neutral — Anthropic, Google, and both OpenAI
+	// records carry it.
+	const DIVERGENCES: &[&str] = &["supports-response-schema"];
+
+	let upstream = AXES
+		.iter()
+		.filter(|axis| !DIVERGENCES.contains(&axis.key))
+		.count();
+	assert_eq!(
+		upstream, 125,
+		"pi defines exactly 125 compatibility axes; omp adds only DIVERGENCES on top"
+	);
+
+	let canonical = canonical
+		.lines()
+		.filter(|row| {
+			row.split('|')
+				.next()
+				.is_some_and(|key| !DIVERGENCES.contains(&key))
+		})
+		.collect::<Vec<_>>()
+		.join("\n");
 	// Pinned against pi `packages/catalog/src/compat/axes.ts` @ 7bfb41f243
 	// (adds `requires-skip-thought-signature-on-first-function-call`).
 	assert_eq!(
 		format!("{:x}", Sha256::digest(canonical)),
 		"2007f279a847e38f761ffefbc180da43f5139652e8cf548b1c088c13ea846e44",
-		"AXES must remain literal key/field/set/shape/records/values parity with pi axes.ts",
+		"shared AXES must remain literal parity with pi axes.ts outside DIVERGENCES",
 	);
 }
 

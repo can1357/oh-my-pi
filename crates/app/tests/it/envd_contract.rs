@@ -1968,10 +1968,7 @@ async fn opt_in_py_eval_is_environment_routed_and_uses_a_fresh_namespace() {
 		json!({"code":"globals().get('sentinel', 'fresh')"}),
 	)
 	.await;
-	assert_eq!(
-		ok_builtin_payload(fresh, "py_eval fresh namespace"),
-		json!({"result": "fresh"})
-	);
+	assert_eq!(ok_builtin_payload(fresh, "py_eval fresh namespace"), json!({"result": "fresh"}));
 	drop(eval_parent_lease);
 }
 #[tokio::test]

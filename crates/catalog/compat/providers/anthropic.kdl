@@ -6,6 +6,17 @@ provider "anthropic" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		}
 	}
+	// Native `output_config.format` constrained decoding. Beta headers are no
+	// longer required; the format object carries `type` and `schema` only.
+	// Listed per model rather than by revision range: the documented support
+	// list is not a contiguous interval, and a range would also claim models
+	// Anthropic does not list.
+	models "claude-sonnet-4-5*" "claude-opus-4-5*" "claude-haiku-4-5*" "claude-opus-4-6" \
+		"claude-opus-4-7" "claude-opus-4-8" "claude-opus-5" "claude-sonnet-4-6" \
+		"claude-sonnet-5" "claude-fable-5" "claude-fable-5-1" "claude-mythos-5" \
+		"claude-mythos-5-1" "claude-mythos-preview" {
+		supports-response-schema #true
+	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "*20240229" "claude-3-7-sonnet-20250219" {
 		disable-adaptive-thinking #false
