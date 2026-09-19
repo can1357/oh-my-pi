@@ -695,6 +695,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			hasGlob: isToolActive("glob", cfgGlobEnabled.get(this.session.settings)),
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			hasRead: isToolActive("read", true),
+			hasWrite: isToolActive("write", true),
 			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
 			// building a bare ToolSession lack the rebuild lifecycle, so fall back
 			// to the derived form (skillful && skills) instead of dropping the hint.
@@ -702,6 +703,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				(this.session.skillHintVisible ??
 					(cfgSkillful.get(this.session.settings) && (this.session.skills?.length ?? 0) > 0)) === true,
 			hasLaunch: this.#launchEnabled,
+			hasProcessProgress: this.session.processProgressMode === "session",
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			hasShellBuiltins: !shellBuiltinsDisabled(this.session.settings),
 			isWindows: process.platform === "win32",
@@ -1395,6 +1397,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (name !== undefined) {
 			// Only a readiness wait can outlast a steer; without `ready` the start
 			// returns once the process spawns.
+			const launchEpoch = this.session.captureLaunchProgressEpoch?.() ?? 0;
 			const service = await startService(
 				this.session,
 				{
@@ -1447,7 +1450,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					`Live progress: ${monitored}; retune or detach with write proc://${daemon.name}/progress (wake, ambient, off).`,
 				);
 			if (service.monitorStopped) lines.push(`Live progress stopped: ${service.monitorStopped}`);
-			const log = await serviceLogs(this.session, name, signal);
+			// A session context change while the start settled leaves no caller for the old service's logs.
+			const log =
+				(this.session.captureLaunchProgressEpoch?.() ?? 0) === launchEpoch && !this.session.isDisposed?.()
+					? await serviceLogs(this.session, name, signal)
+					: "";
 			if (log) lines.push(log);
 			return {
 				content: [{ type: "text", text: lines.join("\n") }],
