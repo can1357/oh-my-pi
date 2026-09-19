@@ -45,6 +45,8 @@ interface OutputRegistration {
 	active: boolean;
 	/** Terminal daemon state observed while an attach was still being published. */
 	terminalState?: DaemonState;
+	/** The broker disabled this monitor (artifact persistence failed or the process was replaced). */
+	expired?: true;
 	/** Readiness of the initial broker publication for this registration. */
 	ready: Promise<void>;
 	/**
@@ -460,6 +462,7 @@ export async function registerOutputSink(
 			return;
 		}
 		if (notification.event === "daemon-monitor-expired") {
+			registration.expired = true;
 			await registration.cleanup();
 			return;
 		}
@@ -710,6 +713,16 @@ export function beginLocalStop(
 		},
 	};
 }
+/** Why a requested monitor is no longer live after its operation settles. */
+export function monitorStopReason(registration: OutputRegistration): string | undefined {
+	if (registration.terminalState !== undefined) return `service is ${registration.terminalState}`;
+	if (registration.active) return undefined;
+	if (registration.expired) {
+		return "the broker disabled the monitor (its output artifact could not be persisted or the process was replaced)";
+	}
+	return "the session context changed before the start settled";
+}
+
 
 /**
  * One watcher in prose: who (this session vs. a session id), the delivery
@@ -731,3 +744,4 @@ export function watcherLabel(
 	else if (watcher.daemonId !== daemon.id) facts.push("previous incarnation");
 	return `${who} (${facts.join(", ")})`;
 }
+

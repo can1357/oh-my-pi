@@ -13,6 +13,7 @@ import {
 	beginLocalStop,
 	DETACHED_MONITOR_ERROR,
 	detachOutputSink,
+	monitorStopReason,
 	type OutputLease,
 	registerOutputSink,
 } from "./service-monitor";
@@ -214,6 +215,7 @@ export async function startService(
 	daemon: DaemonSnapshot;
 	readyTimedOut: boolean;
 	log: string;
+	monitorStopped?: string;
 }> {
 	if (!cfgLaunchEnabled.get(session.settings)) throw new ToolError("Service launch is disabled in this session.");
 	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(params.name))
@@ -278,6 +280,7 @@ export async function startService(
 		daemon: result.daemon,
 		readyTimedOut: result.readyTimedOut,
 		log: await serviceLogs(session, params.name, signal),
+		...(lease ? { monitorStopped: monitorStopReason(lease.registration) } : {}),
 	};
 }
 
@@ -312,9 +315,8 @@ export async function monitorService(
 		lease.bindDaemon(daemon.id);
 		lease.registration.startedAt = daemon.startedAt;
 		await lease.retain();
-		if (!lease.registration.active || lease.registration.terminalState !== undefined) {
-			throw new ToolError(`Cannot monitor ${name}: service is ${lease.registration.terminalState ?? "exited"}`);
-		}
+		const stopped = monitorStopReason(lease.registration);
+		if (stopped !== undefined) throw new ToolError(`Cannot monitor ${name}: ${stopped}`);
 	} catch (error) {
 		await rollbackMonitorLease(lease, name);
 		throw error;

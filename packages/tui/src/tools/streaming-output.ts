@@ -90,7 +90,7 @@ export interface OutputSinkOptions {
 	 * writes still respect the budget. Default 0 = no per-line cap.
 	 */
 	maxColumns?: number;
-	onChunk?: (chunk: string, stamp: number) => void;
+	onChunk?: (chunk: string, stamp: number, artifactId?: string) => void;
 	/**
 	 * Sampled when a chunk's first byte enters the sink and passed to the
 	 * matching (possibly delayed) `onChunk` call. Mirror mode and chunk
@@ -101,7 +101,8 @@ export interface OutputSinkOptions {
 	chunkStamp?: () => number;
 	/**
 	 * Invoked exactly once after the matching sampled `onChunk` delivery
-	 * succeeds or fails.
+	 * succeeds or fails. Callers use this to release entry-time barriers even
+	 * when artifact flushing prevents `onChunk` from running.
 	 */
 	onChunkSettled?: (stamp: number) => void;
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
@@ -924,11 +925,11 @@ export class OutputSink {
 	readonly #artifactId?: string;
 	readonly #artifactWriteMode: "spill" | "mirror";
 	readonly #artifactAppend: boolean;
-	/** Descriptor backing an append-mode sink; Bun's fd writer does not own it. */
-	#appendFd?: number;
+	/** Descriptor backing the artifact sink; Bun's fd writer does not own it. */
+	#fileFd?: number;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
-	readonly #onChunk?: (chunk: string, stamp: number) => void;
+	readonly #onChunk?: (chunk: string, stamp: number, artifactId?: string) => void;
 	readonly #chunkStamp?: () => number;
 	readonly #onChunkSettled?: (stamp: number) => void;
 	readonly #chunkThrottleMs: number;
@@ -1312,23 +1313,12 @@ export class OutputSink {
 	async #createFileSink(): Promise<void> {
 		if (!this.#artifactPath || this.#fileReady || this.#artifactError) return;
 		try {
-			// Bun.file(path).writer() overwrites an existing file in place: it
-			// neither truncates (oven-sh/bun#25968) nor appends. Both fixes run
-			// synchronously so creation stays atomic with the buffer replay below —
-			// an await here would let new pushes land in both #buffer and
-			// #pendingFileWrites and duplicate them on drain.
-			let sink: Bun.FileSink;
-			if (this.#artifactAppend) {
-				// Append via an "a" descriptor. The fd writer does not take
-				// ownership; #finalizeFile closes it.
-				this.#appendFd = fs.openSync(this.#artifactPath, "a", 0o600);
-				sink = Bun.file(this.#appendFd).writer();
-			} else {
-				// Start the capture empty so a shorter capture never keeps a stale
-				// tail from whatever previously lived at this path.
-				fs.writeFileSync(this.#artifactPath, "", { mode: 0o600 });
-				sink = Bun.file(this.#artifactPath).writer();
-			}
+			// Open synchronously so missing/unwritable paths fail inside this
+			// best-effort boundary. The fd writer does not take ownership;
+			// #finalizeFile closes it.
+			const flag = this.#artifactAppend ? "a" : "w";
+			this.#fileFd = fs.openSync(this.#artifactPath, flag, 0o600);
+			const sink = Bun.file(this.#fileFd).writer();
 			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };
 			this.#fileReady = true;
 
@@ -1358,7 +1348,7 @@ export class OutputSink {
 			} catch {
 				/* ignore */
 			}
-			this.#closeAppendFd();
+			this.#closeFileFd();
 			this.#file = undefined;
 			this.#pendingFileWrites = undefined;
 			this.#fileReady = false;
@@ -1393,6 +1383,7 @@ export class OutputSink {
 	 */
 	replace(text: string): void {
 		this.#clearPendingChunkTimer();
+		const discardedChunkStamp = this.#pendingChunkStamp;
 		this.#buffer = text;
 		this.#bufferBytes = Buffer.byteLength(text, "utf-8");
 		this.#head = "";
@@ -1410,6 +1401,7 @@ export class OutputSink {
 		this.#pendingChunk = "";
 		this.#pendingChunkStamp = undefined;
 		this.#crNormalizer.reset();
+		if (discardedChunkStamp !== undefined) this.#onChunkSettled?.(discardedChunkStamp);
 	}
 
 	#clearPendingChunkTimer(): void {
@@ -1422,7 +1414,8 @@ export class OutputSink {
 		this.#clearPendingChunkTimer();
 		this.#lastChunkTime = now;
 		// The stamp travels with the bytes: a merged chunk keeps the stamp of its
-		// earliest byte so consumers can preserve the source boundary.
+		// earliest byte so a boundary crossed mid-hold marks the whole delivery
+		// as pre-boundary (consumers drop toward the boundary, never replay).
 		const stamp = this.#pendingChunkStamp ?? this.#chunkStamp?.() ?? 0;
 		this.#pendingChunkStamp = undefined;
 		const merged = this.#pendingChunk + chunk;
@@ -1440,8 +1433,16 @@ export class OutputSink {
 				// push() finishes routing the raw chunk to the file before this microtask
 				// resumes, then flushArtifact makes it readable before model-facing progress.
 				await Promise.resolve();
-				await this.flushArtifact();
-				this.#onChunk?.(merged, stamp);
+				let artifactId: string | undefined;
+				try {
+					artifactId = await this.flushArtifact();
+				} catch (error) {
+					logger.warn("Output artifact delivery failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+					return;
+				}
+				this.#onChunk?.(merged, stamp, artifactId);
 			} catch (error) {
 				this.#recordChunkDeliveryError(error);
 			} finally {
@@ -1631,7 +1632,7 @@ export class OutputSink {
 		if (this.#pendingArtifactWrites?.size) await Promise.all(this.#pendingArtifactWrites);
 		const file = this.#file;
 		if (!file) {
-			this.#closeAppendFd();
+			this.#closeFileFd();
 			return;
 		}
 		// Capture failures must not replace the command's result. Always close,
@@ -1648,20 +1649,20 @@ export class OutputSink {
 			} catch (error) {
 				this.#recordArtifactError("end", error);
 			}
-			this.#closeAppendFd();
+			this.#closeFileFd();
 		}
 		if (!this.#artifactError) this.#artifactAvailable = true;
 	}
 
-	/** Release the append-mode descriptor; Bun's fd writer never closes it. */
-	#closeAppendFd(): void {
-		if (this.#appendFd === undefined) return;
+	/** Release the artifact descriptor; Bun's fd writer never closes it. */
+	#closeFileFd(): void {
+		if (this.#fileFd === undefined) return;
 		try {
-			fs.closeSync(this.#appendFd);
+			fs.closeSync(this.#fileFd);
 		} catch {
 			/* ignore */
 		}
-		this.#appendFd = undefined;
+		this.#fileFd = undefined;
 	}
 
 	/**

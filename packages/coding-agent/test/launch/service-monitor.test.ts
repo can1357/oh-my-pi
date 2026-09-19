@@ -288,6 +288,31 @@ describe("service output monitoring", () => {
 		expect(harness.registrationCount()).toBe(0);
 	});
 
+	it("rejects an attach when the broker disables its monitor during subscription publication", async () => {
+		const publication = Promise.withResolvers<void>();
+		const harness = createHarness(undefined, publication.promise);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		const monitoring = monitorService(harness.session, daemon.name, "wake");
+		await drainMicrotasks();
+		const subscription = harness.getSubscription();
+		const sink = harness.getOutputSink();
+		if (!subscription || !sink) throw new Error("Expected output subscription");
+		await sink({
+			event: "daemon-monitor-expired",
+			monitorId: subscription.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+		});
+		publication.resolve();
+
+		await expect(monitoring).rejects.toThrow(/broker disabled the monitor/);
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
+		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
+	});
+
 	it("validates a monitored start before advertising its subscription", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
@@ -324,14 +349,19 @@ describe("service output monitoring", () => {
 		expect(harness.requests).toEqual([]);
 		expect(harness.getSubscription()).toBeUndefined();
 
-		const unmonitored = await startService(session, { name: daemon.name, command: "echo service-ready", pty: false,
-			progress: "off", });
+		const unmonitored = await startService(session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "off",
+		});
 		expect(harness.requests).toEqual([
 			expect.objectContaining({ op: "start", owner: undefined }),
 			expect.objectContaining({ op: "logs", name: daemon.name }),
 		]);
 		expect(harness.getSubscription()).toBeUndefined();
 		expect(unmonitored.daemon.state).toBe("running");
+		expect(unmonitored.monitorStopped).toBeUndefined();
 	});
 
 	it("never replays output that predates a successful monitor attach", async () => {
@@ -1244,6 +1274,80 @@ describe("service output monitoring", () => {
 		expect(harness.progress.map(item => item.notification.text)).toEqual(["early"]);
 		expect(harness.getSubscription()?.startPending).toBeUndefined();
 		expect(harness.unregisterCount()).toBe(0);
+	});
+
+	it("reports a started process whose monitor expired during the start instead of claiming live progress", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op === "logs") {
+				return { op: "logs", name: daemon.name, text: "early\n", cursor: 6, timedOut: false, state: daemon.state };
+			}
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			const subscription = harness.getSubscription();
+			const sink = harness.getOutputSink();
+			if (!subscription || !sink) throw new Error("Expected output subscription");
+			// The broker could not persist the output artifact: it buffers early
+			// output followed by an expiry while the start RPC is still pending.
+			await sink({
+				event: "daemon-output",
+				monitorId: subscription.id,
+				name: daemon.name,
+				daemonId: daemon.id,
+				seq: 1,
+				text: "early",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			});
+			await sink({
+				event: "daemon-monitor-expired",
+				monitorId: subscription.id,
+				name: daemon.name,
+				daemonId: daemon.id,
+			});
+			return { op: "start", daemon, readyTimedOut: false };
+		});
+
+		const result = await startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "wake",
+		});
+		await drainMicrotasks();
+
+		// The process did start: the call succeeds and the pre-expiry output is not lost.
+		expect(result.daemon).toEqual(daemon);
+		expect(result.readyTimedOut).toBeFalse();
+		expect(result.log).toBe("early\n");
+		expect(result.monitorStopped).toMatch(/broker disabled the monitor/);
+		expect(harness.progress.map(item => item.notification.text)).toEqual(["early"]);
+		// No live monitor state survives: subscription torn down and the session told.
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: expect.any(String), delivery: "wake", active: false });
+		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
+	});
+
+	it("keeps a successfully started service's monitor live in its requested delivery mode", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		const result = await startService(harness.session, {
+			name: daemon.name,
+			command: "echo service-ready",
+			pty: false,
+			progress: "ambient",
+		});
+
+		expect(result.daemon).toEqual(daemon);
+		expect(result.monitorStopped).toBeUndefined();
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: expect.any(String), delivery: "ambient", active: true });
 	});
 
 	it("bounds and coalesces speculative progress during a delayed monitored start", async () => {
