@@ -555,6 +555,7 @@
 
 - Added a privacy warning to memory reports reminding users to review data for secrets before sharing
 - `omp git` / `/git`: `delete` discards the selected file's changes (press twice to confirm) — in the sidebar on a file or whole directory, in the diff pane on the shown file; untracked files are removed, staged files reset to HEAD
+- `retry.transientSameModelAttempts` (default 0, unchanged behavior) retries the same model that many times on a transient provider failure (overload, 5xx, transport reset) before walking `retry.fallbackChains`, so a capacity blip that clears inside the retry backoff no longer costs you your selected model. Quota, auth, and account-policy errors still switch immediately ([#12061](https://github.com/can1357/oh-my-pi/pull/12061) by [@camjac251](https://github.com/camjac251)).
 
 ### Changed
 

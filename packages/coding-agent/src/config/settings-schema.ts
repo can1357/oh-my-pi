@@ -1764,6 +1764,28 @@ export const SETTINGS_SCHEMA = {
 			description: "Allow retry recovery to switch to configured fallback models",
 		},
 	},
+	"retry.transientSameModelAttempts": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Transient Same-Model Retries",
+			description:
+				"How many times a transient provider failure (overload, 5xx, transport reset) retries the SAME model before walking the fallback chain. Default 0 keeps the existing behavior: the chain is walked on the first transient error, which routes around provider trouble fastest. Raise it when you would rather spend a little latency than lose your selected model to a capacity blip that clears inside the retry backoff. Quota, auth, and account-policy errors ignore this and always switch immediately, because they do not clear on retry.",
+			options: [
+				{
+					value: "0",
+					label: "Switch immediately",
+					description: "Default: walk the chain on the first transient error",
+				},
+				{ value: "1", label: "1 attempt" },
+				{ value: "2", label: "2 attempts" },
+				{ value: "3", label: "3 attempts" },
+				{ value: "5", label: "5 attempts" },
+			],
+		},
+	},
 	"retry.usageAwareFallback": {
 		type: "boolean",
 		default: false,
@@ -6313,6 +6335,7 @@ export interface RetrySettings {
 	maxDelayMs: number;
 	waitForUsageReset: boolean;
 	modelFallback: boolean;
+	transientSameModelAttempts: number;
 	usageAwareFallback: boolean;
 	usageReservePct: number;
 	usageReservePolicy: "confirm" | "auto" | "fail-closed";
