@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { DaemonBrokerClient } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
 import type { DaemonCompletionNotification, DaemonRpcResult } from "../../../src/launch/protocol";
-import type { ToolSession } from "../../../src/tools";
+import type { LaunchContextBoundary, ToolSession } from "../../../src/tools";
 import { executeLaunch } from "../../../src/tools/hub/launch";
 
 afterEach(() => {
@@ -287,18 +287,79 @@ describe("launch broker protocol compatibility", () => {
 		expect(preservedPending).toBe(true);
 	});
 
-	it("routes a broker completion and releases its sink on session change", async () => {
+	function completionBoundaryFixture(): {
+		session: ToolSession;
+		deliver: () => (notification: DaemonCompletionNotification) => void;
+		queued: DaemonCompletionNotification[];
+		crossBoundary: (boundary: LaunchContextBoundary) => void;
+		unregisterOptions: () => Array<{ preservePending: boolean }>;
+	} {
 		const projectDir = process.cwd();
 		const owner = "owner-session";
 		const queued: DaemonCompletionNotification[] = [];
-		let liveOwner = owner;
 		let deliver: ((notification: DaemonCompletionNotification) => void) | undefined;
-		let sessionChange: (() => void) | undefined;
-		let preservedPending = false;
+		let contextBoundary: ((boundary: LaunchContextBoundary) => void) | undefined;
+		const unregisterOptions: Array<{ preservePending: boolean }> = [];
+		const daemon = {
+			name: "web",
+			id: "daemon-id",
+			state: "running",
+			createdAt: 1,
+			startedAt: 1,
+			restartCount: 0,
+			outputBytes: 0,
+			owner,
+			persist: false,
+			detached: false,
+		} as const;
+		const client = {
+			projectDir,
+			onCompletion: (_owner: string, sink: (notification: DaemonCompletionNotification) => void) => {
+				deliver = sink;
+				return options => {
+					unregisterOptions.push({ preservePending: options?.preservePending === true });
+					deliver = undefined;
+				};
+			},
+			request: async () => ({ op: "start", daemon, readyTimedOut: false }) as const,
+			close() {},
+		} satisfies DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		const session = {
+			cwd: projectDir,
+			getSessionId: () => owner,
+			isDisposed: () => false,
+			queueLaunchCompletion: (notification: DaemonCompletionNotification) => queued.push(notification),
+			registerContextBoundaryCallback: (callback: (boundary: LaunchContextBoundary) => void) => {
+				contextBoundary = callback;
+				return () => {
+					if (contextBoundary === callback) contextBoundary = undefined;
+				};
+			},
+		} as unknown as ToolSession;
+		return {
+			session,
+			queued,
+			deliver: () => {
+				if (!deliver) throw new Error("Expected a live completion sink");
+				return deliver;
+			},
+			crossBoundary: boundary => {
+				if (!contextBoundary) throw new Error("Expected a registered context boundary callback");
+				contextBoundary(boundary);
+			},
+			unregisterOptions: () => unregisterOptions,
+		};
+	}
+
+	it("routes a broker completion and keeps it replayable when a switch releases the sink", async () => {
+		const fixture = completionBoundaryFixture();
+		await executeLaunch(fixture.session, { op: "start", name: "web", application: process.execPath, args: [] });
+
 		const completion = {
 			event: "daemon-completed",
 			completionId: "completion-id",
-			owner,
+			owner: "owner-session",
 			daemon: {
 				name: "web",
 				id: "daemon-id",
@@ -309,45 +370,40 @@ describe("launch broker protocol compatibility", () => {
 				exitCode: 0,
 				restartCount: 0,
 				outputBytes: 0,
-				owner,
+				owner: "owner-session",
 				persist: false,
 				detached: false,
 			},
 		} satisfies DaemonCompletionNotification;
-		const client = {
-			projectDir,
-			onCompletion: (_owner: string, sink: (notification: DaemonCompletionNotification) => void) => {
-				deliver = sink;
-				return options => {
-					preservedPending = options?.preservePending === true;
-					deliver = undefined;
-				};
-			},
-			request: async () => ({ op: "start", daemon: completion.daemon, readyTimedOut: false }) as const,
-			close() {},
-		} satisfies DaemonBrokerClient;
-		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		fixture.deliver()(completion);
+		expect(fixture.queued).toEqual([completion]);
 
-		await executeLaunch(
-			{
-				cwd: projectDir,
-				getSessionId: () => liveOwner,
-				isDisposed: () => false,
-				queueLaunchCompletion: (notification: DaemonCompletionNotification) => queued.push(notification),
-				registerSessionChangeCallback: (callback: () => void) => {
-					sessionChange = callback;
-				},
-			} as unknown as ToolSession,
-			{ op: "start", name: "web", application: process.execPath, args: [] },
-		);
-
-		liveOwner = "target-session";
-		deliver?.(completion);
-		expect(queued).toEqual([completion]);
-		sessionChange?.();
-		expect(deliver).toBeUndefined();
-		expect(preservedPending).toBe(true);
+		// The outgoing session stays on disk: whatever the process reports after
+		// the switch must still reach it when it is resumed.
+		fixture.crossBoundary("switch");
+		expect(fixture.unregisterOptions()).toEqual([{ preservePending: true }]);
+		expect(() => fixture.deliver()).toThrow("Expected a live completion sink");
 	});
+
+	it.each<LaunchContextBoundary>(["reset", "new"])(
+		"discards the owner's pending completions at a destructive %s boundary",
+		async boundary => {
+			const fixture = completionBoundaryFixture();
+			await executeLaunch(fixture.session, { op: "start", name: "web", application: process.execPath, args: [] });
+
+			// The conversation that started the process is gone for good: a
+			// retained completion would replay into the emptied context the next
+			// time this owner registers, or sit unacknowledged and block a
+			// same-name restart.
+			fixture.crossBoundary(boundary);
+			expect(fixture.unregisterOptions()).toEqual([{ preservePending: false }]);
+			expect(() => fixture.deliver()).toThrow("Expected a live completion sink");
+
+			// The boundary callback fired once and unregistered itself.
+			expect(() => fixture.crossBoundary(boundary)).toThrow("Expected a registered context boundary callback");
+			expect(fixture.unregisterOptions()).toHaveLength(1);
+		},
+	);
 
 	it("keeps the completion sink when start delivery is indeterminate", async () => {
 		const projectDir = process.cwd();

@@ -6,7 +6,7 @@
  * Op families:
  * - messaging: `send` (with `to`), `inbox`, `list`, `wait` (with `from`);
  * - jobs: `wait` (bare or with `ids`), `cancel`, `jobs`;
- * - processes: `start`, `ps`, `logs`, `stop`, `restart`, `describe`, plus
+ * - processes: `start`, `monitor`, `ps`, `logs`, `stop`, `restart`, `describe`, plus
  *   `send`/`wait` when they carry a process `name`.
  *
  * The unified `wait` blocks until the FIRST of: a matching peer message, a
@@ -40,6 +40,7 @@ import {
 	executeJobsSnapshot,
 	noMatchingJobsResult,
 	nothingToWaitForResult,
+	retuneJobProgress,
 	snapshotJobs,
 	visibleJobs,
 } from "./jobs";
@@ -64,14 +65,16 @@ export * from "./types";
 
 const hubSchema = type({
 	op: type(
-		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
+		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'monitor' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
 	"to?": type("string").describe('send: recipient agent id or "all"'),
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
-	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
+	"ids?": type("string[]").describe(
+		"wait: job ids to watch (omit = all running jobs); cancel: job ids to kill; monitor: job ids whose progress mode is retuned",
+	),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
 	"status?": type("'running' | 'idle' | 'parked'").describe("list: filter by status; omit for running+idle"),
 	"limit?": type("number > 0").describe(
@@ -93,6 +96,9 @@ const hubSchema = type({
 	"persist?": type("boolean").describe("start: survive the last omp client exiting; default false"),
 	"detached?": type("boolean").describe(
 		"start: survive every omp and broker exit; implies persist and disables PTY input",
+	),
+	"progress?": type("'wake' | 'ambient' | 'off'").describe(
+		"start: wake/ambient pushes live output; off explicitly starts without monitoring. monitor: attach a process with wake/ambient or detach with off; with job `ids` it retunes a running job between wake and ambient. wake spends model turns from the shared session wake budget; ambient is free",
 	),
 	"lines?": type("number > 0").describe("logs: output lines; default 100, max 1000"),
 	"head?": type("boolean").describe("logs: read from the beginning instead of the tail"),
@@ -135,6 +141,7 @@ function hubApproval(params: unknown): ToolApprovalDecision {
 		case "ps":
 		case "logs":
 		case "describe":
+		case "monitor":
 			return "read";
 		case "send": {
 			// Peer DMs are read-tier; writing to a process stdin is exec-tier.
@@ -212,7 +219,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				application: "bun",
 				args: ["run", "dev"],
 				ready: { log: "Local:.*http", port: 5173, timeout: 30 },
+				progress: "wake",
 			},
+		},
+		{
+			caption: "Attach push notifications to a running process",
+			call: { op: "monitor", name: "web", progress: "wake" },
 		},
 		{
 			caption: "Follow process output after a cursor",
@@ -256,6 +268,9 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		onUpdate?: AgentToolUpdateCallback<HubDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<HubDetails>> {
+		if (params.progress !== undefined && params.op !== "start" && params.op !== "monitor") {
+			return hubErrorResult("`progress` is only valid with `start` or `monitor`.", { op: params.op });
+		}
 		switch (params.op) {
 			case "list": {
 				const messaging = this.#messaging();
@@ -304,6 +319,11 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				if (!manager) return this.#asyncDisabled("jobs");
 				return executeJobsSnapshot(this.session, manager, this.#ownerId());
 			}
+			case "monitor":
+				// Job ids address the async job manager, never the process
+				// broker: dispatching to launch would demand a process `name`.
+				if (params.ids?.length) return this.#retuneJobs(params);
+				return this.#launch(params, "monitor", signal);
 			case "start":
 			case "ps":
 			case "logs":
@@ -321,11 +341,40 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		return this.session.getAgentId?.() ?? undefined;
 	}
 
-	#asyncDisabled(op: "cancel" | "jobs"): AgentToolResult<HubDetails> {
+	#asyncDisabled(op: "cancel" | "jobs" | "monitor"): AgentToolResult<HubDetails> {
 		return {
 			content: [{ type: "text", text: "Async execution is disabled; no background jobs are available." }],
 			details: { op, jobs: [] },
 		};
+	}
+
+	/**
+	 * `monitor` with job ids: retune a running job's progress delivery mode.
+	 * `off` is rejected rather than approximated — a job's progress channel is
+	 * built at launch and cannot be torn down without losing its capture.
+	 */
+	#retuneJobs(params: HubParams): AgentToolResult<HubDetails> {
+		if (params.name?.trim()) {
+			return hubErrorResult("`monitor` addresses either a process `name` or background job `ids`, not both.", {
+				op: "monitor",
+				jobs: [],
+			});
+		}
+		if (params.progress === undefined) {
+			return hubErrorResult("`monitor` on background job ids requires `progress`: wake or ambient.", {
+				op: "monitor",
+				jobs: [],
+			});
+		}
+		if (params.progress === "off") {
+			return hubErrorResult(
+				'`progress: "off"` detaches a process monitor; a background job\'s progress channel cannot be detached — let it finish or cancel it.',
+				{ op: "monitor", jobs: [] },
+			);
+		}
+		const manager = this.session.asyncJobManager;
+		if (!manager) return this.#asyncDisabled("monitor");
+		return retuneJobProgress(this.session, manager, this.#ownerId(), params.ids ?? [], params.progress);
 	}
 
 	/** Route a process-supervision op to the launch broker, honoring `launch.enabled`. */
