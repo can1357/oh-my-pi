@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Changed
-- TUI terminal detection now resolves the emulator behind tmux from the attached client's terminal-type reply instead of degrading to the color-depth fallback
+- TUI terminal detection now resolves the emulator behind tmux from the attached client's terminal-type reply instead of degrading to the color-depth fallback ([#12524](https://github.com/can1357/oh-my-pi/issues/12524), [#12539](https://github.com/can1357/oh-my-pi/pull/12539) by [@CzBiX](https://github.com/CzBiX)).
 
 ## [18.2.5] - 2026-09-17
 
