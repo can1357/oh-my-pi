@@ -1,3 +1,4 @@
+import type { WriteToolDetails } from "@oh-my-pi/pi-tui/tools/write";
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -10,7 +11,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
-import { type Component, Text } from "@oh-my-pi/pi-tui";
+
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveMemberContent,
@@ -22,25 +23,32 @@ import {
 } from "@oh-my-pi/pi-utils/ar";
 import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+
 import { InternalUrlRouter } from "../internal-urls";
 import { parseInternalUrl } from "../internal-urls/parse";
-import { couldBecomeXdUrl, parseXdUrl } from "../internal-urls/xd-protocol";
-import { createLspWritethrough, type FileDiagnosticsResult, type WritethroughCallback, writethroughNoop } from "../lsp";
+import { parseXdUrl } from "@oh-my-pi/pi-tui/tools/xd-url";
+import { createLspWritethrough, type WritethroughCallback, writethroughNoop } from "../lsp";
+
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
+import { getLspBatchRequest } from "../lsp/batch";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
-import { getLanguageFromPath, highlightCode, type Theme } from "../modes/theme/theme";
+
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
+
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { routeWriteThroughBridge } from "./acp-bridge";
+import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
-import { formatHashlineHeader, stripHashlinePrefixes } from "./hashline-format";
 import {
-	type ConflictEntry,
+	formatHashlineHeader,
+	isReadTruncationNotice,
+	splitAddressableFileLines,
+	stripHashlinePrefixes,
+} from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { type ConflictEntry } from "@oh-my-pi/pi-tui/tools/conflict-detect";
+import {
 	conflictRegionPresent,
 	conflictRegionsEqual,
 	expandContentTokens,
@@ -49,40 +57,30 @@ import {
 	spliceConflict,
 } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
-import { type OutputMeta, outputMeta } from "./output-meta";
+
+import { outputMeta } from "./output-meta";
 import {
 	formatPathRelativeToCwd,
 	pathTargetsSsh,
 	peelWriteUrlSelector,
 	probeLiteralPathExists,
 	resolveFileWriteApprovalTier,
-	splitPathAndSel,
 } from "./path-utils";
+import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import {
 	enforcePlanModeWrite,
 	resolvePlanPath,
 	targetsLocalSandbox,
 	unwrapHashlineHeaderPath,
 } from "./plan-mode-guard";
-import {
-	cachedRenderedString,
-	createRenderedStringCache,
-	Ellipsis,
-	formatDiagnostics,
-	formatErrorDetail,
-	formatExpandHint,
-	formatMoreItems,
-	formatStatusIcon,
-	getLspBatchRequest,
-	type RenderedStringCache,
-	replaceTabs,
-	shortenPath,
-	TRUNCATE_LENGTHS,
-	truncateToWidth,
-} from "./render-utils";
-import type { ToolActivityContext, ToolActivitySummary } from "./renderers";
-import { dispatchReportIssueDevice, REPORT_ISSUE_DEVICE_NAME, renderReportIssueDeviceCall } from "./report-tool-issue";
-import { dispatchResolutionDevice, isResolutionDeviceName, renderResolutionDeviceCall } from "./resolve";
+import { decodeUtf8Text } from "./read-format";
+import { routeReadThroughBridge } from "./read-summary";
+import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+
+import { dispatchReportIssueDevice } from "./report-tool-issue";
+import { REPORT_ISSUE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/report-tool-issue";
+import { dispatchResolutionDevice } from "./resolve";
+import { isResolutionDeviceName } from "@oh-my-pi/pi-tui/tools/resolve";
 import {
 	deleteRowByKey,
 	deleteRowByRowId,
@@ -93,17 +91,9 @@ import {
 	updateRowByKey,
 	updateRowByRowId,
 } from "./sqlite-reader";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
-import {
-	dispatchXdevTool,
-	renderXdevCall,
-	renderXdevResult,
-	resolveXdevTool,
-	type XdevDispatch,
-	xdevActivitySummary,
-	xdevListing,
-} from "./xdev";
+import { dispatchXdevTool, resolveXdevTool, xdevListing } from "./xdev";
 
 const LOOSE_HASHLINE_HEADER_RE = /^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$/;
 const EXECUTABLE_NOTICE = "[Notice: Made executable via chmod +x]";
@@ -310,19 +300,6 @@ const writeSchema = type({
 
 export type WriteToolInput = typeof writeSchema.infer;
 
-/** Details returned by the write tool for TUI rendering */
-export interface WriteToolDetails {
-	diagnostics?: FileDiagnosticsResult;
-	meta?: OutputMeta;
-	/** Set when the file was auto-chmod'd because content begins with a `#!` shebang. */
-	madeExecutable?: boolean;
-	/** Absolute filesystem path the write resolved to. Used by the renderer to wrap
-	 * the (possibly cwd-relative) header path in an OSC 8 `file://` hyperlink. */
-	resolvedPath?: string;
-	/** Set when the write dispatched an `xd://` tool device; drives renderer delegation. */
-	xdev?: XdevDispatch;
-}
-
 /**
  * Strip hashline display prefixes from write content.
  *
@@ -361,6 +338,84 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
 		return { text: content, stripped: false };
 	}
 	return stripWriteContentWithPotentialLooseHeader(content.split("\n"));
+}
+function endsWithReadTruncationNotice(content: string): boolean {
+	const lines = splitAddressableFileLines(normalizeToLF(content));
+	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
+	if (noticeIndex === -1) return false;
+	return isReadTruncationNotice(lines[noticeIndex]!);
+}
+
+async function readCurrentWriteSource(
+	session: ToolSession,
+	requestedPath: string,
+	absolutePath: string,
+): Promise<string | undefined> {
+	const readDisk = async (): Promise<string | undefined> => {
+		try {
+			return await Bun.file(absolutePath).text();
+		} catch (error) {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		}
+	};
+	if (!shouldRouteWriteThroughBridge(session, requestedPath, absolutePath)) return readDisk();
+	const bridgeRead = routeReadThroughBridge(session, absolutePath);
+	if (!bridgeRead) return readDisk();
+	try {
+		return await bridgeRead;
+	} catch {
+		return readDisk();
+	}
+}
+
+/**
+ * Byte span (UTF-16 length) of a read projection's shown payload — everything
+ * up to but excluding its trailing `read` truncation notice and the blank
+ * separator before it. Returns `undefined` when the content does not end in
+ * such a notice.
+ *
+ * Excluding the notice matters at the byte-budget boundary: a single line
+ * truncated just past the limit renders as a ~50 KB prefix plus a footer whose
+ * combined length can exceed the original line, yet it still covers strictly
+ * less source. Measuring the shown payload — not the rendered length — is what
+ * the truncation marker, not character count, establishes as incomplete.
+ */
+function readProjectionPayloadLength(content: string): number | undefined {
+	const lines = splitAddressableFileLines(normalizeToLF(content));
+	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
+	if (noticeIndex === -1 || !isReadTruncationNotice(lines[noticeIndex]!)) return undefined;
+	let end = noticeIndex;
+	while (end > 0 && lines[end - 1]!.trim().length === 0) end--;
+	return lines.slice(0, end).join("\n").length;
+}
+
+function assertNotShorterReadProjection(
+	displayPath: string,
+	rawContent: string,
+	currentContent: string | undefined,
+	writeContent: string = rawContent,
+): void {
+	const rawPayloadLength = readProjectionPayloadLength(rawContent);
+	if (rawPayloadLength === undefined || currentContent === undefined) return;
+	const payloadLength = writeContent === rawContent ? rawPayloadLength : normalizeToLF(writeContent).length;
+	if (payloadLength >= normalizeToLF(currentContent).length) return;
+	throw new ToolError(
+		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
+	);
+}
+
+async function assertNotTruncatedFileReadProjection(
+	session: ToolSession,
+	requestedPath: string,
+	absolutePath: string,
+	displayPath: string,
+	rawContent: string,
+	writeContent: string,
+): Promise<void> {
+	if (!endsWithReadTruncationNotice(rawContent)) return;
+	const currentContent = await readCurrentWriteSource(session, requestedPath, absolutePath);
+	assertNotShorterReadProjection(displayPath, rawContent, currentContent, writeContent);
 }
 
 /**
@@ -644,6 +699,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async #writeArchiveEntry(
 		content: string,
+		rawContent: string,
 		resolvedArchivePath: ResolvedArchiveWritePath,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		// Resolve symlinks before the tmp+rename swap: renaming over a symlink
@@ -683,6 +739,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const sel = readSelectorForEmptyWrite(writeTarget, content);
 		if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
 			throwReadSelectorMisfire(writeTarget, sel);
+		}
+		const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
+		if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
+			const existingBytes =
+				existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
+			const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
+			assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
 		}
 		entries.set(resolvedArchivePath.archiveSubPath, content);
 
@@ -1145,6 +1208,14 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
 				const handler = internalRouter.getHandler(scheme);
 				if (handler?.write) {
+					if (scheme !== "xd" && endsWithReadTruncationNotice(content)) {
+						const currentResource = await internalRouter.resolve(path, {
+							cwd: this.session.cwd,
+							settings: this.session.settings,
+							signal,
+						});
+						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
+					}
 					// Handler-owned writes mutate user data outside the local
 					// sandbox. xd:// dispatches retain each wrapped tool's tier.
 					if (scheme !== "xd") {
@@ -1251,7 +1322,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 					}`,
 					resolvedArchivePath.absolutePath,
 				);
-				const archiveResult = await this.#writeArchiveEntry(cleanContent, resolvedArchivePath);
+				const archiveResult = await this.#writeArchiveEntry(cleanContent, content, resolvedArchivePath);
 				if (stripped) {
 					const firstText = archiveResult.content.find(
 						(block): block is { type: "text"; text: string } =>
@@ -1285,14 +1356,22 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
+			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
-			// Check if file exists and is auto-generated before overwriting
+			// Check if file exists and is auto-generated before overwriting.
 			if (await fs.exists(absolutePath)) {
 				await assertEditableFile(absolutePath, path, this.session.settings);
 			}
+			await assertNotTruncatedFileReadProjection(
+				this.session,
+				path,
+				absolutePath,
+				displayPath,
+				content,
+				cleanContent,
+			);
 
-			const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 			emitWriteProgress(onUpdate, cleanContent, displayPath, absolutePath);
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
@@ -1365,430 +1444,3 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		});
 	}
 }
-
-// =============================================================================
-// TUI Renderer
-// =============================================================================
-
-interface WriteRenderArgs {
-	path?: unknown;
-	file_path?: unknown;
-	content?: unknown;
-}
-
-const WRITE_PREVIEW_LINES = 6;
-const WRITE_STREAMING_PREVIEW_LINES = 12;
-
-function countLines(text: string): number {
-	if (!text) return 0;
-	return text.split("\n").length;
-}
-
-/** Bounded newline scan: whether `text` spans more than `maxLines` lines.
- *  Runs on every live compose (the repaint predicate below), so it must not
- *  materialize the split the way `countLines` does. */
-function exceedsLineCount(text: string, maxLines: number): boolean {
-	if (!text) return false;
-	let lines = 1;
-	for (let index = text.indexOf("\n"); index !== -1; index = text.indexOf("\n", index + 1)) {
-		if (++lines > maxLines) return true;
-	}
-	return false;
-}
-
-function writeContentOf(args: unknown): string {
-	if (args == null || typeof args !== "object" || !("content" in args)) return "";
-	const content = args.content;
-	return typeof content === "string" ? content : "";
-}
-
-function formatLineCountSuffix(lineCount: number, uiTheme: Theme): string {
-	if (lineCount <= 0) return "";
-	return uiTheme.fg("dim", ` · ${lineCount} line${lineCount === 1 ? "" : "s"}`);
-}
-
-function normalizeDisplayText(text: unknown): string {
-	let displayText = "";
-	if (typeof text === "string") {
-		displayText = text;
-	} else if (text !== undefined && text !== null) {
-		displayText = String(text);
-	}
-	return displayText.replace(/\r/g, "");
-}
-
-/**
- * Minimum line-number gutter width for write previews. The streaming preview's
- * gutter must stay byte-stable as the line count grows: a width derived purely
- * from `String(totalLines).length` widens at the 10/100/1000-line crossings,
- * causing the live preview to jitter. Reserving 3 digits keeps the gutter
- * constant through 999 lines and keeps the streamed rows aligned with the
- * final result render.
- */
-const WRITE_GUTTER_MIN_WIDTH = 3;
-
-/**
- * Per-component streaming line index for {@link formatStreamingContent}.
- * Keyed on the ToolExecutionComponent's persistent render-state object (the
- * `options` argument renderers receive on every rebuild), so the entry lives
- * exactly as long as the component and never leaks across tool calls.
- *
- * Why: streamed write content is append-only, but the formatter used to
- * normalize + `split("\n")` the ENTIRE accumulated payload on every reveal
- * tick — O(n) per tick, O(n²) per stream, which was a measurable main-thread
- * stall on long writes (and multiplied across concurrent subagent writes).
- * Tracking the newline count incrementally and extracting only the tail
- * window makes each tick O(delta + preview lines).
- */
-interface WriteStreamingLineIndex {
-	/** Number of content code units scanned so far. */
-	length: number;
-	/** Bounded suffix used to detect a restarted/non-append stream. */
-	suffix: string;
-	/** `1 + count("\n")` over the scanned content. */
-	lineCount: number;
-}
-
-const writeStreamingLineIndex = new WeakMap<object, WriteStreamingLineIndex>();
-
-/** Keep append validation constant-time instead of comparing the entire prior payload. */
-const WRITE_STREAMING_APPEND_GUARD_LENGTH = 64;
-
-/** Total logical line count of `content`, resuming from the cached prefix scan when append-only. */
-function streamingTotalLines(streamKey: object | undefined, content: string): number {
-	if (streamKey === undefined) {
-		let lines = 1;
-		for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
-		return lines;
-	}
-	let entry = writeStreamingLineIndex.get(streamKey);
-	const continuesPrevious =
-		entry !== undefined &&
-		content.length >= entry.length &&
-		content.startsWith(entry.suffix, entry.length - entry.suffix.length);
-	if (entry !== undefined && continuesPrevious) {
-		let lines = entry.lineCount;
-		for (let i = entry.length; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
-		entry.length = content.length;
-		entry.suffix = content.slice(-WRITE_STREAMING_APPEND_GUARD_LENGTH);
-		entry.lineCount = lines;
-		return lines;
-	}
-	let lines = 1;
-	for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
-	entry = {
-		length: content.length,
-		suffix: content.slice(-WRITE_STREAMING_APPEND_GUARD_LENGTH),
-		lineCount: lines,
-	};
-	writeStreamingLineIndex.set(streamKey, entry);
-	return lines;
-}
-
-/**
- * Raw offset just after the (totalLines - previewLines)-th newline — i.e. the
- * start of the last `previewLines` logical lines — scanning back from the end.
- * Returns 0 when the whole content fits in the window. Equivalent to
- * `content.split("\n").slice(-previewLines).join("\n")` without materializing
- * the full line array.
- */
-function tailWindowStart(content: string, previewLines: number): number {
-	let newlinesSeen = 0;
-	for (let i = content.length - 1; i >= 0; i--) {
-		if (content.charCodeAt(i) === 10) {
-			newlinesSeen++;
-			if (newlinesSeen === previewLines) return i + 1;
-		}
-	}
-	return 0;
-}
-
-function formatStreamingContent(
-	content: string,
-	expanded: boolean,
-	language: string | undefined,
-	uiTheme: Theme,
-	spinnerFrame?: number,
-	cache?: RenderedStringCache,
-	streamKey?: object,
-): string {
-	if (!content) return "";
-	const bodyText = cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
-		// Collapsed: follow the streaming edge with a bounded tail window so the box
-		// stays short enough not to strand its scrolled-off head above the viewport
-		// while the block is volatile. `Ctrl+O` (expanded) lifts the cap for a
-		// deliberate full view — matching the eval streaming preview.
-		let totalLines: number;
-		let startIndex: number;
-		let visibleText: string;
-		if (expanded) {
-			visibleText = normalizeDisplayText(content);
-			totalLines = 1;
-			for (let i = 0; i < visibleText.length; i++) if (visibleText.charCodeAt(i) === 10) totalLines++;
-			startIndex = 0;
-		} else {
-			totalLines = streamingTotalLines(streamKey, content);
-			startIndex = Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
-			const tail =
-				startIndex === 0 ? content : content.slice(tailWindowStart(content, WRITE_STREAMING_PREVIEW_LINES));
-			visibleText = tail.replace(/\r/g, "");
-		}
-		if (visibleText.length === 0) return "";
-		const hidden = startIndex;
-		const highlighted = highlightCode(visibleText, language);
-		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
-
-		let text = "\n\n";
-		if (hidden > 0) {
-			text += `${uiTheme.fg("dim", `… (${hidden} earlier line${hidden === 1 ? "" : "s"})`)}\n`;
-		}
-		for (let i = 0; i < highlighted.length; i++) {
-			const lineNum = startIndex + i + 1;
-			const gutter = uiTheme.fg("dim", `${String(lineNum).padStart(lineNumberWidth, " ")} `);
-			const body = replaceTabs(highlighted[i] ?? "");
-			text += `${gutter}${body}\n`;
-		}
-		return text;
-	});
-	if (bodyText.length === 0) return "";
-	// The animated glyph lives on this trailing line — inside the transcript's
-	// volatile-tail holdback — never in the header: an animating head row pins
-	// the native-scrollback commit boundary at the top of the block, so a long
-	// expanded preview could never scroll-append mid-stream.
-	const spinner = spinnerFrame !== undefined ? `${formatStatusIcon("running", uiTheme, spinnerFrame)} ` : "";
-	return `${bodyText}${spinner}${uiTheme.fg("dim", `… (streaming)`)}`;
-}
-
-function renderContentPreview(
-	content: string,
-	expanded: boolean,
-	language: string | undefined,
-	uiTheme: Theme,
-	cache?: RenderedStringCache,
-): string {
-	if (!content) return "";
-	return cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
-		const rawLines = normalizeDisplayText(content).split("\n");
-		const totalLines = rawLines.length;
-		const maxLines = expanded ? totalLines : Math.min(totalLines, WRITE_PREVIEW_LINES);
-		const visibleLines = rawLines.slice(0, maxLines);
-		const highlighted = highlightCode(visibleLines.join("\n"), language);
-		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
-		const hidden = totalLines - maxLines;
-
-		let text = "\n\n";
-		for (let i = 0; i < highlighted.length; i++) {
-			const lineNum = i + 1;
-			const gutter = uiTheme.fg("dim", `${String(lineNum).padStart(lineNumberWidth, " ")} `);
-			const body = replaceTabs(highlighted[i] ?? "");
-			text += `${gutter}${body}\n`;
-		}
-		if (!expanded && hidden > 0) {
-			const hint = formatExpandHint(uiTheme, expanded, hidden > 0);
-			const moreLine = `${formatMoreItems(hidden, "line")}${hint ? ` ${hint}` : ""}`;
-			text += uiTheme.fg("dim", moreLine);
-		}
-		return text.trimEnd();
-	});
-}
-
-/** Render context for the write tool: resolves an `xd://`-mounted tool so its live renderer drives device dispatch previews. */
-export interface WriteRenderContext {
-	resolveXdevMounted?: (name: string) => AgentTool | undefined;
-}
-
-export const writeToolRenderer = {
-	/** Compact one-line activity: device writes read as the mounted tool (`LSP · references foo`), file writes as `Write · <path>`. */
-	activitySummary(args: unknown, context: ToolActivityContext): ToolActivitySummary {
-		const writeArgs = (args ?? {}) as WriteRenderArgs;
-		const rawPath =
-			typeof writeArgs.file_path === "string"
-				? writeArgs.file_path
-				: typeof writeArgs.path === "string"
-					? writeArgs.path
-					: "";
-		if (!rawPath) return { label: "Write" };
-		const xdev = parseXdUrl(rawPath);
-		if (xdev?.name) {
-			const resolveMounted = (context.renderContext as WriteRenderContext | undefined)?.resolveXdevMounted;
-			return xdevActivitySummary(xdev.name, writeArgs.content, resolveMounted);
-		}
-		return { label: "Write", detail: shortenPath(rawPath) };
-	},
-
-	renderCall(
-		args: WriteRenderArgs,
-		options: RenderResultOptions & { renderContext?: WriteRenderContext },
-		uiTheme: Theme,
-	): Component | undefined {
-		const rawPath =
-			typeof args.file_path === "string" ? args.file_path : typeof args.path === "string" ? args.path : "";
-		// Render NOTHING until the streamed path arrives and provably is not an
-		// xd:// device. Device writes then render as queued until execution starts,
-		// after which they delegate to the mounted tool's renderer.
-		// A present-but-malformed path (array/object from a bad provider parse)
-		// is definitively not xd:// — fall through to the legacy frame.
-		if (args.path === undefined && args.file_path === undefined) return undefined;
-		if (rawPath && couldBecomeXdUrl(rawPath)) {
-			const xdev = parseXdUrl(rawPath);
-			// The path string is settled once the content field started streaming.
-			const pathSettled = args.content !== undefined;
-			if (!xdev?.name || !pathSettled) return undefined;
-			if (isResolutionDeviceName(xdev.name)) return renderResolutionDeviceCall(xdev.name, args.content, uiTheme);
-			if (xdev.name === REPORT_ISSUE_DEVICE_NAME) return renderReportIssueDeviceCall(args.content, uiTheme);
-			return renderXdevCall(xdev.name, args.content, options, uiTheme, options.renderContext?.resolveXdevMounted);
-		}
-		const filePath = shortenPath(rawPath);
-		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
-		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
-		const pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
-		// No status icon on the head row: it's the head of the framed block, and
-		// native-scrollback commits are prefix-only — an animated glyph would pin
-		// the commit boundary at the top, and the pending hourglass just adds
-		// noise. The liveness cue rides the trailing "(streaming)" line instead.
-		const header = renderStatusLine(
-			{
-				title: "Write",
-				description: `${langIcon} ${pathDisplay}`,
-			},
-			uiTheme,
-		);
-		// Raw content, not normalizeDisplayText(args.content): the collapsed
-		// streaming path normalizes only its tail window, so a full-payload
-		// normalize on every reveal tick would re-introduce the O(n²) streaming
-		// cost formatStreamingContent avoids. Non-string content still falls
-		// back to the normalizing stringify.
-		const content = typeof args.content === "string" ? args.content : normalizeDisplayText(args.content);
-		const streamingCache = createRenderedStringCache();
-		return framedBlock(uiTheme, width => {
-			const body = content
-				? formatStreamingContent(
-						content,
-						Boolean(options?.expanded),
-						lang,
-						uiTheme,
-						options?.spinnerFrame,
-						streamingCache,
-						// `options` is the ToolExecutionComponent's persistent
-						// render-state object — a stable identity across reveal ticks
-						// that keys the incremental line index.
-						options,
-					)
-				: "";
-			const bodyLines = body ? body.split("\n") : [];
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-				state: "pending",
-				borderColor: "borderMuted",
-				width,
-			};
-		});
-	},
-
-	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails; isError?: boolean },
-		options: RenderResultOptions & { renderContext?: WriteRenderContext },
-		uiTheme: Theme,
-		args?: WriteRenderArgs,
-	): Component {
-		// xd:// dispatch results render as the mounted tool's own result.
-		const xdev = result.details?.xdev;
-		if (xdev) {
-			const delegated = renderXdevResult(xdev, result, options, uiTheme, options.renderContext?.resolveXdevMounted);
-			if (delegated) return delegated;
-			const text = result.content?.find(c => c.type === "text")?.text ?? "";
-			return new Text(uiTheme.fg("toolOutput", replaceTabs(text)), 0, 0);
-		}
-		const rawPath =
-			typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
-		const filePath = shortenPath(rawPath);
-		const fileContent = normalizeDisplayText(args?.content);
-		const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
-		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
-		// The header shows the cwd-relative path but links to the absolute path the
-		// write resolved to (args.path may be relative, which would yield a broken
-		// `file://` URI). Falls back to plain text when the result lacks a path.
-		const linkTarget = result.details?.resolvedPath;
-		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
-		const pathDisplay = filePath && linkTarget ? fileHyperlink(linkTarget, styledPath) : styledPath;
-
-		if (result.isError) {
-			const errorText = result.content?.find(c => c.type === "text")?.text ?? "";
-			const header = renderStatusLine(
-				{ icon: "error", title: "Write", description: `${langIcon} ${pathDisplay}` },
-				uiTheme,
-			);
-			return framedBlock(uiTheme, width => ({
-				header,
-				sections: [{ lines: formatErrorDetail(errorText, uiTheme).split("\n") }],
-				state: "error",
-				borderColor: "error",
-				width,
-			}));
-		}
-
-		const isPartial = options.isPartial === true;
-		const progressText = result.content?.find(c => c.type === "text")?.text ?? "";
-		const lineCount = countLines(fileContent);
-		const lineSuffix = formatLineCountSuffix(lineCount, uiTheme);
-		const execSuffix =
-			!isPartial && result.details?.madeExecutable
-				? `${uiTheme.fg("dim", " · ")}${uiTheme.fg("success", "made executable!")}`
-				: "";
-		const header = renderStatusLine(
-			{
-				icon: isPartial ? "running" : undefined,
-				iconOverride: isPartial ? undefined : uiTheme.styledSymbol("tool.write", "accent"),
-				spinnerFrame: options.spinnerFrame,
-				title: "Write",
-				description: `${langIcon} ${pathDisplay}${lineSuffix}${execSuffix}`,
-			},
-			uiTheme,
-		);
-		const diagnostics = result.details?.diagnostics;
-
-		const previewCache = createRenderedStringCache();
-		return framedBlock(uiTheme, width => {
-			const { expanded } = options;
-			let body = renderContentPreview(fileContent, expanded, lang, uiTheme, previewCache);
-			if (isPartial && progressText) {
-				const safeProgressText = truncateToWidth(
-					replaceTabs(progressText),
-					TRUNCATE_LENGTHS.LINE,
-					Ellipsis.Unicode,
-				);
-				body = `${uiTheme.fg("muted", safeProgressText)}${body ? `\n${body}` : ""}`;
-			}
-			if (!isPartial && diagnostics) {
-				const diagText = formatDiagnostics(diagnostics, expanded, uiTheme, fp =>
-					uiTheme.getLangIcon(getLanguageFromPath(fp)),
-				);
-				if (diagText.trim()) {
-					const diagLines = diagText.split("\n");
-					const firstNonEmpty = diagLines.findIndex(line => line.trim());
-					if (firstNonEmpty >= 0) body += `\n${diagLines.slice(firstNonEmpty).join("\n")}`;
-				}
-			}
-			const bodyLines = body.split("\n");
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-				state: isPartial ? "pending" : "success",
-				borderColor: "borderMuted",
-				width,
-			};
-		});
-	},
-	mergeCallAndResult: true,
-	// The collapsed pending preview follows the streaming edge with a tail
-	// window once the content outgrows it (`… (N earlier lines)` + last rows);
-	// the first partial result re-anchors the frame to the top of the file, so
-	// tail rows already committed to viewport/native scrollback would survive
-	// as stale content above the new frame without a full replay. Expanded and
-	// short previews stay top-anchored and skip the (scrollback-wiping) reset.
-	forceFirstResultViewportRepaint: (args: unknown, options: RenderResultOptions) =>
-		!options.expanded && exceedsLineCount(writeContentOf(args), WRITE_STREAMING_PREVIEW_LINES),
-};

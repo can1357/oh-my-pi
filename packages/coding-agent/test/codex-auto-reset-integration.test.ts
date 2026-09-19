@@ -24,7 +24,6 @@
  * process-wide default is never touched.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -39,6 +38,7 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 const ACCOUNT_ID = "acct-1";
 const EMAIL = "user@example.com";
@@ -149,8 +149,8 @@ describe("codex saved-reset trigger integration", () => {
 	}
 
 	function buildSession(opts: HarnessOpts): Harness {
-		const model = getBundledModel("openai-codex", "gpt-5.4");
-		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.4 to exist");
+		const model = getBundledModel("openai-codex", "gpt-5.5");
+		if (!model) throw new Error("Expected bundled openai-codex/gpt-5.5 to exist");
 		authStorage.setRuntimeApiKey("openai-codex", "test-key");
 		vi.spyOn(authStorage, "getOAuthAccountIdentity").mockReturnValue({ accountId: ACCOUNT_ID, email: EMAIL });
 		vi.spyOn(authStorage, "fetchUsageReports").mockImplementation(async () => [opts.report]);
@@ -209,7 +209,7 @@ describe("codex saved-reset trigger integration", () => {
 			liveCredits: [liveCreditStatus(1)],
 			streamErrorFirst: true,
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
 		await session.waitForIdle();
@@ -240,7 +240,7 @@ describe("codex saved-reset trigger integration", () => {
 			liveCredits: [liveCreditStatus(1)],
 			streamErrorFirst: true,
 		});
-		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		mockSchedulerWaitWithClock();
 
 		await session.prompt("trigger a codex usage limit");
 		await session.waitForIdle();

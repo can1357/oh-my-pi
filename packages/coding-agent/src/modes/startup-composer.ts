@@ -1,18 +1,21 @@
+import { scheduler } from "node:timers/promises";
 import type { Terminal } from "@oh-my-pi/pi-tui";
-import { logger } from "@oh-my-pi/pi-utils";
-import { getRecentSessions } from "../session/session-listing";
-import { computeDefaultSessionDir } from "../session/session-paths";
-import { FileSessionStorage } from "../session/session-storage";
-import type { LspServerInfo, RecentSession } from "./components/welcome";
-import { COMPOSER_DEFAULTS, Composer, type ComposerPreferences, type ComposerWelcomeUpdate } from "./composer";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import type { LspServerInfo, RecentSession } from "@oh-my-pi/pi-tui/prompt/welcome";
+import {
+	COMPOSER_DEFAULTS,
+	Composer,
+	type ComposerPreferences,
+	type ComposerWelcomeUpdate,
+} from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	type ComposerThemePreferences,
 	readComposerStartupCache,
 	writeComposerLspCache,
 	writeComposerRecentSessionsCache,
 	writeComposerUiCache,
-} from "./composer-cache";
-import { initThemeSync } from "./theme/theme";
+} from "@oh-my-pi/pi-tui/prompt/composer-cache";
+import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
 export interface PrepaintComposerOptions {
@@ -112,7 +115,9 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 	}
 	const pending: PendingComposer = { composer, cwd, cache: useCache };
 	pendingComposer = pending;
-	pending.recentSessions = refreshRecentSessions(pending, options.recentSessions);
+	// Keep filesystem discovery out of the synchronous prepaint turn. Composer.start()
+	// has queued the first frame; recents can begin once the event loop yields.
+	pending.recentSessions = loadRecentSessionsAfterFirstFrame(pending, options.recentSessions);
 }
 
 /** Take the live prepaint composer away from the module-level startup owner. */
@@ -168,10 +173,11 @@ export function setStartupComposerLspServers(servers: LspServerInfo[]): void {
 	}
 }
 
-async function refreshRecentSessions(
+async function loadRecentSessionsAfterFirstFrame(
 	pending: PendingComposer,
 	loadOverride: (() => Promise<RecentSession[]>) | undefined,
 ): Promise<RecentSession[] | undefined> {
+	await scheduler.yield();
 	try {
 		const sessions = loadOverride ? await loadOverride() : await loadRecentSessions(pending.cwd);
 		if (pending.cache) {
@@ -190,6 +196,11 @@ async function refreshRecentSessions(
 }
 
 async function loadRecentSessions(cwd: string): Promise<RecentSession[]> {
+	const [{ getRecentSessions }, { computeDefaultSessionDir }, { FileSessionStorage }] = await Promise.all([
+		import("../session/session-listing"),
+		import("../session/session-paths"),
+		import("../session/session-storage"),
+	]);
 	const storage = new FileSessionStorage();
 	const dir = computeDefaultSessionDir(cwd, storage);
 	const list = await getRecentSessions(dir, 4, storage);

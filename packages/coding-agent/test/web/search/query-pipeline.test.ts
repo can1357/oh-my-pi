@@ -9,7 +9,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
-import type { SearchProviderId, SearchResponse, SearchSource } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import type { SearchProviderId, SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
 
 const SOURCES: SearchSource[] = [
 	{ title: "Docs page", url: "https://docs.example.com/guide" },

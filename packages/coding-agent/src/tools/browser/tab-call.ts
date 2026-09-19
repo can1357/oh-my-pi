@@ -1,5 +1,5 @@
-import { renderRunArg } from "../run-code";
-import { ToolError } from "../tool-errors";
+import { renderCallChain, renderRunArg } from "../run-code";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /** One allowlisted method invocation in a tab call chain. */
 export interface TabCallStep {
@@ -55,12 +55,8 @@ export const ELEMENT_METHODS: readonly string[] = [
 const DIRECT_METHODS_DESCRIPTION = [...TAB_VALUE_METHODS, ...TAB_PRESENCE_METHODS].join(", ");
 const ELEMENT_METHODS_DESCRIPTION = ELEMENT_METHODS.join(", ");
 
-function renderStep(step: TabCallStep): string {
-	return `${step.method}(${step.args.map(renderRunArg).join(", ")})`;
-}
-
 function renderElementStep(step: TabCallStep): string {
-	if (step.method !== "evaluate" || typeof step.args[0] !== "string") return renderStep(step);
+	if (step.method !== "evaluate" || typeof step.args[0] !== "string") return renderCallChain([step]);
 	const [source, ...args] = step.args;
 	const renderedArgs = args.map(value => `, ${renderRunArg(value)}`).join("");
 	return `evaluate((${source})${renderedArgs})`;
@@ -80,13 +76,13 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 		if (chain.length === 2) {
 			throw new ToolError(`Only tab.id(n)/tab.ref(id) results accept a chained call; got tab.${root.method}().`);
 		}
-		return `return await tab.${renderStep(root)};`;
+		return `return await tab.${renderCallChain([root])};`;
 	}
 	if (TAB_PRESENCE_METHODS.includes(root.method)) {
 		if (chain.length === 2) {
 			throw new ToolError(`Only tab.id(n)/tab.ref(id) results accept a chained call; got tab.${root.method}().`);
 		}
-		return `return (await tab.${renderStep(root)}) !== null;`;
+		return `return (await tab.${renderCallChain([root])}) !== null;`;
 	}
 	if (TAB_HANDLE_METHODS.includes(root.method)) {
 		if (chain.length === 1) {
@@ -100,7 +96,7 @@ export function renderTabCall(chain: readonly TabCallStep[]): string {
 				`Unknown element method "${element.method}". Element handles support: ${ELEMENT_METHODS_DESCRIPTION}.`,
 			);
 		}
-		return `return await (await tab.${renderStep(root)}).${renderElementStep(element)};`;
+		return `return await (await tab.${renderCallChain([root])}).${renderElementStep(element)};`;
 	}
 
 	throw new ToolError(

@@ -1,9 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import {
-	rankSessionSearchMatches,
-	SessionSelectorComponent,
-} from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { rankSessionSearchMatches, SessionSelectorComponent } from "@oh-my-pi/pi-tui/overlays/session-selector";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 
 /**
@@ -48,7 +45,7 @@ function makeCorpus(): SessionInfo[] {
 }
 
 interface Harness {
-	selector: SessionSelectorComponent;
+	selector: SessionSelectorComponent<SessionInfo>;
 	type: (text: string) => void;
 	/** Sessions currently in the filtered list, probed through the public selection surface. */
 	filtered: () => SessionInfo[];
@@ -162,6 +159,56 @@ describe("session picker incremental search", () => {
 		// History match leads the ranking and the merge requested a re-render.
 		expect(harness.filtered()[0]!.id).toBe("s-105");
 		expect(harness.renders()).toBeGreaterThan(rendersBefore);
+	});
+
+	it("keeps title matches in canonical order before and after history arrives", () => {
+		const sessions = [
+			makeSession("body", { firstMessage: "dashboard", modified: new Date(5) }),
+			makeSession("partial-new", { title: "Dashboard notes", modified: new Date(4) }),
+			makeSession("partial-old", { title: "Old dashboard", modified: new Date(3) }),
+			makeSession("exact-c", { title: "dashboard", modified: new Date(2), created: new Date(2) }),
+			makeSession("exact-a", { title: "  DASHBOARD  ", modified: new Date(2), created: new Date(2) }),
+			makeSession("exact-b", { title: "dashboard", modified: new Date(2), created: new Date(1) }),
+			makeSession("history"),
+		];
+		const harness = makeHarness(sessions, () => ["history", "exact-a", "body"]);
+		harness.type("dashboard");
+		const before = ids(harness.filtered());
+		expect(before).toEqual(["exact-c", "exact-a", "exact-b", "partial-new", "partial-old", "body"]);
+		expect(ids(rankSessionSearchMatches(sessions, "dashboard"))).toEqual(before);
+		vi.runAllTimers();
+		expect(ids(harness.filtered())).toEqual([...before.slice(0, 5), "history", "body"]);
+		harness.selector.dispose();
+	});
+
+	it("preserves imported exact and partial title ties in source order", () => {
+		const sessions = [
+			makeSession("a-partial", { title: "Dashboard notes", created: new Date(1) }),
+			makeSession("b-exact", { title: "dashboard", created: new Date(1) }),
+			makeSession("c-partial", { title: "Old dashboard", created: new Date(2) }),
+			makeSession("d-exact", { title: "dashboard", created: new Date(2) }),
+		];
+		// Codex lists equal-mtime sessions by ID ascending, regardless of creation time.
+		const harness = makeHarness(sessions);
+		harness.type("dashboard");
+		const expected = ["b-exact", "d-exact", "a-partial", "c-partial"];
+		expect(ids(harness.filtered())).toEqual(expected);
+		expect(ids(rankSessionSearchMatches(sessions, "dashboard"))).toEqual(expected);
+		harness.selector.dispose();
+	});
+
+	it("prioritizes titles containing every query token even without a full-title match", () => {
+		const sessions = [
+			makeSession("body", { title: "textcom", firstMessage: "dashboard", modified: new Date(3) }),
+			makeSession("title", { title: "Textcom-dashboard", modified: new Date(1) }),
+			makeSession("history"),
+		];
+		const harness = makeHarness(sessions, () => ["history", "body"]);
+		harness.type("  TEXTCOM   dashb ");
+		expect(ids(harness.filtered())).toEqual(["title", "body"]);
+		vi.runAllTimers();
+		expect(ids(harness.filtered())).toEqual(["title", "history", "body"]);
+		harness.selector.dispose();
 	});
 
 	it("skips the history merge after the user moves the selection", () => {

@@ -93,6 +93,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"clamp-output-to-model-max": wire("clampOutputToModelMax", OAI),
 	"disable-reasoning-on-forced-tool-choice": wire("disableReasoningOnForcedToolChoice", OAI),
 	"disable-reasoning-on-tool-choice": wire("disableReasoningOnToolChoice", OAI),
+	"disable-reasoning-with-tools": wire("disableReasoningWithTools", ["openai"]),
 	"drop-thinking-when-reasoning-effort": wire("dropThinkingWhenReasoningEffort", ["openai"]),
 	"empty-length-finish-is-context-error": wire("emptyLengthFinishIsContextError", OAI),
 	"extra-body": { ...wire("extraBody", ["openai"], "object"), verbatimKeys: true },
@@ -192,6 +193,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"disable-adaptive-thinking": wire("disableAdaptiveThinking", ["anthropic"]),
 	"disable-strict-tools": wire("disableStrictTools", ["anthropic"]),
 	"escape-builtin-tool-names": wire("escapeBuiltinToolNames", ["anthropic"]),
+	"first-party-provider": wire("firstPartyProvider", ["anthropic"]),
 	"inject-claude-code-instruction": wire("injectClaudeCodeInstruction", ["anthropic"]),
 	"official-endpoint": wire("officialEndpoint", ["anthropic", "openai-responses"]),
 	"replay-unsigned-thinking": wire("replayUnsignedThinking", ["anthropic"]),
@@ -205,6 +207,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-mid-conversation-system": wire("supportsMidConversationSystem", ["anthropic"]),
 	"supports-mid-conversation-tool-changes": wire("supportsMidConversationToolChanges", ["anthropic"]),
 	"supports-per-message-effort": wire("supportsPerMessageEffort", ["anthropic"]),
+	"supports-server-compaction": wire("supportsServerCompaction", ["anthropic"]),
 	"supports-thinking-binding-controls": wire("supportsThinkingBindingControls", ["anthropic"]),
 	"supports-turn-scoped-system": wire("supportsTurnScopedSystem", ["anthropic"]),
 
@@ -233,6 +236,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-function-part-id": wire("supportsFunctionPartId", ["google"]),
 
 	// ── wire: shared across surfaces ──
+	/**
+	 * Whether this wire may revise text it has already streamed: bytes
+	 * reclassified out of the visible channel (a leaned-on thinking opener),
+	 * carved into a tool call, reordered by content-block index, or replaced
+	 * wholesale by an authoritative final payload. Unassigned means the wire
+	 * only appends, so the transcript may retire finished lines into native
+	 * scrollback while the turn is still streaming (see
+	 * `AssistantMessageComponent`). Declare `possible` only with a citable
+	 * mechanism: the renderer also verifies published rows every frame and stops
+	 * retiring the block on the first mismatch, so this axis decides where
+	 * mid-stream retirement is attempted, not whether it is safe.
+	 */
+	"stream-revision": wire("streamRevision", [...OAI, "bedrock"], "scalar", ["none", "possible"]),
 	"stream-first-event-timeout-ms": wire("streamFirstEventTimeoutMs", [...OAI, "google"]),
 	"stream-idle-timeout-ms": wire("streamIdleTimeoutMs", [...OAI, "anthropic", "bedrock", "google"]),
 	"strip-image-input": wire("stripImageInput", [...OAI, "anthropic", "google"]),
@@ -259,6 +275,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"thinking-prefix-binding": { key: "prefixBinding", set: "thinking", shape: "scalar" },
 	"thinking-suppress-when-off": { key: "suppressWhenOff", set: "thinking", shape: "scalar" },
 	"thinking-supports-display": { key: "supportsDisplay", set: "thinking", shape: "scalar" },
+	"thinking-upgrade-neutral": { key: "upgradeNeutral", set: "thinking", shape: "scalar" },
 
 	// ── catalog metadata ──
 	"apply-patch-tool-type": {
@@ -271,6 +288,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },
 	"context-window-floor": { key: "contextWindowFloor", set: "catalog", shape: "scalar" },
 	"cost-patch": { key: "costPatch", set: "catalog", shape: "object" },
+	"cost-fallback": { key: "costFallback", set: "catalog", shape: "object" },
 	"delegation-bias": { key: "delegationBias", set: "catalog", shape: "scalar", values: DELEGATION_BIASES },
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
 	"edit-revision": { key: "editRevision", set: "catalog", shape: "scalar" },
@@ -284,8 +302,15 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		set: "catalog",
 		shape: "scalar",
 	},
+	"requires-tool-result-image-hoisting": {
+		key: "requiresToolResultImageHoisting",
+		set: "catalog",
+		shape: "scalar",
+	},
+	"supports-assistant-prefill": { key: "supportsAssistantPrefill", set: "catalog", shape: "scalar" },
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
+	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },
 };
 
 /** Records applicable to each API family; used by `resolve.ts` when applying wire axes. */

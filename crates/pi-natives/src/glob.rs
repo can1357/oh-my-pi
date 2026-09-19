@@ -217,7 +217,8 @@ fn run_glob(
 	};
 
 	if config.sort_by_mtime {
-		// Sorting mode: rank by mtime descending, then apply max-results truncation.
+		// Sorting mode: rank by mtime descending, then apply max-results
+		// truncation.
 		matches.sort_by(compare_matches_by_rank);
 		matches.truncate(config.max_results);
 		if let Some(callback) = on_match {

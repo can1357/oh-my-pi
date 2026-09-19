@@ -1,10 +1,6 @@
 import type { AgentStorage } from "../../../session/agent-storage";
-import {
-	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	SearchProviderError,
-	type SearchProviderId,
-	type SearchSource,
-} from "../../../web/search/types";
+import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
+import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
 import { dateToAgeSeconds } from "../utils";
 
 /**
@@ -127,4 +123,61 @@ export function classifyProviderHttpError(
 		return new SearchProviderError(provider, `${provider}: 403 forbidden`, status);
 	}
 	return null;
+}
+
+/**
+ * Collapse runs of whitespace in a loosely-typed provider field, returning
+ * `undefined` for missing/non-string/blank values. Shared so tab/newline
+ * folding cannot drift between providers.
+ */
+export function normalizeSearchText(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const text = value.replace(/\s+/g, " ").trim();
+	return text.length > 0 ? text : undefined;
+}
+
+/**
+ * Read a provider response body up to a byte cap, truncating or throwing when
+ * the limit is exceeded. Shared so streaming-cap fixes land in one place.
+ */
+export async function readLimitedText(
+	response: Response,
+	provider: SearchProviderId,
+	maxBytes: number,
+	truncate = false,
+): Promise<string> {
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	let buffer = new Uint8Array(Math.min(maxBytes, 64 * 1024));
+	let bytes = 0;
+
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			const accepted = Math.min(value.byteLength, maxBytes - bytes);
+			const nextBytes = bytes + accepted;
+			if (nextBytes > buffer.byteLength) {
+				const grown = new Uint8Array(Math.min(maxBytes, Math.max(nextBytes, buffer.byteLength * 2)));
+				grown.set(buffer.subarray(0, bytes));
+				buffer = grown;
+			}
+			buffer.set(value.subarray(0, accepted), bytes);
+			bytes = nextBytes;
+			if (accepted < value.byteLength) {
+				await reader.cancel().catch(() => undefined);
+				if (!truncate)
+					throw new SearchProviderError(
+						provider,
+						`${SEARCH_PROVIDER_LABELS[provider]} API response exceeded 2 MiB`,
+						500,
+					);
+				break;
+			}
+		}
+	} finally {
+		reader.releaseLock();
+	}
+
+	return new TextDecoder().decode(buffer.subarray(0, bytes));
 }

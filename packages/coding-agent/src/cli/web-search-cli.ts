@@ -8,11 +8,11 @@ import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { Settings } from "../config/settings";
-import { initTheme, theme } from "../modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { runSearchQuery, type SearchQueryParams } from "../web/search/index";
 import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
-import { renderSearchResult } from "../web/search/render";
-import type { SearchProviderId } from "../web/search/types";
+import { renderSearchResult } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchProviderId } from "@oh-my-pi/pi-tui/tools/web-search";
 
 export interface SearchCommandArgs {
 	query: string;

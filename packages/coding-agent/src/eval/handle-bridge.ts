@@ -1,7 +1,8 @@
 import type { AsyncJob, AsyncJobManager } from "../async";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
-import { ToolAbortError, ToolError } from "../tools/tool-errors";
+import { ToolAbortError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -114,7 +115,9 @@ function completionSnapshot(ref: EvalHandleRef, entry: CompletionHandleEntry): E
 			error: entry.error,
 		};
 	}
-	return { ...ref, status: "completed", text: entry.result?.text ?? "" };
+	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: entry.result?.text ?? "" };
+	if (entry.result && Object.hasOwn(entry.result, "data")) snapshot.data = entry.result.data;
+	return snapshot;
 }
 
 function snapshot(resolved: ResolvedHandle): EvalHandleSnapshot {
@@ -132,11 +135,15 @@ function cancelResolved(resolved: ResolvedHandle, reason?: unknown): boolean {
 	return true;
 }
 
-function emitProgress(resolved: ResolvedHandle, emitStatus: ((event: JsStatusEvent) => void) | undefined): void {
-	if (!emitStatus || !("job" in resolved)) return;
+function emitProgress(
+	resolved: ResolvedHandle,
+	emitStatus: ((event: JsStatusEvent) => void) | undefined,
+	previousProgress: unknown,
+): unknown {
+	if (!emitStatus || !("job" in resolved)) return previousProgress;
 	const progress = resolved.job.latestDetails?.progress;
 	const first = Array.isArray(progress) ? progress[0] : undefined;
-	if (!isUnknownRecord(first)) return;
+	if (!isUnknownRecord(first) || first === previousProgress) return previousProgress;
 	const task = typeof first.assignment === "string" ? first.assignment : first.task;
 	const taskPreview = typeof task === "string" ? task.split("\n")[0]?.slice(0, 120) : undefined;
 	emitStatus({
@@ -145,6 +152,7 @@ function emitProgress(resolved: ResolvedHandle, emitStatus: ((event: JsStatusEve
 		id: resolved.job.agentId ?? resolved.job.id,
 		taskPreview: taskPreview || undefined,
 	});
+	return first;
 }
 
 async function waitForSettlement(
@@ -186,12 +194,18 @@ export async function runEvalWait(
 ): Promise<{ items: EvalHandleSnapshot[] }> {
 	const { items, timeoutMs } = parseRefs(args);
 	const resolved = items.map(item => resolveHandle(item, options));
+	const emittedProgress = new Map<string, unknown>();
+	const emitLatestProgress = (handle: ResolvedHandle): void => {
+		if (!("job" in handle)) return;
+		const progress = emitProgress(handle, options.emitStatus, emittedProgress.get(handle.ref.id));
+		if (progress) emittedProgress.set(handle.ref.id, progress);
+	};
 	return await withBridgeTimeoutPause(
 		options.emitStatus,
 		async () => {
-			for (const handle of resolved) emitProgress(handle, options.emitStatus);
+			for (const handle of resolved) emitLatestProgress(handle);
 			const interval = setInterval(() => {
-				for (const handle of resolved) emitProgress(handle, options.emitStatus);
+				for (const handle of resolved) emitLatestProgress(handle);
 			}, 1_000);
 			interval.unref?.();
 			let outcome: "settled" | "timeout" | "aborted";
@@ -200,7 +214,7 @@ export async function runEvalWait(
 			} finally {
 				clearInterval(interval);
 			}
-			for (const handle of resolved) emitProgress(handle, options.emitStatus);
+			for (const handle of resolved) emitLatestProgress(handle);
 			if (outcome === "aborted") {
 				for (const handle of resolved) cancelResolved(handle, options.signal?.reason);
 				await Promise.allSettled(

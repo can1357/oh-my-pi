@@ -7,7 +7,7 @@ use pi_edit::modes::sloppy::{
 };
 
 fn message(input: &str, content: &str) -> String {
-	parse_operations(input, content)
+	parse_operations(input, content, "a.ts")
 		.expect_err("payload must fail")
 		.to_string()
 }
@@ -243,7 +243,7 @@ fn tag_surface_leniency_supports_implicit_find_put_all_and_inline_tags() {
 	));
 	assert_eq!(sections.len(), 1);
 	assert_eq!(sections[0].body, "«*\nold line\n»\nnew line\n«*\nx\n»");
-	let operations = parse_operations(&sections[0].body, "old line\nx\n").unwrap();
+	let operations = parse_operations(&sections[0].body, "old line\nx\n", "a.ts").unwrap();
 	assert_eq!(operations.len(), 2);
 	assert!(operations.iter().all(|operation| operation.all));
 	assert!(
@@ -280,7 +280,7 @@ fn returns_the_complete_atomic_payload_when_an_operation_lacks_sm_put() {
 	assert!(error.contains("Operation 2 has <SM:FIND> but no <SM:PUT>."));
 	assert_eq!(error.matches("Copy-ready corrected payload").count(), 1);
 	assert!(error.contains(concat!(
-		"<SM:EDIT>\n<SM:FIND>\nkeep();\n</SM:FIND>\n",
+		"<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nkeep();\n</SM:FIND>\n",
 		"<SM:PUT>\n{new text}\n</SM:PUT>\n</SM:EDIT>",
 	)));
 }
@@ -293,7 +293,7 @@ fn hands_back_a_fill_in_skeleton_for_a_truncated_register_rewrite_without_echoin
 		error.contains("»1 after <SM:FIND> reads as the <SM:PUT> separator, leaving <SM:PUT> empty.")
 	);
 	assert!(error.contains(concat!(
-		"<SM:EDIT all>\n<SM:FIND>\nenwlineIndex\n",
+		"<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\nenwlineIndex\n",
 		"</SM:FIND>\n<SM:PUT>\n{final text}\n</SM:PUT>\n",
 		"</SM:EDIT>",
 	)));
@@ -357,7 +357,7 @@ fn drops_a_text_block_the_payload_fully_occupied_leaving_only_the_region() {
 #[test]
 fn parses_marker_add_runs_as_inline_insertions_without_consuming_the_next_anchor_twice() {
 	let operations =
-		parse_operations("«\nfirst();\n＋added();\nlast();", "first();\nlast();\n").unwrap();
+		parse_operations("«\nfirst();\n＋added();\nlast();", "first();\nlast();\n", "a.ts").unwrap();
 	assert_eq!(operations.len(), 1);
 	assert!(
 		matches!(&operations[0].rewrite, OperationRewrite::Inline { replacements } if replacements == &["added();\n".to_owned()])
@@ -370,6 +370,7 @@ fn recovers_a_rewrite_written_as_a_selection_directive_list() {
 	let operations = parse_operations(
 		"«\nconst value = oldValue;\n»\n⟪oldValue│newValue⟫",
 		"const value = oldValue;\n",
+		"a.ts",
 	)
 	.unwrap();
 	assert_eq!(operations.len(), 1);
@@ -388,7 +389,7 @@ fn recovers_a_rewrite_written_as_a_selection_directive_list() {
 #[test]
 fn recovers_a_stray_close_typed_as_an_inline_divider() {
 	let operations =
-		parse_operations("«\nconst \u{27ea}old\u{27eb}new\u{27eb};", "const old;\n").unwrap();
+		parse_operations("«\nconst \u{27ea}old\u{27eb}new\u{27eb};", "const old;\n", "a.ts").unwrap();
 	assert_eq!(operations[0].pattern_text, "const \u{27ea}old\u{27eb};");
 	assert!(
 		matches!(&operations[0].rewrite, OperationRewrite::Inline { replacements } if replacements == &["new".to_owned()])
@@ -407,6 +408,7 @@ fn auto_splits_a_uniquely_matching_match_prefix_from_an_omitted_separator() {
 	let operations = parse_operations(
 		"«\nconst value = oldValue;\nconst value = newValue;",
 		"const value = oldValue;\nreport(value);\n",
+		"a.ts",
 	)
 	.unwrap();
 	assert_eq!(operations[0].pattern_text, "const value = oldValue;");
@@ -420,6 +422,7 @@ fn recovers_guillemets_used_as_brackets_around_old_and_new_blocks() {
 	let operations = parse_operations(
 		"«\nconst first = old;\n»\n«\nconst first = new;\n»",
 		"const first = old;\n",
+		"a.ts",
 	)
 	.unwrap();
 	assert_eq!(operations.len(), 1);
@@ -432,11 +435,90 @@ fn recovers_guillemets_used_as_brackets_around_old_and_new_blocks() {
 #[test]
 fn ir_to_xml_preserves_operation_boundaries_and_all() {
 	assert_eq!(
-		ir_to_xml(&["«*", "old", "»", "new", "«", "x"]),
+		ir_to_xml(&["«*", "old", "»", "new", "«", "x"], "a.ts"),
 		concat!(
-			"<SM:EDIT all>\n<SM:FIND>\nold\n</SM:FIND>\n",
-			"<SM:PUT>\nnew\n</SM:PUT>\n</SM:EDIT>\n<SM:EDIT>\n",
+			"<SM:EDIT path=\"a.ts\" all>\n<SM:FIND>\nold\n</SM:FIND>\n",
+			"<SM:PUT>\nnew\n</SM:PUT>\n</SM:EDIT>\n<SM:EDIT path=\"a.ts\">\n",
 			"<SM:FIND>\nx\n</SM:FIND>\n</SM:EDIT>",
 		)
 	);
+}
+
+/// `read` emits three truncation-notice families, and a projection copied into
+/// an edit body must lose all of them alike. The `[N more lines in ...]` family
+/// used to survive normalization, so the copied row became part of the matched
+/// pattern -- and of the text written back -- instead of being dropped like the
+/// other two. Each label names a different entity read can truncate.
+#[test]
+fn drops_a_copied_more_lines_notice_like_the_other_read_notices() {
+	for notice in [
+		"[Showing lines 1-2 of 8. Use :3 to continue]",
+		"[6 more lines in file. Use :3 to continue]",
+		"[6 more lines in notebook. Use :3 to continue]",
+		"[6 more lines in archive entry. Use :3 to continue]",
+		"[6 more lines in artifact. Use https://omp.sh/a:3 to continue]",
+		"[More lines in artifact (1.2 MB total; not scanned to EOF). Use https://omp.sh/a:3 to \
+		 continue]",
+		"[\u{2026}6ln elided; re-read needed ranges with a.txt:3-8]",
+	] {
+		let payload = [
+			"<SM:EDIT path=\"a.txt\">",
+			"<SM:FIND>",
+			"keep a",
+			"keep b",
+			notice,
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"keep a",
+			"changed b",
+			notice,
+			"</SM:PUT>",
+		]
+		.join("\n");
+		let operations = parse_operations(&payload, "keep a\nkeep b\n", "a.ts")
+			.unwrap_or_else(|error| panic!("{notice} defeated matching: {error}"));
+		assert_eq!(
+			operations[0].pattern_text, "keep a\nkeep b",
+			"the copied row reached the pattern: {notice}"
+		);
+		assert_eq!(
+			operations[0].rewrite,
+			OperationRewrite::Explicit { text: "keep a\nchanged b".to_owned() },
+			"the copied row reached the rewrite: {notice}"
+		);
+	}
+}
+
+/// Only read's actual notice shape counts: a label, then `. Use ... to
+/// continue`. Ordinary content that merely contains the phrase has to survive,
+/// or the filter would silently delete real lines from the pattern or the
+/// rewrite.
+#[test]
+fn keeps_content_that_only_resembles_a_more_lines_notice() {
+	for line in ["[3 more lines in the appendix]", "[More lines in artifact]"] {
+		let payload = [
+			"<SM:EDIT path=\"a.txt\">",
+			"<SM:FIND>",
+			"keep a",
+			line,
+			"</SM:FIND>",
+			"<SM:PUT>",
+			"keep b",
+			line,
+			"</SM:PUT>",
+		]
+		.join("\n");
+		let operations = parse_operations(&payload, &format!("keep a\n{line}\n"), "a.ts")
+			.unwrap_or_else(|error| panic!("{line} broke matching: {error}"));
+		assert_eq!(
+			operations[0].pattern_text,
+			format!("keep a\n{line}"),
+			"a content line was filtered as a notice: {line}"
+		);
+		assert_eq!(
+			operations[0].rewrite,
+			OperationRewrite::Explicit { text: format!("keep b\n{line}") },
+			"a content line was filtered out of the rewrite: {line}"
+		);
+	}
 }
