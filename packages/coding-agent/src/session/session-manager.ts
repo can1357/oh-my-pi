@@ -683,7 +683,7 @@ export class ForkSourceNotFoundError extends Error {
  * repointed.
  */
 export class SessionManager {
-	#cwd: string;
+	#executionCwd: string;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
 	#additionalDirectories: string[] = [];
 	#fallbackRuntimeOnly = false;
@@ -789,7 +789,7 @@ export class SessionManager {
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
-		this.#cwd = cwd;
+		this.#executionCwd = cwd;
 		this.#sessionDir = sessionDir;
 		this.#persist = persist;
 		this.#storage = storage;
@@ -809,7 +809,7 @@ export class SessionManager {
 	 */
 	#materializeBreadcrumb(): void {
 		if (!this.#breadcrumbFresh || !this.#sessionFile) return;
-		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, false);
+		this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile, false);
 	}
 
 	#clearDiskError(): void {
@@ -1469,6 +1469,7 @@ export class SessionManager {
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
 		this.#reconcileSessionDirForFallback();
+		const sessionHome = this.#executionCwd;
 		this.#sessionId = mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
@@ -1481,12 +1482,12 @@ export class SessionManager {
 			version: CURRENT_SESSION_VERSION,
 			id: this.#sessionId,
 			timestamp,
-			cwd: this.#cwd,
+			cwd: sessionHome,
 			parentSession: options?.parentSession,
 			providerPromptCacheKey: options?.providerPromptCacheKey,
 		};
 		const workspace = normalizeSessionWorkspace({
-			cwd: this.#cwd,
+			cwd: this.#executionCwd,
 			directories: options?.additionalDirectories ?? [],
 		});
 		this.#additionalDirectories = additionalWorkspaceDirectories(workspace);
@@ -1515,7 +1516,7 @@ export class SessionManager {
 			this.#sessionFile =
 				forcedSessionFile ??
 				path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
-			this.#rememberBreadcrumb(this.#cwd, this.#sessionFile, true);
+			this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile, true);
 		} else {
 			this.#sessionFile = undefined;
 		}
@@ -1662,7 +1663,7 @@ export class SessionManager {
 
 	captureState(): SessionManagerStateSnapshot {
 		return {
-			cwd: this.#cwd,
+			cwd: this.#executionCwd,
 			sessionDir: this.#sessionDir,
 			sessionId: this.#sessionId,
 			sessionName: this.#sessionName,
@@ -1692,7 +1693,7 @@ export class SessionManager {
 	 */
 	cloneCurrentSession(options?: { persist?: boolean }): SessionManager {
 		const persist = options?.persist ?? this.#persist;
-		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
+		const clone = new SessionManager(this.#executionCwd, this.#sessionDir, persist, this.#storage);
 		clone.#suppressBreadcrumb = true;
 		clone.restoreState(this.captureState());
 		if (!persist) {
@@ -1710,7 +1711,7 @@ export class SessionManager {
 		this.#diskTail = Promise.resolve();
 		this.#clearDiskError();
 
-		this.#cwd = snapshot.cwd;
+		this.#executionCwd = snapshot.cwd;
 		this.#sessionDir = snapshot.sessionDir;
 		this.#sessionFile = snapshot.sessionFile;
 		this.#expectedDiskSize = snapshot.expectedDiskSize;
@@ -1730,7 +1731,7 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 		this.#adoptedArtifactManager = null;
 
-		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+		if (this.#sessionFile) this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile);
 	}
 
 	/**
@@ -1799,7 +1800,7 @@ export class SessionManager {
 		}
 
 		this.#sessionFile = resolvedSessionFile;
-		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
+		this.#rememberBreadcrumb(this.#executionCwd, resolvedSessionFile);
 
 		const { entries: fileEntries, titleSlot } = loaded;
 		if (fileEntries.length === 0) {
@@ -1832,12 +1833,12 @@ export class SessionManager {
 		// cannot enter. Keep the current cwd so the session stays where the
 		// user already is.
 		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryIsEnterable(headerCwd))) {
-			this.#cwd = headerCwd;
+		if (headerCwd && headerCwd !== path.resolve(this.#executionCwd) && (await directoryIsEnterable(headerCwd))) {
+			this.#executionCwd = headerCwd;
 			this.#sessionDir = path.dirname(resolvedSessionFile);
 			this.#fallbackRuntimeOnly = false;
-			this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
-		} else if (headerCwd && headerCwd !== path.resolve(this.#cwd)) {
+			this.#rememberBreadcrumb(this.#executionCwd, resolvedSessionFile);
+		} else if (headerCwd && headerCwd !== path.resolve(this.#executionCwd)) {
 			// Header cwd not enterable: keep runtime cwd but mark fallback
 			// so workspace changes stay runtime-only until the transcript
 			// is relocated.
@@ -1895,6 +1896,7 @@ export class SessionManager {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#reconcileSessionDirForFallback();
+		const sessionHome = this.#executionCwd;
 
 		const timestamp = nowIso();
 		this.#sessionId = mintSessionId();
@@ -1907,7 +1909,7 @@ export class SessionManager {
 			title: this.#header.title ?? this.#sessionName,
 			titleSource: this.#header.titleSource ?? this.#titleSource,
 			timestamp,
-			cwd: this.#cwd,
+			cwd: sessionHome,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
 			parentSession: parentSessionId,
 			providerPromptCacheKey: this.#header.providerPromptCacheKey ?? parentSessionId,
@@ -1922,7 +1924,7 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = false;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
-		this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+		this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile);
 
 		await this.#rewriteAtomically();
 		return { oldSessionFile, newSessionFile: this.#sessionFile };
@@ -1932,7 +1934,8 @@ export class SessionManager {
 	async moveTo(newCwd: string, targetSessionDir?: string): Promise<void> {
 		const resolvedCwd = path.resolve(newCwd);
 		const resolvedTargetDir = targetSessionDir ? path.resolve(targetSessionDir) : undefined;
-		const managedRoot = resolveManagedSessionRoot(this.#sessionDir, this.#cwd);
+		const sourceBucketCwd = this.#fallbackRuntimeOnly ? this.#executionCwd : this.getSessionHome();
+		const managedRoot = resolveManagedSessionRoot(this.#sessionDir, sourceBucketCwd);
 		const nextSessionDir =
 			resolvedTargetDir ??
 			(managedRoot
@@ -1942,7 +1945,7 @@ export class SessionManager {
 			? path.join(nextSessionDir, path.basename(this.#sessionFile))
 			: undefined;
 		if (
-			resolvedCwd === path.resolve(this.#cwd) &&
+			resolvedCwd === path.resolve(this.#executionCwd) &&
 			!this.#fallbackRuntimeOnly &&
 			(!resolvedTargetDir || resolvedTargetDir === path.resolve(this.#sessionDir)) &&
 			(!expectedSessionFile || path.resolve(this.#sessionFile!) === path.resolve(expectedSessionFile))
@@ -2045,7 +2048,7 @@ export class SessionManager {
 				this.#sessionFileRelocating = null;
 			}
 
-			this.#cwd = resolvedCwd;
+			this.#executionCwd = resolvedCwd;
 			this.#sessionDir = nextSessionDir;
 			this.#header.cwd = resolvedCwd;
 			// Clear only after the rename has landed. If the move threw,
@@ -2091,8 +2094,9 @@ export class SessionManager {
 		options?: { sessionDir?: string; suppressBreadcrumb?: boolean },
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionManager> {
-		const sessionDir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(this.#cwd, undefined, storage);
-		const manager = new SessionManager(this.#cwd, sessionDir, true, storage);
+		const sessionHome = this.#executionCwd;
+		const sessionDir = options?.sessionDir ?? SessionManager.getDefaultSessionDir(sessionHome, undefined, storage);
+		const manager = new SessionManager(sessionHome, sessionDir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
 		manager.#resetToNewSession();
 		manager.#sessionName = this.#sessionName;
@@ -2342,7 +2346,11 @@ export class SessionManager {
 	}
 
 	getCwd(): string {
-		return this.#cwd;
+		return this.#executionCwd;
+	}
+
+	getSessionHome(): string {
+		return this.#header?.cwd || this.#executionCwd;
 	}
 
 	/** Recorded cwd from the session header (original project), may differ from runtime {@link getCwd} when fallback retained launch cwd. */
@@ -2352,11 +2360,11 @@ export class SessionManager {
 
 	setCwdWithoutRelocation(newCwd: string): void {
 		const resolvedCwd = path.resolve(newCwd);
-		if (resolvedCwd === path.resolve(this.#cwd)) {
+		if (resolvedCwd === path.resolve(this.#executionCwd)) {
 			this.#fallbackRuntimeOnly = true;
 			return;
 		}
-		this.#cwd = resolvedCwd;
+		this.#executionCwd = resolvedCwd;
 		this.#fallbackRuntimeOnly = true;
 		if (this.#sessionFile) {
 			this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
@@ -2365,10 +2373,10 @@ export class SessionManager {
 	adoptRecordedCwd(): void {
 		const recordedCwd = this.#header.cwd;
 		if (!recordedCwd) return;
-		this.#cwd = path.resolve(recordedCwd);
+		this.#executionCwd = path.resolve(recordedCwd);
 		if (this.#sessionFile) this.#sessionDir = path.dirname(this.#sessionFile);
 		this.#fallbackRuntimeOnly = false;
-		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
+		if (this.#sessionFile) this.#rememberBreadcrumb(this.#executionCwd, this.#sessionFile);
 	}
 
 	/**
@@ -2380,7 +2388,7 @@ export class SessionManager {
 	 */
 	#reconcileSessionDirForFallback(): void {
 		if (this.#fallbackRuntimeOnly) {
-			this.#sessionDir = computeDefaultSessionDir(this.#cwd, this.#storage);
+			this.#sessionDir = computeDefaultSessionDir(this.#executionCwd, this.#storage);
 			this.#fallbackRuntimeOnly = false;
 		}
 	}
@@ -2409,8 +2417,8 @@ export class SessionManager {
 	 * path or `null` when the directory was already present (no-op).
 	 */
 	async addWorkspaceDirectory(directory: string): Promise<string | null> {
-		const resolved = normalizeWorkspaceDirectory(directory, this.#cwd);
-		if (resolved === path.resolve(this.#cwd)) {
+		const resolved = normalizeWorkspaceDirectory(directory, this.#executionCwd);
+		if (resolved === path.resolve(this.#executionCwd)) {
 			throw new Error("The current working directory is already the primary workspace root.");
 		}
 		if (this.#additionalDirectories.includes(resolved)) return null;
@@ -2431,7 +2439,7 @@ export class SessionManager {
 	 * `null` when the directory was not an additional root (no-op).
 	 */
 	async removeWorkspaceDirectory(directory: string): Promise<string | null> {
-		const resolved = normalizeWorkspaceDirectory(directory, this.#cwd);
+		const resolved = normalizeWorkspaceDirectory(directory, this.#executionCwd);
 		const idx = this.#additionalDirectories.findIndex(p => path.resolve(p) === resolved);
 		if (idx === -1) return null;
 		this.#additionalDirectories = this.#additionalDirectories.filter((_, i) => i !== idx);
@@ -2450,7 +2458,7 @@ export class SessionManager {
 
 	/** Seed additional directories from settings or a passed list. Also called on resumed sessions with --add-dir; persists the updated header when the session file is already durable. No-op when the normalized list is unchanged (avoids rewriting large session files on every startup). */
 	async setAdditionalDirectories(directories: string[]): Promise<void> {
-		const workspace = normalizeSessionWorkspace({ cwd: this.#cwd, directories });
+		const workspace = normalizeSessionWorkspace({ cwd: this.#executionCwd, directories });
 		const next = additionalWorkspaceDirectories(workspace);
 		// In fallback keep edits runtime-only until relocation.
 		if (this.#fallbackRuntimeOnly) {
@@ -3187,13 +3195,14 @@ export class SessionManager {
 		const timestamp = nowIso();
 		const newSessionId = mintSessionId();
 		this.#reconcileSessionDirForFallback();
+		const sessionHome = this.#executionCwd;
 		const newSessionFile = path.join(this.#sessionDir, `${fileSafeTimestamp(timestamp)}_${newSessionId}.jsonl`);
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
 			id: newSessionId,
 			timestamp,
-			cwd: this.#cwd,
+			cwd: sessionHome,
 			title: this.#sessionName,
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
@@ -3237,7 +3246,7 @@ export class SessionManager {
 		this.#sessionFile = newSessionFile;
 		this.#expectedDiskSize = null;
 		this.#rewriteSynchronously();
-		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
+		this.#rememberBreadcrumb(this.#executionCwd, newSessionFile);
 		return newSessionFile;
 	}
 
@@ -3449,7 +3458,7 @@ export class SessionManager {
 		const header = probed.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when it is verifiably
 		// accessible. A deleted or permission-blocked (macOS TCC denial) project
-		// dir would make the constructor's #cwd — and the `setProjectDir` chdir
+		// dir would make the constructor's #executionCwd — and the `setProjectDir` chdir
 		// interactive mode runs next — fail, so fall back to the launch cwd and
 		// anchor /new and /branch there too, keeping the resumed session where
 		// the user already is.

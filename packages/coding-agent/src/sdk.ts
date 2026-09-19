@@ -4207,14 +4207,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// CPU parsing big `initialize` responses concurrently with the LLM stream consumer, jittering
 		// perceived latency.
 		let lspServers: CreateAgentSessionResult["lspServers"];
+		const lspStartupCwd = sessionManager.getCwd();
 		if (enableLsp && options.hasUI && settings.get("lsp.lazy")) {
-			lspServers = discoverStartupLspServers(cwd, "available");
+			lspServers = discoverStartupLspServers(lspStartupCwd, "available");
 		} else if (enableLsp && options.hasUI) {
-			lspServers = discoverStartupLspServers(cwd);
+			lspServers = discoverStartupLspServers(lspStartupCwd);
 			if (lspServers.length > 0) {
 				void (async () => {
 					try {
-						const result = await logger.time("warmupLspServers", warmupLspServers, cwd);
+						const result = await logger.time("warmupLspServers", warmupLspServers, lspStartupCwd);
 						const serversByName = new Map(result.servers.map(server => [server.name, server] as const));
 						for (const server of lspServers ?? []) {
 							const next = serversByName.get(server.name);
@@ -4230,7 +4231,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						if (!startupQuiet) eventBus.emit(LSP_STARTUP_EVENT_CHANNEL, event);
 					} catch (error) {
 						const errorMessage = error instanceof Error ? error.message : String(error);
-						logger.warn("LSP server warmup failed", { cwd, error: errorMessage });
+						logger.warn("LSP server warmup failed", { cwd: lspStartupCwd, error: errorMessage });
 						for (const server of lspServers ?? []) {
 							server.status = "error";
 							server.error = errorMessage;

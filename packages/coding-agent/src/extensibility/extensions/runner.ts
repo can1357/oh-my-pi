@@ -622,7 +622,7 @@ export class ExtensionRunner {
 	/**
 	 * Live session directory, not a session-start snapshot: `/move`
 	 * (`SessionManager.moveTo()`) relocates the owning session by updating
-	 * `sessionManager`'s own `#cwd`, not a process-global. Reading it here
+	 * `sessionManager`'s own `#executionCwd`, not a process-global. Reading it here
 	 * via the getter — instead of caching the constructor-time value in a
 	 * field — keeps every `ExtensionContext` built below in sync with this
 	 * session's actual, current directory. Deliberately `sessionManager.getCwd()`

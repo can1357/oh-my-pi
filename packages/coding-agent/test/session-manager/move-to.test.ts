@@ -93,10 +93,12 @@ describe("SessionManager.moveTo", () => {
 
 		const oldFile = session.getSessionFile()!;
 		expect(fs.existsSync(oldFile)).toBe(true);
+		expect(session.getSessionHome()).toBe(path.resolve(cwdA));
 
 		await session.moveTo(cwdB);
 
 		expect(session.getCwd()).toBe(path.resolve(cwdB));
+		expect(session.getSessionHome()).toBe(path.resolve(cwdB));
 		expect(fs.existsSync(oldFile)).toBe(false);
 
 		const newFile = session.getSessionFile()!;
@@ -108,6 +110,7 @@ describe("SessionManager.moveTo", () => {
 		expect(header?.cwd).toBe(path.resolve(cwdB));
 		expect(header?.previousSessionFiles).toEqual([path.resolve(oldFile)]);
 		expect(hasAssistantEntry(entries)).toBe(true);
+		await session.close();
 	});
 
 	it("persists the captured header and workspace roots after a rollback relocation", async () => {
@@ -118,10 +121,12 @@ describe("SessionManager.moveTo", () => {
 		await session.flush();
 		const originalFile = session.getSessionFile()!;
 		const snapshot = session.captureState();
+		expect(session.getSessionHome()).toBe(path.resolve(cwdA));
 
 		// Move to a target that is also an additional workspace root: moveTo
 		// filters it from #additionalDirectories in the rewritten header.
 		await session.moveTo(cwdB);
+		expect(session.getSessionHome()).toBe(path.resolve(cwdB));
 		await session.rollbackMove(snapshot);
 
 		// Reopen the restored source file: disk must carry the captured header,
@@ -131,6 +136,8 @@ describe("SessionManager.moveTo", () => {
 		expect(header?.cwd).toBe(path.resolve(cwdA));
 		expect(header?.additionalDirectories ?? []).toContain(path.resolve(cwdB));
 		expect(session.getCwd()).toBe(path.resolve(cwdA));
+		expect(session.getSessionHome()).toBe(path.resolve(cwdA));
+		await session.close();
 	});
 	it("relocates a fallback session whose bucket matches the runtime cwd", async () => {
 		const deniedDir = path.join(testAgentDir, "denied-project");
@@ -155,16 +162,22 @@ describe("SessionManager.moveTo", () => {
 		try {
 			const session = await SessionManager.open(deniedFile, undefined, undefined, { initialCwd: cwdA });
 			try {
+				expect(session.getCwd()).toBe(path.resolve(cwdA));
+				expect(session.getSessionHome()).toBe(path.resolve(deniedDir));
 				const snapshot = session.captureState();
 				await session.moveTo(cwdA);
 				const movedFile = session.getSessionFile()!;
 				expect(movedFile).not.toBe(deniedFile);
+				expect(session.getSessionHome()).toBe(path.resolve(cwdA));
 
 				await session.rollbackMove(snapshot);
 
 				expect(fs.existsSync(deniedFile)).toBe(true);
 				expect(fs.existsSync(movedFile)).toBe(false);
 				expect(session.getSessionFile()).toBe(deniedFile);
+				expect(session.getCwd()).toBe(path.resolve(cwdA));
+				expect(session.getSessionHome()).toBe(path.resolve(deniedDir));
+				expect(getHeader(await loadEntriesFromFile(deniedFile))?.cwd).toBe(path.resolve(deniedDir));
 			} finally {
 				await session.close();
 			}
