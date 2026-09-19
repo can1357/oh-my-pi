@@ -44,6 +44,7 @@ import { renderTerminalOutput } from "./terminal-output";
 import { quotePosixArgv } from "../utils/shell-quote";
 
 const DEFAULT_IDLE_GRACE_MS = 3_000;
+const CLIENT_AUTH_TIMEOUT_MS = 10_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_LOG_BYTES = 25 * 1024 * 1024;
 const LOG_READ_BYTES = 2 * 1024 * 1024;
@@ -429,6 +430,7 @@ class DaemonBroker {
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
 	readonly #endpointCheckMs: number;
+	readonly #clientAuthTimeoutMs: number;
 	#endpointTimer: NodeJS.Timeout | undefined;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
@@ -440,7 +442,6 @@ class DaemonBroker {
 	 * profile lock) or keeps running untracked.
 	 */
 	readonly #startingNames = new Set<string>();
-	readonly #clients = new Set<IpcConnection>();
 	readonly #ownerSockets = new Map<string, { socket: IpcConnection; subscriptionId: string | undefined }>();
 	readonly #completionSubscriptions = new Map<string, string | undefined>();
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
@@ -459,6 +460,7 @@ class DaemonBroker {
 		idleGraceMs: number,
 		restartBackoffBaseMs: number,
 		endpointCheckMs: number,
+		clientAuthTimeoutMs: number,
 	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
@@ -467,9 +469,10 @@ class DaemonBroker {
 		this.#idleGraceMs = idleGraceMs;
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 		this.#endpointCheckMs = endpointCheckMs;
+		this.#clientAuthTimeoutMs = clientAuthTimeoutMs;
 	}
 
-	async run(onListening?: () => void): Promise<void> {
+	async run(onListening?: () => void | Promise<void>): Promise<void> {
 		await this.#recoverRecords();
 		this.#server = await IpcServer.listen(
 			this.#endpoint,
@@ -477,8 +480,13 @@ class DaemonBroker {
 			socket => this.#accept(socket),
 		);
 		if (process.platform !== "win32") this.#watchEndpoint();
+		try {
+			await onListening?.();
+		} catch (error) {
+			await this.shutdown();
+			throw error;
+		}
 		this.#scheduleIdleShutdown();
-		onListening?.();
 		await this.#finished.promise;
 	}
 
@@ -503,30 +511,31 @@ class DaemonBroker {
 		this.#ownerSockets.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
-		this.#clients.clear();
 		await this.#server?.close();
 		this.#finished.resolve();
 	}
 
 	#accept(socket: IpcConnection): void {
 		this.#sockets.add(socket);
+		clearTimeout(this.#idleTimer);
+		this.#idleTimer = undefined;
 		let authenticated = false;
+		const authenticationTimer = setTimeout(() => socket.destroy(), this.#clientAuthTimeoutMs);
+		authenticationTimer.unref();
 		// Oversized requests (> MAX_REQUEST_BYTES) close the connection natively.
 		socket.start(
 			line => {
 				void this.#handleLine(socket, line, () => {
 					if (authenticated) return;
 					authenticated = true;
-					this.#clients.add(socket);
-					clearTimeout(this.#idleTimer);
-					this.#idleTimer = undefined;
+					clearTimeout(authenticationTimer);
 				});
 			},
 			() => {
+				clearTimeout(authenticationTimer);
 				this.#sockets.delete(socket);
-				if (!authenticated) return;
-				this.#clients.delete(socket);
 				this.#scheduleIdleShutdown();
+				if (!authenticated) return;
 				for (const [owner, registration] of this.#ownerSockets) {
 					if (registration.socket === socket) this.#ownerSockets.delete(owner);
 				}
@@ -1539,7 +1548,7 @@ class DaemonBroker {
 	}
 
 	#scheduleIdleShutdown(): void {
-		if (this.#shuttingDown || this.#clients.size > 0) return;
+		if (this.#shuttingDown || this.#sockets.size > 0) return;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = setTimeout(() => {
 			this.#idleTimer = undefined;
@@ -1547,12 +1556,12 @@ class DaemonBroker {
 				const livePersistent = [...this.#records.values()].some(
 					record => record.spec.persist && !terminalState(record.snapshot.state),
 				);
-				if (this.#clients.size > 0 || livePersistent) return;
+				if (this.#sockets.size > 0 || livePersistent) return;
 				if (await hasLiveDaemonProjectPresence(this.#runtimeDir)) {
 					this.#scheduleIdleShutdown();
 					return;
 				}
-				if (this.#clients.size === 0) await this.shutdown();
+				if (this.#sockets.size === 0) await this.shutdown();
 			})();
 		}, this.#idleGraceMs);
 	}
@@ -1591,12 +1600,15 @@ export interface DaemonBrokerStartOptions {
 	restartBackoffBaseMs?: number;
 	/** How often the broker checks that its socket file still exists. */
 	endpointCheckMs?: number;
+	/** Maximum time for a newly accepted socket to authenticate. */
+	clientAuthTimeoutMs?: number;
 	/**
 	 * Called once the broker accepts connections. An embedding host connects its
 	 * clients after this; a client that connects earlier finds no endpoint and
-	 * spawns a competing broker process.
+	 * spawns a competing broker process. Idle shutdown is armed only after the
+	 * callback settles; a rejection shuts the broker down and rejects startup.
 	 */
-	onListening?: () => void;
+	onListening?: () => void | Promise<void>;
 }
 
 /** Start the detached project or global daemon broker selected by the CLI worker host. */
@@ -1615,6 +1627,11 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		Number.isFinite(requestedRestartBackoffBaseMs) && requestedRestartBackoffBaseMs >= 0
 			? requestedRestartBackoffBaseMs
 			: RESTART_BACKOFF_BASE_MS;
+	const requestedClientAuthTimeoutMs = options.clientAuthTimeoutMs ?? CLIENT_AUTH_TIMEOUT_MS;
+	const clientAuthTimeoutMs =
+		Number.isFinite(requestedClientAuthTimeoutMs) && requestedClientAuthTimeoutMs >= 0
+			? requestedClientAuthTimeoutMs
+			: CLIENT_AUTH_TIMEOUT_MS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const endpoint = daemonBrokerEndpoint(runtimeDir);
 	// Hold the lease for the whole broker lifetime: it is a native lock the OS
@@ -1645,6 +1662,7 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		idleGraceMs,
 		restartBackoffBaseMs,
 		options.endpointCheckMs ?? ENDPOINT_CHECK_MS,
+		clientAuthTimeoutMs,
 	);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
