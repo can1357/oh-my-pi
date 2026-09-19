@@ -863,6 +863,13 @@ export const cfgAsyncMaxJobs = register({
 	default: 100,
 });
 
+export const cfgBashAsyncAutoInlineGraceMs = register({
+	id: "bash.asyncAuto.inlineGraceMs",
+	protocolDefault: ["rpc"],
+	type: "number",
+	default: 1_000,
+});
+
 export const cfgToolsXdev = register({
 	id: "tools.xdev",
 	type: "boolean",
