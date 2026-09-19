@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed streaming edits to auto-generated files aborting the entire model turn; the offending edit now returns its actionable tool error while sibling calls and the turn continue ([#12422](https://github.com/can1357/oh-my-pi/issues/12422)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed
