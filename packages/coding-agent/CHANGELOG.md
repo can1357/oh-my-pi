@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Fixed `/review` using the startup checkout after `/wt` relocates a session, so branch and diff operations now follow the active worktree ([#12501](https://github.com/can1357/oh-my-pi/issues/12501)).
+- Fixed `/review` using the startup checkout after `/wt` relocates a session, so branch and diff operations now follow the active worktree ([#12565](https://github.com/can1357/oh-my-pi/pull/12565) by [@domenicomassafra](https://github.com/domenicomassafra)).
 - Fixed resume clutter: elide 0-turn sessions from the /resume menu; -c similarly skips empty sessions.
 - Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
