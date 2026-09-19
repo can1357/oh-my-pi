@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-server `enabledTools` and `disabledTools` MCP tool filtering ([#6299](https://github.com/can1357/oh-my-pi/issues/6299)).
+- MCP configs whose server entry relies on a shared field (`timeout`, `requestIdFormat`, `enabledTools`, `disabledTools`, …) now validate against the bundled JSON schema on every transport, instead of only when no transport-specific key is present.
 ### Breaking Changes
 
 - Removed support for the env parameter in the bash tool

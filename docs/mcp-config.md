@@ -103,6 +103,10 @@ Shared fields for every transport:
 - `requestIdFormat?: "number" | "string"` — outgoing JSON-RPC request-id encoding; defaults to per-transport integers. `"string"` uses collision-resistant snowflake IDs. This OMP-specific field is read only from OMP-native files, root `mcp.json` / `.mcp.json`, and OMP extension packages; configs translated from other tools ignore it.
 - `auth?: { ... }` — stored-credential metadata; managed credential injection is implemented for OAuth
 - `oauth?: { ... }` — explicit OAuth client and callback settings used during auth/reauth
+- `enabledTools?: string[]` — per-server tool allowlist. Entries are raw advertised tool names or glob patterns (`*`, `?`, `[...]`, `{a,b}`); only matching tools are contributed to the session. This OMP-specific field follows the same scoping rule as `requestIdFormat` (camelCase keys in translated files are ignored; translated files may still map their own native spellings, e.g. Codex `enabled_tools`).
+- `disabledTools?: string[]` — per-server tool denylist; matching tools are excluded. When both fields are set, `disabledTools` wins (deny subtracts from allow). An empty array is fail-open (same as absent — filters nothing); to exclude every tool, use `"*"` in `disabledTools` (or a never-matching entry such as `"__none__"` in `enabledTools`).
+
+Glob semantics: entries are matched against the tool's advertised name and its sanitized spelling — every character outside `[A-Za-z0-9_-]` becomes one `_`, so a name like `admin/delete` is addressed by `admin*` or `admin_delete`, and distinct raw names that sanitize to the same spelling are addressed together. Patterns are picomatch globs over that sanitized name (any entry holding `*?[]{}()|\\` takes the glob path; anything else is literal exact equality), with the raw name matched too, so an entry written for the name's literal spelling still reaches it. A pattern may therefore select more tools than the spellings it names. An entry carrying four or more consecutive backslashes cannot be compiled and is ignored (reported as unmatched); a `"` preceded by an even number of backslashes (including none) is treated as bare and matched literally. Escapes mean what they mean in a glob (`\d` is the digit class, `\x41` is `A`), `{a,b}` alternates top-level comma-separated branches, and any brace, grouping, or extglob syntax picomatch cannot read as such is either literal or unmatched rather than disabling the server.
 
 `OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
 
@@ -379,7 +383,7 @@ This is the part that usually trips people up.
 
 ### Discovery-time `${...}` expansion
 
-OMP expands `${VAR}` and `${VAR:-default}` placeholders while discovering MCP configs from OMP-native files and standalone fallback files. Expansion applies recursively to string values in `command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, and `oauth`; unresolved placeholders remain literal strings.
+OMP expands `${VAR}` and `${VAR:-default}` placeholders while discovering MCP configs from OMP-native files and standalone fallback files. Expansion applies recursively to string values in `command`, `args`, `env`, `cwd`, `url`, `headers`, `auth`, and `oauth`; unresolved placeholders remain literal strings. Tool-filter entries (`enabledTools`/`disabledTools`) are tool-name patterns and are never expanded, in every config source.
 
 Example:
 

@@ -70,6 +70,8 @@
     "@opentelemetry/sdk-metrics": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
+    "@types/picomatch": "4.0.3",
+    "picomatch": "4.0.7",
     "puppeteer-core": "catalog:"
   },
   "optionalDependencies": {
