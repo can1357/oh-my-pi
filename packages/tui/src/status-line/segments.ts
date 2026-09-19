@@ -20,6 +20,7 @@ import { formatMetric } from "../components/metric";
 import { formatBillingSummary } from "./metrics";
 import { sanitizeStatusText } from "../chrome/shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "../chrome/context-thresholds";
+import { formatOffloadIndicator, renderCompactContextBar } from "./context-bar";
 import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
@@ -629,6 +630,39 @@ const contextPctSegment: StatusLineSegment = {
 	},
 };
 
+
+const contextBarSegment: StatusLineSegment = {
+	id: "context_bar",
+	render(ctx) {
+		if (ctx.contextWindow <= 0) return { content: "", visible: false };
+		const breakdown = {
+			model: ctx.session.model,
+			contextWindow: ctx.contextWindow,
+			categories: [
+				{ id: "messages" as const, label: "Messages", tokens: ctx.contextTokens, color: "userMessageText" as const, glyph: "▮" },
+			],
+			usedTokens: ctx.contextTokens,
+			autoCompactBufferTokens: 0,
+			freeTokens: Math.max(0, ctx.contextWindow - ctx.contextTokens),
+		};
+		const maxWidth = Math.min(42, Math.max(16, Math.floor(ctx.width * 0.22)));
+		const bar = renderCompactContextBar(breakdown, theme, maxWidth);
+		if (!bar) return { content: "", visible: false };
+		return { content: withIcon(theme.icon.context, bar), visible: true };
+	},
+};
+
+const contextOffloadSegment: StatusLineSegment = {
+	id: "context_offload",
+	render(ctx) {
+		const summary = ctx.offloadSummary ?? ctx.session.getContextOffloadSummary?.() ?? null;
+		if (!summary) return { content: "", visible: false };
+		const text = formatOffloadIndicator(summary.externalBytes, summary.reintroducedTokens);
+		if (!text) return { content: "", visible: false };
+		return { content: theme.fg("muted", text), visible: true };
+	},
+};
+
 const contextTotalSegment: StatusLineSegment = {
 	id: "context_total",
 	render(ctx) {
@@ -908,6 +942,8 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	token_rate: tokenRateSegment,
 	cost: costSegment,
 	context_pct: contextPctSegment,
+	context_bar: contextBarSegment,
+	context_offload: contextOffloadSegment,
 	context_total: contextTotalSegment,
 	time_spent: timeSpentSegment,
 	time: timeSegment,

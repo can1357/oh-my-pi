@@ -58,7 +58,7 @@ export interface StatusLineSession {
 	getGoalModeState(): { goal?: { status: string; tokensUsed: number; tokenBudget?: number } } | undefined;
 	getAdvisorStatusOverview?(): { configured: boolean; advisors: readonly { status: string; yielded: boolean }[] };
 	getAdvisorCost?(): number;
-	isAdvisorUsingSubscription?(): boolean;
+	getContextOffloadSummary?(): { externalBytes: number; reintroducedTokens: number } | null;
 }
 
 export interface FooterSession {

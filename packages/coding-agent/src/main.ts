@@ -1754,6 +1754,14 @@ export async function runRootCommand(
 			// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
 			settingsInstance.override("tools.approvalMode", "yolo");
 		}
+		if (parsedArgs.rlm) {
+			// Session-scoped RLM membrane (not persisted). Search-driven grants preferred.
+			settingsInstance.override("context.engine", "rlm");
+			settingsInstance.override("rlm.enabled", true);
+			if (parsedArgs.rlmAuto) {
+				settingsInstance.override("rlm.workerMode", "auto");
+			}
+		}
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyRpcDefaultSettingOverrides(settingsInstance);
 		} else if (parsedArgs.mode === "acp") {

@@ -81,6 +81,32 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import {
+	buildRlmSessionAccounting,
+	exportRlmExperimentRecord,
+	type EvidenceQualityLabel,
+	type RlmSessionAccounting,
+} from "../rlm/accounting";
+import { getRlmRuntime, rlmEnabled } from "../rlm/session";
+import {
+	createTokenomicsBridge,
+	deriveContextPolicy,
+	type OmpTokenomicsBridge,
+} from "../rlm/tokenomics-bridge";
+import {
+	buildContextFlowSnapshot,
+	getContextFlowRegistry,
+	type ContextFlowSnapshot,
+} from "../context-flow";
+import {
+	contextFlowBeginTurn,
+	contextFlowRecordModelCall,
+	contextFlowSeedResearchStack,
+	subscribeContextFlow,
+} from "../context-flow/hooks";
+import { bindRlmContextFlow, contextFlowRootBegin } from "../context-flow/rlm-flow";
+import { computeSessionContextBreakdown } from "./context-usage-runtime";
+
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
 import {
@@ -573,6 +599,8 @@ export class AgentSession {
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
 	editStore?: EditStore;
+	/** Session-scoped Tokenomics emitter (JSONL). Fail-open; OMP_TOKENOMICS=0 disables. */
+	#tokenomics: OmpTokenomicsBridge | undefined;
 
 	/** Materializes this session's live extension-root policy per discovery call. */
 	readonly #extensionRoots: () => EffectiveExtensionRoots;
@@ -1297,6 +1325,22 @@ export class AgentSession {
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		try {
+			this.#tokenomics = createTokenomicsBridge({
+				sessionId: this.sessionManager.getSessionId(),
+				contextPolicy: deriveContextPolicy(this.settings),
+			});
+		} catch {
+			this.#tokenomics = undefined;
+		}
+		contextFlowSeedResearchStack(this);
+		if (rlmEnabled(this as never)) {
+			try {
+				bindRlmContextFlow(this, getRlmRuntime(this as never));
+			} catch {
+				/* fail-open */
+			}
+		}
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#extensionRoots =
@@ -1678,6 +1722,8 @@ export class AgentSession {
 			toolRegistry: config.toolRegistry,
 			createVibeTools: config.createVibeTools,
 			createThinkTool: config.createThinkTool,
+			createRlmTool: config.createRlmTool,
+
 			builtInToolNames: config.builtInToolNames,
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
@@ -3197,6 +3243,8 @@ export class AgentSession {
 		// background subagent holds a live reading by the time it is focused and
 		// the main session's reading survives focus round-trips.
 		if (event.type === "message_start" && event.message.role === "assistant") {
+			const model = this.model;
+			contextFlowRootBegin(this, model?.provider, model?.id);
 			this.tokenRate.begin(event.message.timestamp);
 		} else if (event.type === "message_update" && event.message.role === "assistant") {
 			const delta = event.assistantMessageEvent;
@@ -3342,6 +3390,29 @@ export class AgentSession {
 					},
 					costUsd: assistantMsg.usage.cost.total,
 				});
+				contextFlowRecordModelCall(this, {
+					component: "omp.root",
+					role: "root",
+					provider: assistantMsg.provider,
+					model: assistantMsg.model,
+					usage: assistantMsg.usage,
+					durationMs: assistantMsg.duration,
+					visibility: "root",
+					failed: assistantMsg.stopReason === "error",
+				});
+				void this.#tokenomics
+					?.emitModelCall({
+						role: "root",
+						name: "omp.root",
+						provider: assistantMsg.provider,
+						model: assistantMsg.model,
+						usage: assistantMsg.usage,
+						status: assistantMsg.stopReason === "error" ? "error" : assistantMsg.stopReason === "aborted" ? "cancelled" : "ok",
+						durationMs: assistantMsg.duration,
+						ttftMs: assistantMsg.ttft,
+						costUsd: assistantMsg.usage.cost.total,
+					})
+					.catch(() => {});
 				// Persist which account served this turn so a resumed process can
 				// re-pin it and keep the provider's account-scoped prompt cache
 				// warm (broker-mode sticky routing is process-local).
@@ -5558,6 +5629,12 @@ export class AgentSession {
 	setThinkToolEnabled(enabled: boolean): Promise<boolean> {
 		return this.#tools.setThinkToolEnabled(enabled);
 	}
+
+	/** Installs or removes the `rlm` tool when the session toggle flips. */
+	setRlmToolEnabled(enabled: boolean): Promise<boolean> {
+		return this.#tools.setRlmToolEnabled(enabled);
+	}
+
 
 	/** Cancels the local rollout-memory startup owned by this session. */
 	cancelLocalMemoryStartup(): void {
@@ -7795,6 +7872,8 @@ export class AgentSession {
 			return;
 		}
 
+		contextFlowBeginTurn(this, text.slice(0, 80));
+
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template
 		// expansion. prompt() awaits manual-compaction cleanup and (on the non-streaming path)
 		// image normalization/vision description before dispatching, so a stream can start in
@@ -9278,11 +9357,221 @@ export class AgentSession {
 	}
 
 	/**
-	 * Run a single ephemeral side-channel turn against this session's current
-	 * model + system prompt + history. The main turn's tool catalog is sent
-	 * to preserve the prompt cache, but the model is reminded not to call
-	 * tools and any tool calls are discarded. The side request
-	 * does not block on, or interfere with, any in-flight main turn. The
+	 * RFC v3 isolated completion path for RLM workers.
+	 * Never copies root transcript or streaming root assistant.
+	 * Prefer this over plain `runEphemeralTurn` for RLM leases.
+	 */
+	async runIsolatedCompletion(args: {
+		purpose?: string;
+		promptText: string;
+		signal?: AbortSignal;
+		conversationKey?: string;
+		onTextDelta?: (delta: string) => void;
+	}): Promise<{ replyText: string; assistantMessage: AssistantMessage }> {
+		const purpose = args.purpose ?? "rlm";
+		const result = await this.runEphemeralTurn({
+			promptText: args.promptText,
+			history: [],
+			isolated: true,
+			conversationKey: args.conversationKey ?? `rlm:${purpose}:${Snowflake.next()}`,
+			signal: args.signal,
+			onTextDelta: args.onTextDelta,
+			dedupeReply: false,
+		});
+		// Durable side-channel usage for whole-session accounting (purpose=rlm).
+		// Partitioned out of "root" by buildRlmSessionAccounting — not double-counted there.
+		const usage = result.assistantMessage.usage;
+		const model = this.model;
+		if (usage && model && (purpose === "rlm" || purpose.startsWith("rlm"))) {
+			try {
+				this.sessionManager.appendModelUsage(
+					{
+						purpose: purpose.startsWith("rlm") ? purpose : "rlm",
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage,
+						stopReason: result.assistantMessage.stopReason ?? "stop",
+					},
+					{
+						sessionId: this.sessionManager.getSessionId(),
+						parentId: this.sessionManager.getLeafId(),
+					},
+				);
+			} catch {
+				// fail-open: accounting prefers ledger when model_usage missing
+			}
+			void this.#tokenomics
+				?.emitModelCall({
+					role: "rlm_worker",
+					name: purpose.startsWith("rlm") ? `omp.${purpose}` : "omp.rlm_worker",
+					provider: model.provider,
+					model: model.id,
+					usage,
+					status:
+						result.assistantMessage.stopReason === "error"
+							? "error"
+							: result.assistantMessage.stopReason === "aborted"
+								? "cancelled"
+								: "ok",
+					durationMs: result.assistantMessage.duration,
+					ttftMs: result.assistantMessage.ttft,
+					costUsd: usage.cost?.total,
+				})
+				.catch(() => {});
+		}
+		return result;
+	}
+
+	/**
+	 * Whole-session RLM + root usage partition for experiment export.
+	 * Does not invent root counters — reads sessionManager + RLM runtime.
+	 */
+	getRlmSessionAccounting(options?: {
+		taskId?: string;
+		evidenceQuality?: EvidenceQualityLabel;
+		durationMs?: number;
+		retries?: number;
+	}): RlmSessionAccounting {
+		const raw = this.sessionManager.getUsageStatistics();
+		const store = (this as { rlmStore?: import("../rlm/store").RlmStore }).rlmStore;
+		let runtime: import("../rlm/runtime").RlmRuntime | undefined;
+		try {
+			if (rlmEnabled(this as never) || store) {
+				runtime = getRlmRuntime(this as never);
+			}
+		} catch {
+			runtime = undefined;
+		}
+		return buildRlmSessionAccounting({
+			sessionId: this.sessionManager.getSessionId(),
+			taskId: options?.taskId,
+			branch: this.sessionManager.getBranch(),
+			messages: this.messages as never,
+			sessionRaw: {
+				input: raw.input,
+				output: raw.output,
+				cacheRead: raw.cacheRead,
+				cacheWrite: raw.cacheWrite,
+				total: raw.totalTokens,
+				cost: raw.cost,
+			},
+			runtime: runtime ?? undefined,
+			store: store ?? runtime?.store,
+			config: {
+				contextEngine: this.settings.get("context.engine") as string | undefined,
+				rlmEnabled: this.settings.get("rlm.enabled") === true,
+				rlmMaxDepth: this.settings.get("rlm.maxDepth") as number | undefined,
+			},
+			durationMs: options?.durationMs,
+			evidenceQuality: options?.evidenceQuality,
+			retries: options?.retries,
+		});
+	}
+
+	/** Append one experiment JSONL row under ~/.omp/rlm-experiments (+ Tokenomics flush). */
+	async exportRlmExperimentRecord(options?: {
+		taskId?: string;
+		evidenceQuality?: EvidenceQualityLabel;
+		durationMs?: number;
+		dir?: string;
+	}): Promise<{
+		accounting: RlmSessionAccounting;
+		jsonlPath: string;
+		snapshotPath?: string;
+		tokenomicsLine?: string;
+		tokenomicsPath?: string;
+	}> {
+		const accounting = this.getRlmSessionAccounting(options);
+		const paths = exportRlmExperimentRecord(accounting, { dir: options?.dir });
+		let tokenomicsLine: string | undefined;
+		let tokenomicsPath: string | undefined;
+		const bridge = this.#tokenomics;
+		if (bridge) {
+			try {
+				const flushed = await bridge.flushTask({
+					metrics: {
+						spills: accounting.ops.spills,
+						bytesSpilled: accounting.ops.bytesSpilled,
+						bytesReintroduced: accounting.ops.bytesReintroduced,
+						searches: accounting.ops.searches,
+						queries: accounting.ops.queries,
+						subcalls: accounting.ops.subcalls,
+						grantsSelected: accounting.ops.grantsSelected,
+						workerCallsAvoided: accounting.ops.workerCallsAvoided,
+						workerCalls: accounting.ops.workerCalls,
+						peeks: accounting.ops.peeks,
+						grantedBytes: accounting.ops.bytesReintroduced,
+					},
+					sessionRaw: accounting.sessionRaw
+						? {
+								input: accounting.sessionRaw.input,
+								output: accounting.sessionRaw.output,
+								cacheRead: accounting.sessionRaw.cacheRead,
+								cacheWrite: accounting.sessionRaw.cacheWrite,
+								totalTokens: accounting.sessionRaw.total,
+								cost: accounting.sessionRaw.cost,
+							}
+						: undefined,
+					evidenceQuality: options?.evidenceQuality,
+					executionCompleted: !options?.evidenceQuality,
+				});
+				tokenomicsLine = flushed.line;
+			} catch {
+				tokenomicsLine = bridge.formatStatusLine();
+			}
+			tokenomicsPath = bridge.jsonlPath;
+		}
+		return { accounting, ...paths, tokenomicsLine, tokenomicsPath };
+	}
+
+	/** Tokenomics status one-liner (trace totals via SDK summarizeTrace). */
+	getTokenomicsStatusLine(): string {
+		return this.#tokenomics?.formatStatusLine() ?? "tokenomics: off";
+	}
+
+	getTokenomicsBridge(): OmpTokenomicsBridge | undefined {
+		return this.#tokenomics;
+	}
+
+	getContextOffloadSummary(): { externalBytes: number; reintroducedTokens: number } | null {
+		const snap = getContextFlowRegistry(this).snapshot().offload;
+		if (!snap.active && snap.externalBytes <= 0) return null;
+		return { externalBytes: snap.externalBytes, reintroducedTokens: snap.reintroducedTokens };
+	}
+
+	getContextFlowSnapshot(breakdown?: import("@oh-my-pi/pi-tui/status-line/context-usage").ContextBreakdown): ContextFlowSnapshot {
+		const bd = breakdown ?? computeSessionContextBreakdown(this, { snapcompactSavings: true });
+		let rlmMetrics: import("../rlm/store").RlmMetrics | undefined;
+		try {
+			if (rlmEnabled(this as never)) {
+				rlmMetrics = getRlmRuntime(this as never).store.metrics;
+			}
+		} catch {
+			rlmMetrics = undefined;
+		}
+		return buildContextFlowSnapshot({
+			registry: getContextFlowRegistry(this),
+			breakdown: bd,
+			bridge: this.#tokenomics,
+			rlmMetrics,
+		});
+	}
+
+	/** Subscribe to in-memory context-flow revisions (coalesced). */
+	subscribeContextFlow(listener: () => void): () => void {
+		return subscribeContextFlow(this, listener);
+	}
+
+	getContextFlowRevision(): number {
+		return getContextFlowRegistry(this).revision;
+	}
+
+
+
+	/**
+	 * Run a one-shot side-channel completion against a detached snapshot of the
+	 * current conversation. The main agent turn is NOT interrupted, and the
 	 * session's history and persisted state are NOT modified by this call.
 	 *
 	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
@@ -9293,6 +9582,12 @@ export class AgentSession {
 	async runEphemeralTurn(args: {
 		promptText: string;
 		history?: readonly Message[];
+		/**
+		 * When true, build a worker-only snapshot: developer no-tools reminder +
+		 * optional history + prompt. Does **not** copy `this.messages` or the
+		 * streaming root assistant (RLM isolation membrane).
+		 */
+		isolated?: boolean;
 		/** Session-local key for serialized side turns; rotate after cancellation or failure. */
 		conversationKey?: string;
 		onTextDelta?: (delta: string) => void;
@@ -9304,7 +9599,7 @@ export class AgentSession {
 			throw new Error("No active model on session");
 		}
 		const cacheSessionId = this.sessionId;
-		const snapshot = this.#buildEphemeralSnapshot(args.promptText, args.history);
+		const snapshot = this.#buildEphemeralSnapshot(args.promptText, args.history, args.isolated === true);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		const context = await this.agent.buildSideRequestContext(llmMessages);
 		const options = this.prepareSimpleStreamOptions(
@@ -9385,39 +9680,50 @@ export class AgentSession {
 	}
 
 	/**
-	 * Build a message snapshot for an ephemeral side-channel turn.  Includes
-	 * the in-flight streaming assistant message (if any) so the model sees
-	 * the partial response in context, then appends detached side-channel history
+	 * Build a message snapshot for an ephemeral side-channel turn.
+	 *
+	 * Default (BTW/OMFG/IRC): includes root messages + in-flight streaming assistant
+	 * so the model sees the half-finished response, then appends detached history
 	 * and the current prompt after the no-tools reminder.
+	 *
+	 * `isolated: true` (RLM workers): **only** no-tools reminder + optional history
+	 * + prompt. Never copies root transcript or streaming root assistant.
 	 */
-	#buildEphemeralSnapshot(promptText: string, history?: readonly Message[]): AgentMessage[] {
-		const messages = [...this.messages];
-		const streaming = this.agent.state.streamMessage;
-		if (streaming && streaming.role === "assistant" && Array.isArray(streaming.content)) {
-			const preservedBlocks: AssistantMessage["content"] = [];
-			// Preserve thinking blocks: DeepSeek-class encoders replay them as
-			// `reasoning_content` and reject the request (HTTP 400) when the field
-			// goes missing on a turn that previously emitted thinking.
-			for (const c of streaming.content) {
-				if (c.type === "thinking") preservedBlocks.push(c);
-			}
-			const streamingText = streaming.content
-				.filter((c): c is TextContent => c.type === "text")
-				.map(c => c.text)
-				.join("");
-			if (streamingText) {
-				preservedBlocks.push({ type: "text", text: streamingText });
-			}
-			if (preservedBlocks.length > 0) {
-				const normalized: AssistantMessage = {
-					...streaming,
-					content: preservedBlocks,
-				};
-				const lastMessage = messages.at(-1);
-				if (lastMessage?.role === "assistant") {
-					messages[messages.length - 1] = normalized;
-				} else {
-					messages.push(normalized);
+	#buildEphemeralSnapshot(
+		promptText: string,
+		history?: readonly Message[],
+		isolated = false,
+	): AgentMessage[] {
+		const messages: AgentMessage[] = [];
+		if (!isolated) {
+			messages.push(...this.messages);
+			const streaming = this.agent.state.streamMessage;
+			if (streaming && streaming.role === "assistant" && Array.isArray(streaming.content)) {
+				const preservedBlocks: AssistantMessage["content"] = [];
+				// Preserve thinking blocks: DeepSeek-class encoders replay them as
+				// `reasoning_content` and reject the request (HTTP 400) when the field
+				// goes missing on a turn that previously emitted thinking.
+				for (const c of streaming.content) {
+					if (c.type === "thinking") preservedBlocks.push(c);
+				}
+				const streamingText = streaming.content
+					.filter((c): c is TextContent => c.type === "text")
+					.map(c => c.text)
+					.join("");
+				if (streamingText) {
+					preservedBlocks.push({ type: "text", text: streamingText });
+				}
+				if (preservedBlocks.length > 0) {
+					const normalized: AssistantMessage = {
+						...streaming,
+						content: preservedBlocks,
+					};
+					const lastMessage = messages.at(-1);
+					if (lastMessage?.role === "assistant") {
+						messages[messages.length - 1] = normalized;
+					} else {
+						messages.push(normalized);
+					}
 				}
 			}
 		}

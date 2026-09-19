@@ -227,9 +227,19 @@ export async function visitEntriesFromFileStream(
 
 	try {
 		const file = Bun.file(filePath);
-		const source = Number.isFinite(maxBytes) ? file.slice(0, maxBytes) : file;
-		for await (const chunk of source.stream()) {
+		// Bun 1.3.x: `file.slice(0, maxBytes).stream()` can hang after yielding the
+		// truncated prefix (for-await never settles). Stream the unsliced file and
+		// enforce the byte budget here instead.
+		let bytesRead = 0;
+		for await (const rawChunk of file.stream()) {
 			if (stopped) break;
+			let chunk: Uint8Array = rawChunk;
+			if (Number.isFinite(maxBytes)) {
+				const remaining = maxBytes - bytesRead;
+				if (remaining <= 0) break;
+				if (chunk.byteLength > remaining) chunk = chunk.subarray(0, remaining);
+			}
+			bytesRead += chunk.byteLength;
 			bytesSinceYield += chunk.byteLength;
 			options.onBytesConsumed?.(chunk.byteLength);
 			// Parsing before the chunk closes a line re-scans the unfinished record

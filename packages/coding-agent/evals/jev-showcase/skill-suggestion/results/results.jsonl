@@ -1,0 +1,12 @@
+{"task":"cookbook-notes-recipe","arm":"typesafe","suggested":"apple-notes","grade":"correct","gold":"apple-notes","latencyMs":350,"ok":true}
+{"task":"cookbook-pptx-author","arm":"typesafe","suggested":"powerpoint","grade":"wrong","gold":"pptx-author","latencyMs":221,"ok":false}
+{"task":"cookbook-1password","arm":"typesafe","suggested":"1password","grade":"correct","gold":"1password","latencyMs":1135,"ok":true}
+{"task":"cookbook-debug-hermes","arm":"typesafe","suggested":"systematic-debugging","grade":"correct","gold":"systematic-debugging","latencyMs":318,"ok":true}
+{"task":"cookbook-agent-reach","arm":"typesafe","suggested":"agent-reach","grade":"correct","gold":"agent-reach","latencyMs":201,"ok":true}
+{"task":"cookbook-hermes-config","arm":"typesafe","suggested":"typesafe-jev","grade":"wrong","gold":"hermes-agent","latencyMs":126,"ok":false}
+{"task":"negative-trello","arm":"typesafe","suggested":"computer-use","grade":"needless","gold":null,"latencyMs":193,"ok":false}
+{"task":"negative-mastodon","arm":"typesafe","suggested":"xurl","grade":"needless","gold":null,"latencyMs":138,"ok":false}
+{"task":"negative-monad","arm":"typesafe","suggested":null,"grade":"correct","gold":null,"latencyMs":139,"ok":true}
+{"task":"negative-greeting","arm":"typesafe","suggested":null,"grade":"correct","gold":null,"latencyMs":174,"ok":true}
+{"task":"negative-thanks","arm":"typesafe","suggested":null,"grade":"correct","gold":null,"latencyMs":228,"ok":true}
+{"task":"lookalike-pptx","arm":"typesafe","suggested":"powerpoint","grade":"wrong","gold":"pptx-author","latencyMs":169,"ok":false}

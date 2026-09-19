@@ -211,6 +211,9 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { renderContextUsagePage } from "../context-flow/format";
+import { computeSessionContextBreakdown } from "../session/context-usage-runtime";
+import { ContextUsageOverlay } from "@oh-my-pi/pi-tui/overlays/context-usage-overlay";
 import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
@@ -959,6 +962,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOverlay: PlanReviewOverlay | undefined;
 	#planReviewOverlayHandle: OverlayHandle | undefined;
 	#sessionInfoOverlayHandle: OverlayHandle | undefined;
+	#contextUsageOverlayHandle: OverlayHandle | undefined;
+	#contextUsageOverlay: ContextUsageOverlay | undefined;
+	#contextFlowUnsub: (() => void) | undefined;
+	#contextFlowRenderScheduled = false;
 	#planReviewCancel: (() => void) | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
@@ -5840,6 +5847,55 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 		this.ui.setFocus(overlay);
 		this.ui.requestRender();
+	}
+
+
+	showContextUsagePanel(body: string): void {
+		this.#hideContextPanel();
+		const overlay = new ContextUsageOverlay(this.ui, body, () => this.#hideContextPanel());
+		this.#contextUsageOverlay = overlay;
+		this.#contextUsageOverlayHandle = this.ui.showOverlay(overlay, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.#contextFlowUnsub = this.session.subscribeContextFlow?.(() => this.#scheduleContextPanelRefresh());
+		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+	}
+
+	#hideContextPanel(): void {
+		this.#contextFlowUnsub?.();
+		this.#contextFlowUnsub = undefined;
+		this.#contextUsageOverlay = undefined;
+		this.#contextFlowRenderScheduled = false;
+		const handle = this.#contextUsageOverlayHandle;
+		this.#contextUsageOverlayHandle = undefined;
+		if (!handle) return;
+		handle.hide();
+		this.#selectorController.focusActiveEditorArea();
+		this.ui.requestRender();
+	}
+
+	#scheduleContextPanelRefresh(): void {
+		const overlay = this.#contextUsageOverlay;
+		if (!overlay || this.#contextFlowRenderScheduled) return;
+		this.#contextFlowRenderScheduled = true;
+		queueMicrotask(() => {
+			this.#contextFlowRenderScheduled = false;
+			const panel = this.#contextUsageOverlay;
+			if (!panel) return;
+			try {
+				const breakdown = computeSessionContextBreakdown(this.session, { snapcompactSavings: true });
+				const flow = this.session.getContextFlowSnapshot(breakdown);
+				panel.setBody(renderContextUsagePage(breakdown, theme, flow));
+				this.statusLine.invalidate();
+				this.ui.requestRender();
+			} catch {
+				/* fail-open */
+			}
+		});
 	}
 
 	#hideSessionInfo(): void {

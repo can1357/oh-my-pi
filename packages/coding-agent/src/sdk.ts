@@ -238,6 +238,11 @@ import {
 import { createBrowserPrelude } from "./tools/browser";
 import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { createComputerPrelude } from "./tools/computer";
+import { createRlmPrelude } from "./rlm/prelude";
+import { disposeRlmStore } from "./rlm/session";
+import type { RlmWorkerMessage } from "./rlm/broker";
+import { EVIDENCE_PACKET_V1_JSON_SCHEMA } from "./rlm/evidence-packet";
+import { runRlmWorkerCompletion } from "./rlm/worker-completion";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -246,7 +251,9 @@ import { isFilesystemSourcePath } from "./tools/path-utils";
 import { isAutoQaEnabled } from "./tools/report-tool-issue";
 import { queueResolveHandler } from "./tools/resolve";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "./tools/todo";
+import { RlmTool } from "./tools/rlm";
 import { ttsTool } from "./tools/tts";
+
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
@@ -1809,6 +1816,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
+		// Session-owned RLM store must die with the session (not process lifetime / cwd).
+		disposeCallbacks.add(() => disposeRlmStore(toolSession));
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		const setActiveToolNames = (names: Iterable<string>): void => {
@@ -1862,12 +1871,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
+			getRlmRuntimeId: () => evalKernelOwnerId,
 			getEvalSessionId: () =>
 				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
 			trackEvalExecution: (execution, abortController) =>
 				session ? session.trackEvalExecution(execution, abortController) : execution,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
+			getTokenomicsBridge: () => session?.getTokenomicsBridge?.(),
 			isDisposed: () => session?.isDisposed ?? false,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
@@ -1960,9 +1971,136 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this undefined so tools and session job snapshots refuse async work
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
+			/** Isolated RLM completer via runIsolatedCompletion (RFC v3 membrane). */
+			rlmComplete: async (
+				prompt: string,
+				options?: {
+					signal?: AbortSignal;
+					deadlineAt?: number;
+					purpose?: string;
+					workerMessages?: readonly { role: string; content: string }[];
+				},
+			) => {
+				if (!session) {
+					return { text: "rlm query unavailable: session not ready (fail-open)" };
+				}
+				try {
+					if (options?.purpose === "rlm-evidence-packet") {
+						const workerResult = await runRlmWorkerCompletion(
+							{
+								settings,
+								modelRegistry,
+								getSessionId: () => sessionManager.getSessionId?.(),
+								getTelemetry: () => agent?.telemetry,
+								getActiveModel: () => agent?.state.model ?? model,
+							},
+							prompt,
+							{
+								signal: options?.signal,
+								purpose: options.purpose,
+								workerMessages: options?.workerMessages as RlmWorkerMessage[] | undefined,
+								responseSchema: EVIDENCE_PACKET_V1_JSON_SCHEMA,
+							},
+						);
+						const usageInput = workerResult.inputTokens ?? 0;
+						const usageOutput = workerResult.outputTokens ?? 0;
+						const usageTotal =
+							workerResult.tokens ??
+							(usageInput + usageOutput > 0 ? usageInput + usageOutput : undefined);
+						const hasProviderUsage =
+							workerResult.inputTokens !== undefined ||
+							workerResult.outputTokens !== undefined ||
+							workerResult.tokens !== undefined ||
+							(workerResult.cost ?? 0) > 0;
+						const usage = hasProviderUsage
+							? {
+									input: usageInput,
+									output: usageOutput,
+									cacheRead: workerResult.cacheReadTokens ?? 0,
+									cacheWrite: 0,
+									totalTokens: usageTotal ?? usageOutput,
+									cost: {
+										input: 0,
+										output: 0,
+										cacheRead: 0,
+										cacheWrite: 0,
+										total: workerResult.cost ?? 0,
+									},
+								}
+							: undefined;
+						if (usage && workerResult.provider && workerResult.model) {
+							try {
+								sessionManager.appendModelUsage(
+									{
+										purpose: "rlm-evidence-packet",
+										api: model?.api ?? "openai-responses",
+										provider: workerResult.provider,
+										model: workerResult.model,
+										usage,
+										stopReason: "stop",
+									},
+									{
+										sessionId: sessionManager.getSessionId(),
+										parentId: sessionManager.getLeafId(),
+									},
+								);
+							} catch {
+								/* fail-open */
+							}
+						}
+						let packetStatus: string | undefined;
+						if (workerResult.structured && typeof workerResult.structured === "object") {
+							const status = (workerResult.structured as { status?: unknown }).status;
+							if (typeof status === "string") packetStatus = status;
+						}
+						void session
+							.getTokenomicsBridge?.()
+							?.emitModelCall({
+								role: "rlm_worker",
+								name: "omp.rlm-evidence-packet",
+								provider: workerResult.provider,
+								model: workerResult.model,
+								usage: usage as never,
+								costUsd: workerResult.cost,
+								attributes: {
+									"omp.rlm.worker.provider": workerResult.provider ?? "unknown",
+									"omp.rlm.packet.status": packetStatus ?? "unknown",
+									"omp.rlm.packet.bytes": Buffer.byteLength(workerResult.text, "utf8"),
+									"omp.rlm.worker.granted_bytes": options?.workerMessages
+										? Buffer.byteLength(
+												options.workerMessages.map(m => m.content).join("\n"),
+												"utf8",
+											)
+										: undefined,
+								},
+							})
+							.catch(() => {});
+						return workerResult;
+					}
+					const { replyText, assistantMessage } = await session.runIsolatedCompletion({
+						purpose: options?.purpose ?? "rlm",
+						promptText: prompt,
+						signal: options?.signal,
+						conversationKey: `rlm:${Snowflake.next()}`,
+					});
+					const usage = assistantMessage.usage;
+					return {
+						text: replyText,
+						tokens: usage?.totalTokens,
+						cost: usage?.cost?.total,
+						inputTokens: usage?.input,
+						outputTokens: usage?.output,
+					};
+				} catch (error) {
+					const msg = error instanceof Error ? error.message : String(error);
+					return { text: `${msg} (fail-open)` };
+				}
+			},
 		};
+
 		let browserPrelude: EvalPreludeDefinition | undefined;
 		let computerPrelude: EvalPreludeDefinition | undefined;
+		let rlmPrelude: EvalPreludeDefinition | undefined;
 		const getEvalPreludes = (): readonly EvalPreludeDefinition[] => {
 			if (restrictToolNames || !toolRegistry.has("eval") || !activeToolNames.has("eval")) return [];
 			const builtins: EvalPreludeDefinition[] = [];
@@ -1973,6 +2111,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (settings.get("computer.enabled")) {
 				computerPrelude ??= createComputerPrelude(toolSession);
 				builtins.push(computerPrelude);
+			}
+			if (settings.get("rlm.enabled") || settings.get("context.engine") === "rlm") {
+				if (settings.get("rlm.kernelBind") === true) {
+					rlmPrelude ??= createRlmPrelude(toolSession);
+					builtins.push(rlmPrelude);
+				}
 			}
 			return getEnabledEvalPreludes(builtins);
 		};
@@ -2567,6 +2711,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							throw new Error(
 								`Usage depleted for ${primary.model.provider}/${primary.model.id}; reserve policy is fail-closed.`,
 							);
+						}
+						// Reserve tier (gpt-reserve / gpt-5.6-luna): when
+						// standard quota is depleted, try the reserve model.
+						if (primary.model.provider === "openai-codex") {
+							const reserve = primary.model.id.includes("-sol")
+								? modelRegistry.find("openai-codex", "gpt-5.6-luna")
+								: undefined;
+							if (reserve) {
+								selectedModel = reserve;
+								usageFallbackTriggered = true;
+								continue;
+							}
 						}
 						if (modelFallbackEnabled) {
 							usageFallbackTriggered = true;
@@ -3902,6 +4058,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						return tools.filter((tool): tool is AgentTool => tool !== null);
 					},
 			createThinkTool: async () => (await HIDDEN_TOOLS.think(toolSession)) ?? null,
+			createRlmTool: async () => new RlmTool(toolSession),
+
+
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)
