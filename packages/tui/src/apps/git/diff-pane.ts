@@ -11,13 +11,14 @@
  * The right edge carries a minimap-style scrollbar encoding change density
  * (deletions > additions > changes > context, hunk headers in accent) with
  * the visible viewport brightened; clicking it seeks. Long lines either pan
- * horizontally (`←`/`→`) or soft-wrap when word wrap is enabled.
+ * horizontally (`←`/`→`) or soft-wrap at word boundaries when word wrap is
+ * enabled, so a word never straddles two rows.
  */
 import type { DiffStreamResult, HighlightStream } from "@oh-my-pi/pi-natives";
 import { diffWords, structuredPatchHunks } from "@oh-my-pi/pi-natives";
 import { Image, type ImageBudget } from "../../components/image";
 import { clampScrollOffset, scrollOffsetForRow, viewportRange } from "../../components/scroll-viewport";
-import { centerLine, sliceWithWidth, truncateToWidth, visibleWidth } from "../../utils";
+import { centerLine, getSegmenter, sliceWithWidth, truncateToWidth, visibleWidth } from "../../utils";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
 import { getLanguageFromPath } from "../../lang-from-path";
@@ -37,8 +38,6 @@ interface DiffRow {
 	/** Tab-expanded line for each side ("" when absent). */
 	readonly oldText: string;
 	readonly newText: string;
-	readonly oldWidth: number;
-	readonly newWidth: number;
 	readonly oldMarks?: MarkRanges;
 	readonly newMarks?: MarkRanges;
 	/** Raw (untab-expanded) source lines, for patch construction. */
@@ -60,11 +59,9 @@ export interface DiffDocument {
 	readonly filePath: string;
 	readonly rows: readonly DiffRow[];
 	readonly hunks: readonly HunkBlock[];
-	/** Tab-expanded new-side lines for the `file` view. */
-	readonly fileLines: readonly { text: string; width: number }[];
 	/** Tab-expanded source lines, retained for progressive syntax highlighting. */
 	readonly oldDisplayLines: readonly string[];
-	/** Tab-expanded source lines, retained for progressive syntax highlighting. */
+	/** Tab-expanded new-side source lines: the `file` view and progressive highlighting. */
 	readonly newDisplayLines: readonly string[];
 	readonly additions: number;
 	readonly deletions: number;
@@ -92,6 +89,114 @@ const HIGHLIGHT_BATCH_LINES = 32;
 /** Cap on intraline word-diff pairs per document. */
 const INTRALINE_PAIR_LIMIT = 1_500;
 
+interface WrapCluster {
+	/** Visible-column offset of the cluster's first cell. */
+	readonly col: number;
+	readonly width: number;
+	readonly whitespace: boolean;
+	/** A word separator the wrap may break *after* (the separator stays on the row). */
+	readonly breakAfter: boolean;
+}
+
+/**
+ * Characters a wrapped row may break after: vim's default `breakat`
+ * (`!@*-+;:,./?`) plus the brackets, quotes, and operators editors treat as
+ * word separators. Underscore and backtick are deliberately absent: vim does not
+ * break after either, and breaking after a backtick splits a markdown code span
+ * across rows, while the rest fill the row so prose inlined with code spans no
+ * longer strands a gap at the right margin.
+ */
+const BREAK_AFTER = /[!@*\-+;:,./?()[\]{}<>"'+=|\\~^%$#&]/;
+
+/**
+ * How much blank a boundary break may leave before the row is filled instead.
+ *
+ * Breaking at the last break opportunity keeps words whole but strands the
+ * blank that the word which did not fit would have used. With `:set linebreak`
+ * vim leaves the same hole, up to a whole line for a single long token. A hole
+ * this large is filled at the width (vim's default `nolinebreak` behaviour for
+ * that one break), so prose keeps its words while a long token no longer leaves
+ * the row half empty. Depth-tied to `limit` so wide panes tolerate wider holes.
+ */
+const maxWrapGap = (limit: number): number => Math.max(12, Math.floor(limit / 6));
+
+/**
+ * Greedy word wrap of `text` into display-column windows `[start, end)`.
+ *
+ * A segment ends at the last break opportunity that still fits, so an
+ * alphanumeric word never straddles two rows and the gap before the right
+ * margin stays bounded by the longest unbreakable run. Break opportunities are
+ * whitespace (the break lands before it, and the whitespace run is dropped) and
+ * the separators in {@link BREAK_AFTER} (the break lands after the separator,
+ * which stays on the row), the set vim's `breakat` covers by default, extended
+ * with the brackets, quotes, and operators editors treat as word separators.
+ * Text with no opportunity at all (one over-long token, unspaced CJK) falls
+ * back to a hard break at the width. Clusters are measured per grapheme so the
+ * windows stay aligned with the native slice/width engine for emoji, skin-tone
+ * modifiers, and combining marks.
+ */
+function wrapSpans(text: string, width: number): WrapSpan[] {
+	if (text.length === 0) return [{ start: 0, end: 0 }];
+	const limit = Math.max(1, width);
+	const clusters: WrapCluster[] = [];
+	let col = 0;
+	for (const { segment } of getSegmenter().segment(text)) {
+		const clusterWidth = visibleWidth(segment);
+		clusters.push({
+			col,
+			width: clusterWidth,
+			whitespace: clusterWidth > 0 && segment.trim().length === 0,
+			breakAfter: clusterWidth > 0 && BREAK_AFTER.test(segment),
+		});
+		col += clusterWidth;
+	}
+	const total = col;
+	const spans: WrapSpan[] = [];
+	let index = 0;
+	while (index < clusters.length) {
+		// Whitespace a break consumed is dropped, but the line's own leading
+		// indentation is content: only skip it when resuming after a break.
+		if (index > 0) {
+			while (index < clusters.length && clusters[index]?.whitespace) index++;
+		}
+		if (index >= clusters.length) break;
+		const start = clusters[index]?.col ?? 0;
+		let end = index;
+		let used = 0;
+		// Segment end (column) and resume index of the last break opportunity seen;
+		// the latest one wins, exactly like vim's `breakat` scan.
+		let breakEnd = -1;
+		let breakNext = -1;
+		while (end < clusters.length) {
+			const cluster = clusters[end];
+			if (cluster === undefined) break;
+			if (end > index && used + cluster.width > limit) break;
+			if (cluster.whitespace) {
+				breakEnd = cluster.col;
+				breakNext = end;
+			} else if (cluster.breakAfter) {
+				breakEnd = cluster.col + cluster.width;
+				breakNext = end + 1;
+			}
+			used += cluster.width;
+			end++;
+		}
+		if (end >= clusters.length) {
+			spans.push({ start, end: total });
+			break;
+		}
+		if (breakEnd > start && breakNext > index && limit - (breakEnd - start) <= maxWrapGap(limit)) {
+			spans.push({ start, end: breakEnd });
+			index = breakNext;
+		} else {
+			// No opportunity, or the one that fits would strand too much blank:
+			// fill the row at the width instead.
+			spans.push({ start, end: clusters[end]?.col ?? total });
+			index = end;
+		}
+	}
+	return spans.length > 0 ? spans : [{ start: 0, end: total }];
+}
 function intralineMarks(oldLine: string, newLine: string): { old: MarkRanges; new: MarkRanges } {
 	const oldRanges: [number, number][] = [];
 	const newRanges: [number, number][] = [];
@@ -233,8 +338,6 @@ export function buildDiffDocument(
 			newNum: newIdx === undefined ? undefined : newIdx + 1,
 			oldText: oldIdx === undefined ? "" : (oldPlain[oldIdx] ?? ""),
 			newText: newIdx === undefined ? "" : (newPlain[newIdx] ?? ""),
-			oldWidth: oldIdx === undefined ? 0 : visibleWidth(oldPlain[oldIdx] ?? ""),
-			newWidth: newIdx === undefined ? 0 : visibleWidth(newPlain[newIdx] ?? ""),
 			oldMarks: marks?.old,
 			newMarks: marks?.new,
 			oldRaw: oldIdx === undefined ? undefined : oldLines[oldIdx],
@@ -388,7 +491,6 @@ export function buildDiffDocument(
 	// formatting noise — staging follows git's real content).
 	const hunks = ignoreFormatting ? allHunks.filter(hunk => hunk.rows.some(row => row.kind !== "context")) : allHunks;
 
-	const fileLines = newPlain.map(line => ({ text: line, width: visibleWidth(line) }));
 	const gutterWidth = Math.max(3, String(Math.max(oldLines.length, newLines.length)).length);
 	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const rowIndexByNewLine: number[] = new Array(newLines.length + 1).fill(-1);
@@ -399,7 +501,6 @@ export function buildDiffDocument(
 		filePath,
 		rows,
 		hunks,
-		fileLines,
 		oldDisplayLines: oldPlain,
 		newDisplayLines: newPlain,
 		additions,
@@ -533,11 +634,21 @@ function palette(): DiffPalette {
 /** Placeholder states shown instead of a document. */
 export type DiffPaneState = "empty" | "loading" | "streaming" | "asset" | "ready";
 
-/** One rendered line of the current view. */
+/** Half-open display-column window `[start, end)` of one rendered row segment. */
+interface WrapSpan {
+	readonly start: number;
+	readonly end: number;
+}
+
+/**
+ * One rendered line of the current view. `span` is the row's word-wrap window;
+ * it is absent while wrapping is off (the renderer pans from `scrollLeft`
+ * instead) and absent on a split-view side whose wrapped row count is exceeded.
+ */
 type Visual =
-	| { t: "split"; row: DiffRow; seg: number; rowIndex: number }
-	| { t: "line"; row: DiffRow; side: "old" | "new" | "both"; seg: number; rowIndex: number }
-	| { t: "file"; index: number; seg: number; rowIndex: number }
+	| { t: "split"; row: DiffRow; oldSpan?: WrapSpan; newSpan?: WrapSpan; rowIndex: number }
+	| { t: "line"; row: DiffRow; side: "old" | "new" | "both"; span?: WrapSpan; first: boolean; rowIndex: number }
+	| { t: "file"; index: number; span?: WrapSpan; first: boolean; rowIndex: number }
 	| { t: "header"; hunk: number }
 	| { t: "blank" };
 
@@ -958,14 +1069,24 @@ export class DiffPane {
 		const key = `${this.#docVersion}\u0000${this.mode}\u0000${this.wrap}\u0000${width}`;
 		if (this.#layoutCache?.key === key) return this.#layoutCache.visuals;
 		const visuals: Visual[] = [];
-		const segsFor = (textWidth: number, ...widths: number[]): number =>
-			this.wrap ? Math.max(1, Math.ceil(Math.max(...widths, 1) / textWidth)) : 1;
+		/**
+		 * Rendered windows for one side: the word-wrap spans when wrapping is
+		 * enabled, else a single `undefined` window that the renderer fills from
+		 * `scrollLeft` (so horizontal panning never invalidates the layout cache).
+		 */
+		const spansFor = (text: string, textWidth: number): (WrapSpan | undefined)[] =>
+			this.wrap ? wrapSpans(text, textWidth) : [undefined];
+		const firstOf = (span: WrapSpan | undefined): boolean => span === undefined || span.start === 0;
 		switch (this.mode) {
 			case "split": {
 				const textWidth = this.#splitTextWidth(width);
 				doc.rows.forEach((row, rowIndex) => {
-					const segs = segsFor(textWidth, row.oldWidth, row.newWidth);
-					for (let seg = 0; seg < segs; seg++) visuals.push({ t: "split", row, seg, rowIndex });
+					const oldSpans = spansFor(row.oldText, textWidth);
+					const newSpans = spansFor(row.newText, textWidth);
+					const count = Math.max(oldSpans.length, newSpans.length);
+					for (let seg = 0; seg < count; seg++) {
+						visuals.push({ t: "split", row, oldSpan: oldSpans[seg], newSpan: newSpans[seg], rowIndex });
+					}
 				});
 				break;
 			}
@@ -973,15 +1094,15 @@ export class DiffPane {
 				const textWidth = this.#lineTextWidth(width);
 				doc.rows.forEach((row, rowIndex) => {
 					if (row.kind === "change") {
-						for (let seg = 0; seg < segsFor(textWidth, row.oldWidth); seg++)
-							visuals.push({ t: "line", row, side: "old", seg, rowIndex });
-						for (let seg = 0; seg < segsFor(textWidth, row.newWidth); seg++)
-							visuals.push({ t: "line", row, side: "new", seg, rowIndex });
+						for (const span of spansFor(row.oldText, textWidth))
+							visuals.push({ t: "line", row, side: "old", span, first: firstOf(span), rowIndex });
+						for (const span of spansFor(row.newText, textWidth))
+							visuals.push({ t: "line", row, side: "new", span, first: firstOf(span), rowIndex });
 					} else {
 						const side = row.kind === "del" ? "old" : row.kind === "add" ? "new" : "both";
-						const rowWidth = side === "old" ? row.oldWidth : row.newWidth;
-						for (let seg = 0; seg < segsFor(textWidth, rowWidth); seg++)
-							visuals.push({ t: "line", row, side, seg, rowIndex });
+						const text = side === "old" ? row.oldText : row.newText;
+						for (const span of spansFor(text, textWidth))
+							visuals.push({ t: "line", row, side, span, first: firstOf(span), rowIndex });
 					}
 				});
 				break;
@@ -992,15 +1113,15 @@ export class DiffPane {
 					visuals.push({ t: "header", hunk: index });
 					for (const row of hunk.rows) {
 						if (row.kind === "change") {
-							for (let seg = 0; seg < segsFor(textWidth, row.oldWidth); seg++)
-								visuals.push({ t: "line", row, side: "old", seg, rowIndex: -1 });
-							for (let seg = 0; seg < segsFor(textWidth, row.newWidth); seg++)
-								visuals.push({ t: "line", row, side: "new", seg, rowIndex: -1 });
+							for (const span of spansFor(row.oldText, textWidth))
+								visuals.push({ t: "line", row, side: "old", span, first: firstOf(span), rowIndex: -1 });
+							for (const span of spansFor(row.newText, textWidth))
+								visuals.push({ t: "line", row, side: "new", span, first: firstOf(span), rowIndex: -1 });
 						} else {
 							const side = row.kind === "del" ? "old" : row.kind === "add" ? "new" : "both";
-							const rowWidth = side === "old" ? row.oldWidth : row.newWidth;
-							for (let seg = 0; seg < segsFor(textWidth, rowWidth); seg++)
-								visuals.push({ t: "line", row, side, seg, rowIndex: -1 });
+							const text = side === "old" ? row.oldText : row.newText;
+							for (const span of spansFor(text, textWidth))
+								visuals.push({ t: "line", row, side, span, first: firstOf(span), rowIndex: -1 });
 						}
 					}
 					visuals.push({ t: "blank" });
@@ -1010,10 +1131,10 @@ export class DiffPane {
 			case "file": {
 				const gutter = doc.gutterWidth;
 				const textWidth = Math.max(8, width - gutter - 1 - 2 - 2);
-				doc.fileLines.forEach((line, index) => {
+				doc.newDisplayLines.forEach((text, index) => {
 					const rowIndex = doc.rowIndexByNewLine[index + 1] ?? -1;
-					for (let seg = 0; seg < segsFor(textWidth, line.width); seg++)
-						visuals.push({ t: "file", index, seg, rowIndex });
+					for (const span of spansFor(text, textWidth))
+						visuals.push({ t: "file", index, span, first: firstOf(span), rowIndex });
 				});
 				break;
 			}
@@ -1249,15 +1370,18 @@ export class DiffPane {
 				return this.#renderHeader(visual.hunk, doc, width, screenRow);
 			case "split": {
 				const textWidth = this.#splitTextWidth(width);
-				const startCol = this.wrap ? visual.seg * textWidth : this.scrollLeft;
+				// The gutter number belongs to a side's own first wrapped row: a side
+				// that wrapped shorter has no `span` here and must render blank.
+				const oldFirst = this.wrap ? visual.oldSpan !== undefined && visual.oldSpan.start === 0 : true;
+				const newFirst = this.wrap ? visual.newSpan !== undefined && visual.newSpan.start === 0 : true;
 				const left = this.#renderSide(
 					visual.row,
 					"old",
 					doc.gutterWidth,
 					textWidth,
 					colors,
-					startCol,
-					visual.seg === 0,
+					this.#resolveSpan(visual.oldSpan, textWidth),
+					oldFirst,
 				);
 				const right = this.#renderSide(
 					visual.row,
@@ -1265,8 +1389,8 @@ export class DiffPane {
 					doc.gutterWidth,
 					textWidth,
 					colors,
-					startCol,
-					visual.seg === 0,
+					this.#resolveSpan(visual.newSpan, textWidth),
+					newFirst,
 				);
 				return `${left}${theme.fg("borderMuted", "│")}${right}`;
 			}
@@ -1275,14 +1399,26 @@ export class DiffPane {
 			case "file": {
 				const gutter = doc.gutterWidth;
 				const textWidth = Math.max(8, width - gutter - 1 - 2 - 2);
-				const startCol = this.wrap ? visual.seg * textWidth : this.scrollLeft;
-				const text = this.#highlights?.new[visual.index] ?? doc.fileLines[visual.index]?.text ?? "";
-				const slice = sliceWithWidth(text, startCol, textWidth);
-				const gutterText =
-					visual.seg === 0 ? theme.fg("dim", String(visual.index + 1).padStart(gutter)) : " ".repeat(gutter);
+				const span = this.#resolveSpan(visual.span, textWidth);
+				const text = this.#highlights?.new[visual.index] ?? doc.newDisplayLines[visual.index] ?? "";
+				const slice =
+					span === null ? { text: "", width: 0 } : sliceWithWidth(text, span.start, span.end - span.start);
+				const gutterText = visual.first
+					? theme.fg("dim", String(visual.index + 1).padStart(gutter))
+					: " ".repeat(gutter);
 				return `${gutterText} ${slice.text}${" ".repeat(Math.max(0, textWidth - slice.width))}`;
 			}
 		}
+	}
+
+	/**
+	 * Wrap window to render: `null` when this visual carries no segment for the
+	 * side (a split row whose other side wrapped further), else the wrap span or,
+	 * while wrapping is off, the pane's horizontal pan window.
+	 */
+	#resolveSpan(span: WrapSpan | undefined, textWidth: number): WrapSpan | null {
+		if (!this.wrap) return { start: this.scrollLeft, end: this.scrollLeft + textWidth };
+		return span ?? null;
 	}
 
 	#renderHeader(hunkIndex: number, doc: DiffDocument, width: number, screenRow: number): string {
@@ -1321,11 +1457,10 @@ export class DiffPane {
 	}
 
 	#renderLine(visual: Visual & { t: "line" }, doc: DiffDocument, width: number, colors: DiffPalette): string {
-		const { row, side, seg } = visual;
+		const { row, side, first } = visual;
 		const gutter = doc.gutterWidth;
 		const textWidth = this.#lineTextWidth(width);
-		const startCol = this.wrap ? seg * textWidth : this.scrollLeft;
-		const first = seg === 0;
+		const span = this.#resolveSpan(visual.span, textWidth);
 		const oldLabel =
 			first && row.oldNum !== undefined && side !== "new" ? String(row.oldNum).padStart(gutter) : " ".repeat(gutter);
 		const newLabel =
@@ -1341,15 +1476,16 @@ export class DiffPane {
 		const marks = side === "old" ? row.oldMarks : row.newMarks;
 		let body: string;
 		if (!isDel && !isAdd) {
-			const slice = sliceWithWidth(text, startCol, textWidth);
+			const slice = span === null ? { text: "", width: 0 } : sliceWithWidth(text, span.start, span.end - span.start);
 			body = ` ${slice.text}${" ".repeat(Math.max(0, textWidth - slice.width))} `;
 		} else {
 			const soft = isDel ? colors.delSoft : colors.addSoft;
 			const strong = isDel ? colors.delStrong : colors.addStrong;
-			if (marks && marks.length > 0 && row.kind === "change") {
-				body = `${withBg(` ${this.#renderMarked(text, marks, textWidth, soft, strong, startCol)} `, soft)}\x1b[0m`;
+			if (marks && marks.length > 0 && row.kind === "change" && span) {
+				body = `${withBg(` ${this.#renderMarked(text, marks, textWidth, soft, strong, span)} `, soft)}\x1b[0m`;
 			} else {
-				const slice = sliceWithWidth(text, startCol, textWidth);
+				const slice =
+					span === null ? { text: "", width: 0 } : sliceWithWidth(text, span.start, span.end - span.start);
 				body = `${withBg(` ${slice.text}${" ".repeat(Math.max(0, textWidth - slice.width))} `, soft)}\x1b[0m`;
 			}
 		}
@@ -1362,7 +1498,7 @@ export class DiffPane {
 		gutter: number,
 		textWidth: number,
 		colors: DiffPalette,
-		startCol: number,
+		span: WrapSpan | null,
 		first: boolean,
 	): string {
 		const num = side === "old" ? row.oldNum : row.newNum;
@@ -1393,12 +1529,12 @@ export class DiffPane {
 		const strong = side === "old" ? colors.delStrong : colors.addStrong;
 		let body: string;
 		if (!changed) {
-			const slice = sliceWithWidth(text, startCol, textWidth);
+			const slice = span === null ? { text: "", width: 0 } : sliceWithWidth(text, span.start, span.end - span.start);
 			body = ` ${slice.text}${" ".repeat(Math.max(0, textWidth - slice.width))} `;
-		} else if (marks && marks.length > 0) {
-			body = `${withBg(` ${this.#renderMarked(text, marks, textWidth, soft, strong, startCol)} `, soft)}\x1b[0m`;
+		} else if (marks && marks.length > 0 && span) {
+			body = `${withBg(` ${this.#renderMarked(text, marks, textWidth, soft, strong, span)} `, soft)}\x1b[0m`;
 		} else {
-			const slice = sliceWithWidth(text, startCol, textWidth);
+			const slice = span === null ? { text: "", width: 0 } : sliceWithWidth(text, span.start, span.end - span.start);
 			body = `${withBg(` ${slice.text}${" ".repeat(Math.max(0, textWidth - slice.width))} `, soft)}\x1b[0m`;
 		}
 		return `${gutterText}${body}`;
@@ -1411,10 +1547,10 @@ export class DiffPane {
 		textWidth: number,
 		soft: string,
 		strong: string,
-		startCol: number,
+		span: WrapSpan,
 	): string {
-		const end = startCol + textWidth;
-		let cursor = startCol;
+		const end = span.end;
+		let cursor = span.start;
 		let out = "";
 		let used = 0;
 		const emit = (from: number, to: number, bg: string): void => {

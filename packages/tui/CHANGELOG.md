@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Git TUI's word wrap splitting words across rows: wrapped rows now break at word and separator boundaries, and a break that would strand a wide gap fills the row instead ([#12472](https://github.com/can1357/oh-my-pi/pull/12472) by [@aleister1102](https://github.com/aleister1102)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
@@ -631,7 +635,7 @@
 
 ### Changed
 
- - Improved native scrollback history management by introducing an optional erase-and-replay mechanism to rebuild scrollback when mutated rows (such as finalized tool blocks or collapsed transcripts) diverge. This is now gated behind the `tui.scrollbackRebuild` setting and defaults to off.
+- Improved native scrollback history management by introducing an optional erase-and-replay mechanism to rebuild scrollback when mutated rows (such as finalized tool blocks or collapsed transcripts) diverge. This is now gated behind the `tui.scrollbackRebuild` setting and defaults to off.
 
 ### Fixed
 
@@ -980,7 +984,7 @@
 - Added `ctrl+j` as a second default binding for the `tui.input.newLine` action alongside `shift+enter`, so terminals that cannot emit `shift+enter` still have a newline key. On terminals with Kitty-protocol / `modifyOtherKeys` disambiguation `ctrl+j` inserts a newline while `Enter` still submits; on legacy terminals where `ctrl+j` and `Enter` are both byte-identical `LF` it submits (documented limitation). User keybinding overrides still take precedence ([#2473](https://github.com/can1357/oh-my-pi/issues/2473))
 - Added an `Editor.onLargePaste(text, lineCount)` hook, fired for a "marker-sized" paste (the point where the editor would otherwise collapse it into a `[Paste #N]` token). Returning `true` lets the host intercept the paste — e.g. to offer wrap-in-code-block / wrap-in-XML / attach-as-file choices — and suppresses the default marker (no undo state is recorded). Added `Editor.insertPaste(content)` so the host can re-insert a (possibly transformed) collapsed paste marker without re-triggering the hook.
 - Added `Editor.deleteBeforeCursor(count)`, which removes up to `count` characters immediately before the cursor on the current line (capped at the cursor column, single line, records one undo state). Hosts use it to "track back" optimistically-inserted characters — e.g. the coding-agent hold-`Space` push-to-talk gesture deleting the space-bar auto-repeat burst.
-- Added an optional `getNativeScrollbackSnapshotSafeEnd()` to the `NativeScrollbackLiveRegion` contract: a *durable* commit boundary (D ≥ the byte-stable `commitSafeEnd`) for live rows whose current snapshot is permanent content but may still drift bytes later (a streaming markdown table re-aligning its columns). The engine commits these rows when they scroll above the window — never dropping them — but **audit-exempt** (tracked via a new byte-stable `auditRows` prefix), so a later layout change of an already-committed row freezes a stale row in history (duplication never loss) instead of re-anchoring the committed-prefix audit and spraying duplicate snapshots. Components that omit it are unchanged: `durableBoundary === byteStableBoundary` and `auditRows === committedRows`, so the ledger math is byte-identical.
+- Added an optional `getNativeScrollbackSnapshotSafeEnd()` to the `NativeScrollbackLiveRegion` contract: a _durable_ commit boundary (D ≥ the byte-stable `commitSafeEnd`) for live rows whose current snapshot is permanent content but may still drift bytes later (a streaming markdown table re-aligning its columns). The engine commits these rows when they scroll above the window — never dropping them — but **audit-exempt** (tracked via a new byte-stable `auditRows` prefix), so a later layout change of an already-committed row freezes a stale row in history (duplication never loss) instead of re-anchoring the committed-prefix audit and spraying duplicate snapshots. Components that omit it are unchanged: `durableBoundary === byteStableBoundary` and `auditRows === committedRows`, so the ledger math is byte-identical.
 
 ### Fixed
 
@@ -1221,7 +1225,7 @@
 
 ### Fixed
 
-- Fixed Windows ConPTY session-resume painting the transcript with the last several rows truncated below the viewport until Alt+Tab forced a host repaint. After `sessionReplace`/`historyRebuild`/`overlayRebuild` paints that scroll-push content into native scrollback, the renderer now arms a 150 ms ConPTY settle window that coalesces spinner/blink-driven `requestRender(false)` calls into a single trailing render — Windows Terminal's viewport-follow logic no longer falls further behind the cursor on every tick of the post-paint storm. The arm also reclaims any render request queued *during* the in-flight composition (notably `ImageBudget.endPass()` calling `requestRender()` synchronously when a frame trips the live-graphics cap): without that, the queued request sat on the standard 30 Hz throttle and fired at ~33 ms — well inside the 150 ms quiet window — defeating the coalescing. Bumped the ConPTY per-`WriteFile` chunk cap from 8 KiB to 16 KiB so a multi-megabyte resume paint emits half as many writes (still well under the ~32 KiB threshold from #2034 that the original cap defends against), and made the cap measure encoded UTF-8 bytes instead of JS code units so a CJK-heavy transcript can't silently inflate a 16-KiB-of-code-units chunk into ~48 KiB of `WriteFile` traffic and reintroduce the #2034 viewport bug ([#2095](https://github.com/can1357/oh-my-pi/issues/2095)).
+- Fixed Windows ConPTY session-resume painting the transcript with the last several rows truncated below the viewport until Alt+Tab forced a host repaint. After `sessionReplace`/`historyRebuild`/`overlayRebuild` paints that scroll-push content into native scrollback, the renderer now arms a 150 ms ConPTY settle window that coalesces spinner/blink-driven `requestRender(false)` calls into a single trailing render — Windows Terminal's viewport-follow logic no longer falls further behind the cursor on every tick of the post-paint storm. The arm also reclaims any render request queued _during_ the in-flight composition (notably `ImageBudget.endPass()` calling `requestRender()` synchronously when a frame trips the live-graphics cap): without that, the queued request sat on the standard 30 Hz throttle and fired at ~33 ms — well inside the 150 ms quiet window — defeating the coalescing. Bumped the ConPTY per-`WriteFile` chunk cap from 8 KiB to 16 KiB so a multi-megabyte resume paint emits half as many writes (still well under the ~32 KiB threshold from #2034 that the original cap defends against), and made the cap measure encoded UTF-8 bytes instead of JS code units so a CJK-heavy transcript can't silently inflate a 16-KiB-of-code-units chunk into ~48 KiB of `WriteFile` traffic and reintroduce the #2034 viewport bug ([#2095](https://github.com/can1357/oh-my-pi/issues/2095)).
 
 ## [15.10.3] - 2026-06-08
 
@@ -1464,7 +1468,7 @@
 
 ### Fixed
 
-- Fixed native Windows + Windows Terminal freezing the editor on the wrap keystroke, on `/plan`/`/resume`/model-switch/status-line toggles, and on any other offscreen structural mutation until the next prompt submit. The `15.7.5` `#1635` fix routed every viewport-saturating pure-append and structural mutation through `deferredMutation` (a literal no-op) whenever `isNativeViewportAtBottom()` returned `undefined` — which it always does under `WT_SESSION` because the kernel32 probe can't see WT host scrollback. The deferral was only ever meant for the *confirmed-scrolled* case; an unknown viewport now falls back to a non-destructive `viewportRepaint` instead, so the live UI keeps updating without emitting `\x1b[3J` and without yanking a possibly-scrolled reader. Confirmed-scrolled frames (probe returns `false`) still defer.
+- Fixed native Windows + Windows Terminal freezing the editor on the wrap keystroke, on `/plan`/`/resume`/model-switch/status-line toggles, and on any other offscreen structural mutation until the next prompt submit. The `15.7.5` `#1635` fix routed every viewport-saturating pure-append and structural mutation through `deferredMutation` (a literal no-op) whenever `isNativeViewportAtBottom()` returned `undefined` — which it always does under `WT_SESSION` because the kernel32 probe can't see WT host scrollback. The deferral was only ever meant for the _confirmed-scrolled_ case; an unknown viewport now falls back to a non-destructive `viewportRepaint` instead, so the live UI keeps updating without emitting `\x1b[3J` and without yanking a possibly-scrolled reader. Confirmed-scrolled frames (probe returns `false`) still defer.
 - Removed the hard-coded 20-result cap on `@`-prefixed fuzzy file completion in `CombinedAutocompleteProvider.#getFuzzyFileSuggestions`. The dropdown now honors the existing `maxResults: 100` ceiling already configured for `fuzzyFind`, so projects with many files sharing a common stem (e.g. `@controller`, `@test`) surface all relevant matches instead of being silently truncated. ([#1652](https://github.com/can1357/oh-my-pi/issues/1652))
 
 ## [15.7.5] - 2026-06-01
