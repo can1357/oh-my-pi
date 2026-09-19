@@ -14,11 +14,214 @@ import type { AsyncJobProgressDelivery } from "../async";
 import { flattenPreviewText, ProgressPreviewAccumulator } from "../session/progress-preview";
 import type { ToolSession } from "../tools";
 import type { DaemonBrokerClient, DaemonOutputUnregister } from "./client";
-import type { DaemonMonitorNotification, DaemonOutputSubscription } from "./protocol";
+import type { DaemonCompletionNotification, DaemonMonitorNotification, DaemonOutputSubscription } from "./protocol";
 
 /** Monitoring needs a live broker connection to the process; detached services have none, so name the alternative. */
 export const DETACHED_MONITOR_ERROR =
 	"Detached services cannot be live-monitored; relaunch it with bash `name` to monitor it, or read its output with `read proc://<name>`";
+
+interface CompletionEpochBinding {
+	epoch: number;
+	daemonId?: string;
+	priorDaemonIds: Set<string>;
+	outcome: Promise<"accepted" | "indeterminate" | "rejected">;
+	accept(daemonId: string): void;
+	preserve(): void;
+	reject(): void;
+}
+
+interface CompletionRegistration {
+	active: boolean;
+	preservePending: boolean;
+	fallbackEpoch: number;
+	daemonEpochs: Map<string, number>;
+	daemonNames: Map<string, string>;
+	pendingBindings: Map<string, Set<CompletionEpochBinding>>;
+	cleanup(preservePending: boolean): void;
+	releaseCallbacks(): void;
+}
+
+const completionRegistrations = new WeakMap<
+	ToolSession,
+	Map<DaemonBrokerClient, Map<string, CompletionRegistration>>
+>();
+
+export function releaseCompletionDaemonAssociation(
+	session: ToolSession,
+	client: DaemonBrokerClient,
+	owner: string,
+	daemonId: string,
+	expectedEpoch?: number,
+): void {
+	const registration = completionRegistrations.get(session)?.get(client)?.get(owner);
+	if (!registration || (expectedEpoch !== undefined && registration.daemonEpochs.get(daemonId) !== expectedEpoch)) {
+		return;
+	}
+	registration.daemonEpochs.delete(daemonId);
+	registration.daemonNames.delete(daemonId);
+}
+
+/** One completion subscription per session, client and owner, kept until a context boundary. */
+export function registerCompletionSink(
+	session: ToolSession,
+	client: DaemonBrokerClient,
+	owner: string,
+	epoch: number,
+	onCompletion: (notification: DaemonCompletionNotification) => void,
+	onCleanup: () => void,
+): CompletionRegistration {
+	let clients = completionRegistrations.get(session);
+	if (!clients) completionRegistrations.set(session, (clients = new Map()));
+	let owners = clients.get(client);
+	if (!owners) clients.set(client, (owners = new Map()));
+	const existing = owners.get(owner);
+	if (existing?.active) return existing;
+	existing?.releaseCallbacks();
+	let unregisterDispose: (() => void) | void;
+	let unregisterBoundary: (() => void) | void;
+	let unregister: ((options: { preservePending: boolean }) => void) | undefined;
+	const registration: CompletionRegistration = {
+		active: true,
+		preservePending: true,
+		// Reset discards broker replay, not the provenance of still-running
+		// incarnations. Only a real switch/new/dispose makes replay resumable.
+		fallbackEpoch: existing?.fallbackEpoch ?? epoch,
+		daemonEpochs: existing?.daemonEpochs ?? new Map(),
+		daemonNames: existing?.daemonNames ?? new Map(),
+		pendingBindings: new Map(),
+		cleanup(preservePending) {
+			const wasActive = registration.active;
+			if (!wasActive && owners.get(owner) !== registration) return;
+			if (!wasActive && !preservePending) return;
+			registration.active = false;
+			registration.preservePending = preservePending;
+			if (wasActive) {
+				for (const bindings of registration.pendingBindings.values()) {
+					for (const binding of bindings) binding.reject();
+				}
+				registration.pendingBindings.clear();
+				unregister?.({ preservePending });
+				onCleanup();
+			}
+			if (preservePending) {
+				registration.daemonEpochs.clear();
+				registration.daemonNames.clear();
+				registration.releaseCallbacks();
+				if (owners.get(owner) === registration) owners.delete(owner);
+				if (owners.size === 0 && clients.get(client) === owners) clients.delete(client);
+				if (clients.size === 0 && completionRegistrations.get(session) === clients) {
+					completionRegistrations.delete(session);
+				}
+			}
+			// After reset keep only provenance and boundary cleanup, not a
+			// broker subscription. A later switch/dispose must release it even
+			// if no service operation re-registers in between.
+		},
+		releaseCallbacks() {
+			const dispose = unregisterDispose;
+			const boundary = unregisterBoundary;
+			unregisterDispose = undefined;
+			unregisterBoundary = undefined;
+			dispose?.();
+			boundary?.();
+		},
+	};
+	owners.set(owner, registration);
+	const canDeliver = (): boolean => {
+		if (registration.active && !session.isDisposed?.()) return true;
+		if (registration.preservePending) throw new Error("Session disposed before service completion delivery");
+		return false;
+	};
+	unregister = client.onCompletion(owner, async notification => {
+		if (!canDeliver()) return;
+		let completionEpoch = registration.daemonEpochs.get(notification.daemon.id);
+		if (completionEpoch === undefined) {
+			let binding: CompletionEpochBinding | undefined;
+			for (const candidate of registration.pendingBindings.get(notification.daemon.name) ?? []) binding = candidate;
+			if (binding) {
+				const outcome = await binding.outcome;
+				if (!canDeliver()) return;
+				if (outcome === "accepted" && binding.daemonId === notification.daemon.id) {
+					completionEpoch = binding.epoch;
+				} else if (outcome === "indeterminate" && !binding.priorDaemonIds.has(notification.daemon.id)) {
+					completionEpoch = binding.epoch;
+					binding.reject();
+				}
+			}
+			// A concurrent operation may have associated this ID while the
+			// binding selected above was awaiting its result.
+			completionEpoch ??= registration.daemonEpochs.get(notification.daemon.id);
+			completionEpoch ??= registration.fallbackEpoch;
+		}
+		onCompletion(notification);
+		try {
+			await session.queueLaunchCompletion?.(notification, completionEpoch);
+		} finally {
+			// A resumed subscription may already own this ID under a new epoch.
+			if (owners.get(owner) === registration) {
+				releaseCompletionDaemonAssociation(session, client, owner, notification.daemon.id, completionEpoch);
+			}
+		}
+	});
+	unregisterDispose = session.registerDisposeCallback?.(() => registration.cleanup(true));
+	// Both switch and new leave the outgoing conversation resumable. Reset erases it.
+	unregisterBoundary = session.registerContextBoundaryCallback?.(boundary => registration.cleanup(boundary !== "reset"));
+	return registration;
+}
+
+/** Correlate a start/monitor result (or a written start whose response was lost) with its initiating epoch. */
+export function bindCompletionOperation(
+	registration: CompletionRegistration | undefined,
+	name: string,
+	epoch: number,
+): CompletionEpochBinding | undefined {
+	if (!registration?.active) return undefined;
+	const { promise: outcome, resolve } = Promise.withResolvers<"accepted" | "indeterminate" | "rejected">();
+	let state: "pending" | "accepted" | "indeterminate" | "rejected" = "pending";
+	const pending = registration.pendingBindings.get(name) ?? new Set<CompletionEpochBinding>();
+	const remove = (): void => {
+		pending.delete(binding);
+		if (registration.pendingBindings.get(name) === pending && pending.size === 0) {
+			registration.pendingBindings.delete(name);
+		}
+	};
+	const priorDaemonIds = new Set<string>();
+	for (const [id, daemonName] of registration.daemonNames) {
+		if (daemonName === name) priorDaemonIds.add(id);
+	}
+	const binding: CompletionEpochBinding = {
+		epoch,
+		priorDaemonIds,
+		outcome,
+		accept(daemonId) {
+			if (!registration.active && !registration.preservePending) {
+				registration.daemonEpochs.set(daemonId, epoch);
+				registration.daemonNames.set(daemonId, name);
+			}
+			if (!registration.active || state === "accepted" || state === "rejected") return;
+			state = "accepted";
+			binding.daemonId = daemonId;
+			registration.daemonEpochs.set(daemonId, epoch);
+			registration.daemonNames.set(daemonId, name);
+			resolve("accepted");
+			remove();
+		},
+		preserve() {
+			if (state !== "pending") return;
+			state = "indeterminate";
+			resolve("indeterminate");
+		},
+		reject() {
+			if (state === "accepted" || state === "rejected") return;
+			state = "rejected";
+			resolve("rejected");
+			remove();
+		},
+	};
+	pending.add(binding);
+	registration.pendingBindings.set(name, pending);
+	return binding;
+}
 
 export type LocalStopResponse = "failed" | "non-terminal" | "terminal";
 
@@ -245,6 +448,7 @@ export async function registerOutputSink(
 	owner: string,
 	delivery: AsyncJobProgressDelivery,
 	startPending: boolean,
+	epoch: number,
 	daemonId?: string,
 	restoreOf?: OutputRegistration,
 ): Promise<OutputLease | undefined> {
@@ -259,7 +463,6 @@ export async function registerOutputSink(
 	) {
 		return undefined;
 	}
-	const epoch = captureLaunchProgressEpoch();
 	const existing = outputRegistrations.get(session)?.get(client)?.get(name);
 	if (existing?.epoch === epoch && existing.binding === "start-pending" && startPending) {
 		return existing.acquirePendingStart?.(delivery);
@@ -352,6 +555,7 @@ export async function registerOutputSink(
 		? {
 				owner: replaceable.owner,
 				delivery: replaceable.delivery,
+				epoch: replaceable.epoch,
 				daemonId: replaceable.daemonId,
 			}
 		: undefined;
@@ -489,20 +693,31 @@ export async function registerOutputSink(
 		// the single completion surface even when the monitor notification
 		// arrives after the response.
 		if (registration.localStop.state === "terminal-response") return;
-		const completion = session.queueLaunchCompletion?.({
-			event: "daemon-completed",
-			completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,
-			owner,
-			daemon: notification.daemon,
-		});
+		const completion = session.queueLaunchCompletion?.(
+			{
+				event: "daemon-completed",
+				completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,
+				owner,
+				daemon: notification.daemon,
+			},
+			registration.epoch,
+		);
+		const releaseEpochAssociation = (): void => {
+			releaseCompletionDaemonAssociation(session, client, owner, notification.daemon.id, registration.epoch);
+		};
 		if (waitForTerminalCompletion) {
-			await completion;
+			try {
+				await completion;
+			} finally {
+				releaseEpochAssociation();
+			}
 		} else {
 			// Buffered terminal notifications were already accepted by the
 			// client sink while the start RPC was pending. Queue the completion
 			// after their preceding output, but do not wait for its delivery
 			// receipt: that receipt can require the current tool step to finish.
-			void completion?.catch(error => {
+			void completion?.then(releaseEpochAssociation, error => {
+				releaseEpochAssociation();
 				logger.warn("Buffered launch monitor completion delivery failed", {
 					monitorId: id,
 					name,
@@ -554,6 +769,7 @@ export async function registerOutputSink(
 			previous.owner,
 			previous.delivery,
 			false,
+			previous.epoch,
 			previous.daemonId,
 			fence,
 		);

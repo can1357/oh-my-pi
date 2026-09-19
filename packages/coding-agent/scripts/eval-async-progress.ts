@@ -1,5 +1,14 @@
 #!/usr/bin/env bun
 
+// Live model behavioral eval for the async-progress policy prompt. It is
+// manual and opt-in on purpose: it needs real provider credentials, spends
+// tokens on every run, and scores stochastic model behavior, so it is wired
+// only as `bun run eval:async-progress` and must never be added to a `ci:*`
+// script. Deterministic batching/queue/wake semantics stay in `bun test`.
+//
+//   bun run eval:async-progress [--surface bash|service|all] [--model <pattern>] [--runs N]
+//   bun run eval:async-progress --case quick [--model <pattern>] [--runs N]
+
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { closeDaemonClients } from "../src/launch/client";
@@ -11,6 +20,8 @@ import type { AgentSessionEvent } from "../src/session/agent-session-events";
 import { ASYNC_PROGRESS_MESSAGE_TYPE, ASYNC_RESULT_MESSAGE_TYPE } from "../src/session/async-job-delivery";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../src/session/launch-completion";
 import { SessionManager } from "../src/session/session-manager";
+import { cfgAutolearnEnabled } from "../src/autolearn/settings";
+import { cfgAsyncEnabled, cfgBashAutoBackgroundEnabled, cfgLaunchEnabled, cfgToolsApprovalMode } from "../src/tools/settings";
 
 const DEFAULT_RUNS = 1;
 const DEFAULT_TIMEOUT_MS = 90_000;
@@ -46,11 +57,12 @@ interface BashCall {
 
 interface EvalCriteria {
 	selectedWake?: boolean;
-	selectedForeground?: boolean;
+	selectedAutoInline?: boolean;
 	onlyExpectedTool: boolean;
 	selectedService?: boolean;
 	singleToolCall?: boolean;
 	singleStart?: boolean;
+	noProcessPolling?: boolean;
 	noAsyncNotification?: boolean;
 	reportedQuickResult?: boolean;
 	notificationDelivered?: boolean;
@@ -93,6 +105,9 @@ function parseArgs(argv: string[]): EvalConfig {
 		throw new Error("--surface must be bash, service, or all");
 	}
 	const caseValue = valueFor("--case");
+	if (argv.includes("--case") && caseValue === undefined) {
+		throw new Error("--case requires wake or quick");
+	}
 	const evalCase = caseValue ?? "wake";
 	if (evalCase !== "wake" && evalCase !== "quick") throw new Error("--case must be wake or quick");
 	if (evalCase === "quick" && surfaceValue !== undefined && surface !== "bash") {
@@ -159,8 +174,12 @@ function scoreMessages(
 	if (evalCase === "quick") {
 		const [call] = toolCalls;
 		return {
-			selectedForeground:
-				toolCalls.length === 1 && call !== undefined && call.name === undefined && call.async === undefined,
+			selectedAutoInline:
+				toolCalls.length === 1 &&
+				call !== undefined &&
+				call.name === undefined &&
+				call.async === "auto" &&
+				call.progress === "wake",
 			onlyExpectedTool: executedTools.length === 1 && executedTools[0] === "bash",
 			singleToolCall: toolCalls.length === 1,
 			noAsyncNotification: messages.every(message => !isProgressMessage(message) && !isCompletionMessage(message)),
@@ -195,8 +214,9 @@ function scoreMessages(
 			? {
 					selectedService: serviceCalls.length > 0,
 					singleStart: serviceCalls.length === 1,
+					noProcessPolling: toolCalls.length === 1,
 				}
-			: { singleToolCall: toolCalls.length === 1 }),
+			: { singleToolCall: toolCalls.length === 1, noProcessPolling: toolCalls.length === 1 }),
 		notificationDelivered: progressIndex >= 0,
 		completionObserved: completionIndex >= 0,
 		notificationBeforeCompletion: progressIndex >= 0 && completionIndex >= 0 && progressIndex < completionIndex,
@@ -212,11 +232,11 @@ async function runOnce(config: EvalConfig, surface: EvalSurface, run: number): P
 	const cwd = process.cwd();
 	const deadline = Date.now() + config.timeoutMs;
 	const settings = await Settings.loadReadOnly({ cwd });
-	settings.override("async.enabled", true);
-	settings.override("bash.autoBackground.enabled", false);
-	settings.override("launch.enabled", true);
-	settings.override("autolearn.enabled", false);
-	settings.override("tools.approvalMode", "yolo");
+	cfgAsyncEnabled.set(settings, true);
+	cfgBashAutoBackgroundEnabled.set(settings, false);
+	cfgLaunchEnabled.set(settings, true);
+	cfgAutolearnEnabled.set(settings, false);
+	cfgToolsApprovalMode.set(settings, "yolo");
 
 	const { session } = await createAgentSession({
 		cwd,

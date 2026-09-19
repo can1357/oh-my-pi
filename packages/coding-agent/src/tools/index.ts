@@ -206,9 +206,8 @@ export interface DeferredDiagnosticsEntry {
 
 /**
  * Why a session is replacing the conversation beneath its live launch
- * subscriptions. Decides whether broker-retained completions for the outgoing
- * owner survive the boundary: only a switch leaves the old conversation
- * resumable, so only a switch may keep them for replay.
+ * subscriptions. Broker-retained completions survive disposal and transitions
+ * to another conversation, but a reset discards the wiped context's completions.
  */
 export type LaunchContextBoundary =
 	/** Same session id, transcript wiped (`/clear`): nothing can legitimately resume the old context. */
@@ -219,6 +218,8 @@ export type LaunchContextBoundary =
 	| "switch";
 
 /** Session context for tool factories */
+export type ProcessProgressMode = "session" | "unavailable";
+
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
@@ -230,6 +231,13 @@ export interface ToolSession {
 	canPromptUser?: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session only). */
 	settingsApproval?: boolean;
+	/**
+	 * Delivery surface for supervised-process progress. `session` routes monitor
+	 * events through this ToolSession's own queue; `unavailable` forbids monitored
+	 * start/monitor operations while leaving unmonitored process operations intact.
+	 * An omitted mode is treated as unavailable.
+	 */
+	processProgressMode?: ProcessProgressMode;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**
@@ -531,9 +539,9 @@ export interface ToolSession {
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
-	/** Queue a broker supervised-process completion for the owning session. */
-	queueLaunchCompletion?(notification: DaemonCompletionNotification): Promise<void>;
-	/** Capture the session generation that owns a supervised-process monitor. */
+	/** Queue a broker completion under its operation's captured epoch; omitted epochs use the current context. */
+	queueLaunchCompletion?(notification: DaemonCompletionNotification, epoch?: number): Promise<void>;
+	/** Capture the session generation that owns a supervised-process incarnation. */
 	captureLaunchProgressEpoch?(): number;
 	/** Queue a live supervised-process output batch for the owning session. */
 	queueLaunchProgress?(

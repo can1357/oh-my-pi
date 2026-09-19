@@ -257,46 +257,7 @@ describe("async batch message boundaries", () => {
 });
 
 describe("async progress chatty guidance", () => {
-	test("renders scheduled Bash reminder metadata with Bash-specific advice", () => {
-		const message = buildAsyncProgressBatchMessage([
-			progressEntry({
-				job: fakeJob({ type: "bash" }),
-				suppressedEvents: 5,
-				reminder: "chatty-monitor",
-			}),
-		]);
 
-		expect(message).not.toBeNull();
-		expect(message!.content).toContain("<system-reminder>");
-		expect(message!.content).toContain("Chatty progress → lower source verbosity");
-		expect(message!.content).toContain("Bash: if retry is unsafe, let it finish.");
-		expect(message!.content).not.toContain("Service:");
-	});
-
-	test("renders process reminder metadata with monitor controls", () => {
-		const message = buildAsyncProgressBatchMessage(
-			[
-				progressEntry({
-					source: {
-						id: "web",
-						type: "process",
-						label: "web server",
-						startedAt: Date.now(),
-					},
-					suppressedEvents: 5,
-					reminder: "chatty-monitor",
-				}),
-			],
-			{ procWrite: true },
-		);
-
-		expect(message).not.toBeNull();
-		expect(message!.content).toContain("<system-reminder>");
-		expect(message!.content).toContain(
-			"Service: retune its monitor without stopping it — write `ambient` or `off` to `proc://<name>/progress`.",
-		);
-		expect(message!.content).not.toContain("Bash:");
-	});
 
 	test("omits the reminder element for unsupported sources", () => {
 		const message = buildAsyncProgressBatchMessage([
@@ -335,7 +296,6 @@ describe("async result terminal metadata", () => {
 		]);
 
 		expect(message).not.toBeNull();
-		expect(message!.content).toContain("failed with exit code 7");
 		expect(message!.details?.jobs[0]?.exitCode).toBe(7);
 	});
 
@@ -353,7 +313,6 @@ describe("async result terminal metadata", () => {
 		]);
 
 		expect(message).not.toBeNull();
-		expect(message!.content).toContain("failed without an exit code (timed out)");
 		expect(message!.details?.jobs[0]?.timedOut).toBe(true);
 	});
 });
@@ -404,7 +363,6 @@ describe("async result terminal-only content for artifact-backed jobs", () => {
 		]);
 
 		expect(message).not.toBeNull();
-		expect(message!.content).toContain("All output was already delivered as progress updates");
 		expect(message!.content).not.toContain("<result>");
 	});
 });

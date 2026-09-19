@@ -1923,7 +1923,12 @@ export class AgentSession implements SettingsScope {
 			coalesceKey: asyncProgressCoalesceKey,
 			coalesce: mergeAsyncProgressEntries,
 			build: entries =>
-				buildAsyncProgressBatchMessage(entries, { procWrite: this.#tools.getActiveToolNames().includes("write") }),
+				buildAsyncProgressBatchMessage(entries, {
+					procWrite:
+						this.#tools.hasBuiltInTool("write") &&
+						this.#tools.getActiveToolNames().includes("write") &&
+						config.isDeviceOnlyWrite?.() !== true,
+				}),
 		});
 		// Every wake-mode producer (managed jobs and, via queueLaunchProgress,
 		// service monitors) shares this one budget: per-source rate limits bound each
@@ -1941,7 +1946,10 @@ export class AgentSession implements SettingsScope {
 				coalesce: mergeAsyncProgressEntries,
 				build: entries =>
 					buildAsyncProgressBatchMessage(entries, {
-						procWrite: this.#tools.getActiveToolNames().includes("write"),
+						procWrite:
+							this.#tools.hasBuiltInTool("write") &&
+							this.#tools.getActiveToolNames().includes("write") &&
+							config.isDeviceOnlyWrite?.() !== true,
 					}),
 			},
 		);
@@ -2769,7 +2777,7 @@ export class AgentSession implements SettingsScope {
 	 * two kinds differ only in whether a flush may spend a wake turn, so output
 	 * sampled under the old mode must still be delivered under the new one
 	 * rather than sit in a queue the source no longer feeds. Managed jobs and
-	 * hub monitors share this path: `identity` is matched through
+	 * service monitors share this path: `identity` is matched through
 	 * `asyncProgressSourceKey`, which keys a monitor by `process:<daemonId>`.
 	 *
 	 * Entries are folded in `seq` order before enqueueing so the target kind's
@@ -7967,11 +7975,14 @@ export class AgentSession implements SettingsScope {
 		this.#queueHiddenNextTurnMessage(message, true);
 	}
 
-	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
+	queueLaunchCompletion(
+		notification: DaemonCompletionNotification,
+		epoch: number = this.#launchProgressEpoch,
+	): Promise<void> {
 		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
-		// A terminal event observed inside a reset/switch boundary belongs to the
-		// process incarnation that boundary is evicting.
-		if (this.#launchProgressBoundaryDepth > 0) return Promise.resolve();
+		// Completion ownership belongs to the accepted daemon incarnation, not
+		// whichever conversation epoch happens to be current when it exits.
+		if (this.#launchProgressBoundaryDepth > 0 || epoch !== this.#launchProgressEpoch) return Promise.resolve();
 		// Ambient monitor output queued while this owner sat idle would be
 		// skipped by the completion-triggered idle flush (its queue registers
 		// with `skipIdleFlush`) and would inject only on a later turn — after
@@ -7990,7 +8001,7 @@ export class AgentSession implements SettingsScope {
 		);
 		const delivered = this.yieldQueue.enqueueWithReceipt<SessionLaunchCompletionEntry>(
 			LAUNCH_COMPLETION_MESSAGE_TYPE,
-			{ ...notification, epoch: this.#launchProgressEpoch },
+			{ ...notification, epoch },
 		);
 		this.yieldQueue.requestIdleFlush();
 		return delivered;
@@ -8027,7 +8038,7 @@ export class AgentSession implements SettingsScope {
 		if (notification.batchKind === "artifact-only") return;
 		// Wake monitors enqueue into the same ASYNC_PROGRESS_WAKE_QUEUE_KIND as
 		// wake background jobs. That kind is the one registered with the
-		// session-wide WakeTurnBudget, so Hub monitor wake-ups draw on the same
+		// session-wide WakeTurnBudget, so service monitor wake-ups draw on the same
 		// idle-turn budget as jobs; monitors deliberately have no budget of their
 		// own and aggregate wake traffic stays bounded per session, not per source.
 		const queueKind = delivery === "wake" ? ASYNC_PROGRESS_WAKE_QUEUE_KIND : ASYNC_PROGRESS_MESSAGE_TYPE;

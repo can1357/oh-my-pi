@@ -29,13 +29,113 @@
 | `name` | `string` | No | Supervised service name (≤48 characters; project-unique). Present only when `launch.enabled` and the session can launch. A live name restarts using the new spec. Incompatible with `async` and `timeout`. |
 | `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness: output regex and/or TCP port must pass; host defaults to `127.0.0.1`, timeout to 30 seconds. Only with `name`. |
 | `env` | `Record<string, string>` | No | Environment overrides for the service. Only with `name`. |
-| `progress` | `"wake" \| "ambient" \| "off"` | No | Named services accept all three modes; `off` (default) starts without monitoring. Finite commands require `async: true` or `"auto"` and accept only `wake` or `ambient`. Delivery starts after backgrounding: `wake` starts an idle follow-up turn; `ambient` waits for an active turn. Complete non-empty output lines collect into trailing 200 ms events; truncated/suppressed previews link the full artifact. |
+| `progress` | `"wake" \| "ambient" \| "off"` | No | Named services accept all three modes; `off` (default) starts without monitoring. Live service output requires a session with process-progress delivery; standalone/ephemeral sessions reject it. Finite commands require `async: true` or `"auto"` and accept only `wake` or `ambient`. Delivery starts after backgrounding: `wake` starts an idle follow-up turn; `ambient` waits for an active turn. Truncated/suppressed previews link the full artifact. |
 
 Named service example:
 ```json
 {"command":"python3 -m http.server 8765","name":"web","ready":{"port":8765}}
 ```
 
+## Agent-facing guidance
+
+When async execution is enabled, the shared policy recommends `async: "auto"` with `progress: "wake"` for finite commands: quick work returns inline, while slow work crosses the turn boundary without restarting the process. `async: true` remains the immediate-background choice for known long-running commands. Low-priority output can use `ambient` to avoid progress-triggered turns. Services, watchers, debuggers, and REPLs use the same Bash tool with a `name`, without `async` or `timeout`.
+
+A command that finishes within `bash.asyncAuto.inlineGraceMs` returns one ordinary Bash result. It does not emit separate progress or completion notifications. If the command outlives the grace, the same process is promoted without a restart. Settings-driven auto-backgrounding of an unmarked call can still deliver completion, but it does not enable progress; progress requires explicit `async: "auto"` or `async: true`.
+
+`wake` is a harness push, not a reason to hold the current turn open. Agents end the turn rather than polling `proc://`, following logs, or calling `wait` for wake progress. Ending a turn this way is not a yield under the delivery contract; the pushed update resumes the task. Use `ready` on a named Bash launch when startup readiness must precede further work. The separate `wait` tool is for a blocked agent awaiting results, messages, or steering; it has no named-service readiness or log-pattern operation. Output received while the model is busy is batched into the next delivery. Progress is a bounded, lossy preview selected by timing; use the artifact to inspect omitted output. A one-job wake message has this structure:
+
+```xml
+<system-notice>
+<job-progress id="<job-id>" type="bash" elapsed="<elapsed>">
+<output>
+<all output events queued for this job>
+</output>
+</job-progress>
+Resume your work using this update.
+</system-notice>
+```
+
+The default and custom system prompts share one asynchronous-progress policy. It includes finite-command guidance only when async Bash is available, and service-monitor guidance only when the active built-in Bash tool can launch services and the session can receive process progress. Standalone and ephemeral tool sessions do not advertise live service monitoring. Service and job retuning instructions require the active built-in `write` capability; a batch's contents do not establish tool availability.
+
+Each delivered progress batch is a harness-injected `async-progress` message in the model's conversation. Rate limiting suppresses whole post-batch events by timing, not severity. A suppression count names events, not lines. When delivery resumes—or a terminal suppression summary is emitted—the batch retains bounded previews from the first and last suppressed events while omitting text from the events between them; delivered progress therefore cannot prove that an error or state transition did not occur. The artifact is authoritative. The resumed event or terminal summary includes `<suppressed events="N" reason="rate-limit" full-output="artifact://<id>" />`. A `<system-reminder>` carrying the same chatty-progress instructions as the system prompt is appended to a few suppression-bearing progress messages with increasing spacing, then never again for that job.
+
+When a batch was rate-limited or exceeded the preview bound, `<output>` contains a `<suppressed reason="rate-limit|preview-limit" [events="N"] [full-output="artifact://<id>"] />` marker. Bounded multi-line previews put retained output in `<head>` and `<tail>` blocks; fitting single-line previews remain verbatim. `<output>` itself has no attributes. Bash uses the same artifact as its final command output, so the URI stays stable for the job.
+
+### Choosing a progress mode
+
+Wake and ambient share per-source batching and rate limits: complete non-empty lines collect into 200 ms batches, with a burst of 10 events followed by one permit every 2 seconds. Previews retain at most 3,000 UTF-8 bytes of head/tail output; suppressed output remains in the artifact. Concurrent sources have independent event buckets, but progress-triggered model turns share a session-wide wake budget of five turns, refilling one permit every 30 seconds.
+
+| Mode | When the agent receives it | Cost and tradeoff | Use it for |
+| --- | --- | --- | --- |
+| `wake` | Starts a follow-up turn when the agent is idle | May add model requests, thinking tokens, and latency, but the agent can act immediately | Readiness, failures, requests for input, or a newly available artifact |
+| `ambient` | Waits for the next turn caused by completion, a user message, or another event | Several batches can share one model request; reaction to intermediate output may be delayed | Test, build, install, download, benchmark, or low-priority diagnostic progress |
+| `off` (services only) | No live output delivery | Detaches this session's monitor without stopping the service | Output that does not need agent attention |
+
+Ambient does not change batching, rate limiting, or artifact capture. It avoids spending an inference turn on updates that would produce no useful action, such as another passing test file or download percentage. When completion starts the next turn, queued ambient progress is delivered before the completion result.
+
+For noisy output, lower source verbosity or filter to actionable lines. If safe to retry, cancel and relaunch quieter. Otherwise, keep the job running and use `write` with `{"path":"proc://<job-id>/progress","content":"ambient"}` to retune a caller-owned running job between `wake` and `ambient`. Already-queued output survives retuning, so a pending wake can still start one more turn. Job channels cannot be detached with `off`, and a job launched without `progress` cannot gain a channel later.
+
+Services also allow `write` with `{"path":"proc://<name>/progress","content":"off"}` to detach the current session's monitor without stopping the process. Writing `wake` or `ambient` attaches or retunes a monitor; a new attachment captures future output only. To change source verbosity, relaunch the named Bash service with a quieter command or environment only when restarting is safe.
+
+Use ambient for a long test suite when only the final status changes the plan:
+
+```json
+{
+  "command": "bun test",
+  "async": "auto",
+  "progress": "ambient"
+}
+```
+
+Use wake when an intermediate line should change the agent's next action:
+
+```json
+{
+  "command": "bun scripts/wait-for-preview.ts",
+  "async": "auto",
+  "progress": "wake"
+}
+```
+
+The same choice applies to named services. Use `write` to retune an existing service's diagnostic stream or attach an actionable monitor:
+
+```json
+{"path":"proc://benchmark/progress","content":"ambient"}
+{"path":"proc://preview/progress","content":"wake"}
+```
+
+### Capability compared with Claude Code Monitor
+
+This comparison uses the observed Claude Code 2.1.233 Monitor contract. Each surface pushes events from the harness to the agent; the model does not poll after arming the work.
+
+| Capability | OMP async Bash | OMP named-service monitoring | Claude Code Monitor |
+| --- | --- | --- | --- |
+| Intended workload | Finite command spanning turns | Shared long-running process, watcher, service, debugger, or REPL | Command or WebSocket watcher |
+| Start operation | `bash` with `async: "auto"`, `progress: "wake"` (or `async: true` for immediate background) | `bash` with `command`, `name`, and `progress:"wake"` | Top-level `Monitor` call with a command or WebSocket URL |
+| Attach or retune | Write `wake` or `ambient` to `proc://<job-id>/progress`; no attach after launch | Write `wake`, `ambient`, or `off` to `proc://<name>/progress` | No attach/retune operation observed |
+| Detach without stopping work | No; `off` is rejected | Write `off` to `proc://<name>/progress` | Persistent monitor is stopped through task control |
+| Harness push while idle | Starts a follow-up turn | Starts a follow-up turn | Starts a follow-up turn |
+| Events received while busy | Permitted events buffered and delivered together; suppressed events remain in the artifact | Same shared batching contract | Permitted events buffered and delivered together; suppressed events remain in the output file |
+| Burst/rate limit | 10 events, then one event permit every 2s | Same shared meter | Observed: about 10 events, then one event permit every 2s |
+| Command event boundary | Complete non-empty merged stdout/stderr line | Complete non-empty merged stdout/stderr line | Stdout line |
+| WebSocket event boundary | Not supported | Not supported | Text frame |
+| Termination | Separate async-job completion/failure | Separate process completion | Separate monitor termination |
+| Non-waking delivery | `progress:"ambient"` | `progress:"ambient"` | No native ambient mode observed |
+| Native regex, cadence, or stop-on-match controls | None; filtering belongs in the command | None; filtering belongs in the supervised process | None; filtering and polling belong in the monitor command |
+| Lifetime | Command lifetime; `timeout:0` disables its deadline | Monitor is session-scoped; write `persist`, `session`, or `detached` to `proc://<name>/mode` to control service lifetime | Optional `persistent:true` |
+
+Named-service monitoring is the long-running-process counterpart to Claude Code Monitor's `persistent:true`. Service lifetime and output delivery are independent: `persist` lets the service survive the last omp client, while `progress` controls the current session's subscription. A fully detached service cannot be live-monitored.
+
+## Live model behavioral eval
+
+The opt-in eval runs a real authenticated model through the normal `AgentSession`. Its finite Bash wake scenario requires `async: "auto"` with `progress: "wake"`; its service scenario requires one named Bash launch with `progress: "wake"`. In both cases the harness must inject the marker before completion, a later assistant message must acknowledge the pushed event, and the model must avoid blocking/polling calls. The quick-command case requires one Bash call with `async: "auto"` and `progress: "wake"` that finishes inline, no async notification, and a reported result. User prompts do not mention these selection rules, so the criteria measure agent-facing policy rather than parroting eval instructions.
+
+```bash
+bun --cwd=packages/coding-agent run eval:async-progress --model <provider/model> --runs 3
+bun --cwd=packages/coding-agent run eval:async-progress --case quick --model <provider/model> --runs 3
+```
+
+The default wake case runs both surfaces; pass `--surface bash` or `--surface service` to isolate one. The quick case is Bash-only. Omit `--model` to use the configured default. The command exits non-zero if any run fails and prints the selected tool arguments plus each criterion. It is opt-in because it uses external credentials, incurs provider cost, and measures stochastic model behavior; deterministic queue, batching, and wake semantics remain covered by the regular test suite.
 ## Outputs
 The tool returns a single `text` content block plus optional `details`.
 

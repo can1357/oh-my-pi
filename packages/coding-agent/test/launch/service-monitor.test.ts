@@ -55,6 +55,7 @@ interface MonitorHarness {
 		artifactId?: string;
 	}>;
 	completions: DaemonCompletionNotification[];
+	completionEpochs: number[];
 	active: Array<{ monitorId: string; delivery: string; active: boolean }>;
 	completionPreservePending: boolean[];
 	epochs: number[];
@@ -81,6 +82,7 @@ function createHarness(
 	const requests: DaemonOperation[] = [];
 	const progress: MonitorHarness["progress"] = [];
 	const completions: DaemonCompletionNotification[] = [];
+	const completionEpochs: number[] = [];
 	const active: MonitorHarness["active"] = [];
 	const completionPreservePending: boolean[] = [];
 	const epochs: number[] = [];
@@ -142,6 +144,7 @@ function createHarness(
 	const session = {
 		cwd: process.cwd(),
 		settings: Settings.isolated(),
+		processProgressMode: "session",
 		allocateOutputArtifact: async () => allocatedArtifact,
 		getSessionId: () => OWNER,
 		isDisposed: () => false,
@@ -156,8 +159,9 @@ function createHarness(
 			epochs.push(epoch);
 			progress.push({ notification, delivery, artifactId });
 		},
-		queueLaunchCompletion: async (notification: DaemonCompletionNotification) => {
+		queueLaunchCompletion: async (notification: DaemonCompletionNotification, epoch: number) => {
 			completions.push(notification);
+			completionEpochs.push(epoch);
 		},
 		setLaunchMonitorActive: (monitorId: string, delivery: string, isActive: boolean, epoch: number) => {
 			epochs.push(epoch);
@@ -177,6 +181,7 @@ function createHarness(
 		requests,
 		progress,
 		completions,
+		completionEpochs,
 		active,
 		completionPreservePending,
 		disposeCallbacks,
@@ -327,6 +332,32 @@ describe("service output monitoring", () => {
 		expect(harness.getOutputSink()).toBeUndefined();
 		expect(harness.unregisterCount()).toBe(0);
 		expect(harness.active).toEqual([]);
+	});
+
+	it.each(["unavailable", undefined] as const)("rejects progress without session delivery (%s) but allows monitor off", async mode => {
+		const harness = createHarness();
+		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const advisorSession = { ...harness.session, processProgressMode: mode } as ToolSession;
+
+		await expect(
+			startService(advisorSession, {
+				name: daemon.name,
+				command: "echo ready",
+				progress: "wake",
+			}),
+		).rejects.toThrow("Live process progress monitoring is unavailable in this tool session");
+		await expect(
+			monitorService(advisorSession, daemon.name, "ambient"),
+		).rejects.toThrow("Live process progress monitoring is unavailable in this tool session");
+
+		expect(broker).not.toHaveBeenCalled();
+		expect(harness.requests).toEqual([]);
+		expect(harness.getSubscription()).toBeUndefined();
+
+		const unmonitored = await monitorService(advisorSession, daemon.name, "off");
+		expect(unmonitored.detached).toBe(false);
+		expect(broker).toHaveBeenCalledTimes(1);
+		expect(harness.requests).toEqual([expect.objectContaining({ op: "describe" })]);
 	});
 
 	it("rejects a monitored start without a session owner but accepts explicit off", async () => {
@@ -1001,7 +1032,6 @@ describe("service output monitoring", () => {
 		// retained completion would replay into the emptied context the next
 		// time a service call re-registers this owner, so it is discarded instead.
 		expect(harness.completionPreservePending).toEqual([false]);
-		expect(harness.contextBoundaryCallbacks.size).toBe(0);
 		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
 	});
@@ -1084,6 +1114,15 @@ describe("service output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(1);
 		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
 		expect(harness.completions).toEqual([]);
+		const completion: DaemonCompletionNotification = {
+			event: "daemon-completed",
+			completionId: "owner-completion",
+			owner: OWNER,
+			daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+		};
+		await harness.getCompletionSink()?.(completion);
+		expect(harness.completions).toEqual([completion]);
+		expect(harness.completionEpochs).toEqual([17]);
 	});
 
 	it("delivers a terminal completion when a stop bypassed the owner notification", async () => {
@@ -1093,6 +1132,7 @@ describe("service output monitoring", () => {
 		await monitorService(harness.session, daemon.name, "wake");
 		const subscription = harness.getSubscription();
 		if (!subscription) throw new Error("Expected output subscription");
+		vi.spyOn(harness.session, "captureLaunchProgressEpoch").mockReturnValue(18);
 		// Another client stopped the daemon: the broker skipped the owner
 		// completion (stopRequested) and this monitor notification is the only
 		// terminal signal the owning session will ever receive.
@@ -1114,6 +1154,7 @@ describe("service output monitoring", () => {
 				daemon: stopped,
 			},
 		]);
+		expect(harness.completionEpochs).toEqual([17]);
 	});
 
 	it("suppresses the synthesized completion when the monitoring session stopped the process itself", async () => {

@@ -1044,12 +1044,6 @@ describe("AgentSession owner-routed async delivery", () => {
 			await releaseRefresh.promise;
 		});
 
-		const staleCompletion = session.queueLaunchCompletion({
-			event: "daemon-completed",
-			completionId: "old-reset-completion",
-			owner,
-			daemon: { ...completionDaemon, name: "old-reset-process", id: "old-daemon" },
-		});
 		const reset = session.resetSessionContext();
 		await refreshStarted.promise;
 		session.queueLaunchProgress(
@@ -1067,11 +1061,20 @@ describe("AgentSession owner-routed async delivery", () => {
 			Date.now(),
 			oldMonitorEpoch,
 		);
-		// The completion was queued immediately before reset. Its old epoch is
-		// discovered only when the delayed yield flush crosses the reset boundary.
+		// The daemon incarnation was accepted before reset but exits only after
+		// reset returns. Its captured epoch must not be restamped as current.
 		releaseRefresh.resolve();
 		await expect(reset).resolves.toEqual({ droppedCount: 0 });
 		const freshMonitorEpoch = session.captureLaunchProgressEpoch();
+		const staleCompletion = session.queueLaunchCompletion(
+			{
+				event: "daemon-completed",
+				completionId: "old-reset-completion",
+				owner,
+				daemon: { ...completionDaemon, name: "old-reset-process", id: "old-daemon" },
+			},
+			oldMonitorEpoch,
+		);
 
 		session.queueLaunchProgress(
 			{
@@ -1088,12 +1091,15 @@ describe("AgentSession owner-routed async delivery", () => {
 			Date.now(),
 			freshMonitorEpoch,
 		);
-		await session.queueLaunchCompletion({
-			event: "daemon-completed",
-			completionId: "fresh-reset-completion",
-			owner,
-			daemon: { ...completionDaemon, name: "fresh-reset-process", id: "fresh-daemon" },
-		});
+		await session.queueLaunchCompletion(
+			{
+				event: "daemon-completed",
+				completionId: "fresh-reset-completion",
+				owner,
+				daemon: { ...completionDaemon, name: "fresh-reset-process", id: "fresh-daemon" },
+			},
+			freshMonitorEpoch,
+		);
 		await staleCompletion;
 		await session.waitForIdle();
 
@@ -1206,7 +1212,8 @@ describe("AgentSession owner-routed async delivery", () => {
 		const toolSession = {
 			cwd: process.cwd(),
 			settings: Settings.isolated(),
-			allocateOutputArtifact: async () => ({ id: "hub-progress-reset", path: "/dev/null" }),
+			allocateOutputArtifact: async () => ({ id: "service-progress-reset", path: "/dev/null" }),
+			processProgressMode: "session",
 			getSessionId: () => live.sessionManager.getSessionId(),
 			isDisposed: () => live.isDisposed,
 			captureLaunchProgressEpoch: () => live.captureLaunchProgressEpoch(),
@@ -1217,8 +1224,8 @@ describe("AgentSession owner-routed async delivery", () => {
 				epoch: number,
 				artifactId?: string,
 			) => live.queueLaunchProgress(notification, delivery, startedAt, epoch, artifactId),
-			queueLaunchCompletion: (notification: DaemonCompletionNotification) =>
-				live.queueLaunchCompletion(notification),
+			queueLaunchCompletion: (notification: DaemonCompletionNotification, epoch?: number) =>
+				live.queueLaunchCompletion(notification, epoch),
 			setLaunchMonitorActive: (monitorId: string, delivery: "wake" | "ambient", active: boolean, epoch: number) =>
 				live.setLaunchMonitorActive(monitorId, delivery, active, epoch),
 			registerDisposeCallback: () => () => {},
@@ -1396,12 +1403,15 @@ describe("AgentSession owner-routed async delivery", () => {
 				Date.now(),
 				previousEpoch,
 			);
-			rollbackCompletion = session.queueLaunchCompletion({
-				event: "daemon-completed",
-				completionId: "rollback-completion",
-				owner: previousOwner,
-				daemon: { ...completionDaemon, name: "rollback-process", id: "rollback-daemon" },
-			});
+			rollbackCompletion = session.queueLaunchCompletion(
+				{
+					event: "daemon-completed",
+					completionId: "rollback-completion",
+					owner: previousOwner,
+					daemon: { ...completionDaemon, name: "rollback-process", id: "rollback-daemon" },
+				},
+				previousEpoch,
+			);
 			throw failure;
 		});
 
@@ -1430,12 +1440,15 @@ describe("AgentSession owner-routed async delivery", () => {
 				Date.now(),
 				previousEpoch,
 			);
-			successfulOldCompletion = session.queueLaunchCompletion({
-				event: "daemon-completed",
-				completionId: "successful-old-completion",
-				owner: previousOwner,
-				daemon: { ...completionDaemon, name: "successful-old-process", id: "successful-old-daemon" },
-			});
+			successfulOldCompletion = session.queueLaunchCompletion(
+				{
+					event: "daemon-completed",
+					completionId: "successful-old-completion",
+					owner: previousOwner,
+					daemon: { ...completionDaemon, name: "successful-old-process", id: "successful-old-daemon" },
+				},
+				previousEpoch,
+			);
 		});
 
 		await expect(session.switchSession(targetFile)).resolves.toBe(true);
@@ -2205,25 +2218,28 @@ describe("AgentSession owner-routed async delivery", () => {
 		await busyStarted.promise;
 		session.queueLaunchProgress(progress("PROCESS EVENT TWO", 2), "wake", Date.now(), monitorEpoch);
 		session.queueLaunchProgress(progress("PROCESS EVENT THREE", 3), "wake", Date.now(), monitorEpoch);
-		const completion = session.queueLaunchCompletion({
-			event: "daemon-completed",
-			completionId: "completion-1",
-			owner: sessionManager.getSessionId(),
-			daemon: {
-				name: "watcher",
-				id: "daemon-1",
-				state: "exited",
-				createdAt: 1,
-				startedAt: 1,
-				exitedAt: 2,
-				exitCode: 0,
-				restartCount: 0,
-				outputBytes: 0,
+		const completion = session.queueLaunchCompletion(
+			{
+				event: "daemon-completed",
+				completionId: "completion-1",
 				owner: sessionManager.getSessionId(),
-				persist: true,
-				detached: false,
+				daemon: {
+					name: "watcher",
+					id: "daemon-1",
+					state: "exited",
+					createdAt: 1,
+					startedAt: 1,
+					exitedAt: 2,
+					exitCode: 0,
+					restartCount: 0,
+					outputBytes: 0,
+					owner: sessionManager.getSessionId(),
+					persist: false,
+					detached: false,
+				},
 			},
-		});
+			monitorEpoch,
+		);
 		session.setLaunchMonitorActive("monitor-1", "wake", false, monitorEpoch);
 		expect(session.hasPendingAsyncWork()).toBe(true);
 		releaseBusy.resolve();
@@ -2285,25 +2301,28 @@ describe("AgentSession owner-routed async delivery", () => {
 		// The terminal notification's idle flush must carry the queued ambient
 		// output with it, ahead of the completion — not strand it for a later
 		// out-of-order turn.
-		await session.queueLaunchCompletion({
-			event: "daemon-completed",
-			completionId: "completion-ambient",
-			owner: sessionManager.getSessionId(),
-			daemon: {
-				name: "watcher",
-				id: "daemon-ambient",
-				state: "exited",
-				createdAt: 1,
-				startedAt: 1,
-				exitedAt: 2,
-				exitCode: 0,
-				restartCount: 0,
-				outputBytes: 0,
+		await session.queueLaunchCompletion(
+			{
+				event: "daemon-completed",
+				completionId: "completion-ambient",
 				owner: sessionManager.getSessionId(),
-				persist: false,
-				detached: false,
+				daemon: {
+					name: "watcher",
+					id: "daemon-ambient",
+					state: "exited",
+					createdAt: 1,
+					startedAt: 1,
+					exitedAt: 2,
+					exitCode: 0,
+					restartCount: 0,
+					outputBytes: 0,
+					owner: sessionManager.getSessionId(),
+					persist: false,
+					detached: false,
+				},
 			},
-		});
+			session.captureLaunchProgressEpoch(),
+		);
 		await session.waitForIdle();
 
 		const markerIndex = (messages: (typeof mock.calls)[number]["context"]["messages"], marker: string) =>
@@ -2366,25 +2385,28 @@ describe("AgentSession owner-routed async delivery", () => {
 		sample(2, "SAMPLE TWO", "ambient");
 		sample(3, "SAMPLE THREE", "wake");
 
-		await session.queueLaunchCompletion({
-			event: "daemon-completed",
-			completionId: "completion-retuned",
-			owner: sessionManager.getSessionId(),
-			daemon: {
-				name: "watcher",
-				id: "daemon-retuned",
-				state: "exited",
-				createdAt: 1,
-				startedAt: 1,
-				exitedAt: 2,
-				exitCode: 0,
-				restartCount: 0,
-				outputBytes: 0,
+		await session.queueLaunchCompletion(
+			{
+				event: "daemon-completed",
+				completionId: "completion-retuned",
 				owner: sessionManager.getSessionId(),
-				persist: false,
-				detached: false,
+				daemon: {
+					name: "watcher",
+					id: "daemon-retuned",
+					state: "exited",
+					createdAt: 1,
+					startedAt: 1,
+					exitedAt: 2,
+					exitCode: 0,
+					restartCount: 0,
+					outputBytes: 0,
+					owner: sessionManager.getSessionId(),
+					persist: false,
+					detached: false,
+				},
 			},
-		});
+			epoch,
+		);
 		await session.waitForIdle();
 
 		const followUp = mock.calls.find(call => messageText(call.context.messages).includes(completionMarker));

@@ -92,6 +92,124 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		expect(AsyncJobManager.instance()).toBeUndefined();
 	}, 60000);
 
+	// Assert capability syntax, not surrounding policy wording.
+	const BASH_ASYNC_MARKER = 'async: "auto"';
+	const SERVICE_NAME_MARKER = "`name`";
+	const SERVICE_READY_MARKER = "`ready`";
+	const SERVICE_RETUNE_MARKER = "proc://<name>/progress";
+	const JOB_RETUNE_MARKER = "proc://<job-id>/progress";
+
+	function asyncProgressBlock(systemPrompt: string): string | undefined {
+		const start = systemPrompt.indexOf("<async-progress>");
+		if (start < 0) return undefined;
+		const end = systemPrompt.indexOf("</async-progress>", start);
+		if (end < 0) throw new Error("Unclosed <async-progress> block");
+		return systemPrompt.slice(start, end);
+	}
+
+	it("advertises finite-job, named-service, and process-control capabilities", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": true });
+		try {
+			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected <async-progress> block");
+			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(SERVICE_NAME_MARKER);
+			expect(block).toContain(SERVICE_READY_MARKER);
+			expect(block).toContain(SERVICE_RETUNE_MARKER);
+			expect(block).toContain(JOB_RETUNE_MARKER);
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	it("rebuilds progress guidance from the currently active built-in tools", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": true });
+		try {
+			await session.setActiveToolsByName(["read", "bash"]);
+			let block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected Bash progress policy");
+			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(SERVICE_NAME_MARKER);
+			expect(block).not.toContain(SERVICE_RETUNE_MARKER);
+			expect(block).not.toContain(JOB_RETUNE_MARKER);
+
+			await session.setActiveToolPresentation(["read", "write"], []);
+			expect(asyncProgressBlock(session.systemPrompt.join("\n\n"))).toBeUndefined();
+
+			await session.setActiveToolsByName(["read", "bash", "write"]);
+			block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected restored progress policy");
+			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(SERVICE_NAME_MARKER);
+			expect(block).toContain(SERVICE_RETUNE_MARKER);
+			expect(block).toContain(JOB_RETUNE_MARKER);
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	it("advertises only named-service progress when async Bash is disabled", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": false });
+		try {
+			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected named-service progress policy");
+			expect(block).not.toContain(BASH_ASYNC_MARKER);
+			expect(block).not.toContain(JOB_RETUNE_MARKER);
+			expect(block).toContain(SERVICE_NAME_MARKER);
+			expect(block).toContain(SERVICE_READY_MARKER);
+			expect(block).toContain(SERVICE_RETUNE_MARKER);
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	it("omits push guidance when neither progress surface is available", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": false, "launch.enabled": false });
+		try {
+			expect(session.systemPrompt.join("\n\n")).not.toContain("<async-progress>");
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	function overrideBuiltinExtension(name: "bash" | "write"): ExtensionFactory {
+		return pi => {
+			pi.registerTool({
+				name,
+				label: `Custom ${name}`,
+				description: `Custom ${name} replacement without async progress parameters.`,
+				parameters: type({}),
+				approval: "read",
+				async execute() {
+					return { content: [{ type: "text" as const, text: "custom" }] };
+				},
+			});
+		};
+	}
+
+	it("omits progress guidance when an extension replaces the built-in bash tool", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": true }, [overrideBuiltinExtension("bash")]);
+		try {
+			expect(asyncProgressBlock(session.systemPrompt.join("\n\n"))).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
+	it("omits process-control guidance when an extension replaces the built-in write tool", async () => {
+		const session = await spawnTopLevelSession({ "async.enabled": true }, [overrideBuiltinExtension("write")]);
+		try {
+			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
+			if (block === undefined) throw new Error("Expected Bash progress policy");
+			expect(block).not.toContain(SERVICE_RETUNE_MARKER);
+			expect(block).not.toContain(JOB_RETUNE_MARKER);
+			expect(block).toContain(BASH_ASYNC_MARKER);
+			expect(block).toContain(SERVICE_NAME_MARKER);
+		} finally {
+			await session.dispose();
+		}
+	}, 60000);
+
 	it("does not cancel the primary session's running jobs when a secondary session disposes", async () => {
 		const primary = await spawnTopLevelSession();
 		try {

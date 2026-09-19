@@ -630,6 +630,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			hasGlob: isToolActive("glob", cfgGlobEnabled.get(this.session.settings)),
 			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
 			hasRead: isToolActive("read", true),
+			hasWrite: isToolActive("write", true),
 			// Frozen at the last prompt rebuild (managed sessions). SDK consumers
 			// building a bare ToolSession lack the rebuild lifecycle, so fall back
 			// to the derived form (skillful && skills) instead of dropping the hint.
@@ -637,6 +638,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				(this.session.skillHintVisible ??
 					(cfgSkillful.get(this.session.settings) && (this.session.skills?.length ?? 0) > 0)) === true,
 			hasLaunch: this.#launchEnabled,
+			hasProcessProgress: this.session.processProgressMode === "session",
 			hasEval: isToolActive("eval", evalBackends.python || evalBackends.js),
 			hasShellBuiltins: !shellBuiltinsDisabled(this.session.settings),
 			isWindows: process.platform === "win32",

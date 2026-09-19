@@ -102,7 +102,7 @@ describe("session-owned supervised services", () => {
 		}
 	}, 15_000);
 
-	it("replays a completion to its session when that session is resumed after a switch", async () => {
+	it.each(["switch", "new"] as const)("replays a completion to its session when resumed after %s", async boundary => {
 		using tempDir = TempDir.createSync("@omp-service-transition-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
@@ -131,7 +131,7 @@ describe("session-owned supervised services", () => {
 		};
 		const switchTo = (nextSessionId: string): void => {
 			sessionId = nextSessionId;
-			for (const callback of callbacks.splice(0)) callback("switch");
+			for (const callback of callbacks.splice(0)) callback(boundary);
 		};
 		try {
 			vi.spyOn(brokerClients, "daemonClientForProject").mockResolvedValue(client);
