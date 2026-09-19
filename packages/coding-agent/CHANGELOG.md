@@ -8,6 +8,8 @@
 
 - `curl -fsSL https://omp.sh/install | sh` and `install.ps1` now install the standalone binary by default, even when bun is present, so installs get delta updates; pass `--source`/`-Source` for a bun package install
 - Ask forms can attach notes to selected options; those notes accompany the answers separately from submitted form values ([#18779](https://github.com/can1357/oh-my-pi/pull/18779) by [@Shadorain](https://github.com/Shadorain))
+- Added the `publish` tool: the agent can publish an HTML or Markdown file as a hosted web page (and update it in place, list, read, pin, delete, upload assets). With an Anthropic OAuth login and no `publish.backends`, pages go to claude.ai Artifacts like Claude Code's, private to your account; `publish.backends` instead puts them on your object storage (S3, R2, GCS, Azure, MinIO, …) at a stable URL ([#18806](https://github.com/can1357/oh-my-pi/pull/18806) by [@H4vC](https://github.com/H4vC))
+- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues under one session-wide wake-turn budget, and completion notices that lead with the full-output artifact and carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
 
 ### Fixed
 
