@@ -487,8 +487,13 @@ export class OmpTokenomicsBridge {
 		correct?: boolean;
 		verificationSource: string;
 		dangerousFalse?: boolean;
+		/** Override experiment id (paired replay uses rlm-worker-needed-replay-v1). */
+		experimentId?: string;
+		/** Opaque private replay snapshot id — never grant bodies. */
+		replaySnapshotId?: string;
 	}): Promise<TokenomicsEvent | null> {
 		if (!this.enabled) return null;
+		const goldKnown = input.gold !== "UNKNOWN";
 		return this.#record(
 			makeEvent({
 				...this.baseFields(),
@@ -496,27 +501,28 @@ export class OmpTokenomicsBridge {
 				name: "omp.shadow.rlm.worker_needed.gold",
 				capability_id: "rlm.worker_needed",
 				role: "verifier",
-				status: "ok",
+				status: goldKnown ? "ok" : "unknown",
 				experiment: {
-					experiment_id: "omp-shadow-rlm-worker-needed-v1",
+					experiment_id: input.experimentId ?? "omp-shadow-rlm-worker-needed-v1",
 					pair_id: input.pairId,
 					task_snapshot_id: input.taskSnapshotId,
 					arm_id: input.armId ?? "decider_2b",
 					treatment_hash: input.treatmentHash,
-					selection_policy: "shadow",
+					selection_policy: input.experimentId ? "counterfactual_replay" : "shadow",
 					replay_grade: "counterfactual",
 				},
 				outcome: {
-					verified_success: input.correct,
-					verifier_ok: input.correct,
+					verified_success: goldKnown ? input.correct : undefined,
+					verifier_ok: goldKnown ? input.correct : undefined,
 					verification_source: input.verificationSource,
 					source: "omp_counterfactual",
 				},
 				attributes: {
 					"decision.gold": input.gold,
-					"decision.gold_status": "known",
-					"decision.correct": Boolean(input.correct),
+					"decision.gold_status": goldKnown ? "known" : "unknown",
+					"decision.correct": Boolean(input.correct) && goldKnown,
 					"decision.dangerous_false": Boolean(input.dangerousFalse),
+					...(input.replaySnapshotId ? { "replay.snapshot_id": input.replaySnapshotId } : {}),
 				},
 			}),
 		);

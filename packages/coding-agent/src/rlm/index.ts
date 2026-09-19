@@ -209,3 +209,12 @@ export {
 	SHADOW_EXPERIMENT_ID,
 } from "./shadow";
 export type { ShadowPrediction, ShadowWorkerNeededResult, Z0intBridgeTransport } from "./shadow";
+export {
+	freezeWorkerNeededReplaySnapshot,
+	runWorkerNeededPairedReplay,
+	labelFromPairedArms,
+	loadReplayCandidatesSorted,
+	WORKER_NEEDED_REPLAY_EXPERIMENT,
+} from "./shadow";
+export type { PairedReplayResult, WorkerNeededReplaySnapshot, GoldLabel } from "./shadow";
+

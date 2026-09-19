@@ -335,6 +335,7 @@ export class RlmTool implements AgentTool<typeof rlmSchema, RlmToolDetails> {
 				policyInput,
 				useEvidencePacket: useEvidence,
 				handle: params.handle,
+				grantedEvidence: policyInput.grantTextSample,
 				autoDecision,
 				onFlow: args => {
 					if (!shadowFlowOwner) return;

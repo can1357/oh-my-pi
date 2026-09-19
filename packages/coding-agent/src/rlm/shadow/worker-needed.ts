@@ -8,6 +8,7 @@ import type { WorkerModeAutoDecision, WorkerModePolicyInput } from "../worker-mo
 import { classifyGrantComplexity } from "../worker-mode-policy";
 import { getShadowPredictor, requestShadowDeciderWarm, type ShadowPrediction } from "./decider-client";
 import { enqueueShadowReplayCandidate, scoreReplayPriority } from "./replay-queue";
+import { freezeWorkerNeededReplaySnapshot } from "./replay-snapshot";
 import {
 	actualPolicyToLabel,
 	buildWorkerNeededDecisionRequest,
@@ -36,6 +37,8 @@ export interface LaunchShadowWorkerNeededInput {
 	policyInput: WorkerModePolicyInput;
 	useEvidencePacket: boolean;
 	handle: string;
+	/** Private granted evidence for WorkerNeededReplayV1 freeze (never Tokenomics). */
+	grantedEvidence?: string;
 	autoDecision?: WorkerModeAutoDecision | null;
 	/** When set, context-flow shadow node is recorded. */
 	onFlow?: (args: {
@@ -59,6 +62,7 @@ export interface ShadowWorkerNeededResult {
 	traceId?: string;
 	pairId?: string;
 	enqueuedReplay?: boolean;
+	replaySnapshotId?: string;
 }
 
 function shadowEnabled(host: ShadowWorkerNeededHost): boolean {
@@ -158,14 +162,48 @@ export async function runShadowWorkerNeeded(input: LaunchShadowWorkerNeededInput
 		prediction.prediction !== actualPolicy;
 
 	let enqueuedReplay = false;
+	let replaySnapshotId: string | undefined;
 	if (prediction.status === "ok" && (disagreed || (prediction.confidence ?? 1) < 0.75)) {
 		const scored = scoreReplayPriority({
 			disagrees: Boolean(disagreed),
 			confidence: prediction.confidence,
 			grantedBytes: featureState.granted_bytes,
 			goldUnknown: true,
+			expectedWorkerCost: Math.min(1, featureState.granted_bytes / 12_000),
+			capabilityEvidenceGap: 0.85,
 		});
 		if (scored.priority > 0) {
+			const evidence =
+				input.grantedEvidence?.trim() ||
+				input.policyInput.grantTextSample?.trim() ||
+				"";
+			if (evidence.length > 0) {
+				try {
+					const snap = await freezeWorkerNeededReplaySnapshot({
+						pairId,
+						traceId: bridge.traceId,
+						sessionId: String(sessionId ?? bridge.sessionId),
+						handle: input.handle,
+						policyInput: input.policyInput,
+						featureState,
+						featureHash,
+						grantedEvidence: evidence,
+						shadowPrediction: prediction.prediction,
+						actualPolicy,
+						confidence: prediction.confidence,
+						autoDecision: input.autoDecision,
+						provenance: {
+							selection_policy: "shadow_disagreement",
+							shadow_backend_id: SHADOW_BACKEND_ID,
+							feature_schema: WORKER_NEEDED_FEATURE_SCHEMA,
+							contract: WORKER_NEEDED_CONTRACT,
+						},
+					});
+					replaySnapshotId = snap.manifest.snapshot_id;
+				} catch {
+					/* fail-open: queue without snapshot */
+				}
+			}
 			await enqueueShadowReplayCandidate({
 				schema: "omp.shadow.replay_candidate.v1",
 				ts: Date.now(),
@@ -178,6 +216,9 @@ export async function runShadowWorkerNeeded(input: LaunchShadowWorkerNeededInput
 				shadow_prediction: prediction.prediction,
 				actual_policy: actualPolicy,
 				confidence: prediction.confidence,
+				replay_snapshot_id: replaySnapshotId,
+				expected_worker_cost: Math.min(1, featureState.granted_bytes / 12_000),
+				capability_evidence_gap: 0.85,
 			});
 			enqueuedReplay = true;
 		}
@@ -191,6 +232,7 @@ export async function runShadowWorkerNeeded(input: LaunchShadowWorkerNeededInput
 		traceId: bridge.traceId,
 		pairId,
 		enqueuedReplay,
+		replaySnapshotId,
 	};
 }
 

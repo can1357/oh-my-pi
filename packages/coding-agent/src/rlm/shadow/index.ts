@@ -42,3 +42,29 @@ export type { ShadowReplayCandidate } from "./replay-queue";
 
 export { launchShadowWorkerNeeded, runShadowWorkerNeeded } from "./worker-needed";
 export type { LaunchShadowWorkerNeededInput, ShadowWorkerNeededHost, ShadowWorkerNeededResult } from "./worker-needed";
+
+export {
+	defaultWorkerNeededReplayRoot,
+	freezeWorkerNeededReplaySnapshot,
+	loadWorkerNeededReplaySnapshot,
+	deriveVerifierFromEvidence,
+	WORKER_NEEDED_REPLAY_EXPERIMENT,
+	WORKER_NEEDED_REPLAY_SCHEMA,
+} from "./replay-snapshot";
+export type {
+	WorkerNeededReplaySnapshot,
+	ReplayVerifierSpec,
+	WorkerNeededReplayManifest,
+} from "./replay-snapshot";
+
+export {
+	runWorkerNeededPairedReplay,
+	labelFromPairedArms,
+	assessNonInferiority,
+	verifyArmText,
+	grantGroundedCompleter,
+	evidencePacketCompleter,
+} from "./paired-replay";
+export type { PairedReplayResult, GoldLabel, ArmMetrics } from "./paired-replay";
+
+export { loadReplayCandidatesSorted } from "./replay-queue";
