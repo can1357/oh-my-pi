@@ -92,6 +92,16 @@ const HIGHLIGHT_BATCH_LINES = 32;
 /** Cap on intraline word-diff pairs per document. */
 const INTRALINE_PAIR_LIMIT = 1_500;
 
+/**
+ * Git-format patch header for one path. The native applier only accepts
+ * git-format patches: it rejects a patch whose first line is not `diff --git`
+ * before reading any hunk ("patch does not apply: patch has no diff --git
+ * header"), so every patch this pane hands to callers (hunk and
+ * line-selection stage/unstage/discard) must carry it.
+ */
+function patchHeader(filePath: string): string {
+	return `diff --git a/${filePath} b/${filePath}\n`;
+}
 function intralineMarks(oldLine: string, newLine: string): { old: MarkRanges; new: MarkRanges } {
 	const oldRanges: [number, number][] = [];
 	const newRanges: [number, number][] = [];
@@ -379,7 +389,7 @@ export function buildDiffDocument(
 	const allHunks: HunkBlock[] = tightHunks.map(hunk => ({
 		header: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
 		patch: canPatch
-			? `--- a/${filePath}\n+++ b/${filePath}\n@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}\n`
+			? `${patchHeader(filePath)}--- a/${filePath}\n+++ b/${filePath}\n@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}\n`
 			: "",
 		rows: walkHunk(hunk, false),
 	}));
@@ -476,7 +486,7 @@ export function buildLineSelectionPatch(
 				`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}`,
 		)
 		.join("\n");
-	return `--- a/${doc.filePath}\n+++ b/${doc.filePath}\n${body}\n`;
+	return `${patchHeader(doc.filePath)}--- a/${doc.filePath}\n+++ b/${doc.filePath}\n${body}\n`;
 }
 
 // ── palette ──────────────────────────────────────────────────────────────────
