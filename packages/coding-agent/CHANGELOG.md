@@ -33,6 +33,10 @@
 - Added Stencil account support to `/login`. `omp stream` uses a signed-in Stencil account or `STENCIL_API_KEY` for channel ownership and authentication. Sensitive environment, dotenv, `secrets.yml`, credential-shaped, and configured pattern-matching values are redacted before screen data is transmitted.
 - Added faster keyless web search fallback by prioritizing the default keyless Parallel provider ahead of Perplexity.
 
+### Added
+
+- Added `--dry-run` to `omp plugin upgrade`. The flag was accepted and ignored: it moved the version into the cache, rewrote `installed_plugins.json` and registered the plugin, then printed nothing to say the change was real. It now reports the version each plugin would move to and changes nothing on disk. ([#12383](https://github.com/can1357/oh-my-pi/pull/12383) by [@phoenix-server](https://github.com/phoenix-server))
+
 ### Changed
 
 - Improved parent IRC message prompts to make interruption handling more reliable.
