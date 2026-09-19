@@ -63,8 +63,19 @@ describe("daemon broker completion acknowledgement", () => {
 		};
 
 		try {
-			// The ping publishes the completion subscription before the first start.
-			await client.request({ op: "ping" });
+			const aborted = new AbortController();
+			aborted.abort();
+			const abortedDispatches: string[] = [];
+			await expect(
+				client.request({ op: "ping" }, aborted.signal, state => abortedDispatches.push(state)),
+			).rejects.toThrow("aborted");
+			expect(abortedDispatches).toEqual([]);
+
+			// The callback is the local certainty boundary: once socket.write
+			// accepts the frame, a missing response can no longer prove rejection.
+			const dispatches: string[] = [];
+			await client.request({ op: "ping" }, undefined, state => dispatches.push(state));
+			expect(dispatches).toEqual(["written"]);
 			await client.request({ op: "start", owner: "owner-1", spec: { ...spec } });
 			await client.request({ op: "wait", name: "acked", for: "exit", timeoutMs: 5_000 });
 			await received.promise;
