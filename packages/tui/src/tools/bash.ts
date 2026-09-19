@@ -74,6 +74,8 @@ export interface BashToolDetails {
 		ready: boolean;
 		timedOut: boolean;
 		pid?: number;
+		/** Live output monitor delivery attached at start; absent when unmonitored. */
+		progress?: "wake" | "ambient";
 	};
 	async?: {
 		state: "running" | "completed" | "failed";
@@ -343,6 +345,7 @@ function bashStatsParts(
 		statsParts.push(`Service: ${service.name}`, `State: ${service.state}`);
 		statsParts.push(`Ready: ${service.ready ? "yes" : service.timedOut ? "timed out" : "no"}`);
 		if (service.pid !== undefined) statsParts.push(`PID: ${service.pid}`);
+		if (service.progress) statsParts.push(`Progress: ${service.progress}`);
 	}
 	if (wallTimeMs !== undefined) {
 		statsParts.push(`Wall: ${formatWallTimeSeconds(wallTimeMs)}s`);
@@ -407,6 +410,7 @@ function shellFootParts(details: BashToolDetails | undefined, artifactId: string
 		parts.push(`Service ${service.name}`, service.state);
 		parts.push(service.ready ? "ready" : service.timedOut ? "ready timed out" : "not ready");
 		if (service.pid !== undefined) parts.push(`PID ${service.pid}`);
+		if (service.progress) parts.push(`Progress ${service.progress}`);
 	}
 	if (artifactId) parts.push(`Artifact ${artifactId}`);
 	return parts;
