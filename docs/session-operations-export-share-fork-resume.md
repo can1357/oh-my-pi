@@ -50,10 +50,9 @@ Behavior details:
 - Tool calls render through the `<omp-tool-view>` web component — the React per-tool renderers shared with collab-web (`packages/collab-web/src/tool-render/`), prebuilt into `src/export/html/tool-views.generated.js` by `bun run gen:tool-views`.
 - No session entries are appended during export.
 
-Caveat:
+Notes:
 
-- Parsing is whitespace-based, so quoted paths with spaces are not preserved. Use a path without spaces.
-
+- Output path arguments support single- and double-quoted strings containing spaces (e.g. `/export "my report.html"`).
 ### `--export <inputSessionFile> [outputPath]` (CLI)
 
 Flow in `main.ts`:
