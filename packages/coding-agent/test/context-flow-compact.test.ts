@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { type ContextBreakdown, renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import {
+	CONTEXT_SAVINGS_EMPTY,
+	CURRENT_TURN_EMPTY,
 	renderContextSavings,
 	renderContextUsagePage,
 	renderCurrentTurnFlow,
@@ -17,6 +19,7 @@ import {
 } from "../src/context-flow/rlm-flow";
 import { buildContextFlowSnapshot } from "../src/context-flow/snapshot";
 import { getContextFlowRegistry } from "../src/context-flow/registry";
+import type { ContextFlowSnapshot } from "../src/context-flow/types";
 import { RlmStore } from "../src/rlm/store";
 
 initTheme();
@@ -44,14 +47,91 @@ function snapshotFor(owner: object, store?: RlmStore) {
 	});
 }
 
+/** Economics-on, savings/turn-empty — matches the failing live screenshot shape. */
+function economicsOnlyFlow(): ContextFlowSnapshot {
+	return {
+		turn: 1,
+		updatedAt: Date.now(),
+		nodes: [
+			{
+				id: "n1",
+				turn: 1,
+				stage: "prompt",
+				component: "omp.user",
+				role: "user",
+				visibility: "root",
+				status: "complete",
+				startedAt: Date.now(),
+			},
+		],
+		offload: { externalBytes: 0, reintroducedTokens: 0, grantedTokens: 0, active: false },
+		economics: {
+			rootTokens: 61_200,
+			workerTokens: 0,
+			subagentTokens: 0,
+			cachedTokens: 0,
+			unattributedTokens: 0,
+			totalIncrementalTokens: 61_200,
+			costUsd: 0.12,
+			tokenomicsEnabled: true,
+		},
+		wiring: {},
+	};
+}
+
 describe("context-flow unified /context page", () => {
-	it("RLM off: page matches original Context Usage grid", () => {
+	it("empty live state still renders Context savings + Current turn headers", () => {
 		const owner = {};
 		contextFlowBeginTurn(owner, "hello");
 		const flow = snapshotFor(owner);
-		expect(renderContextSavings(flow)).toBeUndefined();
-		expect(renderCurrentTurnFlow(flow)).toBeUndefined();
-		expect(renderContextUsagePage(breakdown, theme, flow)).toBe(renderContextUsage(breakdown, theme));
+		expect(renderContextSavings(flow)).toBe(CONTEXT_SAVINGS_EMPTY);
+		expect(renderCurrentTurnFlow(flow)).toBe(CURRENT_TURN_EMPTY);
+		const page = renderContextUsagePage(breakdown, theme, flow);
+		expect(page).toContain("Context savings");
+		expect(page).toContain(CONTEXT_SAVINGS_EMPTY);
+		expect(page).toContain("Current turn");
+		expect(page).toContain(CURRENT_TURN_EMPTY);
+		expect(page.startsWith(renderContextUsage(breakdown, theme))).toBe(true);
+	});
+
+	it("economics-only live model still shows structural sections (screenshot shape)", () => {
+		const flow = economicsOnlyFlow();
+		const page = renderContextUsagePage(breakdown, theme, flow);
+		expect(page).toContain("Context savings");
+		expect(page).toContain(CONTEXT_SAVINGS_EMPTY);
+		expect(page).toContain("Current turn");
+		expect(page).toContain(CURRENT_TURN_EMPTY);
+		expect(page).toContain("Session economics");
+		expect(page).toContain("61.2k");
+	});
+
+	it("populated fixture renders savings lineage and current-turn pipeline", () => {
+		const owner = {};
+		const store = new RlmStore();
+		contextFlowBeginTurn(owner, "hello");
+		contextFlowRlmGrants(owner, { grantedBytes: 4200, grantCount: 2, grantedTokens: 4200 }, store);
+		getContextFlowRegistry(owner).updateOffload({
+			externalBytes: 184_000,
+			reintroducedTokens: 318,
+			grantedTokens: 4200,
+			active: true,
+		});
+		contextFlowRlmWorkerBegin(owner, { component: FLOW_KEYS.RLM_CODEC, grantedBytes: 4200, inputTokens: 4200 });
+		contextFlowRlmWorkerComplete(
+			owner,
+			{ component: FLOW_KEYS.RLM_CODEC, inputTokens: 4200, outputTokens: 318, durationMs: 812 },
+			store,
+		);
+		contextFlowRootBegin(owner, "anthropic", "claude");
+		const flow = snapshotFor(owner, store);
+		const page = renderContextUsagePage(breakdown, theme, flow);
+		expect(page).toContain("Context savings");
+		expect(page).toContain("RLM");
+		expect(page).toMatch(/46\.0k → 4\.2k → 318/);
+		expect(page).toContain("Current turn");
+		expect(page).toContain("↓");
+		expect(page).not.toContain(CONTEXT_SAVINGS_EMPTY);
+		expect(page).not.toContain(CURRENT_TURN_EMPTY);
 	});
 
 	it("RLM active: savings section appears below root grid", () => {
@@ -97,7 +177,7 @@ describe("context-flow unified /context page", () => {
 		expect(page).toContain("Pipeline");
 		expect(page).toContain("Current turn");
 		expect(page).toContain("↓");
-		const turn = renderCurrentTurnFlow(flow)!;
+		const turn = renderCurrentTurnFlow(flow);
 		expect(turn).toContain("codec");
 		expect(turn).toContain("4.2k → 318 t");
 	});
@@ -108,7 +188,7 @@ describe("context-flow unified /context page", () => {
 		contextFlowRlmGrants(owner, { grantedBytes: 4200, grantCount: 2, grantedTokens: 4200 });
 		contextFlowRlmWorkerBegin(owner, { component: FLOW_KEYS.RLM_CODEC, grantedBytes: 4200, inputTokens: 4200 });
 		const flow = snapshotFor(owner);
-		const turn = renderCurrentTurnFlow(flow)!;
+		const turn = renderCurrentTurnFlow(flow);
 		expect(turn).toContain("◉");
 	});
 
@@ -117,7 +197,7 @@ describe("context-flow unified /context page", () => {
 		contextFlowBeginTurn(owner, "hello");
 		contextFlowRootBegin(owner, "anthropic", "claude");
 		const flow = snapshotFor(owner);
-		const turn = renderCurrentTurnFlow(flow)!;
+		const turn = renderCurrentTurnFlow(flow);
 		expect(turn).toContain("Root");
 		expect(turn).toContain("◉");
 	});
@@ -149,7 +229,8 @@ describe("context-flow unified /context page", () => {
 		contextFlowRlmWorkerBegin(owner, { component: FLOW_KEYS.RLM_CODEC, grantedBytes: 4200, inputTokens: 4200 });
 		contextFlowRootBegin(owner, "anthropic", "claude");
 		const flow = snapshotFor(owner);
-		const turn = renderCurrentTurnFlow(flow, 24)!;
+		const turn = renderCurrentTurnFlow(flow, 24);
+		expect(turn).not.toBe(CURRENT_TURN_EMPTY);
 		for (const line of turn.split("\n")) {
 			expect(line.length).toBeLessThanOrEqual(24);
 		}

@@ -348,8 +348,11 @@ export function renderContextWindow(breakdown: ContextBreakdown, theme: Theme): 
 	return renderContextUsage(breakdown, theme);
 }
 
+export const CONTEXT_SAVINGS_EMPTY = "No active context transformations";
+export const CURRENT_TURN_EMPTY = "Waiting for context activity";
+
 /** Context savings from mechanisms that actually ran (no wiring inventory). */
-export function renderContextSavings(flow: ContextFlowSnapshot, breakdown?: ContextBreakdown): string | undefined {
+export function renderContextSavings(flow: ContextFlowSnapshot, breakdown?: ContextBreakdown): string {
 	const sections: string[] = [];
 	const o = flow.offload;
 	const externalT = estimateTokensFromBytes(o.externalBytes);
@@ -414,17 +417,16 @@ export function renderContextSavings(flow: ContextFlowSnapshot, breakdown?: Cont
 		sections.push(lines.join("\n"));
 	}
 
-	if (sections.length === 0) return undefined;
+	if (sections.length === 0) return CONTEXT_SAVINGS_EMPTY;
 	return sections.join("\n\n");
 }
 
-/** Vertical pipeline for the current turn (participating stages only). */
-export function renderCurrentTurnFlow(flow: ContextFlowSnapshot, maxWidth?: number): string | undefined {
+/** Vertical pipeline for the current turn. Always returns body text (empty state when idle). */
+export function renderCurrentTurnFlow(flow: ContextFlowSnapshot, maxWidth?: number): string {
 	const byComponent = collectTurnNodes(flow);
-	if (byComponent.size <= 1) return undefined;
-
 	const ordered = TURN_FLOW_ORDER.filter(key => byComponent.has(key));
-	if (ordered.length <= 1) return undefined;
+	// A lone prompt/root node is not a transformation pipeline yet.
+	if (ordered.length <= 1) return CURRENT_TURN_EMPTY;
 
 	const lines: string[] = [];
 	for (let i = 0; i < ordered.length; i++) {
@@ -464,22 +466,25 @@ export function renderContextUsagePage(
 	const window = renderContextWindow(breakdown, theme);
 	if (!flow) return window;
 
+	// Structural sections always exist when a flow snapshot is available.
+	// Only row/pipeline *content* is conditional (see empty-state strings).
 	const savings = renderContextSavings(flow, breakdown);
 	const turnFlow = renderCurrentTurnFlow(flow, options?.maxWidth);
 	const economics = renderSessionEconomics(flow);
-	const sections = [window];
-
-	if (savings) {
-		sections.push("", theme.fg("accent", "Context savings"), "", savings);
-	}
-	if (turnFlow) {
-		sections.push("", theme.fg("accent", "Current turn"), "", turnFlow);
-	}
+	const sections = [
+		window,
+		"",
+		theme.fg("accent", "Context savings"),
+		"",
+		savings,
+		"",
+		theme.fg("accent", "Current turn"),
+		"",
+		turnFlow,
+	];
 	if (economics) {
 		sections.push("", theme.fg("dim", economics));
 	}
-
-	if (sections.length === 1) return window;
 	return sections.join("\n");
 }
 

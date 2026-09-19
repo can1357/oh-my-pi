@@ -29,10 +29,10 @@ Groq codec
 
 [38;2;254;188;56mCurrent turn[39m
 
-prompt ✓            query evidence  0ms
+prompt ✓
   ↓
-grants ✓            4.2k external  0ms
+RLM ✓               4.2k selected
   ↓
-Groq codec ✓        4.2k → 318 t  812ms
+codec ✓             4.2k → 318 t  812ms
   ↓
-root model ◉        +318 t
+Root ◉              +318 t
