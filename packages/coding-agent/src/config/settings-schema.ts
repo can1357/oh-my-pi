@@ -4583,6 +4583,17 @@ export const SETTINGS_SCHEMA = {
 			description: "Launch browser in headless mode (disable to show browser UI)",
 		},
 	},
+	"browser.engine": {
+		type: "string",
+		default: "chromium",
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser Engine",
+			description:
+				"Browser engine to use for automation (chromium or lightpanda). Set OMP_BROWSER_ENGINE=lightpanda to override.",
+		},
+	},
 
 	"browser.cmux": {
 		type: "boolean",

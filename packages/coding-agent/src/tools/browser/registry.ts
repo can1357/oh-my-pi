@@ -20,9 +20,11 @@ import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
+import { launchLightpandaBrowser } from "./lightpanda";
 
 export type PuppeteerBrowserKind =
 	| { kind: "headless"; headless: boolean }
+	| { kind: "lightpanda" }
 	| { kind: "spawned"; path: string; args?: string[] }
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
@@ -80,6 +82,8 @@ export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
 			return `headless:${kind.headless ? "1" : "0"}`;
+		case "lightpanda":
+			return "lightpanda";
 		case "spawned":
 			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
@@ -187,6 +191,16 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			kind,
 			browser,
 			userDataDir,
+			refCount: 0,
+			stealth: { browserSession: null, override: null },
+		};
+	}
+	if (kind.kind === "lightpanda") {
+		const { browser } = await launchLightpandaBrowser();
+		return {
+			key: browserKey(kind),
+			kind,
+			browser,
 			refCount: 0,
 			stealth: { browserSession: null, override: null },
 		};
