@@ -1494,6 +1494,28 @@ export function buildHomebrewUpdateArgs(force: boolean): string[] {
 }
 
 /**
+ * Environment for unattended Homebrew self-updates.
+ *
+ * Homebrew's default ask mode prompts `[y/n]` when stdin is a TTY, which
+ * hangs `omp update` in a terminal. `HOMEBREW_NO_ASK` is the official
+ * opt-out for `brew upgrade`/`reinstall`; `NONINTERACTIVE` covers installer-
+ * style prompts. Auto-update is disabled because this path already runs
+ * `brew update` first.
+ */
+export function buildHomebrewUpdateEnv(
+	base: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+	return {
+		...base,
+		NONINTERACTIVE: "1",
+		HOMEBREW_NO_ASK: "1",
+		HOMEBREW_NO_AUTO_UPDATE: "1",
+		HOMEBREW_NO_ENV_HINTS: "1",
+		HOMEBREW_PAGER: "cat",
+	};
+}
+
+/**
  * Build the attended mise update command.
  *
  * `--before 0s` overrides global and per-tool release-age settings for this
@@ -1768,14 +1790,15 @@ export async function updateViaManager(
 
 async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
 	console.log(chalk.dim("Updating Homebrew formulae..."));
-	const update = await $`brew update`.nothrow();
+	const env = buildHomebrewUpdateEnv();
+	const update = await $`brew update`.env(env).nothrow();
 	if (update.exitCode !== 0) {
 		throw new Error(`brew update failed with exit code ${update.exitCode}`);
 	}
 
 	console.log(chalk.dim("Updating via Homebrew..."));
 	const args = buildHomebrewUpdateArgs(force);
-	const result = await $`brew ${args}`.nothrow();
+	const result = await $`brew ${args}`.env(env).nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`brew ${args[0]} failed with exit code ${result.exitCode}`);
 	}
