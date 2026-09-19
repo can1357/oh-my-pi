@@ -98,6 +98,17 @@ function isTagSelectedBranch(branch: unknown, value: unknown): boolean {
 	return matched;
 }
 
+/** The unique discriminator-selected branch, or undefined when selection is ambiguous or absent. */
+export function getTagSelectedUnionBranch(branches: readonly unknown[], value: unknown): unknown {
+	let selected: unknown;
+	for (const branch of branches) {
+		if (!isTagSelectedBranch(branch, value)) continue;
+		if (selected !== undefined) return undefined;
+		selected = branch;
+	}
+	return selected;
+}
+
 function pushIssue(
 	issues: JsonSchemaValidationIssue[],
 	path: readonly PropertyKey[],
@@ -383,7 +394,7 @@ function validateSchemaNode(
 		let matches = 0;
 		let firstIssues: JsonSchemaValidationIssue[] | undefined;
 		let selectedIssues: JsonSchemaValidationIssue[] | undefined;
-		let selectedCount = 0;
+		const selectedBranch = getTagSelectedUnionBranch(branches, value);
 		for (const branch of branches) {
 			const branchIssues: JsonSchemaValidationIssue[] = [];
 			if (validateSchemaNode(branch, value, path, ctx, branchIssues)) {
@@ -391,14 +402,11 @@ function validateSchemaNode(
 				continue;
 			}
 			if (!firstIssues) firstIssues = branchIssues;
-			if (isTagSelectedBranch(branch, value)) {
-				selectedCount += 1;
-				if (selectedCount === 1) selectedIssues = branchIssues;
-			}
+			if (branch === selectedBranch) selectedIssues = branchIssues;
 		}
 		const branchValid = keyword === "anyOf" ? matches > 0 : matches === 1;
 		if (!branchValid) {
-			if (matches === 0 && selectedCount === 1 && selectedIssues && selectedIssues.length > 0) {
+			if (matches === 0 && selectedIssues && selectedIssues.length > 0) {
 				// A const/enum discriminator uniquely identifies the intended
 				// variant, so its diagnosis is authoritative: surface untagged and
 				// keep every repair (including lossy ones) available.
@@ -741,10 +749,15 @@ function validateSchemaValueInRoot(schema: unknown, value: unknown, root: unknow
 	return { success, issues };
 }
 
-export function validateJsonSchemaValue(schema: unknown, value: unknown): JsonSchemaValidationResult {
-	return validateSchemaValueInRoot(schema, value, schema);
+export function validateJsonSchemaValue(
+	schema: unknown,
+	value: unknown,
+	root: unknown = schema,
+): JsonSchemaValidationResult {
+	return validateSchemaValueInRoot(schema, value, root);
 }
 
-export function isJsonSchemaValueValid(schema: unknown, value: unknown): boolean {
-	return validateJsonSchemaValue(schema, value).success;
+/** Validate a subschema using its complete schema's local-reference context. */
+export function isJsonSchemaValueValid(schema: unknown, value: unknown, root: unknown = schema): boolean {
+	return validateSchemaValueInRoot(schema, value, root).success;
 }

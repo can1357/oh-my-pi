@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed valid required null values inside tool argument unions being removed before dispatch ([#12523](https://github.com/can1357/oh-my-pi/pull/12523) by [@cswenor](https://github.com/cswenor)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

@@ -80,7 +80,7 @@ describe("Tool argument coercion", () => {
 		expect(result.payload).toBe('{"a":1}');
 	});
 
-	it("does not delete unrecognized keys diagnosed inside a failed union branch", () => {
+	it.each([1, "1"])("does not delete unrecognized keys diagnosed inside a failed union branch (value=%s)", value => {
 		const tool: Tool = {
 			name: "union-closed",
 			description: "",
@@ -111,9 +111,134 @@ describe("Tool argument coercion", () => {
 				type: "toolCall",
 				id: "call-union-extra-key",
 				name: "union-closed",
-				arguments: { op: { kind: "set", value: 1, extra: "keep me" } },
+				arguments: { op: { kind: "set", value, extra: "keep me" } },
 			}),
 		).toThrow(/op/);
+	});
+
+	it("preserves content whitespace while composing nested null and boolean repairs", () => {
+		const tool: Tool = {
+			name: "content-union",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: {
+					content: {
+						anyOf: [
+							{
+								type: "object",
+								properties: {
+									enabled: { type: "boolean" },
+									path: { type: "string" },
+									note: { type: "string" },
+								},
+								required: ["enabled", "path"],
+							},
+							{ type: "null" },
+						],
+					},
+				},
+				required: ["content"],
+			} as never,
+		};
+		const arguments_ = { content: { enabled: "true", path: "literal\n", note: null } };
+		expect(
+			validateToolArguments(tool, { type: "toolCall", id: "content", name: tool.name, arguments: arguments_ }),
+		).toEqual({
+			content: { enabled: true, path: "literal\n" },
+		});
+		expect(arguments_).toEqual({ content: { enabled: "true", path: "literal\n", note: null } });
+	});
+
+	it("does not authorize destructive nested repairs through an unselected ancestor union", () => {
+		const tool: Tool = {
+			name: "nested-union",
+			description: "",
+			parameters: {
+				type: "object",
+				properties: {
+					op: {
+						anyOf: [
+							{
+								type: "object",
+								properties: {
+									value: { type: "number" },
+									nested: {
+										anyOf: [
+											{
+												type: "object",
+												additionalProperties: false,
+												properties: {
+													op: { const: "a" },
+													enabled: { type: "boolean" },
+													note: { type: "string" },
+												},
+												required: ["op", "enabled"],
+											},
+											{ type: "null" },
+										],
+									},
+								},
+								required: ["value", "nested"],
+							},
+							{ type: "string" },
+						],
+					},
+				},
+				required: ["op"],
+			} as never,
+		};
+		expect(() =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "nested",
+				name: tool.name,
+				arguments: { op: { value: "1", nested: { op: "a", enabled: "true", note: null, extra: "keep me" } } },
+			}),
+		).toThrow();
+	});
+
+	it.each(["wrapped", null])("allows nested default-selected repairs under a selected ancestor (kind=%s)", kind => {
+		const tool: Tool = {
+			name: "selected-nested-union",
+			description: "",
+			parameters: {
+				anyOf: [
+					{ type: "object", properties: { kind: { const: "none" } }, required: ["kind"] },
+					{
+						type: "object",
+						properties: {
+							kind: { const: "wrapped", default: "wrapped" },
+							nested: {
+								anyOf: [
+									{
+										type: "object",
+										additionalProperties: false,
+										properties: { op: { const: "a" } },
+										required: ["op"],
+									},
+									{
+										type: "object",
+										additionalProperties: false,
+										properties: { op: { const: "b", default: "b" }, enabled: { type: "boolean" } },
+										required: ["op", "enabled"],
+									},
+								],
+							},
+						},
+						required: ["kind", "nested"],
+					},
+				],
+			} as never,
+		};
+		expect(
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "selected-nested",
+				name: tool.name,
+				arguments: { kind, nested: { op: null, enabled: "true", extra: "discard after selection" } },
+			}),
+		).toEqual({ kind: "wrapped", nested: { op: "b", enabled: true } });
 	});
 
 	it("still applies lossless repairs inside union branches", () => {
@@ -757,6 +882,48 @@ describe("Tool argument coercion", () => {
 			}),
 		).toThrow("false schema");
 	});
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"keeps root refs while composing null, enum, and type repairs in %s",
+		keyword => {
+			const tool: Tool = {
+				name: "root_refs",
+				description: "",
+				parameters: {
+					type: "object",
+					$defs: { Name: { type: "string" }, Op: { const: "a" }, Enabled: { type: "boolean" } },
+					properties: {
+						values: {
+							[keyword]: [
+								{
+									type: "object",
+									properties: {
+										name: { $ref: "#/$defs/Name" },
+										op: { $ref: "#/$defs/Op" },
+										enabled: { $ref: "#/$defs/Enabled" },
+										note: { type: "string" },
+									},
+									required: ["name", "op", "enabled"],
+								},
+								{ type: "null" },
+							],
+						},
+					},
+					required: ["values"],
+				},
+			};
+			const call: ToolCall = {
+				type: "toolCall",
+				id: "root-refs",
+				name: tool.name,
+				arguments: { values: { name: "Ada", op: " a ", enabled: "true", note: null } },
+			};
+			expect(validateToolArguments(tool, call)).toEqual({ values: { name: "Ada", op: "a", enabled: true } });
+			expect(() =>
+				validateToolArguments(tool, { ...call, arguments: { values: { name: null, op: "a", enabled: true } } }),
+			).toThrow("Validation failed");
+		},
+	);
 
 	it("parses nested JSON arrays in string values", () => {
 		const tool: Tool = {

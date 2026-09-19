@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { validateToolArguments } from "@oh-my-pi/pi-ai";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import { DeferredMCPTool, MCPTool, type MCPToolDefinition } from "@oh-my-pi/pi-coding-agent/mcp";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
@@ -43,6 +44,80 @@ function createCapturedConnection(calls: CapturedRequest[]): MCPServerConnection
 	return createMockConnection({ tools: {} }, transport);
 }
 
+function createHistoryToolDefinition(keyword: "anyOf" | "oneOf"): MCPToolDefinition {
+	return {
+		name: "preview_history",
+		inputSchema: {
+			type: "object",
+			properties: {
+				source_row_id: { type: ["string", "null"] },
+				expected_source_revision: { type: ["string", "null"] },
+				values: {
+					[keyword]: [
+						{
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								form: { const: "salary" },
+								amount: { type: "string" },
+								currency: { enum: ["COP", "USD"] },
+								effectiveFrom: { type: "string" },
+							},
+							required: ["form", "amount", "currency", "effectiveFrom"],
+						},
+						{
+							type: "object",
+							additionalProperties: false,
+							properties: {
+								form: { const: "work" },
+								clientId: { type: "string" },
+								startDate: { type: "string" },
+								endDate: { type: ["string", "null"] },
+								staffingDiscountUntil: { type: ["string", "null"] },
+								staffingDiscountPercent: { type: ["string", "null"] },
+							},
+							required: [
+								"form",
+								"clientId",
+								"startDate",
+								"endDate",
+								"staffingDiscountUntil",
+								"staffingDiscountPercent",
+							],
+						},
+					],
+				},
+			},
+			required: ["source_row_id", "expected_source_revision", "values"],
+		},
+	};
+}
+
+function workHistoryArgs(): Record<string, unknown> {
+	return {
+		source_row_id: null,
+		expected_source_revision: null,
+		values: {
+			form: "work",
+			clientId: "synthetic-client",
+			startDate: "2026-09-14",
+			endDate: null,
+			staffingDiscountUntil: null,
+			staffingDiscountPercent: null,
+		},
+	};
+}
+
+async function dispatchValidated(tool: MCPTool, args: Record<string, unknown>): Promise<void> {
+	const validated = validateToolArguments(tool, {
+		type: "toolCall",
+		id: "history-preview",
+		name: tool.name,
+		arguments: args,
+	});
+	await tool.execute("history-preview", validated, undefined, unusedContext);
+}
+
 const imageToolDefinition: MCPToolDefinition = {
 	name: "read_image_with_model",
 	description: "Read an image from a local filesystem path",
@@ -74,6 +149,209 @@ async function createLocalImageContext(
 }
 
 describe("MCP tool arguments", () => {
+	it.each(["anyOf", "oneOf"] as const)(
+		"retains required nested nulls through %s normalization and MCP dispatch",
+		async keyword => {
+			const calls: CapturedRequest[] = [];
+			const tool = new MCPTool(createCapturedConnection(calls), createHistoryToolDefinition(keyword));
+			const args = workHistoryArgs();
+
+			await dispatchValidated(tool, args);
+
+			expect(calls).toEqual([
+				{ method: "tools/call", params: { name: "preview_history", arguments: workHistoryArgs() } },
+			]);
+		},
+	);
+
+	it("does not lose nested nulls while a later pass repairs the union discriminator", async () => {
+		const calls: CapturedRequest[] = [];
+		const tool = new MCPTool(createCapturedConnection(calls), createHistoryToolDefinition("anyOf"));
+		const args = workHistoryArgs();
+		args.values = { ...(args.values as Record<string, unknown>), form: " work " };
+
+		await dispatchValidated(tool, args);
+
+		expect(calls).toEqual([
+			{ method: "tools/call", params: { name: "preview_history", arguments: workHistoryArgs() } },
+		]);
+	});
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"composes null cleanup and discriminator repair within a valid %s branch before dispatch",
+		async keyword => {
+			const calls: CapturedRequest[] = [];
+			const tool = new MCPTool(createCapturedConnection(calls), {
+				name: "repair_union",
+				inputSchema: {
+					type: "object",
+					properties: {
+						values: {
+							[keyword]: ["a", "b"].map(op => ({
+								type: "object",
+								additionalProperties: false,
+								properties: {
+									op: { const: op },
+									note: { type: "string" },
+									label: { type: "string", default: "untitled" },
+								},
+								required: ["op", "label"],
+							})),
+						},
+					},
+					required: ["values"],
+				},
+			});
+
+			await dispatchValidated(tool, { values: { op: " a ", note: null, label: null } });
+
+			expect(calls).toEqual([
+				{
+					method: "tools/call",
+					params: { name: "repair_union", arguments: { values: { op: "a", label: "untitled" } } },
+				},
+			]);
+			calls.length = 0;
+			await expect(dispatchValidated(tool, { values: { op: "unknown", note: null, label: null } })).rejects.toThrow(
+				"Validation failed",
+			);
+			expect(calls).toEqual([]);
+		},
+	);
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"composes default discriminators and boolean coercion inside a %s candidate before dispatch",
+		async keyword => {
+			const calls: CapturedRequest[] = [];
+			const tool = new MCPTool(createCapturedConnection(calls), {
+				name: "repair_default_discriminator",
+				inputSchema: {
+					type: "object",
+					properties: {
+						values: {
+							[keyword]: [
+								{
+									type: "object",
+									additionalProperties: false,
+									properties: { op: { const: "a" } },
+									required: ["op"],
+								},
+								{
+									type: "object",
+									additionalProperties: false,
+									properties: {
+										op: { const: "b", default: "b" },
+										enabled: { type: "boolean" },
+									},
+									required: ["op", "enabled"],
+								},
+							],
+						},
+					},
+					required: ["values"],
+				},
+			});
+			// The default selects b, authorizing its existing unknown-key repair.
+			const args = { values: { op: null, enabled: "true", extra: "discard only after selection" } };
+			await dispatchValidated(tool, args);
+			expect(calls).toEqual([
+				{
+					method: "tools/call",
+					params: {
+						name: "repair_default_discriminator",
+						arguments: { values: { op: "b", enabled: true } },
+					},
+				},
+			]);
+			expect(args).toEqual({ values: { op: null, enabled: "true", extra: "discard only after selection" } });
+			calls.length = 0;
+			await expect(dispatchValidated(tool, { values: { op: null, enabled: "unknown" } })).rejects.toThrow(
+				"Validation failed",
+			);
+			expect(calls).toEqual([]);
+		},
+	);
+
+	it.each(["anyOf", "oneOf"] as const)(
+		"reconsiders null cleanup after identifier repair makes a %s branch viable",
+		async keyword => {
+			const calls: CapturedRequest[] = [];
+			const tool = new MCPTool(createCapturedConnection(calls), {
+				name: "repair_identifier",
+				inputSchema: {
+					type: "object",
+					properties: {
+						values: {
+							[keyword]: ["a", "b"].map(op => ({
+								type: "object",
+								properties: {
+									op: { const: op },
+									path: { type: "string", maxLength: 7 },
+									note: { type: "string" },
+								},
+								required: ["op", "path"],
+							})),
+						},
+					},
+					required: ["values"],
+				},
+			});
+			await dispatchValidated(tool, { values: { op: "a", path: "file.ts\n", note: null } });
+			expect(calls).toEqual([
+				{
+					method: "tools/call",
+					params: { name: "repair_identifier", arguments: { values: { op: "a", path: "file.ts" } } },
+				},
+			]);
+		},
+	);
+
+	it("still rejects ambiguous oneOf matches before MCP dispatch", async () => {
+		const calls: CapturedRequest[] = [];
+		const tool = new MCPTool(createCapturedConnection(calls), {
+			name: "ambiguous",
+			inputSchema: {
+				type: "object",
+				properties: { values: { oneOf: [{ type: "object" }, { type: "object" }] } },
+				required: ["values"],
+			},
+		});
+		await expect(dispatchValidated(tool, { values: { endDate: null } })).rejects.toThrow("Validation failed");
+		expect(calls).toEqual([]);
+	});
+
+	it("keeps the salary branch payload intact through normalization and MCP dispatch", async () => {
+		const calls: CapturedRequest[] = [];
+		const tool = new MCPTool(createCapturedConnection(calls), createHistoryToolDefinition("anyOf"));
+		const args = {
+			source_row_id: null,
+			expected_source_revision: null,
+			values: { form: "salary", amount: "100", currency: "USD", effectiveFrom: "2026-09-14" },
+		};
+
+		await dispatchValidated(tool, args);
+
+		expect(calls).toEqual([{ method: "tools/call", params: { name: "preview_history", arguments: args } }]);
+	});
+
+	it("rejects missing, non-nullable, and wrong-branch values before MCP dispatch", async () => {
+		const calls: CapturedRequest[] = [];
+		const tool = new MCPTool(createCapturedConnection(calls), createHistoryToolDefinition("anyOf"));
+		const work = workHistoryArgs().values as Record<string, unknown>;
+		const missing = { ...work };
+		delete missing.endDate;
+		const invalidValues = [
+			missing,
+			{ ...work, clientId: null },
+			{ ...work, form: "salary" },
+			{ form: "salary", amount: "100", currency: "EUR", effectiveFrom: "2026-09-14" },
+		];
+		for (const values of invalidValues) {
+			await expect(dispatchValidated(tool, { ...workHistoryArgs(), values })).rejects.toThrow("Validation failed");
+		}
+		expect(calls).toEqual([]);
+	});
+
 	it("omits optional empty placeholders before tools/call", async () => {
 		const calls: CapturedRequest[] = [];
 		const tool = new MCPTool(createCapturedConnection(calls), createSearchToolDefinition());
