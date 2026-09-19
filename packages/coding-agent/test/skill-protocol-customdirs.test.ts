@@ -140,14 +140,18 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		});
 		setActiveSkills(skills);
 
-		const dup = skills.find(s => s.name === "same-name");
-		expect(dup).toBeDefined();
-		// Same-source (custom) duplicates keep first-wins: dirA claims the name.
-		expect(dup!.filePath).toBe(path.join(skillA, "SKILL.md"));
+		const nsA = path.basename(dirA);
+		const nsB = path.basename(dirB);
+		const skillAEntry = skills.find(s => s.name === `${nsA}/same-name`);
+		const skillBEntry = skills.find(s => s.name === `${nsB}/same-name`);
+		expect(skillAEntry).toBeDefined();
+		expect(skillBEntry).toBeDefined();
+		expect(skillAEntry!.filePath).toBe(path.join(skillA, "SKILL.md"));
+		expect(skillBEntry!.filePath).toBe(path.join(skillB, "SKILL.md"));
 		expect(warnings.some(w => w.message.includes("collision"))).toBe(true);
 
 		const handler = new SkillProtocolHandler();
-		const resource = await handler.resolve(parseInternalUrl("skill://same-name/"));
+		const resource = await handler.resolve(parseInternalUrl(`skill://${nsA}/same-name/`));
 		expect(resource.sourcePath).toBe(path.join(skillA, "SKILL.md"));
 	});
 
@@ -180,13 +184,16 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		});
 		setActiveSkills(skills);
 
-		const dup = skills.find(s => s.name === "shared-name");
-		expect(dup).toBeDefined();
-		// The explicitly configured custom directory is the higher-priority source.
-		expect(dup!.filePath).toBe(path.join(customSkill, "SKILL.md"));
+		const customNs = path.basename(customDir);
+		const customEntry = skills.find(s => s.name === `${customNs}/shared-name`);
+		const defaultEntry = skills.find(s => s.name === "claude/shared-name");
+		expect(customEntry).toBeDefined();
+		expect(defaultEntry).toBeDefined();
+		expect(customEntry!.filePath).toBe(path.join(customSkill, "SKILL.md"));
+		expect(defaultEntry!.filePath).toBe(path.join(defaultSkill, "SKILL.md"));
 
 		const handler = new SkillProtocolHandler();
-		const resource = await handler.resolve(parseInternalUrl("skill://shared-name/"));
+		const resource = await handler.resolve(parseInternalUrl(`skill://${customNs}/shared-name/`));
 		expect(resource.sourcePath).toBe(path.join(customSkill, "SKILL.md"));
 		expect(resource.content).toContain("from custom");
 	});

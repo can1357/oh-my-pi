@@ -472,6 +472,12 @@ export async function scanSkillsFromDir(
 			const skillDirName = path.basename(path.dirname(skillPath));
 			const rawName = frontmatter.name;
 			const name = typeof rawName === "string" ? rawName.trim() || skillDirName : skillDirName;
+			// `/` is reserved for collision namespaces (`<namespace>/<name>`) and
+			// path resolution in skill:// URLs; a raw name must never claim one.
+			if (/[\\/]/.test(name)) {
+				warnings.push(`Skill name "${name}" contains a path separator, skipping: ${skillPath}`);
+				return;
+			}
 			items.push({
 				name,
 				path: skillPath,

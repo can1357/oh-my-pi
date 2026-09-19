@@ -11,8 +11,9 @@ import {
 	loadSkills,
 	loadSkillsFromDir,
 	parseSkillInvocation,
-	type Skill,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
@@ -552,50 +553,252 @@ description: Skill loaded from a tilde-expanded custom directory.
 });
 
 describe("collision handling", () => {
-	it("should detect name collisions and keep first skill", async () => {
-		// Load from first directory
-		const first = await loadSkillsFromDir({
-			dir: path.join(collisionFixturesDir, "first"),
-			source: "first",
+	const first = path.join(collisionFixturesDir, "first");
+	const second = path.join(collisionFixturesDir, "second");
+	const mirror = path.join(collisionFixturesDir, "mirror");
+
+	it("keeps a differing same-name skill under a namespaced name and warns", async () => {
+		const { skills, warnings } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second],
 		});
+		const names = skills.map(skill => skill.name).sort();
+		expect(names).toEqual(["first/calendar", "second/calendar"]);
+		expect(skills.find(skill => skill.name === "first/calendar")?.filePath).toBe(
+			path.join(first, "calendar", "SKILL.md"),
+		);
+		expect(skills.find(skill => skill.name === "second/calendar")?.filePath).toBe(
+			path.join(second, "calendar", "SKILL.md"),
+		);
+		const collision = warnings.filter(warning => warning.message.includes("name collision"));
+		expect(collision).toHaveLength(2);
+		expect(collision.some(w => w.message.includes('available as "first/calendar"'))).toBe(true);
+		expect(collision.some(w => w.message.includes('available as "second/calendar"'))).toBe(true);
+	});
 
-		const second = await loadSkillsFromDir({
-			dir: path.join(collisionFixturesDir, "second"),
-			source: "second",
+	it("silently collapses an identical same-name skill from another location", async () => {
+		const { skills, warnings } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, mirror],
 		});
+		expect(skills.map(skill => skill.name)).toEqual(["calendar"]);
+		expect(skills[0].filePath).toBe(path.join(first, "calendar", "SKILL.md"));
+		expect(warnings.filter(warning => warning.message.includes("collision"))).toHaveLength(0);
+	});
 
-		// Both directories should have loaded one skill each
-		expect(first.skills).toHaveLength(1);
-		expect(second.skills).toHaveLength(1);
+	it("silently collapses identical bodies across different namespaces", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skills-mirror-"));
+		const thirdDir = path.join(tempDir, "third", "calendar");
+		await fs.mkdir(thirdDir, { recursive: true });
+		await fs.copyFile(path.join(second, "calendar", "SKILL.md"), path.join(thirdDir, "SKILL.md"));
 
-		// Both have the same name "calendar"
-		expect(first.skills[0].name).toBe("calendar");
-		expect(second.skills[0].name).toBe("calendar");
-
-		// Simulate the collision behavior from loadSkills()
-		const skillMap = new Map<string, Skill>();
-		const collisionWarnings: Array<{ skillPath: string; message: string }> = [];
-
-		for (const skill of first.skills) {
-			skillMap.set(skill.name, skill);
+		try {
+			const { skills, warnings } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: [first, second, path.join(tempDir, "third")],
+			});
+			const names = skills.map(skill => skill.name).sort();
+			expect(names).toEqual(["first/calendar", "second/calendar"]);
+			const collision = warnings.filter(warning => warning.message.includes("name collision"));
+			expect(collision).toHaveLength(2);
+			expect(collision.some(w => w.message.includes('available as "second/calendar"'))).toBe(true);
+		} finally {
+			await removeWithRetries(tempDir);
 		}
+	});
 
-		for (const skill of second.skills) {
-			const existing = skillMap.get(skill.name);
-			if (existing) {
-				collisionWarnings.push({
-					skillPath: skill.filePath,
-					message: `name collision: "${skill.name}" already loaded from ${existing.filePath}`,
-				});
-			} else {
-				skillMap.set(skill.name, skill);
-			}
+	it("resolves namespaced skills through skill:// URLs", async () => {
+		const { skills } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second],
+		});
+		const handler = new SkillProtocolHandler();
+		await expect(handler.resolve(parseInternalUrl("skill://calendar")!, { skills })).rejects.toThrow(
+			"Unknown skill: calendar",
+		);
+		const firstSkill = await handler.resolve(parseInternalUrl("skill://first/calendar")!, { skills });
+		expect(firstSkill.content).toContain("Calendar (First)");
+		const namespaced = await handler.resolve(parseInternalUrl("skill://second/calendar")!, { skills });
+		expect(namespaced.content).toContain("Calendar (Second)");
+		const nested = await handler.resolve(parseInternalUrl("skill://second/calendar/SKILL.md")!, { skills });
+		expect(nested.content).toContain("Calendar (Second)");
+	});
+
+	it("collapses a custom override whose body matches an existing alias", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "skills-override-"));
+		const previousHome = process.env.HOME;
+		process.env.HOME = home;
+		try {
+			// Provider copy of Second's calendar in ~/.agents/skills; the custom
+			// directory then overrides the bare name with the identical body.
+			const providerDir = path.join(home, ".agents", "skills", "calendar");
+			await fs.mkdir(providerDir, { recursive: true });
+			await fs.copyFile(path.join(second, "calendar", "SKILL.md"), path.join(providerDir, "SKILL.md"));
+			const { skills } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				enableAgentsUser: true,
+				customDirectories: [second],
+			});
+			expect(skills.map(skill => skill.name)).toEqual(["calendar"]);
+			expect(skills[0].filePath).toBe(path.join(second, "calendar", "SKILL.md"));
+		} finally {
+			restoreEnvValue("HOME", previousHome);
+			await removeWithRetries(home);
 		}
+	});
 
-		expect(skillMap.size).toBe(1);
-		expect(skillMap.get("calendar")?.source).toBe("first");
-		expect(collisionWarnings).toHaveLength(1);
-		expect(collisionWarnings[0].message).toContain("name collision");
+	it("normalizes derived namespaces to a token-safe form", async () => {
+		const spaced = await fs.mkdtemp(path.join(os.tmpdir(), "My Skills-"));
+		try {
+			await fs.mkdir(path.join(spaced, "calendar"), { recursive: true });
+			await fs.copyFile(path.join(second, "calendar", "SKILL.md"), path.join(spaced, "calendar", "SKILL.md"));
+			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [first, spaced] });
+			const alias = skills.find(skill => skill.filePath.includes("My Skills"));
+			// The temp root is "My Skills-<suffix>" → sanitized to "My-Skills-<suffix>".
+			expect(alias?.name).toMatch(/^My-Skills-[^/]+\/calendar$/);
+			expect(alias?.name).not.toContain(" ");
+			const handler = new SkillProtocolHandler();
+			const resolved = await handler.resolve(parseInternalUrl(`skill://${alias!.name}`)!, { skills });
+			expect(resolved.content).toContain("Calendar (Second)");
+			expect(parseSkillInvocation(`/skill:${alias!.name}`)?.name).toBe(alias!.name);
+		} finally {
+			await removeWithRetries(spaced);
+		}
+	});
+
+	it("prefers an exact namespaced skill over a bare skill sharing the namespace", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-selfnamed-"));
+		try {
+			// A skills root literally named "calendar" holding a differing "calendar"
+			// skill produces the alias "calendar/calendar".
+			const selfNamed = path.join(root, "calendar");
+			await fs.mkdir(path.join(selfNamed, "calendar"), { recursive: true });
+			await fs.copyFile(path.join(second, "calendar", "SKILL.md"), path.join(selfNamed, "calendar", "SKILL.md"));
+			const { skills } = await loadSkills({ ...DISABLE_ALL_BUILTIN_SKILLS, customDirectories: [first, selfNamed] });
+			expect(skills.map(skill => skill.name).sort()).toEqual(["calendar/calendar", "first/calendar"]);
+			const handler = new SkillProtocolHandler();
+			const resolved = await handler.resolve(parseInternalUrl("skill://calendar/calendar")!, { skills });
+			expect(resolved.content).toContain("Calendar (Second)");
+		} finally {
+			await removeWithRetries(root);
+		}
+	});
+
+	it("keeps every differing skill when two of them share a namespace", async () => {
+		const nested = path.join(collisionFixturesDir, "nested", "second");
+		const { skills, warnings } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second, nested],
+		});
+		expect(skills.map(skill => skill.name).sort()).toEqual([
+			"first/calendar",
+			"second/calendar",
+			"second/calendar~2",
+		]);
+		expect(skills.find(skill => skill.name === "second/calendar~2")?.filePath).toBe(
+			path.join(nested, "calendar", "SKILL.md"),
+		);
+		expect(warnings.filter(warning => warning.message.includes("name collision"))).toHaveLength(3);
+	});
+
+	it("keeps a differing skill whose body matches a genuine ~N raw name", async () => {
+		// A legal raw name ending in `~N` must not be read as a generated
+		// collision suffix: `tilde-third/foo` shares a body with
+		// `tilde-second/foo~2`, whose raw name is `foo~2`, not `foo` — so it is
+		// a distinct skill and must be kept under its own namespace.
+		const tildeMain = path.join(collisionFixturesDir, "tilde-main");
+		const tildeSecond = path.join(collisionFixturesDir, "tilde-second");
+		const tildeThird = path.join(collisionFixturesDir, "tilde-third");
+		const { skills, warnings } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [tildeMain, tildeSecond, tildeThird],
+		});
+		expect(skills.map(skill => skill.name).sort()).toEqual([
+			"tilde-main/foo",
+			"tilde-main/foo~2",
+			"tilde-second/foo",
+			"tilde-second/foo~2",
+			"tilde-third/foo",
+		]);
+		expect(skills.find(skill => skill.name === "tilde-second/foo~2")?.filePath).toBe(
+			path.join(tildeSecond, "foo-raw", "SKILL.md"),
+		);
+		expect(skills.find(skill => skill.name === "tilde-third/foo")?.filePath).toBe(
+			path.join(tildeThird, "foo", "SKILL.md"),
+		);
+		expect(warnings.filter(warning => warning.message.includes("name collision"))).toHaveLength(5);
+	});
+
+	it("refuses a raw skill name that claims a namespaced address", async () => {
+		const squatter = path.join(collisionFixturesDir, "squatter");
+		const { skills, warnings } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [squatter, first, second],
+		});
+		expect(skills.map(skill => skill.name).sort()).toEqual(["first/calendar", "second/calendar"]);
+		expect(skills.find(skill => skill.name === "second/calendar")?.filePath).toBe(
+			path.join(second, "calendar", "SKILL.md"),
+		);
+		expect(warnings.some(warning => warning.message.includes("path separator"))).toBe(true);
+	});
+
+	it("disables a namespaced skill by its own extension id without touching the bare one", async () => {
+		const { skills } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second],
+			disabledExtensions: ["skill:second/calendar"],
+		});
+		expect(skills.map(skill => skill.name)).toEqual(["calendar"]);
+	});
+
+	it("matches include patterns against the namespaced name", async () => {
+		const { skills } = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second],
+			includeSkills: ["second/*"],
+		});
+		// The bare skill is still needed to derive the namespaced name; only the
+		// final listing is filtered.
+		expect(skills.map(skill => skill.name)).toEqual(["second/calendar"]);
+		const excluded = await loadSkills({
+			...DISABLE_ALL_BUILTIN_SKILLS,
+			customDirectories: [first, second],
+			ignoredSkills: ["second/*"],
+		});
+		expect(excluded.skills.map(skill => skill.name)).toEqual(["calendar"]);
+	});
+
+	it("keeps a displaced provider skill when its namespaced slot is already taken", async () => {
+		const project = await fs.mkdtemp(path.join(os.tmpdir(), "skills-displaced-"));
+		try {
+			// Project-level .claude/skills/calendar (provider "claude"; the dotted
+			// home makes its namespace fall back to the provider id) versus a custom
+			// root literally named "claude" that derives the same namespace.
+			const providerDir = path.join(project, ".claude", "skills", "calendar");
+			const claudeRoot = path.join(project, "x", "claude");
+			await fs.mkdir(providerDir, { recursive: true });
+			await fs.mkdir(path.join(claudeRoot, "calendar"), { recursive: true });
+			await fs.copyFile(path.join(first, "calendar", "SKILL.md"), path.join(providerDir, "SKILL.md"));
+			await fs.copyFile(
+				path.join(collisionFixturesDir, "nested", "second", "calendar", "SKILL.md"),
+				path.join(claudeRoot, "calendar", "SKILL.md"),
+			);
+			const { skills } = await loadSkills({
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				enableClaudeProject: true,
+				cwd: project,
+				customDirectories: [second, claudeRoot],
+			});
+			const byName = new Map(skills.map(skill => [skill.name, skill]));
+			// Both the provider skill and the custom skills collide on "calendar",
+			// so all three variants receive a namespace prefix.
+			expect(byName.get("second/calendar")?.filePath).toBe(path.join(second, "calendar", "SKILL.md"));
+			expect(byName.get("claude/calendar")?.filePath).toBe(path.join(providerDir, "SKILL.md"));
+			expect(byName.get("claude/calendar~2")?.filePath).toBe(path.join(claudeRoot, "calendar", "SKILL.md"));
+			expect(skills).toHaveLength(3);
+		} finally {
+			await removeWithRetries(project);
+		}
 	});
 });
 

@@ -6,13 +6,14 @@
  * URL forms:
  * - skill://<name> - Reads SKILL.md
  * - skill://<name>/<path> - Reads relative path within skill's baseDir
+ * - skill://<namespace>/<name>[/<path>] - Same, for a collision-namespaced skill
  */
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { resolveContainedPath } from "../discovery/contained-path";
-import { getActiveSkills } from "../extensibility/skills";
+import { getActiveSkills, type Skill } from "../extensibility/skills";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
@@ -56,7 +57,19 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			throw new Error("skill:// URL requires a skill name: skill://<name>");
 		}
 
-		const skill = skills.find(s => s.name === skillName);
+		let urlPath = url.pathname;
+		let skill: Skill | undefined;
+		if (urlPath.length > 1) {
+			// A namespaced skill (`<plugin>/<name>`) spans the host and the first
+			// path segment. Skill names never contain `/`, so an exact match here
+			// is unambiguous and wins over reading `<name>` as a path relative to
+			// a bare skill that happens to share the namespace's name.
+			const slash = urlPath.indexOf("/", 1);
+			const namespaced = `${skillName}/${decodeURIComponent(slash === -1 ? urlPath.slice(1) : urlPath.slice(1, slash))}`;
+			skill = skills.find(s => s.name === namespaced);
+			if (skill) urlPath = slash === -1 ? "" : urlPath.slice(slash);
+		}
+		skill ??= skills.find(s => s.name === skillName);
 		if (!skill) {
 			const available = skills.map(s => s.name);
 			const availableStr = available.length > 0 ? available.join(", ") : "none";
@@ -64,7 +77,6 @@ export class SkillProtocolHandler implements ProtocolHandler {
 		}
 
 		let targetPath: string;
-		const urlPath = url.pathname;
 		const hasRelativePath = urlPath && urlPath !== "/" && urlPath !== "";
 
 		if (hasRelativePath) {
