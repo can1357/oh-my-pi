@@ -159,7 +159,7 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("Timeout:");
 	});
 
-	it("renders a backgrounded job as a static footer notice, with or without a stated deadline", async () => {
+	it("renders a backgrounded job as a static footer notice, with or without a stated deadline or label", async () => {
 		for (const [label, notice] of [
 			// Persisted by older versions, before the notice stated a deadline.
 			[
@@ -168,6 +168,7 @@ describe("bashToolRenderer", () => {
 			],
 			["deadline", formatBackgroundNotice("bash-42", 300)],
 			["deadline disabled", formatBackgroundNotice("bash-42", undefined)],
+			["deadline and label", formatBackgroundNotice("bash-42", 300, "sleep 30")],
 		] as const) {
 			const component = bashToolRenderer.renderResult(
 				{
@@ -189,6 +190,7 @@ describe("bashToolRenderer", () => {
 			expect(rendered, label).not.toContain("injected into the conversation");
 			expect(rendered, label).not.toContain("Do NOT poll");
 			expect(rendered, label).not.toContain("deadline");
+			expect(rendered, label).not.toContain("(sleep 30)");
 		}
 	});
 
