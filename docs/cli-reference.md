@@ -144,8 +144,9 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 
 | Flag | Description |
 | --- | --- |
-| `--system-prompt <text\|file>` | System prompt (default: coding assistant prompt). See [system prompt customization](./system-prompt-customization.md). |
-| `--append-system-prompt <text\|file>` | Append text or file contents to the system prompt. |
+| `--system-prompt <text\|file>` | Plain-text system prompt override (default: coding assistant prompt). See [system prompt customization](./system-prompt-customization.md). |
+| `--system-prompt-template <path>` | Strictly read `<path>` as a Handlebars system-prompt template; mutually exclusive with `--system-prompt`. See [system prompt customization](./system-prompt-customization.md). |
+| `--append-system-prompt <text\|file>` | Append plain text or file contents to the system prompt. |
 
 #### Output mode
 

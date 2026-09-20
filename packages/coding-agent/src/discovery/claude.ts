@@ -475,18 +475,41 @@ async function loadSystemPrompts(ctx: LoadContext): Promise<LoadResult<SystemPro
 	const items: SystemPrompt[] = [];
 	const warnings: string[] = [];
 
+	const projectBase = getProjectClaude(ctx);
+	for (const [file, kind] of [
+		["SYSTEM_TEMPLATE.md", "template"],
+		["SYSTEM.md", "text"],
+	] as const) {
+		const projectPath = path.join(projectBase, file);
+		const content = await readFile(projectPath);
+		if (content) {
+			items.push({
+				path: projectPath,
+				content,
+				kind,
+				level: "project",
+				_source: createSourceMeta(PROVIDER_ID, projectPath, "project"),
+			});
+		}
+	}
+
 	const userBase = getUserClaude(ctx);
 	if (userBase) {
-		const userSystemMd = path.join(userBase, "SYSTEM.md");
-
-		const content = await readFile(userSystemMd);
-		if (content !== null) {
-			items.push({
-				path: userSystemMd,
-				content,
-				level: "user",
-				_source: createSourceMeta(PROVIDER_ID, userSystemMd, "user"),
-			});
+		for (const [file, kind] of [
+			["SYSTEM_TEMPLATE.md", "template"],
+			["SYSTEM.md", "text"],
+		] as const) {
+			const userPath = path.join(userBase, file);
+			const content = await readFile(userPath);
+			if (content !== null) {
+				items.push({
+					path: userPath,
+					content,
+					kind,
+					level: "user",
+					_source: createSourceMeta(PROVIDER_ID, userPath, "user"),
+				});
+			}
 		}
 	}
 
