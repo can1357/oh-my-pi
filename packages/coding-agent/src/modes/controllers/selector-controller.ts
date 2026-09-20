@@ -101,12 +101,9 @@ import { createExtensionDashboardRuntime } from "../components/extensions/dashbo
 import { HistorySearchComponent } from "@oh-my-pi/pi-tui/overlays/history-search";
 import type { LoginDialogComponent as LoginDialogComponentType } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import type { LogoutAccountSelectorComponent as LogoutAccountSelectorComponentType } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
-import type {
-	ModelHubComponent as ModelHubComponentType,
-	ModelRoleSelectionScope,
-} from "@oh-my-pi/pi-tui/overlays/model-hub";
+import { ModelHubComponent, type ModelRoleSelectionScope } from "@oh-my-pi/pi-tui/overlays/model-hub";
 import { createModelBrowserSource } from "../model-browser-source";
-import type { ModelPickerComponent as ModelPickerComponentType } from "@oh-my-pi/pi-tui/overlays/model-picker";
+import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
 import type { OAuthSelectorComponent as OAuthSelectorComponentType } from "@oh-my-pi/pi-tui/overlays/oauth-selector";
 import { PluginSelectorComponent } from "@oh-my-pi/pi-tui/overlays/plugin-selector";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
@@ -124,19 +121,6 @@ import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
-
-interface ModelOverlayModules {
-	ModelHubComponent: typeof ModelHubComponentType;
-	ModelPickerComponent: typeof ModelPickerComponentType;
-}
-
-/** Synchronous first-use boundary for model overlays; key callbacks require immediate mounting. */
-function loadModelOverlayComponents(): ModelOverlayModules {
-	return {
-		ModelHubComponent: require("@oh-my-pi/pi-tui/overlays/model-hub.js").ModelHubComponent,
-		ModelPickerComponent: require("@oh-my-pi/pi-tui/overlays/model-picker.js").ModelPickerComponent,
-	};
-}
 
 interface ProviderAuthUiModules {
 	PASTE_CODE_LOGIN_PROVIDERS: typeof PasteCodeLoginProviders;
@@ -958,7 +942,6 @@ export class SelectorController {
 	 * highlighted and preselected; a leading `@` searches ctrl+p quick roles.
 	 */
 	#showModelPicker(): void {
-		const { ModelPickerComponent } = loadModelOverlayComponents();
 		const currentContextTokens = this.ctx.session.getContextUsage()?.tokens ?? 0;
 		const current = this.ctx.session.model;
 		const quickRoleOrder = this.ctx.settings.get("cycleOrder");
@@ -1049,7 +1032,6 @@ export class SelectorController {
 	 * entry — used when reopening the hub after a /login round-trip.
 	 */
 	#showModelHub(hubOptions: { initialProviderId?: string }): void {
-		const { ModelHubComponent } = loadModelOverlayComponents();
 		let closed = false;
 		const done = () => {
 			// Re-entrant guard: cancel paths (Esc, login forward) may race;
