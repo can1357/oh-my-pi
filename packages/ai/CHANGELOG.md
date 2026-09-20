@@ -11,15 +11,7 @@
 
 - Anthropic organization-level OAuth permission errors now rotate to an eligible sibling credential instead of failing permanently.
 - Fixed error handling for provider responses that do not include token usage information.
-- Fixed Anthropic organization-level OAuth permission errors (`oauth_not_allowed_for_organization`) being treated as fatal failures instead of rotating to a sibling credential.
-- Fixed error classification crashing when a provider error arrives without token usage.
-### Breaking Changes
-
-### Breaking Changes
-
-- Import Anthropic streaming and provider request helpers from `@oh-my-pi/pi-ai/providers/anthropic` rather than the package root.
-- Moved `NO_AUTH_SENTINEL` from `providers/openai-shared` to `auth-retry`.
-- Fixed Anthropic forced-tool turns (e.g. a subagent's pinned `_yield`) dying on a 400 during the zero-output cache-refresh replay: the refresh request no longer inherits `tool_choice`, which Anthropic rejects together with `max_tokens: 0` ([#12597](https://github.com/can1357/oh-my-pi/issues/12597)).
+- Fixed Anthropic forced-tool turns (e.g. a subagent's pinned `_yield`) dying on a 400 during the zero-output cache-refresh replay: the refresh request no longer inherits `tool_choice`, which Anthropic rejects together with `max_tokens: 0` ([#12602](https://github.com/can1357/oh-my-pi/pull/12602) by [@xiechimon](https://github.com/xiechimon))
 
 ## [18.2.6] - 2026-09-18
 
