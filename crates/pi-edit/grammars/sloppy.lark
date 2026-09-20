@@ -27,12 +27,15 @@ after_body: LF after_body_line* AFTER_TEXT?
 body_line: BODY_TEXT LF | LF
 after_body_line: AFTER_TEXT LF | LF
 
-BEGIN_PATCH.10: /[ \t]*\*{3}[ \t]+(?i:Begin[ \t]+Patch)[ \t]*(?=\n|$)/
-EDIT_HEADER.10: /[ \t]*\*{3}[ \t]+(?i:SM:EDIT)(?:[ \t]+[^\r\n]*)?(?=\n|$)/
-FIND_HEADER.10: /[ \t]*\*{3}[ \t]+(?i:SM:FIND)[ \t]*(?=\n|$)/
-PUT_HEADER.10: /[ \t]*\*{3}[ \t]+(?i:SM:PUT)[ \t]*(?=\n|$)/
-AFTER_HEADER.10: /[ \t]*\*{3}[ \t]+(?i:SM:AFTER)[ \t]*(?=\n|$)/
-BODY_TEXT: /(?![ \t]*\*{3}[ \t]+(?i:SM:EDIT)(?=[ \t\r\n]|$))(?![ \t]*\*{3}[ \t]+(?i:SM:(?:FIND|PUT|AFTER))(?=[ \t]*(?:\r?\n|$)))(?![ \t]*\*{3}[ \t]+(?i:(?:Begin|End)[ \t]+Patch)(?=[ \t]*(?:\r?\n|$)))[^\r\n]+/
-AFTER_TEXT: /(?![ \t]*\*{3}[ \t]+(?i:SM:EDIT)(?=[ \t\r\n]|$))(?![ \t]*\*{3}[ \t]+(?i:SM:(?:FIND|PUT|AFTER))(?=[ \t]*(?:\r?\n|$)))[^\r\n]+/
+BEGIN_PATCH: /[ \t]*\*{3}[ \t]+(?i:Begin[ \t]+Patch)[ \t]*/
+END_PATCH: /[ \t]*\*{3}[ \t]+(?i:End[ \t]+Patch)[ \t]*/
+EDIT_HEADER: /[ \t]*\*{3}[ \t]+(?i:SM:EDIT)(?:[ \t]+[^\r\n]*)?/
+FIND_HEADER: /[ \t]*\*{3}[ \t]+(?i:SM:FIND)[ \t]*/
+PUT_HEADER: /[ \t]*\*{3}[ \t]+(?i:SM:PUT)[ \t]*/
+AFTER_HEADER: /[ \t]*\*{3}[ \t]+(?i:SM:AFTER)[ \t]*/
+
+// LLGuidance supports terminal intersection/complement, not priorities or lookarounds.
+BODY_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | PUT_HEADER | AFTER_HEADER | BEGIN_PATCH | END_PATCH)
+AFTER_TEXT: /[^\r\n]+/ & ~(EDIT_HEADER | FIND_HEADER | PUT_HEADER | AFTER_HEADER)
 
 %import common.LF

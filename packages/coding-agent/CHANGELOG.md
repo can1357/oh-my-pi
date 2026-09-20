@@ -18,6 +18,7 @@
 - Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
 - Added image, web, speech, dictation, judge, and memory model roles with ordered fallbacks, automatic migration of legacy backend settings, and `omp models --kind` filtering.
 - Added native OpenRouter image generation and model-selected web-plugin search, plus live TypeSafe judge-model discovery.
+- Fixed Codex rejecting the sloppy edit tool's grammar.
 
 ### Changed
 
