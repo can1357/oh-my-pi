@@ -715,6 +715,14 @@ if "__omp_prelude_loaded__" not in globals():
             )
             return snapshot.get("status") if isinstance(snapshot, dict) else "failed"
 
+
+        def metadata(self):
+            snapshot = _bridge_call(
+                "__status__",
+                {"item": {"kind": self.kind, "id": self.id}},
+            )
+            return snapshot.get("metadata") if isinstance(snapshot, dict) else None
+
         def done(self):
             return self.status != "running"
 

@@ -139,6 +139,9 @@ A stateless, tool-free one-shot model call that returns a `CompletionHandle` imm
 - `schema`: JSON Schema for a synthetic `respond` tool; `.wait()` then returns parsed data.
 - Unresolved tier and invalid arguments fail the call itself; missing credentials, error/abort stops, empty output, and invalid structured output surface from `.wait()`.
 - Handles are process-local, owned by the calling agent, and evicted 30 minutes after settling (or when the owner session ends).
+- `handle.metadata()` reads the current completion snapshot without waiting or starting another model request (`await` it in JS; call it directly in Python). It returns `null` for `agent()`/`judge()` handles.
+- Completion metadata keeps the requested role and configured selector/effort, the final model that entered the adapter, the last request's `requestEffort`/`reasoningDisabled`, fallback use, and per-candidate outcomes. It excludes prompts, response bodies, credentials, headers, and provider payloads.
+- Evidence is layered: `configuredEffort` is user/configuration intent; `requestEffort` and `reasoningDisabled` with `effortEvidence: "provider-options"` are the provider-interface options observed by this bridge; wire-level request fields require adapter/transport capture; none of these fields prove the provider internally applied an effort.
 
 ### `agent()`
 

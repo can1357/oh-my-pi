@@ -4,7 +4,7 @@ import type { ToolSession } from "../tools";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
-import { getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
+import { getCompletionHandle, type CompletionHandleEntry, type EvalCompletionMetadata } from "./completion-bridge";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for waiting on eval handles. */
@@ -29,6 +29,7 @@ export interface EvalHandleSnapshot extends EvalHandleRef {
 	text?: string;
 	data?: unknown;
 	error?: string;
+	metadata?: EvalCompletionMetadata | null;
 }
 
 interface EvalHandleBridgeOptions {
@@ -43,6 +44,14 @@ type ResolvedHandle =
 
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function cloneCompletionMetadata(metadata: EvalCompletionMetadata | undefined): EvalCompletionMetadata | null {
+	if (!metadata) return null;
+	return {
+		...metadata,
+		attempts: metadata.attempts.map(attempt => ({ ...attempt })),
+	};
 }
 
 function parseRef(value: unknown): EvalHandleRef {
@@ -107,15 +116,17 @@ function agentSnapshot(ref: EvalHandleRef, job: AsyncJob): EvalHandleSnapshot {
 }
 
 function completionSnapshot(ref: EvalHandleRef, entry: CompletionHandleEntry): EvalHandleSnapshot {
-	if (!entry.settled) return { ...ref, status: "running" };
+	const metadata = cloneCompletionMetadata(entry.metadata);
+	if (!entry.settled) return { ...ref, status: "running", metadata };
 	if (entry.error) {
 		return {
 			...ref,
 			status: entry.controller.signal.aborted ? "cancelled" : "failed",
 			error: entry.error,
+			metadata,
 		};
 	}
-	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: entry.result?.text ?? "" };
+	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: entry.result?.text ?? "", metadata };
 	if (entry.result && Object.hasOwn(entry.result, "data")) snapshot.data = entry.result.data;
 	return snapshot;
 }

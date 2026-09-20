@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import { DELIVER_PLAN_DEVICE_NAME, PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(() => {
@@ -33,7 +33,53 @@ function proposeExecuteEnd(): AgentSessionEvent {
 	} as unknown as AgentSessionEvent;
 }
 
+/** A completed `write xd://deliver-plan` execution; it must never open approval UI. */
+function deliverPlanExecuteEnd(): AgentSessionEvent {
+	return {
+		type: "tool_execution_end",
+		toolCallId: "deliver-plan-1",
+		toolName: "write",
+		isError: false,
+		result: {
+			content: [{ type: "text", text: "Design delivered; still in plan mode." }],
+			details: {
+				xdev: {
+					tool: DELIVER_PLAN_DEVICE_NAME,
+					mode: "execute",
+					args: { title: "demo" },
+					inner: {
+						kind: "plan-delivery",
+						planFilePath: "local://demo-plan.md",
+						title: "demo",
+						implementationAuthorized: false,
+					},
+				},
+			},
+		},
+	} as unknown as AgentSessionEvent;
+}
+
 describe("EventController plan-approval dispatch", () => {
+	it("does not dispatch design delivery to execution approval", async () => {
+		let listener: ((event: AgentSessionEvent) => void | Promise<void>) | undefined;
+		const handlePlanApproval = vi.fn();
+		const ctx = createInteractiveModeContext({
+			session: {
+				subscribe: fn => {
+					listener = fn;
+					return () => {};
+				},
+			},
+			handlePlanApproval,
+		});
+		const controller = new EventController(ctx);
+		controller.subscribeToAgent();
+		if (!listener) throw new Error("subscribeToAgent did not register a listener");
+
+		await listener(deliverPlanExecuteEnd());
+
+		expect(handlePlanApproval).not.toHaveBeenCalled();
+	});
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});

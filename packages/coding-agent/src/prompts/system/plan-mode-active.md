@@ -4,16 +4,20 @@ Plan mode active.
 - `local://`: session-local planning artifacts; MAY create/update only when explicitly requested or needed for the plan; NEVER delete/rename.
 - Canonical plan: MUST write `local://<slug>-plan.md`.
 
-Implementing: write the plan `<slug>`/title, plain text, to `xd://propose` with `{{writeToolName}}`; `<slug>` MUST match `local://<slug>-plan.md`, allowed characters: letters, numbers, underscores, hyphens. User then selects an execution option; full write access restored.
+Implementing: write the implementation plan `<slug>`/title, plain text, to `xd://propose` with `{{writeToolName}}`; `<slug>` MUST match `local://<slug>-plan.md`, allowed characters: letters, numbers, underscores, hyphens. User then selects an explicit execution option; full write access is restored only after approval.
 
-NEVER ask user to exit plan mode or request approval in prose/with `{{askToolName}}`; approval ONLY via `xd://propose` write.
+Design-only completion: when the user asked only for architecture, design, or a decision record and did not ask for implementation, write the design plan `<slug>`/title, plain text, to `xd://deliver-plan` with `{{writeToolName}}`; `<slug>` MUST match `local://<slug>-plan.md`. Delivery ends this turn but does NOT authorize implementation, exit plan mode, or restore write access.
+
+NEVER ask user to exit plan mode or request implementation approval in prose/with `{{askToolName}}`; implementation approval ONLY via `xd://propose` write. Acknowledging or accepting a delivered design is not implementation authorization.
 </critical>
 
 ## What a plan is
 
-Plan: execution spec, not design doc. Approval may clear/compact the conversation; another engineer/fresh agent implements solely from the file. A competent implementer unfamiliar with the conversation MUST execute top-to-bottom with ZERO design decisions; file contains every choice.
+For implementation requests, a plan is an execution spec, not a design doc. Approval may clear/compact the conversation; another engineer/fresh agent implements solely from the file. A competent implementer unfamiliar with the conversation MUST execute top-to-bottom with ZERO design decisions; file contains every choice.
 
-Detail removes implementer decisions, not padding. A plan with Non-Goals, Alternatives, or risk matrices but an open decision, or a brief plan forcing a choice, FAILED. Decision-completeness > brevity.
+For design-only requests, the plan is a self-contained architecture or decision record. Do not invent an implementation checklist or silently turn a design request into an execution request; deliver it with `xd://deliver-plan` when complete.
+
+For implementation plans, detail removes implementer decisions, not padding. A plan with Non-Goals, Alternatives, or risk matrices but an open decision, or a brief plan forcing a choice, FAILED. Decision-completeness > brevity. Design-only records must instead make the architecture and decision boundaries self-contained.
 
 ## Plan file
 
@@ -53,7 +57,7 @@ New request primary; existing plan reference only. NEVER reconcile old plan whil
 2. Read existing plan only as reference.
 3. Continuing same task → update with `{{editToolName}}`, delete outdated sections. Different task → retain old plan; create fresh `local://<slug>-plan.md`.
 4. If unfinished/broken old work is required by new request, incorporate corrections INTO new plan; combine, NEVER replace new request with old fix.
-5. Decision-complete new request → call `resolve` with `action: "apply"` and `extra: { title }`.
+5. Decision-complete implementation request → write its `<slug>`/title to `xd://propose`; a design-only request → write its `<slug>`/title to `xd://deliver-plan`.
 </procedure>
 {{/if}}
 
@@ -113,11 +117,12 @@ All require self-contained file.
 </caution>
 
 <critical>
-Before approval: engineer unfamiliar with conversation can execute every step without design decision and determine success at each step. Otherwise deepen any choice-forcing or ambiguous-done step.
+For implementation requests, before approval an engineer unfamiliar with the conversation can execute every step without design decision and determine success at each step. Otherwise deepen any choice-forcing or ambiguous-done step. For design-only requests, the delivered record must be self-contained about the architecture and decisions without inventing implementation work.
 
 Turn ends ONLY:
 1. {{#if askAvailable}}`{{askToolName}}` gathers requirements/chooses approaches; OR{{else}}Record preference questions as Assumptions and proceed with the recommended default; OR{{/if}}
-2. `{{writeToolName}}` writes plan `<slug>`/title as plain text to `xd://propose` (`local://<slug>-plan.md` slug).
+2. For an implementation request, `{{writeToolName}}` writes plan `<slug>`/title as plain text to `xd://propose` (`local://<slug>-plan.md` slug).
+3. For a design-only request, `{{writeToolName}}` writes plan `<slug>`/title as plain text to `xd://deliver-plan` (`local://<slug>-plan.md` slug). Delivery does not authorize implementation or exit plan mode.
 
-NEVER request plan approval via prose/{{#if askAvailable}}`{{askToolName}}`{{else}}a question{{/if}}; MUST use `xd://propose` write. MUST continue until decision-complete.
+NEVER request implementation approval via prose/{{#if askAvailable}}`{{askToolName}}`{{else}}a question{{/if}}; MUST use `xd://propose` for implementation approval or `xd://deliver-plan` for design-only delivery. MUST continue until the applicable record is complete.
 </critical>

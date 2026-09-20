@@ -13,7 +13,7 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import { instrumentedCompleteSimple, resolveTelemetry, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { type Api, type AssistantMessage, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { Snowflake } from "@oh-my-pi/pi-utils";
@@ -21,6 +21,7 @@ import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit
 
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	extractExplicitThinkingSelector,
 	expandRoleAlias,
 	formatModelString,
 	formatModelStringWithRouting,
@@ -38,7 +39,12 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
-import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import {
+	AUTO_THINKING,
+	shouldDisableReasoning,
+	toReasoningEffort,
+	type ConfiguredThinkingLevel,
+} from "@oh-my-pi/pi-tui/thinking";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `completion()` helper across both runtimes. */
@@ -76,6 +82,25 @@ export interface EvalCompletionResult {
 	details: { model: string; tier?: CompletionTier; structured: boolean };
 }
 
+/** Provider-interface evidence retained for one completion handle. */
+export interface EvalCompletionMetadata {
+	requestedRole: CompletionTier;
+	configuredSelector: string;
+	configuredEffort: ConfiguredThinkingLevel | null;
+	finalModel: string | null;
+	requestEffort: Effort | null;
+	reasoningDisabled: boolean | null;
+	fallbackUsed: boolean;
+	effortEvidence: "provider-options";
+	attempts: Array<{
+		candidateIndex: number;
+		model: string;
+		requestEffort: Effort | null;
+		reasoningDisabled: boolean;
+		outcome: "skipped-no-credentials" | "running" | "succeeded" | "failed" | "cancelled";
+	}>;
+}
+
 /** Handle returned immediately after an eval completion starts. */
 export interface EvalCompletionHandleResult {
 	id: string;
@@ -89,6 +114,7 @@ export interface CompletionHandleEntry {
 	settled: boolean;
 	result?: EvalCompletionResult;
 	error?: string;
+	metadata?: EvalCompletionMetadata;
 	evictionTimer?: NodeJS.Timeout;
 }
 
@@ -116,16 +142,21 @@ interface CompletionCandidate {
 	model: Model<Api>;
 	reasoning: Effort | undefined;
 	disableReasoning: boolean;
+	/** Configured selector effort before model-specific clamping. */
+	configuredEffort?: ConfiguredThinkingLevel;
 }
 
 function reasoningForCandidate(
 	tier: CompletionTier,
 	model: Model<Api>,
-	level?: ThinkingLevel,
+	level?: ConfiguredThinkingLevel,
 	parent?: Pick<CompletionCandidate, "reasoning" | "disableReasoning">,
 ): Pick<CompletionCandidate, "reasoning" | "disableReasoning"> {
-	if (shouldDisableReasoning(level)) return { reasoning: undefined, disableReasoning: true };
-	const explicit = toReasoningEffort(level);
+	// `auto` is a dynamic session sentinel. Completion has no prompt-aware
+	// selector, so preserve its existing tier-default behavior.
+	const concreteLevel = level === AUTO_THINKING ? undefined : level;
+	if (shouldDisableReasoning(concreteLevel)) return { reasoning: undefined, disableReasoning: true };
+	const explicit = toReasoningEffort(concreteLevel);
 	if (explicit !== undefined) {
 		return { reasoning: clampThinkingLevelForModel(model, explicit), disableReasoning: false };
 	}
@@ -204,7 +235,7 @@ function appendFallbackCandidates(
 		const identity = candidateIdentity(candidate, reasoning);
 		if (seen.has(identity)) continue;
 		seen.add(identity);
-		out.push({ selector: entry.raw, model: candidate, ...reasoning });
+		out.push({ selector: entry.raw, model: candidate, configuredEffort: entry.thinkingLevel, ...reasoning });
 		appendFallbackCandidates(deps, entry.raw, candidate, reasoning, undefined, seen, expanded, out);
 	}
 }
@@ -220,11 +251,20 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	if (available.length === 0) return [];
 
 	const matchPreferences = getModelMatchPreferences(session.settings);
-	const resolve = (pattern: string | undefined): { model: Model<Api>; selector: string } | undefined => {
+	const isLiteralModelId = (provider: string, id: string): boolean =>
+		available.some(candidate => candidate.provider === provider && candidate.id === id);
+	const resolve = (
+		pattern: string | undefined,
+	): { model: Model<Api>; selector: string; configuredEffort?: ConfiguredThinkingLevel } | undefined => {
 		if (!pattern) return undefined;
 		const selector = expandRoleAlias(pattern, session.settings);
 		const model = resolveModelFromString(selector, available, matchPreferences);
-		return model ? { model, selector } : undefined;
+		if (!model) return undefined;
+		return {
+			model,
+			selector,
+			configuredEffort: extractExplicitThinkingSelector(selector, session.settings, { isLiteralModelId }),
+		};
 	};
 	const primary =
 		tier === "default"
@@ -233,7 +273,15 @@ function resolveTierCandidates(tier: CompletionTier, session: ToolSession): Comp
 	if (!primary) return [];
 
 	const candidates: CompletionCandidate[] = [
-		{ selector: primary.selector, model: primary.model, ...reasoningForCandidate(tier, primary.model) },
+		{
+			selector: primary.selector,
+			model: primary.model,
+			configuredEffort: primary.configuredEffort,
+			// Explicit primary effort selectors are a slow-role contract. The
+			// default and smol tiers retain their existing provider options while
+			// metadata still records the configured selector intent.
+			...reasoningForCandidate(tier, primary.model, tier === "slow" ? primary.configuredEffort : undefined),
+		},
 	];
 	const retry = session.settings.getGroup("retry");
 	if (!retry.enabled || !retry.modelFallback) return candidates;
@@ -282,6 +330,7 @@ async function executeCompletion(
 	candidates: CompletionCandidate[],
 	session: ToolSession,
 	signal: AbortSignal,
+	metadata?: EvalCompletionMetadata,
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("completion() has no model registry.");
@@ -307,20 +356,45 @@ async function executeCompletion(
 	let lastError: unknown;
 	let retriesUsed = 0;
 	let completed = false;
+	let activeAttempt: EvalCompletionMetadata["attempts"][number] | undefined;
 	for (const [index, candidate] of candidates.entries()) {
 		if (index > 0 && retriesUsed >= maxRetries) break;
 		model = candidate.model;
+		const attempt: EvalCompletionMetadata["attempts"][number] | undefined = metadata
+			? {
+					candidateIndex: index,
+					model: formatModelStringWithRouting(candidate.model),
+					requestEffort: null,
+					reasoningDisabled: false,
+					outcome: "running",
+				}
+			: undefined;
+		if (attempt && metadata) metadata.attempts.push(attempt);
+		activeAttempt = undefined;
 		try {
 			// Forward the session id so session-sticky OAuth credentials
 			// resolve (see #5325); without it a usable fallback looks keyless.
 			const apiKey = await registry.getApiKey(model, session.getSessionId?.() ?? undefined, { signal });
 			if (!apiKey) {
+				if (attempt) attempt.outcome = "skipped-no-credentials";
 				lastError = new ToolError(
 					`completion() has no API key for ${formatModelString(model)}. Configure credentials for this provider or choose another tier.`,
 				);
 				continue;
 			}
 			if (index > 0) retriesUsed += 1;
+			const requestEffort = candidate.reasoning ?? null;
+			if (attempt) {
+				attempt.requestEffort = requestEffort;
+				attempt.reasoningDisabled = candidate.disableReasoning;
+				activeAttempt = attempt;
+			}
+			if (metadata) {
+				metadata.finalModel = formatModelStringWithRouting(model);
+				metadata.requestEffort = requestEffort;
+				metadata.reasoningDisabled = candidate.disableReasoning;
+				if (index > 0) metadata.fallbackUsed = true;
+			}
 			response = await instrumentedCompleteSimple(
 				model,
 				{
@@ -338,14 +412,17 @@ async function executeCompletion(
 				{ telemetry, oneshotKind: "eval_completion" },
 			);
 		} catch (error) {
+			if (attempt) attempt.outcome = signal.aborted ? "cancelled" : "failed";
 			lastError = error;
 			if (signal.aborted || index === candidates.length - 1) throw error;
 			continue;
 		}
 		if (response.stopReason === "aborted") {
+			if (activeAttempt) activeAttempt.outcome = "cancelled";
 			throw new ToolError("completion() request aborted.");
 		}
 		if (response.stopReason === "error") {
+			if (activeAttempt) activeAttempt.outcome = "failed";
 			lastError = new ToolError(response.errorMessage ?? "completion() request failed.");
 			if (!signal.aborted && index < candidates.length - 1) continue;
 			throw lastError;
@@ -366,18 +443,26 @@ async function executeCompletion(
 			value = call.arguments;
 		} else {
 			const text = extractTextContent(response);
-			if (!text) throw new ToolError("completion() returned no structured response.");
+			if (!text) {
+				if (activeAttempt) activeAttempt.outcome = "failed";
+				throw new ToolError("completion() returned no structured response.");
+			}
 			try {
 				value = parseJsonPayload(text);
 			} catch {
+				if (activeAttempt) activeAttempt.outcome = "failed";
 				throw new ToolError("completion() did not return a structured response matching the schema.");
 			}
 		}
 		resultText = JSON.stringify(value);
 	} else {
 		resultText = extractTextContent(response);
-		if (!resultText) throw new ToolError("completion() returned no text output.");
+		if (!resultText) {
+			if (activeAttempt) activeAttempt.outcome = "failed";
+			throw new ToolError("completion() returned no text output.");
+		}
 	}
+	if (activeAttempt) activeAttempt.outcome = "succeeded";
 
 	return {
 		text: resultText,
@@ -402,9 +487,23 @@ export async function runEvalCompletion(
 			`completion() could not resolve a model for the "${finalTier}" tier. Configure modelRoles.${finalTier === "default" ? "default" : finalTier} or ensure a provider is available.`,
 		);
 	}
-
-	return retainCompletionHandle("cmp", options, signal =>
-		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal),
+	const primary = candidates[0]!;
+	const metadata: EvalCompletionMetadata = {
+		requestedRole: finalTier,
+		configuredSelector: primary.selector,
+		configuredEffort: primary.configuredEffort ?? null,
+		finalModel: null,
+		requestEffort: null,
+		reasoningDisabled: null,
+		fallbackUsed: false,
+		effortEvidence: "provider-options",
+		attempts: [],
+	};
+	return retainCompletionHandle(
+		"cmp",
+		options,
+		signal => executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal, metadata),
+		metadata,
 	);
 }
 
@@ -418,6 +517,7 @@ export function retainCompletionHandle(
 	prefix: string,
 	options: EvalCompletionBridgeOptions,
 	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
+	metadata?: EvalCompletionMetadata,
 ): EvalCompletionHandleResult {
 	const id = `${prefix}-${Snowflake.next()}`;
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
@@ -428,6 +528,7 @@ export function retainCompletionHandle(
 		controller,
 		promise: Promise.resolve(),
 		settled: false,
+		metadata,
 	};
 	completionHandles.set(id, entry);
 	entry.promise = execute(signal)

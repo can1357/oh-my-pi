@@ -7,6 +7,7 @@ import {
 	isPreviewResolutionToolCall,
 	isProposeToolCall,
 	type PlanProposalHandler,
+	DELIVER_PLAN_DEVICE_PATH,
 	PROPOSE_DEVICE_PATH,
 	REJECT_DEVICE_PATH,
 	RESOLVE_DEVICE_PATH,
@@ -14,6 +15,7 @@ import {
 	writeDeviceDispatch,
 } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 import {
+	DELIVER_PLAN_DEVICE_NAME,
 	PROPOSE_DEVICE_NAME,
 	REJECT_DEVICE_NAME,
 	RESOLVE_DEVICE_NAME,
@@ -25,6 +27,7 @@ function createSession(
 	options: {
 		handler?: (input: unknown) => Promise<unknown>;
 		proposalHandler?: PlanProposalHandler;
+		deliverPlan?: NonNullable<ToolSession["deliverPlan"]>;
 		clearPendingInvokers?: () => void;
 	} = {},
 ): ToolSession {
@@ -36,6 +39,7 @@ function createSession(
 		settings: Settings.isolated(),
 		peekQueueInvoker: options.handler ? () => options.handler : () => undefined,
 		peekPlanProposalHandler: options.proposalHandler ? () => options.proposalHandler : () => undefined,
+		deliverPlan: options.deliverPlan,
 		clearPendingInvokers: options.clearPendingInvokers,
 	};
 }
@@ -49,6 +53,7 @@ describe("dispatchResolutionDevice", () => {
 		expect(resolutionDeviceUsage(RESOLVE_DEVICE_NAME)).toContain(RESOLVE_DEVICE_PATH);
 		expect(resolutionDeviceUsage(REJECT_DEVICE_NAME)).toContain(REJECT_DEVICE_PATH);
 		expect(resolutionDeviceUsage(PROPOSE_DEVICE_NAME)).toContain(PROPOSE_DEVICE_PATH);
+		expect(resolutionDeviceUsage(DELIVER_PLAN_DEVICE_NAME)).toContain(DELIVER_PLAN_DEVICE_PATH);
 	});
 
 	it("errors and clears stale pending markers when resolve has no invoker", async () => {
@@ -176,6 +181,36 @@ describe("dispatchResolutionDevice", () => {
 		expect(proposedTitle).toBe("demo");
 		expect(getText(result)).toContain("Plan ready for approval.");
 		expect(xdev).toMatchObject({ tool: PROPOSE_DEVICE_NAME, mode: "execute", args: { title: "demo" } });
+	});
+	it("routes deliver-plan to the session delivery hook without approval", async () => {
+		let deliveredTitle = "";
+		const { result, xdev } = await dispatchResolutionDevice(
+			createSession({
+				deliverPlan: async title => {
+					deliveredTitle = title;
+					return {
+						content: [{ type: "text", text: "Design delivered; still in plan mode." }],
+						details: {
+							kind: "plan-delivery",
+							planFilePath: "local://demo-plan.md",
+							title,
+							implementationAuthorized: false,
+						},
+					};
+				},
+			}),
+			DELIVER_PLAN_DEVICE_NAME,
+			"demo",
+		);
+		expect(deliveredTitle).toBe("demo");
+		expect(getText(result)).toContain("still in plan mode");
+		expect(xdev).toMatchObject({ tool: DELIVER_PLAN_DEVICE_NAME, mode: "execute", args: { title: "demo" } });
+	});
+
+	it("rejects deliver-plan when the host has not wired the delivery hook", async () => {
+		await expect(dispatchResolutionDevice(createSession(), DELIVER_PLAN_DEVICE_NAME, "demo")).rejects.toThrow(
+			/host.*deliver-plan|delivery.*available/i,
+		);
 	});
 });
 

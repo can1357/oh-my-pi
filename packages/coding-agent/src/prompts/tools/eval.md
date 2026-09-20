@@ -20,7 +20,8 @@ output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | di
 {{#if js}}await {{/if}}tool.<name>(args) → unknown
     Invoke any session tool; `args` = its parameter object.{{#if py}} Async: `await tool.read({...})`.{{/if}}
 completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → CompletionHandle
-    Oneshot, stateless (no history/tools); returns immediately. `.wait()` → str (parsed object with `schema`). `model`: "smol" fast | "default" session | "slow" most capable.
+    Oneshot, stateless (no history/tools); returns immediately. `.wait()` → str (parsed object with `schema`); `.metadata()` → current request metadata without waiting or another model call. `model`: "smol" fast | "default" session | "slow" most capable.
+    Metadata evidence is bounded: configured effort is intent, `requestEffort`/`reasoningDisabled` with `effortEvidence="provider-options"` are adapter options observed by this bridge, and do not prove wire mapping or provider-internal effort. Metadata contains no prompt, response, credential, header, or raw payload.
 judge(state, questions) → JudgmentHandle
     Typed judgment over one `state` (str | JSON object | JSON array); returns immediately, `.wait()` → `{id: answer}`. Every question sees the same state and is answered independently: batch independent questions into one call. Cheap and fast (TypeSafe when credentialed, else the tiny/smol chat model); prefer over `completion()` for classification, yes/no, ranking.
     `questions`: `{id: q}` where q is one of

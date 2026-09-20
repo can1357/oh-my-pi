@@ -5,8 +5,9 @@ Pending previews and plan approval do not use a `resolve` tool. They finalize th
 - `xd://resolve` — apply the pending staged preview; body = a one-sentence reason
 - `xd://reject` — discard the pending staged preview; body = a one-sentence reason
 - `xd://propose` — submit a plan for approval while plan mode is active; body = the plan slug (`<slug>` for `local://<slug>-plan.md`)
+- `xd://deliver-plan` — deliver a design without authorizing implementation; body = the exact plan slug (`<slug>` for `local://<slug>-plan.md`)
 
-These are internal URLs, not filesystem paths. `read xd://resolve`, `read xd://reject`, and `read xd://propose` return a one-line usage hint. Completed device writes carry `details.xdev` metadata; consumers recover the inner result through `writeDeviceDispatch()` and `resolveDispatchDetails()`.
+These are internal URLs, not filesystem paths. Reading any of these devices returns a one-line usage hint. Completed device writes carry `details.xdev` metadata; consumers recover the inner result through `writeDeviceDispatch()` and `resolveDispatchDetails()`.
 
 ## Preview flows
 
@@ -33,10 +34,18 @@ Dispatch invokes the pending queue head through `runResolveInvocation(...)`.
 Plan mode installs a separate proposal handler through `setPlanProposalHandler(...)`.
 
 - Interactive mode hands `PlanApprovalDetails` to the plan-review UI.
-- ACP mode runs elicitation/approval and emits mode updates.
+- ACP mode requires an explicit approval choice through a form-capable client before emitting execution mode updates. Clients without `elicitation.form` remain in plan mode and can deliver a design instead; lack of an approval UI never authorizes implementation.
 - PlanYolo auto-approves and switches to the execution target.
 
 `xd://propose` dispatches the written slug to the installed plan proposal handler and is valid only while plan mode is active.
+
+## Design-only delivery
+
+Write a non-empty design to `local://<slug>-plan.md`, then write `<slug>` to `xd://deliver-plan`. Delivery validates only that exact file; it does not search other plans. A successful result contains `PlanDeliveryDetails` with `kind: "plan-delivery"` and `implementationAuthorized: false`.
+
+Delivery lets the current user turn finish without forcing an approval prompt. It does not open the execution approval UI, exit plan mode, restore worktree write access, clear the session, or enqueue implementation. A later acknowledgement of the design is not implementation approval. A new user turn must make its own planning decision or delivery; the prior delivery is not a cross-turn exemption.
+
+Implementation still requires the existing native approval flow. `deliver-plan` does not invoke the proposal handler, including the PlanYolo handler.
 
 ## Why `write` is guaranteed
 
