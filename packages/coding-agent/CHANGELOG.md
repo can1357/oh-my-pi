@@ -9,6 +9,7 @@
 ### Added
 
 - Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
+- Added ACP-visible `/plan [prompt]`, letting chat clients activate native read-only plan mode and its proposal approval flow ([#12593](https://github.com/can1357/oh-my-pi/pull/12593) by [@royweisfeld](https://github.com/royweisfeld)).
 
 ### Fixed
 

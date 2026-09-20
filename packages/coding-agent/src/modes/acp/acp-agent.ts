@@ -761,14 +761,17 @@ export class AcpAgent implements Agent {
 	}
 
 	async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
-		const record = this.#getSessionRecord(params.sessionId);
-		this.#applyModeChange(record.session, params.modeId);
+		await this.#setSessionMode(this.#getSessionRecord(params.sessionId), params.modeId);
+		return {};
+	}
+
+	async #setSessionMode(record: ManagedSessionRecord, modeId: string): Promise<void> {
+		this.#applyModeChange(record.session, modeId);
 		await this.#connection.sessionUpdate({
 			sessionId: record.session.sessionId,
 			update: this.#buildCurrentModeUpdate(record.session),
 		});
 		await this.#pushConfigOptionUpdate(record);
-		return {};
 	}
 
 	async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
@@ -1000,6 +1003,7 @@ export class AcpAgent implements Agent {
 			notifyConfigChanged: async () => {
 				await this.#pushConfigOptionUpdate(record);
 			},
+			setMode: modeId => this.#setSessionMode(record, modeId),
 		});
 		if (promptTurn?.cancelRequested) return;
 		if (builtinResult !== false) {

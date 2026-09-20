@@ -99,6 +99,11 @@ export interface SlashCommandRuntime {
 	runCommandInBackground?: (task: () => Promise<void>) => void;
 	notifyTitleChanged?: () => Promise<void> | void;
 	notifyConfigChanged?: () => Promise<void> | void;
+	/**
+	 * Change the host session mode. Available in ACP, whose adapter owns the
+	 * proposal/approval lifecycle for plan mode.
+	 */
+	setMode?: (modeId: string) => Promise<void> | void;
 }
 
 /**
