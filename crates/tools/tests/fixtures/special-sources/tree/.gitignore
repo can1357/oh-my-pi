@@ -1,2 +1,7 @@
+# This fixture tree proves `read` honours .gitignore, so it needs files that
+# git really ignores. The two entries below are therefore tracked only via
+# `git add -f`; manifest.json lists them and
+# special_source_fixture_workspace_is_complete_and_self_contained asserts they
+# exist. Do not delete them as stray build output.
 ignored.txt
 nested/ignored-*.txt

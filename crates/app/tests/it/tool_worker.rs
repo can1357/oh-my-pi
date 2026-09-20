@@ -20,10 +20,9 @@ use omp_envd::{
 		control::{
 			ControlAuthority, ControlAuthorityFactory, ControlAuthoritySnapshot, ControlEffect,
 			ControlProtocolError, ControlRequestContext, EnvdControlAuthorities,
-			ExternalControlAuthorities,
-			FixedControlAuthorityFactory, HostControlAuthorityFactory, PersistenceControlAuthorities,
-			PolicyControlAuthorities, PresentationControlAuthorities, ProviderControlAuthorities,
-			RegistryControlAuthorities,
+			ExternalControlAuthorities, FixedControlAuthorityFactory, HostControlAuthorityFactory,
+			PersistenceControlAuthorities, PolicyControlAuthorities, PresentationControlAuthorities,
+			ProviderControlAuthorities, RegistryControlAuthorities,
 		},
 		dispatch::CallbackDispatcherSlot,
 	},
@@ -181,24 +180,19 @@ async fn control_progress_parallelism_availability_and_result_spill_are_preserve
 	let key = HostKey::new("workspace", "trusted", "control-features");
 	let mut extension = ExtHostSpec::new(
 		key.clone(),
-		test_manifest(
-			&key,
-			"control_features",
-			[
-				"control_progress",
-				"control_overlap",
-				"control_large",
-				"control_unavailable",
-			],
-		),
+		test_manifest(&key, "control_features", [
+			"control_progress",
+			"control_overlap",
+			"control_large",
+			"control_unavailable",
+		]),
 	);
 	extension.python_site = Some(site.path().to_owned());
 	extension.data_socket = Some(site.path().join("features-data.sock"));
 
 	let mut config = test_config();
-	config.bind_result_store(
-		BlobHost::open(site.path().join("result-cas")).expect("open result CAS"),
-	);
+	config
+		.bind_result_store(BlobHost::open(site.path().join("result-cas")).expect("open result CAS"));
 	config.extensions.push(extension);
 	let callbacks = bind_test_control(&mut config);
 	let supervisor = Arc::new(
@@ -216,9 +210,12 @@ async fn control_progress_parallelism_availability_and_result_spill_are_preserve
 		.expect("activate CONTROL feature host");
 
 	let batches = availability.0.lock().expect("availability capture");
-	assert!(batches.iter().flat_map(|batch| batch.deltas.iter()).any(|delta| {
-		delta.name == "control_unavailable" && !delta.mounted
-	}));
+	assert!(
+		batches
+			.iter()
+			.flat_map(|batch| batch.deltas.iter())
+			.any(|delta| { delta.name == "control_unavailable" && !delta.mounted })
+	);
 	drop(batches);
 
 	let mut progress = open_committed(
@@ -240,10 +237,7 @@ async fn control_progress_parallelism_availability_and_result_spill_are_preserve
 		event => panic!("expected progress before terminal response, got {event:?}"),
 	};
 	assert_eq!(update, json!({"stage": "running", "value": "visible"}));
-	assert!(matches!(
-		progress.next().await.expect("progress terminal"),
-		ExtHostEvent::Complete(_)
-	));
+	assert!(matches!(progress.next().await.expect("progress terminal"), ExtHostEvent::Complete(_)));
 
 	let overlap = time::timeout(Duration::from_secs(3), async {
 		tokio::join!(
@@ -309,27 +303,27 @@ def extension_activate(event, _context):
 	.expect("write activation extension");
 
 	let key = HostKey::new("workspace", "trusted", "test/activation");
-	let mut extension =
-		ExtHostSpec::new(key.clone(), test_manifest(&key, "activation_contract", ["activation_echo"]));
+	let mut extension = ExtHostSpec::new(
+		key.clone(),
+		test_manifest(&key, "activation_contract", ["activation_echo"]),
+	);
 	extension.python_site = Some(site.path().to_owned());
 	extension.entry_path = Some(module);
 	extension.data_socket = Some(site.path().join("activation-data.sock"));
 	let contribution = CliContribution {
-		publisher: sf!("test"),
-		extension: sf!("activation"),
-		name: sf!("mode"),
-		description: sf!("Activation mode"),
-		kind: CliValueKind::String,
-		default: None,
+		publisher:      sf!("test"),
+		extension:      sf!("activation"),
+		name:           sf!("mode"),
+		description:    sf!("Activation mode"),
+		kind:           CliValueKind::String,
+		default:        None,
 		shadow_builtin: false,
-		sink: CliValueSink { key: sf!("mode") },
+		sink:           CliValueSink { key: sf!("mode") },
 	};
 	let owner = contribution.qualified_name();
-	extension.cli_contributions = CliContributionSet::build(
-		[contribution],
-		std::iter::empty::<Str>(),
-	)
-	.expect("valid CLI contribution");
+	extension.cli_contributions =
+		CliContributionSet::build([contribution], std::iter::empty::<Str>())
+			.expect("valid CLI contribution");
 
 	let mut config = test_config();
 	config.contributed_values.push(ContributedCliValue {
@@ -373,10 +367,9 @@ def extension_activate(event, _context):
 		.await
 		.expect("activate extension entry callback");
 
-	let activation: Value = serde_json::from_slice(
-		&fs::read(&marker).expect("activation callback marker"),
-	)
-	.expect("activation callback JSON");
+	let activation: Value =
+		serde_json::from_slice(&fs::read(&marker).expect("activation callback marker"))
+			.expect("activation callback JSON");
 	assert_eq!(activation["cli_values"], json!([{"sink": "mode", "value": "strict"}]));
 	assert_eq!(activation["session"], "authoritative-session");
 	assert_eq!(activation["depth"], 2);
@@ -388,10 +381,9 @@ def extension_activate(event, _context):
 			.expect("reload activation host"),
 		2,
 	);
-	let restarted: Value = serde_json::from_slice(
-		&fs::read(&marker).expect("restart activation callback marker"),
-	)
-	.expect("restart activation callback JSON");
+	let restarted: Value =
+		serde_json::from_slice(&fs::read(&marker).expect("restart activation callback marker"))
+			.expect("restart activation callback JSON");
 	assert_eq!(restarted["cli_values"], json!([{"sink": "mode", "value": "strict"}]));
 	assert_eq!(restarted["session"], "authoritative-session");
 	assert_eq!(restarted["depth"], 2);

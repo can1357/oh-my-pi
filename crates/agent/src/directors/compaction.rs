@@ -483,7 +483,16 @@ fn summary_request(
 		messages:          messages.into(),
 		tools:             Arc::from([]),
 		hosted_tools:      Arc::from([]),
-		tool_choice:       Setting::Require(ToolChoice::Disabled),
+		// The summariser ships no tools, so it states no tool-choice intent:
+		// `Unset` emits no `chat.tools.choice` requirement at all
+		// (`extract_requirements` skips it), where `Require` made it a hard
+		// demand that a route carrying no tool-choice evidence fails outright.
+		// Compaction would then break the session on exactly the long-context
+		// routes it exists to serve. `Prefer` is not enough: unknown evidence
+		// still rejects unless the request also opts into
+		// `UnknownCapabilityPolicy::AllowPreferences`, which defaults to
+		// `Reject`. With no tools declared, the wire request is identical.
+		tool_choice:       Setting::Unset,
 		output:            Setting::Unset,
 		reasoning:         Setting::Unset,
 		verbosity:         Setting::Unset,

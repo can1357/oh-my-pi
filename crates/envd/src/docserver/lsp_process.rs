@@ -1344,6 +1344,7 @@ fn initialize_params(
 				"definition": { "dynamicRegistration": true },
 				"references": { "dynamicRegistration": true },
 				"documentSymbol": { "dynamicRegistration": true },
+				"callHierarchy": { "dynamicRegistration": true },
 				"codeAction": { "dynamicRegistration": true },
 				"formatting": { "dynamicRegistration": true },
 				"rangeFormatting": { "dynamicRegistration": true },

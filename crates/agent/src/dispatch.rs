@@ -26,7 +26,7 @@ use omp_journal::{
 	EntryId,
 	blob::{BlobRef, BlobStage, BlobStore},
 };
-use omp_session::{Session, SessionError};
+use omp_session::{Session, SessionError, ToolReceipt};
 use omp_tool::{
 	Abort, ArtifactLifetime, BlobRef as ToolBlobRef, CallOutcome, CallOutcomeDetails, CapsBase,
 	Diag, DiagEnvelope, DiagKind, Effects, ErasedEv, ErasedOutcome, ExpectedArtifact,
@@ -2895,6 +2895,7 @@ impl Committer {
 		} else {
 			self.policy.max_output_bytes
 		};
+		let source_bytes = u64::try_from(outcome.get().len()).unwrap_or(u64::MAX);
 		let inline = !force_spill && outcome.get().len() <= inline_limit;
 		let outcome = if inline {
 			outcome
@@ -2918,6 +2919,7 @@ impl Committer {
 				byte_len: u64::try_from(outcome.get().len()).unwrap_or(u64::MAX),
 			})?
 		};
+		let inline_bytes = u64::try_from(outcome.get().len()).unwrap_or(u64::MAX);
 		let parts = serde_json::value::to_raw_value(&parts)?;
 		match (is_error, source_artifact) {
 			(true, Some(source_artifact)) => {
@@ -2933,6 +2935,17 @@ impl Committer {
 				session.settle_projected(call.call, outcome, parts)?;
 			},
 		}
+		// After the terminal entry: a crash between them loses the receipt
+		// rather than leaving one against a call that never settled.
+		session.call_receipt(call.call, ToolReceipt {
+			source_bytes,
+			inline_bytes,
+			elapsed_ms: call
+				.started
+				.map(|started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX))
+				.unwrap_or_default(),
+			outcome: if is_error { "error" } else { "ok" },
+		})?;
 		self
 			.events
 			.publish(KernelEvent::ToolSettled { call_id: call.call_id.clone(), is_error });

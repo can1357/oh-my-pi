@@ -805,6 +805,7 @@ mod tests {
 	use std::io::Write as _;
 
 	use flate2::{Compression, write::GzEncoder};
+	use omp_tool::{DiagKind, Severity};
 	use serde_json::Value;
 
 	use super::{

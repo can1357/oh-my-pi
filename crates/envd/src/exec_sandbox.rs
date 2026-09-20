@@ -14,7 +14,7 @@ use std::{
 use omp_core::{Str, StrMut, sf};
 use omp_sandbox::{
 	Capability, CommandWrapper, DegradationPolicy, EnvironmentSource, NetworkMode,
-	RUNTIME_READ_ROOTS, Runner, SandboxError, SandboxSpec, WriteMode,
+	RUNTIME_READ_ROOTS, ResourceLimits, Runner, SandboxError, SandboxSpec, WriteMode,
 };
 use omp_shell::{OpenRequest, PathAccess, PathDenied, PathPolicy, SpawnWrapper};
 use parking_lot::Mutex;
@@ -814,6 +814,14 @@ fn policy_parts_with_approved_scope(
 			SandboxNetworkMode::Scoped => NetworkMode::Outbound,
 		})
 		.set_degradation(DegradationPolicy::Reject);
+	// Validated here rather than at the call site: `ResourceLimits::new`
+	// rejects a nonfinite or negative core count, and a ceiling that cannot be
+	// represented must fail loudly instead of silently running unlimited.
+	spec.set_resource_limits(ResourceLimits::new(
+		Some(settings.cpu_cores),
+		u64::try_from(settings.memory_bytes).ok(),
+		Some(settings.pids),
+	)?);
 	// Seatbelt's deny-default profile still permits the baseline POSIX IPC and
 	// DNS Unix sockets required by ordinary commands, so it cannot claim full
 	// `ipc.restrict`. Everything else missing keeps rejecting compilation.

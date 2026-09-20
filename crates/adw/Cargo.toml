@@ -1,0 +1,20 @@
+[package]
+name = "omp-adw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "AI developer workflow domain: phase dependency graphs, attempt accounting, and acceptance decisions"
+readme = "README.md"
+
+[dependencies]
+omp-core.workspace = true
+serde.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

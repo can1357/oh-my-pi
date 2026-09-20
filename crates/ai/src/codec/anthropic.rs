@@ -705,7 +705,15 @@ const SCHEMA_COMBINATORS: &[&str] = &["anyOf", "allOf", "oneOf"];
 /// Strict grammars carry provider-side compile cost, so only high-traffic
 /// argument-heavy tools opt in; the allowlist uses the corresponding OMP tool
 /// names.
-const STRICT_TOOL_ALLOWLIST: &[&str] = &["bash", "shell", "python", "eval", "edit", "find", "glob"];
+///
+/// `yield` carries a subagent's declared output schema, so a strict grammar is
+/// worth more there than anywhere else: it constrains the one call whose
+/// arguments the caller contractually depends on. It opts in only when the
+/// subagent asked for `SchemaMode::Strict` — the workpool variant declares
+/// `Constraint::None` deliberately and is filtered out by the declared-strict
+/// check below, not by this list.
+const STRICT_TOOL_ALLOWLIST: &[&str] =
+	&["bash", "eval", "edit", "glob", "grep", "read", "write", "yield"];
 /// Maximum tools promoted to strict per request.
 const MAX_STRICT_TOOLS: usize = 20;
 /// Cross-tool budget of properties kept optional under strict.
@@ -1821,16 +1829,16 @@ fn lower_output_config(
 		});
 	let format = match setting_value(output) {
 		None => None,
-		Some(StructuredOutput::JsonObject) => Some(
-			serde_json::value::to_raw_value(&JsonObjectFormat { kind: "json" })
-				.map_err(|_| encoding_error("anthropic.output.format"))?,
-		),
-		Some(StructuredOutput::JsonSchema { name, schema, strict }) => Some(
+		// Anthropic documents one response format: `json_schema` with a schema.
+		// A bare object mode has no documented spelling here, and guessing one
+		// would fail at the provider instead of at negotiation.
+		Some(StructuredOutput::JsonObject) => {
+			return Err(capability_error("anthropic.output.json_object_unsupported"));
+		},
+		Some(StructuredOutput::JsonSchema { schema, .. }) => Some(
 			serde_json::value::to_raw_value(&JsonSchemaFormat {
-				kind: "json_schema",
-				name,
+				kind:   "json_schema",
 				schema: schema.as_value(),
-				strict: *strict,
 			})
 			.map_err(|_| encoding_error("anthropic.output.schema"))?,
 		),
@@ -1844,19 +1852,15 @@ fn lower_output_config(
 	Ok(Some(OutputConfig { effort, task_budget: None, format }))
 }
 
-#[derive(Serialize)]
-struct JsonObjectFormat<'a> {
-	#[serde(rename = "type")]
-	kind: &'a str,
-}
-
+// The documented format object carries exactly `type` and `schema`
+// (`JSONOutputFormatParam`). `name` and `strict` are OpenAI's spelling of the
+// same idea; sending them here relies on the endpoint ignoring unknown keys
+// rather than on anything Anthropic documents.
 #[derive(Serialize)]
 struct JsonSchemaFormat<'a> {
 	#[serde(rename = "type")]
 	kind:   &'a str,
-	name:   &'a Str,
 	schema: &'a Value,
-	strict: bool,
 }
 
 const fn setting_value<T>(setting: &Setting<T>) -> Option<&T> {
@@ -4988,6 +4992,86 @@ mod tests {
 			name: sf!("eval"),
 			disable_parallel_tool_use: Some(true),
 		});
+	}
+	#[test]
+	fn response_format_emits_exactly_the_documented_fields() {
+		let schema = serde_json::json!({ "type": "object" });
+
+		let wire =
+			serde_json::to_string(&JsonSchemaFormat { kind: "json_schema", schema: &schema })
+				.expect("format serializes");
+
+		// `JSONOutputFormatParam` declares `type` and `schema`, nothing else.
+		assert_eq!(wire, r#"{"type":"json_schema","schema":{"type":"object"}}"#);
+	}
+	#[test]
+	fn the_strict_allowlist_names_only_real_tools() {
+		// Every entry must be a registered roster name. `python`, `shell`, and
+		// `find` were listed here once and are not tools, so the entries were
+		// dead weight that silently promoted nothing.
+		const ROSTER: &[&str] = &[
+			"ask",
+			"ast_edit",
+			"ast_grep",
+			"bash",
+			"checkpoint",
+			"computer",
+			"debug",
+			"designer",
+			"edit",
+			"eval",
+			"github",
+			"glob",
+			"goal",
+			"grep",
+			"hub",
+			"image_gen",
+			"learn",
+			"librarian",
+			"main",
+			"manage_skill",
+			"memory_edit",
+			"read",
+			"recall",
+			"reflect",
+			"rep",
+			"report_issue",
+			"retain",
+			"reviewer",
+			"rewind",
+			"scout",
+			"security_scan",
+			"sonic",
+			"task",
+			"think",
+			"todo",
+			"tts",
+			"web_search",
+			"write",
+			"yield",
+		];
+
+		for name in STRICT_TOOL_ALLOWLIST {
+			assert!(ROSTER.contains(name), "`{name}` is not a registered tool name");
+		}
+	}
+
+	#[test]
+	fn yield_is_eligible_for_a_strict_grammar() {
+		assert!(
+			STRICT_TOOL_ALLOWLIST.contains(&"yield"),
+			"yield carries the subagent output contract; strict matters most there"
+		);
+	}
+
+	#[test]
+	fn bare_json_object_output_is_refused_rather_than_guessed() {
+		let output = Setting::Require(StructuredOutput::JsonObject);
+
+		let error = lower_output_config(None, None, &output, false, false, false)
+			.expect_err("Anthropic documents no bare object response format");
+
+		assert_eq!(error.kind, ErrorKind::CapabilityMismatch);
 	}
 
 	#[test]

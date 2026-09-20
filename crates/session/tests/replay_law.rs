@@ -8,7 +8,7 @@
 use omp_core::{Hash32, Str};
 use omp_dom::{KnownTag, Op, PropId, Tag, Txn, Value};
 use omp_journal::{Journal, kind};
-use omp_session::{ComponentRegistry, Session};
+use omp_session::{ComponentRegistry, Session, ToolReceipt};
 use proptest::prelude::*;
 use serde_json::value::RawValue;
 
@@ -178,6 +178,81 @@ fn json_object_patch_validates_the_wire_form_and_replays() {
 	drop(session);
 	let restored = Session::open(path, ComponentRegistry::default()).expect("JSON patch replays");
 	assert_eq!(restored.dom().snapshot().as_bytes(), live.as_bytes());
+}
+#[test]
+fn a_tool_receipt_survives_replay() {
+	let directory = tempfile::tempdir().expect("temporary session directory");
+	let path = directory.path().join("receipt.oms");
+	let mut session = Session::create(&path, ComponentRegistry::default()).expect("session creates");
+	session.begin_turn().expect("turn starts");
+	let call = session
+		.call("read", 1, "call-1", None, None, None)
+		.expect("call appends");
+	session.call_started(call).expect("execution starts");
+	session
+		.call_receipt(call, ToolReceipt {
+			source_bytes: 4096,
+			inline_bytes: 512,
+			elapsed_ms:   17,
+			outcome:      "ok",
+		})
+		.expect("receipt appends");
+	session
+		.settle(call, raw(serde_json::json!({ "ok": true })))
+		.expect("call settles");
+
+	let live = session.dom().snapshot();
+	drop(session);
+
+	let restored = Session::open(path, ComponentRegistry::default()).expect("receipt replays");
+	assert_eq!(
+		restored.dom().snapshot().as_bytes(),
+		live.as_bytes(),
+		"a journal carrying receipts must replay to the same tree it folded live"
+	);
+}
+
+#[test]
+fn a_journal_without_receipts_still_opens() {
+	let directory = tempfile::tempdir().expect("temporary session directory");
+	let path = directory.path().join("no-receipt.oms");
+	let mut session = Session::create(&path, ComponentRegistry::default()).expect("session creates");
+	session.begin_turn().expect("turn starts");
+	let call = session
+		.call("read", 1, "call-1", None, None, None)
+		.expect("call appends");
+	session.call_started(call).expect("execution starts");
+	session
+		.settle(call, raw(serde_json::json!({ "ok": true })))
+		.expect("call settles");
+
+	let live = session.dom().snapshot();
+	drop(session);
+
+	let restored = Session::open(path, ComponentRegistry::default()).expect("old journal replays");
+	assert_eq!(
+		restored.dom().snapshot().as_bytes(),
+		live.as_bytes(),
+		"a receipt is additive: its absence must read as unknown, never break replay"
+	);
+}
+
+#[test]
+fn an_extension_cannot_forge_a_receipt() {
+	let directory = tempfile::tempdir().expect("temporary session directory");
+	let path = directory.path().join("forged.oms");
+	let mut session = Session::create(&path, ComponentRegistry::default()).expect("session creates");
+	session.begin_turn().expect("turn starts");
+	let call = session
+		.call("read", 1, "call-1", None, None, None)
+		.expect("call appends");
+
+	assert!(
+		session
+			.call_update(call, raw(serde_json::json!({ "kernel": "receipt" })))
+			.is_err(),
+		"accounting is kernel-owned; an extension writing `kernel` must be refused"
+	);
 }
 
 #[test]

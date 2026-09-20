@@ -1,6 +1,6 @@
 //! Forced-tool Director and its bounded escalation ladder.
 
-use omp_ai::{ChatRequest, ForcedCall, Setting, ToolChoice};
+use omp_ai::{ChatRequest, ForcedCall, Setting, ToolChoice, UnknownCapabilityPolicy};
 use omp_core::Str;
 use omp_dom::{Dom, KnownTag, Node, PropId, PropKey, Tag, Value};
 
@@ -144,13 +144,25 @@ impl Director for ForceTool {
 		]
 	}
 
-	fn prepare_inference(&self, _cx: &DirectorCx<'_>, req: &mut ChatRequest) {
+	fn prepare_inference(&self, cx: &DirectorCx<'_>, req: &mut ChatRequest) {
 		if self.deferred && self.attempts == 0 {
 			return;
 		}
 		// This is semantic intent only. Inference owns the soft/native/costly
 		// translation and receipts each rung (ADRs 0016 and 0019).
-		req.tool_choice = Setting::Require(ToolChoice::Named(self.name.clone()));
+		//
+		// When the route has no penalty-free native forcing capability, the
+		// encode-time ladder degrades to the soft-prompt rung only. Planning
+		// must not hard-reject Unknown evidence on `chat.tools.choice` in
+		// that case — downgrade to a preferred requirement and permit unknown
+		// preferences so the planner accepts and the encoder applies the
+		// soft-prompt directive.
+		if cx.route.forced_choice_free {
+			req.tool_choice = Setting::Require(ToolChoice::Named(self.name.clone()));
+		} else {
+			req.tool_choice = Setting::Prefer(ToolChoice::Named(self.name.clone()));
+			req.negotiation.unknown = UnknownCapabilityPolicy::AllowPreferences;
+		}
 		req.forced_call = Some(ForcedCall {
 			non_compliant_turns: u8::try_from(self.attempts).unwrap_or(u8::MAX),
 			escalations_left:    u8::try_from(self.retries.saturating_sub(self.attempts))

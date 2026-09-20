@@ -2,6 +2,7 @@
 
 //! Journal-first production composition for OMP application modes.
 
+pub mod adw;
 pub mod auth_backend;
 pub mod auth_flow;
 pub mod bridges;

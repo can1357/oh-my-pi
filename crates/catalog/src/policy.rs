@@ -604,6 +604,12 @@ pub struct StructuredOutputPolicy {
 	pub stop_sequences:          Option<bool>,
 	/// Whether both penalty and stop parameters are accepted.
 	pub penalty_and_stop_params: Option<bool>,
+	/// Whether the endpoint enforces a caller-supplied response JSON Schema.
+	///
+	/// Distinct from `tool.supports_strict_mode`: one constrains the model's
+	/// own response, the other constrains a tool call's arguments. A route may
+	/// offer either without the other.
+	pub response_schema:         Option<bool>,
 }
 
 /// Typed `thinking: { type: ... }` request-body override.
@@ -963,6 +969,7 @@ impl WirePolicy {
 				sampling_params:         None,
 				stop_sequences:          None,
 				penalty_and_stop_params: None,
+				response_schema:         None,
 			},
 			reasoning:  ReasoningPolicy {
 				wire_format: None,

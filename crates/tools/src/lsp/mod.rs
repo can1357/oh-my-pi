@@ -53,6 +53,10 @@ pub enum Action {
 	Hover,
 	/// List document or workspace symbols.
 	Symbols,
+	/// Find the callers of the symbol at a position.
+	IncomingCalls,
+	/// Find what the symbol at a position calls.
+	OutgoingCalls,
 	/// Preview or apply a symbol rename.
 	Rename,
 	/// Plan and atomically apply a path rename with import updates.
@@ -481,6 +485,8 @@ fn lift_legacy_call(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
 			Action::TypeDefinition => navigation::render_locations("type definition", &payload.data),
 			Action::Implementation => navigation::render_locations("implementation", &payload.data),
 			Action::References => navigation::render_references(&payload.data),
+			Action::IncomingCalls => navigation::render_calls("caller", "callers", &payload.data),
+			Action::OutgoingCalls => navigation::render_calls("callee", "callees", &payload.data),
 			_ => payload.output.clone(),
 		};
 	}

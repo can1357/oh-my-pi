@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "2.0.0"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -119,52 +119,53 @@ objc2-app-kit = "0.3"
 notify = { version = "=8.2.0", features = ["macos_kqueue"] }
 num-bigint = "0.4"
 num-traits = "0.2"
-omp-agent = { path = "crates/agent", version = "0.1.0" }
-omp-app = { path = "crates/app", version = "0.1.0" }
-omp-chat = { path = "crates/chat", version = "0.1.0" }
-omp-con = { path = "crates/con", version = "0.1.0" }
-omp-ar = { path = "crates/ar", version = "0.1.0" }
-omp-ast = { path = "crates/ast", version = "0.1.0" }
-omp-audio = { path = "crates/audio", version = "0.1.0" }
-omp-core = { path = "crates/core", version = "0.1.0", features = ["schemars"] }
-omp-dom = { path = "crates/dom", version = "0.1.0" }
-omp-journal = { path = "crates/journal", version = "0.1.0" }
+omp-adw = { path = "crates/adw", version = "2.0.0" }
+omp-agent = { path = "crates/agent", version = "2.0.0" }
+omp-app = { path = "crates/app", version = "2.0.0" }
+omp-chat = { path = "crates/chat", version = "2.0.0" }
+omp-con = { path = "crates/con", version = "2.0.0" }
+omp-ar = { path = "crates/ar", version = "2.0.0" }
+omp-ast = { path = "crates/ast", version = "2.0.0" }
+omp-audio = { path = "crates/audio", version = "2.0.0" }
+omp-core = { path = "crates/core", version = "2.0.0", features = ["schemars"] }
+omp-dom = { path = "crates/dom", version = "2.0.0" }
+omp-journal = { path = "crates/journal", version = "2.0.0" }
 objc2-core-graphics = "=0.3.2"
-omp-desktop = { path = "crates/desktop", version = "0.1.0" }
-omp-driver = { path = "crates/driver", version = "0.1.0", default-features = false }
-omp-env = { path = "crates/env", version = "0.1.0" }
-omp-envd = { path = "crates/envd", version = "0.1.0" }
-omp-ext = { path = "crates/ext", version = "0.1.0" }
-omp-gui = { path = "crates/gui", version = "0.1.0" }
-omp-edit = { path = "crates/edit", version = "0.1.0" }
-omp-http = { path = "crates/http", version = "0.1.0" }
-omp-catalog = { path = "crates/catalog", version = "0.1.0" }
-omp-ai = { path = "crates/ai", version = "0.1.0", features = ["test-support"] }
-omp-serve = { path = "crates/serve", version = "0.1.0" }
-omp-memory = { path = "crates/memory", version = "0.1.0", default-features = false }
-omp-oauth = { path = "crates/oauth", version = "0.1.0" }
-omp-macros = { path = "crates/macros", version = "0.1.0" }
-omp-proto = { path = "crates/proto", version = "0.1.0", features = ["tonic"] }
-omp-py = { path = "crates/py", version = "0.1.0" }
-omp-rpc = { path = "crates/rpc", version = "0.1.0" }
-omp-collab = { path = "crates/collab", version = "0.1.0" }
-omp-sdk = { path = "crates/sdk", version = "0.1.0" }
-omp-scribe = { path = "crates/scribe", version = "0.1.0" }
-omp-session = { path = "crates/session", version = "0.1.0" }
-omp-snapcompact = { path = "crates/snapcompact", version = "0.1.0" }
-omp-secrets = { path = "crates/secrets", version = "0.1.0" }
-omp-sandbox = { path = "crates/sandbox", version = "0.1.0" }
-omp-shell-builtins = { path = "crates/shell-builtins", version = "0.1.0" }
-omp-shell = { path = "crates/shell", version = "0.1.0" }
-omp-cache = { path = "crates/cache", version = "0.1.0" }
-omp-observability = { path = "crates/observability", version = "0.1.0" }
-omp-tool = { path = "crates/tool", version = "0.1.0" }
-omp-tools = { path = "crates/tools", version = "0.1.0" }
-omp-tui = { path = "crates/tui", version = "0.1.0" }
-omp-vocab = { path = "crates/vocab", version = "0.1.0" }
-omp-vcs = { path = "crates/vcs", version = "0.1.0" }
-omp-webview = { path = "crates/webview", version = "0.1.0" }
-omp-walker = { path = "crates/walker", version = "0.1.0" }
+omp-desktop = { path = "crates/desktop", version = "2.0.0" }
+omp-driver = { path = "crates/driver", version = "2.0.0", default-features = false }
+omp-env = { path = "crates/env", version = "2.0.0" }
+omp-envd = { path = "crates/envd", version = "2.0.0" }
+omp-ext = { path = "crates/ext", version = "2.0.0" }
+omp-gui = { path = "crates/gui", version = "2.0.0" }
+omp-edit = { path = "crates/edit", version = "2.0.0" }
+omp-http = { path = "crates/http", version = "2.0.0" }
+omp-catalog = { path = "crates/catalog", version = "2.0.0" }
+omp-ai = { path = "crates/ai", version = "2.0.0", features = ["test-support"] }
+omp-serve = { path = "crates/serve", version = "2.0.0" }
+omp-memory = { path = "crates/memory", version = "2.0.0", default-features = false }
+omp-oauth = { path = "crates/oauth", version = "2.0.0" }
+omp-macros = { path = "crates/macros", version = "2.0.0" }
+omp-proto = { path = "crates/proto", version = "2.0.0", features = ["tonic"] }
+omp-py = { path = "crates/py", version = "2.0.0" }
+omp-rpc = { path = "crates/rpc", version = "2.0.0" }
+omp-collab = { path = "crates/collab", version = "2.0.0" }
+omp-sdk = { path = "crates/sdk", version = "2.0.0" }
+omp-scribe = { path = "crates/scribe", version = "2.0.0" }
+omp-session = { path = "crates/session", version = "2.0.0" }
+omp-snapcompact = { path = "crates/snapcompact", version = "2.0.0" }
+omp-secrets = { path = "crates/secrets", version = "2.0.0" }
+omp-sandbox = { path = "crates/sandbox", version = "2.0.0" }
+omp-shell-builtins = { path = "crates/shell-builtins", version = "2.0.0" }
+omp-shell = { path = "crates/shell", version = "2.0.0" }
+omp-cache = { path = "crates/cache", version = "2.0.0" }
+omp-observability = { path = "crates/observability", version = "2.0.0" }
+omp-tool = { path = "crates/tool", version = "2.0.0" }
+omp-tools = { path = "crates/tools", version = "2.0.0" }
+omp-tui = { path = "crates/tui", version = "2.0.0" }
+omp-vocab = { path = "crates/vocab", version = "2.0.0" }
+omp-vcs = { path = "crates/vcs", version = "2.0.0" }
+omp-webview = { path = "crates/webview", version = "2.0.0" }
+omp-walker = { path = "crates/walker", version = "2.0.0" }
 opentelemetry = "0.32.0"
 opentelemetry-appender-tracing = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "logs", "metrics", "reqwest-blocking-client", "trace"] }

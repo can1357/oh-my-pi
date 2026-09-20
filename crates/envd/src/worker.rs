@@ -428,7 +428,8 @@ impl ExtHostConfig {
 		self.authority_snapshot = snapshot;
 	}
 
-	/// Installs the live session-authority projection without replacing policy tiers.
+	/// Installs the live session-authority projection without replacing policy
+	/// tiers.
 	pub(crate) fn bind_session_authority_snapshot(
 		&mut self,
 		current_session: serde_json::Value,
@@ -1097,31 +1098,31 @@ fn python_registration_authority(
 
 #[derive(Clone)]
 struct PendingControlActivation {
-	control:            ControlHandle,
-	identity:           Arc<ControlConnectionIdentity>,
-	manifest:           ExtensionManifest,
-	key:                HostKey,
-	data_enabled:       bool,
-	trigger:            ActivationTrigger,
-	session_id:         Str,
-	session_started_at: SystemTime,
-	session_generation: u64,
-	principal:          Principal,
-	host_factory:       Arc<HostControlAuthorityFactory>,
-	agents_factory:     Arc<dyn ControlAuthorityFactory>,
-	registry_control:   Arc<RegistryControlFactory>,
-	hook_control:       Option<Arc<HookControlFactory>>,
-	quota_runtime:      ControlQuotaRuntime,
-	lifecycle_gate:     Option<Arc<HookGate>>,
+	control:              ControlHandle,
+	identity:             Arc<ControlConnectionIdentity>,
+	manifest:             ExtensionManifest,
+	key:                  HostKey,
+	data_enabled:         bool,
+	trigger:              ActivationTrigger,
+	session_id:           Str,
+	session_started_at:   SystemTime,
+	session_generation:   u64,
+	principal:            Principal,
+	host_factory:         Arc<HostControlAuthorityFactory>,
+	agents_factory:       Arc<dyn ControlAuthorityFactory>,
+	registry_control:     Arc<RegistryControlFactory>,
+	hook_control:         Option<Arc<HookControlFactory>>,
+	quota_runtime:        ControlQuotaRuntime,
+	lifecycle_gate:       Option<Arc<HookGate>>,
 	registered_ui:        Arc<RwLock<Option<RegisterUi>>>,
 	availability:         Arc<RwLock<AvailabilityBatch>>,
 	availability_sink:    Arc<Mutex<Option<Arc<dyn AvailabilitySink>>>>,
 	availability_pending: Arc<Mutex<BTreeMap<Str, AvailabilityDelta>>>,
 	settings:             serde_json::Map<String, serde_json::Value>,
-	cli_contributions:  omp_ext::config::CliContributionSet,
-	contributed_values: Arc<[omp_ext::config::ContributedCliValue]>,
-	python_route:       PyCallbackRoute,
-	roots:              Box<[Str]>,
+	cli_contributions:    omp_ext::config::CliContributionSet,
+	contributed_values:   Arc<[omp_ext::config::ContributedCliValue]>,
+	python_route:         PyCallbackRoute,
+	roots:                Box<[Str]>,
 }
 struct LiveControlRoute {
 	control:  RwLock<ControlHandle>,
@@ -1373,10 +1374,7 @@ fn normalize_control_availability(
 			continue;
 		};
 		if family == manifest.provenance.extension_id() && family != declared.family.as_str() {
-			row.insert(
-				String::from("family"),
-				serde_json::Value::String(declared.family.to_string()),
-			);
+			row.insert(String::from("family"), serde_json::Value::String(declared.family.to_string()));
 		}
 	}
 	Ok(())
@@ -1421,9 +1419,9 @@ fn evidence_availability(evidence: &SealedRegistryEvidence) -> AvailabilityBatch
 			.availability
 			.iter()
 			.map(|row| AvailabilityDelta {
-				name: row.name.clone(),
+				name:    row.name.clone(),
 				mounted: row.mounted,
-				reason: row.reason.clone(),
+				reason:  row.reason.clone(),
 			})
 			.collect(),
 	}
@@ -1456,18 +1454,14 @@ fn publish_host_down(activation: &PendingControlActivation, reason: &'static str
 			.deltas
 			.iter()
 			.map(|delta| AvailabilityDelta {
-				name: delta.name.clone(),
+				name:    delta.name.clone(),
 				mounted: false,
-				reason: Some(Str::new_static(reason)),
+				reason:  Some(Str::new_static(reason)),
 			})
 			.collect(),
 	};
 	drop(current);
-	publish_availability(
-		&activation.availability_sink,
-		&activation.availability_pending,
-		batch,
-	);
+	publish_availability(&activation.availability_sink, &activation.availability_pending, batch);
 }
 
 fn publish_host_availability(
@@ -1476,11 +1470,7 @@ fn publish_host_availability(
 ) {
 	let batch = evidence_availability(evidence);
 	*activation.availability.write() = batch.clone();
-	publish_availability(
-		&activation.availability_sink,
-		&activation.availability_pending,
-		batch,
-	);
+	publish_availability(&activation.availability_sink, &activation.availability_pending, batch);
 }
 
 fn initial_authority_snapshot(config: &ExtHostConfig) -> ControlAuthoritySnapshot {
@@ -1532,9 +1522,7 @@ fn initial_authority_snapshot(config: &ExtHostConfig) -> ControlAuthoritySnapsho
 				.map(Str::from)
 				.or_else(|| {
 					row.and_then(|row| row.properties.get("effects"))
-						.and_then(|value| {
-							serde_json::from_value::<omp_tool::Effects>(value.clone()).ok()
-						})
+						.and_then(|value| serde_json::from_value::<omp_tool::Effects>(value.clone()).ok())
 						.map(|effects| {
 							Str::from(<&'static str>::from(ApprovalTier::from_effects(&effects)))
 						})
@@ -1543,9 +1531,9 @@ fn initial_authority_snapshot(config: &ExtHostConfig) -> ControlAuthoritySnapsho
 			snapshot
 				.tiers
 				.entry(ControlTierTarget::Device {
-					name: tool.name.clone(),
+					name:   tool.name.clone(),
 					family: tool.family.clone(),
-					rev: Str::from(tool.rev.to_string()),
+					rev:    Str::from(tool.rev.to_string()),
 				})
 				.or_insert(tier);
 		}
@@ -2521,9 +2509,7 @@ impl ExtHostSupervisor {
 			mem::take(&mut *self.availability_pending.lock())
 		};
 		if !pending.is_empty() {
-			sink.set_availability(AvailabilityBatch {
-				deltas: pending.into_values().collect(),
-			});
+			sink.set_availability(AvailabilityBatch { deltas: pending.into_values().collect() });
 		}
 	}
 
@@ -3444,8 +3430,9 @@ fn control_completion(
 	} else {
 		let text = match result {
 			serde_json::Value::String(text) => text,
-			value => serde_json::to_string(&value)
-				.expect("serializing an existing JSON value cannot fail"),
+			value => {
+				serde_json::to_string(&value).expect("serializing an existing JSON value cannot fail")
+			},
 		};
 		vec![text_part(text)]
 	};
@@ -3519,8 +3506,8 @@ struct ControlRestartBreaker {
 impl ControlRestartBreaker {
 	fn new() -> Self {
 		Self {
-			next: CONTROL_RESTART_INITIAL,
-			failures: 0,
+			next:          CONTROL_RESTART_INITIAL,
+			failures:      0,
 			healthy_since: std::time::Instant::now(),
 		}
 	}
@@ -3557,17 +3544,14 @@ fn abort_control_invocation(
 	}));
 }
 
-fn reject_queued_control_commands(
-	mailbox: &Receiver<ControlHostCommand>,
-	reason: &'static str,
-) {
+fn reject_queued_control_commands(mailbox: &Receiver<ControlHostCommand>, reason: &'static str) {
 	while let Ok(command) = mailbox.try_recv() {
 		match command {
 			ControlHostCommand::Open { call, events, .. } => {
 				let _ = events.send(ExtHostEvent::Aborted(ExtHostAbort {
-					call_id: call.invocation_id,
-					kind: ExtHostAbortKind::Crashed,
-					reason: Str::new_static(reason),
+					call_id:         call.invocation_id,
+					kind:            ExtHostAbortKind::Crashed,
+					reason:          Str::new_static(reason),
 					effects_unknown: false,
 				}));
 			},
@@ -3575,12 +3559,9 @@ fn reject_queued_control_commands(
 				let _ = reply.send(Err(ExtHostError::Unavailable));
 			},
 			ControlHostCommand::PromptPull { reply, .. } => {
-				let _ = reply.send(Err(PromptDispatchError::Control(
-					ControlRuntimeError::Protocol(ControlProtocolError::new(
-						"host_disabled",
-						reason,
-					)),
-				)));
+				let _ = reply.send(Err(PromptDispatchError::Control(ControlRuntimeError::Protocol(
+					ControlProtocolError::new("host_disabled", reason),
+				))));
 			},
 			ControlHostCommand::Reload { reply } => {
 				let _ = reply.send(Err(ExtHostError::Unavailable));
@@ -3642,10 +3623,7 @@ async fn run_control_supervisor(
 					);
 				}
 				loop {
-					reject_queued_control_commands(
-						&mailbox,
-						"CONTROL extension host is restarting",
-					);
+					reject_queued_control_commands(&mailbox, "CONTROL extension host is restarting");
 					let Some(delay) = breaker.failed() else {
 						tracing::error!(
 							extension_id = %activation.key.extension(),
@@ -3985,11 +3963,7 @@ async fn run_control_supervisor(
 		notify_extension_unload(gate, activation.key.extension(), "shutdown", 0);
 	}
 	for invocation in pending.into_values() {
-		abort_control_invocation(
-			invocation,
-			"CONTROL supervisor stopped before dispatch",
-			false,
-		);
+		abort_control_invocation(invocation, "CONTROL supervisor stopped before dispatch", false);
 	}
 	reject_queued_control_commands(&mailbox, "CONTROL extension host was disabled");
 	cancelled.lock().extend(in_flight.lock().keys().copied());
@@ -4242,17 +4216,18 @@ mod tests {
 	fn control_restart_breaker_is_bounded_and_resets_after_health() {
 		let mut breaker = ControlRestartBreaker::new();
 		let delays = (0..CONTROL_RESTART_FAILURE_LIMIT)
-			.map(|_| breaker.failed().expect("breaker remains closed within its limit"))
+			.map(|_| {
+				breaker
+					.failed()
+					.expect("breaker remains closed within its limit")
+			})
 			.collect::<Vec<_>>();
-		assert_eq!(
-			delays,
-			[
-				Duration::from_secs(1),
-				Duration::from_secs(2),
-				Duration::from_secs(4),
-				Duration::from_secs(8),
-			]
-		);
+		assert_eq!(delays, [
+			Duration::from_secs(1),
+			Duration::from_secs(2),
+			Duration::from_secs(4),
+			Duration::from_secs(8),
+		]);
 		assert!(breaker.failed().is_none());
 		breaker.healthy_since = std::time::Instant::now() - CONTROL_RESTART_HEALTHY;
 		assert_eq!(breaker.failed(), Some(CONTROL_RESTART_INITIAL));
@@ -4268,9 +4243,9 @@ mod tests {
 				owner: HostKey::new("project", "trusted", "broken"),
 				call: ExtHostToolCall {
 					invocation_id: sf!("queued"),
-					name: sf!("tool"),
-					rev: sf!("1"),
-					deadline: Duration::from_secs(1),
+					name:          sf!("tool"),
+					rev:           sf!("1"),
+					deadline:      Duration::from_secs(1),
 				},
 				events,
 				callback_policy: CallbackConcurrency::Threadsafe,

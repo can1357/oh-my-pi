@@ -265,11 +265,7 @@ impl SessionTool for TaskSessionTool {
 		args: Box<serde_json::value::RawValue>,
 	) -> SessionToolFuture<'a> {
 		Box::pin(async move {
-			let mut value: serde_json::Value = serde_json::from_str(args.get())?;
-			if let Some(object) = value.as_object_mut() {
-				object.remove("i");
-			}
-			let request: TaskParams = serde_json::from_value(value)?;
+			let request: TaskParams = omp_tool::decode_params(args.get())?;
 			let request = request.into_batch();
 			if request.tasks.is_empty() {
 				let fault = serde_json::value::to_raw_value(&TaskFault {

@@ -1285,7 +1285,18 @@ fn classify_http_error_with_hint(
 		&& message
 			.as_deref()
 			.is_some_and(is_transient_generation_fault);
-	let (kind, action) = if account_exhausted {
+	// A gateway that reports a rejected credential under a throttle status is
+	// still reporting a rejected credential: sleeping the backoff lane replays
+	// the same key and only defers the failure.
+	//
+	// The sanitizer drops any message naming a key so secrets never reach a
+	// receipt, which also drops the "invalid api key" evidence itself. Matching
+	// the raw body preserves the classification without retaining the text.
+	let credential_rejected = matches!(status, 429 | 503)
+		&& str::from_utf8(body).is_ok_and(|raw| CREDENTIAL_REJECTED_TEXT.is_match(raw));
+	let (kind, action) = if credential_rejected {
+		(ErrorKind::Authentication, RetryAction::RefreshCredential)
+	} else if account_exhausted {
 		let kind = if status == 402 {
 			ErrorKind::PaymentRequired
 		} else {
@@ -1402,6 +1413,22 @@ static STATUS_402_QUOTA_TEXT: LazyLock<regex::Regex> = LazyLock::new(|| {
 		r"(?i)\b(?:payment(?:\s+is)?[-_.\s]*required|deactivated_workspace|insufficient.?balance)\b",
 	)
 	.expect("402 quota pattern compiles")
+});
+/// Credential-rejection wording that some gateways return under a throttle or
+/// capacity status instead of 401.
+///
+/// Retrying the same rejected key cannot succeed, so this evidence must reach
+/// the credential lane rather than the same-route backoff lane, where it would
+/// otherwise sleep the configured retry budget out before surfacing.
+static CREDENTIAL_REJECTED_TEXT: LazyLock<regex::Regex> = LazyLock::new(|| {
+	regex::Regex::new(concat!(
+		r"(?i)\binvalid[-_ ]?api[-_ ]?key\b|\bapi[-_ ]?key[-_ ]?(?:invalid|missing|not[-_ ]?found|expired)\b",
+		r"|\bincorrect api key\b|\bunauthorized\b|\bunauthenticated\b",
+		r"|\binvalid[-_ ]?(?:token|credential|authorization)\b",
+		r"|\bauthentication[-_ ]?(?:failed|error|required)\b",
+		r"|\bmissing[-_ ]?(?:api[-_ ]?key|authorization|credential)\b",
+	))
+	.expect("credential-rejection pattern compiles")
 });
 /// Status digits, HTTP/JSON framing words, and punctuation carry no signal
 /// beyond the status itself.
@@ -2328,6 +2355,42 @@ mod tests {
 				"status {status}",
 			);
 		}
+	}
+
+	#[test]
+	fn credential_rejection_under_a_throttle_status_reaches_the_credential_lane() {
+		// Gateways in front of a provider commonly answer a rejected key with a
+		// throttle status. Backing off replays the same rejected key, so the
+		// caller waits out the whole retry budget before seeing an auth failure
+		// it could have been told about immediately.
+		for body in [
+			br#"{"error":"Invalid API key"}"#.as_slice(),
+			br#"{"error":{"message":"invalid_api_key"}}"#.as_slice(),
+			br#"{"error":{"message":"Unauthorized"}}"#.as_slice(),
+			br#"{"error":{"message":"authentication failed"}}"#.as_slice(),
+		] {
+			for status in [429, 503] {
+				let error = classify_http_error(status, body);
+				assert_eq!(
+					error.kind,
+					ErrorKind::Authentication,
+					"status {status} body {}",
+					String::from_utf8_lossy(body),
+				);
+				assert_eq!(
+					error.action,
+					RetryAction::RefreshCredential,
+					"status {status} body {}",
+					String::from_utf8_lossy(body),
+				);
+			}
+		}
+		// A throttle that names no credential evidence keeps its backoff.
+		assert!(matches!(
+			classify_http_error(429, br#"{"error":{"message":"too many requests per minute"}}"#)
+				.action,
+			RetryAction::SameRoute { .. },
+		));
 	}
 
 	#[test]

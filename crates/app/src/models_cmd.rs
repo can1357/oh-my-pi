@@ -31,6 +31,9 @@ pub async fn run(args: &ModelsArgs, extensions: &LaunchExtensions) -> miette::Re
 	let data_dir = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let catalog = composed_catalog(&data_dir, extensions).await?;
 	match args.command.as_ref() {
+		None if args.filter.is_none() && !args.json && args.role.is_none() => {
+			print_summary(catalog.as_ref())
+		},
 		None => print_rows(&select(catalog.as_ref(), args.filter.as_deref(), args.role), args.json),
 		Some(ModelsCommand::List { filter, json, role }) => {
 			print_rows(&select(catalog.as_ref(), filter.as_deref(), *role), *json)
@@ -148,11 +151,45 @@ async fn refresh() -> miette::Result<()> {
 			refreshed = refreshed.saturating_add(rows.len());
 		}
 	}
-	for failure in failures {
-		eprintln!("warning: discovery refresh failed for {failure}");
-	}
+	report_discovery_failures(&failures);
 	println!("refreshed {refreshed} runtime model row(s); configured catalog models remain visible");
 	Ok(())
+}
+
+/// Summarizes discovery failures on one line.
+///
+/// A workstation configures many providers it never authenticates, so an
+/// unauthenticated provider is the steady state rather than an incident: one
+/// `warning:` line per provider buried the actual result under a scrolling
+/// wall. Per-provider causes stay addressable through the structured
+/// `tracing::warn!` already emitted at the failure site, and setting
+/// `OMP_DISCOVERY_VERBOSE=1` restores the per-provider lines for triage.
+fn report_discovery_failures(failures: &[String]) {
+	if failures.is_empty() {
+		return;
+	}
+	if std::env::var_os("OMP_DISCOVERY_VERBOSE").is_some() {
+		for failure in failures {
+			eprintln!("warning: discovery refresh failed for {failure}");
+		}
+		return;
+	}
+	let providers = failures
+		.iter()
+		.filter_map(|failure| failure.split_once(": "))
+		.map(|(provider, _)| provider)
+		.collect::<std::collections::BTreeSet<_>>();
+	let named = providers.iter().take(3).copied().collect::<Vec<_>>();
+	let remainder = providers.len().saturating_sub(named.len());
+	let mut summary = named.join(", ");
+	if remainder > 0 {
+		summary.push_str(&format!(", +{remainder} more"));
+	}
+	eprintln!(
+		"warning: discovery refresh failed for {} provider(s) ({summary}); set \
+		 OMP_DISCOVERY_VERBOSE=1 for per-provider causes",
+		providers.len(),
+	);
 }
 
 async fn refresh_local_providers(
@@ -165,6 +202,7 @@ async fn refresh_local_providers(
 		omp_driver::discovery::models::discovery_probes(config, catalog).into_diagnostic()?;
 	let http = omp_envd::model_discovery::ModelDiscoveryHttpHost::new();
 	let mut refreshed = 0_usize;
+	let mut failures = Vec::new();
 	for probe in probes {
 		let provider = probe.provider.clone();
 		let key = DiscoveryCacheKey::endpoint(provider.clone(), &probe.endpoint);
@@ -204,11 +242,44 @@ async fn refresh_local_providers(
 						retry_at_ms:    Some(now_ms.saturating_add(5 * 60 * 1000)),
 					})
 					.into_diagnostic()?;
-				eprintln!("warning: local model discovery failed for {}: {error}", provider.as_str());
+				tracing::warn!(
+					provider = %provider,
+					%error,
+					"local model discovery failed"
+				);
+				failures.push(format!("{}: {error}", provider.as_str()));
 			},
 		}
 	}
+	report_local_discovery_failures(&failures);
 	Ok(refreshed)
+}
+
+/// Summarizes local-probe failures on one line.
+///
+/// Local runtimes (Ollama, LM Studio, llama.cpp) are absent far more often
+/// than they are present, so a per-runtime `warning:` line reports the normal
+/// case as an error. `OMP_DISCOVERY_VERBOSE=1` restores the detail.
+fn report_local_discovery_failures(failures: &[String]) {
+	if failures.is_empty() {
+		return;
+	}
+	if std::env::var_os("OMP_DISCOVERY_VERBOSE").is_some() {
+		for failure in failures {
+			eprintln!("warning: local model discovery failed for {failure}");
+		}
+		return;
+	}
+	let providers = failures
+		.iter()
+		.filter_map(|failure| failure.split_once(": "))
+		.map(|(provider, _)| provider)
+		.collect::<std::collections::BTreeSet<_>>();
+	eprintln!(
+		"warning: {} local model runtime(s) unreachable ({}); set OMP_DISCOVERY_VERBOSE=1 for causes",
+		providers.len(),
+		providers.iter().copied().collect::<Vec<_>>().join(", "),
+	);
 }
 
 fn discovered(
@@ -287,6 +358,16 @@ fn select<'a>(
 	rows
 }
 
+fn print_summary(catalog: &Catalog) -> miette::Result<()> {
+	let models = catalog.models().len();
+	let providers = catalog.providers().len();
+	println!(
+		"{models} catalog model(s) across {providers} provider(s). Use `omp models list`, `omp \
+		 models find <text>`, or `omp models --role <role>`."
+	);
+	Ok(())
+}
+
 fn print_rows(rows: &[&ModelSpec], json: bool) -> miette::Result<()> {
 	if json {
 		println!("{}", serde_json::to_string_pretty(rows).into_diagnostic()?);
@@ -320,5 +401,11 @@ mod tests {
 		let first = catalog.models().first().expect("embedded model");
 		let prefix = &first.key.as_str()[..3.min(first.key.as_str().len())];
 		assert!(select(catalog, Some(&prefix.to_ascii_uppercase()), None).contains(&first));
+	}
+
+	#[test]
+	fn bare_models_command_summarizes_instead_of_dumping_catalog() {
+		let catalog = Catalog::embedded();
+		assert!(print_summary(catalog).is_ok());
 	}
 }

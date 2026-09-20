@@ -974,6 +974,20 @@ pub const AXES: &[AxisDef] = &[
 		verbatim_keys: false,
 	},
 	AxisDef {
+		key:           "supports-response-schema",
+		resolved_key:  "supports_response_schema",
+		set:           AxisSet::Wire,
+		shape:         AxisShape::Scalar,
+		records:       &[
+			CompatRecord::Anthropic,
+			CompatRecord::Google,
+			CompatRecord::OpenAi,
+			CompatRecord::OpenAiResponses,
+		],
+		values:        &[],
+		verbatim_keys: false,
+	},
+	AxisDef {
 		key:           "supports-sampling-params",
 		resolved_key:  "supports_sampling_params",
 		set:           AxisSet::Wire,

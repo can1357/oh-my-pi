@@ -10,7 +10,7 @@ use std::{
 	path::{Path, PathBuf},
 	process,
 	str::FromStr,
-	sync::Arc,
+	sync::{Arc, OnceLock},
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -19,7 +19,7 @@ use clap_complete::Shell;
 use futures::StreamExt as _;
 use miette::{IntoDiagnostic as _, miette};
 use omp_catalog::settings::TierSetting;
-use omp_core::{SecretString, Str, encoding::hex};
+use omp_core::{FastHashSet, SecretString, Str, encoding::hex};
 use omp_driver::{cleanse::CleanseArgs, compress::CompressArgs};
 use omp_envd::{site::TrustedModule, worker::ExtHostSpec};
 use omp_ext::config::ContributedCliValue;
@@ -62,7 +62,7 @@ use omp_envd::{
 use tokio::io::{AsyncWriteExt as _, stdout};
 
 use crate::{
-	acp_mode, auth_broker_cmd, auth_cli, auth_gateway_cmd, bench_cmd, chat_cmd,
+	acp_mode, adw_cmd, auth_broker_cmd, auth_cli, auth_gateway_cmd, bench_cmd, chat_cmd,
 	chat_cmd::{ChatPresentation, ChatStart},
 	cleanse_cmd, complete_cmd,
 	complete_cmd::CompletionKind,
@@ -930,6 +930,40 @@ pub struct CompressCliArgs {
 	pub model:    Option<Str>,
 }
 
+/// AI developer workflow options.
+#[derive(Clone, Debug, Args)]
+pub struct AdwArgs {
+	/// Workflow verb.
+	#[command(subcommand)]
+	pub command: AdwCommand,
+}
+
+/// Workflow inspection and execution verbs.
+#[derive(Clone, Debug, Subcommand)]
+pub enum AdwCommand {
+	/// List workflows this project declares.
+	List {
+		/// Project root whose workflow declarations are read.
+		#[arg(long, value_name = "PATH", default_value = ".")]
+		project: PathBuf,
+	},
+	/// Run one declared workflow to acceptance or halt.
+	Run {
+		/// Declared workflow name.
+		#[arg(value_name = "WORKFLOW")]
+		workflow:     Str,
+		/// Project root whose workflow declarations are read.
+		#[arg(long, value_name = "PATH", default_value = ".")]
+		project:      PathBuf,
+		/// Model selector for agent and review phases.
+		#[arg(long, short = 'm', default_value = "@smol")]
+		model:        Str,
+		/// Attempts one phase may consume before the run halts.
+		#[arg(long, default_value_t = omp_adw::DEFAULT_MAX_ATTEMPTS)]
+		max_attempts: u32,
+	},
+}
+
 /// Production application commands.
 #[derive(Clone, Debug, Subcommand)]
 pub enum Command {
@@ -1029,6 +1063,8 @@ pub enum Command {
 	Ssh(SshArgs),
 	/// Detect, repair, and verify native project diagnostics.
 	Cleanse(CleanseCliArgs),
+	/// Run declared multi-phase AI developer workflows.
+	Adw(AdwArgs),
 	/// Generate a static shell completion script.
 	Completions {
 		/// Target shell.
@@ -1350,6 +1386,7 @@ pub struct CommandSpec {
 pub const COMMAND_REGISTRY: &[CommandSpec] = &[
 	CommandSpec { name: "browser-relay", aliases: &[] },
 	CommandSpec { name: "commit", aliases: &[] },
+	CommandSpec { name: "adw", aliases: &[] },
 	CommandSpec { name: "serve", aliases: &[] },
 	CommandSpec { name: "envd", aliases: &[] },
 	CommandSpec { name: "chat", aliases: &["i", "launch"] },
@@ -2434,6 +2471,7 @@ enum DispatchTarget {
 	Grievances,
 	Ssh,
 	Cleanse,
+	Adw,
 	Completions,
 	Complete,
 	Compress,
@@ -2485,6 +2523,7 @@ const fn dispatch_target(command: Option<&Command>) -> DispatchTarget {
 		Some(Command::Grievances(_)) => DispatchTarget::Grievances,
 		Some(Command::Ssh(_)) => DispatchTarget::Ssh,
 		Some(Command::Cleanse(_)) => DispatchTarget::Cleanse,
+		Some(Command::Adw(_)) => DispatchTarget::Adw,
 		Some(Command::Completions { .. }) => DispatchTarget::Completions,
 		Some(Command::Complete { .. }) => DispatchTarget::Complete,
 		Some(Command::Compress(_)) => DispatchTarget::Compress,
@@ -3023,6 +3062,7 @@ async fn dispatch_with_input(cli: OmpCli, piped_input: Option<Str>) -> miette::R
 			})
 			.await
 		},
+		Command::Adw(args) => adw_cmd::run(args.command).await,
 		Command::Completions { shell } => {
 			let bytes = completions::script(shell.into());
 			io::Write::write_all(&mut io::stdout(), &bytes).into_diagnostic()
@@ -3077,6 +3117,19 @@ fn parse_arguments(arguments: impl IntoIterator<Item = OsString>) -> Result<OmpC
 			&& (matches!(arguments[index].to_str(), Some("--" | "-"))
 				|| !arguments[index].to_string_lossy().starts_with('-'))
 		{
+			// An unknown word in the command position is a command the operator
+			// expected to exist. Falling through to chat would open a session
+			// whose prompt is that command, which is indistinguishable from the
+			// command running and doing nothing.
+			if let Some(name) = mistyped_command(&arguments, index) {
+				return Err(clap::Error::raw(
+					ErrorKind::InvalidSubcommand,
+					format!(
+						"`omp {name}` is not a command; run `omp --help` for the command list, or `omp \
+						 print {name} …` to send it as a prompt"
+					),
+				));
+			}
 			// Clap's generated root help command is special only in the leading
 			// position; after launch flags, `help` is prompt text.
 			arguments.insert(index, OsString::from("chat"));
@@ -3250,6 +3303,118 @@ fn first_positional(arguments: &[OsString]) -> Option<usize> {
 		return Some(index);
 	}
 	None
+}
+
+/// Classifies an unknown leading positional as a mistyped command rather than
+/// prompt text.
+///
+/// The discrimination is evidence-based, not a list of reserved words: a lone
+/// unknown word is genuinely ambiguous with a one-word prompt and stays a
+/// prompt, but an unknown command-shaped word followed by a flag that only a
+/// command could own is an invocation of a command the operator believed
+/// existed. Two flag shapes qualify:
+///
+/// - a help or version request, which asks about the word itself; nobody sends
+///   a one-word prompt and asks for its help;
+/// - a flag no root or launch option declares, which `chat` would reject anyway
+///   — reporting the command is strictly better than a parser complaint
+///   rendered against `omp chat` usage.
+///
+/// Prose keeps every other shape: a second word, a `--` escape, or any token
+/// that is not command-shaped stops the scan, so `omp upgrade the
+/// dependencies` and `omp fix it --model sonnet` still open chat.
+///
+/// Returns the name to report, or `None` when the invocation is prompt text.
+fn mistyped_command(arguments: &[OsString], index: usize) -> Option<&str> {
+	let name = arguments[index].to_str()?;
+	if !command_shaped(name) {
+		return None;
+	}
+	let mut operands = 0_usize;
+	let mut rest = index + 1;
+	while rest < arguments.len() {
+		let argument = arguments[rest].to_string_lossy();
+		if argument == "--" {
+			return None;
+		}
+		if argument.starts_with('-') {
+			let flag = argument
+				.split_once('=')
+				.map_or(argument.as_ref(), |(flag, _)| flag);
+			if matches!(flag, "--help" | "-h" | "--version" | "-V" | "-v")
+				|| !accepted_flag_names().contains(flag)
+			{
+				// Decided: everything after this belongs to the command the
+				// operator meant, so it is not scanned for prose.
+				return Some(name);
+			}
+			rest += 1 + usize::from(launch_option(&arguments[rest]) == Some(true));
+			continue;
+		}
+		operands += 1;
+		if operands > 1 || !command_shaped(&argument) {
+			return None;
+		}
+		rest += 1;
+	}
+	None
+}
+
+/// Long and short spellings any root or `chat` option accepts.
+///
+/// Derived from the clap command itself rather than a second hand-kept list,
+/// so a new launch flag never turns a working prompt into a command
+/// diagnostic. Built at most once per process, and only for an invocation
+/// that already looks command-shaped.
+fn accepted_flag_names() -> &'static FastHashSet<Str> {
+	static NAMES: OnceLock<FastHashSet<Str>> = OnceLock::new();
+	NAMES.get_or_init(|| {
+		let mut command = OmpCli::command();
+		let chat = command
+			.find_subcommand("chat")
+			.into_iter()
+			.flat_map(clap::Command::get_arguments)
+			.collect::<Vec<_>>();
+		command
+			.get_arguments()
+			.chain(chat)
+			.flat_map(|argument| {
+				argument
+					.get_long()
+					.into_iter()
+					.chain(argument.get_all_aliases().into_iter().flatten())
+					.map(|long| Str::from(format!("--{long}")))
+					.chain(
+						argument
+							.get_short()
+							.into_iter()
+							.chain(
+								argument
+									.get_short_and_visible_aliases()
+									.into_iter()
+									.flatten(),
+							)
+							.map(|short| Str::from(format!("-{short}"))),
+					)
+			})
+			.collect()
+	})
+}
+
+/// Whether a token has the shape of a command verb or subcommand.
+///
+/// Lowercase ASCII words with interior dashes, which is every spelling in
+/// [`COMMAND_REGISTRY`]. Prose punctuation, capitals, digits, paths, and
+/// `@`-mentions all disqualify a token, keeping ordinary prompt words out of
+/// this classification.
+fn command_shaped(token: &str) -> bool {
+	!token.is_empty()
+		&& token.len() <= 24
+		&& token.starts_with(|character: char| character.is_ascii_lowercase())
+		&& token.ends_with(|character: char| character.is_ascii_lowercase())
+		&& token
+			.bytes()
+			.all(|byte| byte.is_ascii_lowercase() || byte == b'-')
 }
 
 /// Routes a launch `--mode` transport value to its stdio server command.
@@ -3660,17 +3825,9 @@ mod tests {
 
 	#[test]
 	fn parses_hidden_managed_relay_mode_and_ipv6_bind() {
-		let Some(Command::BrowserRelay(args)) = parse(&[
-			"omp",
-			"browser-relay",
-			"serve",
-			"--managed",
-			"--bind",
-			"::1",
-			"--port",
-			"9333",
-		])
-		.command
+		let Some(Command::BrowserRelay(args)) =
+			parse(&["omp", "browser-relay", "serve", "--managed", "--bind", "::1", "--port", "9333"])
+				.command
 		else {
 			panic!("browser relay command");
 		};
@@ -4147,6 +4304,54 @@ mod tests {
 			panic!("chat command");
 		};
 		assert_eq!(chat.model.as_deref(), Some("list"));
+	}
+
+	#[test]
+	fn an_unknown_command_word_carrying_command_flags_never_becomes_a_silent_chat_prompt() {
+		// The defect this defends: `omp adw --help` rendered `chat` help, and
+		// `omp adw run --workflow ship` opened a chat session whose prompt was
+		// the invocation, which is indistinguishable from the command running.
+		for arguments in [
+			&["omp", "nosuch", "--help"][..],
+			&["omp", "nosuch", "--version"][..],
+			&["omp", "nosuch", "run", "--workflow", "ship"][..],
+			&["omp", "nosuch", "--unknown-flag"][..],
+		] {
+			let error = parse_from_os(arguments.iter().map(OsString::from))
+				.expect_err("an unknown command-shaped invocation is reported, never run as chat");
+			assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "{arguments:?}");
+			assert!(error.to_string().contains("`omp nosuch`"), "{arguments:?}");
+		}
+
+		// Prompt text keeps every ambiguous shape: a lone word, a sentence, and
+		// a sentence carrying launch flags the chat command genuinely accepts.
+		for (arguments, prompt) in [
+			(&["omp", "explain"][..], &["explain"][..]),
+			(&["omp", "upgrade", "the", "dependencies"][..], &["upgrade", "the", "dependencies"][..]),
+			(&["omp", "refactor", "--model", "provider/model"][..], &["refactor"][..]),
+		] {
+			let Some(Command::Chat(chat)) = parse_from_os(arguments.iter().map(OsString::from))
+				.expect("prompt text still opens chat")
+				.command
+			else {
+				panic!("chat command for {arguments:?}");
+			};
+			assert_eq!(chat.prompt, prompt.iter().map(|word| sf!(*word)).collect::<Vec<_>>());
+		}
+
+		// A real command keeps parsing, including its own flags and help.
+		assert!(matches!(
+			parse_from_os(["omp", "adw", "list"].map(OsString::from))
+				.expect("adw is a command")
+				.command,
+			Some(Command::Adw(_))
+		));
+		assert_eq!(
+			parse_from_os(["omp", "adw", "--help"].map(OsString::from))
+				.expect_err("command help is a clap display")
+				.kind(),
+			ErrorKind::DisplayHelp
+		);
 	}
 
 	#[test]

@@ -3,14 +3,21 @@
 # LLVM-22 LTO bitcode in vendor/python. Xcode's ld64 (LLVM 17) cannot read
 # that bitcode, and rustc's rust-lld (LLVM 23) mis-resolves a handful of
 # symbols in it; the producer-matched major is the one that links clean.
-LLD=/opt/homebrew/opt/lld/bin/ld64.lld
-case "$("$LLD" --version 2>/dev/null)" in
-	*"LLD 22."*) ;;
-	*)
-		echo "scripts/ld64.lld: need Homebrew LLD 22.x at $LLD (matching the" >&2
-		echo "LLVM-22 bitcode in vendor/python); found: $("$LLD" --version 2>&1)." >&2
-		echo "Pin it (brew install lld@22 / brew pin lld) or re-vendor python." >&2
-		exit 1
-		;;
-esac
+# Homebrew's unversioned `lld` tracks the newest major, so it drifts off 22 as
+# soon as anything upgrades it. Prefer the versioned keg (`brew install lld@22`)
+# and fall back to the unversioned prefix for installs that pinned it there.
+for candidate in /opt/homebrew/opt/lld@22/bin/ld64.lld /opt/homebrew/opt/lld/bin/ld64.lld; do
+	case "$("$candidate" --version 2>/dev/null)" in
+		*"LLD 22."*)
+			LLD=$candidate
+			break
+			;;
+	esac
+done
+if [ -z "${LLD:-}" ]; then
+	echo "scripts/ld64.lld: need Homebrew LLD 22.x (matching the LLVM-22 bitcode in" >&2
+	echo "vendor/python); searched /opt/homebrew/opt/lld@22 and /opt/homebrew/opt/lld." >&2
+	echo "Install it with: brew install lld@22" >&2
+	exit 1
+fi
 exec "$LLD" "$@"

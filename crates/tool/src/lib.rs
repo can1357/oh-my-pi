@@ -106,6 +106,7 @@ fn inject_protocol_fields(value: &mut serde_json::Value) -> Result<(), ProtocolS
 			"description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."
 		}),
 	);
+
 	let required = object
 		.entry("required")
 		.or_insert_with(|| serde_json::Value::Array(Vec::new()))
@@ -2219,6 +2220,45 @@ mod tests {
 	use omp_core::sf;
 
 	use super::*;
+
+	#[test]
+	fn protocol_schema_injects_intent_and_output_request_fields() {
+		let schema = inject_protocol_schema(
+			br#"{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}"#,
+		)
+		.expect("schema injects protocol fields");
+		let value: serde_json::Value = serde_json::from_slice(&schema).expect("schema is JSON");
+		let properties = value
+			.get("properties")
+			.and_then(serde_json::Value::as_object)
+			.expect("properties object");
+		assert!(properties.contains_key("i"));
+		assert!(properties.contains_key("notrunc"));
+		let required = value
+			.get("required")
+			.and_then(serde_json::Value::as_array)
+			.expect("required array");
+		assert_eq!(required.first().and_then(serde_json::Value::as_str), Some("i"));
+		assert!(required.iter().any(|value| value.as_str() == Some("path")));
+		assert!(
+			!required
+				.iter()
+				.any(|value| value.as_str() == Some("notrunc"))
+		);
+	}
+
+	#[test]
+	fn decode_params_strips_protocol_fields_from_domain_params() {
+		#[derive(Debug, Deserialize, PartialEq)]
+		#[serde(deny_unknown_fields)]
+		struct Params {
+			path: String,
+		}
+
+		let params = decode_params::<Params>(r#"{"path":"Cargo.toml","i":"reading","notrunc":true}"#)
+			.expect("protocol fields are stripped before domain decode");
+		assert_eq!(params, Params { path: "Cargo.toml".to_owned() });
+	}
 
 	#[test]
 	fn device_fault_round_trips_through_the_durable_verdict_codec() {

@@ -55,10 +55,7 @@ async fn serve(args: BrowserRelayArgs) -> miette::Result<()> {
 		},
 		Err(error) => return Err(error).into_diagnostic(),
 	};
-	let endpoint = format!(
-		"http://{}",
-		std::net::SocketAddr::new(args.bind, relay.port())
-	);
+	let endpoint = format!("http://{}", std::net::SocketAddr::new(args.bind, relay.port()));
 
 	println!("omp browser relay listening on {endpoint}");
 	println!(

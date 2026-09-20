@@ -49,9 +49,8 @@ fn test_forced_call_is_semantic_intent_for_inference_to_lower() {
 		&cx,
 		&mut req,
 	);
-	assert!(
-		matches!(&req.tool_choice, Setting::Require(ToolChoice::Named(name)) if name == "write")
-	);
+	assert!(matches!(&req.tool_choice, Setting::Prefer(ToolChoice::Named(name)) if name == "write"));
+	assert_eq!(req.negotiation.unknown, omp_ai::UnknownCapabilityPolicy::AllowPreferences);
 	assert_eq!(req.messages.len(), 0, "Directors do not author provider-strategy prompts");
 	assert_eq!(
 		req.forced_call,

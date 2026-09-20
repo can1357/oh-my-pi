@@ -362,13 +362,13 @@ impl Launch {
 		let templates =
 			PromptTemplates::discover(&project, &config_root, &prompt_template, !no_prompt_templates);
 		for warning in &templates.warnings {
-			eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+			tracing::warn!(path = %warning.path.display(), "{}", warning.message);
 		}
 		let active_skills = Arc::new(
 			omp_driver::discovery::skills::ActiveSkills::discover(&ctx, &project).into_diagnostic()?,
 		);
 		for warning in &active_skills.warnings {
-			eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+			tracing::warn!(path = %warning.path.display(), "{}", warning.message);
 		}
 		let (theme, light_theme, theme_catalog) =
 			resolve_theme(&ctx, &theme, &config_root, &project)?;
@@ -403,7 +403,8 @@ impl Launch {
 				Some(remembered.map_or_else(|| first.key.clone(), |key| Str::new(key.as_str())))
 			})
 			.or_else(|| roles.primary.as_ref().map(|value| Str::new(value.as_str())))
-			.ok_or_else(|| miette!("launch requires a configured default model role"))?;
+			.or_else(|| roles::fallback_model_selector(catalog.as_ref(), &scoped))
+			.ok_or_else(|| miette!("launch could not select a catalog model"))?;
 		if api_key.is_some() && !model_override && models.is_none() {
 			return Err(miette!("--api-key requires a model to be specified via --model or --models"));
 		}
@@ -438,7 +439,7 @@ impl Launch {
 			match handoff(selector) {
 				Ok(target) => Some(target),
 				Err(source) => {
-					eprintln!("warning: prewalk disabled: {selector} did not resolve: {source}");
+					tracing::warn!(selector, %source, "prewalk disabled: selector did not resolve");
 					omp_ai::settings::AI_PREWALK_ENABLED
 						.set(&ctx, false)
 						.into_diagnostic()?;
@@ -634,7 +635,7 @@ fn resolve_theme(
 	])
 	.into_diagnostic()?;
 	for warning in &catalog.warnings {
-		eprintln!("warning: {}: {}", warning.path.display(), warning.message);
+		tracing::warn!(path = %warning.path.display(), "{}", warning.message);
 	}
 	let (dark, light) = if automatic && explicit.is_empty() {
 		(
@@ -662,7 +663,7 @@ fn resolve_named_theme(
 		Some(theme) => Some(theme),
 		None => {
 			if !name.is_empty() && name != STOCK_THEME && name != stock_name {
-				eprintln!("warning: theme `{name}` not found; using the stock palette");
+				tracing::warn!(theme = name, "theme not found; using the stock palette");
 			}
 			None
 		},
@@ -936,11 +937,11 @@ pub(crate) async fn run(
 		skills:    Arc::clone(&launch.skills),
 	});
 	for reserved in omp_chat::commands::prompts::register(ctx, interactive_prompts.clone()) {
-		eprintln!("warning: prompt template `{reserved}` shadows a built-in command; skipped");
+		tracing::warn!(template = %reserved, "prompt template shadows a built-in command; skipped");
 	}
 	if omp_driver::settings::SV_SKILLS_ENABLE_SKILL_COMMANDS.get(ctx) {
 		for reserved in omp_chat::commands::prompts::register_skills(ctx, interactive_prompts) {
-			eprintln!("warning: skill command `{reserved}` shadows a built-in command; skipped");
+			tracing::warn!(command = %reserved, "skill command shadows a built-in command; skipped");
 		}
 	}
 	let launch_inputs = launch_input::prepare(&launch, None, Vec::new())?;
@@ -1645,6 +1646,24 @@ mod tests {
 			Str::new_static("openai/gpt-5"),
 			Some(Str::new_static("minimal"))
 		)]);
+	}
+
+	#[tokio::test]
+	async fn launch_without_configured_default_uses_catalog_fallback() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut args = ChatArgs::default_interactive();
+		args.project = dir.path().to_path_buf();
+		let launch = Launch::prepare(args, Arc::new(omp_con::Ctx::new()), test_env(dir.path()))
+			.await
+			.unwrap();
+		assert!(
+			embedded()
+				.model(&omp_catalog::ModelKey::from(launch.model.as_str()))
+				.is_some(),
+			"fallback must be a catalog model, got {}",
+			launch.model
+		);
+		assert!(!launch.options.model_override);
 	}
 
 	#[tokio::test]

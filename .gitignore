@@ -30,3 +30,4 @@ __pycache__/
 .omp/plans/
 .omp/config.toml.lock
 .omp/omp-*.md
+dist/

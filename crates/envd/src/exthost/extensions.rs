@@ -2388,8 +2388,7 @@ default = "warning"
 			"extension.tools.deep"
 		);
 		assert_eq!(
-			manifest_module_for_callback(&manifest, "extension.tools")
-				.expect("exact callback module"),
+			manifest_module_for_callback(&manifest, "extension.tools").expect("exact callback module"),
 			"extension.tools"
 		);
 		assert!(matches!(
@@ -2412,31 +2411,28 @@ default = "warning"
 			),
 			"extension",
 			[sf!("extension.tools")],
-			DeclarationSet::new(
-				[ToolDeclarationKey::new("helper", "prelude", 1)],
-				[],
-			),
+			DeclarationSet::new([ToolDeclarationKey::new("helper", "prelude", 1)], []),
 			ServiceManifest::default(),
 			[],
 			[],
 		);
 		let preludes = seal_preludes(&manifest, vec![FrozenPrelude {
-			name: String::from("helper"),
-			rev: 1,
-			doc: String::from("Helper docs."),
-			summary: String::from("Helper summary."),
+			name:          String::from("helper"),
+			rev:           1,
+			doc:           String::from("Helper docs."),
+			summary:       String::from("Helper summary."),
 			source_module: String::from("extension.tools"),
-			params: vec![FrozenPreludeParam {
-				name: String::from("value"),
-				kind: String::from("positional_or_keyword"),
+			params:        vec![FrozenPreludeParam {
+				name:         String::from("value"),
+				kind:         String::from("positional_or_keyword"),
 				default_json: Some(String::from("7")),
-				annotation: Some(String::from("int")),
+				annotation:   Some(String::from("int")),
 			}],
-			callback: FrozenToolCallback {
+			callback:      FrozenToolCallback {
 				operation: String::from("omp.devices.call"),
-				path: String::from("helper"),
-				family: String::from("prelude"),
-				rev: 1,
+				path:      String::from("helper"),
+				family:    String::from("prelude"),
+				rev:       1,
 			},
 		}])
 		.expect("seal prelude");
@@ -2444,37 +2440,37 @@ default = "warning"
 		assert_eq!(preludes[0].prelude_params.len(), 1);
 
 		let tool = FrozenTool {
-			name: String::from("device"),
-			family: String::from("extension"),
-			rev: 1,
-			description: String::new(),
-			schema: serde_json::json!({}),
-			strict: None,
-			streams_args: false,
+			name:          String::from("device"),
+			family:        String::from("extension"),
+			rev:           1,
+			description:   String::new(),
+			schema:        serde_json::json!({}),
+			strict:        None,
+			streams_args:  false,
 			source_module: String::from("extension.tools"),
-			kind: String::from("soft"),
-			place: String::from("host"),
-			effects: None,
-			constraint: None,
-			serial: false,
-			precedence: 0,
-			replaces: None,
-			summary: None,
-			docs: serde_json::Value::Null,
-			examples: Vec::new(),
-			callback: FrozenToolCallback {
+			kind:          String::from("soft"),
+			place:         String::from("host"),
+			effects:       None,
+			constraint:    None,
+			serial:        false,
+			precedence:    0,
+			replaces:      None,
+			summary:       None,
+			docs:          serde_json::Value::Null,
+			examples:      Vec::new(),
+			callback:      FrozenToolCallback {
 				operation: String::from("omp.devices.call"),
-				path: String::from("device"),
-				family: String::from("extension"),
-				rev: 1,
+				path:      String::from("device"),
+				family:    String::from("extension"),
+				rev:       1,
 			},
 		};
 		let availability = seal_availability(&[tool], vec![FrozenAvailability {
-			name: String::from("device"),
-			family: String::from("extension"),
-			rev: 1,
+			name:    String::from("device"),
+			family:  String::from("extension"),
+			rev:     1,
 			mounted: false,
-			reason: Some(String::from("offline")),
+			reason:  Some(String::from("offline")),
 		}])
 		.expect("seal availability");
 		assert!(!availability[0].mounted);
@@ -2502,36 +2498,33 @@ default = "warning"
 		);
 		manifest.trust_runtime_declarations();
 		let tools = seal_tools(&manifest, vec![FrozenTool {
-			name: String::from("runtime_tool"),
-			family: String::from("extension"),
-			rev: 1,
-			description: String::from("Trusted runtime tool"),
-			schema: serde_json::json!({"type": "object"}),
-			strict: None,
-			streams_args: false,
+			name:          String::from("runtime_tool"),
+			family:        String::from("extension"),
+			rev:           1,
+			description:   String::from("Trusted runtime tool"),
+			schema:        serde_json::json!({"type": "object"}),
+			strict:        None,
+			streams_args:  false,
 			source_module: String::from("extension.tools"),
-			kind: String::from("soft"),
-			place: String::from("host"),
-			effects: None,
-			constraint: None,
-			serial: false,
-			precedence: 0,
-			replaces: None,
-			summary: None,
-			docs: serde_json::Value::Null,
-			examples: Vec::new(),
-			callback: FrozenToolCallback {
+			kind:          String::from("soft"),
+			place:         String::from("host"),
+			effects:       None,
+			constraint:    None,
+			serial:        false,
+			precedence:    0,
+			replaces:      None,
+			summary:       None,
+			docs:          serde_json::Value::Null,
+			examples:      Vec::new(),
+			callback:      FrozenToolCallback {
 				operation: String::from("omp.devices.call"),
-				path: String::from("runtime_tool"),
-				family: String::from("extension"),
-				rev: 1,
+				path:      String::from("runtime_tool"),
+				family:    String::from("extension"),
+				rev:       1,
 			},
 		}])
 		.expect("trusted runtime tool");
-		assert_eq!(
-			tools[0].definition.as_ref().expect("definition").name,
-			"runtime_tool"
-		);
+		assert_eq!(tools[0].definition.as_ref().expect("definition").name, "runtime_tool");
 	}
 
 	#[test]
@@ -2556,28 +2549,28 @@ default = "warning"
 		manifest.trust_runtime_declarations();
 		assert!(matches!(
 			seal_preludes(&manifest, vec![FrozenPrelude {
-				name: String::from("helper"),
-				rev: 1,
-				doc: String::new(),
-				summary: String::new(),
+				name:          String::from("helper"),
+				rev:           1,
+				doc:           String::new(),
+				summary:       String::new(),
 				source_module: String::from("foreign"),
-				params: Vec::new(),
-				callback: FrozenToolCallback {
+				params:        Vec::new(),
+				callback:      FrozenToolCallback {
 					operation: String::from("omp.devices.call"),
-					path: String::from("helper"),
-					family: String::from("prelude"),
-					rev: 1,
+					path:      String::from("helper"),
+					family:    String::from("prelude"),
+					rev:       1,
 				},
 			}]),
 			Err(SealedRegistryEvidenceError::SourceModule | SealedRegistryEvidenceError::Malformed)
 		));
 		assert!(matches!(
 			seal_availability(&[], vec![FrozenAvailability {
-				name: String::from("extra"),
-				family: String::new(),
-				rev: 1,
+				name:    String::from("extra"),
+				family:  String::new(),
+				rev:     1,
 				mounted: true,
-				reason: None,
+				reason:  None,
 			}]),
 			Err(SealedRegistryEvidenceError::ManifestDrift)
 		));

@@ -127,11 +127,7 @@ impl SessionTool for HubSessionTool {
 		args: Box<serde_json::value::RawValue>,
 	) -> SessionToolFuture<'a> {
 		Box::pin(async move {
-			let mut value: serde_json::Value = serde_json::from_str(args.get())?;
-			if let Some(object) = value.as_object_mut() {
-				object.remove("i");
-			}
-			let params: Params = serde_json::from_value(value)?;
+			let params: Params = omp_tool::decode_params(args.get())?;
 			let params = match omp_tools::hub::validate(params, self.caller_id.as_str()) {
 				Ok(request) => request.params,
 				Err(fault) => {
