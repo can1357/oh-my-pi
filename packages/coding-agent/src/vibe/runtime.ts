@@ -564,26 +564,44 @@ export class VibeSessionRegistry {
 	}
 
 	/**
-	 * Minimal live roster for the director's rebuilt context message: one
-	 * entry per actionable worker in spawn order. Dead sessions are omitted —
-	 * they cannot be driven. All strings are one-line sanitized here so the
-	 * prompt template can print them verbatim.
+	 * Actionable workers in `scope`, spawn order: the single definition of
+	 * director liveness. Dead sessions are omitted — they cannot be driven.
 	 */
-	roster(session: ToolSession): VibeRosterEntry[] {
-		const scope = this.ownerScope(session);
+	#liveRecords(scope: VibeOwnerScope): VibeRecord[] {
 		const records: VibeRecord[] = [];
 		for (const record of this.#records.values()) {
 			if (!matchesScope(record, scope) || record.state === "dead") continue;
 			records.push(record);
 		}
+		// Stable ordering: spawn order, not activity order.
 		records.sort((a, b) => a.createdAt - b.createdAt);
-		return records.map(record => ({
+		return records;
+	}
+
+	/**
+	 * Minimal live roster for the director's rebuilt context message: one
+	 * entry per actionable worker. All strings are one-line sanitized here so
+	 * the prompt template can print them verbatim.
+	 */
+	roster(session: ToolSession): VibeRosterEntry[] {
+		const scope = this.ownerScope(session);
+		return this.#liveRecords(scope).map(record => ({
 			id: record.id,
 			cli: record.cli,
 			state: record.state,
 			turns: record.turnCount,
 			lastActivity: record.lastActivity ? firstLine(record.lastActivity, 80) : undefined,
 		}));
+	}
+
+	/**
+	 * Count of actionable workers for resume decisions. Unlike {@link roster},
+	 * this carries no display strings and never returns a degraded empty on
+	 * error — failures propagate so a broken registry cannot read as "nobody
+	 * home". The prompt block is the only consumer allowed to degrade.
+	 */
+	liveWorkerCount(session: ToolSession): number {
+		return this.#liveRecords(this.ownerScope(session)).length;
 	}
 
 	#persistedIds(session: VibeParentSession, scope: VibeOwnerScope): Set<string> {

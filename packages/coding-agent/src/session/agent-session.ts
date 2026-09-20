@@ -647,6 +647,7 @@ export class AgentSession {
 	#planModeState: PlanModeState | undefined;
 	#vibeModeState: VibeModeState | undefined;
 	#getVibeRoster: (() => string | undefined) | undefined;
+	#getVibeWorkerCount: (() => number) | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
@@ -1675,6 +1676,7 @@ export class AgentSession {
 			localProtocolOptions: () => this.#localProtocolOptions(),
 		};
 		this.#getVibeRoster = config.getVibeRoster;
+		this.#getVibeWorkerCount = config.getVibeWorkerCount;
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
 			toolRegistry: config.toolRegistry,
@@ -2363,13 +2365,24 @@ export class AgentSession {
 	 * True when vibe mode is active and this director owns at least one live
 	 * worker, yet no async delivery is pending to re-wake it after compaction.
 	 * Compaction wipes the transcript that held the roster, so without an
-	 * armed continuation the director would sit idle forever. Liveness comes
-	 * from the same roster provider that feeds the rebuilt context message: a
-	 * non-empty roster means actionable workers.
+	 * armed continuation the director would sit idle forever. Liveness keys on
+	 * the worker count, never the formatted roster block: the block degrades
+	 * (empty on error or missing scope) by design, and must not decide resumes.
+	 * A count failure warns fail-safe (armed): a spurious wake is one extra
+	 * turn, a missed one strands the session forever.
 	 */
 	#isStrandedVibeDirector(): boolean {
 		if (this.#vibeModeState?.enabled !== true) return false;
-		if (!this.#getVibeRoster?.()) return false;
+		let liveWorkers: number;
+		try {
+			liveWorkers = this.#getVibeWorkerCount?.() ?? 0;
+		} catch (error) {
+			logger.warn("Vibe worker liveness check failed; arming continuation fail-safe", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return true;
+		}
+		if (liveWorkers <= 0) return false;
 		return !this.#hasPendingAsyncWake();
 	}
 

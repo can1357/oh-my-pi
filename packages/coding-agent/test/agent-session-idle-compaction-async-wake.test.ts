@@ -53,6 +53,8 @@ describe("AgentSession idle compaction async-job deferral", () => {
 	let gates: Array<PromiseWithResolvers<string>>;
 	/** Live vibe roster text; undefined means no actionable workers. */
 	let vibeRoster: string | undefined;
+	/** Live vibe worker count backing the stranded-director predicate. */
+	let vibeWorkerCount = 0;
 
 	function highUsage(input: number) {
 		return {
@@ -135,6 +137,7 @@ describe("AgentSession idle compaction async-job deferral", () => {
 		manager = new AsyncJobManager({ onJobComplete: async () => {} });
 		gates = [];
 		vibeRoster = undefined;
+		vibeWorkerCount = 0;
 
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
@@ -166,6 +169,7 @@ describe("AgentSession idle compaction async-job deferral", () => {
 			agentId: "Main",
 			asyncJobManager: manager,
 			getVibeRoster: () => vibeRoster,
+			getVibeWorkerCount: () => vibeWorkerCount,
 		});
 	});
 
@@ -227,7 +231,7 @@ describe("AgentSession idle compaction async-job deferral", () => {
 
 	it("schedules a continuation when a stranded vibe director owns live workers", async () => {
 		mockCompaction();
-		vibeRoster = "- `worker-a` [fast] running · 1 turn";
+		vibeWorkerCount = 1;
 		session.setVibeModeState({ enabled: true });
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
 

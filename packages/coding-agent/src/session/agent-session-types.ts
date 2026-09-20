@@ -210,6 +210,8 @@ export interface AgentSessionConfig {
 	createVibeTools?: () => AgentTool[];
 	/** Live vibe worker roster text for the rebuilt mode-context message. Called every turn; undefined omits the roster. */
 	getVibeRoster?: () => string | undefined;
+	/** Count of live vibe workers for resume decisions. Never a display string; failures propagate. */
+	getVibeWorkerCount?: () => number;
 	/** Names whose current registry entry is the built-in implementation. */
 	builtInToolNames?: Iterable<string>;
 	/** MCP names whose initial registry entries came from the manager snapshot. */

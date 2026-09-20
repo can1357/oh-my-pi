@@ -3909,6 +3909,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: undefined,
 			getVibeRoster:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix ? () => vibeRosterText(toolSession) : undefined,
+			getVibeWorkerCount:
+				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
+					? () => VibeSessionRegistry.global().liveWorkerCount(toolSession)
+					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,

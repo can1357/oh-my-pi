@@ -105,12 +105,15 @@ describe("vibe wait completion classification", () => {
 			timeoutMs: 1_000,
 			signal: controller.signal,
 		});
+		// The worker settles while watched: the delivery text is retained, not queued.
+		turn.complete("delivered later");
+		await manager.getJob(turn.jobId)?.promise;
+		// Only then is the wait aborted: the inline outcome dies with the
+		// caller, so the retained delivery must still arrive asynchronously.
 		controller.abort();
 
 		const outcome = await pending;
 		expect(outcome.timedOut).toBe(false);
-		turn.complete("delivered later");
-		await manager.getJob(turn.jobId)?.promise;
 		await manager.drainDeliveries({ timeoutMs: 1_000 });
 
 		expect(deliveries).toEqual([{ jobId: turn.jobId, text: "delivered later" }]);

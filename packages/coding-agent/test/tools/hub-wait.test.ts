@@ -126,6 +126,29 @@ describe("hub unified wait", () => {
 		expect(text).toContain("## Completed (1)");
 	});
 
+	test("an aborted wait does not consume the settling job's async delivery", async () => {
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		manager.registerDeliverySink(SELF_ID, async (jobId, text) => {
+			deliveries.push({ jobId, text });
+		});
+		const job = registerHangingJob(manager, "aborted-watch job");
+		const tool = new HubTool(makeSession(manager));
+		const controller = new AbortController();
+
+		const pending = tool.execute("call_abort", { op: "wait", ids: [job.id] }, controller.signal);
+		// The job settles while watched: retained, not queued.
+		job.finish("late result");
+		await manager.getJob(job.id)?.promise;
+		// Only then abort: the inline snapshot dies with the caller, so the
+		// retained delivery must still arrive asynchronously.
+		controller.abort();
+
+		await pending;
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(deliveries).toEqual([{ jobId: job.id, text: "late result" }]);
+	});
+
 	test("bare wait with no jobs and no running peers returns immediately", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
