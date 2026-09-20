@@ -1,16 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { Judge, JudgmentResult, Questions } from "@oh-my-pi/pi-ai";
-import {
-	DEFAULT_ROUTING_POLICY,
-	filterAvailable,
-	isWithinWindow,
-	needsRouting,
-	routeTurn,
-	verifyAndEscalate,
-	type TierCandidate,
-	type TierSpec,
-} from "../src/routing";
-
+import { filterAvailable, isWithinWindow, needsRouting, type TierCandidate } from "../src/routing/availability";
+import { routeTurn, verifyAndEscalate } from "../src/routing/route";
+import { DEFAULT_ROUTING_POLICY, type TierSpec } from "../src/routing/types";
 // ---------------------------------------------------------------------------
 // Mock judge — returns canned answers or throws, per spec §10.6 (mock-first).
 // ---------------------------------------------------------------------------
@@ -263,5 +255,64 @@ describe("verifyAndEscalate", () => {
 				})
 			).tier,
 		).toBe("cheap");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Cancellation semantics (spec §1 timeout + abort boundary)
+// ---------------------------------------------------------------------------
+
+describe("cancellation", () => {
+	function abortAwareJudge(controller: AbortController): Judge {
+		return {
+			label: "mock/abort-aware",
+			async judge(_req, opts) {
+				controller.abort();
+				throw opts?.signal?.aborted ? new DOMException("aborted", "AbortError") : new Error("boom");
+			},
+		};
+	}
+
+	it("rethrows when the caller's signal aborted (user escape)", async () => {
+		const controller = new AbortController();
+		await expect(
+			routeTurn(abortAwareJudge(controller), "x", TIERS, DEFAULT_ROUTING_POLICY, controller.signal),
+		).rejects.toThrow();
+	});
+
+	it("maps non-abort failures to engine-unavailable", async () => {
+		const controller = new AbortController();
+		const d = await routeTurn(throwingJudge(), "x", TIERS, DEFAULT_ROUTING_POLICY, controller.signal);
+		expect(d).toEqual({ tier: "frontier", reason: "engine-unavailable" });
+	});
+
+	it("internal timeout -> engine-unavailable while caller signal stays live", async () => {
+		const controller = new AbortController();
+		const slowJudge: Judge = {
+			label: "mock/slow",
+			async judge(_req, opts) {
+				const { promise, reject } = Promise.withResolvers<never>();
+				opts?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+				return promise;
+			},
+		};
+		const d = await routeTurn(slowJudge, "x", TIERS, DEFAULT_ROUTING_POLICY, controller.signal, 20);
+		expect(d).toEqual({ tier: "frontier", reason: "engine-unavailable" });
+		expect(controller.signal.aborted).toBe(false);
+	});
+
+	it("verifyAndEscalate rethrows caller abort instead of accepting", async () => {
+		const controller = new AbortController();
+		await expect(
+			verifyAndEscalate(
+				abortAwareJudge(controller),
+				"r",
+				"o",
+				TIERS,
+				{ tier: "cheap", reason: "jev-confident" },
+				DEFAULT_ROUTING_POLICY,
+				controller.signal,
+			),
+		).rejects.toThrow();
 	});
 });

@@ -7249,6 +7249,14 @@ export class AgentSession implements SettingsScope {
 			// non-auto sessions are skipped. Never blocks the turn — failures fall
 			// back to a concrete level inside the helper.
 			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
+			if (isUserTurn) {
+				// Jev model-tier routing runs first: it may switch the model, and the
+				// thinking clamp below must see the routed model's effort surface.
+				await this.#models.applyJevRouting(expandedText, generation);
+				if (this.#promptGeneration !== generation) {
+					return false;
+				}
+			}
 			if (this.isAutoThinking && isUserTurn) {
 				await this.#models.applyAutoThinkingLevel(expandedText, generation);
 				if (this.#promptGeneration !== generation) {

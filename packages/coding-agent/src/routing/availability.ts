@@ -4,6 +4,43 @@
 //
 // ---------------------------------------------------------------------------
 // Rule: never ask a decision model a question you can answer with arithmetic.
+
+/** One routing tier as configured in `jevRouting.tiers` — model is a `provider/model` selector string. */
+export interface ConfiguredTier {
+	/** Stable tier id the judge names in its answer. */
+	id: string;
+	/** Model selector `provider/model` this tier binds to. */
+	model: string;
+	/** Free-text eligibility test handed to the judge — never a model name. */
+	capability: string;
+	/** Reporting only; the router never optimizes cost directly. */
+	costHintUsdPerMTokOut?: number;
+	availability?: TierAvailability;
+}
+
+/**
+ * Narrow free-text `jevRouting.tiers` config (array settings arrive untyped) to
+ * the configured-tier shape; entries missing required fields are dropped.
+ */
+export function toJevTiers(value: unknown): ConfiguredTier[] {
+	if (!Array.isArray(value)) return [];
+	return value.flatMap(item => {
+		if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+		const record = item as Record<string, unknown>;
+		if (typeof record.id !== "string" || typeof record.model !== "string") return [];
+		if (typeof record.capability !== "string") return [];
+		const tier: ConfiguredTier = {
+			id: record.id,
+			model: record.model,
+			capability: record.capability,
+		};
+		if (typeof record.costHintUsdPerMTokOut === "number") tier.costHintUsdPerMTokOut = record.costHintUsdPerMTokOut;
+		if (record.availability && typeof record.availability === "object") {
+			tier.availability = record.availability as TierAvailability;
+		}
+		return [tier];
+	});
+}
 // ---------------------------------------------------------------------------
 // Time-of-day windows, remaining quota, context ceilings and rate limits are
 // FACTS. Handing them to the judge would:

@@ -7,13 +7,16 @@ export {
 	type AvailabilityContext,
 	type AvailabilityResult,
 	type Excluded,
+	type ConfiguredTier,
 	type ExclusionReason,
 	type Quota,
+	toJevTiers,
 	type TierAvailability,
 	type TierCandidate,
 	type Window,
 } from "./availability";
-export { buildRoutingQuestions, routeTurn, verifyAndEscalate } from "./route";
+export { resolveRoutingJudge } from "./judge";
+export { buildRoutingQuestions, ROUTING_JUDGE_TIMEOUT_MS, routeTurn, verifyAndEscalate } from "./route";
 export {
 	DEFAULT_ROUTING_POLICY,
 	type ModelTier,
