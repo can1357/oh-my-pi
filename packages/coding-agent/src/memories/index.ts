@@ -508,7 +508,13 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 		await syncPhase2Artifacts(memoryRoot, outputs);
 		if (!isMemoryStartupActive(options)) return;
 		if (outputs.length === 0) {
-			await cleanupConsolidatedArtifacts(memoryRoot);
+			// Never wipe consolidated artifacts for an empty input: the scope
+			// may simply have no outputs yet (or its outputs landed under a
+			// sibling scope key, e.g. a case-variant cwd on Windows), while a
+			// live MEMORY.md / memory_summary.md / skills/ from a prior run —
+			// or a racing scope sharing this directory — is still valid. The
+			// destructive cleanup previously deleted those on every empty
+			// Phase 2, stranding and erasing real consolidations (#12596).
 			if (!isMemoryStartupActive(options)) return;
 			const marked = markGlobalPhase2Succeeded(db, {
 				ownershipToken: claim.ownershipToken,
@@ -859,12 +865,6 @@ async function syncPhase2Artifacts(memoryRoot: string, outputs: Stage1OutputRow[
 
 	const rawBody = buildRawMemoriesMarkdown(outputs);
 	await Bun.write(path.join(memoryRoot, "raw_memories.md"), rawBody);
-}
-
-async function cleanupConsolidatedArtifacts(memoryRoot: string): Promise<void> {
-	await fs.rm(path.join(memoryRoot, "MEMORY.md"), { force: true });
-	await fs.rm(path.join(memoryRoot, "memory_summary.md"), { force: true });
-	await fs.rm(path.join(memoryRoot, "skills"), { recursive: true, force: true });
 }
 
 function buildRawMemoriesMarkdown(outputs: Stage1OutputRow[]): string {
