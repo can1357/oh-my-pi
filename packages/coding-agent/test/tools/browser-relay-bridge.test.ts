@@ -66,7 +66,13 @@ function tab(overrides: Partial<TabSnapshot> & { tabId: number }): TabSnapshot {
 	};
 }
 
-function connect(bridge: RelayBridge, socket: FakeExtSocket, tabs: TabSnapshot[], attachedTabIds: number[] = []): void {
+function connect(
+	bridge: RelayBridge,
+	socket: FakeExtSocket,
+	tabs: TabSnapshot[],
+	attachedTabIds: number[] = [],
+	caps?: { createTabActive?: boolean },
+): void {
 	bridge.extConnected(socket);
 	bridge.extMessage(
 		socket,
@@ -74,6 +80,7 @@ function connect(bridge: RelayBridge, socket: FakeExtSocket, tabs: TabSnapshot[]
 			t: "hello",
 			userAgent: "test",
 			browserVersion: "Chrome/151.0.0.0",
+			...(caps ? { caps } : {}),
 			tabs,
 			attachedTabIds,
 		}),
@@ -248,6 +255,67 @@ describe("RelayBridge tab grouping", () => {
 		const groups = ext.rpcs("group");
 		expect(groups).toHaveLength(1);
 		expect(groups[0]!.tabIds).toEqual([9]);
+	});
+
+	it("opens a background tab only when the extension advertises the capability", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [], [], { createTabActive: true });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.createTarget",
+				params: { url: "https://example.com/", background: true },
+			}),
+		);
+		await flush();
+		expect(ext.rpcs("createTab")).toMatchObject([
+			{ op: "createTab", url: "https://example.com/", active: false },
+		]);
+		ack(bridge, ext, "createTab", { tab: tab({ tabId: 9 }) });
+		await flush();
+		expect(cdp.sessionFor(msgSeq)).toBeUndefined();
+		expect(cdp.messages.at(-1)).toMatchObject({ id: msgSeq, result: { targetId: "PAGE9" } });
+	});
+
+	it("refuses a background create when the extension predates the capability", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, []);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				method: "Target.createTarget",
+				params: { url: "https://example.com/", background: true },
+			}),
+		);
+		await flush();
+		// An old extension would open the tab in the foreground and steal the
+		// user's focus, so nothing may reach it.
+		expect(ext.rpcs("createTab")).toHaveLength(0);
+		expect(JSON.stringify(cdp.messages.at(-1))).toContain("too old");
+	});
+
+	it("keeps a plain create in the foreground", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [], [], { createTabActive: true });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: { url: "https://example.com/" } }),
+		);
+		await flush();
+		const creates = ext.rpcs("createTab");
+		expect(creates).toHaveLength(1);
+		expect("active" in creates[0]!).toBe(false);
 	});
 
 	it("never re-groups a tab the user pulled out of the omp group", async () => {
