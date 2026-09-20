@@ -14,8 +14,8 @@ export type KeywordHighlighter = (text: string, resetTo?: string, phase?: number
 
 /** Declarative spec for {@link createGradientHighlighter}. */
 export interface GradientHighlightSpec {
-	/** Cheap, stateless presence probe used to skip the boundary regex on most lines. Must be non-global. */
-	probe: RegExp;
+	/** Literal substring whose absence skips the boundary regex on most lines. */
+	probe: string;
 	/** Global, word-bounded match regex walked by `.replace`. */
 	highlight: RegExp;
 	/** Number of color stops swept across the gradient. */
@@ -82,7 +82,7 @@ export function createGradientHighlighter(spec: GradientHighlightSpec): KeywordH
 	};
 
 	return (text: string, resetTo: string = FG_RESET, phase: number = 0): string => {
-		if (!probe.test(text)) return text;
+		if (!text.includes(probe)) return text;
 		// Wrap phase into [0, 1) so negative inputs and values ≥ 1 stay well-defined.
 		const wrappedPhase = ((phase % 1) + 1) % 1;
 		// Match against a code/markup-masked copy so keywords inside code spans,

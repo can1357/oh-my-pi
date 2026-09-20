@@ -1,10 +1,10 @@
 //! Mermaid → ASCII/Unicode renderer.
 //!
-//! Output is byte-identical to the previous TypeScript renderer for every
-//! supported diagram type:
+//! Supported diagram types (output is pinned by `fixtures/mermaid.json`):
 //!
 //! - Flowcharts (`graph TD` / `flowchart LR`) and state diagrams
-//!   (`stateDiagram-v2`): grid layout with A* edge routing ([`flowchart`]).
+//!   (`stateDiagram-v2`): Sugiyama-style layering onto a grid with A* edge
+//!   routing ([`flowchart`]).
 //! - Sequence diagrams: column-based timeline layout ([`sequence`]).
 //! - Class diagrams: level-based UML layout ([`class`]).
 //! - ER diagrams: grid layout with crow's-foot notation ([`er`]).
@@ -246,10 +246,21 @@ mod tests {
 
 	use super::*;
 
-	/// One case of `fixtures/mermaid.json`: the upstream TypeScript
-	/// renderer's exact output (or thrown error message) for a source and
-	/// option set, captured before that renderer was removed from the repo.
-	/// The file is the frozen specification of this module's output.
+	#[test]
+	fn bundled_edges_stay_aligned_with_mixed_width_borders() {
+		let source = "graph TD\nA --> B[Order Service]\nA --> C\nB --> D[[Queue]]\nB --> E\nD --> E";
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render(source, &options).unwrap();
+		assert!(art.contains("Order Service") && art.contains("Queue"), "{art}");
+		assert!(!art.contains("│▼"), "arrowhead must align with its incoming line:\n{art}");
+		assert!(!art.contains("┬┬"), "shared exits must attach at the same border column:\n{art}");
+	}
+
+	/// One case of `fixtures/mermaid.json`: the exact output (or error
+	/// message) for a source and option set. Originally captured from the
+	/// TypeScript renderer; flowchart layouts have since been re-baselined
+	/// after the Sugiyama layering work, so the file is the golden spec of
+	/// this module's output rather than TS parity.
 	#[derive(serde::Deserialize)]
 	struct Fixture {
 		name:    String,
@@ -274,11 +285,12 @@ mod tests {
 		report
 	}
 
-	/// Byte-exact parity with the upstream renderer over every fixture.
-	/// Filter with `MERMAID_FIXTURE=<name substring>`; dump a failing render
-	/// with `MERMAID_DUMP=1`.
+	/// Compare rendered art against the reviewed diagram gallery.
+	///
+	/// Filter with `MERMAID_FIXTURE=<name substring>`; show changed art with
+	/// `MERMAID_DUMP=1`.
 	#[test]
-	fn matches_typescript_renderer() {
+	fn matches_golden_fixtures() {
 		let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/mermaid.json");
 		let fixtures: Vec<Fixture> =
 			serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();

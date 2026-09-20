@@ -1,9 +1,7 @@
 //! Logical-grid placement and conversion to character-space coordinates.
 
-use std::collections::{HashMap, HashSet};
-
 use super::{
-	AsciiGraph, GridCoord, LayoutDirection, NodeId, SubgraphId, bundling, draw, routing,
+	AsciiGraph, GridCoord, LayoutDirection, NodeId, SubgraphId, bundling, draw, layering, routing,
 	shapes::{self, ShapeRenderOptions},
 };
 use crate::mermaid::canvas::DrawingCoord;
@@ -37,18 +35,9 @@ pub fn line_to_drawing(graph: &AsciiGraph, line: &[GridCoord]) -> Vec<DrawingCoo
 pub fn reserve_spot_in_grid(
 	graph: &mut AsciiGraph,
 	node: NodeId,
-	requested: GridCoord,
-) -> GridCoord {
-	let direction = effective_direction(graph, node);
-	reserve_spot_with_direction(graph, node, requested, direction)
-}
-
-fn reserve_spot_with_direction(
-	graph: &mut AsciiGraph,
-	node: NodeId,
 	mut requested: GridCoord,
-	direction: LayoutDirection,
 ) -> GridCoord {
+	let direction = graph.config.direction;
 	while graph.grid.contains_key(&requested) {
 		match direction {
 			LayoutDirection::LR => requested.y += 4,
@@ -131,13 +120,6 @@ pub fn increase_grid_size_for_path(graph: &mut AsciiGraph, path: &[GridCoord]) {
 			.entry(coordinate.y)
 			.or_insert_with(|| graph.config.padding_y.div_euclid(2));
 	}
-}
-
-fn is_node_in_any_subgraph(graph: &AsciiGraph, node: NodeId) -> bool {
-	graph
-		.subgraphs
-		.iter()
-		.any(|subgraph| subgraph.nodes.contains(&node))
 }
 
 /// Return the deepest subgraph that directly or transitively contains a node.
@@ -358,113 +340,15 @@ pub fn offset_drawing_for_subgraphs(graph: &mut AsciiGraph) {
 /// subgraph sizing.
 pub fn create_mapping(graph: &mut AsciiGraph) {
 	let direction = graph.config.direction;
-	let mut highest_position_per_level = HashMap::<i32, i32>::new();
-
-	let mut found = HashSet::new();
-	let mut initial_roots = Vec::new();
-	for node in 0..graph.nodes.len() {
-		if !found.contains(&node) {
-			initial_roots.push(node);
-		}
-		found.insert(node);
-		found.extend(children(graph, node));
-	}
-
-	let root_nodes: Vec<_> = initial_roots
-		.into_iter()
-		.filter(|&node| {
-			let Some(node_subgraph) = get_node_subgraph(graph, node) else {
-				return true;
-			};
-			!graph.edges.iter().any(|edge| {
-				edge.to == node && get_node_subgraph(graph, edge.from) != Some(node_subgraph)
-			})
-		})
-		.collect();
-
-	let has_external_roots = root_nodes
-		.iter()
-		.any(|&node| !is_node_in_any_subgraph(graph, node));
-	let has_subgraph_roots_with_edges = root_nodes
-		.iter()
-		.any(|&node| is_node_in_any_subgraph(graph, node) && !children(graph, node).is_empty());
-	let should_separate =
-		direction == LayoutDirection::LR && has_external_roots && has_subgraph_roots_with_edges;
-	let (external_roots, subgraph_roots): (Vec<_>, Vec<_>) = if should_separate {
-		root_nodes
-			.into_iter()
-			.partition(|&node| !is_node_in_any_subgraph(graph, node))
-	} else {
-		(root_nodes, Vec::new())
-	};
-
-	for node in &external_roots {
-		let position = *highest_position_per_level.get(&0).unwrap_or(&0);
-		let requested = match direction {
-			LayoutDirection::LR => GridCoord::new(0, position),
-			LayoutDirection::TD => GridCoord::new(position, 0),
-		};
-		reserve_spot_in_grid(graph, *node, requested);
-		highest_position_per_level.insert(0, position + 4);
-	}
-	if should_separate {
-		let level = 4;
-		for node in &subgraph_roots {
-			let position = *highest_position_per_level.get(&level).unwrap_or(&0);
+	let layering = layering::layer(graph);
+	for row in &layering.order {
+		for &node in row {
+			let (level, position) = (layering.rank[node] as i32 * 4, layering.slot[node] as i32 * 4);
 			let requested = match direction {
 				LayoutDirection::LR => GridCoord::new(level, position),
 				LayoutDirection::TD => GridCoord::new(position, level),
 			};
-			reserve_spot_in_grid(graph, *node, requested);
-			highest_position_per_level.insert(level, position + 4);
-		}
-	}
-
-	let mut placed_count = external_roots.len() + subgraph_roots.len();
-	while placed_count < graph.nodes.len() {
-		let previous_count = placed_count;
-		for node in 0..graph.nodes.len() {
-			let Some(parent_coordinate) = graph.nodes[node].grid_coord else {
-				continue;
-			};
-			for child in children(graph, node) {
-				if graph.nodes[child].grid_coord.is_some() {
-					continue;
-				}
-				let parent_subgraph = get_node_subgraph(graph, node);
-				let child_subgraph = get_node_subgraph(graph, child);
-				let edge_direction = if parent_subgraph == child_subgraph {
-					parent_subgraph
-						.and_then(|id| graph.subgraphs.get(id)?.direction)
-						.unwrap_or(direction)
-				} else {
-					direction
-				};
-				let child_level = match edge_direction {
-					LayoutDirection::LR => parent_coordinate.x + 4,
-					LayoutDirection::TD => parent_coordinate.y + 4,
-				};
-				let highest_position = if edge_direction == direction {
-					*highest_position_per_level.get(&child_level).unwrap_or(&0)
-				} else {
-					match edge_direction {
-						LayoutDirection::LR => parent_coordinate.y,
-						LayoutDirection::TD => parent_coordinate.x,
-					}
-				};
-				let requested = match edge_direction {
-					LayoutDirection::LR => GridCoord::new(child_level, highest_position),
-					LayoutDirection::TD => GridCoord::new(highest_position, child_level),
-				};
-				reserve_spot_with_direction(graph, child, requested, edge_direction);
-				if edge_direction == direction {
-					highest_position_per_level.insert(child_level, highest_position + 4);
-				}
-				placed_count += 1;
-			}
-		}
-		if placed_count == previous_count {
-			break;
+			reserve_spot_in_grid(graph, node, requested);
 		}
 	}
 
@@ -499,14 +383,6 @@ pub fn create_mapping(graph: &mut AsciiGraph) {
 	graph.size_canvases_to_grid();
 	calculate_subgraph_bounding_boxes(graph);
 	offset_drawing_for_subgraphs(graph);
-}
-
-fn children(graph: &AsciiGraph, node: NodeId) -> Vec<NodeId> {
-	graph
-		.edges
-		.iter()
-		.filter_map(|edge| (edge.from == node).then_some(edge.to))
-		.collect()
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@
 import {
 	type AssistantMessage,
 	chatTextBackend,
+	isJudgmentApi,
 	type Judge,
 	type JudgeOptions,
 	type JudgmentRequest,
@@ -58,15 +59,28 @@ const LOCAL_ANSWER_MAX_TOKENS = 16;
 /** On-device reasoning models need room for the keyword after their `<think>` preamble. */
 const LOCAL_REASONING_MAX_TOKENS = 1024;
 
-/** Which backend a judge-role candidate routes to. */
-export type JudgeKind = "typesafe" | "local" | "online";
+/**
+ * How long a candidate stays skipped after its account rejected a judgment
+ * outright (401/403 credential, 402 billing cap). Every judgment rebuilds the
+ * chain, so without this each call re-pays the rejected request plus a
+ * credential-rotation round trip before reaching the next candidate.
+ */
+const CANDIDATE_REJECTION_COOLDOWN_MS = 5 * 60 * 1000;
+/** Skip-until timestamps keyed by routed model identity, carried by the registry that produced the rejection. */
+const kRejections = Symbol("judgment.rejections");
+interface RegistryWithRejections extends ModelRegistry {
+	[kRejections]?: Map<string, number>;
+}
+
+/** Which backend a judge-role candidate routes to: native System One decisions, on-device keywords, or a chat model. */
+export type JudgeKind = "native" | "local" | "online";
 
 /** Classify a role candidate by model API, never by provider identity. */
 export function kindOf(candidate: RoleChainCandidate): JudgeKind;
 export function kindOf(model: Model): JudgeKind;
 export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 	const model = "model" in value ? value.model : value;
-	if (model.api === TYPESAFE_PROVIDER) return "typesafe";
+	if (isJudgmentApi(model.api)) return "native";
 	if (model.api === "local-inference") return "local";
 	return "online";
 }
@@ -101,9 +115,19 @@ export class ChainJudge implements Judge {
 		let lastFailure: string | undefined;
 		let lastUnavailable: string | undefined;
 		const candidates = this.#resolveCandidates();
+		const rejections = this.#rejections();
 		for (const candidate of candidates) {
 			if (signal?.aborted) {
 				throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
+			}
+			const identity = formatModelStringWithRouting(candidate.model);
+			const skippedUntil = rejections.get(identity);
+			if (skippedUntil !== undefined) {
+				if (skippedUntil > Date.now()) {
+					lastUnavailable = `${identity} rejected the account recently`;
+					continue;
+				}
+				rejections.delete(identity);
 			}
 			try {
 				const judge = await this.#createJudge(candidate, signal);
@@ -117,11 +141,17 @@ export class ChainJudge implements Judge {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
 				if (isAbortOrTimeout(error)) throw error;
+				if (isAccountRejection(error)) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
 				lastFailure = error instanceof Error ? error.message : String(error);
 			}
 		}
 		if (candidates.length === 0) throw new Error("judgment: no judge model available");
 		throw new Error(`judgment: every judge candidate failed: ${lastFailure ?? lastUnavailable ?? "unknown error"}`);
+	}
+
+	#rejections(): Map<string, number> {
+		const registry: RegistryWithRejections = this.#deps.registry;
+		return (registry[kRejections] ??= new Map());
 	}
 
 	#resolveCandidates(): RoleChainCandidate[] {
@@ -137,40 +167,37 @@ export class ChainJudge implements Judge {
 
 	async #createJudge(candidate: RoleChainCandidate, signal: AbortSignal | undefined): Promise<Judge | undefined> {
 		const model = candidate.model;
-		switch (kindOf(candidate)) {
-			case "typesafe": {
-				if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
-				const judge = new TypeSafeJudge({
-					apiKey: this.#deps.registry.resolver(model, this.#deps.sessionId),
-					model: model.id,
-					baseUrl: model.baseUrl,
-				});
-				return usageReportingTypeSafeJudge(judge, this.#deps.onUsage);
-			}
-			case "local":
-				return new TextJudge(new LocalTextBackend(model.id));
-			case "online": {
-				if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
-				// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
-				const metadata = this.#deps.metadataResolver?.(model.provider);
-				const backend = chatTextBackend(model, {
-					apiKey: this.#deps.registry.resolver(model, this.#deps.sessionId),
-					sessionId: this.#deps.sessionId,
-					metadata,
-					onAttempt: attempt =>
-						this.#deps.onUsage?.({
-							role: "judge",
-							api: attempt.api,
-							provider: attempt.provider,
-							model: attempt.model,
-							usage: attempt.usage,
-							stopReason: attempt.stopReason,
-							errorMessage: attempt.errorMessage,
-						}),
-				});
-				return new TextJudge(backend);
-			}
+		if (model.api === "local-inference") return new TextJudge(new LocalTextBackend(model.id));
+		if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
+		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
+		if (isJudgmentApi(model.api)) {
+			const judge = new TypeSafeJudge({
+				apiKey,
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				baseUrl: model.baseUrl,
+			});
+			return usageReportingTypeSafeJudge(judge, this.#deps.onUsage);
 		}
+		// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
+		const metadata = this.#deps.metadataResolver?.(model.provider);
+		const backend = chatTextBackend(model, {
+			apiKey,
+			sessionId: this.#deps.sessionId,
+			metadata,
+			onAttempt: attempt =>
+				this.#deps.onUsage?.({
+					role: "judge",
+					api: attempt.api,
+					provider: attempt.provider,
+					model: attempt.model,
+					usage: attempt.usage,
+					stopReason: attempt.stopReason,
+					errorMessage: attempt.errorMessage,
+				}),
+		});
+		return new TextJudge(backend);
 	}
 }
 
@@ -222,6 +249,12 @@ function usageReportingTypeSafeJudge(judge: TypeSafeJudge, onUsage: JudgeDeps["o
 			return result;
 		},
 	};
+}
+
+/** Credential or billing rejection: the account cannot serve this candidate until something changes out of band. */
+function isAccountRejection(error: unknown): boolean {
+	const status = AIError.status(error);
+	return status === 401 || status === 402 || status === 403;
 }
 
 function isAbortOrTimeout(error: unknown): boolean {

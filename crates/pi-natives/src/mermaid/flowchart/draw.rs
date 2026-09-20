@@ -283,13 +283,12 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Canvas; 6] {
 	}
 	let label_canvas = draw_arrow_label(graph, edge);
 	let (path_canvas, lines_drawn, line_dirs) = draw_path(graph, &edge.path, edge.style);
-	let first_line = lines_drawn.first().map_or(&[][..], Vec::as_slice);
 	let source_shape = graph
 		.nodes
 		.get(edge.from)
 		.map(|node| node.shape)
 		.unwrap_or_default();
-	let box_start_canvas = draw_box_start(graph, &edge.path, first_line, source_shape);
+	let box_start_canvas = draw_box_start(graph, &edge.path, source_shape);
 	let arrow_end_canvas = if edge.has_arrow_end {
 		match (lines_drawn.last(), line_dirs.last()) {
 			(Some(line), Some(&dir)) => draw_arrow_head(graph, line, dir),
@@ -381,28 +380,27 @@ fn draw_path(
 	(canvas, lines, directions)
 }
 
-fn draw_box_start(
-	graph: &AsciiGraph,
-	path: &[GridCoord],
-	first_line: &[DrawingCoord],
-	source_shape: NodeShape,
-) -> Canvas {
+/// Mark where an edge leaves its source box with a tee on the border. The
+/// path's first cell is the box's border cell, so the tee goes exactly there
+/// even when the first segment is too short to draw any line cell.
+fn draw_box_start(graph: &AsciiGraph, path: &[GridCoord], source_shape: NodeShape) -> Canvas {
 	let mut canvas = graph.canvas.blank_like();
 	if graph.config.use_ascii || matches!(source_shape, NodeShape::StateStart | NodeShape::StateEnd)
 	{
 		return canvas;
 	}
-	let (Some(&from), Some((&first, &second))) = (first_line.first(), path.first().zip(path.get(1)))
-	else {
+	let Some((&first, &second)) = path.first().zip(path.get(1)) else {
 		return canvas;
 	};
-	match determine_direction(first, second) {
-		Dir::Up => canvas.set(from.x, from.y + 1, Cell::from('┴')),
-		Dir::Down => canvas.set(from.x, from.y - 1, Cell::from('┬')),
-		Dir::Left => canvas.set(from.x + 1, from.y, Cell::from('┤')),
-		Dir::Right => canvas.set(from.x - 1, from.y, Cell::from('├')),
-		_ => {},
-	}
+	let from = grid_to_drawing_coord(graph, first);
+	let tee = match determine_direction(first, second) {
+		Dir::Up => '┴',
+		Dir::Down => '┬',
+		Dir::Left => '┤',
+		Dir::Right => '├',
+		_ => return canvas,
+	};
+	canvas.set(from.x, from.y, Cell::from(tee));
 	canvas
 }
 
@@ -546,7 +544,18 @@ fn node_attachment_point(graph: &AsciiGraph, node: NodeId, dir: Dir) -> Option<D
 		grid_columns: [0, 0, 0],
 		grid_rows:    [0, 0, 0],
 	};
-	Some(shape_attachment_point(node.shape, dir, &dimensions, node.drawing_coord?))
+	let mut point = shape_attachment_point(node.shape, dir, &dimensions, node.drawing_coord?);
+	// Edge paths run through grid cell centers; when the box is an even
+	// number of cells wide (2-wide border columns), its midpoint rounds away
+	// from the center of the middle column, so snap cardinal attachments to
+	// the column/row the path actually uses.
+	let middle = grid_to_drawing_coord(graph, GridCoord::new(gc.x + 1, gc.y + 1));
+	match dir {
+		Dir::Up | Dir::Down => point.x = middle.x,
+		Dir::Left | Dir::Right => point.y = middle.y,
+		_ => {},
+	}
+	Some(point)
 }
 
 fn draw_bundled_edge_segment(

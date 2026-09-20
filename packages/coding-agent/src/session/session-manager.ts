@@ -70,7 +70,6 @@ import {
 import {
 	filterSessionsForPicker,
 	findMostRecentNonEmptySession,
-	findMostRecentSession,
 	isEmptySession,
 	listAllSessions,
 	listSessions,

@@ -126,7 +126,7 @@ describe("ChainJudge", () => {
 		});
 
 		expect(answer).toBe("high");
-		expect(kinds).toEqual(["typesafe", "local", "online"]);
+		expect(kinds).toEqual(["native", "local", "online"]);
 		expect(localPrompt).toContain("trivial");
 		expect(localPrompt).toContain("moderate");
 		expect(localPrompt).toContain("hard");
@@ -166,6 +166,28 @@ describe("ChainJudge", () => {
 		expect(onUsage).toHaveBeenCalledWith(
 			expect.objectContaining({ role: "typesafe", provider: "typesafe", model: "jev-preview" }),
 		);
+	});
+
+	it("skips a candidate whose account rejected the previous judgment instead of re-paying it every call", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${ONLINE.provider}/${ONLINE.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, ONLINE], { typesafe: "ts-key", [ONLINE.provider]: "online-key" });
+		const typesafeCalls = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(
+				asGlobalFetch(async () => Response.json({ detail: { error_type: "billing_error" } }, { status: 402 })),
+			);
+		vi.spyOn(ai, "completeSimple").mockImplementation(async model => reply(model, "level: low"));
+		const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
+
+		const first = await new ChainJudge({ settings, registry }).judge(request);
+		const second = await new ChainJudge({ settings, registry }).judge(request);
+
+		expect(first.answers.level.choice).toBe("low");
+		expect(second.answers.level.choice).toBe("low");
+		expect(typesafeCalls).toHaveBeenCalledTimes(1);
 	});
 
 	it("propagates caller abort without attempting a fallback", async () => {

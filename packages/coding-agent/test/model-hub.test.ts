@@ -890,6 +890,37 @@ describe("ModelHub", () => {
 			expect(footerLine(hub.render(220))).not.toContain("inherit");
 		});
 
+		test("role strip offers only roles the model can fill", () => {
+			const chat = makeModel("test", "chat-model");
+			const search = makeModel("web", "perplexity", 128_000, undefined, "search");
+			const { hub } = createHub({ models: [chat, search], scoped: true });
+			hub.handleInput("\t");
+
+			for (const ch of "chat-model") hub.handleInput(ch);
+			hub.handleInput("\n");
+			const chatStrip = footerLine(hub.render(400));
+			expect(chatStrip).toContain("default");
+			expect(chatStrip).toContain("smol");
+			expect(chatStrip).toContain("judge");
+			expect(chatStrip).toContain("retry-fallback");
+			expect(chatStrip).not.toContain("image");
+			expect(chatStrip).not.toContain("web");
+			expect(chatStrip).not.toContain("speech");
+			expect(chatStrip).not.toContain("dictation");
+			hub.handleInput(ESC);
+
+			hub.handleInput(ESC); // clear query
+			for (const ch of "perplexity") hub.handleInput(ch);
+			hub.handleInput("\n");
+			const searchStrip = footerLine(hub.render(400));
+			expect(searchStrip).toContain("web");
+			expect(searchStrip).toContain("fallbacks:perplexity");
+			expect(searchStrip).not.toContain("default");
+			expect(searchStrip).not.toContain("smol");
+			expect(searchStrip).not.toContain("judge");
+			expect(searchStrip).not.toContain("retry-fallback");
+		});
+
 		test("retry-fallback chip appends the model to the default chain without a thinking strip", () => {
 			const model = makeModel("test", "retry-fallback-model");
 			const { hub, onAssign, onFallbackChainChange } = createHub({ models: [model], scoped: true });

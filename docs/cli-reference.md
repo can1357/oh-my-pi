@@ -246,7 +246,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `token` | Get the API key or OAuth token for a provider. | [secrets](./secrets.md) |
 | `ttsr` | Inspect and test Time-Traveling Stream Rules (TTSR). (Covers the CLI command; the [TTSR feature](./ttsr-injection-lifecycle.md) is documented separately.) | |
 | `worktree`, `wt` | List or clear agent-managed git worktrees (`~/.omp/wt`). | |
-| `search`, `q` | Test web search providers from the CLI. | [web_search tool](./tools/web_search.md) |
+| `search`, `q`, `web-search` | Test web search providers from the CLI. | [web_search tool](./tools/web_search.md) |
 
 > `install`, `join`, `browser-relay`, `auth-gateway`, and `tiny-models` are also
 > reachable through related mechanisms (the `plugin` command, the `/join` slash

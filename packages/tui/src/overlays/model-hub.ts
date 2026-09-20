@@ -1021,12 +1021,14 @@ export class ModelHubComponent implements Component {
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
 	}
 
+	/** Offer only the roles this model can actually fill (chat roles for chat models, `web` for search runners, …). */
 	#openRoleStrip(item: ModelBrowserItem): void {
 		const chips: StripChip[] = [];
 		const scopedStorage = this.#settings.modelRoleStorage === "project";
 		const scopes: readonly ModelRoleSelectionScope[] = scopedStorage ? ["project", "global"] : ["global"];
 		for (const role of this.#visibleRoleIds()) {
 			const info = this.#settings.getRoleInfo(role);
+			if (!info.accepts(item.model)) continue;
 			const assignment = this.#roles[role];
 			for (const scope of scopes) {
 				const scopedModel = scopedStorage
@@ -1063,7 +1065,10 @@ export class ModelHubComponent implements Component {
 			styled: theme.fg("muted", `fallbacks:${item.model.provider}/*`),
 			action: "fallbackProvider",
 		});
-		chips.push({ label: "fallback", styled: theme.fg("muted", "retry-fallback"), action: "fallback" });
+		// `retry-fallback` appends to the default chain, so only chat-capable models qualify.
+		if (this.#settings.getRoleInfo("default").accepts(item.model)) {
+			chips.push({ label: "fallback", styled: theme.fg("muted", "retry-fallback"), action: "fallback" });
+		}
 		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
 	}
 
@@ -1565,11 +1570,14 @@ export class ModelHubComponent implements Component {
 			this.#moveRoleTab(1);
 			return;
 		}
-		if (matchesKey(data, "alt+left")) {
+		// macOS terminals (ghostty, Terminal.app, iTerm) send ESC b / ESC f for
+		// Option+←/→, which parse as alt+b / alt+f — same aliases the editor's
+		// word-motion bindings accept.
+		if (matchesKey(data, "alt+left") || matchesKey(data, "alt+b")) {
 			this.#moveModelKind(-1);
 			return;
 		}
-		if (matchesKey(data, "alt+right")) {
+		if (matchesKey(data, "alt+right") || matchesKey(data, "alt+f")) {
 			this.#moveModelKind(1);
 			return;
 		}

@@ -1,7 +1,10 @@
-//! Flowchart and state-diagram pipeline: parse → grid layout → A* edge
-//! routing → canvas drawing.
+//! Flowchart and state-diagram pipeline: parse → layering → grid placement
+//! → A* edge routing → canvas drawing.
 //!
-//! Nodes occupy 3×3 blocks on a logical grid; the center cell holds the node
+//! [`layering`] assigns every node a rank (longest path, cycles broken at DFS
+//! back edges), an in-rank order (barycenter crossing minimization) and a
+//! cross-axis slot (relaxed toward neighbours). Nodes then occupy 3×3 blocks
+//! on a logical grid at `(slot·4, rank·4)`; the center cell holds the node
 //! and the ring around it hosts edge attachment points. Column widths and row
 //! heights are computed per grid line, then grid coordinates map to canvas
 //! coordinates for drawing.
@@ -18,6 +21,7 @@ pub mod bundling;
 pub mod converter;
 pub mod draw;
 pub mod grid;
+pub mod layering;
 pub mod parser;
 pub mod pathfinder;
 pub mod routing;
