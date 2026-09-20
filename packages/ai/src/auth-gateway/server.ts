@@ -52,11 +52,11 @@ import type {
 	AuthGatewayFormatModule as FormatModule,
 	AuthGatewayParsedRequest as ParsedFormatRequest,
 } from "./types";
-import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
+import { DEFAULT_AUTH_GATEWAY_BIND, RetryableModelResolutionError } from "./types";
 
 // ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
 
-export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+export type ModelResolver = (modelId: string) => Model<Api> | undefined | Promise<Model<Api> | undefined>;
 
 export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
@@ -79,6 +79,8 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages" },
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
 };
+
+const MAX_GATEWAY_CREDENTIAL_SELECTION_ATTEMPTS = 2;
 
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
 // particular the Anthropic Claude-Code OAuth system-prompt prefix injection.
@@ -377,6 +379,14 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 	return route.module.formatError(499, "request_aborted", "client closed request");
 }
 
+function formatRetryableModelResolutionError(
+	error: unknown,
+	formatError: FormatModule["formatError"],
+): Response | undefined {
+	if (!(error instanceof RetryableModelResolutionError)) return undefined;
+	return formatError(error.status, "upstream_error", error.message);
+}
+
 /**
  * Attribute one settled upstream request to the originating client via the
  * broker's observed-usage channel (`AuthStorage.recordObservedUsage`, batched
@@ -446,7 +456,14 @@ async function handleFormatEndpoint(
 		return route.module.formatError(400, "invalid_request_error", "Missing top-level `model` field");
 	}
 
-	const model = bootOpts.resolveModel(modelId);
+	let model: Model<Api> | undefined;
+	try {
+		model = await bootOpts.resolveModel(modelId);
+	} catch (error) {
+		const response = formatRetryableModelResolutionError(error, route.module.formatError);
+		if (response) return response;
+		throw error;
+	}
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
@@ -511,26 +528,84 @@ async function handleFormatEndpoint(
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
 	let apiKey: string | undefined;
-	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
-			modelId: model.id,
-			signal: controller.signal,
-		});
-	} catch (error) {
+	for (let attempt = 0; attempt < MAX_GATEWAY_CREDENTIAL_SELECTION_ATTEMPTS; attempt++) {
+		const credentialProvider = model.provider;
+		const selectionGeneration = bootOpts.storage.getGeneration();
+		let selectedApiKey: string | undefined;
+		try {
+			selectedApiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
+				modelId: model.id,
+				signal: controller.signal,
+			});
+		} catch (error) {
+			if (controller.signal.aborted) return clientClosedResponse(route);
+			const classified = classifyGatewayError(error);
+			logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+			return route.module.formatError(classified.status, classified.type, classified.message);
+		}
+		const credentialGeneration = bootOpts.storage.getGeneration();
 		if (controller.signal.aborted) return clientClosedResponse(route);
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return route.module.formatError(classified.status, classified.type, classified.message);
+		if (!selectedApiKey) {
+			// getApiKey adopts external logouts before it reads the credential pool.
+			// Re-resolve after that adoption so the generation-synchronized caller
+			// can rebuild its served catalog before we decide whether this is a
+			// missing credential or an unroutable model.
+			let revalidatedModel: Model<Api> | undefined;
+			try {
+				revalidatedModel = await bootOpts.resolveModel(modelId);
+			} catch (error) {
+				const response = formatRetryableModelResolutionError(error, route.module.formatError);
+				if (response) return response;
+				throw error;
+			}
+			if (controller.signal.aborted) return clientClosedResponse(route);
+			if (!revalidatedModel) {
+				return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
+			}
+			return route.module.formatError(
+				401,
+				"authentication_error",
+				`No credential available for provider ${model.provider}`,
+			);
+		}
+
+		// Credential selection can adopt an externally changed account set. Resolve
+		// again before dispatch so the model comes from that generation's catalog.
+		let revalidatedModel: Model<Api> | undefined;
+		try {
+			revalidatedModel = await bootOpts.resolveModel(modelId);
+		} catch (error) {
+			const response = formatRetryableModelResolutionError(error, route.module.formatError);
+			if (response) return response;
+			throw error;
+		}
+		const resolutionGeneration = bootOpts.storage.getGeneration();
+		if (controller.signal.aborted) return clientClosedResponse(route);
+		if (!revalidatedModel) {
+			return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
+		}
+		if (selectionGeneration !== credentialGeneration || credentialGeneration !== resolutionGeneration) {
+			model = revalidatedModel;
+			continue;
+		}
+		if (revalidatedModel.provider !== credentialProvider) {
+			return route.module.formatError(
+				409,
+				"invalid_request_error",
+				"Model provider changed while selecting credentials; retry request",
+			);
+		}
+		model = revalidatedModel;
+		apiKey = selectedApiKey;
+		break;
 	}
-	if (controller.signal.aborted) return clientClosedResponse(route);
 	if (!apiKey) {
 		return route.module.formatError(
-			401,
-			"authentication_error",
-			`No credential available for provider ${model.provider}`,
+			409,
+			"invalid_request_error",
+			"Credentials changed while resolving model; retry request",
 		);
 	}
-
 	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
 	// Per-session provider learning (sticky strict-tools / fast-mode / thinking
 	// fallbacks, Codex transport sessions). Owned by this gateway instance: the
@@ -701,7 +776,14 @@ async function handlePiNative(
 		return piNative.formatError(400, "invalid_request_error", message);
 	}
 
-	const model = bootOpts.resolveModel(parsed.modelId);
+	let model: Model<Api> | undefined;
+	try {
+		model = await bootOpts.resolveModel(parsed.modelId);
+	} catch (error) {
+		const response = formatRetryableModelResolutionError(error, piNative.formatError);
+		if (response) return response;
+		throw error;
+	}
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
@@ -716,26 +798,82 @@ async function handlePiNative(
 	parsed.options.sessionId = sessionId;
 
 	let apiKey: string | undefined;
-	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
-			modelId: model.id,
-			signal: controller.signal,
-		});
-	} catch (error) {
+	for (let attempt = 0; attempt < MAX_GATEWAY_CREDENTIAL_SELECTION_ATTEMPTS; attempt++) {
+		const credentialProvider = model.provider;
+		const selectionGeneration = bootOpts.storage.getGeneration();
+		let selectedApiKey: string | undefined;
+		try {
+			selectedApiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
+				modelId: model.id,
+				signal: controller.signal,
+			});
+		} catch (error) {
+			if (controller.signal.aborted) return aborted();
+			const classified = classifyGatewayError(error);
+			logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+			return piNative.formatError(classified.status, classified.type, classified.message);
+		}
+		const credentialGeneration = bootOpts.storage.getGeneration();
 		if (controller.signal.aborted) return aborted();
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return piNative.formatError(classified.status, classified.type, classified.message);
+		if (!selectedApiKey) {
+			// getApiKey adopts external logouts before it reads the credential pool.
+			// Re-resolve after that adoption so the generation-synchronized caller
+			// can rebuild its served catalog before we decide whether this is a
+			// missing credential or an unroutable model.
+			let revalidatedModel: Model<Api> | undefined;
+			try {
+				revalidatedModel = await bootOpts.resolveModel(parsed.modelId);
+			} catch (error) {
+				const response = formatRetryableModelResolutionError(error, piNative.formatError);
+				if (response) return response;
+				throw error;
+			}
+			if (controller.signal.aborted) return aborted();
+			if (!revalidatedModel) {
+				return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+			}
+			return piNative.formatError(
+				401,
+				"authentication_error",
+				`No credential available for provider ${model.provider}`,
+			);
+		}
+
+		let revalidatedModel: Model<Api> | undefined;
+		try {
+			revalidatedModel = await bootOpts.resolveModel(parsed.modelId);
+		} catch (error) {
+			const response = formatRetryableModelResolutionError(error, piNative.formatError);
+			if (response) return response;
+			throw error;
+		}
+		const resolutionGeneration = bootOpts.storage.getGeneration();
+		if (controller.signal.aborted) return aborted();
+		if (!revalidatedModel) {
+			return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
+		}
+		if (selectionGeneration !== credentialGeneration || credentialGeneration !== resolutionGeneration) {
+			model = revalidatedModel;
+			continue;
+		}
+		if (revalidatedModel.provider !== credentialProvider) {
+			return piNative.formatError(
+				409,
+				"invalid_request_error",
+				"Model provider changed while selecting credentials; retry request",
+			);
+		}
+		model = revalidatedModel;
+		apiKey = selectedApiKey;
+		break;
 	}
-	if (controller.signal.aborted) return aborted();
 	if (!apiKey) {
 		return piNative.formatError(
-			401,
-			"authentication_error",
-			`No credential available for provider ${model.provider}`,
+			409,
+			"invalid_request_error",
+			"Credentials changed while resolving model; retry request",
 		);
 	}
-
 	// Per-session provider learning, owned by this gateway instance. The map is
 	// non-serializable, so `parseRequest` cannot accept one from the wire and
 	// every turn would otherwise re-learn each lesson from a fresh upstream

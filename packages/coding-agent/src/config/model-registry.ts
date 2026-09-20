@@ -1111,12 +1111,12 @@ export class ModelRegistry {
 		);
 	}
 
-	#resolveStartupModelCacheProviderId(providerId: string): string {
+	#resolveStartupModelCacheProviderId(providerId: string, headers?: Record<string, string>): string {
 		const baseUrl =
 			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
 			this.#providerOverrides.get(providerId)?.baseUrl ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
-		return resolveModelCacheProviderId(providerId, { baseUrl });
+		return resolveModelCacheProviderId(providerId, { baseUrl, headers });
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
@@ -1987,6 +1987,52 @@ export class ModelRegistry {
 		return projectId ? projectId : undefined;
 	}
 
+	/**
+	 * Return the resolved Grok Bot key plus every active stored credential that
+	 * can identify a Grok account, in canonical order. AvailableModels is
+	 * entitlement-scoped, while the gateway can rotate requests across all of
+	 * these credentials.
+	 */
+	#resolveGrokbotDiscoveryApiKeys(resolvedApiKey: string | undefined): string[] {
+		const apiKeys = new Set<string>();
+		const addStructuredCredential = (rawValue: string | undefined): boolean => {
+			const raw = rawValue?.trim();
+			if (!raw) return false;
+			try {
+				const structured = JSON.parse(raw) as { renewal?: unknown; machineId?: unknown };
+				const renewal = typeof structured.renewal === "string" ? structured.renewal.trim() : "";
+				const machineId = typeof structured.machineId === "string" ? structured.machineId.trim() : "";
+				if (!renewal || !machineId) return false;
+				apiKeys.add(JSON.stringify({ renewal, machineId }));
+				return true;
+			} catch {
+				return false;
+			}
+		};
+
+		const current = resolvedApiKey?.trim();
+		if (current && !addStructuredCredential(current)) {
+			// A raw resolved key remains an input; Grok discovery rejects it if
+			// it cannot provide the paired machine id.
+			apiKeys.add(current);
+		}
+
+		for (const { credential } of this.authStorage.listStoredCredentials("grokbot")) {
+			if (credential.type === "api_key") {
+				// Unlike a raw resolved provider key, persisted API-key rows are
+				// usable Grok accounts only when they carry the complete envelope.
+				addStructuredCredential(credential.key);
+				continue;
+			}
+
+			if (addStructuredCredential(credential.access)) continue;
+			const renewal = credential.access?.trim();
+			const machineId = credential.orgId?.trim();
+			if (renewal && machineId) apiKeys.add(JSON.stringify({ renewal, machineId }));
+		}
+		return [...apiKeys].sort((left, right) => left.localeCompare(right));
+	}
+
 	async #collectBuiltInModelManagerOptions(
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
@@ -2044,15 +2090,18 @@ export class ModelRegistry {
 			if (configuredDiscoveryProviders.has(descriptor.providerId)) return false;
 			return providerFilter ? providerFilter.has(descriptor.providerId) : true;
 		});
-		const standardProviderKeys = await Promise.all(
-			standardProviderDescriptors.map(descriptor => {
-				const cacheProviderId = this.#resolveStartupModelCacheProviderId(descriptor.providerId);
-				return this.#resolveBuiltInDiscoveryApiKey(
+		const standardProviderDiscoveryInputs = await Promise.all(
+			standardProviderDescriptors.map(async descriptor => {
+				const headers =
+					descriptor.providerId === "grokbot" ? await this.getProviderHeaders(descriptor.providerId) : undefined;
+				const cacheProviderId = this.#resolveStartupModelCacheProviderId(descriptor.providerId, headers);
+				const apiKey = await this.#resolveBuiltInDiscoveryApiKey(
 					descriptor.providerId,
 					strategy,
 					cacheProviderId,
 					descriptor.dynamicModelsAuthoritative ?? false,
 				);
+				return { apiKey, headers };
 			}),
 		);
 		const specialKeys = await Promise.all(
@@ -2068,7 +2117,7 @@ export class ModelRegistry {
 		const options: ModelManagerOptions<Api>[] = [];
 		for (let i = 0; i < standardProviderDescriptors.length; i++) {
 			const descriptor = standardProviderDescriptors[i];
-			const apiKey = standardProviderKeys[i];
+			const { apiKey, headers } = standardProviderDiscoveryInputs[i]!;
 			const hasExplicitVllmConfig =
 				descriptor.providerId === "vllm" &&
 				(this.#runtimeProviderOverrides.has(descriptor.providerId) ||
@@ -2076,16 +2125,22 @@ export class ModelRegistry {
 					this.#keylessProviders.has(descriptor.providerId));
 			const supportsSharedCatalog = MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP[descriptor.providerId] === true;
 			const canUseSharedCatalogWithoutAuth = supportsSharedCatalog && !descriptor.dynamicModelsAuthoritative;
+			const discoveryApiKey = isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined;
+			const grokbotApiKeys =
+				descriptor.providerId === "grokbot" ? this.#resolveGrokbotDiscoveryApiKeys(discoveryApiKey) : undefined;
 			if (
 				isAuthenticated(apiKey) ||
+				grokbotApiKeys?.length ||
 				descriptor.allowUnauthenticated ||
 				hasExplicitVllmConfig ||
 				canUseSharedCatalogWithoutAuth
 			) {
 				const discoveryConfig = {
-					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
+					apiKey: discoveryApiKey,
+					...(grokbotApiKeys ? { apiKeys: grokbotApiKeys } : undefined),
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,
+					headers,
 				};
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??

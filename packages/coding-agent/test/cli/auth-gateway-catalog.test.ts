@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { type Api, AuthStorage, type Model } from "@oh-my-pi/pi-ai";
+import { RetryableModelResolutionError } from "@oh-my-pi/pi-ai/auth-gateway";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createSerializedRebuilder, indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
+import {
+	createGenerationSynchronizedModelResolver,
+	createSerializedRebuilder,
+	indexModelsByRequestId,
+	initializeGatewayModelCatalog,
+} from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
 const authStores: AuthStorage[] = [];
@@ -110,6 +117,188 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 		expect(index.get(`anthropic/${anthropicModel.id}`)).toBeDefined();
 		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
 	});
+
+	test("resolves unique native aliases only as qualified, case-insensitive request ids", () => {
+		const model = buildModel({
+			id: "grok-4.6-fast",
+			aliases: [" LaTeSt "],
+			name: "Grok 4.6 Fast",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		});
+
+		const index = indexModelsByRequestId([model], new Set(["grokbot"]));
+
+		expect(index.get("grokbot/latest")).toBe(model);
+		expect(index.get("latest")).toBeUndefined();
+	});
+
+	test("rejects a bare canonical id shared by eligible providers", () => {
+		const first = buildModel({
+			id: "GroK-4.6-Fast",
+			name: "Grok 4.6 Fast",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		});
+		const second = { ...first, provider: "other" };
+		const index = indexModelsByRequestId([first, second], new Set(["grokbot", "other"]));
+
+		expect(index.get("grok-4.6-fast")).toBeUndefined();
+		expect(index.get("grokbot/grok-4.6-fast")).toBe(first);
+		expect(index.get("other/grok-4.6-fast")).toBe(second);
+	});
+
+	test("omits colliding qualified aliases but keeps a canonical id ahead of an alias", () => {
+		const model = (id: string, aliases: readonly string[] = []): Model<Api> =>
+			buildModel({
+				id,
+				aliases,
+				name: id,
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			});
+		const first = model("grok-4.6", ["latest"]);
+		const second = model("grok-4.6-fast", ["LATEST"]);
+		const canonical = model("stable");
+		const alias = model("grok-4.6-pro", ["STABLE"]);
+
+		const index = indexModelsByRequestId([first, second, canonical, alias], new Set(["grokbot"]));
+
+		expect(index.get("grokbot/latest")).toBeUndefined();
+		expect(index.get("grokbot/stable")).toBe(canonical);
+	});
+});
+
+describe("createGenerationSynchronizedModelResolver", () => {
+	test("does not rebuild until the AuthStorage generation changes", async () => {
+		let storageGeneration = 7;
+		let catalogGeneration = 7;
+		const calls: boolean[] = [];
+		const resolveModel = createGenerationSynchronizedModelResolver(
+			() => storageGeneration,
+			() => catalogGeneration,
+			async force => {
+				calls.push(force ?? false);
+				catalogGeneration = storageGeneration;
+			},
+			() => undefined,
+		);
+
+		await resolveModel("grok-4.6");
+		expect(calls).toEqual([]);
+
+		storageGeneration = 8;
+		await resolveModel("grok-4.6");
+		expect(calls).toEqual([true]);
+	});
+
+	test("does not accept a catalog generation superseded during a rebuild", async () => {
+		let storageGeneration = 2;
+		let catalogGeneration = 1;
+		const calls: boolean[] = [];
+		const firstRebuild = Promise.withResolvers<void>();
+		const resolveModel = createGenerationSynchronizedModelResolver(
+			() => storageGeneration,
+			() => catalogGeneration,
+			async force => {
+				calls.push(force ?? false);
+				if (calls.length === 1) {
+					await firstRebuild.promise;
+					catalogGeneration = 2;
+					return;
+				}
+				catalogGeneration = storageGeneration;
+			},
+			() => undefined,
+		);
+
+		const resolving = resolveModel("grok-4.6");
+		storageGeneration = 3;
+		firstRebuild.resolve();
+
+		await resolving;
+		expect(calls).toEqual([true, true]);
+	});
+
+	test("rejects repeated catalog supersession with a retryable error", async () => {
+		let storageGeneration = 1;
+		let catalogGeneration = 0;
+		let rebuilds = 0;
+		const resolveModel = createGenerationSynchronizedModelResolver(
+			() => storageGeneration,
+			() => catalogGeneration,
+			async () => {
+				rebuilds++;
+				catalogGeneration = storageGeneration;
+				storageGeneration++;
+			},
+			() => undefined,
+		);
+
+		const error = await resolveModel("grok-4.6").catch(error => error);
+		expect(error).toBeInstanceOf(RetryableModelResolutionError);
+		expect(error).toMatchObject({ status: 503, retryable: true });
+		expect(rebuilds).toBe(3);
+	});
+});
+
+describe("initializeGatewayModelCatalog", () => {
+	test("hydrates an exact credential-scoped cache before the initial cache-aware refresh", async () => {
+		const cachedModel = buildModel({
+			id: "expired-grok-cache-model",
+			name: "Expired Grok cache model",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		});
+		const events: string[] = [];
+		let models: Model<Api>[] = [];
+		let networkFetches = 0;
+		const storage = {
+			getGeneration: () => 1,
+			exportSnapshot: () => ({ credentials: [{ provider: "grokbot" }] }),
+		} as unknown as Pick<AuthStorage, "exportSnapshot" | "getGeneration">;
+		const registry = {
+			hydrateCredentialScopedModelCaches: async () => {
+				events.push("hydrate");
+				models = [cachedModel];
+			},
+			refresh: async (strategy: string) => {
+				events.push(`refresh:${strategy}`);
+				if (strategy === "online-if-uncached" && !models.includes(cachedModel)) networkFetches++;
+			},
+			getAll: () => models,
+		} as unknown as Pick<ModelRegistry, "getAll" | "hydrateCredentialScopedModelCaches" | "refresh">;
+
+		const catalog = await initializeGatewayModelCatalog(storage, registry);
+
+		expect(events).toEqual(["hydrate", "refresh:online-if-uncached"]);
+		expect(networkFetches).toBe(0);
+		expect(await catalog.resolveModel("grokbot/expired-grok-cache-model")).toBe(cachedModel);
+	});
 });
 
 describe("createSerializedRebuilder", () => {
@@ -151,6 +340,22 @@ describe("createSerializedRebuilder", () => {
 		expect(calls).toEqual([false, true]);
 	});
 
+	test("runs a queued forced rebuild after a cached rebuild fails", async () => {
+		const { calls, gates, run } = makeRun();
+		const rebuild = createSerializedRebuilder(run);
+
+		const initial = rebuild(false);
+		const initialFailure = initial.catch(error => error);
+		const forced = rebuild(true);
+		gates[0].reject(new Error("cached rebuild failed"));
+		await flush();
+		expect(calls).toEqual([false, true]);
+
+		gates[1].resolve();
+		expect(await initialFailure).toBeInstanceOf(Error);
+		await forced;
+	});
+
 	test("coalesces a non-forced rebuild without an extra pass", async () => {
 		const { calls, gates, run } = makeRun();
 		const rebuild = createSerializedRebuilder(run);
@@ -162,5 +367,30 @@ describe("createSerializedRebuilder", () => {
 		gates[0].resolve();
 		await first;
 		expect(calls).toEqual([false]); // no redundant follow-up
+	});
+
+	test("runs and settles a forced pass queued during finalization", async () => {
+		const { calls, gates, run } = makeRun();
+		const rebuild = createSerializedRebuilder(run);
+		const initial = rebuild(false);
+		let forced: Promise<void> | undefined;
+		let forcedSettled = false;
+
+		gates[0].resolve();
+		// The queued microtask runs after the inner loop completes but before
+		// its `.finally()` clears `inFlight`.
+		queueMicrotask(() => {
+			forced = rebuild(true);
+			void forced.then(() => {
+				forcedSettled = true;
+			});
+		});
+		await flush();
+		expect(calls).toEqual([false, true]);
+
+		gates[1].resolve();
+		await initial;
+		await flush();
+		expect(forcedSettled).toBe(true);
 	});
 });

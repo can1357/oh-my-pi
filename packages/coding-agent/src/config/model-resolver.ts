@@ -324,12 +324,10 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 	} as ModelSpec<Api>);
 }
 
-const kProviderModelIndex = Symbol("model-resolver.providerIndex");
-const kProviderSpellingIndex = Symbol("model-resolver.providerSpellingIndex");
-type ModelsWithProviderIndex = readonly Model<Api>[] & {
-	[kProviderModelIndex]?: Map<string, Model<Api> | null>;
-	[kProviderSpellingIndex]?: Map<string, Model<Api> | null>;
-};
+const providerModelIndexes = new WeakMap<readonly Model<Api>[], Map<string, Model<Api> | null>>();
+const providerSpellingIndexes = new WeakMap<readonly Model<Api>[], Map<string, Model<Api> | null>>();
+const providerAliasIndexes = new WeakMap<readonly Model<Api>[], Map<string, Model<Api> | null>>();
+const providerWireRouteIndexes = new WeakMap<readonly Model<Api>[], Map<string, Model<Api> | null>>();
 
 /**
  * Collapse the dotted revision spelling aggregators use (`claude-fable-5.1`,
@@ -358,28 +356,45 @@ function buildProviderIndex(
 }
 
 function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
-	const tagged = availableModels as ModelsWithProviderIndex;
-	const cached = tagged[kProviderModelIndex];
+	const cached = providerModelIndexes.get(availableModels);
 	if (cached) return cached;
 	const index = buildProviderIndex(availableModels, id => id.toLowerCase());
-	tagged[kProviderModelIndex] = index;
+	providerModelIndexes.set(availableModels, index);
 	return index;
 }
 
 /** `provider\0revisionSpellingKey(id)` → model; the dot/dash-tolerant twin of {@link getProviderModelIndex}. */
 function getProviderSpellingIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
-	const tagged = availableModels as ModelsWithProviderIndex;
-	const cached = tagged[kProviderSpellingIndex];
+	const cached = providerSpellingIndexes.get(availableModels);
 	if (cached) return cached;
 	const index = buildProviderIndex(availableModels, revisionSpellingKey);
-	tagged[kProviderSpellingIndex] = index;
+	providerSpellingIndexes.set(availableModels, index);
 	return index;
 }
 
-const kProviderWireRouteIndex = Symbol("model-resolver.wireRouteIndex");
-type ModelsWithWireRouteIndex = readonly Model<Api>[] & {
-	[kProviderWireRouteIndex]?: Map<string, Model<Api> | null>;
-};
+/** `provider\0alias` → model, with ambiguous aliases retained as `null`. */
+function getProviderAliasIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const cached = providerAliasIndexes.get(availableModels);
+	if (cached) return cached;
+
+	const index = new Map<string, Model<Api> | null>();
+	for (const m of availableModels) {
+		for (const alias of m.aliases ?? []) {
+			const normalizedAlias = alias.trim().toLowerCase();
+			if (!normalizedAlias) continue;
+
+			const key = `${m.provider.toLowerCase()}\u0000${normalizedAlias}`;
+			const existing = index.get(key);
+			if (existing === undefined) {
+				index.set(key, m);
+			} else if (existing !== null && existing !== m) {
+				index.set(key, null);
+			}
+		}
+	}
+	providerAliasIndexes.set(availableModels, index);
+	return index;
+}
 
 /**
  * Reverse index over collapsed models' `thinking.effortRouting`:
@@ -390,8 +405,7 @@ type ModelsWithWireRouteIndex = readonly Model<Api>[] & {
  * resolve to nothing, exactly like the exact-id index.
  */
 function getProviderWireRouteIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
-	const tagged = availableModels as ModelsWithWireRouteIndex;
-	const cached = tagged[kProviderWireRouteIndex];
+	const cached = providerWireRouteIndexes.get(availableModels);
 	if (cached) return cached;
 	const index = new Map<string, Model<Api> | null>();
 	for (const m of availableModels) {
@@ -410,28 +424,45 @@ function getProviderWireRouteIndex(availableModels: readonly Model<Api>[]): Map<
 			}
 		}
 	}
-	tagged[kProviderWireRouteIndex] = index;
+	providerWireRouteIndexes.set(availableModels, index);
 	return index;
 }
 
-export function resolveProviderModelReference(
+interface ProviderModelReferenceResolution {
+	model: Model<Api> | undefined;
+	/** An exact provider-scoped selector matched multiple candidates. */
+	ambiguous: boolean;
+}
+
+function resolveProviderModelReferenceResult(
 	provider: string,
 	modelId: string,
 	availableModels: readonly Model<Api>[],
-): Model<Api> | undefined {
+): ProviderModelReferenceResolution {
 	const normalizedProvider = provider.trim().toLowerCase();
 	const normalizedModelId = modelId.trim().toLowerCase();
 	if (!normalizedProvider || !normalizedModelId) {
-		return undefined;
+		return { model: undefined, ambiguous: false };
 	}
 
 	const index = getProviderModelIndex(availableModels);
 	const exact = index.get(`${normalizedProvider}\u0000${normalizedModelId}`);
 	if (exact === null) {
-		return undefined; // ambiguous
+		return { model: undefined, ambiguous: true };
 	}
 	if (exact !== undefined) {
-		return exact;
+		return { model: exact, ambiguous: false };
+	}
+
+	// Provider-native aliases (such as Grok Bot's `idAliases`) retain the
+	// canonical model object and therefore never rewrite the downstream id.
+	// An ambiguous alias must not fall through to a looser selector.
+	const alias = getProviderAliasIndex(availableModels).get(`${normalizedProvider}\u0000${normalizedModelId}`);
+	if (alias === null) {
+		return { model: undefined, ambiguous: true };
+	}
+	if (alias !== undefined) {
+		return { model: alias, ambiguous: false };
 	}
 
 	// Retired effort-tier variant ids resolve to their collapsed logical
@@ -443,8 +474,11 @@ export function resolveProviderModelReference(
 		(collapsedVariant.thinkingVariant ? collapsedVariant.logicalId : undefined);
 	if (variantAliasId) {
 		const aliased = index.get(`${normalizedProvider}\u0000${variantAliasId.toLowerCase()}`);
-		if (aliased) {
-			return aliased;
+		if (aliased === null) {
+			return { model: undefined, ambiguous: true };
+		}
+		if (aliased !== undefined) {
+			return { model: aliased, ambiguous: false };
 		}
 	}
 
@@ -453,13 +487,16 @@ export function resolveProviderModelReference(
 	// selects its logical model. The exact lookup above keeps a live raw model
 	// winning over the collapsed carrier.
 	const routed = getProviderWireRouteIndex(availableModels).get(`${normalizedProvider}\u0000${normalizedModelId}`);
-	if (routed) {
-		return routed;
+	if (routed === null) {
+		return { model: undefined, ambiguous: true };
+	}
+	if (routed !== undefined) {
+		return { model: routed, ambiguous: false };
 	}
 
 	const bedrockInferenceProfile = resolveBedrockInferenceProfileReference(provider, modelId, availableModels);
 	if (bedrockInferenceProfile) {
-		return bedrockInferenceProfile;
+		return { model: bedrockInferenceProfile, ambiguous: false };
 	}
 
 	// Dotted vs dashed revision spelling (`anthropic/claude-fable-5.1` for the
@@ -470,25 +507,36 @@ export function resolveProviderModelReference(
 	const spelled = getProviderSpellingIndex(availableModels).get(
 		`${normalizedProvider}\u0000${revisionSpellingKey(normalizedModelId)}`,
 	);
-	if (spelled) {
-		return spelled;
+	if (spelled === null) {
+		return { model: undefined, ambiguous: true };
+	}
+	if (spelled !== undefined) {
+		return { model: spelled, ambiguous: false };
 	}
 
 	if (normalizedProvider !== "openrouter") {
-		return undefined;
+		return { model: undefined, ambiguous: false };
 	}
 
 	for (const fallbackId of getOpenRouterFallbackModelIds(modelId).slice(1)) {
 		const fallback = index.get(`${normalizedProvider}\u0000${fallbackId.toLowerCase()}`);
 		if (fallback === null) {
-			return undefined;
+			return { model: undefined, ambiguous: true };
 		}
 		if (fallback !== undefined) {
-			return cloneModelWithRequestedId(fallback, modelId);
+			return { model: cloneModelWithRequestedId(fallback, modelId), ambiguous: false };
 		}
 	}
 
-	return undefined;
+	return { model: undefined, ambiguous: false };
+}
+
+export function resolveProviderModelReference(
+	provider: string,
+	modelId: string,
+	availableModels: readonly Model<Api>[],
+): Model<Api> | undefined {
+	return resolveProviderModelReferenceResult(provider, modelId, availableModels).model;
 }
 
 export interface ModelMatchPreferences {
@@ -679,10 +727,13 @@ function isProviderLockedCrossMatch(pattern: string, matchedModel: Model<Api>): 
 /**
  * Find an exact explicit provider/model match.
  */
-function findExactModelReferenceMatch(modelReference: string, availableModels: Model<Api>[]): Model<Api> | undefined {
+function findExactModelReferenceMatch(
+	modelReference: string,
+	availableModels: Model<Api>[],
+): ProviderModelReferenceResolution {
 	const trimmedReference = modelReference.trim();
 	if (!trimmedReference) {
-		return undefined;
+		return { model: undefined, ambiguous: false };
 	}
 
 	const slashIndex = trimmedReference.indexOf("/");
@@ -690,10 +741,10 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
 		const provider = trimmedReference.substring(0, slashIndex).trim();
 		const modelId = trimmedReference.substring(slashIndex + 1).trim();
 		if (provider && modelId) {
-			return resolveProviderModelReference(provider, modelId, availableModels);
+			return resolveProviderModelReferenceResult(provider, modelId, availableModels);
 		}
 	}
-	return undefined;
+	return { model: undefined, ambiguous: false };
 }
 /**
  * The single model-matching engine. Tries, in order:
@@ -718,8 +769,11 @@ function matchModel(
 	options?: { exactOnly?: boolean },
 ): Model<Api> | undefined {
 	const exactRefMatch = findExactModelReferenceMatch(modelPattern, availableModels);
-	if (exactRefMatch) {
-		return exactRefMatch;
+	if (exactRefMatch.model) {
+		return exactRefMatch.model;
+	}
+	if (exactRefMatch.ambiguous) {
+		return undefined;
 	}
 
 	// Exact ID match (case-insensitive) — this must happen before provider-scoped
@@ -1449,15 +1503,21 @@ export function resolveModelFromString(
 	available: Model<Api>[],
 	matchPreferences?: ModelMatchPreferences,
 ): Model<Api> | undefined {
-	const exact = available.find(model => `${model.provider}/${model.id}` === value);
-	if (exact) return exact;
+	const providerModelIndex = getProviderModelIndex(available);
+	const slashIndex = value.indexOf("/");
+	if (slashIndex !== -1) {
+		const exact = providerModelIndex.get(
+			`${value.slice(0, slashIndex).toLowerCase()}\u0000${value.slice(slashIndex + 1).toLowerCase()}`,
+		);
+		if (exact !== undefined) return exact ?? undefined;
+	}
 	const parsed = parseModelString(value, {
 		...MAX_THINKING_SUFFIX_OPTIONS,
 		isLiteralModelId: (provider, id) => available.some(model => model.provider === provider && model.id === id),
 	});
 	if (parsed) {
-		const parsedExact = available.find(model => model.provider === parsed.provider && model.id === parsed.id);
-		if (parsedExact) return parsedExact;
+		const parsedExact = providerModelIndex.get(`${parsed.provider.toLowerCase()}\u0000${parsed.id.toLowerCase()}`);
+		if (parsedExact !== undefined) return parsedExact ?? undefined;
 	}
 	return parseModelPattern(value, available, matchPreferences).model;
 }
@@ -1813,15 +1873,20 @@ export function filterAvailableModelsByEnabledPatterns(
 
 	return includeSyntheticAllowedModels(available, allowedModels);
 }
+interface ExactCliModelResolution {
+	model: Model<Api> | undefined;
+	ambiguous: boolean;
+}
+
 function findExactCliModel(
 	selector: string,
 	allModels: Model<Api>[],
 	availableModels: Model<Api>[],
 	options?: { catalogFallback?: boolean },
-): Model<Api> | undefined {
+): ExactCliModelResolution {
 	// Explicit provider/id references stay authoritative against the full catalog.
 	const referenced = findExactModelReferenceMatch(selector, allModels);
-	if (referenced) return referenced;
+	if (referenced.model || referenced.ambiguous) return referenced;
 
 	// Flat-id (or full-selector-string) matches prefer authenticated providers,
 	// then fall back to catalog order. This covers aggregator-style flat ids
@@ -1834,17 +1899,21 @@ function findExactCliModel(
 	const isFlatMatch = (model: Model<Api>) =>
 		model.id.toLowerCase() === lower || formatModelString(model).toLowerCase() === lower;
 	const preferred = availableModels.find(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
-	if (preferred) return preferred;
+	if (preferred) return { model: preferred, ambiguous: false };
 	// The unauthenticated catalog fallback is a weak match: a bare id like
 	// `default` collides with the bundled `cursor/default` model, which must not
 	// shadow a configured `modelRoles.default` role the user can actually run.
 	// Callers resolving a possible role name pass `catalogFallback: false` so the
 	// role gets a chance first; the deferred fuzzy fallback below still recovers
 	// the catalog id when no role matches.
-	if (options?.catalogFallback === false) return undefined;
-	return availableModels === allModels
-		? undefined
-		: allModels.find(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m));
+	if (options?.catalogFallback === false) return { model: undefined, ambiguous: false };
+	return {
+		model:
+			availableModels === allModels
+				? undefined
+				: allModels.find(m => isFlatMatch(m) && !isProviderLockedCrossMatch(selector, m)),
+		ambiguous: false,
+	};
 }
 
 export interface ResolveCliModelResult {
@@ -1913,13 +1982,22 @@ export function resolveCliModel(options: {
 	const trimmedModel = cliModel.trim();
 	if (!provider) {
 		const exact = findExactCliModel(trimmedModel, allModels, availableModels, { catalogFallback: false });
-		if (exact) {
+		if (exact.model) {
 			return {
-				model: exact,
-				selector: formatModelString(exact),
+				model: exact.model,
+				selector: formatModelString(exact.model),
 				warning: undefined,
 				thinkingLevel: undefined,
 				error: undefined,
+			};
+		}
+		if (exact.ambiguous) {
+			return {
+				model: undefined,
+				selector: undefined,
+				warning: undefined,
+				thinkingLevel: undefined,
+				error: `Model "${trimmedModel}" not found. Run "omp models" to see available models.`,
 			};
 		}
 		const { base: exactBase, level: exactThinkingLevel } = splitThinkingSuffix(
@@ -1929,13 +2007,22 @@ export function resolveCliModel(options: {
 		);
 		if (exactThinkingLevel) {
 			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels, { catalogFallback: false });
-			if (exactSuffixed) {
+			if (exactSuffixed.model) {
 				return {
-					model: exactSuffixed,
-					selector: formatModelString(exactSuffixed),
+					model: exactSuffixed.model,
+					selector: formatModelString(exactSuffixed.model),
 					warning: undefined,
 					thinkingLevel: exactThinkingLevel,
 					error: undefined,
+				};
+			}
+			if (exactSuffixed.ambiguous) {
+				return {
+					model: undefined,
+					selector: undefined,
+					warning: undefined,
+					thinkingLevel: undefined,
+					error: `Model "${trimmedModel}" not found. Run "omp models" to see available models.`,
 				};
 			}
 		}

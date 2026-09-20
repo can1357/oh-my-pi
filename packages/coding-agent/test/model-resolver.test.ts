@@ -1275,6 +1275,32 @@ describe("resolveAgentModelPatterns", () => {
 });
 
 describe("resolveModelFromString", () => {
+	const duplicateProviderModel = buildModel({
+		id: "duplicate-model",
+		name: "Duplicate model",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: true,
+		thinking: { mode: "budget", efforts: [Effort.High] },
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 8_192,
+	});
+
+	test("rejects duplicate provider-qualified exact selectors", () => {
+		const models = [duplicateProviderModel, { ...duplicateProviderModel }];
+
+		expect(resolveModelFromString("anthropic/duplicate-model", models)).toBeUndefined();
+	});
+
+	test("rejects duplicate provider-qualified thinking-suffix selectors", () => {
+		const models = [duplicateProviderModel, { ...duplicateProviderModel }];
+
+		expect(resolveModelFromString("anthropic/duplicate-model:high", models)).toBeUndefined();
+	});
+
 	test("falls back to pattern parsing for provider/model:thinking when strict provider+id miss", () => {
 		const resolved = resolveModelFromString("openrouter/qwen/qwen3-coder:exacto:high", allModels);
 		expect(resolved?.provider).toBe("openrouter");
@@ -2581,5 +2607,103 @@ describe("Devin selector parity", () => {
 	test("a live raw model still wins over the collapsed carrier routing to it", () => {
 		const withRaw = [...devinModels, devinModel("claude-mythos-9-high")];
 		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", withRaw)?.id).toBe("claude-mythos-9-high");
+	});
+});
+
+describe("provider model aliases", () => {
+	const grokbotModel = (
+		id: string,
+		aliases: readonly string[] = [],
+		provider = "grokbot",
+		overrides: Partial<Model<Api>> = {},
+	): Model<Api> =>
+		buildModel({
+			id,
+			aliases,
+			name: id,
+			api: "grokbot-sand",
+			provider,
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...overrides,
+		});
+
+	test("resolves a trimmed case-insensitive Grok Bot idAlias to the canonical model", () => {
+		const canonical = grokbotModel("grok-4.6-fast", ["grok-4.6"]);
+		const result = resolveProviderModelReference(" GROKBOT ", " GroK-4.6 ", [canonical]);
+
+		expect(result).toBe(canonical);
+		expect(result?.id).toBe("grok-4.6-fast");
+	});
+
+	test("prefers a real id over another model's alias", () => {
+		const live = grokbotModel("grok-4.6");
+		const aliased = grokbotModel("grok-4.6-fast", ["grok-4.6"]);
+
+		expect(resolveProviderModelReference("grokbot", "GROK-4.6", [live, aliased])).toBe(live);
+	});
+
+	test("keeps identical aliases isolated to their provider", () => {
+		const grokbot = grokbotModel("grok-4.6", ["latest"]);
+		const other = grokbotModel("other-4.6", ["latest"], "other");
+		const models = [grokbot, other];
+
+		expect(resolveProviderModelReference("grokbot", "latest", models)).toBe(grokbot);
+		expect(resolveProviderModelReference("other", "latest", models)).toBe(other);
+	});
+
+	test("does not resolve an alias shared by two models for one provider", () => {
+		const first = grokbotModel("grok-4.6", ["latest"]);
+		const second = grokbotModel("grok-4.6-fast", [" LATEST "]);
+
+		expect(resolveProviderModelReference("grokbot", "latest", [first, second])).toBeUndefined();
+	});
+
+	test("preserves ambiguous native aliases through public parser and CLI selectors", () => {
+		const first = grokbotModel("grok-4.6", ["latest"]);
+		const second = grokbotModel("grok-4.6-fast", [" LATEST "]);
+		const models = [first, second];
+		const registry = { getAll: () => models, getAvailable: () => models } as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		expect(parseModelPattern("grokbot/latest", models).model).toBeUndefined();
+		const cli = resolveCliModel({ cliModel: "grokbot/latest", modelRegistry: registry });
+		expect(cli.model).toBeUndefined();
+		expect(cli.error).toContain('Model "grokbot/latest" not found');
+	});
+
+	test("keeps a canonical id ahead of a colliding native alias on public selectors", () => {
+		const canonical = grokbotModel("latest");
+		const aliased = grokbotModel("grok-4.6-fast", ["LATEST"]);
+		const models = [canonical, aliased];
+		const registry = { getAll: () => models, getAvailable: () => models } as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		expect(parseModelPattern("grokbot/latest", models).model).toBe(canonical);
+		expect(resolveCliModel({ cliModel: "grokbot/latest", modelRegistry: registry }).model).toBe(canonical);
+	});
+
+	test("resolves provider references from a frozen model snapshot", () => {
+		const canonical = grokbotModel("grok-4-6-fast", ["latest"]);
+		const routed = {
+			...grokbotModel("grok-routed"),
+			thinking: {
+				mode: "effort" as const,
+				efforts: [Effort.High],
+				effortRouting: { [Effort.High]: "grok-wire" },
+			},
+		};
+		const models = Object.freeze([canonical, routed]) as unknown as Model<Api>[];
+
+		expect(resolveProviderModelReference("grokbot", "grok-4-6-fast", models)).toBe(canonical);
+		expect(parseModelPattern("grokbot/latest", models).model).toBe(canonical);
+		expect(resolveProviderModelReference("grokbot", "grok-4.6-fast", models)).toBe(canonical);
+		expect(resolveProviderModelReference("grokbot", "grok-wire", models)).toBe(routed);
 	});
 });

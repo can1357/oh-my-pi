@@ -138,6 +138,21 @@ export interface AuthGatewayFormatModule {
 	formatError(status: number, type: string, message: string): Response;
 }
 
+/**
+ * A model resolver could not observe a stable catalog after its bounded retry
+ * budget. Clients can retry the same request after the credential/catalog
+ * update settles.
+ */
+export class RetryableModelResolutionError extends Error {
+	readonly status = 503;
+	readonly retryable = true;
+
+	constructor(message = "Model catalog changed while resolving the request; retry request") {
+		super(message);
+		this.name = "RetryableModelResolutionError";
+	}
+}
+
 export interface AuthGatewayServerOptions {
 	/** Listen address. Default `127.0.0.1:4000`. */
 	bind?: string;

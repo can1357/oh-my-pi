@@ -3509,9 +3509,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			checkAbort();
 			if (!registryFromParent) {
-				modelRegistry.refreshInBackground();
+				await awaitAbortable(modelRegistry.hydrateCredentialScopedModelCaches());
 			} else {
-				logger.debug("runSubagent: reusing parent modelRegistry; skipping refresh");
+				logger.debug("runSubagent: reusing parent modelRegistry; skipping cache hydration and refresh");
 			}
 			checkAbort();
 
@@ -3582,6 +3582,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					requested: modelPatterns,
 				});
 			}
+			if (!registryFromParent) modelRegistry.refreshInBackground();
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
