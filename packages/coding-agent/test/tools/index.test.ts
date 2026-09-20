@@ -223,6 +223,16 @@ describe("createTools", () => {
 		expect(prewalkSubagent.map(t => t.name)).toContain("todo");
 	});
 
+	it("keeps todo for yield sessions with an explicit todo grant (issue #12575)", async () => {
+		// Explicit `tools: [read, todo]` frontmatter opts the subagent into its
+		// own list; the default stays parent-owned.
+		const granted = await createTools(createTestSession({ requireYieldTool: true }), ["read", "todo"]);
+		expect(granted.map(t => t.name)).toContain("todo");
+
+		const ungranted = await createTools(createTestSession({ requireYieldTool: true }), ["read"]);
+		expect(ungranted.map(t => t.name)).not.toContain("todo");
+	});
+
 	it("excludes ask tool when hasUI is false", async () => {
 		const session = createTestSession({ hasUI: false });
 		const tools = await createTools(session);
