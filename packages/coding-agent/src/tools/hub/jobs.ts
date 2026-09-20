@@ -196,6 +196,7 @@ export function buildJobResult(
 	jobs: TrackedJobLike[],
 	cancelOutcomes: CancelOutcome[],
 	agents: AgentActivitySnapshot[] = [],
+	options?: { consumeSettled?: boolean },
 ): AgentToolResult<CoordinationDetails> {
 	// Deduplicate by id (cancelled jobs may also appear in the watched set).
 	const seen = new Set<string>();
@@ -207,7 +208,11 @@ export function buildJobResult(
 	const jobResults = snapshotJobs(session, uniqueJobs);
 	const alreadyConsumed = new Set(jobResults.filter(job => manager.isJobResultConsumed(job.id)).map(job => job.id));
 
-	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
+	// An aborted wait discards its inline result with the turn — skipping the
+	// consume leaves the retained async deliveries to re-wake the agent.
+	if (options?.consumeSettled !== false) {
+		manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
+	}
 
 	const completed = jobResults.filter(j => j.status !== "running");
 	const running = jobResults.filter(j => j.status === "running");

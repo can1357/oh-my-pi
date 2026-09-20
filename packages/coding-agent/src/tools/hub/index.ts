@@ -379,7 +379,11 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const runningJobs = jobsToWatch.filter(j => j.status === "running");
 		if (manager && jobsToWatch.length > 0 && runningJobs.length === 0) {
 			// Every explicitly watched job already settled — immediate snapshot.
-			return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
+			// When already aborted the inline result dies with the turn, so the
+			// async deliveries must survive: report without consuming them.
+			return buildJobResult(this.session, manager, "wait", jobsToWatch, [], [], {
+				consumeSettled: signal?.aborted !== true,
+			});
 		}
 
 		// Wait window: the adaptive ladder starts at the floor and climbs as the
@@ -498,6 +502,10 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			if (settled.message) return messageResult(messaging.senderId, settled.message);
 		}
 
-		return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
+		// An aborted wait discards its inline result with the turn — report
+		// without consuming so the retained async deliveries still re-wake us.
+		return buildJobResult(this.session, manager, "wait", jobsToWatch, [], [], {
+			consumeSettled: signal?.aborted !== true,
+		});
 	}
 }

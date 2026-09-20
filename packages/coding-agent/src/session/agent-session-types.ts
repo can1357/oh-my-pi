@@ -208,6 +208,8 @@ export interface AgentSessionConfig {
 	toolRegistry?: Map<string, AgentTool>;
 	/** Creates tools registered only while vibe mode is active. */
 	createVibeTools?: () => AgentTool[];
+	/** Live vibe worker roster text for the rebuilt mode-context message. Called every turn; undefined omits the roster. */
+	getVibeRoster?: () => string | undefined;
 	/** Names whose current registry entry is the built-in implementation. */
 	builtInToolNames?: Iterable<string>;
 	/** MCP names whose initial registry entries came from the manager snapshot. */

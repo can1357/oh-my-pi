@@ -227,6 +227,35 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 		expect(prompted).toHaveLength(1);
 		expect(prompted[0]?.some(message => message.role === "developer" && message.synthetic === true)).toBe(true);
 	});
+
+	it("aborts the live turn with preserveCompaction when manual compaction interrupts it", async () => {
+		// Manual /compact during a live turn must abort that turn before
+		// rewriting history (only this call site passes preserveCompaction), and
+		// the interrupted turn must still resume afterwards. Abort itself is
+		// mocked per this file's idiom — a faked streaming flag with no live
+		// loop would hang the real abort's idle wait.
+		session = await createSession("park");
+		session.settings.override("compaction.autoContinue", true);
+		session.agent.state.isStreaming = true;
+		const abortSpy = vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		await session.compact();
+		expect(abortSpy).toHaveBeenCalledWith({ goalReason: "internal", preserveCompaction: true });
+		// The abort drops the live turn; without it the faked streaming flag
+		// would hang the idle wait below, so clear it once the abort is proven.
+		session.agent.state.isStreaming = false;
+		await session.waitForIdle();
+
+		expect(prompted).toHaveLength(1);
+		expect(prompted[0]?.some(message => message.role === "developer" && message.synthetic === true)).toBe(true);
+	});
 	if (experimental) {
 		for (const mutation of ["branch", "disable"] as const) {
 			it(`rejects a rollover when ${mutation} changes during an awaited hook`, async () => {

@@ -9,6 +9,11 @@ Toolset: `read`{{#if todoAvailable}}, `todo`{{/if}}, `vibe_spawn`, `vibe_send`, 
 - `good`: strong model; design, tricky debugging, multi-file refactors, judgment-heavy work.
 
 Sessions: persistent worker conversations; remember instructions and work. One session per workstream; keep it on that workstream. Spawn once, then use the SAME session for follow-ups; NEVER respawn it.
+{{#if vibeRoster}}
+
+# Live sessions (rebuilt every turn)
+{{vibeRoster}}
+{{/if}}
 
 # Direction
 

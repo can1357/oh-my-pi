@@ -683,6 +683,35 @@ describe("AsyncJobManager", () => {
 		expect(attempts).toBe(attemptsAfterAck);
 	});
 
+	test("a job that settles while watched delivers after unwatch unless acknowledged", async () => {
+		const completions: Array<{ jobId: string; text: string }> = [];
+		const manager = new AsyncJobManager({
+			onJobComplete: async (jobId, text) => {
+				completions.push({ jobId, text });
+			},
+		});
+		const release = Promise.withResolvers<void>();
+		const deferredId = manager.register("bash", "watched job", async () => {
+			await release.promise;
+			return "deferred result";
+		});
+		const droppedId = manager.register("bash", "acknowledged job", async () => {
+			await release.promise;
+			return "dropped result";
+		});
+		manager.watchJobs([deferredId, droppedId]);
+		release.resolve();
+		await manager.waitForAll();
+		// Both settled while watched: nothing reaches the sink yet.
+		await manager.drainDeliveries({ timeoutMs: 50 });
+		expect(completions).toEqual([]);
+		// Acknowledging one makes its drop permanent; the other still owes delivery.
+		manager.acknowledgeDeliveries([droppedId]);
+		expect(manager.unwatchJobs([deferredId, droppedId])).toBe(2);
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+		expect(completions).toEqual([{ jobId: deferredId, text: "deferred result" }]);
+	});
+
 	test("dispose clears jobs and pending deliveries", async () => {
 		const manager = new AsyncJobManager({
 			onJobComplete: async () => {

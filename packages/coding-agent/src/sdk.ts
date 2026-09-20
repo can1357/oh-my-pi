@@ -229,6 +229,7 @@ import {
 	supportsExternalThinking,
 	type Tool,
 	type ToolSession,
+	vibeRosterText,
 	WebSearchTool,
 	WriteTool,
 	warmupLspServers,
@@ -3906,6 +3907,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)
 					: undefined,
+			getVibeRoster:
+				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix ? () => vibeRosterText(toolSession) : undefined,
 			builtInToolNames: builtInRegistryToolNames,
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,

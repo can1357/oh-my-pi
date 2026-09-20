@@ -51,6 +51,8 @@ describe("AgentSession idle compaction async-job deferral", () => {
 	let modelRegistry: ModelRegistry;
 	let manager: AsyncJobManager;
 	let gates: Array<PromiseWithResolvers<string>>;
+	/** Live vibe roster text; undefined means no actionable workers. */
+	let vibeRoster: string | undefined;
 
 	function highUsage(input: number) {
 		return {
@@ -132,6 +134,7 @@ describe("AgentSession idle compaction async-job deferral", () => {
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		manager = new AsyncJobManager({ onJobComplete: async () => {} });
 		gates = [];
+		vibeRoster = undefined;
 
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
@@ -162,6 +165,7 @@ describe("AgentSession idle compaction async-job deferral", () => {
 			modelRegistry,
 			agentId: "Main",
 			asyncJobManager: manager,
+			getVibeRoster: () => vibeRoster,
 		});
 	});
 
@@ -219,5 +223,27 @@ describe("AgentSession idle compaction async-job deferral", () => {
 		await session.runIdleCompaction();
 		await session.waitForIdle();
 		expect(compactSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("schedules a continuation when a stranded vibe director owns live workers", async () => {
+		mockCompaction();
+		vibeRoster = "- `worker-a` [fast] running · 1 turn";
+		session.setVibeModeState({ enabled: true });
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+
+		// Compaction wipes the transcript that held the roster and no delivery
+		// will wake the idle director, so the commit must arm a continuation.
+		await session.runIdleCompaction();
+		await session.waitForIdle();
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+
+		// A pending async wake owns the resume instead: the delivery re-wakes
+		// the director, so compaction must not also arm a continuation.
+		promptSpy.mockClear();
+		const job = registerGatedJob("Main");
+		await session.runIdleCompaction();
+		await session.waitForIdle();
+		expect(promptSpy).not.toHaveBeenCalled();
+		job.resolve();
 	});
 });

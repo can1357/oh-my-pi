@@ -13,6 +13,8 @@
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
+- Fixed interrupted `vibe_wait`/`hub` waits swallowing worker results: an aborted wait no longer acknowledges results its discarded turn never returns, so they re-deliver asynchronously instead of vanishing.
+- Fixed `/compact` and idle compaction stranding an idle `/vibe` director that owns live workers: compaction now arms a post-compaction continuation when no delivery will wake the director, and the rebuilt director context carries the live worker roster.
 
 ## [18.2.6] - 2026-09-18
 

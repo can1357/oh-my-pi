@@ -646,6 +646,7 @@ export class AgentSession {
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
 	#planModeState: PlanModeState | undefined;
 	#vibeModeState: VibeModeState | undefined;
+	#getVibeRoster: (() => string | undefined) | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
@@ -1673,6 +1674,7 @@ export class AgentSession {
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
 		};
+		this.#getVibeRoster = config.getVibeRoster;
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
 			toolRegistry: config.toolRegistry,
@@ -1911,6 +1913,7 @@ export class AgentSession {
 			messages: () => this.messages,
 			baseSystemPrompt: () => this.#tools.baseSystemPrompt,
 			goalModeState: () => this.#goalModeState,
+			isStrandedVibeDirector: () => this.#isStrandedVibeDirector(),
 			planReferencePath: () => this.#planReferencePath,
 			nonMessageTokenSource: () => this,
 			hasExperimentalContextRolloverTools: () => {
@@ -2354,6 +2357,20 @@ export class AgentSession {
 	 */
 	hasPendingAsyncWork(): boolean {
 		return this.#hasPendingAsyncWake();
+	}
+
+	/**
+	 * True when vibe mode is active and this director owns at least one live
+	 * worker, yet no async delivery is pending to re-wake it after compaction.
+	 * Compaction wipes the transcript that held the roster, so without an
+	 * armed continuation the director would sit idle forever. Liveness comes
+	 * from the same roster provider that feeds the rebuilt context message: a
+	 * non-empty roster means actionable workers.
+	 */
+	#isStrandedVibeDirector(): boolean {
+		if (this.#vibeModeState?.enabled !== true) return false;
+		if (!this.#getVibeRoster?.()) return false;
+		return !this.#hasPendingAsyncWake();
 	}
 
 	/** True while a submission has been admitted but has not yet started a turn, queued, or bailed. */
@@ -4012,9 +4029,15 @@ export class AgentSession {
 			});
 			return true;
 		}
-		if (!options.autoContinue) return false;
+		const strandedVibeDirector = this.#isStrandedVibeDirector();
+		// A stranded vibe director owns live workers but nothing will wake it: the
+		// idle "no need to continue" judgments don't apply. Explicit opt-outs still
+		// win — suppression above, and the autoContinue setting here.
+		const autoContinue =
+			options.autoContinue || (strandedVibeDirector && this.settings.get("compaction.autoContinue") !== false);
+		if (!autoContinue) return false;
 		const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
-		if (options.terminalTextAnswer && !activeGoal) return false;
+		if (options.terminalTextAnswer && !activeGoal && !strandedVibeDirector) return false;
 		return this.#scheduleAutoContinuePrompt(options.generation);
 	}
 
@@ -6139,6 +6162,7 @@ export class AgentSession {
 			customType: VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 			content: prompt.render(vibeModeActivePrompt, {
 				todoAvailable: this.getActiveToolNames().includes("todo"),
+				vibeRoster: this.#getVibeRoster?.(),
 			}),
 			display: false,
 			attribution: "agent",

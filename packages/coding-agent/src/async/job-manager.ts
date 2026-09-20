@@ -256,6 +256,13 @@ export class AsyncJobManager {
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
+	/**
+	 * Delivery text retained for jobs that settled while watched. A watch is a
+	 * deferral, not a drop: `unwatchJobs` re-enqueues these normally, while
+	 * only `acknowledgeDeliveries` drops them. No entry exists unless a
+	 * watched job actually settled.
+	 */
+	readonly #deferredWatchDeliveries = new Map<string, string>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
@@ -338,6 +345,7 @@ export class AsyncJobManager {
 
 		const id = this.#resolveJobId(options?.id);
 		this.#suppressedDeliveries.delete(id);
+		this.#deferredWatchDeliveries.delete(id);
 		this.#consumedJobResults.delete(id);
 		const abortController = new AbortController();
 		const startTime = Date.now();
@@ -477,6 +485,15 @@ export class AsyncJobManager {
 		for (const jobId of uniqueJobIds) {
 			if (this.#watchedJobs.delete(jobId)) {
 				removed += 1;
+				// A watch defers delivery: a job that settled while watched had
+				// its text retained instead of queued — re-enqueue it now so the
+				// result still delivers. `#enqueueDelivery` still honours
+				// acknowledgement, so an acknowledged job stays dropped.
+				const deferred = this.#deferredWatchDeliveries.get(jobId);
+				if (deferred !== undefined) {
+					this.#deferredWatchDeliveries.delete(jobId);
+					this.#enqueueDelivery(jobId, deferred);
+				}
 			}
 		}
 		return removed;
@@ -514,6 +531,9 @@ export class AsyncJobManager {
 
 		for (const jobId of uniqueJobIds) {
 			this.#suppressedDeliveries.add(jobId);
+			// An acknowledgement is the only permanent drop: a retained
+			// watched-settlement for this job must never resurface later.
+			this.#deferredWatchDeliveries.delete(jobId);
 		}
 
 		const before = this.#deliveries.length;
@@ -767,6 +787,7 @@ export class AsyncJobManager {
 		this.#inFlightDeliveries.length = 0;
 		this.#suppressedDeliveries.clear();
 		this.#watchedJobs.clear();
+		this.#deferredWatchDeliveries.clear();
 		this.#consumedJobResults.clear();
 		this.#pollEscalation.clear();
 		this.#deliverySinks.clear();
@@ -921,6 +942,7 @@ export class AsyncJobManager {
 		this.#evictionTimers.delete(jobId);
 		this.#suppressedDeliveries.delete(jobId);
 		this.#watchedJobs.delete(jobId);
+		this.#deferredWatchDeliveries.delete(jobId);
 		this.#consumedJobResults.delete(jobId);
 		const job = this.#jobs.get(jobId);
 		if (job) this.#runRetainedArtifactsCleanup(job);
@@ -1010,10 +1032,17 @@ export class AsyncJobManager {
 	}
 
 	#enqueueDelivery(jobId: string, text: string): void {
-		// Skip delivery if already acknowledged
-		if (this.isDeliverySuppressed(jobId)) {
+		// An acknowledgement permanently drops the result.
+		if (this.#suppressedDeliveries.has(jobId)) {
 			return;
 		}
+		// A watch merely defers it: retain the text for `unwatchJobs` to
+		// re-enqueue instead of discarding it.
+		if (this.#watchedJobs.has(jobId)) {
+			this.#deferredWatchDeliveries.set(jobId, text);
+			return;
+		}
+
 		const job = this.#jobs.get(jobId);
 		this.#queueDelivery({
 			jobId,
