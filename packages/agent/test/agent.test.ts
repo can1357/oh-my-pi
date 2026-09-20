@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, AgentBusyError, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { SimpleStreamOptions, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -1159,6 +1160,65 @@ describe("Agent", () => {
 		}
 		expect(assistantEnd.message.stopReason).toBe("error");
 		expect(assistantEnd.message.errorMessage).toBe(errorText);
+	});
+
+	it("does not restore discarded thinking-loop reasoning on thrown stream errors", async () => {
+		const mock = createMockModel({ responses: [] });
+		const thinking = "?!".repeat(32);
+		const started = createAssistantMessage([{ type: "thinking", thinking }]);
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: started });
+					stream.push({
+						type: "thinking_delta",
+						contentIndex: 0,
+						delta: thinking,
+						partial: started,
+					});
+					stream.fail(
+						AIError.attach(
+							new Error("Thinking loop detected: the model repeated near-identical content"),
+							AIError.create(AIError.Flag.ThinkingLoop),
+						),
+					);
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		const assistant = agent.state.messages.find(message => message.role === "assistant");
+		expect(assistant?.stopReason).toBe("error");
+		expect(assistant?.content).toEqual([]);
+		expect(AIError.is(assistant?.errorId, AIError.Flag.ThinkingLoop)).toBe(true);
+	});
+
+	it("keeps partial reasoning on ordinary thrown stream errors", async () => {
+		const mock = createMockModel({ responses: [] });
+		const thinking = "partial reasoning";
+		const started = createAssistantMessage([{ type: "thinking", thinking }]);
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: started });
+					stream.fail(new Error("connection reset"));
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("trigger");
+
+		const assistant = agent.state.messages.find(message => message.role === "assistant");
+		expect(assistant?.stopReason).toBe("error");
+		expect(assistant?.errorMessage).toBe("connection reset");
+		expect(assistant?.content).toEqual([{ type: "thinking", thinking }]);
 	});
 
 	it("prompt() refreshes tools and system prompt between same-turn model calls", async () => {

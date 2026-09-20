@@ -537,9 +537,19 @@ function detectExactSuffixCycle(text: string): [unit: string, count: number] | n
 		const minChars = len <= EXACT_SHORT_MAX_UNIT ? EXACT_SHORT_MIN_REPEATED_CHARS : EXACT_LONG_MIN_REPEATED_CHARS;
 		if (count < minCount || len * count < minChars) continue;
 		const unit = text.slice(-len);
-		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit)) return [unit, count];
+		// Letter/pictograph units keep the original eligibility gate. Pure
+		// punctuation (e.g. `?!`) is an additional exact-cycle shape; digit
+		// runs such as hexdumps stay excluded.
+		if (/\p{L}|\p{Extended_Pictographic}/u.test(unit) || isPunctuationCycleUnit(unit)) return [unit, count];
 	}
 	return null;
+}
+
+/** True for a cycle unit that is punctuation/symbol only — e.g. `?!`. Digits
+ *  and letters stay excluded so hexdumps and structured dumps are not
+ *  reclassified (#11129). */
+function isPunctuationCycleUnit(unit: string): boolean {
+	return /[\p{P}\p{S}]/u.test(unit) && !/[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(unit);
 }
 
 /** Lowercase and tokenize prose plus code/path payloads, dropping pure numbers. */
