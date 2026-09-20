@@ -66,6 +66,9 @@ const appSchema = type({
 	"relay?": type("boolean").describe("drive the user's own tabs via the omp browser relay"),
 	"args?": type("string[]").describe("extra cli args"),
 	"target?": type("string").describe("substring to pick a window"),
+	"new_tab?": type("boolean").describe(
+		"open a fresh, non-activating tab instead of adopting an existing one (relay/connected); isolates concurrent omp processes, ignored when no browser is user-driven",
+	),
 });
 
 const tabCallStepSchema = type({
@@ -318,6 +321,7 @@ async function openBrowser(
 							}
 						: undefined,
 					target: params.app?.target,
+					newTab: params.app?.new_tab,
 					timeoutMs,
 					deadlineStartMs: deadlineStart,
 					dialogs: params.dialogs,

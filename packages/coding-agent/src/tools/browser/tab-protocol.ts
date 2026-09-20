@@ -59,7 +59,14 @@ export type WorkerInitPayload =
 			mode: "attach";
 			browserWSEndpoint: string;
 			safeDir: string;
-			targetId: string;
+			targetId?: string;
+			/**
+			 * Create a fresh tab (`Target.createTarget` with `background: true`)
+			 * instead of adopting `targetId`. Used by the `app.new_tab` opt-in:
+			 * it keeps concurrent omp processes on separate pages and never
+			 * activates the tab, so the user's focus does not move.
+			 */
+			createPage?: boolean;
 			dialogs?: "accept" | "dismiss";
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";

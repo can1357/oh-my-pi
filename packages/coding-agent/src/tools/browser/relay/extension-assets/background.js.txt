@@ -114,6 +114,10 @@ async function buildHello() {
     t: "hello",
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
+    // Advertised so a relay paired with an older build refuses a `background`
+    // create (rather than silently opening a foreground tab); the extension is
+    // installed and reloaded by hand, so version skew is expected.
+    caps: { createTabActive: true },
     tabs: snapshots,
     attachedTabIds
   };
@@ -135,7 +139,9 @@ async function runRpc(msg) {
     case "send":
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
-      const tab = await chrome.tabs.create({ url: msg.url });
+      // `active: false` creates the tab in the background: omp opens tabs for its
+      // own use and must never move the user's focus. Unset keeps the old behavior.
+      const tab = await chrome.tabs.create({ url: msg.url, active: msg.active !== false });
       const snap = snapshot(tab);
       if (!snap)
         throw new Error("created tab has no id");

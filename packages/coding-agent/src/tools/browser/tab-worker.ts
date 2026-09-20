@@ -780,6 +780,21 @@ async function createTrackedHeadlessPage(browser: Browser, reportTarget: (target
 	return page;
 }
 
+/**
+ * Create a fresh tab in the background and report its id before waiting on the
+ * page, so a worker that dies during init still lets the supervisor close it.
+ *
+ * `background: true` is CDP's "create without activating": Chromium honors it
+ * natively on a connected browser, and the omp relay forwards it to the
+ * extension as `chrome.tabs.create({ active: false })`. The user's focus never
+ * moves, and each caller gets a page no other omp process is driving.
+ */
+async function createBackgroundPage(browser: Browser, reportTarget: (targetId: string) => void): Promise<Page> {
+	const page = await browser.newPage({ background: true });
+	reportTarget(await targetIdForPage(page));
+	return page;
+}
+
 async function collectObservationEntries(
 	core: WorkerCore,
 	node: SerializedAXNode,
@@ -1152,7 +1167,15 @@ export class WorkerCore {
 				await applyStealthPatches(this.#browser, this.#page, { browserSession: null, override: null });
 				if (payload.emulateViewport !== false) await applyViewport(this.#page, payload.viewport);
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
+			} else if (payload.createPage) {
+				this.#page = await createBackgroundPage(this.#browser, targetId => {
+					this.#transport.send({ type: "page-created", targetId });
+				});
+				await this.#claimRelayTarget(this.#page);
+				this.#observeDialogs();
+				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			} else {
+				if (!payload.targetId) throw new ToolError("Attach payload carries neither a target id nor a page request");
 				const target = await this.#findAttachedTarget(payload.targetId);
 				// Post-timeout recycle: unblock the target BEFORE adopting the page — an open
 				// modal dialog or hung navigation can stall `target.page()` / ready info, and a
@@ -1183,9 +1206,11 @@ export class WorkerCore {
 		} catch (error) {
 			// A failed headless init leaves the worker's page orphaned in the shared
 			// browser (the supervisor retries with a fresh worker), so close it before
-			// reporting. Attach mode adopts an existing target — never close it.
+			// reporting. Attach mode adopts an existing target — never close it — unless
+			// this worker created the page itself (`createPage`).
 			const page = this.#page;
-			if (payload.mode === "headless" && page && !page.isClosed()) {
+			const ownsPage = payload.mode === "headless" || payload.createPage === true;
+			if (ownsPage && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
