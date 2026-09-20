@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.24] - 2026-09-20
+
 ### Fixed
 
 - `OperationalStore` write transactions now run `BEGIN IMMEDIATE`: deferred read-then-write transactions could hit `SQLITE_BUSY_SNAPSHOT` (uncovered by `busy_timeout`) when an independent connection committed between the read and the write, surfacing `database is locked` to callers under real cross-process contention.
