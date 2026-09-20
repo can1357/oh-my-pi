@@ -143,6 +143,8 @@ export interface SegmentContext {
 	contextPercent: number | null;
 	contextTokens: number;
 	contextWindow: number;
+	/** Externalized context kept out of the root window (RLM etc.). */
+	offloadSummary?: { externalBytes: number; reintroducedTokens: number } | null;
 	autoCompactEnabled: boolean;
 	/** Background speculative-compaction state (async compaction). */
 	compactionSpeculation: "idle" | "running" | "armed";

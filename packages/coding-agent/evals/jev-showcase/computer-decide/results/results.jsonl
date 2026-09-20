@@ -1,0 +1,12 @@
+{"task":"save-cancel-rules","arm":"rules-rerank","ok":true,"latencyMs":0,"backend":"rerank","action":"click","target":"e1"}
+{"task":"save-cancel-rules","arm":"jev","ok":true,"latencyMs":0,"backend":"rerank","action":"click","target":"e1"}
+{"task":"submit-ambiguous-null","arm":"rules-rerank","ok":true,"latencyMs":0}
+{"task":"submit-ambiguous-null","arm":"jev","ok":true,"latencyMs":335}
+{"task":"delete-no-match","arm":"rules-rerank","ok":true,"latencyMs":0}
+{"task":"delete-no-match","arm":"jev","ok":false,"latencyMs":150,"backend":"jev","action":"click"}
+{"task":"rerank-purchase","arm":"rules-rerank","ok":true,"latencyMs":0,"backend":"rerank","action":"click","target":"e2"}
+{"task":"rerank-purchase","arm":"jev","ok":true,"latencyMs":0,"backend":"rerank","action":"click","target":"e2"}
+{"task":"lone-control-rules","arm":"rules-rerank","ok":true,"latencyMs":0,"backend":"rules","action":"click","target":"e1"}
+{"task":"lone-control-rules","arm":"jev","ok":true,"latencyMs":0,"backend":"rules","action":"click","target":"e1"}
+{"task":"jev-armed-click","arm":"rules-rerank","ok":true,"latencyMs":0,"backend":"rerank","action":"click","target":"e1"}
+{"task":"jev-armed-click","arm":"jev","ok":true,"latencyMs":0,"backend":"rerank","action":"click","target":"e1"}

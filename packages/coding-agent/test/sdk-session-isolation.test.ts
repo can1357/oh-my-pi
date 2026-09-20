@@ -36,13 +36,30 @@ function createTtsrRule(name: string): Rule {
 }
 
 const SECRET_ENV_PATTERNS = /(?:KEY|SECRET|TOKEN|PASSWORD|PASS|AUTH|CREDENTIAL|PRIVATE|OAUTH)(?:_|$)/i;
+/** Mirrors `collectEnvSecrets` second pass — passwords embedded in DSN-style URLs. */
+const CONNECTION_URL_PASSWORD_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/:@?#\s]*:([^/?#\s]+)@/i;
+const MIN_ENV_SECRET_LEN = 8;
+
+function envVarSuppliesCollectableSecret(name: string, value: string | undefined): boolean {
+	if (!value || value.length < MIN_ENV_SECRET_LEN) return false;
+	if (SECRET_ENV_PATTERNS.test(name)) return true;
+	const match = CONNECTION_URL_PASSWORD_RE.exec(value);
+	if (!match) return false;
+	const password = match[1];
+	if (password.length >= MIN_ENV_SECRET_LEN) return true;
+	try {
+		const decoded = decodeURIComponent(password);
+		return decoded !== password && decoded.length >= MIN_ENV_SECRET_LEN;
+	} catch {
+		return false;
+	}
+}
 
 async function withClearedSecretEnv<T>(run: () => Promise<T>): Promise<T> {
 	const removed: Array<[string, string]> = [];
 	for (const [name, value] of Object.entries(process.env)) {
-		if (!value || value.length < 8) continue;
-		if (!SECRET_ENV_PATTERNS.test(name)) continue;
-		removed.push([name, value]);
+		if (!envVarSuppliesCollectableSecret(name, value)) continue;
+		removed.push([name, value!]);
 		delete process.env[name];
 	}
 	try {

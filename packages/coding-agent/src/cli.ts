@@ -85,6 +85,8 @@ const PREPAINT_SAFE_FLAGS: Record<string, true> = {
 	"--no-title": true,
 	"--no-prewalk": true,
 	"--no-pty": true,
+	"--rlm-auto": true,
+	"--rlm": true,
 };
 
 /** Complete the OS-visible process-name setup after speculative first paint. */

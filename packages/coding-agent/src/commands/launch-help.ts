@@ -54,6 +54,14 @@ export const launchHelp = {
 			description: "Add a workspace directory beyond the working directory (repeatable)",
 			multiple: true,
 		}),
+		rlm: Flags.boolean({
+			description:
+				"Enable RLM context engine for this session (context.engine=rlm + rlm.enabled; prefer search-driven grants via rlm op=query pattern=…)",
+		}),
+		"rlm-auto": Flags.boolean({
+			description:
+				"Enable RLM with rlm.workerMode=auto (complexity gate logs C/D decision each query; implies --rlm)",
+		}),
 		print: Flags.boolean({ char: "p", description: "Non-interactive mode: process prompt and exit" }),
 		continue: Flags.boolean({ char: "c", description: "Continue previous session" }),
 		resume: Flags.string({ char: "r", description: "Resume a session (by ID prefix, path, or picker if omitted)" }),
@@ -114,6 +122,8 @@ export const launchHelp = {
 		`# Interactive mode with initial prompt\n  ${APP_NAME} "List all .ts files in src/"`,
 		`# Include files in initial message\n  ${APP_NAME} @prompt.md @image.png "What color is the sky?"`,
 		`# Non-interactive mode (process and exit)\n  ${APP_NAME} -p "List all .ts files in src/"`,
+		`# RLM spill/search/query membrane for this session\n  ${APP_NAME} --rlm`,
+		`# RLM + deterministic auto C/D gate (log-only)\n  ${APP_NAME} --rlm-auto`,
 		`# Continue previous session\n  ${APP_NAME} --continue "What did we discuss?"`,
 		`# Create a shell shortcut for a work profile\n  ${APP_NAME} --profile work --alias omp-work`,
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,

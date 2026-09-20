@@ -1,10 +1,11 @@
 /**
- * Internal URL router for internal protocols (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`).
+ * Internal URL router for internal protocols (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rlm://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`).
  *
  * One process-global router with one handler per scheme. Access via
  * `InternalUrlRouter.instance()`. Handlers are stateless; per-session and
  * shared state lives in `./state.ts`.
  */
+
 import { setInternalUrlCompletionHost } from "@oh-my-pi/pi-tui/prompt/internal-url-autocomplete";
 import { setInternalReadTargetPredicate } from "@oh-my-pi/pi-tui/chat/read-target";
 import { AgentProtocolHandler } from "./agent-protocol";
@@ -19,6 +20,8 @@ import { extractUriScheme, parseInternalUrl } from "./parse";
 import { RuleProtocolHandler } from "./rule-protocol";
 import { SecurityProtocolHandler } from "./security-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
+import { RlmProtocolHandler } from "./rlm-protocol";
+
 import { SshProtocolHandler } from "./ssh-protocol";
 import type {
 	InternalResource,
@@ -47,6 +50,8 @@ export class InternalUrlRouter {
 		this.register(new OmpProtocolHandler());
 		this.register(new AgentProtocolHandler());
 		this.register(new ArtifactProtocolHandler());
+		this.register(new RlmProtocolHandler());
+
 		this.register(new MemoryProtocolHandler());
 		this.register(new LocalProtocolHandler());
 		this.register(new VaultProtocolHandler());

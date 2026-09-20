@@ -76,6 +76,10 @@ export interface Args {
 	pluginDirs?: string[];
 	print?: boolean;
 	printThoughts?: boolean;
+	/** Enable RLM context engine for this session (runtime override, not persisted). */
+	rlm?: boolean;
+	/** Enable rlm.workerMode=auto (requires --rlm). */
+	rlmAuto?: boolean;
 	export?: string;
 	noSkills?: boolean;
 	skills?: string[];
@@ -265,6 +269,11 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.noPrewalk = true;
 		} else if (arg === "--plan-yolo") {
 			result.planYolo = true;
+		} else if (arg === "--rlm-auto") {
+			result.rlm = true;
+			result.rlmAuto = true;
+		} else if (arg === "--rlm") {
+			result.rlm = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 		} else if (arg === "--print-thoughts") {

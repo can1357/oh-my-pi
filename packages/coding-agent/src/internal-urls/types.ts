@@ -1,3 +1,5 @@
+import type { RlmStore } from "../rlm/store";
+
 /**
  * Types for the internal URL routing system.
  *
@@ -169,6 +171,14 @@ export interface ResolveContext {
 	 * ignore the flag.
 	 */
 	pathOnly?: boolean;
+	/**
+	 * Calling session's RLM spill store. Prefer this over registry lookup so
+	 * `rlm://h/<id>` never resolves against a peer session's corpus.
+	 * Return null/undefined when RLM is off or no store exists yet — do not create.
+	 */
+	getRlmStore?: () => RlmStore | null | undefined;
+
+
 }
 
 /**

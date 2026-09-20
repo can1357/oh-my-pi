@@ -302,6 +302,7 @@ export interface InteractiveModeContext {
 	presentCommandOutput(content: Component | readonly Component[]): void;
 	/** Show session information in a focused transient overlay. */
 	showSessionInfo(info: string): void;
+	showContextUsagePanel(body: string): void;
 	/** Mount command output deferred by {@link presentCommandOutput}. */
 	flushPendingCommandOutput(): void;
 	/**

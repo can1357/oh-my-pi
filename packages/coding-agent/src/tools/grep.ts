@@ -761,7 +761,9 @@ async function resolveInternalSearchInputs(opts: {
 	getSessionBranch: ResolveContext["getSessionBranch"];
 	sessionId?: string;
 	agentRegistry?: ResolveContext["agentRegistry"];
+	getRlmStore?: ResolveContext["getRlmStore"];
 }): Promise<InternalSearchInputResolution> {
+
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
 	const virtualResources: VirtualSearchResource[] = [];
@@ -781,6 +783,7 @@ async function resolveInternalSearchInputs(opts: {
 		rules: opts.rules,
 		experimentalContextManagement: opts.experimentalContextManagement,
 		getSessionBranch: opts.getSessionBranch,
+		getRlmStore: opts.getRlmStore,
 		skipDirectoryListing: true,
 		// Try path-only first so large artifacts (and any other handler that
 		// separates path from content) resolve without materializing bytes.
@@ -788,6 +791,7 @@ async function resolveInternalSearchInputs(opts: {
 		// resources without a sourcePath fall through to a second resolve.
 		pathOnly: true,
 	};
+
 
 	for (let idx = 0; idx < paths.length; idx++) {
 		const rawPath = paths[idx];
@@ -968,7 +972,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					getSessionBranch: () => getExperimentalContextSession(this.session).getBranch(),
 					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
 					agentRegistry: this.session.agentRegistry,
+					getRlmStore: () => {
+						const store = this.session.rlmStore;
+						return store && !store.disposed ? store : null;
+					},
 				});
+
 				const searchablePaths = internalResolution.paths;
 				const { virtualResources, virtualPathSet, virtualInputIndexes } = internalResolution;
 				const rangesByAbsPath = new Map<string, LineRange[]>();

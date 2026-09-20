@@ -2135,6 +2135,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			contextPercent,
 			contextTokens,
 			contextWindow,
+			offloadSummary: this.session.getContextOffloadSummary?.() ?? null,
 			autoCompactEnabled: this.#autoCompactEnabled,
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
