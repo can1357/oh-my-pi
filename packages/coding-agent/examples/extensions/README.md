@@ -16,7 +16,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 | Plugin | Install | Description |
 | --- | --- | --- |
-| [OMP Code Model](https://github.com/cyriusweng/omp-code-model) | `omp plugin install github:cyriusweng/omp-code-model` | Runs reversible coding-model phases inside the current conversation, with optional Jev routing and graphical configuration. |
+| [OMP Code Model](https://github.com/cyriusweng/omp-code-model) | `omp plugin install github:cyriusweng/omp-code-model` | Runs reversible coding-model phases with Jev routing and audit state; it composes with [OMP Jev Gate](https://github.com/cyriusweng/omp-jev-gate) so selected executors receive its policy and guarded-tool checkpoints. |
 
 ## Examples
 
