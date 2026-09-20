@@ -221,9 +221,12 @@ describe("OpenAI compat policy", () => {
 		} satisfies ModelSpec<"openai-completions">);
 	}
 
-	it("routes local Qwen3.8 effort selections onto the chat template (llama.cpp qwen dialect)", () => {
+	it("routes local Qwen3.8 effort selections onto the chat template (llama.cpp)", () => {
 		// Regression: the qwen dialects used to emit only `enable_thinking: true`,
 		// so every effort selection ran at the template's xhigh default.
+		// llama-server reads per-request template controls out of
+		// `chat_template_kwargs`, so the effort, the thinking toggle and the
+		// history knob all ride that object and nothing goes top-level.
 		const model = localQwenModel("qwen3.8-27b", "llama.cpp", "http://127.0.0.1:8080/v1");
 		for (const effort of [Effort.Low, Effort.Medium, Effort.XHigh]) {
 			const params = chatParams();
@@ -231,12 +234,14 @@ describe("OpenAI compat policy", () => {
 				params,
 				resolveOpenAICompatPolicy(model, { endpoint: "chat-completions", reasoning: effort }),
 			);
-			// Twin emission: top-level for newer llama.cpp builds, kwargs for
-			// older builds — and the preserve_thinking kwarg must survive.
-			expect(params.enable_thinking).toBe(true);
-			expect(params.reasoning_effort).toBe(effort);
-			expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true, reasoning_effort: effort });
-			expect(params.preserve_thinking).toBe(true);
+			expect(params.chat_template_kwargs).toEqual({
+				preserve_thinking: true,
+				enable_thinking: true,
+				reasoning_effort: effort,
+			});
+			expect(params.enable_thinking).toBeUndefined();
+			expect(params.reasoning_effort).toBeUndefined();
+			expect(params.preserve_thinking).toBeUndefined();
 		}
 	});
 
@@ -271,9 +276,9 @@ describe("OpenAI compat policy", () => {
 			params,
 			resolveOpenAICompatPolicy(model, { endpoint: "chat-completions", reasoning: Effort.Medium }),
 		);
-		expect(params.enable_thinking).toBe(true);
+		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true, enable_thinking: true });
+		expect(params.enable_thinking).toBeUndefined();
 		expect(params.reasoning_effort).toBeUndefined();
-		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true });
 	});
 
 	it("keeps pre-3.8 local Qwen on the bare enable_thinking toggle", () => {
@@ -285,8 +290,8 @@ describe("OpenAI compat policy", () => {
 			params,
 			resolveOpenAICompatPolicy(model, { endpoint: "chat-completions", reasoning: Effort.High }),
 		);
-		expect(params.enable_thinking).toBe(true);
+		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true, enable_thinking: true });
+		expect(params.enable_thinking).toBeUndefined();
 		expect(params.reasoning_effort).toBeUndefined();
-		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true });
 	});
 });
