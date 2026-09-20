@@ -17,7 +17,7 @@
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
-- Fixed the agent-storage exit-backfill test leaking its fixture `stats.db` into the real `~/.omp` on Windows, where it later crashed `omp stats` with `no such column: entry_id`.
+- Fixed the agent-storage exit-backfill test leaking its fixture `stats.db` into the real `~/.omp` on Windows, where it later crashed `omp stats` with `no such column: entry_id` ([#12598](https://github.com/can1357/oh-my-pi/pull/12598) by [@abilliontokens](https://github.com/abilliontokens)).
 
 ## [18.2.6] - 2026-09-18
 
