@@ -62,6 +62,7 @@ interface AppKeybindings {
 	"app.history.search": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
+	"app.speech.speakLast": true;
 }
 
 /** Application action identifier registered alongside the base TUI keybindings. */
@@ -244,6 +245,10 @@ export const KEYBINDINGS = {
 	"app.live.toggle": {
 		defaultKeys: "ctrl+l",
 		description: "Start or stop live voice mode (/live)",
+	},
+	"app.speech.speakLast": {
+		defaultKeys: [],
+		description: "Speak the last assistant message on demand (second press stops playback)",
 	},
 } as const satisfies KeybindingDefinitions;
 

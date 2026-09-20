@@ -48,6 +48,7 @@ app.history.search: []
 | `app.stt.toggle`             | Unbound (hold `Space`)                                                | Toggle speech-to-text. By default there is no key chord — hold the space bar to record (push-to-talk) and release to transcribe; bind a chord here for a press-to-toggle alternative |
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
+| `app.speech.speakLast`       | Unbound                                                               | Speak the last assistant message on demand through the configured local TTS voice; a second press stops playback                                                                     |
 
 ## Recover a cleared prompt
 

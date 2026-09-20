@@ -390,6 +390,11 @@ export class InputController {
 					this.toggleToolActivityVisibility();
 					return { consume: true };
 				}
+				if (this.ctx.keybindings.matches(data, "app.speech.speakLast")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					this.#speakLastAssistantMessage();
+					return { consume: true };
+				}
 				return undefined;
 			});
 		}
@@ -2401,6 +2406,27 @@ export class InputController {
 		// A viewport-only repaint leaves tool rows already retired to terminal history unchanged.
 		this.ctx.ui.resetDisplay();
 		this.ctx.showStatus(`Tool activity: ${this.ctx.hideToolActivity ? "hidden" : "visible"}`);
+	}
+	/**
+	 * Speak the most recent assistant message through the configured local TTS
+	 * backend (issue #12552). A second press while speaking stops playback.
+	 * Independent of `speech.enabled`; reuses `speech.voice` / `tts.localVoice`.
+	 */
+	#speakLastAssistantMessage(): void {
+		if (vocalizer.isSpeaking()) {
+			vocalizer.clear();
+			return;
+		}
+		const message = this.ctx.session.getLastAssistantMessage?.();
+		const text = message?.content
+			.filter((part): part is { type: "text"; text: string } => part.type === "text")
+			.map(part => part.text)
+			.join("")
+			.trim();
+		const spoken = vocalizer.speakLastText(text);
+		if (spoken === undefined) {
+			this.ctx.showStatus("Nothing speakable in the last assistant message");
+		}
 	}
 
 	setToolsExpanded(expanded: boolean): void {

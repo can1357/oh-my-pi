@@ -223,6 +223,26 @@ export class Vocalizer {
 	}
 
 	/**
+	 * Speak the most recent assistant message on demand (issue #12552): a second
+	 * press while speaking stops playback instead. Bypasses the
+	 * `speech.enabled` gate (pushDelta would no-op) while still honoring
+	 * suspensions, so on-demand use never requires continuous speech mode.
+	 * Returns the spoken text, or undefined when there was nothing to speak.
+	 */
+	speakLastText(text: string | undefined): string | undefined {
+		if (this.isSpeaking()) {
+			this.clear();
+			return undefined;
+		}
+		const trimmed = text?.trim();
+		if (!trimmed) return undefined;
+		if (this.#suspensions > 0) return undefined;
+		this.#pushBypassingEnabledGate(trimmed);
+		this.flush();
+		return trimmed;
+	}
+
+	/**
 	 * Interrupt and drop every utterance, killing in-flight playback, synthesis,
 	 * and rewrites (new turn / user message / Esc interrupt). Audio stops at once.
 	 */
@@ -261,6 +281,26 @@ export class Vocalizer {
 	/** Resolve once the playback chain has drained (tests / shutdown). */
 	idle(): Promise<void> {
 		return this.#chain;
+	}
+	/**
+	 * Push text through the speakable pipeline without the `speech.enabled`
+	 * gate. Suspensions still apply (checked by the caller): push-to-talk owns
+	 * the audio device while active.
+	 */
+	#pushBypassingEnabledGate(text: string): void {
+		if (!text) return;
+		const speechSettings = this.#modelSource?.settings ?? settings;
+		if (this.#enhanced || (!this.#speakable && this.#enhancer && speechSettings.get("speech.enhanced"))) {
+			this.#pushEnhanced(text);
+			return;
+		}
+		this.#speakable ??= new SpeakableStream();
+		const speakable = this.#speakable;
+		this.#pushSegments(speakable.push(text));
+		this.#armIdle(() => {
+			if (this.#speakable !== speakable) return;
+			this.#pushSegments(speakable.flushIdle());
+		});
 	}
 
 	// --- Enhanced pipeline ---------------------------------------------------
