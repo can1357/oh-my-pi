@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { isCompiledBinary, logger, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { isCompiledBinary, logger, untilAborted, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import type { Browser, CDPSession } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
@@ -74,7 +74,7 @@ export interface ReleaseBrowserOptions {
 
 const browsers = new Map<string, BrowserHandle>();
 /** In-flight opens by browser key, so concurrent acquisitions share one launch instead of storming Chromium. */
-const pendingOpens = new Map<string, Promise<BrowserHandle>>();
+const pendingOpens = new Map<string, { promise: Promise<BrowserHandle>; startedAt: number }>();
 
 export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
@@ -95,6 +95,13 @@ export interface AcquireBrowserOptions {
 	cwd: string;
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	signal?: AbortSignal;
+	/**
+	 * The caller's own open budget. A waiter that aborts while the pending open
+	 * has already outlived one full budget evicts that entry, so a stalled
+	 * acquisition cannot wedge its browser key for the rest of the process.
+	 * Omit for callers whose abort does not imply the pending open is stuck.
+	 */
+	budgetMs?: number;
 }
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
@@ -120,11 +127,38 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 		// leaking the rest as unreferenced process trees.
 		const pending = pendingOpens.get(key);
 		if (pending) {
-			await pending.catch(() => undefined);
+			// A pending open that never settles poisons its key: every later
+			// acquisition waits here forever while its caller reports nothing but
+			// its own timeout, and the real failure is discarded. Wait under the
+			// caller's signal instead, and once an aborted waiter has outlived a
+			// full caller budget, evict the entry so the next acquisition gets a
+			// fresh attempt. The abandoned open keeps whatever handle it produces —
+			// the `opts.signal?.aborted` branch below disposes it when it settles.
+			try {
+				await untilAborted(opts.signal, () => pending.promise.catch(() => undefined));
+			} catch (error) {
+				if (opts.budgetMs !== undefined && performance.now() - pending.startedAt >= opts.budgetMs) {
+					if (pendingOpens.get(key) === pending) pendingOpens.delete(key);
+					logger.debug("Evicted stalled browser open", {
+						key,
+						stalledMs: Math.round(performance.now() - pending.startedAt),
+					});
+				}
+				throw error;
+			}
 			continue;
 		}
-		const open = openBrowserHandle(kind, opts).finally(() => pendingOpens.delete(key));
-		pendingOpens.set(key, open);
+		const open = openBrowserHandle(kind, opts);
+		const entry = { promise: open, startedAt: performance.now() };
+		pendingOpens.set(key, entry);
+		// Drop the entry when the open settles, but only while it is still the
+		// registered one — a late settlement of an evicted open must not remove
+		// the replacement now in flight. Both branches are handled here, so a
+		// rejected open never surfaces as an unhandled rejection.
+		const clearEntry = () => {
+			if (pendingOpens.get(key) === entry) pendingOpens.delete(key);
+		};
+		void open.then(clearEntry, clearEntry);
 		const handle = await open;
 		// The launch may resolve AFTER the caller has already aborted (the outer
 		// `untilAborted` rejects immediately on abort but does not cancel the
