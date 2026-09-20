@@ -6,6 +6,10 @@
 
 - Removed support for the env parameter in the bash tool
 
+### Added
+
+- Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
+
 ### Fixed
 
 - Fixed resume clutter: elide 0-turn sessions from the /resume menu; -c similarly skips empty sessions.

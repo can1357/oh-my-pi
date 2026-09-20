@@ -2809,6 +2809,14 @@ export class RelayBridge {
 			case "Target.getBrowserContexts":
 				this.#reply(conn, msg, { browserContextIds: [] });
 				return;
+			case "Target.getTargets": {
+				const targetInfos: TargetInfo[] = [];
+				for (const tab of this.#tabs.values()) {
+					if (this.#eligible(tab)) targetInfos.push(this.#pageInfo(tab, tab.attached));
+				}
+				this.#reply(conn, msg, { targetInfos });
+				return;
+			}
 			case "Target.setDiscoverTargets": {
 				conn.discover = true;
 				for (const tab of this.#tabs.values()) {
