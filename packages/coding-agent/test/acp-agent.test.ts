@@ -21,6 +21,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { resetSessionTitleIndexForTests } from "@oh-my-pi/pi-coding-agent/session/title-index";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -30,7 +31,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "@oh-my-pi/pi-coding-agent/tts/models";
-import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
 	ClientCapabilities,
@@ -311,6 +312,7 @@ class FakeAgentSession {
 
 	async dispose(): Promise<void> {
 		this.disposed = true;
+		this.sessionManager.seal();
 		await this.sessionManager.close();
 	}
 
@@ -462,11 +464,21 @@ function expectAcpNotifications(updates: SessionNotification[]): void {
 }
 
 const cleanupRoots: string[] = [];
+const cleanupHarnesses: AgentHarness[] = [];
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
 const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
 
 afterEach(async () => {
 	vi.useRealTimers();
+
+	const harnesses = cleanupHarnesses.splice(0);
+	for (const harness of harnesses) {
+		harness.abortController.abort();
+	}
+	await Promise.all(harnesses.map(harness => harness.agent.dispose()));
+	await Promise.all(harnesses.flatMap(harness => harness.sessions.map(session => session.dispose())));
+	resetSessionTitleIndexForTests();
+
 	if (originalAgentDir) {
 		setAgentDir(originalAgentDir);
 	} else {
@@ -476,7 +488,7 @@ afterEach(async () => {
 	resetSettingsForTest();
 
 	for (const root of cleanupRoots.splice(0)) {
-		await fs.promises.rm(root, { recursive: true, force: true });
+		await removeWithRetries(root);
 	}
 });
 
@@ -539,7 +551,7 @@ async function createHarness(
 		} as Parameters<typeof agent.initialize>[0]);
 	}
 
-	return {
+	const harness: AgentHarness = {
 		agent,
 		updates,
 		abortController,
@@ -550,6 +562,8 @@ async function createHarness(
 		cwdB,
 		findSession: (sessionId: string) => sessions.find(session => session.sessionId === sessionId),
 	};
+	cleanupHarnesses.push(harness);
+	return harness;
 }
 
 /** Fire `#scheduleBootstrapUpdates`'s guard without paying wall-clock time. */

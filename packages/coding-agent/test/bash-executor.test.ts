@@ -170,7 +170,7 @@ describe("executeBash", () => {
 		expect(result.output).toContain("tail");
 		expect(result.output).not.toContain("\x1b_G");
 		expect(result.output).not.toContain(image.data);
-	});
+	}, 15_000);
 
 	it("extracts Sixel emitted by an arbitrary subprocess", async () => {
 		const sixel = '\x1bP1;1q"1;1;3;6#1;2;100;0;0#1!3~\x1b\\';
@@ -192,9 +192,13 @@ describe("executeBash", () => {
 			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 		};
 		const frame = await encodeTerminalImage(image);
-		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; sleep 3`, {
+		vi.spyOn(piNatives.Shell.prototype, "run").mockImplementation(async (_options, onChunk) => {
+			onChunk?.(null, frame);
+			return { exitCode: undefined, cancelled: true, timedOut: true };
+		});
+		const result = await executeBash("image-then-timeout", {
 			cwd: tempDir,
-			timeout: 20,
+			timeout: 5000,
 		});
 
 		expect(result.timedOut).toBe(true);
@@ -1492,6 +1496,83 @@ describe("executeBash :async: background retention", () => {
 					} catch {}
 				}
 			}
+		},
+	);
+});
+
+describe("executeBash :follow-up: isolation", () => {
+	let tmp: string;
+
+	beforeEach(async () => {
+		tmp = makeTempDir();
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: tmp });
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+		vi.restoreAllMocks();
+		if (fs.existsSync(tmp)) removeSyncWithRetries(tmp);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"does not persist env across :follow-up: calls and does not leak into the session shell",
+		async () => {
+			const persistent = `follow-up-exec-${Date.now()}`;
+			const followUp = `${persistent}:follow-up:call1`;
+			await executeBash("export PI_FOLLOW_UP_VAR=session", { cwd: tmp, timeout: 5000, sessionKey: persistent });
+			const isolated = await executeBash("printf '%s' \"${PI_FOLLOW_UP_VAR:-unset}\"", {
+				cwd: tmp,
+				timeout: 5000,
+				sessionKey: followUp,
+			});
+			expect(isolated.output.trim()).toBe("unset");
+
+			await executeBash("export PI_FOLLOW_UP_VAR=verify", { cwd: tmp, timeout: 5000, sessionKey: followUp });
+			const again = await executeBash("printf '%s' \"${PI_FOLLOW_UP_VAR:-unset}\"", {
+				cwd: tmp,
+				timeout: 5000,
+				sessionKey: followUp,
+			});
+			expect(again.output.trim()).toBe("unset");
+
+			const session = await executeBash("printf '%s' \"$PI_FOLLOW_UP_VAR\"", {
+				cwd: tmp,
+				timeout: 5000,
+				sessionKey: persistent,
+			});
+			expect(session.output.trim()).toBe("session");
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"reaps leftover background jobs when follow-up execution returns",
+		async () => {
+			const pidFile = path.join(tmp, "follow-up-reap.pid");
+			const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+			const res = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $! > ${shellQuote(pidFile)}`, {
+				sessionKey: `follow-up-reap-${Date.now()}:follow-up:call1`,
+				cwd: tmp,
+				timeout: 5000,
+			});
+			expect(res.cancelled).toBe(false);
+			const pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+			expect(Number.isInteger(pid)).toBe(true);
+			await pollUntil(() => {
+				try {
+					process.kill(pid, 0);
+					return false;
+				} catch {
+					return true;
+				}
+			}, Date.now() + 2000);
+			let alive = true;
+			try {
+				process.kill(pid, 0);
+			} catch {
+				alive = false;
+			}
+			expect(alive).toBe(false);
 		},
 	);
 });

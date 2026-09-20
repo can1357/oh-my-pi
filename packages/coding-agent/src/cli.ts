@@ -18,7 +18,6 @@ import type * as WorkerThreads from "node:worker_threads";
 import type { MessagePort } from "node:worker_threads";
 import type { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
-import type * as Postmortem from "@oh-my-pi/pi-utils/postmortem";
 import {
 	APP_NAME,
 	getActiveProfile,
@@ -238,8 +237,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		// runtime and postmortem/inspector graph out of ordinary startup without
 		// putting an await ahead of the subprocess message handler.
 		const { startJsEvalProcess }: typeof JsProcessEntry = require("./eval/js/process-entry");
-		// The .js subpath is the package's unconditional export for synchronous loading.
-		const { interceptUnhandledRejections }: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
+		const { interceptUnhandledRejections } = await import("@oh-my-pi/pi-utils/postmortem");
 		// The JS evaluator forwards user-controlled payloads (tool-call args,
 		// display outputs); a non-serializable one must fail that cell, not
 		// SIGKILL the kernel and erase the eval session's state.
@@ -606,8 +604,9 @@ if (isProcessEntry || !Bun.isMainThread) {
 	// terminal lifetime; help/version/subcommand launches never start one. See #10930. The
 	// registration lives for the process — a one-shot entry exits right after runCli settles.
 	if (isProcessEntry) {
-		const { registerStdioDisconnectHandling }: typeof Postmortem = require("@oh-my-pi/pi-utils/postmortem.js");
-		registerStdioDisconnectHandling();
+		void import("@oh-my-pi/pi-utils/postmortem").then(({ registerStdioDisconnectHandling }) => {
+			registerStdioDisconnectHandling();
+		});
 	}
 	runCli(process.argv.slice(2)).catch(async error => {
 		// Failure boundary: inspector/postmortem is irrelevant to successful startup.

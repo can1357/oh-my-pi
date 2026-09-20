@@ -47,13 +47,18 @@ import { outputMeta } from "../tools/output-meta";
 import { resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { planLocalProtocolOptions } from "../tools/plan-mode-guard";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import {
+	type EditMode,
+	type EditToolDetails,
+	type EditToolPerFileResult,
+	type Operation,
+} from "@oh-my-pi/pi-tui/tools/edit";
 import { normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
 import { getLspBatchRequest } from "../lsp/batch";
-import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "@oh-my-pi/pi-tui/tools/edit";
+import { assertNativeThenRunForbidden, GRAMMAR_THEN_RUN_MESSAGE } from "../tools/action-fusion";
 import {
 	type ApplyPatchParams,
 	applyPatchSchema,
@@ -163,7 +168,11 @@ export function resolveEditToolDescription(
 		model?.editPromptVariant === "compact"
 			? (editDescriptionCompact(mode) ?? editDescription(mode))
 			: editDescription(mode);
-	return prompt.render(source);
+	const rendered = prompt.render(source);
+	if (mode === "hashline" || mode === "sloppy" || mode === "apply_patch") {
+		return `${rendered}\n\n${GRAMMAR_THEN_RUN_MESSAGE}`;
+	}
+	return rendered;
 }
 
 function resolveAllowFuzzy(session: ToolSession, rawValue: string): boolean {
@@ -486,6 +495,7 @@ export class EditTool implements AgentTool<TInput> {
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
+		assertNativeThenRunForbidden(params);
 		let editSession = this.#sessions.get(toolCallId);
 		const argsJson = JSON.stringify(params);
 		if (editSession && this.#streamedArgs.get(toolCallId) !== argsJson) {

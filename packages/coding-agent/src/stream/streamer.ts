@@ -194,30 +194,46 @@ export class StreamMuxHost {
 	}
 
 	async close(reason = "stream ended", exitCode = 0): Promise<void> {
-		if (this.#closing) return;
+		if (this.#closing) {
+			await this.#finished.promise;
+			return;
+		}
 		this.#closing = true;
 		process.off("exit", this.#removeSocketSync);
-		const bye: StreamStreamerFrame = { t: "bye", reason };
-		for (const connection of this.#connections) {
-			connection.socket.end(encodeStreamFrame(bye));
-			connection.socket.destroySoon();
-		}
-		this.#connections.clear();
-		this.#panes.clear();
-		this.#client.close();
-		this.#onEvent({ t: "link", state: "stopped", detail: reason });
+		try {
+			const byeLine = encodeStreamFrame({ t: "bye", reason });
+			const connections = [...this.#connections];
+			this.#connections.clear();
+			this.#panes.clear();
+			this.#client.close();
+			this.#onEvent({ t: "link", state: "stopped", detail: reason });
 
-		const server = this.#server;
-		this.#server = undefined;
-		if (server) {
-			const closed = Promise.withResolvers<void>();
-			server.close(() => closed.resolve());
-			await closed.promise;
+			const server = this.#server;
+			this.#server = undefined;
+			if (server) {
+				const closed = Promise.withResolvers<void>();
+				server.close(() => closed.resolve());
+				// server.close() waits until every connection is gone. destroySoon()
+				// waits for pending writes, so a peer that is already gone (or not
+				// reading) leaves this await pending. Destroy immediately, matching
+				// collab/tiny unix-server shutdown.
+				for (const connection of connections) {
+					if (connection.socket.destroyed) continue;
+					connection.socket.end(byeLine);
+					connection.socket.destroy();
+				}
+				await closed.promise;
+			} else {
+				for (const connection of connections) {
+					if (!connection.socket.destroyed) connection.socket.destroy();
+				}
+			}
+			if (process.platform !== "win32" && this.#endpoint) {
+				await fs.promises.rm(this.#endpoint, { force: true });
+			}
+		} finally {
+			this.#finished.resolve(exitCode);
 		}
-		if (process.platform !== "win32" && this.#endpoint) {
-			await fs.promises.rm(this.#endpoint, { force: true });
-		}
-		this.#finished.resolve(exitCode);
 	}
 
 	readonly #removeSocketSync = (): void => {

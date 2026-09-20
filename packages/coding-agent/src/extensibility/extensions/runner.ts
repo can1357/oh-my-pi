@@ -26,6 +26,7 @@ import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import { FUSION_TOOL_NAMES, hasThenRun, stripThenRun } from "../../tools/action-fusion";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
@@ -562,6 +563,11 @@ export class ExtensionRunner {
 		return this.#nativeToolResolver?.(name) !== undefined;
 	}
 
+	/** Native bash used for write/edit `then_run`. Fusion wraps it in the approval gate. */
+	getFollowUpBashTool(): AgentTool | undefined {
+		return this.#nativeToolResolver?.("bash")?.tool;
+	}
+
 	/**
 	 * Run the native built-in of `name` with `params` and return its result — the delegation target
 	 * of a same-tool `ctx.invokeTool`. Calls the unwrapped native `execute` directly with the loop's
@@ -569,6 +575,10 @@ export class ExtensionRunner {
 	 * same tool) rather than re-running the gate. `depth` guards a wrapper that recurses into itself;
 	 * it is per call chain (threaded from the caller), not session-global, so concurrent independent
 	 * delegations do not interfere.
+	 *
+	 * Write/edit `then_run` is stripped so same-tool `invokeTool` cannot double-run follow-up
+	 * verification; the outer wrapper owns fusion. Native write/edit still fail closed if
+	 * `then_run` reaches them on a direct call.
 	 */
 	async invokeNativeTool<TDetails = unknown>(
 		name: string,
@@ -593,9 +603,10 @@ export class ExtensionRunner {
 			throw new Error(`invokeTool: delegation depth exceeded 8 (recursive invokeTool for "${name}"?)`);
 		}
 		const toolCallId = `invoke-${name}-${Date.now().toString(36)}-${depth}`;
+		const executeParams = FUSION_TOOL_NAMES[name] && hasThenRun(params) ? stripThenRun(params) : params;
 		return (await resolved.tool.execute(
 			toolCallId,
-			params as never,
+			executeParams as never,
 			options?.signal,
 			options?.onUpdate as never,
 			options?.callerContext ?? resolved.makeContext(),

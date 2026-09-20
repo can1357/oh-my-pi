@@ -33,19 +33,23 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 				"anthropic/claude-sonnet-4-5",
 				JSON.stringify("implement X"),
 			].join(" ");
-			const proc = Bun.spawn(["timeout", "10s", "script", "-q", "-c", command, "/dev/null"], {
+			const env: Record<string, string | undefined> = {
+				...process.env,
+				HOME: root,
+				NO_COLOR: "1",
+				OMP_TITLE_PROBE_PATH: outputPath,
+				PI_CODING_AGENT_DIR: agentDir,
+				TERM: "xterm-256color",
+			};
+			delete env.PI_NO_TITLE;
+			// `-e` forwards the inner bun exit. stdin must stay a live pipe: inherited
+			// EOF is copied onto the PTY and can dismiss the CLI before the probe writes.
+			const proc = Bun.spawn(["timeout", "10s", "script", "-q", "-e", "-c", command, "/dev/null"], {
 				cwd: repoRoot,
+				stdin: "pipe",
 				stdout: "pipe",
 				stderr: "pipe",
-				env: {
-					...process.env,
-					HOME: root,
-					NO_COLOR: "1",
-					OMP_TITLE_PROBE_PATH: outputPath,
-					PI_CODING_AGENT_DIR: agentDir,
-					PI_NO_TITLE: "",
-					TERM: "xterm-256color",
-				},
+				env,
 			});
 
 			const [stdout, stderr, exitCode] = await Promise.all([
@@ -54,7 +58,10 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 				proc.exited,
 			]);
 
-			expect({ exitCode, stderr, stdoutBytes: stdout.byteLength }).toMatchObject({ exitCode: 0, stderr: "" });
+			expect({ exitCode, stderr, stdout: Buffer.from(stdout).toString("utf8") }).toMatchObject({
+				exitCode: 0,
+				stderr: "",
+			});
 			expect(await Bun.file(outputPath).text()).toBe(
 				JSON.stringify({ generatedFrom: "implement X", sessionName: "CLI Initial Title" }),
 			);

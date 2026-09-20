@@ -232,14 +232,13 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 	let db: Database | undefined;
 	try {
 		db = new Database(dbPath, { readonly: true });
-		const row = db
-			.prepare<{ matching: number; unsafe: number }, [string, string]>(`
+		using statement = db.prepare<{ matching: number; unsafe: number }, [string, string]>(`
 				SELECT
 					SUM(CASE WHEN json_extract(metadata_json, '$.cwd') = ? THEN 1 ELSE 0 END) AS matching,
 					SUM(CASE WHEN json_extract(metadata_json, '$.cwd') IS NULL OR json_extract(metadata_json, '$.cwd') <> ? THEN 1 ELSE 0 END) AS unsafe
 				FROM working_memory
-			`)
-			.get(cwd, cwd);
+		`);
+		const row = statement.get(cwd, cwd);
 		return (row?.matching ?? 0) > 0 && (row?.unsafe ?? 0) === 0;
 	} catch (error) {
 		logger.debug("Mnemopi: legacy bank probe failed", { dbPath, error: String(error) });

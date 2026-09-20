@@ -35,17 +35,17 @@ async function runProbe(command: string[], cwd?: string): Promise<BundleProbeRes
 }
 
 /**
- * Swap `@oh-my-pi/pi-utils` and the changelog module's `../config` import for a
- * dependency-free stub. Both pull the native addon loader into the bundle graph, and
- * that loader resolves `pi_natives.<platform>.node` relative to the emitted artifact,
- * so any probe written outside the repo fails to start. The subject under test is
- * emitted-asset resolution, not native loading.
+ * Swap `@oh-my-pi/pi-utils`, `@oh-my-pi/pi-utils/marked`, and the changelog
+ * module's `../config` import for a dependency-free stub. The first two pull
+ * the native addon loader and `packages/utils/src/marked.ts` (a file sitting
+ * beside a `marked/` directory) into the compile graph; both break standalone
+ * probes. The subject under test is emitted-asset resolution, not markdown lexing.
  */
 function changelogUtilsStubPlugin(): BunPlugin {
 	return {
 		name: "changelog-utils-stub",
 		setup(build) {
-			build.onResolve({ filter: /^@oh-my-pi\/pi-utils$/ }, () => ({ path: utilsStubPath }));
+			build.onResolve({ filter: /^@oh-my-pi\/pi-utils(?:\/marked)?$/ }, () => ({ path: utilsStubPath }));
 			build.onResolve({ filter: /^\.\.\/config$/ }, args =>
 				args.importer.endsWith("/utils/changelog.ts") ? { path: utilsStubPath } : undefined,
 			);
@@ -133,8 +133,10 @@ describe("changelog static import resources", () => {
 			const buildOutput = await Bun.build({
 				entrypoints: [bundleProbePath],
 				root: repoRoot,
+				target: "bun",
 				external: ["omp-legacy-pi-modules"],
 				plugins: [changelogUtilsStubPlugin()],
+				throw: false,
 				compile: {
 					outfile: binaryPath,
 					autoloadBunfig: false,

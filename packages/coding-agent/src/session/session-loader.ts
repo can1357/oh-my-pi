@@ -117,6 +117,7 @@ export async function visitEntriesFromFileStream(
 	let bytesSinceYield = 0;
 	let entriesSinceYield = 0;
 	let recordsSeen = 0;
+	let bytesRead = 0;
 	const maxRecords = Math.max(0, options.maxRecords ?? Number.POSITIVE_INFINITY);
 	let stopped = false;
 	let visitorThrew = false;
@@ -142,19 +143,41 @@ export async function visitEntriesFromFileStream(
 		await Bun.sleep(0);
 	};
 
-	const drain = async (): Promise<void> => {
+	const hasPayload = (bytes: Uint8Array, start: number, end: number): boolean => {
+		for (let index = start; index < end; index++) {
+			const byte = bytes[index];
+			if (byte !== 0x09 && byte !== 0x0a && byte !== 0x0d && byte !== 0x20) return true;
+		}
+		return false;
+	};
+
+	const drain = async (endOfInput = false): Promise<void> => {
 		const view = sink.flush();
 		if (!view) return;
 		// Only newline-terminated bytes may reach the parser: a trailing fragment
 		// in the same call turns an end-of-input `done` into a syntax error at the
 		// preceding newline, which would then be miscounted as a malformed record.
 		const lastNewline = view.lastIndexOf(0x0a);
-		if (lastNewline === -1) return;
+		if (lastNewline === -1) {
+			if (endOfInput && hasPayload(view, 0, view.length)) {
+				options.onMalformedRecord?.();
+				recordsSeen++;
+				sink.consume(view.length);
+			}
+			return;
+		}
 		let buffer: Uint8Array = view.subarray(0, lastNewline + 1);
 		let consumed = 0;
 		const advance = (count: number): void => {
 			consumed += count;
 			buffer = buffer.subarray(count);
+		};
+		const finishIncomplete = (start: number): void => {
+			if (hasPayload(buffer, start, buffer.length)) {
+				options.onMalformedRecord?.();
+				recordsSeen++;
+			}
+			advance(buffer.length);
 		};
 		while (buffer.length > 0 && !stopped) {
 			if (recordsSeen >= maxRecords) {
@@ -197,7 +220,13 @@ export async function visitEntriesFromFileStream(
 			if (error) {
 				// Malformed record: skip past the next newline and continue.
 				const nextNewline = buffer.indexOf(0x0a, read);
-				if (nextNewline === -1) break; // rest of the bad line not yet received
+				if (nextNewline === -1) {
+					// Mid-stream the rest of the bad line is still arriving. At EOF /
+					// the byte cap there is no more data, so the remainder is the
+					// incomplete record.
+					if (endOfInput) finishIncomplete(read);
+					break;
+				}
 				let nonWhitespace = false;
 				for (let index = read; index < nextNewline; index++) {
 					const byte = buffer[index];
@@ -215,7 +244,13 @@ export async function visitEntriesFromFileStream(
 				}
 				continue;
 			}
-			if (read === 0) break; // incomplete record awaiting more data
+			if (read === 0) {
+				// Incomplete value awaiting more bytes. After the source has ended
+				// (EOF or maxBytes), that value is a malformed truncated record —
+				// the same rule parseJsonlLenient uses for a trailing fragment.
+				if (endOfInput) finishIncomplete(0);
+				break;
+			}
 			advance(read);
 			if (done) {
 				advance(buffer.length);
@@ -224,17 +259,21 @@ export async function visitEntriesFromFileStream(
 		}
 		sink.consume(consumed);
 	};
-
 	try {
 		const file = Bun.file(filePath);
 		const source = Number.isFinite(maxBytes) ? file.slice(0, maxBytes) : file;
 		for await (const chunk of source.stream()) {
 			if (stopped) break;
-			bytesSinceYield += chunk.byteLength;
-			options.onBytesConsumed?.(chunk.byteLength);
+			const remaining = maxBytes - bytesRead;
+			if (remaining <= 0) break;
+			const take = remaining < chunk.byteLength ? remaining : chunk.byteLength;
+			const piece = take === chunk.byteLength ? chunk : chunk.subarray(0, take);
+			bytesRead += piece.byteLength;
+			bytesSinceYield += piece.byteLength;
+			options.onBytesConsumed?.(piece.byteLength);
 			// Parsing before the chunk closes a line re-scans the unfinished record
 			// on every chunk, which is quadratic for large records.
-			if (chunk.lastIndexOf(0x0a) === -1) {
+			if (piece.lastIndexOf(0x0a) === -1) {
 				// Skipping drain() also skips the only enforcement of the record cap,
 				// so re-check it here: a delimiter-free file would otherwise be read
 				// and buffered in full despite an exhausted budget.
@@ -242,11 +281,15 @@ export async function visitEntriesFromFileStream(
 					stopped = true;
 					break;
 				}
-				sink.append(chunk);
+				sink.append(piece);
 				await yieldToMacrotask();
+				// maxBytes is a loop-exit invariant, not just a slice hint. The
+				// delimiter-free path never reaches drain(), so without this break a
+				// truncated record at the cap waits forever for a newline/EOF.
+				if (bytesRead >= maxBytes) break;
 				continue;
 			}
-			sink.append(chunk);
+			sink.append(piece);
 			// The optional fixed-width title slot is a physical first line that is
 			// NOT JSON; peel it before the parser would (correctly) reject it. The
 			// first line ends at a '\n' byte, so it is a complete UTF-8 sequence and
@@ -271,12 +314,13 @@ export async function visitEntriesFromFileStream(
 			// sink keeps that remainder for the next chunk.
 			await drain();
 			await yieldToMacrotask();
+			if (bytesRead >= maxBytes) break;
 		}
 		// A trailing record without a final newline: terminate it so the parser
 		// can complete it (readline yielded it; parseChunk needs the delimiter).
 		if (!stopped && !sink.isEmpty) {
 			sink.append(LF);
-			await drain();
+			await drain(true);
 		}
 	} catch (err) {
 		if (visitorThrew) throw err;

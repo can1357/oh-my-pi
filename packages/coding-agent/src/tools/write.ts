@@ -40,6 +40,7 @@ import type { ToolSession } from "../sdk";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
+import { assertNativeThenRunForbidden, thenRunFieldSchema } from "./action-fusion";
 import { assertEditableFile } from "./auto-generated-guard";
 import {
 	formatHashlineHeader,
@@ -296,6 +297,7 @@ function resolveBulkDirectives(raw: string, stripped: string): Map<number, strin
 const writeSchema = type({
 	path: type("string").describe("file path"),
 	content: type("string").describe("file content"),
+	"then_run?": thenRunFieldSchema,
 });
 
 export type WriteToolInput = typeof writeSchema.infer;
@@ -1168,11 +1170,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content }: WriteParams,
+		params: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<WriteToolDetails>> {
+		assertNativeThenRunForbidden(params);
+		const { path: rawPath, content } = params;
 		// Strip a hashline `[path#TAG]` wrapper up front so every downstream
 		// decision (scheme routing, internal-URL handler dispatch, plan-mode
 		// guard, plan path resolution, ACP bridge routing) sees the same

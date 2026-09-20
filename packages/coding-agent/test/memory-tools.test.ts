@@ -2,8 +2,8 @@
  * Contract tests for the three shared memory tool factories.
  *
  * These exercise the public tool surface (factory gating + execute path) by
- * spying on `HindsightApi.prototype.{retain, recall, reflect}` and stubbing
- * Hindsight state on the fake ToolSession. We deliberately do not boot a real
+ * spying on `HindsightApi.prototype.{createBank, retain, retainBatch, recall, reflect}`
+ * and stubbing Hindsight state on the fake ToolSession. We deliberately do not boot a real
  * session — these tools only need a populated state accessor and Settings.
  */
 
@@ -97,6 +97,10 @@ interface RegisterStateOptions {
 }
 
 function registerState(client: HindsightApi, settings?: Settings, opts: RegisterStateOptions = {}) {
+	// First-use bank PUT runs inside flush/reflect via ensureBankExists. Isolate it
+	// at the HindsightApi boundary so tests keep the real bank-setup path without
+	// waiting on unmocked createBank → http://localhost:8888 (30s request timeout).
+	vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 	registeredState = new HindsightSessionState({
 		sessionId: TEST_SESSION_ID,
 		client,

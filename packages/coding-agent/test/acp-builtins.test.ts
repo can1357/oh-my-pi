@@ -15,7 +15,7 @@ import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plug
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getProjectDir, removeWithRetries, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -250,6 +250,42 @@ function createRuntime() {
 			notifyConfigChanged: undefined as (() => Promise<void> | void) | undefined,
 		},
 	};
+}
+
+/**
+ * Point `/mcp` user+project config reads at empty temp files.
+ * `getMCPConfigPath("user")` resolves through `getAgentDir()`, so Settings.isolated()
+ * and `runtime.cwd = "/tmp/project"` still pick up the host `mcp.json` (e.g. exa).
+ */
+async function withIsolatedMcpConfigRoots(runtime: { cwd: string }, run: () => Promise<void>): Promise<void> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-acp-mcp-"));
+	const agentDir = path.join(root, "agent");
+	const projectDir = path.join(root, "project");
+	await fs.mkdir(agentDir, { recursive: true });
+	await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+	await Bun.write(path.join(agentDir, "mcp.json"), JSON.stringify({ mcpServers: {} }));
+	await Bun.write(path.join(projectDir, ".omp", "mcp.json"), JSON.stringify({ mcpServers: {} }));
+	const previousAgentDir = getAgentDir();
+	const previousAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
+	const previousOmpProfile = process.env.OMP_PROFILE;
+	const previousPiProfile = process.env.PI_PROFILE;
+	setAgentDir(agentDir);
+	runtime.cwd = projectDir;
+	try {
+		await run();
+	} finally {
+		if (previousAgentDirEnv !== undefined) {
+			setAgentDir(previousAgentDirEnv);
+		} else {
+			setAgentDir(previousAgentDir);
+			delete process.env.PI_CODING_AGENT_DIR;
+		}
+		if (previousOmpProfile === undefined) delete process.env.OMP_PROFILE;
+		else process.env.OMP_PROFILE = previousOmpProfile;
+		if (previousPiProfile === undefined) delete process.env.PI_PROFILE;
+		else process.env.PI_PROFILE = previousPiProfile;
+		await removeWithRetries(root);
+	}
 }
 
 describe("ACP builtin slash commands", () => {
@@ -933,6 +969,7 @@ describe("wave 3 commands", () => {
 			await git("init", "-q", "-b", "main");
 			await git("config", "user.email", "t@example.com");
 			await git("config", "user.name", "t");
+			await git("config", "core.autocrlf", "false");
 			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
 			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
 			await git("add", "-A");
@@ -986,6 +1023,7 @@ describe("wave 3 commands", () => {
 			await git("init", "-q", "-b", "main");
 			await git("config", "user.email", "t@example.com");
 			await git("config", "user.name", "t");
+			await git("config", "core.autocrlf", "false");
 			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
 			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
 			await git("add", "-A");
@@ -1041,6 +1079,7 @@ describe("wave 3 commands", () => {
 			await git("init", "-q", "-b", "main");
 			await git("config", "user.email", "t@example.com");
 			await git("config", "user.name", "t");
+			await git("config", "core.autocrlf", "false");
 			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
 			await git("add", "-A");
 			await git("commit", "-qm", "init");
@@ -1191,10 +1230,12 @@ describe("wave 4 commands", () => {
 
 	it("/mcp resources: outputs server list or no-server message", async () => {
 		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/mcp resources", runtime);
-		expect(result).toEqual({ consumed: true });
-		// No servers configured in tmp project dir — should report that
-		expect(output[0]).toMatch(/No MCP servers configured|No resources/);
+		await withIsolatedMcpConfigRoots(runtime, async () => {
+			const result = await executeAcpBuiltinSlashCommand("/mcp resources", runtime);
+			expect(result).toEqual({ consumed: true });
+			// Isolated empty user+project mcp.json — should not read host servers
+			expect(output[0]).toMatch(/No MCP servers configured|No resources/);
+		});
 	});
 
 	it("/mcp unknown-verb: returns usage pointing to help", async () => {
@@ -1340,10 +1381,11 @@ describe("wave 5 — adapters and polish", () => {
 	// /mcp test — spy on connectToServer
 	it("/mcp test bogus: returns error when server not found in config", async () => {
 		const { output, runtime } = createRuntime();
-		// No servers in /tmp/project config — server not found
-		const result = await executeAcpBuiltinSlashCommand("/mcp test bogus", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("not found");
+		await withIsolatedMcpConfigRoots(runtime, async () => {
+			const result = await executeAcpBuiltinSlashCommand("/mcp test bogus", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("not found");
+		});
 	});
 
 	// /ssh add — spy on addSSHHost
