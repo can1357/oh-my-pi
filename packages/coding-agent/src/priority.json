@@ -97,6 +97,7 @@
 		"web/kimi",
 		"web/synthetic",
 		"web/ollama",
+		"web/serply",
 		"web/searxng",
 		"web/startpage",
 		"web/duckduckgo",

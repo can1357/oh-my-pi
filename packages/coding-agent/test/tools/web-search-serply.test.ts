@@ -1,7 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { searchSerply } from "@oh-my-pi/pi-coding-agent/web/search/providers/serply";
 import type { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
+
+// The registry resolves the bundled `web/serply` catalog model that `SearchParams` now
+// carries; the per-test `fakeAuthStorage` below still supplies the API key.
+const registryAuthStorage = createInMemoryAuthStorage();
+const { modelRegistry, model: serplyModel } = (() => {
+	const modelRegistry = new ModelRegistry(registryAuthStorage);
+	const model = modelRegistry.find("web", "serply");
+	if (!model) throw new Error("Expected bundled web/serply model");
+	return { modelRegistry, model };
+})();
+
+afterAll(() => registryAuthStorage.close());
 
 describe("Serply web search provider", () => {
 	// `searchSerply` takes its key from the injected `authStorage` resolver, so the fixture
@@ -36,6 +50,8 @@ describe("Serply web search provider", () => {
 		return {
 			query,
 			authStorage: fakeAuthStorage,
+			model: serplyModel,
+			modelRegistry,
 			systemPrompt: "Serply test prompt",
 		} as const;
 	}

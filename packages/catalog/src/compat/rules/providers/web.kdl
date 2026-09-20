@@ -96,6 +96,13 @@ provider "web" {
 			limits
 			supports-tools #false
 		}
+		model "serply" name="Serply" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "searxng" name="SearXNG" {
 			reasoning #false
 			input "text"
