@@ -12,6 +12,12 @@ pi --extension examples/extensions/permission-gate.ts
 cp permission-gate.ts ~/.omp/agent/extensions/
 ```
 
+## Standalone Plugins
+
+| Plugin | Install | Description |
+| --- | --- | --- |
+| [OMP Code Model](https://github.com/cyriusweng/omp-code-model) | `omp plugin install github:cyriusweng/omp-code-model` | Runs reversible coding-model phases inside the current conversation, with optional Jev routing and graphical configuration. |
+
 ## Examples
 
 ### Lifecycle & Safety
