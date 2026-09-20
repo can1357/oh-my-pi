@@ -375,6 +375,16 @@ export type StdinBufferOptions = {
 	 * same way, bounding memory when the end marker never arrives.
 	 */
 	pasteByteLimit?: number;
+	/**
+	 * Opt-out of unbracketed raw-paste classification. When true, CR/LF-bearing
+	 * input is never coalesced onto the paste channel; every byte keeps the key
+	 * path. Terminals with working bracketed paste (DECSET 2004 confirmed via
+	 * DECRQM) should set this: genuine pastes always arrive bracketed there, so
+	 * the heuristic is pure downside — and a UI event-loop stall batches human
+	 * keystrokes into byte-identical bursts that Enter must still submit
+	 * (issue #12540).
+	 */
+	disableRawPasteClassification?: boolean;
 };
 
 const KITTY_ENTER = /^\x1b\[13(?:;1)?u/u;
@@ -423,6 +433,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	#escapeSearchOffset = 0;
 	#rawPasteCandidate = "";
 	#rawPasteTimer?: NodeJS.Timeout;
+	#rawPasteClassificationDisabled = false;
 	#stringDiscardActive = false;
 	#stringDiscardBytes = 0;
 	#stringDiscardEscHeld = false;
@@ -434,6 +445,20 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#partialHoldMaxMs = options.partialHoldTimeout ?? PARTIAL_HOLD_MAX_MS;
 		this.#pasteTimeoutMs = options.pasteTimeout ?? PASTE_INACTIVITY_TIMEOUT_MS;
 		this.#pasteByteLimit = options.pasteByteLimit ?? PASTE_MAX_BYTES;
+		this.#rawPasteClassificationDisabled = options.disableRawPasteClassification ?? false;
+	}
+
+	/**
+	 * Enable or disable unbracketed raw-paste classification at runtime.
+	 * The terminal calls this when DECRQM confirms bracketed-paste (2004)
+	 * support: genuine pastes then always arrive bracketed, so the heuristic
+	 * only risks swallowing stall-batched Enter keys (issue #12540).
+	 */
+	setRawPasteClassificationEnabled(enabled: boolean): void {
+		this.#rawPasteClassificationDisabled = !enabled;
+		if (!enabled) {
+			this.#flushRawPasteCandidate();
+		}
 	}
 
 	process(data: string | Buffer): void {
@@ -492,6 +517,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		}
 
 		if (
+			!this.#rawPasteClassificationDisabled &&
 			this.#buffer.length === 0 &&
 			str.indexOf(ESC) === -1 &&
 			(str.indexOf("\r") !== -1 || str.indexOf("\n") !== -1)

@@ -906,4 +906,49 @@ describe("StdinBuffer", () => {
 			expect(emittedSequences).toEqual([]);
 		});
 	});
+	describe("Raw paste classification opt-out (issue #12540)", () => {
+		it("keeps stall-batched Enters on the key path when classification is disabled", async () => {
+			buffer.destroy();
+			buffer = new StdinBuffer({ timeout: 10, disableRawPasteClassification: true });
+			const pastes: string[] = [];
+			buffer.on("data", (sequence: string) => {
+				emittedSequences.push(sequence);
+			});
+			buffer.on("paste", (content: string) => {
+				pastes.push(content);
+			});
+
+			// Byte-identical to what a stalled event loop delivers on resume:
+			// three human Enters batched into one stdin read.
+			buffer.process("aaa\rbbb\rccc");
+			await waitUntil(() => emittedSequences.join("") === "aaa\rbbb\rccc");
+			expect(pastes).toEqual([]);
+			expect(emittedSequences.join("")).toBe("aaa\rbbb\rccc");
+		});
+
+		it("disables classification at runtime once bracketed paste is confirmed", async () => {
+			const pastes: string[] = [];
+			buffer.on("paste", (content: string) => {
+				pastes.push(content);
+			});
+
+			buffer.setRawPasteClassificationEnabled(false);
+			buffer.process("aaa\rbbb\rccc");
+			await waitUntil(() => emittedSequences.join("") === "aaa\rbbb\rccc");
+			expect(pastes).toEqual([]);
+			expect(emittedSequences.join("")).toBe("aaa\rbbb\rccc");
+		});
+
+		it("still classifies genuine unbracketed bursts by default", async () => {
+			const pastes: string[] = [];
+			buffer.on("paste", (content: string) => {
+				pastes.push(content);
+			});
+
+			buffer.process("aaa\rbbb\rccc");
+			await waitUntil(() => pastes.length === 1);
+			expect(pastes).toEqual(["aaa\rbbb\rccc"]);
+			expect(emittedSequences).toEqual([]);
+		});
+	});
 });
