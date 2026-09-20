@@ -4,13 +4,13 @@
 
 ### Added
 
-- Added `completion()` handle `metadata()` snapshots in JavaScript and Python, preserving existing `wait()` results while exposing configured role/effort, provider-option request evidence, and fallback attempts.
-- Added `write xd://deliver-plan` for design-only delivery that ends the current planning turn without authorizing implementation or leaving plan mode.
+- Added `completion()` handle `metadata()` snapshots in JavaScript and Python, preserving existing `wait()` results while exposing configured role/effort, provider-option request evidence, and fallback attempts ([#12566](https://github.com/can1357/oh-my-pi/pull/12566) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- Added `write xd://deliver-plan` for design-only delivery that ends the current planning turn without authorizing implementation or leaving plan mode ([#12566](https://github.com/can1357/oh-my-pi/pull/12566) by [@xiangnan0811](https://github.com/xiangnan0811)).
 
 ### Fixed
 
-- Preserved explicit slow-role completion effort selectors, including `max` and `off`, using existing model support clamping.
-- Removed implicit implementation approval for ACP clients without a form-capable authorization UI.
+- Preserved explicit slow-role completion effort selectors, including `max` and `off`, using existing model support clamping ([#12566](https://github.com/can1357/oh-my-pi/pull/12566) by [@xiangnan0811](https://github.com/xiangnan0811)).
+- Removed implicit implementation approval for ACP clients without a form-capable authorization UI ([#12566](https://github.com/can1357/oh-my-pi/pull/12566) by [@xiangnan0811](https://github.com/xiangnan0811)).
 
 ## [18.2.6] - 2026-09-18
 
