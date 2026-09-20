@@ -125,7 +125,7 @@ import {
 	wrapFetchForCopilotFallback,
 } from "./github-copilot-headers";
 import { servedModelFromAnthropicSignature } from "./anthropic-signature";
-import { getOpenAIPromptCacheKey } from "./openai-shared";
+import { getOpenAIPromptCacheKey, NO_AUTH_SENTINEL } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
@@ -368,10 +368,20 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		};
 		return allowAnthropicHeaderOverrides ? mergeHeaders(headers, anthropicHeaderOverrides) : headers;
 	} else if (!isOfficialAnthropicApiUrl(options.baseUrl)) {
+		// A keyless custom provider (`auth: none` in models.yml) resolves
+		// `options.apiKey` to the `N/A` sentinel rather than a real credential.
+		// Forwarding `Authorization: Bearer N/A` leaks the sentinel onto the
+		// wire instead of omitting the header — every other keyless transport
+		// already guards this exact sentinel (openai-shared's NO_AUTH_SENTINEL
+		// check, mirrored in google-vertex and cloudflare-ai-gateway, #6188).
+		// A caller-supplied Authorization in `model.headers` still wins.
+		const hasRealApiKey = options.apiKey !== NO_AUTH_SENTINEL;
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
-			Authorization: incomingAuthorization ?? `Bearer ${options.apiKey}`,
+			...(incomingAuthorization || hasRealApiKey
+				? { Authorization: incomingAuthorization ?? `Bearer ${options.apiKey}` }
+				: {}),
 			...sharedHeaders,
 			...(incomingUserAgent ? { "User-Agent": incomingUserAgent } : {}),
 			...(betaHeader ? { "anthropic-beta": betaHeader } : {}),
