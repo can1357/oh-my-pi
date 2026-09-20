@@ -2343,9 +2343,8 @@ describe("Settings", () => {
 			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.41.0");
 		});
 
-		it("migrates legacy find and search settings to glob and grep", async () => {
+		it("migrates legacy search settings to grep", async () => {
 			await writeSettings({
-				find: { enabled: false },
 				search: {
 					enabled: false,
 					contextBefore: 2,
@@ -2355,15 +2354,13 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(false);
 			expect(settings.get("grep.enabled")).toBe(false);
 			expect(settings.get("grep.contextBefore")).toBe(2);
 			expect(settings.get("grep.contextAfter")).toBe(5);
 		});
 
-		it("migrates flat legacy find and search settings keys to nested glob and grep", async () => {
+		it("migrates flat legacy search settings keys to nested grep", async () => {
 			await writeSettings({
-				"find.enabled": false,
 				"search.enabled": false,
 				"search.contextBefore": 2,
 				"search.contextAfter": 5,
@@ -2371,28 +2368,31 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(false);
 			expect(settings.get("grep.enabled")).toBe(false);
 			expect(settings.get("grep.contextBefore")).toBe(2);
 			expect(settings.get("grep.contextAfter")).toBe(5);
 		});
 
-		it("does not clobber existing glob/grep settings when migrating legacy find/search ones", async () => {
+		it("does not clobber existing grep settings when migrating legacy search ones", async () => {
 			await writeSettings({
-				find: { enabled: false },
-				glob: { enabled: true },
 				search: { enabled: false },
 				grep: { enabled: true },
-				"find.enabled": false,
-				"glob.enabled": true,
 				"search.enabled": false,
 				"grep.enabled": true,
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(true);
 			expect(settings.get("grep.enabled")).toBe(true);
+		});
+
+		it("keeps find.enabled as the semantic find tool toggle across reloads", async () => {
+			await writeSettings({ find: { enabled: true }, glob: { enabled: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("find.enabled")).toBe(true);
+			expect(settings.get("glob.enabled")).toBe(false);
 		});
 
 		it("migrates nested dev.autoqa.consent and todo.reminders.max without configuring parents", async () => {

@@ -23,11 +23,13 @@ import {
 	type Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelStringWithRouting, resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
+import type { SessionManager } from "../session/session-manager";
 import { getTinyLocalModelSpec } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
@@ -52,6 +54,33 @@ export interface JudgeDeps {
 	sessionId?: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	onUsage?: (usage: JudgmentUsage) => void;
+}
+
+/** Session journal surface that records off-transcript model cost; journal-only managers omit it. */
+export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId">;
+
+function isUsageLedger(manager: Partial<JudgmentUsageLedger>): manager is JudgmentUsageLedger {
+	return (
+		manager.appendModelUsage !== undefined && manager.getSessionId !== undefined && manager.getLeafId !== undefined
+	);
+}
+
+/**
+ * Build a {@link JudgeDeps.onUsage} that journals every judgment attempt as a
+ * `model_usage` entry under `purpose`, beneath the session leaf at record time,
+ * so `getSessionStats()` counts it in session totals. Attempts that land after
+ * the session changes are dropped by the ledger. Returns `undefined` when the
+ * journal cannot record usage.
+ */
+export function journalJudgmentUsage(
+	manager: Partial<JudgmentUsageLedger> | undefined,
+	purpose: string,
+): JudgeDeps["onUsage"] {
+	if (!manager || !isUsageLedger(manager)) return undefined;
+	const sessionId = manager.getSessionId();
+	return usage => {
+		manager.appendModelUsage({ purpose, ...usage }, { sessionId, parentId: manager.getLeafId() });
+	};
 }
 
 /** One keyword per answer; OpenAI-compatible endpoints reject budgets below 16. */
@@ -178,7 +207,7 @@ export class ChainJudge implements Judge {
 				model: model.id,
 				baseUrl: model.baseUrl,
 			});
-			return usageReportingTypeSafeJudge(judge, this.#deps.onUsage);
+			return usageReportingTypeSafeJudge(judge, model, this.#deps.onUsage);
 		}
 		// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 		const metadata = this.#deps.metadataResolver?.(model.provider);
@@ -230,7 +259,12 @@ class LocalTextBackend implements TextBackend {
 	}
 }
 
-function usageReportingTypeSafeJudge(judge: TypeSafeJudge, onUsage: JudgeDeps["onUsage"]): Judge {
+/**
+ * Report each native judgment's usage. TypeSafe itself reports tokens only, so
+ * a response without a billed amount is priced from the catalog model; a
+ * route that bills (OpenRouter) keeps its reported cost.
+ */
+function usageReportingTypeSafeJudge(judge: TypeSafeJudge, model: Model, onUsage: JudgeDeps["onUsage"]): Judge {
 	return {
 		label: judge.label,
 		async judge<Q extends Questions>(
@@ -238,6 +272,7 @@ function usageReportingTypeSafeJudge(judge: TypeSafeJudge, onUsage: JudgeDeps["o
 			options?: JudgeOptions,
 		): Promise<JudgmentResult<Q>> {
 			const result = await judge.judge(request, options);
+			if (result.usage.cost.total === 0) calculateCost(model, result.usage);
 			onUsage?.({
 				role: TYPESAFE_PROVIDER,
 				api: result.api,

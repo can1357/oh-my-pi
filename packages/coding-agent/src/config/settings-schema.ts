@@ -560,7 +560,11 @@ export const SETTINGS_SCHEMA = {
 			description: "Glyph set for icons and symbols (Unicode, Nerd Font, or ASCII)",
 			options: [
 				{ value: "unicode", label: "Unicode", description: "Standard symbols (default)" },
-				{ value: "nerd", label: "Nerd Font", description: "Requires Nerd Font" },
+				{
+					value: "nerd",
+					label: "Nerd Font",
+					description: "Requires a Nerd Font, or a Glyph Protocol terminal (icons ship in-band)",
+				},
 				{ value: "ascii", label: "ASCII", description: "Maximum compatibility" },
 			],
 		},
@@ -4248,6 +4252,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "AST Edit",
 			description: "Enable the ast_edit tool for structural AST rewrites",
+		},
+	},
+
+	"find.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Find (semantic grep)",
+			description:
+				"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role",
 		},
 	},
 
