@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex Spark account routing and model-health checks ignoring explicit Spark entitlements on non-Pro plans ([#12561](https://github.com/can1357/oh-my-pi/pull/12561) by [@lemonleks](https://github.com/lemonleks)).
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

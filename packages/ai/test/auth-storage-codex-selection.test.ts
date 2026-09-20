@@ -2273,6 +2273,60 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(apiKey).toBe("api-acct-pro");
 	});
 
+	test.each([
+		[
+			"uses an allowed Pro Lite account when Pro is exhausted",
+			"gpt-5.3-codex-spark",
+			"prolite",
+			1,
+			"allow",
+			"api-acct-other",
+		],
+		[
+			"keeps the Pro preference when Spark entitlement is absent",
+			"gpt-5.3-codex-spark",
+			"prolite",
+			0.4,
+			"missing",
+			"api-acct-pro",
+		],
+		["honors an explicit Spark denial even on Pro", "gpt-5.3-codex-spark", "pro", 0.4, "deny", "api-acct-pro"],
+		["does not apply a Spark denial to paid chat models", "gpt-5.6-sol", "prolite", 1, "deny", "api-acct-other"],
+		["does not use Spark permission to unlock paid chat models", "gpt-5.6-sol", "free", 0.4, "allow", "api-acct-pro"],
+	] as const)("Spark entitlement: %s", async (_name, modelId, otherPlan, proUsed, entitlement, expectedKey) => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-pro", "pro@example.com") },
+			{ type: "oauth", ...createCredential("acct-other", "other@example.com") },
+		]);
+		for (const [accountId, planType, usedFraction] of [
+			["acct-pro", "pro", proUsed],
+			["acct-other", otherPlan, 0],
+		] as const) {
+			const report = addSparkUsage(
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction, resetInMs: HOUR_MS },
+					secondary: { usedFraction, resetInMs: WEEK_MS },
+					metadata: { planType, allowed: usedFraction < 1, limitReached: usedFraction >= 1 },
+				}),
+				usedFraction,
+				usedFraction,
+			);
+			if (accountId === "acct-other") {
+				const meters = report.metadata?.meterStates as Record<string, unknown>;
+				if (entitlement === "missing") delete meters.spark;
+				else meters.spark = { allowed: entitlement === "allow", limitReached: false };
+			}
+			usageByAccount.set(accountId, report);
+		}
+		expect(await authStorage.getApiKey("openai-codex", "spark-entitlement", { modelId })).toBe(expectedKey);
+		if (modelId === "gpt-5.3-codex-spark" && entitlement === "allow") {
+			const health = await authStorage.getModelUsageHealth("openai-codex", { modelId, reserveFraction: 0.1 });
+			expect(health.state).toBe("healthy");
+		}
+	});
+
 	test("ignores plan-ineligible headroom when reporting Spark model health", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
@@ -2291,6 +2345,7 @@ describe("AuthStorage codex oauth ranking", () => {
 				}),
 				0.05,
 				0.05,
+				{ allowed: false, limitReached: false },
 			),
 		);
 		usageByAccount.set(
