@@ -10,6 +10,8 @@
 ### Changed
 
 - Centralized llama.cpp Qwen routing and thinking policy in KDL, with reviewed Bonsai lineage aliases and shared backend policy for custom provider names.
+- Added the Grok Bot catalog layer: `grokbot` provider descriptor with offline model seeds (grok-4.6 at 256K context, sand routers), live `AvailableModels` discovery keyed to the signed-in account, auth policy (`/login` custom hook + structured api-key format), and KDL compat rules for thinking efforts.
+- Added account-scoped Grok Bot model discovery and compatibility metadata, including the routed Auto default and advertised effort controls.
 
 ## [18.2.5] - 2026-09-17
 

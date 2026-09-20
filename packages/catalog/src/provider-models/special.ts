@@ -4,6 +4,7 @@ import { apiRouteFor } from "../compat/behavior";
 import { seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { fetchGrokbotAvailableModels, GROKBOT_SAND_ROUTER_IDS } from "../discovery/grokbot";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
@@ -11,6 +12,7 @@ import type { Api, FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
 import { toModelSpec } from "./bundled-references";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
+import { GROKBOT_BACKEND, resolveGrokbotBackend } from "./grokbot";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -352,6 +354,85 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Grok Bot (Cursor sand InferenceService)
+// ---------------------------------------------------------------------------
+
+export interface GrokbotModelManagerConfig {
+	apiKey?: string;
+	/** Every structured Grok Bot credential eligible for gateway rotation. */
+	apiKeys?: readonly string[];
+	baseUrl?: string;
+	/** Resolved effective provider headers for minting and roster discovery. */
+	headers?: Record<string, string>;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Grok Bot's roster is credential-scoped: `AvailableModels` answers for the
+ * signed-in account, so a baked catalog would misstate every other account's
+ * entitlements. The KDL seed therefore stays as the offline fallback and live
+ * discovery replaces it once a renewer resolves.
+ */
+export function grokbotModelManagerOptions(
+	config: GrokbotModelManagerConfig = {},
+): ModelManagerOptions<"grokbot-sand"> {
+	const { apiKey, apiKeys, baseUrl, fetch, headers } = config;
+	const credentials = canonicalGrokbotCredentialKeys(apiKey, apiKeys);
+	const effectiveBaseUrl = resolveGrokbotBackend(baseUrl);
+	const staticModels = seedModels<"grokbot-sand">("grokbot");
+	const grokbotRouterIds = new Set<string>(GROKBOT_SAND_ROUTER_IDS);
+	const cacheApiKey =
+		credentials.length === 0 ? undefined : credentials.length === 1 ? credentials[0] : JSON.stringify(credentials);
+	return {
+		providerId: "grokbot",
+		cacheProviderId: resolveModelCacheProviderId("grokbot", {
+			apiKey: cacheApiKey,
+			baseUrl: effectiveBaseUrl,
+			headers,
+		}),
+		staticModels:
+			effectiveBaseUrl === GROKBOT_BACKEND
+				? staticModels
+				: staticModels.map(model => ({ ...model, baseUrl: effectiveBaseUrl })),
+		...(credentials.length > 0
+			? {
+					dynamicModelsAuthoritative: true,
+					isDynamicModelRosterEmpty: models =>
+						models.length === grokbotRouterIds.size && models.every(model => grokbotRouterIds.has(model.id)),
+					fetchDynamicModels: () =>
+						fetchGrokbotAvailableModels({
+							apiKeys: credentials,
+							baseUrl: effectiveBaseUrl,
+							fetch,
+							headers,
+						}),
+				}
+			: undefined),
+	};
+}
+
+function canonicalGrokbotCredentialKeys(apiKey: string | undefined, apiKeys: readonly string[] | undefined): string[] {
+	const credentials = new Map<string, true>();
+	for (const rawCredential of [apiKey, ...(apiKeys ?? [])]) {
+		const credential = rawCredential?.trim();
+		if (!credential) continue;
+		let canonicalCredential = credential;
+		try {
+			const parsed = JSON.parse(credential) as { renewal?: unknown; machineId?: unknown };
+			const renewal = typeof parsed.renewal === "string" ? parsed.renewal.trim() : "";
+			const machineId = typeof parsed.machineId === "string" ? parsed.machineId.trim() : "";
+			if (renewal && machineId) canonicalCredential = JSON.stringify({ renewal, machineId });
+		} catch {
+			// A raw key remains a distinct manager input; discovery will reject it
+			// when it cannot supply the required paired machine id.
+		}
+		credentials.set(canonicalCredential, true);
+	}
+	return [...credentials.keys()].sort((left, right) => left.localeCompare(right));
+}
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

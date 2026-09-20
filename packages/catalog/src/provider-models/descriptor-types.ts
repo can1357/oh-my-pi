@@ -5,8 +5,12 @@ import type { Api, FetchImpl } from "../types";
 /** Config passed to a provider's runtime model-manager factory. */
 export type ModelManagerConfig = {
 	apiKey?: string;
+	/** Every credential the gateway may select for an account-scoped provider. */
+	apiKeys?: readonly string[];
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	/** Resolved effective provider headers for discovery and cache scoping. */
+	headers?: Record<string, string>;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
 };

@@ -30,6 +30,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// User-configured models.yml provider pointing at
 	// https://inference-api.nousresearch.com/v1 (NousResearch inference API).
 	"nous",
+	// Grok Bot: the roster is credential-scoped (`AvailableModels` answers per
+	// signed-in account), so no bundled rows are frozen into models.json. The
+	// KDL seed is the offline fallback and live discovery replaces it.
+	"grokbot",
 ]);
 
 function collectReferencedProviders(): Map<string, string> {

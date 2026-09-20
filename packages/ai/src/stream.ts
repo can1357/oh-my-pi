@@ -10,6 +10,7 @@ import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
 	mapEffortToGoogleThinkingLevel,
+	minimumSupportedEffort,
 	requireSupportedEffort,
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -26,6 +27,7 @@ import type { AnthropicOptions } from "./providers/anthropic";
 import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
+import type { GrokbotOptions } from "./providers/grokbot";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -50,6 +52,7 @@ import {
 	streamBedrock,
 	streamCursor,
 	streamDevin,
+	streamGrokBot,
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
@@ -1073,6 +1076,9 @@ function streamDispatch<TApi extends Api>(
 		case "devin-agent":
 			return streamDevin(providerModel as Model<"devin-agent">, context, providerOptions as DevinOptions);
 
+		case "grokbot-sand":
+			return streamGrokBot(providerModel as Model<"grokbot-sand">, context, providerOptions as GrokbotOptions);
+
 		default:
 			throw new AIError.ConfigurationError(`Unhandled API: ${api}`);
 	}
@@ -2031,7 +2037,7 @@ function assertExplicitOpenAIResponsesPromptCacheSupport<TApi extends Api>(
 	);
 }
 
-function mapOptionsForApi<TApi extends Api>(
+export function mapOptionsForApi<TApi extends Api>(
 	model: Model<TApi>,
 	rawOptions?: SimpleStreamOptions,
 	apiKey?: string,
@@ -2482,6 +2488,44 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"devin-agent">({
 				...base,
 				chatModelUid: resolveWireModelId(devinModel, effort),
+			});
+		}
+		case "grokbot-sand": {
+			const grokbotModel = model as Model<"grokbot-sand">;
+			const allowed = grokbotModel.sandParameterIds ?? [];
+			const acceptsEffort =
+				allowed.includes("effort") || allowed.includes("reasoning") || allowed.includes("reasoning_effort");
+			const disableThinking = Boolean(options?.disableReasoning || options?.forceReasoningOff);
+			const enableBooleanThinking = Boolean(
+				options?.reasoning && grokbotModel.reasoning && !disableThinking && !acceptsEffort,
+			);
+			let effort: Effort | undefined;
+			if (acceptsEffort && grokbotModel.reasoning && grokbotModel.thinking) {
+				if (disableThinking) {
+					// A model whose parameters include a thinking switch can be told to
+					// stop reasoning directly; flooring effort as well is contradictory.
+					if (!allowed.includes("thinking")) {
+						effort = minimumSupportedEffort(grokbotModel) ?? defaultSupportedEffort(grokbotModel);
+					}
+				} else if (options?.reasoning) {
+					effort = requireSupportedEffort(grokbotModel, options.reasoning);
+				}
+			}
+			// Only pin thinking when the caller chose an effort or disabled reasoning.
+			// Omitting it lets the request builder apply discovered parameter defaults.
+			const thinkingOption =
+				allowed.includes("thinking") && (disableThinking || enableBooleanThinking || effort !== undefined)
+					? { thinking: !disableThinking }
+					: {};
+			return castApi<"grokbot-sand">({
+				...base,
+				// Server-side prompt cache is keyed by conversation id (verified:
+				// same conv ⇒ cacheRead>0, fresh conv with identical history ⇒ 0).
+				// promptCacheKey is the explicit cache identity; sessionId falls back.
+				conversationId: options?.promptCacheKey ?? options?.sessionId,
+				stopSequences: options?.stopSequences,
+				effort,
+				...thinkingOption,
 			});
 		}
 		default:

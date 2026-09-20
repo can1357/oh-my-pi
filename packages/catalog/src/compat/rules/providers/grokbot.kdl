@@ -1,0 +1,74 @@
+// Provider-wire compat for "grokbot" (Cursor sand InferenceService).
+//
+// Grok Bot is its own product with its own usage pool: not the Cursor agent
+// provider (`cursor`, AgentService/Run) and not the public xAI API
+// (`xai` / `xai-oauth`).
+//
+// Inference runs over `POST /aiserver.v1.InferenceService/Stream` with a
+// hand-rolled protobuf body — fields 1 messages, 2 tools, 4 model_config,
+// 6 invocation_id, 7 requested_model, 8 conversation_id. Harness-only fields
+// (3, 5, 9-16) are never encoded.
+
+provider "grokbot" {
+	default-model "default"
+
+	dynamic-models-authoritative #true
+
+	// The account-scoped roster comes from live `AvailableModels`; generate-models
+	// must not backfill limits/modalities from same-id rows on other providers,
+	// because another host's metadata misstates what this account can actually
+	// serve.
+	skip-cross-provider-reference-fills #true
+
+	trust-explicit-thinking-only #true
+
+	class "xai" {
+		family "grok" {
+			thinking-mode "effort"
+		}
+	}
+
+	// Offline seed: current first-party routed ids plus the verified Grok 4.6
+	// fallback. These rows also make `default-model` resolve synchronously at
+	// boot when live discovery is unavailable.
+	seed api="grokbot-sand" base-url="https://api2.cursor.sh" bundle="always" {
+		// Verified router aliases use fixed reasoning profiles and ignore effort
+		// parameters, so they have no controllable ladder.
+		model "sand-cua" name="sand-cua (routed)" {
+			reasoning #true
+			input "text" "image"
+			supports-tools #false
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=200000 max-tokens=64000
+			sand-parameter-ids
+			sand-max-mode #false
+		}
+		// `default` routes to Auto and ignores effort/reasoning parameters. The
+		// live endpoint rejects caller-supplied tool schemas for this router, so
+		// keep native tools disabled and let coding-agent use its in-band dialect.
+		model "default" name="Auto" {
+			reasoning #true
+			input "text" "image"
+			supports-tools #false
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=200000 max-tokens=64000
+			sand-parameter-ids
+			sand-max-mode #false
+		}
+		model "grok-4.6" name="Grok 4.6 (sand)" {
+			reasoning #true
+			input "text" "image"
+			supports-tools #true
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=256000 max-tokens=64000
+			sand-parameter-ids "effort" "fast"
+			sand-max-mode #false
+			thinking-mode "effort"
+			thinking-efforts "low" "medium" "high" "xhigh"
+		}
+	}
+
+	models "grok-4.6" {
+		thinking-efforts "low" "medium" "high" "xhigh"
+	}
+}

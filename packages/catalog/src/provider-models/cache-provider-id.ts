@@ -1,9 +1,11 @@
 import { CHARM_HYPER_API_BASE_URL, normalizeCharmHyperBaseUrl } from "../wire/charm-hyper";
 import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import { fingerprintGrokbotCustomHeaders, GROKBOT_BACKEND, resolveGrokbotBackend } from "./grokbot";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
 	baseUrl?: string;
+	headers?: Readonly<Record<string, string>>;
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -11,6 +13,7 @@ const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = 
 	"opencode-zen": true,
 	"github-copilot": true,
 	"muse-code": true,
+	grokbot: true,
 };
 
 /** Whether a provider's model-cache namespace requires its resolved credential. */
@@ -33,6 +36,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
 			return "https://opencode.ai/zen/v1";
+		case "grokbot":
+			return GROKBOT_BACKEND;
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
 		default:
@@ -131,6 +136,16 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
 			return `github-copilot:models-v2:${Bun.hash(scope).toString(36)}`;
+		}
+		case "grokbot": {
+			// AvailableModels is account-scoped and caller headers can select a
+			// different tenant or reverse-proxy route. Scope only by their
+			// canonicalized fingerprint: cache identifiers must never expose values.
+			// v5 drops stale non-first-party router aliases and overlays the current
+			// routed Auto contract; v4 raised the roster body cap.
+			const baseUrl = resolveGrokbotBackend(options.baseUrl);
+			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}\u0000${fingerprintGrokbotCustomHeaders(options.headers)}`;
+			return `grokbot:models-v5:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

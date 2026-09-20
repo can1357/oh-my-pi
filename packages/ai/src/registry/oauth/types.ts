@@ -89,6 +89,15 @@ export interface OAuthController {
 	onBrowserSession?(request: OAuthBrowserSessionRequest, signal?: AbortSignal): Promise<string>;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
+	/**
+	 * Grok Bot only: accessor for the client-owned install id. Flows read
+	 * before generating and write after registering so the id is a property
+	 * of the machine (survives logout/credential rotation), not the credential.
+	 */
+	grokbotMachineId?: {
+		read(): string | undefined;
+		write(machineId: string): void;
+	};
 }
 
 export interface OAuthLoginCallbacks extends OAuthController {
