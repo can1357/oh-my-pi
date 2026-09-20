@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Nerd Font status-line brand icon rendering as a rotating arrow instead of π ([#11802](https://github.com/can1357/oh-my-pi/issues/11802), [#12570](https://github.com/can1357/oh-my-pi/pull/12570) by [@kouhe3](https://github.com/kouhe3)).
+
 ## [18.4.7] - 2026-10-01
 
 ### Added
