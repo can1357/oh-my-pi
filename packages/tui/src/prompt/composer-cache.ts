@@ -192,6 +192,7 @@ function readUiState(file: string): { preferences: ComposerPreferences; theme: C
 	const spellingTypoDetection = field(rawPreferences, "spellingTypoDetection");
 	const spellingAutocomplete = field(rawPreferences, "spellingAutocomplete");
 	const spellingAutocorrect = field(rawPreferences, "spellingAutocorrect");
+	const pinToBottom = field(rawPreferences, "pinToBottom");
 	if (
 		typeof quiet !== "boolean" ||
 		typeof composerShape !== "string" ||
@@ -205,7 +206,8 @@ function readUiState(file: string): { preferences: ComposerPreferences; theme: C
 		typeof autocompleteMaxVisible !== "number" ||
 		typeof spellingTypoDetection !== "boolean" ||
 		typeof spellingAutocomplete !== "boolean" ||
-		typeof spellingAutocorrect !== "boolean"
+		typeof spellingAutocorrect !== "boolean" ||
+		(pinToBottom !== undefined && typeof pinToBottom !== "boolean")
 	) {
 		return undefined;
 	}
@@ -239,6 +241,7 @@ function readUiState(file: string): { preferences: ComposerPreferences; theme: C
 			spellingTypoDetection,
 			spellingAutocomplete,
 			spellingAutocorrect,
+			pinToBottom: pinToBottom === true,
 		},
 		theme: { symbolPreset, colorBlindMode, darkTheme, lightTheme },
 	};

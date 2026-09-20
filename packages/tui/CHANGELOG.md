@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ComposerPreferences.pinToBottom` and `ViewportSize.anchor` so a frame provider can pin its chrome to the terminal's bottom row while keeping the transcript in native scrollback ([#12520](https://github.com/can1357/oh-my-pi/pull/12520) by [@cxalem](https://github.com/cxalem)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

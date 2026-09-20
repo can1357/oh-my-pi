@@ -1152,6 +1152,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			spellingTypoDetection: settings.get("spelling.typoDetection"),
 			spellingAutocomplete: settings.get("spelling.autocomplete"),
 			spellingAutocorrect: settings.get("spelling.autocorrect"),
+			pinToBottom: settings.get("composer.pinToBottom"),
 		};
 		const wasStarted = composer?.started ?? false;
 		this.composer =
@@ -2627,7 +2628,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	syncComposerShape(): void {
 		const shape = settings.get("composer.shape") ?? "band";
 		const style = getComposerStyle(shape);
-		this.composer.setPreferences({ composerShape: shape });
+		this.composer.setPreferences({ composerShape: shape, pinToBottom: settings.get("composer.pinToBottom") });
 		this.statusLine.setAutocompleteActiveProbe(() => this.editor.isAutocompleteActive());
 		switch (style.statusAttachment) {
 			case "top-border":
