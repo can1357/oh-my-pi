@@ -6,7 +6,7 @@
  */
 import { type } from "@oh-my-pi/omptype";
 import type { FetchImpl, Provider } from "./types";
-export type UsageUnit = "percent" | "tokens" | "requests" | "usd" | "minutes" | "bytes" | "unknown";
+export type UsageUnit = "percent" | "tokens" | "requests" | "credits" | "usd" | "minutes" | "bytes" | "unknown";
 
 export type UsageStatus = "ok" | "warning" | "exhausted" | "unknown";
 
@@ -54,6 +54,8 @@ export interface UsageScope {
 	tier?: string;
 	windowId?: string;
 	shared?: boolean;
+	/** Stable identity shared by routing-specific copies of one upstream quota. */
+	sharedGroup?: string;
 }
 
 /** Normalized limit entry for a single window or quota bucket. */
@@ -194,11 +196,27 @@ export interface ClientUsageReport {
 	installId: string;
 	/** Human-readable machine name for display surfaces. */
 	hostname?: string;
+	/** Application label for the process that burned the tokens (e.g. `omp`, `robomp`). */
+	app?: string;
 	entries: ObservedUsageEntry[];
+}
+
+/**
+ * Identity a client presents for usage attribution. Defaults to this
+ * process's install id / hostname / app label; the auth-gateway overrides it
+ * with the identity its caller sent so token burn lands on the originating
+ * machine and application instead of the gateway host.
+ */
+export interface ClientUsageIdentity {
+	installId: string;
+	hostname?: string;
+	app?: string;
 }
 
 /** Per-provider aggregate of one client's recorded usage. */
 export interface ClientProviderUsage {
+	/** Application label the usage was reported under; absent for legacy rows. */
+	app?: string;
 	provider: string;
 	requests: number;
 	inputTokens: number;
@@ -224,7 +242,9 @@ export interface ClientUsageSummary {
 
 // ─── Zod schemas (wire-shape validation for the broker `/v1/usage` endpoint) ─
 
-export const usageUnitSchema = type("'percent' | 'tokens' | 'requests' | 'usd' | 'minutes' | 'bytes' | 'unknown'");
+export const usageUnitSchema = type(
+	"'percent' | 'tokens' | 'requests' | 'credits' | 'usd' | 'minutes' | 'bytes' | 'unknown'",
+);
 export const usageStatusSchema = type("'ok' | 'warning' | 'exhausted' | 'unknown'");
 
 export const usageWindowSchema = type({
@@ -253,6 +273,7 @@ export const usageScopeSchema = type({
 	"tier?": "string",
 	"windowId?": "string",
 	"shared?": "boolean",
+	"sharedGroup?": "string",
 });
 
 export const usageLimitSchema = type({
@@ -335,12 +356,18 @@ export interface UsageProvider {
 	id: Provider;
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
-	parseRateLimitHeaders?(headers: Record<string, string>, now?: number): UsageReport | null;
+	parseRateLimitHeaders?(
+		headers: Record<string, string>,
+		now?: number,
+		context?: { responseStatus?: number },
+	): UsageReport | null;
 	supports?(params: UsageFetchParams): boolean;
 	/** True when fetchUsage contacts upstream and can authenticate the credential for health checks. */
 	validatesCredentials?: boolean;
 	/** Whether a failed refresh may serve the previous successful report. Defaults to true. */
 	retainLastGoodOnFailure?: boolean;
+	/** Provider-specific cool-down after a failed refresh. Defaults to the shared short backoff. */
+	failureBackoffMs?: number;
 }
 
 /** Request context used when ranking usage for a specific model. */
@@ -391,11 +418,28 @@ export interface CredentialRankingStrategy {
 	 * block written under one scope is invisible to requests and to healing.
 	 */
 	blockScopes?(context?: CredentialRankingContext): string[];
+	/**
+	 * Backoff scopes a fresh usage report can vouch for, each with the limits
+	 * gating it. {@link AuthStorage} clears a stale block under a returned scope
+	 * once every listed limit is below exhaustion, so a 429 whose retry-after
+	 * overstated the real reset does not sideline a recovered account until the
+	 * clock runs out. Scopes not returned expire by clock only. Codex heals
+	 * through its meter metadata instead and omits this.
+	 */
+	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[] }[];
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;
 		secondaryMs: number;
 	};
-	/** Optional: priority boost for specific credential states (e.g., fresh 5h ticker start). */
-	hasPriorityBoost?(primary: UsageLimit | undefined): boolean;
+	/**
+	 * Optional: priority boost for specific credential states (e.g., fresh 5h
+	 * ticker start). `primaryUncapped` is true only when the fetched report has
+	 * an applicable secondary window but no applicable primary window.
+	 */
+	hasPriorityBoost?(
+		primary: UsageLimit | undefined,
+		primaryUncapped?: boolean,
+		context?: CredentialRankingContext,
+	): boolean;
 }

@@ -9,7 +9,8 @@ import {
 	DEFAULT_SHAKE_CONFIG,
 	RESCUE_SHAKE_CONFIG,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { convertMessageToLlm } from "../src/compaction/messages";
 
 const tokenizer = new Tokenizer();
 
@@ -85,6 +86,23 @@ describe("collectShakeRegions — tool results", () => {
 		applyShakeRegion(region, "[shaken]");
 		expect(tr.prunedAt).toBeGreaterThan(0);
 		expect(tr.content).toEqual([{ type: "text", text: "[shaken]" }]);
+	});
+
+	test("keeps images in the provider view of an elided mixed tool result", () => {
+		const image: ImageContent = {
+			type: "image",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+			mimeType: "image/png",
+		};
+		const tr = toolResultMessage("bash", "[shaken]", {
+			content: [{ type: "text", text: "[shaken]" }, image],
+			prunedAt: Date.now(),
+		});
+
+		const converted = convertMessageToLlm(tr);
+
+		expect(converted?.content).toEqual([{ type: "text", text: "[shaken]" }, image]);
+		expect(Array.isArray(converted?.content) ? converted.content[1] : undefined).toBe(image);
 	});
 
 	test("never collects protected tools", () => {

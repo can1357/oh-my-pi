@@ -47,6 +47,8 @@ export type WorkerInitPayload =
 			mode: "headless";
 			browserWSEndpoint: string;
 			safeDir: string;
+			/** Keep the page tied to an OMP-owned worker without pinning a visible window's layout viewport. */
+			emulateViewport?: boolean;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
 			url?: string;
@@ -68,6 +70,8 @@ export type WorkerInitPayload =
 			 * previously force-killed the tab). Never set for first-time Electron attach.
 			 */
 			recover?: boolean;
+			/** Restore focus emulation when recycling an OMP-owned tab, never a borrowed user tab. */
+			emulateFocus?: boolean;
 			/**
 			 * Whether the worker may raise this tab before capturing a screenshot. Unset
 			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
@@ -75,6 +79,7 @@ export type WorkerInitPayload =
 			activateForScreenshot?: boolean;
 	  };
 
+/** Result of one host tool requested by browser-run JavaScript. */
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
 export type WorkerInbound =
@@ -108,6 +113,23 @@ export interface RunErrorPayload {
 }
 
 export type WorkerOutbound =
+	| {
+			/**
+			 * Puppeteer loaded, browser connected. Sent before page acquisition so the supervisor's cold-start budget
+			 * bounds only the realm setup (cold import + connect); page creation and the first navigation run under the
+			 * ready wait.
+			 */
+			type: "setup";
+	  }
+	| {
+			/**
+			 * The headless page was created (before the potentially slow post-creation CDP work such as stealth and
+			 * viewport). Lets the supervisor close exactly this target if it kills the worker during init — a killed
+			 * worker can't clean up after itself.
+			 */
+			type: "page-created";
+			targetId: string;
+	  }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }
 	| { type: "result"; id: string; ok: true; payload: RunResultOk }

@@ -1,23 +1,26 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	TodoTool,
+} from "@oh-my-pi/pi-coding-agent/tools";
+import {
 	selectCollapsedTodos,
 	TODO_STRIKE_HOLD_FRAMES,
 	TODO_STRIKE_TOTAL_FRAMES,
 	type TodoItem,
 	type TodoPhase,
-	TodoTool,
 	todoMatchesAnyDescription,
 	todoToolRenderer,
-} from "@oh-my-pi/pi-coding-agent/tools";
+} from "@oh-my-pi/pi-tui/tools/todo";
 import type { Component } from "@oh-my-pi/pi-tui";
 
 function createSession(initialPhases: TodoPhase[] = []): ToolSession {
@@ -310,6 +313,21 @@ describe("TodoTool operations", () => {
 		expect(parsedA?.blocker).toBe("x");
 	});
 
+	it("parses checklist items with backslash-escaped brackets from /todo edit", () => {
+		// Editors/serializers (e.g. content pasted from a markdown renderer) escape
+		// `[` and `]`; the line still renders as a checkbox, so it must parse rather
+		// than error out and drop the user's edits (issue #9188).
+		const md = ["# Todos", "* \\[x] first", "- \\[ \\] second", "+ \\[/\\] third"].join("\n");
+		const { phases, errors } = markdownToPhases(md);
+		expect(errors).toEqual([]);
+		const tasks = phases[0]?.tasks ?? [];
+		expect(tasks).toEqual([
+			{ content: "first", status: "completed" },
+			{ content: "second", status: "pending" },
+			{ content: "third", status: "in_progress" },
+		]);
+	});
+
 	it("normalizes a multi-line blocker reason so the markdown round-trip survives", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", { op: "init", list: [{ phase: "Work", items: ["a"] }] });
@@ -423,6 +441,18 @@ describe("TodoTool operations", () => {
 		if (summary?.type !== "text") throw new Error("Expected text summary");
 		expect(summary.text).toContain("Todo list is empty.");
 		expect(result.isError).toBeUndefined();
+	});
+});
+
+describe("TodoTool provider schema", () => {
+	it("advertises items for single-phase init and append", () => {
+		expect(toolWireSchema(new TodoTool(createSession()))).toMatchObject({
+			properties: {
+				items: {
+					description: "tasks for single-phase init or append",
+				},
+			},
+		});
 	});
 });
 
@@ -618,7 +648,12 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 	}
 	function innerLines(component: Component): string[] {
 		const lines = Bun.stripANSI(component.render(100).join("\n")).split("\n");
-		return lines.slice(1, -1).map(line => line.replace(/^│/, "").replace(/│\s*$/, "").trim());
+		return lines.slice(1, -1).map(line =>
+			line
+				.replace(/^│/, "")
+				.replace(/│\s*$/, "")
+				.trim(),
+		);
 	}
 	it("collapses untouched phases to a one-line summary while expanding the active phase", async () => {
 		const result = await buildThreePhaseAfterDone();

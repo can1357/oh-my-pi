@@ -139,3 +139,41 @@ it("agent:// path form falls back to JSON extraction when no nested output match
 	expect(extracted.contentType).toBe("application/json");
 	expect(JSON.parse(extracted.content)).toEqual({ ok: true });
 });
+
+it("agent:// path extraction prefers the <id>.json sidecar over the markdown body", async () => {
+	const root = tempDir.path();
+	const rootSessionFile = path.join(root, "sidecar-session.jsonl");
+	const rootArtifactsDir = rootSessionFile.slice(0, -6);
+	await fs.mkdir(rootArtifactsDir, { recursive: true });
+	const sharedArtifactManager = new ArtifactManager(rootArtifactsDir);
+	// Non-JSON body proves the fallback path could not have produced the answer.
+	await fs.writeFile(path.join(rootArtifactsDir, "Worker.md"), "schema_violation summary text");
+	await fs.writeFile(path.join(rootArtifactsDir, "Worker.json"), JSON.stringify({ summary: "ok", count: 7 }));
+
+	const fakeSession = {
+		sessionManager: { getArtifactsDir: () => sharedArtifactManager.dir },
+	} as unknown as AgentSession;
+	const registry = AgentRegistry.global();
+	registry.register({
+		id: "Main",
+		displayName: "main",
+		kind: "main",
+		session: fakeSession,
+		sessionFile: rootSessionFile,
+	});
+
+	const handler = new AgentProtocolHandler();
+	const resource = await handler.resolve(new URL("agent://Worker/count") as never);
+	expect(resource.contentType).toBe("application/json");
+	expect(JSON.parse(resource.content)).toBe(7);
+	expect(resource.sourcePath?.endsWith("Worker.json")).toBe(true);
+
+	// A bare id keeps serving the markdown body, never the sidecar.
+	const bare = await handler.resolve(new URL("agent://Worker") as never);
+	expect(bare.contentType).toBe("text/markdown");
+	expect(bare.content).toBe("schema_violation summary text");
+
+	// A corrupt sidecar falls back to <id>.md instead of surfacing its own parse error.
+	await fs.writeFile(path.join(rootArtifactsDir, "Worker.json"), "{not json");
+	await expect(handler.resolve(new URL("agent://Worker/count") as never)).rejects.toThrow(/Worker is not valid JSON/);
+});

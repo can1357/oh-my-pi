@@ -3,7 +3,7 @@
  * Release script for pi-mono
  *
  * Usage:
- *   bun scripts/release.ts <version|major|minor|patch>   Full release (preflight, version, changelog, commit, push, watch)
+ *   bun scripts/release.ts <version|major|minor|patch|canary>   Full release (preflight, version, changelog, commit, push, watch)
  *   bun scripts/release.ts watch                         Watch CI for current commit
  *
  * Example: bun scripts/release.ts minor
@@ -188,14 +188,17 @@ async function cmdWatch(): Promise<void> {
 	process.exit(success ? 0 : 1);
 }
 
-function parseVersion(v: string): [number, number, number] {
-	const match = v.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)/);
+export function parseVersion(v: string): [number, number, number] {
+	const match = v.replace(/^v/, "").match(/^(\d+)\.(\d+)\.(\d+)(?:-canary\.\d+)?$/);
 	if (!match) throw new Error(`Invalid version: ${v}`);
 	return [parseInt(match[1], 10), parseInt(match[2], 10), parseInt(match[3], 10)];
 }
 
-function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
+export function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string {
 	const [major, minor, patch] = parseVersion(current);
+	if (bump === "patch" && /-canary\.\d+$/.test(current)) {
+		return `${major}.${minor}.${patch}`;
+	}
 	switch (bump) {
 		case "major":
 			return `${major + 1}.0.0`;
@@ -206,6 +209,15 @@ function bumpVersion(current: string, bump: "major" | "minor" | "patch"): string
 	}
 }
 
+export function bumpCanaryVersion(current: string): string {
+	const [major, minor, patch] = parseVersion(current);
+	const canaryMatch = current.match(/-canary\.(\d+)$/);
+	if (canaryMatch) {
+		return `${major}.${minor}.${patch}-canary.${parseInt(canaryMatch[1], 10) + 1}`;
+	}
+	return `${major}.${minor}.${patch + 1}-canary.1`;
+}
+
 async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("\n=== Release Script ===\n");
 	// Validate explicit versions before any compare: the shared compareVersions
@@ -213,11 +225,16 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	// accepted and written into every package.json / Cargo.toml / tag. The
 	// validator also normalizes a leading `v` to the bare version so every
 	// downstream write (manifests, Cargo.toml, tag) uses `17.2.8`, not `v17.2.8`.
-	if (versionOrBump !== "major" && versionOrBump !== "minor" && versionOrBump !== "patch") {
+	if (
+		versionOrBump !== "major" &&
+		versionOrBump !== "minor" &&
+		versionOrBump !== "patch" &&
+		versionOrBump !== "canary"
+	) {
 		const normalized = validateExplicitVersion(versionOrBump);
 		if (normalized === null) {
 			console.error(
-				`Error: Invalid version "${versionOrBump}". Expected a semver like 17.2.8 or v17.2.8 (prereleases such as 17.2.8-rc.1 are not supported by this release path), or a bump keyword (major/minor/patch).`,
+				`Error: Invalid version "${versionOrBump}". Expected a semver like 17.2.8 or v17.2.8 (prereleases such as 17.2.8-rc.1 are not supported by this release path), or a bump keyword (major/minor/patch/canary).`,
 			);
 			process.exit(1);
 		}
@@ -250,6 +267,9 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	if (version === "major" || version === "minor" || version === "patch") {
 		version = bumpVersion(latestTag, version);
 		console.log(`Bumping ${versionOrBump} version from ${latestTag} -> ${version}`);
+	} else if (version === "canary") {
+		version = bumpCanaryVersion(latestTag);
+		console.log(`Bumping canary version from ${latestTag} -> ${version}`);
 	}
 
 	if (compareVersions(version, latestTag) <= 0) {
@@ -353,20 +373,24 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log();
 
 	// 5. Update changelogs
-	console.log("Updating CHANGELOGs...");
-	// Omit `since` so the fixer resolves its own baseline: the `clog` tag (last
-	// authoritative rewrite) when newer than `latestTag`, else `latestTag`. This
-	// keeps a release run from re-promoting bullets a prior `--recover` restored.
-	const fixResult = await runChangelogFixer({});
-	for (const fixed of fixResult.changedFiles) {
-		console.log(
-			`  Fixed ${fixed.path}: ${fixed.promotedItems} promoted, ` +
-				`${fixed.mergedDuplicateHeadings} duplicate heading(s) merged, ` +
-				`${fixed.removedEmptyHeadings} empty heading(s) removed`,
-		);
+	if (versionOrBump === "canary") {
+		console.log("Skipping CHANGELOGs for canary release.\n");
+	} else {
+		console.log("Updating CHANGELOGs...");
+		// Omit `since` so the fixer resolves its own baseline: the `clog` tag (last
+		// authoritative rewrite) when newer than `latestTag`, else `latestTag`. This
+		// keeps a release run from re-promoting bullets a prior `--recover` restored.
+		const fixResult = await runChangelogFixer({});
+		for (const fixed of fixResult.changedFiles) {
+			console.log(
+				`  Fixed ${fixed.path}: ${fixed.promotedItems} promoted, ` +
+					`${fixed.mergedDuplicateHeadings} duplicate heading(s) merged, ` +
+					`${fixed.removedEmptyHeadings} empty heading(s) removed`,
+			);
+		}
+		await updateChangelogsForRelease(version);
+		console.log();
 	}
-	await updateChangelogsForRelease(version);
-	console.log();
 
 	// 6. Run checks
 	console.log("Running checks...");
@@ -437,19 +461,25 @@ if (import.meta.main) {
 
 	if (!arg) {
 		console.error("Usage:");
-		console.error("  bun scripts/release.ts <version|major|minor|patch>   Full release");
+		console.error("  bun scripts/release.ts <version|major|minor|patch|canary>   Full release");
 		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
 		process.exit(1);
 	}
 
 	if (arg === "watch") {
 		await cmdWatch();
-	} else if (arg === "major" || arg === "minor" || arg === "patch" || validateExplicitVersion(arg) !== null) {
+	} else if (
+		arg === "major" ||
+		arg === "minor" ||
+		arg === "patch" ||
+		arg === "canary" ||
+		validateExplicitVersion(arg) !== null
+	) {
 		await cmdRelease(arg);
 	} else {
 		console.error(`Unknown command or invalid version: ${arg}`);
 		console.error("Usage:");
-		console.error("  bun scripts/release.ts <version|major|minor|patch>   Full release");
+		console.error("  bun scripts/release.ts <version|major|minor|patch|canary>   Full release");
 		console.error("  bun scripts/release.ts watch                         Watch CI for current commit");
 		process.exit(1);
 	}

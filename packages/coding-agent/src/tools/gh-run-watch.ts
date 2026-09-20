@@ -1,6 +1,7 @@
+import { renderJobsSection, renderFailedJobLogs, renderRunSection } from "@oh-my-pi/pi-tui/tools/github";
 import { scheduler } from "node:timers/promises";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type {
 	GhRunWatchFailedLogDetails,
@@ -8,13 +9,15 @@ import type {
 	GhRunWatchRunDetails,
 	GhRunWatchViewDetails,
 	GhToolDetails,
-} from "./gh";
+} from "@oh-my-pi/pi-tui/tools/github";
 import {
 	buildTextResult,
+	formatRepoRef,
+	ghApiHostArgs,
 	githubRepoSlugEquals,
 	normalizeBlock,
 	normalizeOptionalString,
-	pushLine,
+	parseRepoRef,
 	requireCurrentGitBranch,
 	requireCurrentGitHead,
 	requireNonEmpty,
@@ -22,20 +25,20 @@ import {
 	saveArtifactText,
 	tryResolveCurrentRepoFresh,
 } from "./gh-common";
-import { formatShortSha } from "./gh-format";
+import { pushLine } from "@oh-my-pi/pi-tui/tools/gh-format";
+import { formatShortSha } from "@oh-my-pi/pi-tui/tools/gh-format";
 import type {
 	GhActionsJobApi,
 	GhActionsJobsResponse,
 	GhActionsRunApi,
 	GhActionsRunListResponse,
 	GhBranchApiResponse,
-	GhFailedJobLog,
-	GhRunJobSnapshot,
 	GhRunReference,
-	GhRunSnapshot,
 	GithubInput,
 } from "./gh-types";
-import { ToolError, throwIfAborted } from "./tool-errors";
+import type { GhFailedJobLog, GhRunJobSnapshot, GhRunSnapshot } from "@oh-my-pi/pi-tui/tools/github";
+import { throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 export const RUN_WATCH_INTERVAL_DEFAULT = 3;
 export const RUN_WATCH_INTERVAL_SLOW = 15;
@@ -60,7 +63,7 @@ export function resolveTailLimit(value: number | undefined): number {
 	return Math.min(Math.floor(value), RUN_WATCH_TAIL_MAX);
 }
 
-export const RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)(?:\/.*)?$/;
+export const RUN_URL_PATTERN = /^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)(?:\/.*)?$/;
 export const RUN_SUCCESS_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 export const RUN_FAILURE_CONCLUSIONS = new Set([
 	"failure",
@@ -87,8 +90,8 @@ export function parseRunReference(value: string | undefined): GhRunReference {
 	}
 
 	return {
-		repo: match[1],
-		runId: Number(match[2]),
+		repo: formatRepoRef(match[1], match[2]),
+		runId: Number(match[3]),
 	};
 }
 
@@ -196,10 +199,6 @@ export function isRateLimitedGhError(err: unknown): boolean {
 	return err instanceof ToolError && GH_RATE_LIMIT_ERROR_PATTERN.test(err.message);
 }
 
-export function formatJobState(job: GhRunJobSnapshot): string {
-	return job.conclusion ?? job.status ?? "unknown";
-}
-
 export function parseTimestampMs(value: string | undefined): number | undefined {
 	if (!value) {
 		return undefined;
@@ -253,82 +252,6 @@ export function buildFailedLogDetails(failedJobLogs: GhFailedJobLog[]): GhRunWat
 		tail: entry.tail,
 		available: entry.available,
 	}));
-}
-
-export function renderJobsSection(jobs: GhRunJobSnapshot[]): string[] {
-	if (jobs.length === 0) {
-		return ["## Jobs", "", "No jobs reported yet."];
-	}
-
-	const lines: string[] = [`## Jobs (${jobs.length})`, ""];
-	for (const job of jobs) {
-		lines.push(`- [${formatJobState(job)}] ${job.name}`);
-		if (job.startedAt) {
-			pushLine(lines, "  Started", job.startedAt);
-		}
-		if (job.completedAt) {
-			pushLine(lines, "  Completed", job.completedAt);
-		}
-		if (job.url) {
-			pushLine(lines, "  URL", job.url);
-		}
-	}
-
-	return lines;
-}
-
-export function renderFailedJobLogs(
-	failedJobLogs: GhFailedJobLog[],
-	options: { mode: "tail"; tail: number } | { mode: "full" },
-): string[] {
-	if (failedJobLogs.length === 0) {
-		return [];
-	}
-
-	const lines: string[] = ["## Failed Jobs", ""];
-	for (const entry of failedJobLogs) {
-		lines.push(`### ${entry.job.name} [${entry.job.conclusion ?? "failed"}]`);
-		pushLine(lines, "Run", `#${entry.run.id}`);
-		pushLine(lines, "Workflow", entry.run.workflowName ?? undefined);
-		if (entry.job.startedAt) {
-			pushLine(lines, "Started", entry.job.startedAt);
-		}
-		if (entry.job.completedAt) {
-			pushLine(lines, "Completed", entry.job.completedAt);
-		}
-		if (entry.job.url) {
-			pushLine(lines, "URL", entry.job.url);
-		}
-		lines.push("");
-		const logText = options.mode === "full" ? entry.full : entry.tail;
-		if (entry.available && logText) {
-			lines.push(options.mode === "full" ? "Full log:" : `Last ${options.tail} log lines:`);
-			lines.push("```text");
-			lines.push(logText);
-			lines.push("```");
-		} else {
-			lines.push(options.mode === "full" ? "Full log unavailable." : "Log tail unavailable.");
-		}
-		lines.push("");
-	}
-
-	return lines;
-}
-
-export function renderRunSection(run: GhRunSnapshot): string[] {
-	const label = run.workflowName ? `### Run #${run.id} - ${run.workflowName}` : `### Run #${run.id}`;
-	const lines: string[] = [label, ""];
-	pushLine(lines, "Title", run.displayTitle ?? undefined);
-	pushLine(lines, "Branch", run.branch ?? undefined);
-	pushLine(lines, "Commit", formatShortSha(run.headSha));
-	pushLine(lines, "Status", run.status);
-	pushLine(lines, "Conclusion", run.conclusion ?? undefined);
-	pushLine(lines, "Created", run.createdAt);
-	pushLine(lines, "Updated", run.updatedAt);
-	pushLine(lines, "URL", run.url);
-	lines.push("");
-	lines.push(...renderJobsSection(run.jobs));
-	return lines;
 }
 
 export function formatRunWatchSnapshot(
@@ -577,9 +500,10 @@ export async function resolveGitHubBranchHead(
 	branch: string,
 	signal?: AbortSignal,
 ): Promise<string> {
-	const response = await git.github.json<GhBranchApiResponse>(
+	const ref = parseRepoRef(repo);
+	const response = await github.json<GhBranchApiResponse>(
 		cwd,
-		["api", "--method", "GET", `/repos/${repo}/branches/${encodeURIComponent(branch)}`],
+		["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/branches/${encodeURIComponent(branch)}`],
 		signal,
 		{ repoProvided: true },
 	);
@@ -598,13 +522,15 @@ export async function fetchRunsForCommit(
 	// whose `head_branch` is not the local checkout — e.g. tag-push triggered
 	// release workflows (`head_branch=v1.2.3`) or PR-triggered runs
 	// (`head_branch=<pr head>`). See coding-agent issue tracker for details.
-	const response = await git.github.json<GhActionsRunListResponse>(
+	const ref = parseRepoRef(repo);
+	const response = await github.json<GhActionsRunListResponse>(
 		cwd,
 		[
 			"api",
+			...ghApiHostArgs(ref),
 			"--method",
 			"GET",
-			`/repos/${repo}/actions/runs`,
+			`/repos/${ref.slug}/actions/runs`,
 			"-F",
 			`head_sha=${headSha}`,
 			"-F",
@@ -642,17 +568,19 @@ export async function fetchRunJobs(
 	runId: number,
 	signal?: AbortSignal,
 ): Promise<GhRunJobSnapshot[]> {
+	const ref = parseRepoRef(repo);
 	const jobs: GhRunJobSnapshot[] = [];
 	let page = 1;
 
 	while (true) {
-		const response = await git.github.json<GhActionsJobsResponse>(
+		const response = await github.json<GhActionsJobsResponse>(
 			cwd,
 			[
 				"api",
+				...ghApiHostArgs(ref),
 				"--method",
 				"GET",
-				`/repos/${repo}/actions/runs/${runId}/jobs`,
+				`/repos/${ref.slug}/actions/runs/${runId}/jobs`,
 				"-F",
 				`per_page=${RUN_JOBS_PAGE_SIZE}`,
 				"-F",
@@ -687,10 +615,11 @@ export async function fetchRunSnapshot(
 	runId: number,
 	signal?: AbortSignal,
 ): Promise<GhRunSnapshot> {
+	const ref = parseRepoRef(repo);
 	const [run, jobs] = await Promise.all([
-		git.github.json<GhActionsRunApi>(
+		github.json<GhActionsRunApi>(
 			cwd,
-			["api", "--method", "GET", `/repos/${repo}/actions/runs/${runId}`],
+			["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/actions/runs/${runId}`],
 			signal,
 			{
 				repoProvided: true,
@@ -719,9 +648,14 @@ export async function fetchFailedJobLogs(
 	tail: number,
 	signal?: AbortSignal,
 ): Promise<GhFailedJobLog[]> {
+	const ref = parseRepoRef(repo);
 	return Promise.all(
 		failedJobs.map(async entry => {
-			const result = await git.github.run(cwd, ["api", `/repos/${repo}/actions/jobs/${entry.job.id}/logs`], signal);
+			const result = await github.run(
+				cwd,
+				["api", ...ghApiHostArgs(ref), `/repos/${ref.slug}/actions/jobs/${entry.job.id}/logs`],
+				signal,
+			);
 			const fullLog = result.exitCode === 0 ? normalizeBlock(result.stdout) : undefined;
 			const logTail = fullLog ? tailLogLines(fullLog, tail) : undefined;
 			return {

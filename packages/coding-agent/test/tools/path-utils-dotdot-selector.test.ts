@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { parseLineRangeChunk, parseLineRanges, splitPathAndSel } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { isFilesystemSourcePath } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { parseLineRangeChunk, parseLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
+import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 describe("`..` range selector alias", () => {
 	it("treats `N..M` as the inclusive range `N-M`", () => {
@@ -42,5 +44,18 @@ describe("`..` range selector alias", () => {
 	it("does not mistake a `..` path segment for a selector", () => {
 		// No digits around the dots → still a plain path, not a range selector.
 		expect(splitPathAndSel("foo:../bar.ts")).toEqual({ path: "foo:../bar.ts" });
+	});
+});
+
+describe("isFilesystemSourcePath", () => {
+	it("accepts POSIX, Windows drive, and UNC paths", () => {
+		expect(isFilesystemSourcePath("/tmp/tools/systemd.ts")).toBe(true);
+		expect(isFilesystemSourcePath("C:\\repo\\.omp\\tools\\systemd.ts")).toBe(true);
+		expect(isFilesystemSourcePath("C:/.omp/tools/systemd.ts")).toBe(true);
+		expect(isFilesystemSourcePath("\\\\server\\share\\.omp\\tools\\systemd.ts")).toBe(true);
+		expect(isFilesystemSourcePath("//server/share/.omp/tools/systemd.ts")).toBe(true);
+		expect(isFilesystemSourcePath("systemd.ts")).toBe(false);
+		expect(isFilesystemSourcePath("<extension:systemd>")).toBe(false);
+		expect(isFilesystemSourcePath("mcp:gog")).toBe(false);
 	});
 });

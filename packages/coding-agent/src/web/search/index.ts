@@ -12,31 +12,26 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
 import { settings } from "../../config/settings";
 import type { CustomTool, CustomToolContext, RenderResultOptions } from "../../extensibility/custom-tools/types";
-import type { Theme } from "../../modes/theme/theme";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import webSearchSystemPrompt from "../../prompts/system/web-search.md" with { type: "text" };
 import webSearchDescription from "../../prompts/tools/web-search.md" with { type: "text" };
 import { discoverAuthStorage } from "../../sdk";
 import type { ToolSession } from "../../tools";
-import { formatAge } from "../../tools/render-utils";
+import { formatAge } from "@oh-my-pi/pi-tui/render/render-utils";
 import { throwIfAborted } from "../../tools/tool-errors";
 import {
 	formatSearchProviderFailure,
 	formatSearchProviderFailures,
 	getSearchProvider,
-	getSearchProviderLabel,
 	resolveProviderCandidates,
 	type SearchProvider,
 	type SearchProviderCandidate,
 } from "./provider";
+import { getSearchProviderLabel } from "@oh-my-pi/pi-tui/tools/web-search";
 import { applyQueryConstraints, parseSearchQuery } from "./query";
-import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
-import {
-	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
-	SearchProviderError,
-	type SearchProviderId,
-	type SearchResponse,
-} from "./types";
+import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "@oh-my-pi/pi-tui/tools/web-search";
+import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "./types";
+import { type SearchProviderId, type SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
 
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
@@ -130,6 +125,7 @@ function hasRenderableSearchContent(response: SearchResponse): boolean {
 interface ExecuteSearchOptions {
 	authStorage: AuthStorage;
 	modelRegistry?: ModelRegistry;
+	modelName?: string;
 	sessionId?: string;
 	signal?: AbortSignal;
 }
@@ -140,7 +136,7 @@ async function executeSearch(
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
-	const { authStorage, modelRegistry, sessionId, signal } = options;
+	const { authStorage, modelRegistry, modelName, sessionId, signal } = options;
 	const explicitProvider = params.provider;
 	let candidates: SearchProviderCandidate[];
 	if (explicitProvider && explicitProvider !== "auto") {
@@ -215,6 +211,7 @@ async function executeSearch(
 				timeoutMs,
 				authStorage,
 				modelRegistry,
+				modelName,
 				sessionId,
 				antigravityEndpointMode,
 				geminiModel,
@@ -290,7 +287,13 @@ async function executeSearch(
  */
 export async function runSearchQuery(
 	params: SearchQueryParams,
-	options: { authStorage?: AuthStorage; modelRegistry?: ModelRegistry; sessionId?: string; signal?: AbortSignal } = {},
+	options: {
+		authStorage?: AuthStorage;
+		modelRegistry?: ModelRegistry;
+		modelName?: string;
+		sessionId?: string;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
 	const createdAuthStorage = options.authStorage || options.modelRegistry ? undefined : await discoverAuthStorage();
 	const authStorage = options.authStorage ?? options.modelRegistry?.authStorage ?? createdAuthStorage;
@@ -302,6 +305,7 @@ export async function runSearchQuery(
 		return await executeSearch("cli-web-search", params, {
 			authStorage,
 			modelRegistry,
+			modelName: options.modelName,
 			sessionId: options.sessionId,
 			signal: options.signal,
 		});
@@ -344,13 +348,14 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 		return executeSearch(_toolCallId, params, {
 			authStorage,
 			modelRegistry: this.#session.modelRegistry,
+			modelName: this.#session.getActiveModel?.()?.id,
 			sessionId,
 			signal,
 		});
 	}
 }
 
-/** Web search tool as CustomTool (for TUI rendering support) */
+/** Web search tool as CustomTool for consumers embedding the custom-tool API. */
 export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRenderDetails> = {
 	name: "web_search",
 	label: "Web Search",
@@ -370,6 +375,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRende
 		return executeSearch(toolCallId, params, {
 			authStorage,
 			modelRegistry: ctx.modelRegistry,
+			modelName: ctx.model?.id,
 			sessionId,
 			signal,
 		});
@@ -389,5 +395,5 @@ export function getSearchTools(): CustomTool<any, any>[] {
 }
 
 export { getSearchProvider, setExcludedSearchProviders, setSearchProviderOrder } from "./provider";
-export type { SearchProviderId as SearchProvider, SearchResponse } from "./types";
+export type { SearchProviderId as SearchProvider, SearchResponse } from "@oh-my-pi/pi-tui/tools/web-search";
 export { isSearchProviderId, isSearchProviderPreference } from "./types";

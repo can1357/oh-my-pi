@@ -1,5 +1,7 @@
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -10,7 +12,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
-import { SessionManager } from "../session/session-manager";
+import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
 import type { AgentDefinition } from "./types";
@@ -34,6 +36,8 @@ export interface PersistedSubagentReviveContext {
 	 * the same lifecycle/progress frames a live run does.
 	 */
 	eventBus?: EventBus;
+	/** Root-scoped observability bus the revived run's frames also publish to. */
+	subagentEventBus?: EventBus;
 }
 
 /**
@@ -64,12 +68,18 @@ export function createPersistedSubagentReviverFactory(
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
 		if (!peek?.init) return undefined;
+		// Isolated runs are never resumable: their worktree is merged + cleaned,
+		// and the parent was told messaging is impossible. A retained workspace
+		// (capture/persist failure) still exists on disk and would pass the cwd
+		// probe below, so gate on the stamped contract instead — otherwise a
+		// restart + Hub message revives the agent outside isolation, in the
+		// parent cwd, contradicting the delivery notice.
+		if (peek.init.isolated) return undefined;
 		try {
 			await fs.stat(peek.cwd);
 		} catch {
 			return undefined;
 		}
-		const init = peek.init;
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
 		// assuming a fixed level.
@@ -81,31 +91,53 @@ export function createPersistedSubagentReviverFactory(
 			taskDepth++;
 			parentId = registry.get(parentId)?.parentId;
 		}
-		// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
-		// advisor-role model, anything else = the explicit pattern stamped onto
-		// this session's `modelRoles.advisor`. Absent = unadvised (the
-		// createSubagentSettings default).
-		const subagentSettings = createSubagentSettings(ctx.settings, {
-			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-			...(init.advisor
-				? {
-						"advisor.enabled": true,
-						...(init.advisor !== "on"
-							? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
-							: undefined),
-					}
-				: undefined),
-		});
-		const persistedModelPattern =
-			init.modelRole && init.modelRole !== "default"
-				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
-				: init.resolvedModel;
 		return async expectedRef => {
 			// Re-open fresh on every revive: park closes the writer, so this takes
 			// the single-writer lock cleanly and restores the full message history.
 			const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
 				suppressBreadcrumb: true,
+				throwIfMissing: true,
 			});
+			const entries = reopened.getEntries();
+			const init = extractSessionInit(entries);
+			if (!init) {
+				await reopened.close();
+				throw new Error(
+					`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no persisted session contract. The agent was not revived.`,
+				);
+			}
+			if (!hasConversationalHistory(entries)) {
+				await reopened.close();
+				throw new Error(
+					`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no message history (truncated to header/session_init). The agent was not revived.`,
+				);
+			}
+			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
+			// advisor-role model, anything else = the explicit pattern stamped onto
+			// this session's `modelRoles.advisor`. Absent = unadvised (the
+			// createSubagentSettings default).
+			const subagentSettings = createSubagentSettings(ctx.settings, {
+				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+				...(init.advisor
+					? {
+							"advisor.enabled": true,
+							...(init.advisor !== "on"
+								? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
+								: undefined),
+						}
+					: undefined),
+			});
+			const persistedModelPattern =
+				init.modelRole && init.modelRole !== "default"
+					? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
+					: init.resolvedModel;
+			// Older session files persisted the synthetic xd:// write transport in the
+			// enabled set. A read-only agent definition could never grant full write,
+			// so remove that transport name before replaying tools as explicit grants.
+			const revivedToolNames =
+				init.readOnly === true && init.tools.includes("write")
+					? init.tools.filter(name => name !== "write")
+					: init.tools;
 			const artifactManager = ctx.session.sessionManager.getArtifactManager();
 			if (artifactManager) reopened.adoptArtifactManager(artifactManager);
 			// A restricted persisted contract must not consult process-global MCP
@@ -116,6 +148,9 @@ export function createPersistedSubagentReviverFactory(
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
+				// Revived agents join the root session tree, so their observability
+				// frames ride the same bus the RPC/collab surfaces subscribed to.
+				subagentEventBus: ctx.subagentEventBus,
 				modelRegistry: ctx.modelRegistry,
 				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
 				modelPatternAuthFallback: init.resolvedModel,
@@ -123,16 +158,37 @@ export function createPersistedSubagentReviverFactory(
 				sessionManager: reopened,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,
+				// `agents` rule scoping keys on the durable definition name (`scout`,
+				// `reviewer`, …), not the registry display label — cold-revived refs
+				// register with `displayName: id` (registry/persisted-agents.ts), so a
+				// generated task id would silently drop every agent-scoped rule.
+				// `init.agent` carries the real name; only files predating that field
+				// fall back to the display label. A parked transcript may also predate
+				// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
+				// persisted `init.agent` of either sentinel value from such a legacy
+				// custom agent must not masquerade as that sentinel here, so it falls
+				// back to the display label too, keeping it scoped as an ordinary
+				// subagent under its generated id instead of `main` or the shared `sub`
+				// bucket.
+				agentName:
+					init.agent &&
+					init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+					init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+						? init.agent
+						: ref.displayName,
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
-				toolNames: init.tools,
+				toolNames: revivedToolNames,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
 				requireYieldTool: true,
 				systemPrompt: () => [init.systemPrompt],
+				// Inherit current owner policy, never extension authority from a transcript.
+				extensionRoots: () => ctx.session.effectiveExtensionRoots,
+				preloadedPreparedExtensions: ctx.session.preparedExtensions,
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
 				spawns: init.spawns ?? "",
@@ -154,7 +210,7 @@ export function createPersistedSubagentReviverFactory(
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
+			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
 			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
@@ -183,10 +239,13 @@ export function createPersistedSubagentReviverFactory(
 				id: ref.id,
 				agent: wakeAgent,
 				eventBus: ctx.eventBus,
+				subagentEventBus: ctx.subagentEventBus,
 				sessionFile,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
-				artifactsDir: ctx.session.sessionFile?.slice(0, -6),
+				// Anchor artifacts to the revived ref's own dir (its parent's children
+				// dir), not the live root session's, matching the spawn callers (#11563).
+				artifactsDir: path.dirname(sessionFile),
 			});
 			return session;
 		};

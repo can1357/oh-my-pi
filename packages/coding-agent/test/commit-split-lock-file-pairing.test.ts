@@ -14,7 +14,7 @@ function plan(...commits: Array<{ paths: string[] }>): SplitCommitPlan {
 	return {
 		warnings: [],
 		commits: commits.map(commit => ({
-			changes: commit.paths.map(path => ({ path, hunks: { type: "all" } })),
+			changes: commit.paths.map(path => ({ path, kind: "all" })),
 			type: "chore",
 			scope: null,
 			summary: "test",

@@ -1,0 +1,38 @@
+// Canonical grammar for the sloppy edit payload (constrained decoding).
+//
+// Shape:
+//   *** SM:EDIT relative/path.ts   open edits in that file
+//   *** SM:EDIT relative/path.ts all
+//                                  apply every match
+//   *** SM:EDIT                    continue with the same file
+//   *** SM:FIND                    current-text body; … elides gaps
+//   *** SM:PUT                     final replacement body; empty deletes
+//   *** SM:AFTER                   lines inserted after the match
+// Headers are standalone and case-insensitive. A body continues until the
+// next recognized header or EOF; no closing delimiter is used. AFTER treats
+// foreign Begin/End Patch rows as literal insertion text.
+start: begin_patch? edit+
+
+begin_patch: BEGIN_PATCH LF
+
+edit: edit_open pair+
+edit_open: EDIT_HEADER LF
+pair: find (put | after)
+find: FIND_HEADER LF body_line*
+put: PUT_HEADER action_body?
+after: AFTER_HEADER after_body?
+action_body: LF body_line* BODY_TEXT?
+after_body: LF after_body_line* AFTER_TEXT?
+
+body_line: BODY_TEXT LF | LF
+after_body_line: AFTER_TEXT LF | LF
+
+BEGIN_PATCH.10: /[ \t]*\*{3}[ \t]+(?i:Begin[ \t]+Patch)[ \t]*(?=\n|$)/
+EDIT_HEADER.10: /[ \t]*\*{3}[ \t]+(?i:SM:EDIT)(?:[ \t]+[^\r\n]*)?(?=\n|$)/
+FIND_HEADER.10: /[ \t]*\*{3}[ \t]+(?i:SM:FIND)[ \t]*(?=\n|$)/
+PUT_HEADER.10: /[ \t]*\*{3}[ \t]+(?i:SM:PUT)[ \t]*(?=\n|$)/
+AFTER_HEADER.10: /[ \t]*\*{3}[ \t]+(?i:SM:AFTER)[ \t]*(?=\n|$)/
+BODY_TEXT: /(?![ \t]*\*{3}[ \t]+(?i:SM:EDIT)(?=[ \t\r\n]|$))(?![ \t]*\*{3}[ \t]+(?i:SM:(?:FIND|PUT|AFTER))(?=[ \t]*(?:\r?\n|$)))(?![ \t]*\*{3}[ \t]+(?i:(?:Begin|End)[ \t]+Patch)(?=[ \t]*(?:\r?\n|$)))[^\r\n]+/
+AFTER_TEXT: /(?![ \t]*\*{3}[ \t]+(?i:SM:EDIT)(?=[ \t\r\n]|$))(?![ \t]*\*{3}[ \t]+(?i:SM:(?:FIND|PUT|AFTER))(?=[ \t]*(?:\r?\n|$)))[^\r\n]+/
+
+%import common.LF

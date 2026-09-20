@@ -1,0 +1,12 @@
+// Provider-wire compat for "xiaomi-token-plan-cn"; regenerated from the frozen census using deployment contract selectors.
+
+provider "xiaomi-token-plan-cn" {
+	default-model "mimo-v2.5"
+	env "XIAOMI_TOKEN_PLAN_CN_API_KEY"
+
+	class "mimo" {
+		family "v2" {
+			thinking-mode "effort"
+		}
+	}
+}

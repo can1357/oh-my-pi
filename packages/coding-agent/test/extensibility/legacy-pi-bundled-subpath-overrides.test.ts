@@ -139,6 +139,13 @@ export const observed = [
 		}
 	});
 
+	it("serves coding-agent registry wildcard exports in compiled mode", () => {
+		const key = "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+		const overrides = __buildLegacyPiPackageRootOverrides(true, bundledModuleKeys);
+		expect(bundledModuleKeys.has(key)).toBe(true);
+		expect(overrides[key]).toBe(`omp-legacy-pi-bundled:${key}`);
+	});
+
 	it("does not enumerate root catch-all wildcards (./* / ./*.js)", () => {
 		// Root `./*` / `./*.js` patterns would static-import top-level files
 		// like the package's own `cli.ts` and explode the bundle through the
@@ -219,6 +226,6 @@ export const observed = [
 		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/slash-commands/helpers/active-oauth-account")).toBe(true);
 		// Directory index modules stay excluded: `./x/*` must not serve `x/y`
 		// from `y/index.ts`, which Node would not resolve either.
-		expect(bundledModuleKeys.has("@oh-my-pi/pi-coding-agent/modes/theme/defaults/index")).toBe(false);
+		expect(bundledModuleKeys.has("@oh-my-pi/pi-tui/theme/defaults/index")).toBe(false);
 	});
 });

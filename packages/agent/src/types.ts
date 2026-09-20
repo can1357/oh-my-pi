@@ -31,8 +31,22 @@ export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
+/** Staged queue preparation; commit synchronously only while the batch is still owned. */
+export interface QueuedMessagePreparation {
+	/** Append context after the originals; undefined stops this attempt, retaining originals unless explicitly removed. */
+	commit(): readonly AgentMessage[] | undefined;
+}
+
+/** Prepare an exclusively claimed batch. Undefined delivers unchanged; the signal also aborts when the claim is cancelled. */
+export type PrepareQueuedMessages = (
+	messages: readonly AgentMessage[],
+	signal: AbortSignal,
+) => QueuedMessagePreparation | undefined | Promise<QueuedMessagePreparation | undefined>;
+
 /** Called once an aside has been inserted into the agent's live context. */
 export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
+/** Symbol-keyed handoff for one finalized, tool-owned stream speculation session. */
+export const SPECULATIVE_STREAM_SESSION = Symbol("speculative-stream-session");
 /** Called when an aside was drained but the agent loop ended before inserting it. */
 export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
 
@@ -245,8 +259,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
-	 * Called after each tool execution (unless interruptMode is "wait") to decide
-	 * whether to skip the remaining tool calls in the batch. The queue keeps
+	 * Polled while a tool batch runs (unless interruptMode is "wait") to decide
+	 * whether to abort in-flight and skip not-yet-started *interruptible* waits;
+	 * every other already-emitted call still executes and the message injects
+	 * at the batch boundary. The queue keeps
 	 * owning its messages until the loop reaches the next injection boundary and
 	 * dequeues via {@link getSteeringMessages} — so callers can still cancel or
 	 * restore queued messages while in-flight tools settle, and an external
@@ -337,12 +353,32 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	/**
+	 * Opt-in speculative execution for finalized, discard-safe tool calls.
+	 *
+	 * Candidates remain invisible until ordinary dispatch commits their result.
+	 */
+	speculativeToolExecution?: SpeculativeToolExecutionConfig;
+	/**
 	 * Resolve a tool call whose name matched no advertised tool (including
 	 * `customWireName` aliases). Lets hosts route calls to tools they expose
 	 * through side transports (e.g. `xd://` device mounts) instead of failing
 	 * with "Tool not found". Returning `undefined` keeps the failure.
+	 *
+	 * `advertised` is the very snapshot exact-name dispatch just searched — the
+	 * set offered to THIS request. A host must resolve against it rather than
+	 * its own live tool state: an MCP `tools/list_changed` mid-stream reassigns
+	 * the agent's tools, so live state can hold a roster the model never saw,
+	 * and a name-recovering host would dispatch a tool this request never
+	 * advertised while exact dispatch still answered from the snapshot.
 	 */
-	resolveFallbackTool?: (name: string) => AgentTool<any> | undefined;
+	resolveFallbackTool?: (name: string, advertised: readonly AgentTool<any>[]) => AgentTool<any> | undefined;
+	/**
+	 * Names reachable through {@link resolveFallbackTool} but absent from the
+	 * advertised set (e.g. `xd://` device mounts). Consulted only to name a
+	 * plausible target when a call misses, so a mis-transcribed device call is
+	 * recoverable; never a dispatch source.
+	 */
+	suggestFallbackToolNames?: () => Iterable<string>;
 
 	/**
 	 * Enable intent tracing for tool calls.
@@ -563,6 +599,192 @@ export interface ToolCallContext {
 /** A single tool-call content block emitted by an assistant message. */
 export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
+export interface SpeculativeResourceAccess {
+	scheme: "file";
+	path: string;
+	access: "read";
+}
+
+/** Declares an operation whose early execution can be discarded without rollback. */
+export type ToolSpeculationEffect =
+	| { kind: "pure" }
+	| { kind: "local_read"; resources: readonly SpeculativeResourceAccess[] };
+
+export type ToolSpeculationAssessment =
+	| { eligible: false; reason: string }
+	| { eligible: true; effect: ToolSpeculationEffect };
+
+/** Immutable finalized call data provided to a tool-owned policy. */
+export interface ToolSpeculationAssessmentContext {
+	toolCall: AgentToolCall;
+	args: Readonly<Record<string, unknown>>;
+}
+
+export interface ToolSpeculationExecutionContext extends ToolSpeculationAssessmentContext {
+	effect: ToolSpeculationEffect;
+}
+
+export interface ToolSpeculationCommitContext extends ToolSpeculationExecutionContext {
+	physicalOutcome: SpeculativePhysicalOutcome;
+}
+
+export interface ToolSpeculationDiscardContext extends ToolSpeculationExecutionContext {
+	reason: string;
+}
+
+export interface SpeculativePhysicalOutcome {
+	kind: "result";
+	result: AgentToolResult<unknown>;
+	isError: boolean;
+	/** Opaque evidence binding the result to the local bytes actually consumed. */
+	evidence?: unknown;
+}
+
+export interface SpeculativeToolReference {
+	name: string;
+	approval?: ToolApproval;
+	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
+}
+
+export interface SpeculativeOperationContext extends ToolSpeculationExecutionContext {
+	tool: SpeculativeToolReference;
+	candidateId: string;
+	source: "direct" | "eval_shadow";
+	dependencies: readonly string[];
+}
+
+export interface SpeculativeCommitContext extends SpeculativeOperationContext {
+	physicalOutcome: SpeculativePhysicalOutcome;
+}
+
+export interface SpeculativeDiscardContext extends SpeculativeOperationContext {
+	reason: string;
+}
+
+export type SpeculativeAuthorization =
+	| { allowed: false; reason: string }
+	| { allowed: true; deferBeforeToolCall?: boolean };
+
+export type SpeculativeCommitDecision =
+	| { kind: "committed"; result: AgentToolResult<unknown> }
+	| { kind: "fallback"; reason: string }
+	| { kind: "failed"; error: unknown };
+
+export interface SpeculativeExecutionHost {
+	authorize(context: SpeculativeOperationContext): SpeculativeAuthorization | Promise<SpeculativeAuthorization>;
+	/**
+	 * Capture content evidence after admission gates pass but before the
+	 * candidate executes. The coordinator invokes this immediately before
+	 * starting speculative execution — which for hook-deferred candidates is
+	 * after `beforeToolCall` runs — so content inspection never precedes a
+	 * hook that may block the call. Return false (or throw) to veto the
+	 * candidate without executing it. Hosts without this hook keep the legacy
+	 * behavior of capturing during `authorize`.
+	 */
+	captureEvidence?(context: SpeculativeOperationContext): boolean | Promise<boolean>;
+	validate?(context: SpeculativeCommitContext): boolean | Promise<boolean>;
+	commit?(
+		context: SpeculativeCommitContext,
+		commitDefault: () => Promise<AgentToolResult<unknown>>,
+	): Promise<SpeculativeCommitDecision>;
+	discard?(context: SpeculativeDiscardContext): void | Promise<void>;
+	close?(reason: string): void | Promise<void>;
+}
+
+export interface ToolSpeculationStreamContext {
+	readonly coordinator: SpeculativeOperationSink;
+	readonly parentToolCallId: string;
+}
+
+/** One dependency-aware child operation projected by a streamed outer tool. */
+export interface SpeculativeChildDefinition {
+	candidateId: string;
+	parentToolCallId: string;
+	dependencies: readonly string[];
+	toolCall: AgentToolCall;
+	tool: AgentTool;
+	source: "eval_shadow";
+	virtualDurationMs?: number;
+}
+
+/** Opaque ownership handle returned after agent-core validates and authorizes a child. */
+export interface SpeculativeChildHandle {
+	readonly candidateId: string;
+	readonly fingerprint: string;
+	readonly effect: ToolSpeculationEffect;
+	readonly outcome: Promise<SpeculativePhysicalOutcome>;
+	commit(actualArgs: Readonly<Record<string, unknown>>): Promise<AgentToolResult<unknown> | undefined>;
+	discard(reason: string): Promise<void>;
+}
+
+export interface ToolSpeculationStreamSession {
+	/** True when the tool owns claim routing and does not need an AgentToolContext attachment. */
+	readonly contextIndependent?: boolean;
+	update(toolCall: AgentToolCall, partialJson?: string): void | Promise<void>;
+	finalize(context: ToolSpeculationAssessmentContext): void | Promise<void>;
+	commit(): void | Promise<void>;
+	discard(reason: string): void | Promise<void>;
+	/**
+	 * Whether the session's streamed plan still authorizes these final
+	 * arguments. The coordinator discards the session when the finalized call
+	 * kept its ID but a hook or argument transform replaced its arguments:
+	 * deferred work planned from the original code must never release.
+	 * Sessions without this predicate are always retained.
+	 */
+	matchesFinalArgs?(args: Readonly<Record<string, unknown>>): boolean;
+}
+
+export interface SpeculativeOperationSink {
+	readonly maxInFlight: number;
+	admit(definition: SpeculativeChildDefinition): Promise<SpeculativeChildHandle | undefined>;
+	discardChildren?(parentToolCallId: string, reason: string): void | Promise<void>;
+	close(reason: string): void | Promise<void>;
+}
+
+export interface ToolSpeculationPolicy {
+	finalized?: {
+		assess(context: ToolSpeculationAssessmentContext): ToolSpeculationAssessment | Promise<ToolSpeculationAssessment>;
+		execute(context: ToolSpeculationExecutionContext, signal: AbortSignal): Promise<SpeculativePhysicalOutcome>;
+		commit?(
+			context: ToolSpeculationCommitContext,
+			outcome: SpeculativePhysicalOutcome,
+		): Promise<AgentToolResult<unknown>>;
+		discard?(context: ToolSpeculationDiscardContext): void | Promise<void>;
+	};
+	stream?: {
+		open(
+			context: ToolSpeculationStreamContext,
+		): ToolSpeculationStreamSession | Promise<ToolSpeculationStreamSession | undefined>;
+	};
+}
+
+/** Diagnostic information for one speculative operation. */
+export interface SpeculativeToolTelemetry {
+	source: "direct" | "eval_shadow";
+	candidateId: string;
+	parentToolCallId?: string;
+	toolName: string;
+	effectKind?: ToolSpeculationEffect["kind"];
+	candidateStartedAt?: number;
+	candidateFinishedAt?: number;
+	dispatchReachedAt?: number;
+	dependencyCount: number;
+	queueMs?: number;
+	executionDurationMs?: number;
+	overlapMs?: number;
+	outcome: "committed" | "discarded" | "ineligible" | "fingerprint_mismatch" | "aborted" | "commit_conflict";
+	reason?: string;
+	resourceCount: number;
+}
+
+/** Opt-in configuration for discard-safe speculative tool execution. */
+export interface SpeculativeToolExecutionConfig {
+	enabled: boolean;
+	maxInFlight?: number;
+	host?: SpeculativeExecutionHost;
+	onTelemetry?: (event: SpeculativeToolTelemetry) => void;
+}
+
 /**
  * Result returned from `beforeToolCall`.
  *
@@ -607,7 +829,7 @@ export interface BeforeToolCallContext {
 	/** The raw tool call block from `assistantMessage.content`. */
 	toolCall: AgentToolCall;
 	/** The resolved tool the call dispatches to. */
-	tool: AgentTool<any>;
+	tool: AgentTool;
 	/**
 	 * Validated tool arguments. The same reference is forwarded to `tool.execute`
 	 * (after any `transformToolCallArguments` pass), so in-place mutations stick;
@@ -746,7 +968,8 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
-	// Empty by default - apps extend via declaration merging
+	/** Present only while the matching outer tool owns its finalized stream session. */
+	[SPECULATIVE_STREAM_SESSION]?: ToolSpeculationStreamSession;
 }
 
 export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown> = (
@@ -758,13 +981,40 @@ export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = an
 	context?: AgentToolContext,
 ) => Promise<AgentToolResult<TDetails, TParameters>>;
 
+/** Live receiver for a tool call's streamed arguments (see AgentTool.openArgStream). */
+export interface AgentToolArgStream {
+	/** Raw wire fragment of the arguments (JSON text, or verbatim payload for custom-format tools). */
+	push(delta: string): void;
+	/** Arguments are complete; `args` is the final parsed object the loop will pass to `execute`. */
+	end(args: unknown): void;
+	/** The call will never execute (stream error, abort, blocked). Release resources. */
+	cancel(): void;
+}
+
+export interface AgentToolArgStreamInit {
+	toolCallId: string;
+	toolName: string;
+	/** Wire-level name for custom-format tools; undefined for JSON function tools. */
+	customWireName?: string;
+	/** Push a serializable projection of the in-flight call (e.g. diff previews); surfaces as `tool_stream_update`. */
+	emit(update: unknown): void;
+}
+
 // AgentTool extends Tool but adds the execute function
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown>
-	extends Tool<TParameters> {
+export interface AgentTool<
+	TParameters extends TSchema = TSchema,
+	TDetails = any,
+	TTheme = unknown,
+> extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
-	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
+	/**
+	 * Called at `toolcall_start`, before any argument delta. Return `undefined` to opt out.
+	 */
+	openArgStream?: (init: AgentToolArgStreamInit) => AgentToolArgStream | undefined;
 	hidden?: boolean;
+	/** If true, the tool can read `skill://<name>` instruction content; prompt builders gate skill guidance on it. */
+	readsSkillUris?: boolean;
 	/** If true, tool can stage a pending action that requires explicit resolution via the resolve tool. */
 	deferrable?: boolean;
 	/** How an enabled tool is presented. See {@link ToolLoadMode}. Omitted is treated as `"essential"` for built-ins; custom-tool adapters normalize omission to `"discoverable"`. */
@@ -778,17 +1028,24 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * - function: resolved per call from the (raw, pre-validation) arguments
 	 */
 	concurrency?: "shared" | "exclusive" | ((args: Partial<Static<TParameters>>) => "shared" | "exclusive");
+
+	/**
+	 * Declares the bounded, validated effect of a finalized call that may execute
+	 * before ordinary dispatch commits its result.
+	 */
+	speculation?: ToolSpeculationPolicy;
 	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
 	lenientArgValidation?: boolean;
 	/**
-	 * Whether the agent loop may abort this tool mid-execution to deliver a
-	 * queued steering message. A function resolves this per call from the raw,
-	 * pre-validation arguments.
+	 * Whether the agent loop may abort this tool mid-execution — or skip it
+	 * before it starts — to deliver a queued steering message. A function
+	 * resolves this per call from the raw, pre-validation arguments.
 	 *
 	 * Enable only for calls that purely *wait* and observe their abort signal
 	 * cleanly (e.g. `job` poll), so the abort surfaces the tool's current
-	 * snapshot rather than corrupting a side effect. Honored only when
-	 * `interruptMode` is "immediate".
+	 * snapshot rather than corrupting a side effect. Every other call runs to
+	 * completion even when steering is queued; the message lands at the next
+	 * batch boundary. Honored only when `interruptMode` is "immediate".
 	 */
 	interruptible?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
 	/**
@@ -882,4 +1139,5 @@ export type AgentEvent =
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; intent?: string }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+	| { type: "tool_stream_update"; toolCallId: string; toolName: string; update: unknown }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };

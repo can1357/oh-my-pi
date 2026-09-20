@@ -12,7 +12,7 @@ import { isFireworksFastModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id"
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
-import { classifyDifficulty } from "../auto-thinking/classifier";
+import { autoThinkingEffortCeiling, classifyDifficulty } from "../auto-thinking/classifier";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	filterAvailableModelsByEnabledPatterns,
@@ -23,7 +23,7 @@ import {
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
 import type { Settings } from "../config/settings";
-import { containsUltrathink } from "../modes/ultrathink";
+import { containsUltrathink } from "@oh-my-pi/pi-tui/prompt/ultrathink";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -33,8 +33,8 @@ import {
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
-} from "../thinking";
-import type { EditMode } from "../utils/edit-mode";
+} from "@oh-my-pi/pi-tui/thinking";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
@@ -136,6 +136,16 @@ export class ModelControls {
 	/** Models explicitly scoped to the session's cycle command. */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
 		return this.#scopedModels;
+	}
+
+	/**
+	 * Replace the Ctrl+P cycle scope. Startup resolves the scope before background
+	 * provider discovery runs; the CLI re-pushes the fuller list here once discovery
+	 * completes so a newly-discovered `enabledModels` model joins the cycle and the
+	 * scoped `/models` picker (issue #9220).
+	 */
+	setScopedModels(scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>): void {
+		this.#scopedModels = scopedModels;
 	}
 
 	/** Live per-provider-family service-tier selection. */
@@ -593,8 +603,9 @@ export class ModelControls {
 		// nothing to pick — skip classification rather than discard its result.
 		if (getSupportedEfforts(model).length === 0) return;
 
+		const isUltrathink = this.#host.magicKeywordEnabled("ultrathink") && containsUltrathink(promptText);
 		let resolved: Effort | undefined;
-		if (this.#host.magicKeywordEnabled("ultrathink") && containsUltrathink(promptText)) {
+		if (isUltrathink) {
 			// The user explicitly asked for maximum thinking; bypass the classifier
 			// (and the `providers.autoThinkingMaxEffort` ceiling) and jump straight
 			// to the highest supported level for this model.
@@ -602,6 +613,10 @@ export class ModelControls {
 		} else {
 			const controller = new AbortController();
 			const timer = setTimeout(() => controller.abort(), ModelControls.#AUTO_THINKING_TIMEOUT_MS);
+			const usageOwner = {
+				sessionId: this.#host.sessionManager.getSessionId(),
+				parentId: this.#host.sessionManager.getLeafId(),
+			};
 			try {
 				resolved = await classifyDifficulty(promptText, {
 					settings: this.#host.settings,
@@ -610,6 +625,13 @@ export class ModelControls {
 					sessionId: this.#host.sessionId(),
 					signal: controller.signal,
 					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+					onUsage: usage => {
+						const entryId = this.#host.sessionManager.appendModelUsage(
+							{ purpose: "auto-thinking", ...usage },
+							usageOwner,
+						);
+						if (entryId) usageOwner.parentId = entryId;
+					},
 				});
 			} catch (error) {
 				logger.debug("auto-thinking: classification failed; using fallback level", {
@@ -623,11 +645,16 @@ export class ModelControls {
 		// Drop the result if the turn was aborted/superseded while classifying.
 		if (this.#host.promptGeneration() !== generation || !this.#autoThinking) return;
 
-		const effort = clampThinkingLevelToCeiling(
-			model,
-			resolved ?? this.#autoResolvedLevel ?? resolveProvisionalAutoLevel(model),
-			this.#thinkingLevelCeiling,
-		);
+		const candidate = resolved ?? this.#autoResolvedLevel ?? resolveProvisionalAutoLevel(model);
+		const autoLimited =
+			candidate === undefined || isUltrathink
+				? candidate
+				: clampAutoThinkingEffort(
+						model,
+						candidate,
+						autoThinkingEffortCeiling(model, this.#host.settings.get("providers.autoThinkingMaxEffort")),
+					);
+		const effort = clampThinkingLevelToCeiling(model, autoLimited, this.#thinkingLevelCeiling);
 		if (effort === undefined) return;
 		const shouldPersistResolution = this.#thinkingLevel !== effort;
 		this.#autoResolvedLevel = effort;

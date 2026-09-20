@@ -236,6 +236,10 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
     _stage_agent_home()
     _ensure_agent_run_dir()
     env = dict.fromkeys(_SCRUBBED_ENV_KEYS, "")
+    # Usage attribution: the pi-native gateway transport forwards this label
+    # (x-omp-app) so broker-side per-client burn tracking shows `robomp`
+    # instead of an anonymous gateway client.
+    env["OMP_APP_NAME"] = "robomp"
     if _AGENT_HOME.is_dir():
         env["HOME"] = str(_AGENT_HOME)
     return env

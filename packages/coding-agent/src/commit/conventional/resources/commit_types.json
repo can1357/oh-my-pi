@@ -1,0 +1,242 @@
+{
+  "classifier_hint": "CRITICAL disambiguation rules:\n- feat vs refactor: feat=ANY observable behavior change OR new public API; refactor=provably unchanged (same tests, same API). When in doubt, prefer feat.\n- fix vs hotfix: hotfix=critical production emergency; fix=normal bug.\n- fix vs security: security=proactive hardening, CVE patches, auth hardening; fix=non-security bugs.\n- deps vs chore: deps=dependency version bumps only; chore=other maintenance (tooling, scripts).\n- deps vs build: build=build system scripts/config; deps=bumping library versions in manifests.\n- config vs chore: config=application/runtime config; chore=dev tooling and housekeeping.\n- ux vs feat: ux=existing feature made easier/clearer; feat=new capability.\n- init=bootstrap commit for a project or major subsystem; use once.\n- wip=in-progress save-point; prefer a real type for finished commits.\n- hack=deliberate temporary workaround; body must note intent to revisit.\n- merge=merge/sync commits with no standalone logic change.",
+  "types": [
+    {
+      "name": "feat",
+      "description": "New public API surface OR user-observable capability/behavior change",
+      "diff_indicators": ["pub fn", "pub struct", "pub enum", "export function", "#[arg]"],
+      "examples": [
+        "Added pub fn process_batch() → feat (new API)",
+        "Migrated HTTP client to async → feat (behavior change)"
+      ],
+      "hint": "ANY observable behavior change OR new public API. When unsure between feat and refactor, prefer feat.",
+      "aliases": ["feature", "features", "enhancement", "enhancements"]
+    },
+    {
+      "name": "fix",
+      "description": "Fixes incorrect behavior (bugs, crashes, wrong outputs, race conditions)",
+      "diff_indicators": ["unwrap() → ?", "bounds check", "off-by-one", "error handling"],
+      "examples": [
+        "Corrected off-by-one in pagination offset → fix (wrong output)",
+        "Guarded against panic on empty input → fix (crash)"
+      ],
+      "hint": "Non-security bug fixes. Security-motivated fix → security; production emergency → hotfix.",
+      "aliases": ["bug", "bugfix", "bugfixes"]
+    },
+    {
+      "name": "refactor",
+      "description": "Internal restructuring with provably unchanged behavior",
+      "diff_indicators": ["rename", "extract", "consolidate", "reorganize"],
+      "examples": [
+        "Renamed internal module structure → refactor (no API change)",
+        "Extracted shared helper from three call sites → refactor"
+      ],
+      "hint": "Requires proof: same tests pass, same API. If behavior changes, use feat.",
+      "aliases": ["refactoring", "refactors", "rework", "rewrite", "cleanup"]
+    },
+    {
+      "name": "docs",
+      "description": "Documentation only changes",
+      "diff_indicators": ["///", "//!", "README", "/** */"],
+      "file_patterns": ["*.md", "doc comments"],
+      "examples": [
+        "Expanded README usage section → docs",
+        "Added rustdoc examples to public API → docs"
+      ],
+      "hint": "Excludes prompt template files (prompts/*.md). Prompt changes are functional — use feat/fix/refactor.",
+      "aliases": ["doc", "documentation"]
+    },
+    {
+      "name": "test",
+      "description": "Adding or modifying tests",
+      "diff_indicators": ["#[test]", "assert_eq!", "describe(", "it(", "expect("],
+      "file_patterns": ["*_test.rs", "tests/", "*.test.ts", "*.spec.ts"],
+      "examples": [
+        "Added unit tests for parser edge cases → test",
+        "Migrated suite to table-driven cases → test"
+      ],
+      "hint": "Test-only changes. Production code touched alongside tests uses that code's type.",
+      "aliases": ["tests", "testing"]
+    },
+    {
+      "name": "chore",
+      "description": "Housekeeping: tooling scripts, editor config, miscellaneous maintenance not covered by other types",
+      "file_patterns": [".gitignore", "*.lock", ".editorconfig"],
+      "examples": [
+        "Updated .gitignore and editor config → chore",
+        "Refreshed lockfile after unrelated change → chore"
+      ],
+      "hint": "Use deps for version bumps, config for app/env config, build for build scripts.",
+      "aliases": ["housekeeping", "maintenance", "misc"]
+    },
+    {
+      "name": "style",
+      "description": "Formatting, whitespace changes (no logic change)",
+      "diff_indicators": ["whitespace", "formatting", "indentation"],
+      "examples": [
+        "Reformatted with rustfmt, no logic change → style",
+        "Normalized import ordering → style"
+      ],
+      "hint": "Variable/function renames are refactor, not style.",
+      "aliases": ["format", "formatting", "reformat", "whitespace", "lint", "fmt"]
+    },
+    {
+      "name": "perf",
+      "description": "Performance improvements (proven faster)",
+      "diff_indicators": ["optimization", "cache", "batch", "preallocate"],
+      "examples": [
+        "Cached repeated lookups to cut allocations → perf",
+        "Replaced O(n^2) scan with hashmap → perf"
+      ],
+      "hint": "Requires evidence of a measurable improvement; speculative tidying is refactor.",
+      "aliases": ["performance", "optimize", "optimise", "optimization"]
+    },
+    {
+      "name": "build",
+      "description": "Build system and toolchain configuration (build scripts, compiler/bundler settings)",
+      "file_patterns": ["Cargo.toml", "package.json", "Makefile", "build.rs"],
+      "examples": [
+        "Added release profile to Cargo.toml → build",
+        "Wired a new build script step → build"
+      ],
+      "hint": "Build scripts and tooling config. Bumping library versions in manifests → deps.",
+      "aliases": ["buildsystem", "builder"]
+    },
+    {
+      "name": "ci",
+      "description": "CI/CD configuration",
+      "file_patterns": [".github/workflows/", ".gitlab-ci.yml", ".circleci/"],
+      "examples": [
+        "Added a test matrix to GitHub Actions → ci",
+        "Cached cargo registry between CI runs → ci"
+      ],
+      "hint": "Pipeline definitions and CI scripts. Runtime app config → config; IaC → infra.",
+      "aliases": ["pipeline", "workflow", "actions", "cicd"]
+    },
+    {
+      "name": "revert",
+      "description": "Reverts a previous commit",
+      "diff_indicators": ["Revert", "This reverts commit"],
+      "examples": ["Reverted commit abc123 introducing the regression → revert"],
+      "hint": "Undoing a prior commit. A fresh fix that supersedes it is fix, not revert.",
+      "aliases": ["reverts", "reversion"]
+    },
+    {
+      "name": "deps",
+      "description": "Dependency version bumps (Cargo.toml, package.json, go.mod, requirements.txt, etc.)",
+      "diff_indicators": ["version = \"", "\"^", "~>", "go.sum"],
+      "file_patterns": ["Cargo.toml", "package.json", "go.mod", "requirements.txt", "pyproject.toml"],
+      "examples": [
+        "Bumped serde 1.0.197 → 1.0.210 → deps",
+        "Upgraded transitive deps via lockfile → deps"
+      ],
+      "hint": "Version bumps only. Build system changes belong in build; lockfile-only changes can be deps.",
+      "aliases": ["dependency", "dependencies", "dep", "bump"]
+    },
+    {
+      "name": "security",
+      "description": "Security hardening, CVE patches, auth improvements, input sanitization, rate limiting",
+      "diff_indicators": ["sanitize", "auth", "CVE", "rate limit", "HMAC", "escape"],
+      "examples": [
+        "Sanitized user input before the SQL query → security",
+        "Added rate limiting to the login endpoint → security"
+      ],
+      "hint": "Use for proactive hardening too, not just bug fixes. Security-motivated fix → security, not fix.",
+      "aliases": ["sec", "vuln", "vulnerability"]
+    },
+    {
+      "name": "config",
+      "description": "Application or environment configuration changes (.env, settings, feature flags, runtime config)",
+      "file_patterns": [".env", "settings.toml", "config.yaml"],
+      "examples": [
+        "Added a feature flag for the new pipeline → config",
+        "Raised the default request timeout → config"
+      ],
+      "hint": "App/runtime config. Build system config → build; CI config → ci; dev tooling → chore.",
+      "aliases": ["configuration", "settings", "cfg"]
+    },
+    {
+      "name": "ux",
+      "description": "Usability and ergonomics improvements to existing interfaces (CLI flags, error messages, output formatting)",
+      "diff_indicators": ["help text", "error message", "prompt", "--flag"],
+      "examples": [
+        "Clarified an ambiguous error message → ux",
+        "Added a short alias for an existing flag → ux"
+      ],
+      "hint": "Existing feature made easier/clearer → ux. New capability → feat.",
+      "aliases": ["ui", "usability", "ergonomics"]
+    },
+    {
+      "name": "release",
+      "description": "Version bump and release preparation (CHANGELOG.md updates, version files, release tags)",
+      "file_patterns": ["CHANGELOG.md", "CHANGELOG", "VERSION"],
+      "examples": [
+        "Bumped version to 2.1.0 and updated CHANGELOG → release",
+        "Cut the v3 release notes → release"
+      ],
+      "hint": "Only for the release commit itself. Code changes alongside a release use their own type.",
+      "aliases": ["releases", "versioning"]
+    },
+    {
+      "name": "hotfix",
+      "description": "Critical production fix requiring immediate patch, often on a dedicated hotfix branch",
+      "examples": [
+        "Patched a production auth bypass on the hotfix branch → hotfix",
+        "Emergency rollback of a broken migration → hotfix"
+      ],
+      "hint": "Reserve for genuine production emergencies. Normal bugs → fix.",
+      "aliases": ["hotfixes"]
+    },
+    {
+      "name": "infra",
+      "description": "Infrastructure-as-code changes (Terraform, Kubernetes manifests, Ansible, cloud config)",
+      "file_patterns": ["*.tf", "helm/", "terraform/", "k8s/", "ansible/"],
+      "examples": [
+        "Added a Terraform module for RDS → infra",
+        "Tuned Kubernetes resource limits → infra"
+      ],
+      "hint": "IaC and cloud provisioning. App config → config; CI pipelines → ci.",
+      "aliases": ["infrastructure", "iac"]
+    },
+    {
+      "name": "init",
+      "description": "Initial commit bootstrapping a project, module, or major subsystem",
+      "examples": [
+        "Scaffolded a new crate with cargo init → init",
+        "Bootstrapped the auth subsystem skeleton → init"
+      ],
+      "hint": "Use once per project/module bootstrap. Subsequent setup → chore or build.",
+      "aliases": ["initial", "bootstrap", "scaffold", "initialization"]
+    },
+    {
+      "name": "merge",
+      "description": "Merge or sync commit with no standalone logic change (merge branches, sync forks)",
+      "examples": [
+        "Merged the release branch back into main → merge",
+        "Synced fork with upstream → merge"
+      ],
+      "hint": "Only when the commit is purely a merge. Squashed logic changes → use the appropriate type.",
+      "aliases": ["merges", "sync", "merging"]
+    },
+    {
+      "name": "hack",
+      "description": "Deliberate temporary workaround or shortcut with known technical debt",
+      "examples": [
+        "Hardcoded a timeout pending the upstream fix → hack",
+        "Stubbed the flaky call behind a guard → hack"
+      ],
+      "hint": "Must signal intent to revisit in the body (e.g., TODO: replace once X lands).",
+      "aliases": ["hacks", "workaround", "hacky"]
+    },
+    {
+      "name": "wip",
+      "description": "Incomplete in-progress work not ready for review or release",
+      "examples": [
+        "Saved a partial refactor mid-progress → wip",
+        "Checkpointed exploratory spike → wip"
+      ],
+      "hint": "Prefer a real type for finished commits. Use wip only for explicit save-points.",
+      "aliases": ["inprogress", "work-in-progress"]
+    }
+  ]
+}

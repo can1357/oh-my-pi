@@ -35,6 +35,8 @@ type FakeEditor = {
 	pendingImageLinks: (string | undefined)[];
 	setText(text: string): void;
 	getText(): string;
+	setCollapsedText(text: string): void;
+	composerChips(): unknown[];
 	addToHistory(text: string): void;
 	clearDraft(historyText?: string): void;
 	setActionKeys(action: string, keys: string[]): void;
@@ -61,6 +63,12 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		getText() {
 			return editorText;
 		},
+		setCollapsedText(text: string) {
+			editorText = text;
+		},
+		composerChips() {
+			return [];
+		},
 		addToHistory,
 		clearDraft(historyText?: string) {
 			if (historyText !== undefined) addToHistory(historyText);
@@ -86,6 +94,8 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 			prompt,
 			maybeStartTitleGeneration: vi.fn(),
 			queuedMessageCount: 0,
+			customCommands: [],
+			promptTemplates: [],
 			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		} as unknown as InteractiveModeContext["session"]);
 
@@ -96,6 +106,7 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		settings: session.settings,
 		sessionManager: { getSessionName: () => "named-session" } as InteractiveModeContext["sessionManager"],
 		compactionQueuedMessages: [] as InteractiveModeContext["compactionQueuedMessages"],
+		skillCommands: new Map(),
 		fileSlashCommands: new Set<string>(),
 		locallySubmittedUserSignatures: new Set<string>(),
 		isKnownSlashCommand: () => false,
@@ -204,10 +215,13 @@ describe("InputController orphaned submit", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("look at this");
+		await editor.onSubmit?.("look at this [Image #1]");
 
-		expect(spies.prompt).toHaveBeenCalledWith("look at this", { streamingBehavior: "steer", images: [image] });
-		expect(ctx.locallySubmittedUserSignatures.has("look at this\u00001")).toBe(true);
+		expect(spies.prompt).toHaveBeenCalledWith("look at this [Image #1]", {
+			streamingBehavior: "steer",
+			images: [image],
+		});
+		expect(ctx.locallySubmittedUserSignatures.has("look at this [Image #1]\u00001")).toBe(true);
 		expect(ctx.editor.pendingImages.length).toBe(0);
 	});
 
@@ -221,14 +235,14 @@ describe("InputController orphaned submit", () => {
 		const controller = new InputController(ctx);
 		controller.setupEditorSubmitHandler();
 
-		await editor.onSubmit?.("doomed message");
+		await editor.onSubmit?.("doomed message [Image #1]");
 
 		expect(spies.showError).toHaveBeenCalledWith("queue exploded");
 		// The message survives the failure: text and images return to the editor.
-		expect(editor.getText()).toBe("doomed message");
+		expect(editor.getText()).toBe("doomed message [Image #1]");
 		expect(ctx.editor.pendingImages).toEqual([image]);
 		// The signature must not leak for a message that never started.
-		expect(ctx.locallySubmittedUserSignatures.has("doomed message\u00001")).toBe(false);
+		expect(ctx.locallySubmittedUserSignatures.has("doomed message [Image #1]\u00001")).toBe(false);
 	});
 
 	it("returns queued images to the pending-image buffer on queue restore", async () => {

@@ -1,0 +1,7 @@
+class "mistral" {
+	bounded "mistral"
+	bounded "mixtral"
+
+	family "mistral" glob="*mistral*"
+	family "mixtral" glob="*mixtral*"
+}

@@ -123,8 +123,7 @@ export class AnthropicApiError extends ProviderHttpError {
 		else signal?.addEventListener("abort", onAbort, { once: true });
 
 		const deadline = performance.now() + anthropicErrorBodyReadTimeoutMs;
-		let timeout: Timer | undefined;
-		timeout = setTimeout(() => {
+		const timeout = setTimeout(() => {
 			timedOut = true;
 			cancelReader();
 		}, anthropicErrorBodyReadTimeoutMs);

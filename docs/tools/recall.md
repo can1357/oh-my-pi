@@ -41,7 +41,7 @@ Hindsight bullet format comes from `formatMemories(...)`:
 
 Mnemopi bullet format comes from `formatScopedRecallWithIds(...)`:
 - each bullet is `- <content> (id: <id>) [<source>] (<YYYY-MM-DD>) c:<score>`; an unavailable id renders as `(id unavailable)`, and source, date, and score are omitted when absent.
-- Mnemopi recall content is a preview capped at 500 characters by default. A clipped preview ends in `…`; fetch the full row with `read memory://<id>` before a wholesale `memory_edit update`.
+- Mnemopi recall content is a preview capped at 500 characters by default (`RECALL_CONTENT_PREVIEW_CHARS` / `RecallOptions.contentPreviewChars` in `packages/mnemopi/src/core/beam/recall.ts`; `0` or a negative limit disables clipping — the explicit tool path uses the default). A clipped preview ends in `…`; fetch the full row with `read memory://<id>` before a wholesale `memory_edit update`.
 - Although the internal recall row carries `truncated` and `full_length`, this tool returns formatted text with `details = {}` and does not expose those fields.
 
 When no matches exist:

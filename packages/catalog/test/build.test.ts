@@ -3,13 +3,14 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
-import { buildOpenAICompat, buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
-import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
@@ -25,6 +26,22 @@ function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128_000,
 		maxTokens: 8_192,
+		...overrides,
+	};
+}
+
+function responsesSpec(overrides: Partial<ModelSpec<"openai-responses">> = {}): ModelSpec<"openai-responses"> {
+	return {
+		id: "some-model",
+		name: "Some Model",
+		api: "openai-responses",
+		provider: "custom",
+		baseUrl: "https://api.example.com/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: null,
+		maxTokens: null,
 		...overrides,
 	};
 }
@@ -46,6 +63,76 @@ function openrouterSpec(overrides: Partial<ModelSpec<"openrouter">> = {}): Model
 }
 
 describe("buildModel", () => {
+	describe("discovery backend policy", () => {
+		it("routes built-in and aliased llama discovery through the same persisted Qwen policy", () => {
+			const raw = responsesSpec({
+				id: "qwen3.8-27b",
+				name: "Qwen 3.8 27B",
+				provider: "llama.cpp",
+				baseUrl: "http://llama-box.local:8080",
+				reasoning: false,
+			});
+			const builtIn = buildDiscoveredModel(raw, "llama.cpp");
+			const aliased = buildDiscoveredModel({ ...raw, provider: "workbench" }, "llama.cpp");
+			const rebuilt = buildModel(toModelSpec(aliased));
+
+			expect(builtIn.api).toBe("openai-completions");
+			expect(aliased).toMatchObject({
+				api: "openai-completions",
+				provider: "workbench",
+				providerType: "llama.cpp",
+				reasoning: true,
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+					requiresEffort: true,
+				},
+				compat: {
+					supportsStore: false,
+					supportsDeveloperRole: false,
+					supportsReasoningEffort: true,
+					supportsReasoningParams: true,
+					thinkingFormat: "qwen-chat-template",
+					reasoningDisableMode: "qwen-template-false",
+					qwenPreserveThinking: true,
+					qwenTemplateReasoningEffort: true,
+				},
+			});
+			expect(rebuilt).toEqual(aliased);
+			expect(builtIn.thinking).toEqual(aliased.thinking);
+			expect(builtIn.compat).toEqual(aliased.compat);
+		});
+
+		it("keeps non-Qwen capabilities neutral and lets explicit compat override backend policy", () => {
+			const plain = buildDiscoveredModel(
+				responsesSpec({
+					id: "plain-model",
+					provider: "workbench",
+					baseUrl: "https://llama.internal",
+					reasoning: false,
+				}),
+				"llama.cpp",
+			);
+			expect(plain.api).toBe("openai-responses");
+			expect(plain.reasoning).toBe(false);
+			expect(plain.thinking).toBeUndefined();
+
+			const explicit = buildDiscoveredModel(
+				{
+					...responsesSpec({
+						id: "qwen3.8-27b",
+						provider: "workbench",
+						baseUrl: "https://llama.internal",
+						reasoning: false,
+					}),
+					compat: { supportsStore: true },
+				},
+				"llama.cpp",
+			);
+			expect(explicit.compat).toMatchObject({ supportsStore: true });
+		});
+	});
+
 	it("resolves a complete compat record for an openai-completions spec with no compat", () => {
 		const model = buildModel(completionsSpec());
 
@@ -119,6 +206,39 @@ describe("buildModel", () => {
 		expect(model.compat.supportsStrictMode).toBe(true);
 		expect(model.compat.strictResponsesPairing).toBe(false);
 		expect(model.compat.openRouterRouting).toEqual({ only: ["anthropic"], order: ["anthropic"] });
+	});
+	it("materializes glyph-tokenization eligibility for Anthropic-compatible wire models", () => {
+		const anthropic = buildModel({
+			id: "claude-opus-4-8",
+			name: "Some Model",
+			api: "anthropic-messages",
+			provider: "anthropic-compatible",
+			baseUrl: "https://api.example.com/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+
+		expect(anthropic.requiresGlyphTokenization).toBe(true);
+		expect(buildModel(completionsSpec()).requiresGlyphTokenization).toBe(false);
+		expect(buildModel({ ...completionsSpec(), id: "claude-opus-4-8" }).requiresGlyphTokenization).toBe(true);
+		expect(
+			buildModel({
+				id: "other-model",
+				name: "Other Model",
+				api: "anthropic-messages",
+				provider: "anthropic-compatible",
+				baseUrl: "https://api.example.com/v1",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			}).requiresGlyphTokenization,
+		).toBe(false);
+		expect(getBundledModel("anthropic", "claude-opus-4-8").requiresGlyphTokenization).toBe(true);
 	});
 
 	it("loads bundled OpenRouter models with resolved compat", () => {
@@ -251,19 +371,19 @@ describe("xAI Responses reasoning-effort suppression", () => {
 	});
 
 	it("omits the effort dial for a custom grok-build spec (off the allowlist)", () => {
-		const compat = buildOpenAIResponsesCompat(grokResponsesSpec("grok-build"));
+		const compat = resolveModelPolicy(grokResponsesSpec("grok-build")).compat;
 		expect(compat.supportsReasoningEffort).toBe(false);
 		expect(compat.omitReasoningEffort).toBe(true);
 		expect(buildModel(grokResponsesSpec("grok-build")).thinking).toBeUndefined();
 	});
 
 	it("keeps the effort dial for a custom grok-4.3 spec (on the allowlist)", () => {
-		expect(buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3")).supportsReasoningEffort).toBe(true);
+		expect(resolveModelPolicy(grokResponsesSpec("grok-4.3")).compat.supportsReasoningEffort).toBe(true);
 	});
 
 	it("applies the same Responses dialect to paid xai and xai-oauth", () => {
-		const paid = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3", "xai"));
-		const oauth = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.3", "xai-oauth"));
+		const paid = resolveModelPolicy(grokResponsesSpec("grok-4.3", "xai")).compat;
+		const oauth = resolveModelPolicy(grokResponsesSpec("grok-4.3", "xai-oauth")).compat;
 		expect(paid.promptCacheSessionHeader).toBe("x-grok-conv-id");
 		expect(oauth.promptCacheSessionHeader).toBe("x-grok-conv-id");
 		expect(paid.includeEncryptedReasoning).toBe(true);
@@ -277,7 +397,7 @@ describe("xAI Responses reasoning-effort suppression", () => {
 		expect(paid.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high", max: "high" });
 		expect(oauth.reasoningEffortMap).toEqual({ minimal: "low", xhigh: "high", max: "high" });
 		expect(
-			buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.20-multi-agent-0309", "xai")).reasoningEffortMap,
+			resolveModelPolicy(grokResponsesSpec("grok-4.20-multi-agent-0309", "xai")).compat.reasoningEffortMap,
 		).toEqual({ minimal: "low" });
 		expect(paid.supportsPenaltyAndStopParams).toBe(false);
 		expect(oauth.supportsPenaltyAndStopParams).toBe(false);
@@ -286,17 +406,17 @@ describe("xAI Responses reasoning-effort suppression", () => {
 	});
 
 	it("suppresses penalty params on every first-party xAI Responses model", () => {
-		const reasoning = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.5", "xai"));
-		const nonReasoning = buildOpenAIResponsesCompat({
+		const reasoning = resolveModelPolicy(grokResponsesSpec("grok-4.5", "xai")).compat;
+		const nonReasoning = resolveModelPolicy({
 			...grokResponsesSpec("grok-2", "xai"),
 			reasoning: false,
-		});
+		}).compat;
 		expect(reasoning.supportsPenaltyAndStopParams).toBe(false);
 		expect(nonReasoning.supportsPenaltyAndStopParams).toBe(false);
 	});
 
 	it("omits effort for paid xai models off the Grok allowlist", () => {
-		const compat = buildOpenAIResponsesCompat(grokResponsesSpec("grok-code-fast-1", "xai"));
+		const compat = resolveModelPolicy(grokResponsesSpec("grok-code-fast-1", "xai")).compat;
 		expect(compat.supportsReasoningEffort).toBe(false);
 		expect(compat.omitReasoningEffort).toBe(true);
 		expect(buildModel(grokResponsesSpec("grok-code-fast-1", "xai")).thinking).toBeUndefined();
@@ -322,82 +442,128 @@ describe("xAI Responses reasoning-effort suppression", () => {
 	});
 
 	it("lets an explicit compat.supportsReasoningEffort override the allowlist default", () => {
-		const compat = buildOpenAIResponsesCompat({
+		const compat = resolveModelPolicy({
 			...grokResponsesSpec("grok-build"),
 			compat: { supportsReasoningEffort: true },
-		});
+		}).compat;
 		expect(compat.supportsReasoningEffort).toBe(true);
 	});
 
 	it("does not suppress effort for a non-xAI provider with a grok-like id", () => {
-		const compat = buildOpenAIResponsesCompat({
+		const compat = resolveModelPolicy({
 			...grokResponsesSpec("grok-build"),
 			provider: "openai",
 			baseUrl: "https://api.openai.com/v1",
-		});
+		}).compat;
 		expect(compat.supportsReasoningEffort).toBe(true);
 	});
 });
 
 describe("openai-completions wire-quirk compat detection", () => {
 	it("derives wireModelIdMode from provider/host", () => {
-		expect(buildOpenAICompat(completionsSpec({ provider: "firepass" })).wireModelIdMode).toBe("firepass");
+		expect(resolveModelPolicy(completionsSpec({ provider: "firepass" })).compat.wireModelIdMode).toBe("firepass");
 		expect(
-			buildOpenAICompat(completionsSpec({ provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference/v1" }))
-				.wireModelIdMode,
+			resolveModelPolicy(
+				completionsSpec({ provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference/v1" }),
+			).compat.wireModelIdMode,
 		).toBe("fireworks");
 		// Fireworks "Fast" variants route through the router namespace (like Fire Pass).
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					provider: "fireworks",
 					id: "kimi-k2.6-fast",
 					baseUrl: "https://api.fireworks.ai/inference/v1",
 				}),
-			).wireModelIdMode,
+			).compat.wireModelIdMode,
 		).toBe("firepass");
 		expect(
-			buildOpenAICompat(completionsSpec({ provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }))
+			resolveModelPolicy(completionsSpec({ provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" })).compat
 				.wireModelIdMode,
 		).toBe("openrouter");
-		expect(buildOpenAICompat(completionsSpec()).wireModelIdMode).toBe("raw");
+		expect(resolveModelPolicy(completionsSpec()).compat.wireModelIdMode).toBe("raw");
 	});
 
 	it("strips DeepSeek special tokens only for deepseek ids on nvidia/deepseek providers", () => {
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					provider: "nvidia",
 					id: "deepseek-ai/deepseek-v3.1",
 					baseUrl: "https://integrate.api.nvidia.com/v1",
 				}),
-			).stripDeepseekSpecialTokens,
+			).compat.stripDeepseekSpecialTokens,
 		).toBe(true);
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({ provider: "deepseek", id: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1" }),
-			).stripDeepseekSpecialTokens,
+			).compat.stripDeepseekSpecialTokens,
 		).toBe(true);
 		// DeepSeek id behind another host must NOT strip (only nvidia/deepseek hosts emit the raw tokens).
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					provider: "openrouter",
 					id: "deepseek/deepseek-v3.1",
 					baseUrl: "https://openrouter.ai/api/v1",
 				}),
-			).stripDeepseekSpecialTokens,
+			).compat.stripDeepseekSpecialTokens,
 		).toBe(false);
 		// Non-deepseek id on nvidia must NOT strip.
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					provider: "nvidia",
 					id: "meta/llama-3.1",
 					baseUrl: "https://integrate.api.nvidia.com/v1",
 				}),
-			).stripDeepseekSpecialTokens,
+			).compat.stripDeepseekSpecialTokens,
 		).toBe(false);
+	});
+
+	it("keeps image input for the natively multimodal DeepSeek V4.1 Flash lineage", () => {
+		// DeepSeek V4.1 Flash is image-text-to-text, but its id carries no
+		// `vision` token, so the class-wide strip rule dropped every attachment
+		// the model reads on hosts without their own carve-out.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(false);
+		// Hosts that were carved out individually must keep working without them.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "openrouter",
+					id: "deepseek/deepseek-v4.1-flash",
+					baseUrl: "https://openrouter.ai/api/v1",
+					input: ["text", "image"],
+				}),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Text-only DeepSeek SKUs keep the wire guard.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4-flash", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(true);
+		// The lineage glob covers dated SKUs, not just the bare id.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-0731", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// A V4.1 id that also carries a `vision` token matches both exceptions at
+		// equal rank; the explicit priority keeps that resolvable instead of
+		// throwing AmbiguousOverlapError.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({ provider: "vllm", id: "deepseek-v4.1-flash-vision-exp", input: ["text", "image"] }),
+			).compat.stripImageInput,
+		).toBe(false);
+		// Non-Flash V4.1 lineages are not established as multimodal and keep the guard.
+		expect(
+			resolveModelPolicy(completionsSpec({ provider: "vllm", id: "deepseek-v4.1-pro", input: ["text", "image"] }))
+				.compat.stripImageInput,
+		).toBe(true);
 	});
 
 	it("downgrades forced tool choice only for DeepSeek reasoning models on OpenCode gateways", () => {
@@ -408,100 +574,136 @@ describe("openai-completions wire-quirk compat detection", () => {
 		} as const;
 
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					...deepseekReasoning,
 					provider: "opencode-zen",
 					baseUrl: "https://opencode.ai/zen/v1",
 				}),
-			).supportsForcedToolChoice,
+			).compat.supportsForcedToolChoice,
 		).toBe(false);
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					...deepseekReasoning,
 					provider: "custom",
 					baseUrl: "https://opencode.ai/zen/go/v1",
 				}),
-			).supportsForcedToolChoice,
+			).compat.supportsForcedToolChoice,
 		).toBe(false);
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					...deepseekReasoning,
 					provider: "nvidia",
 					baseUrl: "https://integrate.api.nvidia.com/v1",
 				}),
-			).supportsForcedToolChoice,
+			).compat.supportsForcedToolChoice,
 		).toBe(true);
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					...deepseekReasoning,
 					provider: "opencode-zen",
 					baseUrl: "https://opencode.ai/zen/v1",
 					reasoning: false,
 				}),
-			).supportsForcedToolChoice,
+			).compat.supportsForcedToolChoice,
 		).toBe(true);
 	});
 	it("downgrades forced tool choice for OpenCode gateways on Responses API", () => {
 		expect(
-			buildOpenAIResponsesCompat({
-				id: "muse-spark-1.2-contributor",
-				provider: "opencode-go",
-				name: "Muse Spark",
-				baseUrl: "https://opencode.ai/zen/go/v1",
-			}).supportsForcedToolChoice,
+			resolveModelPolicy(
+				responsesSpec({
+					id: "muse-spark-1.2-contributor",
+					provider: "opencode-go",
+					name: "Muse Spark",
+					baseUrl: "https://opencode.ai/zen/go/v1",
+				}),
+			).compat.supportsForcedToolChoice,
 		).toBe(false);
 		expect(
-			buildOpenAIResponsesCompat({
-				id: "muse-spark-1.2",
-				provider: "opencode-zen",
-				name: "Muse Spark",
-				baseUrl: "https://opencode.ai/zen/v1",
-			}).supportsForcedToolChoice,
+			resolveModelPolicy(
+				responsesSpec({
+					id: "muse-spark-1.2",
+					provider: "opencode-zen",
+					name: "Muse Spark",
+					baseUrl: "https://opencode.ai/zen/v1",
+				}),
+			).compat.supportsForcedToolChoice,
 		).toBe(false);
 		expect(
-			buildOpenAIResponsesCompat({
-				id: "gpt-5",
-				provider: "openai",
-				name: "GPT-5",
-				baseUrl: "https://api.openai.com/v1",
-			}).supportsForcedToolChoice,
+			resolveModelPolicy(
+				responsesSpec({ id: "gpt-5", provider: "openai", name: "GPT-5", baseUrl: "https://api.openai.com/v1" }),
+			).compat.supportsForcedToolChoice,
 		).toBe(true);
+	});
+	it("disables encrypted reasoning replay for Muse Spark on OpenCode gateways (#11928)", () => {
+		// The Zen/Go gateways proxy Muse Spark's Responses lane to Meta but
+		// cannot round-trip encrypted reasoning: the upstream binds
+		// `encrypted_content` to the gateway's caller, so replaying it on a
+		// later tool-call step 400s with "reasoning `encrypted_content` was not
+		// issued to this caller". The deployment contract must stop requesting
+		// it and drop native reasoning items from replay.
+		for (const [provider, id, baseUrl] of [
+			["opencode-zen", "muse-spark-1.3-contributor-free", "https://opencode.ai/zen/v1"],
+			["opencode-go", "muse-spark-1.3-contributor", "https://opencode.ai/zen/go/v1"],
+		] as const) {
+			const compat = resolveModelPolicy(
+				responsesSpec({ id, provider, name: "Muse Spark", baseUrl, reasoning: true }),
+			).compat;
+			expect(compat.includeEncryptedReasoning).toBe(false);
+			expect(compat.filterReasoningHistory).toBe(true);
+		}
+		// A non-Muse reasoning model on the same gateway keeps the Responses
+		// default replay behavior, so the carve-out is scoped to the broken lane.
+		const other = resolveModelPolicy(
+			responsesSpec({
+				id: "big-pickle",
+				provider: "opencode-zen",
+				name: "Big Pickle",
+				baseUrl: "https://opencode.ai/zen/v1",
+				reasoning: true,
+			}),
+		).compat;
+		expect(other.includeEncryptedReasoning).toBe(true);
+		expect(other.filterReasoningHistory).toBe(false);
 	});
 
 	it("requires a synthetic assistant bridge after tool results only for Mistral hosts", () => {
 		// Mistral/Devstral reject a user message directly after a tool result; the chat
 		// builder bridges it with a synthetic assistant turn, keyed on the Mistral host.
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({ provider: "mistral", id: "devstral-latest", baseUrl: "https://api.mistral.ai/v1" }),
-			).requiresAssistantAfterToolResult,
+			).compat.requiresAssistantAfterToolResult,
 		).toBe(true);
 		// URL-only match (custom provider fronting Mistral).
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({
 					provider: "custom",
 					id: "mistral-large",
 					baseUrl: "https://proxy.example/mistral.ai/v1",
 				}),
-			).requiresAssistantAfterToolResult,
+			).compat.requiresAssistantAfterToolResult,
 		).toBe(true);
 		// Non-Mistral hosts must not insert the bridge.
-		expect(buildOpenAICompat(completionsSpec()).requiresAssistantAfterToolResult).toBe(false);
+		expect(resolveModelPolicy(completionsSpec()).compat.requiresAssistantAfterToolResult).toBe(false);
 		expect(
-			buildOpenAICompat(completionsSpec({ provider: "openai", id: "gpt-5", baseUrl: "https://api.openai.com/v1" }))
-				.requiresAssistantAfterToolResult,
+			resolveModelPolicy(completionsSpec({ provider: "openai", id: "gpt-5", baseUrl: "https://api.openai.com/v1" }))
+				.compat.requiresAssistantAfterToolResult,
 		).toBe(false);
 	});
 
 	it("flags cumulative reasoning deltas for MiniMax provider or id", () => {
-		expect(buildOpenAICompat(completionsSpec({ provider: "minimax" })).reasoningDeltasMayBeCumulative).toBe(true);
-		expect(buildOpenAICompat(completionsSpec({ id: "MiniMax-M2" })).reasoningDeltasMayBeCumulative).toBe(true);
-		expect(buildOpenAICompat(completionsSpec()).reasoningDeltasMayBeCumulative).toBe(false);
+		expect(resolveModelPolicy(completionsSpec({ provider: "minimax" })).compat.reasoningDeltasMayBeCumulative).toBe(
+			true,
+		);
+		expect(resolveModelPolicy(completionsSpec({ id: "MiniMax-M2" })).compat.reasoningDeltasMayBeCumulative).toBe(
+			true,
+		);
+		expect(resolveModelPolicy(completionsSpec()).compat.reasoningDeltasMayBeCumulative).toBe(false);
 	});
 
 	it("extends the reasoning stream idle floor to Kimi K2.6 and K2.7 Code, not other reasoning models", () => {
@@ -510,38 +712,42 @@ describe("openai-completions wire-quirk compat detection", () => {
 			baseUrl: "https://api.moonshot.ai/v1",
 			reasoning: true,
 		} as const;
-		expect(buildOpenAICompat(completionsSpec({ ...kimiOverrides, id: "kimi-k2.6" })).streamIdleTimeoutMs).toBe(
-			300_000,
-		);
-		expect(buildOpenAICompat(completionsSpec({ ...kimiOverrides, id: "kimi-k2.7-code" })).streamIdleTimeoutMs).toBe(
-			300_000,
-		);
 		expect(
-			buildOpenAICompat(completionsSpec({ ...kimiOverrides, id: "kimi-k2.7-code-highspeed" })).streamIdleTimeoutMs,
+			resolveModelPolicy(completionsSpec({ ...kimiOverrides, id: "kimi-k2.6" })).compat.streamIdleTimeoutMs,
+		).toBe(300_000);
+		expect(
+			resolveModelPolicy(completionsSpec({ ...kimiOverrides, id: "kimi-k2.7-code" })).compat.streamIdleTimeoutMs,
+		).toBe(300_000);
+		expect(
+			resolveModelPolicy(completionsSpec({ ...kimiOverrides, id: "kimi-k2.7-code-highspeed" })).compat
+				.streamIdleTimeoutMs,
 		).toBe(300_000);
 		// K2.7 Code on non-native OpenAI-compatible hosts keeps their default.
 		expect(
-			buildOpenAICompat(completionsSpec({ id: "kimi-k2.7-code", reasoning: true })).streamIdleTimeoutMs,
+			resolveModelPolicy(completionsSpec({ id: "kimi-k2.7-code", reasoning: true })).compat.streamIdleTimeoutMs,
 		).toBeUndefined();
 		// A non-Kimi reasoning model on a generic host keeps the runtime default.
 		expect(
-			buildOpenAICompat(completionsSpec({ id: "some-reasoner", reasoning: true })).streamIdleTimeoutMs,
+			resolveModelPolicy(completionsSpec({ id: "some-reasoner", reasoning: true })).compat.streamIdleTimeoutMs,
 		).toBeUndefined();
 	});
 
 	it("maps the remaining provider-keyed wire quirks", () => {
-		expect(buildOpenAICompat(completionsSpec({ provider: "ollama" })).emptyLengthFinishIsContextError).toBe(true);
-		expect(buildOpenAICompat(completionsSpec()).emptyLengthFinishIsContextError).toBe(false);
+		expect(resolveModelPolicy(completionsSpec({ provider: "ollama" })).compat.emptyLengthFinishIsContextError).toBe(
+			true,
+		);
+		expect(resolveModelPolicy(completionsSpec()).compat.emptyLengthFinishIsContextError).toBe(false);
 		expect(
-			buildOpenAICompat(completionsSpec({ provider: "openai", baseUrl: "https://api.openai.com/v1" }))
+			resolveModelPolicy(completionsSpec({ provider: "openai", baseUrl: "https://api.openai.com/v1" })).compat
 				.usesOpenAIToolCallIdLimit,
 		).toBe(true);
-		expect(buildOpenAICompat(completionsSpec()).usesOpenAIToolCallIdLimit).toBe(false);
+		expect(resolveModelPolicy(completionsSpec()).compat.usesOpenAIToolCallIdLimit).toBe(false);
 		expect(
-			buildOpenAICompat(completionsSpec({ provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference/v1" }))
-				.dropThinkingWhenReasoningEffort,
+			resolveModelPolicy(
+				completionsSpec({ provider: "fireworks", baseUrl: "https://api.fireworks.ai/inference/v1" }),
+			).compat.dropThinkingWhenReasoningEffort,
 		).toBe(true);
-		expect(buildOpenAICompat(completionsSpec()).dropThinkingWhenReasoningEffort).toBe(false);
+		expect(resolveModelPolicy(completionsSpec()).compat.dropThinkingWhenReasoningEffort).toBe(false);
 	});
 
 	it("floors the stream timeout for a loopback litellm proxy without enabling reasoning replay (#4786)", () => {
@@ -551,25 +757,25 @@ describe("openai-completions wire-quirk compat detection", () => {
 		// field is never forwarded to an unrelated cloud upstream) must NOT also
 		// strip the widened stream-timeout floor, or the turn aborts and
 		// retry-loops during a slow reprocess.
-		const loopback = buildOpenAICompat(
+		const loopback = resolveModelPolicy(
 			completionsSpec({ provider: "litellm", id: "qwen3", baseUrl: "http://127.0.0.1:4000/v1" }),
-		);
+		).compat;
 		expect(loopback.streamIdleTimeoutMs).toBe(300_000);
 		expect(loopback.replayReasoningContent).toBe(false);
 
 		// A litellm proxy on a remote baseUrl gets neither: no local upstream to
 		// wait on, and replay would risk a 400 on the cloud upstream.
-		const remote = buildOpenAICompat(
+		const remote = resolveModelPolicy(
 			completionsSpec({ provider: "litellm", id: "qwen3", baseUrl: "https://litellm.example.com/v1" }),
-		);
+		).compat;
 		expect(remote.streamIdleTimeoutMs).toBeUndefined();
 		expect(remote.replayReasoningContent).toBe(false);
 
 		// A first-party local backend (llama.cpp) still gets both the floor and
 		// the reasoning replay it needs for KV-cache reuse.
-		const native = buildOpenAICompat(
+		const native = resolveModelPolicy(
 			completionsSpec({ provider: "llama.cpp", id: "qwen3", baseUrl: "http://127.0.0.1:8080/v1" }),
-		);
+		).compat;
 		expect(native.streamIdleTimeoutMs).toBe(300_000);
 		expect(native.replayReasoningContent).toBe(true);
 	});
@@ -579,45 +785,76 @@ describe("openai-completions wire-quirk compat detection", () => {
 		// the provider-local healer stays off; every other OpenAI-compatible host
 		// keeps the default "thinking" healer, and Kimi/DSML keep their grammars.
 		expect(
-			buildOpenAICompat(completionsSpec({ provider: "openai", baseUrl: "https://api.openai.com/v1" }))
+			resolveModelPolicy(completionsSpec({ provider: "openai", baseUrl: "https://api.openai.com/v1" })).compat
 				.streamMarkupHealingPattern,
 		).toBeUndefined();
 		expect(
-			buildOpenAICompat(completionsSpec({ provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }))
+			resolveModelPolicy(completionsSpec({ provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" })).compat
 				.streamMarkupHealingPattern,
 		).toBe("thinking");
 		// A lookalike host under the openai provider id is NOT the official endpoint.
 		expect(
-			buildOpenAICompat(completionsSpec({ provider: "openai", baseUrl: "https://api.openai.com.evil/v1" }))
+			resolveModelPolicy(completionsSpec({ provider: "openai", baseUrl: "https://api.openai.com.evil/v1" })).compat
 				.streamMarkupHealingPattern,
 		).toBe("thinking");
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({ provider: "moonshot", id: "kimi-k2", baseUrl: "https://api.moonshot.ai/v1" }),
-			).streamMarkupHealingPattern,
+			).compat.streamMarkupHealingPattern,
 		).toBe("kimi");
+		// Transparent gateways / user-configured hosts forward the upstream chat
+		// template unchanged: a deepseek-classed model behind a LiteLLM proxy or
+		// the NousResearch inference API still emits DSML envelopes and needs the
+		// DSML grammar, not the generic thinking healer.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "litellm",
+					id: "deepseek/deepseek-chat",
+					baseUrl: "http://127.0.0.1:4000/v1",
+				}),
+			).compat.streamMarkupHealingPattern,
+		).toBe("dsml");
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "nous",
+					id: "deepseek/deepseek-v4-flash-0731",
+					baseUrl: "https://inference-api.nousresearch.com/v1",
+				}),
+			).compat.streamMarkupHealingPattern,
+		).toBe("dsml");
 	});
 
 	it("derives Responses obfuscation opt-out and wire mode per surface", () => {
 		expect(
-			buildOpenAIResponsesCompat({
-				id: "gpt-5",
-				provider: "openai",
-				name: "GPT 5",
-				baseUrl: "https://api.openai.com/v1",
-			}).supportsObfuscationOptOut,
+			resolveModelPolicy(
+				responsesSpec({ id: "gpt-5", provider: "openai", name: "GPT 5", baseUrl: "https://api.openai.com/v1" }),
+			).compat.supportsObfuscationOptOut,
 		).toBe(true);
 		// Azure mirrors the schema but is NOT the OpenAI host: no obfuscation opt-out.
 		expect(
-			buildOpenAIResponsesCompat({ id: "gpt-5", provider: "azure", name: "gpt-5", baseUrl: "" })
-				.supportsObfuscationOptOut,
+			resolveModelPolicy({
+				id: "gpt-5",
+				name: "gpt-5",
+				api: "azure-openai-responses",
+				provider: "azure",
+				baseUrl: "",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: null,
+				maxTokens: null,
+			}).compat.supportsObfuscationOptOut,
 		).toBe(false);
-		const openrouterResponses = buildOpenAIResponsesCompat({
-			id: "anthropic/claude-sonnet-4",
-			provider: "openrouter",
-			name: "Claude Sonnet 4",
-			baseUrl: "https://openrouter.ai/api/v1",
-		});
+		const openrouterResponses = resolveModelPolicy(
+			responsesSpec({
+				id: "anthropic/claude-sonnet-4",
+				provider: "openrouter",
+				name: "Claude Sonnet 4",
+				baseUrl: "https://openrouter.ai/api/v1",
+			}),
+		).compat;
 		expect(openrouterResponses.supportsObfuscationOptOut).toBe(false);
 		expect(openrouterResponses.wireModelIdMode).toBe("openrouter");
 	});
@@ -625,15 +862,17 @@ describe("openai-completions wire-quirk compat detection", () => {
 
 describe("OpenAI explicit prompt-cache breakpoint compat", () => {
 	it("enables the 30-minute breakpoint contract for GPT-5.6+ on the official API", () => {
-		const completions = buildOpenAICompat(
+		const completions = resolveModelPolicy(
 			completionsSpec({ id: "gpt-5.6", provider: "openai", baseUrl: "https://api.openai.com/v1" }),
-		);
-		const responses = buildOpenAIResponsesCompat({
-			id: "gpt-5.6-mini",
-			provider: "openai",
-			name: "GPT 5.6 Mini",
-			baseUrl: "https://api.openai.com/v1",
-		});
+		).compat;
+		const responses = resolveModelPolicy(
+			responsesSpec({
+				id: "gpt-5.6-mini",
+				provider: "openai",
+				name: "GPT 5.6 Mini",
+				baseUrl: "https://api.openai.com/v1",
+			}),
+		).compat;
 
 		expect(completions.supportsPromptCacheBreakpoints).toBe(true);
 		expect(completions.promptCacheBreakpointTtl).toBe("30m");
@@ -641,63 +880,98 @@ describe("OpenAI explicit prompt-cache breakpoint compat", () => {
 		expect(responses.promptCacheBreakpointTtl).toBe("30m");
 
 		expect(
-			buildOpenAICompat(
+			resolveModelPolicy(
 				completionsSpec({ id: "gpt-5.6-preview", provider: "openai", baseUrl: "https://api.openai.com/v1" }),
-			).supportsPromptCacheBreakpoints,
+			).compat.supportsPromptCacheBreakpoints,
 		).toBe(true);
 		expect(
-			buildOpenAICompat(completionsSpec({ id: "gpt-5.7", provider: "openai", baseUrl: "https://api.openai.com/v1" }))
-				.supportsPromptCacheBreakpoints,
+			resolveModelPolicy(
+				completionsSpec({ id: "gpt-5.7", provider: "openai", baseUrl: "https://api.openai.com/v1" }),
+			).compat.supportsPromptCacheBreakpoints,
 		).toBe(true);
 		expect(
-			buildOpenAIResponsesCompat({
-				id: "gpt-6.1-mini",
-				provider: "openai",
-				name: "GPT 6.1 Mini",
-				baseUrl: "https://api.openai.com/v1",
-			}).supportsPromptCacheBreakpoints,
+			resolveModelPolicy(
+				responsesSpec({
+					id: "gpt-6.1-mini",
+					provider: "openai",
+					name: "GPT 6.1 Mini",
+					baseUrl: "https://api.openai.com/v1",
+				}),
+			).compat.supportsPromptCacheBreakpoints,
 		).toBe(true);
 
 		expect(
-			buildOpenAICompat(completionsSpec({ id: "gpt-5.5", provider: "openai", baseUrl: "https://api.openai.com/v1" }))
-				.supportsPromptCacheBreakpoints,
+			resolveModelPolicy(
+				completionsSpec({ id: "gpt-5.5", provider: "openai", baseUrl: "https://api.openai.com/v1" }),
+			).compat.supportsPromptCacheBreakpoints,
 		).toBe(false);
 		expect(
-			buildOpenAIResponsesCompat({
-				id: "gpt-5.6",
-				provider: "openrouter",
-				name: "GPT 5.6 through OpenRouter",
-				baseUrl: "https://openrouter.ai/api/v1",
-			}).supportsPromptCacheBreakpoints,
+			resolveModelPolicy(
+				responsesSpec({
+					id: "gpt-5.6",
+					provider: "openrouter",
+					name: "GPT 5.6 through OpenRouter",
+					baseUrl: "https://openrouter.ai/api/v1",
+				}),
+			).compat.supportsPromptCacheBreakpoints,
 		).toBe(false);
 		expect(
-			buildOpenAIResponsesCompat({
-				id: "gpt-4.1",
-				provider: "openai",
-				name: "GPT 4.1",
-				baseUrl: "https://api.openai.com/v1",
-			}).supportsPromptCacheBreakpoints,
+			resolveModelPolicy(
+				responsesSpec({ id: "gpt-4.1", provider: "openai", name: "GPT 4.1", baseUrl: "https://api.openai.com/v1" }),
+			).compat.supportsPromptCacheBreakpoints,
 		).toBe(false);
 		expect(
-			buildOpenAIResponsesCompat({
-				id: "gpt-5.6",
-				provider: "openai",
-				name: "GPT 5.6",
-				baseUrl: "https://api.openai.com.evil/v1",
-			}).supportsPromptCacheBreakpoints,
+			resolveModelPolicy(
+				responsesSpec({
+					id: "gpt-5.6",
+					provider: "openai",
+					name: "GPT 5.6",
+					baseUrl: "https://api.openai.com.evil/v1",
+				}),
+			).compat.supportsPromptCacheBreakpoints,
 		).toBe(false);
 	});
 
 	it("keeps custom endpoint support opt-in", () => {
-		const compat = buildOpenAICompat(
+		const compat = resolveModelPolicy(
 			completionsSpec({
 				id: "gpt-5.6",
 				compat: { supportsPromptCacheBreakpoints: true, promptCacheBreakpointTtl: "30m" },
 			}),
-		);
+		).compat;
 
 		expect(compat.supportsPromptCacheBreakpoints).toBe(true);
 		expect(compat.promptCacheBreakpointTtl).toBe("30m");
+	});
+});
+
+describe("Responses configuration_update compat", () => {
+	/** The gpt-6-astra id served by a custom Responses-compatible proxy. */
+	function astraProxySpec(overrides: Partial<ModelSpec<"openai-responses">> = {}): ModelSpec<"openai-responses"> {
+		return responsesSpec({
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra",
+			provider: "astra-proxy",
+			baseUrl: "https://proxy.example.com/v1",
+			reasoning: true,
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			...overrides,
+		});
+	}
+
+	it("turns supportsConfigurationUpdate on for gpt-6-astra on any host and leaves sibling ids off", () => {
+		// The class rule is keyed on the exact id, not on the host: a custom proxy
+		// serving gpt-6-astra gets the item, its gpt-6 neighbour never does.
+		expect(buildModel(astraProxySpec()).compat.supportsConfigurationUpdate).toBe(true);
+		expect(buildModel(astraProxySpec({ id: "gpt-6", name: "GPT-6" })).compat.supportsConfigurationUpdate).toBe(false);
+	});
+
+	it("lets a spec-level compat override switch configuration_update off for a custom endpoint", () => {
+		// Spec-authored overrides are the last compat layer, so a models.yml
+		// `compat.supportsConfigurationUpdate: false` beats the class rule.
+		const model = buildModel(astraProxySpec({ compat: { supportsConfigurationUpdate: false } }));
+		expect(model.compat.supportsConfigurationUpdate).toBe(false);
 	});
 });
 
@@ -756,7 +1030,7 @@ describe("OpenRouter model discovery", () => {
 		}
 	});
 
-	it("maps OpenRouter's advertised reasoning effort ladder and default", async () => {
+	it("maps OpenRouter's advertised reasoning effort ladder, default, and mandatory state", async () => {
 		const options = openrouterModelManagerOptions({
 			fetch: async () =>
 				Response.json({
@@ -768,6 +1042,7 @@ describe("OpenRouter model discovery", () => {
 							reasoning: {
 								supported_efforts: ["max", "high", "low"],
 								default_effort: "high",
+								mandatory: true,
 							},
 						},
 					],
@@ -781,6 +1056,7 @@ describe("OpenRouter model discovery", () => {
 			mode: "effort",
 			efforts: [Effort.Low, Effort.High, Effort.Max],
 			defaultLevel: Effort.High,
+			requiresEffort: true,
 		});
 	});
 
@@ -814,8 +1090,32 @@ describe("OpenRouter model discovery", () => {
 	});
 });
 
-describe("model cache spec round trip", () => {
-	it("persists sparse specs and rebuilds resolved models on cache reads", async () => {
+describe("model cache materialized round trip", () => {
+	it("fingerprints current static content without mutating caller arrays", () => {
+		const staticModels = [completionsSpec({ id: "fingerprint-model" })];
+		const initial = fingerprintStaticModels(staticModels);
+		staticModels[0]!.name = "Changed in place";
+		expect(fingerprintStaticModels(staticModels)).not.toBe(initial);
+
+		const frozen = Object.freeze([completionsSpec({ id: "frozen-fingerprint-model" })]);
+		expect(() => fingerprintStaticModels(frozen)).not.toThrow();
+	});
+
+	it("uses generator-materialized bundled rows without rebuilding them", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-bundled-models-"));
+		const bundled = getBundledModel("anthropic", "claude-fable-5-1");
+		try {
+			const offline = await resolveProviderModels(
+				{ providerId: "anthropic", cacheDbPath: path.join(tempDir, "models.db") },
+				"offline",
+			);
+			expect(offline.models.find(model => model.id === bundled.id)).toBe(bundled);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("persists and directly restores fully resolved models", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-model-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
 		const sparse = { supportsDeveloperRole: true } as const;
@@ -832,19 +1132,26 @@ describe("model cache spec round trip", () => {
 			);
 			expect(online.models[0]?.compat.supportsDeveloperRole).toBe(true);
 
-			// The persisted row carries the sparse spec, never the resolved record.
-			const db = new Database(dbPath, { readonly: true });
+			// The persisted row is the resolved model, while retaining the sparse
+			// authoring provenance needed by later explicit override rebuilds.
+			const db = new Database(dbPath);
 			const row = db
 				.query<{ models: string }, [string]>("SELECT models FROM model_cache WHERE provider_id = ?")
 				.get("spec-cache-test");
-			db.close();
 			expect(row).toBeDefined();
-			const persisted = JSON.parse(row?.models ?? "[]") as ModelSpec<"openai-completions">[];
-			expect(persisted[0]?.compat).toEqual(sparse);
-			expect(persisted[0]).not.toHaveProperty("compatConfig");
-			expect(persisted[0]?.compat).not.toHaveProperty("isOpenRouterHost");
-
-			// Offline reads rebuild the row into a fully-resolved model.
+			const persisted = JSON.parse(row?.models ?? "[]") as Model<"openai-completions">[];
+			expect(persisted[0]?.compat.supportsDeveloperRole).toBe(true);
+			expect(persisted[0]?.compat.isOpenRouterHost).toBe(false);
+			expect(persisted[0]?.compatConfig).toEqual(sparse);
+			expect(persisted[0]?.identity).toEqual(online.models[0]?.identity);
+			// A compatible materialized row is trusted rather than sent back
+			// through buildModel. Policy changes invalidate the whole row instead.
+			persisted[0]!.compat.supportsDeveloperRole = false;
+			db.run("UPDATE model_cache SET models = ? WHERE provider_id = ?", [
+				JSON.stringify(persisted),
+				"spec-cache-test",
+			]);
+			db.close();
 			const offline = await resolveProviderModels<"openai-completions">(
 				{
 					providerId: "spec-cache-test",
@@ -854,7 +1161,7 @@ describe("model cache spec round trip", () => {
 				"offline",
 			);
 			const model = offline.models.find(candidate => candidate.id === spec.id);
-			expect(model?.compat.supportsDeveloperRole).toBe(true);
+			expect(model?.compat.supportsDeveloperRole).toBe(false);
 			expect(model?.compat.isOpenRouterHost).toBe(false);
 			expect(model?.compatConfig).toEqual(sparse);
 		} finally {
@@ -903,6 +1210,29 @@ describe("model cache spec round trip", () => {
 
 			const offline = await resolveProviderModels<"openai-completions">(options, "offline");
 			expect(offline.models[0]?.cost.longContext).toEqual(staticModel.cost.longContext);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("invalidates rows materialized under a stale build or rules policy", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-stale-policy-cache-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const model = buildModel(completionsSpec({ provider: "stale-policy-cache-test" }));
+		try {
+			writeModelCache("stale-policy-cache-test", Date.now(), [model], true, "", dbPath);
+			const db = new Database(dbPath);
+			db.run("UPDATE model_cache SET materialization_policy = ? WHERE provider_id = ?", [
+				"stale-builder:stale-rules",
+				"stale-policy-cache-test",
+			]);
+			db.close();
+
+			expect(readModelCache("stale-policy-cache-test", Infinity, Date.now, dbPath)).toBeNull();
+			const verified = new Database(dbPath, { readonly: true });
+			const row = verified.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache").get();
+			verified.close();
+			expect(row?.count).toBe(0);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -986,10 +1316,10 @@ describe("model cache spec round trip", () => {
 				.get("computer-use-cache-test");
 			db.close();
 			const persisted = JSON.parse(row?.models ?? "[]") as Array<Record<string, unknown>>;
-			expect(persisted.find(model => model.id === direct.id)).not.toHaveProperty("supportsComputerUse");
-			expect(persisted.find(model => model.id === proxy.id)).not.toHaveProperty("supportsComputerUse");
-			expect(persisted.find(model => model.id === explicitTrue.id)?.supportsComputerUse).toBe(true);
-			expect(persisted.find(model => model.id === explicitFalse.id)?.supportsComputerUse).toBe(false);
+			expect(persisted.find(model => model.id === direct.id)?.supportsComputerUseConfig).toBeNull();
+			expect(persisted.find(model => model.id === proxy.id)?.supportsComputerUseConfig).toBeNull();
+			expect(persisted.find(model => model.id === explicitTrue.id)?.supportsComputerUseConfig).toBe(true);
+			expect(persisted.find(model => model.id === explicitFalse.id)?.supportsComputerUseConfig).toBe(false);
 
 			const offline = await resolveProviderModels<"openai-responses">(
 				{ providerId: "computer-use-cache-test", staticModels: [], cacheDbPath: dbPath },
@@ -1121,6 +1451,90 @@ describe("model cache spec round trip", () => {
 			const cached = await resolveProviderModels(options, "online-if-uncached");
 			expect(cached.models.map(model => model.id)).toEqual([recoveredModel.id]);
 			expect(cached.stale).toBe(false);
+			expect(fetches).toBe(2);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refreshes an existing empty cache row when discovery fails to preserve retry backoff", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-empty-failure-backoff-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const recoveredModel = completionsSpec({ id: "recovered-model", provider: "empty-failure-backoff-test" });
+		let discoveredModels: readonly ModelSpec<"openai-completions">[] | null = [];
+		let fetches = 0;
+		let currentTime = 1_000_000;
+		const options = {
+			providerId: "empty-failure-backoff-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => {
+				fetches++;
+				return discoveredModels;
+			},
+		};
+		try {
+			const empty = await resolveProviderModels(options, "online");
+			expect(empty.models).toEqual([]);
+			expect(fetches).toBe(1);
+
+			currentTime += 5 * 60 * 1_000;
+			discoveredModels = null;
+			const failedRefresh = await resolveProviderModels(options, "online-if-uncached");
+			expect(failedRefresh.models).toEqual([]);
+			expect(fetches).toBe(2);
+
+			// The failed refresh advances the existing empty row's timestamp, so
+			// another launch waits for the normal backoff instead of retrying now.
+			discoveredModels = [recoveredModel];
+			const backedOff = await resolveProviderModels(options, "online-if-uncached");
+			expect(backedOff.models).toEqual([]);
+			expect(fetches).toBe(2);
+
+			currentTime += 5 * 60 * 1_000;
+			const recovered = await resolveProviderModels(options, "online-if-uncached");
+			expect(recovered.models.map(model => model.id)).toEqual([recoveredModel.id]);
+			expect(fetches).toBe(3);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("does not cache an empty row when discovery fails, so the next launch retries immediately (#10964)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-failed-discovery-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const recoveredModel = completionsSpec({ id: "vendor-7/model-7", provider: "failed-discovery-test" });
+		let fetches = 0;
+		let fail = true;
+		const currentTime = 1_000_000;
+		const options = {
+			providerId: "failed-discovery-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => {
+				fetches++;
+				// A timeout/network failure surfaces to the manager as null (distinct
+				// from a successful but empty [] catalog, which stays cached).
+				return fail ? null : [recoveredModel];
+			},
+		};
+		try {
+			const failed = await resolveProviderModels(options, "online");
+			expect(failed.models).toEqual([]);
+			expect(fetches).toBe(1);
+
+			// With no prior catalog and nothing static, the failure writes no cache
+			// row. Had it persisted an empty non-authoritative snapshot, the next
+			// launch inside the 5-min window would serve that empty catalog and skip
+			// discovery, hiding every discovery-only model. The clock does not advance,
+			// so a retry here proves the row is absent rather than aged out.
+			fail = false;
+			const recovered = await resolveProviderModels(options, "online-if-uncached");
+			expect(recovered.models.map(model => model.id)).toEqual([recoveredModel.id]);
+			expect(recovered.stale).toBe(false);
 			expect(fetches).toBe(2);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });

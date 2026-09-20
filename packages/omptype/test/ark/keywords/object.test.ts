@@ -5,7 +5,6 @@ import type { Eq } from "../type-assert";
 it("Function", () => {
 	// should not be treated as a morph
 	const fnType = type("Function");
-	// biome-ignore lint/complexity/noBannedTypes: built-in Function keyword test
 	const _0: Eq<typeof fnType.infer, Function> = true;
 });
 

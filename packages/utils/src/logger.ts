@@ -91,7 +91,7 @@ function pruneStaleProcessLogs(dir: string): void {
 		`${cutoff.getFullYear()}-${String(cutoff.getMonth() + 1).padStart(2, "0")}-` +
 		String(cutoff.getDate()).padStart(2, "0");
 
-	const staleLogsByProcessDay = new Map<string, Array<{ path: string; mtimeMs: number; rollover: number }>>();
+	const staleLogsByProcessDay = new Map<string, Array<{ path: string; rollover: number }>>();
 	for (const entry of entries) {
 		if (!entry.isFile()) continue;
 		const logMatch = PROCESS_LOG_PATTERN.exec(entry.name);
@@ -120,25 +120,29 @@ function pruneStaleProcessLogs(dir: string): void {
 			continue;
 		}
 
-		try {
-			const key = `${pidText}:${logMatch[1]}`;
-			const staleLogs = staleLogsByProcessDay.get(key) ?? [];
-			staleLogs.push({
-				path: entryPath,
-				mtimeMs: fs.statSync(entryPath).mtimeMs,
-				rollover: Number(logMatch[3] ?? 0),
-			});
-			staleLogsByProcessDay.set(key, staleLogs);
-		} catch {
-			// Another process may have pruned the same stale namespace.
-		}
+		const key = `${pidText}:${logMatch[1]}`;
+		const staleLogs = staleLogsByProcessDay.get(key) ?? [];
+		staleLogs.push({
+			path: entryPath,
+			rollover: Number(logMatch[3] ?? 0),
+		});
+		staleLogsByProcessDay.set(key, staleLogs);
 	}
 
 	for (const staleLogs of staleLogsByProcessDay.values()) {
-		staleLogs.sort(
+		if (staleLogs.length <= RETAINED_STALE_LOGS_PER_PROCESS_DAY) continue;
+		const ranked: Array<{ path: string; mtimeMs: number; rollover: number }> = [];
+		for (const stale of staleLogs) {
+			try {
+				ranked.push({ ...stale, mtimeMs: fs.statSync(stale.path).mtimeMs });
+			} catch {
+				// Another process may have pruned the same stale namespace.
+			}
+		}
+		ranked.sort(
 			(a, b) => b.mtimeMs - a.mtimeMs || b.rollover - a.rollover || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0),
 		);
-		for (const stale of staleLogs.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) {
+		for (const stale of ranked.slice(RETAINED_STALE_LOGS_PER_PROCESS_DAY)) {
 			try {
 				fs.rmSync(stale.path, { force: true });
 			} catch {
@@ -146,6 +150,19 @@ function pruneStaleProcessLogs(dir: string): void {
 			}
 		}
 	}
+}
+
+const scheduledPruneDirs = new Set<string>();
+
+/** Run shared retention only after logger construction has returned to the event loop. */
+function schedulePruneStaleProcessLogs(dir: string): void {
+	if (scheduledPruneDirs.has(dir)) return;
+	scheduledPruneDirs.add(dir);
+	const immediate = setImmediate(() => {
+		scheduledPruneDirs.delete(dir);
+		pruneStaleProcessLogs(dir);
+	});
+	immediate.unref();
 }
 
 /** Ensure a logs directory exists; return the resolved path. */
@@ -233,7 +250,7 @@ function formatLogInfo(info: NormalizedLogInfo): string {
 /** Build a rotating file sink with process-local rotation and shared retention. */
 function makeFileTransport(dir?: string): RotatingFileSink {
 	const logsDir = ensureDir(dir ?? getLogsDir());
-	pruneStaleProcessLogs(logsDir);
+	schedulePruneStaleProcessLogs(logsDir);
 	return new RotatingFileSink({
 		directory: logsDir,
 		filenamePrefix: "omp",
@@ -272,12 +289,11 @@ function getLocalTransports(): LocalTransports {
 
 function emitLocally(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
 	const transports = getLocalTransports();
-	const info = normalizeLogInfo(level, message, context);
 	if (!transports.file && !transports.console) return;
-
+	const info = normalizeLogInfo(level, message, context);
 	const line = formatLogInfo(info);
 	if (transports.file) transports.file.write(line);
-	if (transports.console) fs.writeSync(1, `${formatLogInfo(info)}${os.EOL}`);
+	if (transports.console) fs.writeSync(1, `${line}${os.EOL}`);
 }
 
 /**

@@ -12,13 +12,9 @@ import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
-import type {
-	AgentProgress,
-	SubagentEventPayload,
-	SubagentLifecyclePayload,
-	SubagentProgressPayload,
-} from "../../task";
-import type { TodoPhase } from "../../tools/todo";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
+import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import type { RpcMessagesPage } from "./rpc-messages";
 
 // ============================================================================
@@ -367,10 +363,22 @@ export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
 // ============================================================================
 // Extension UI Events (stdout)
 // ============================================================================
+/** Positional presentation metadata for an RPC select option. */
+export interface RpcExtensionUISelectOptionDetail {
+	description?: string;
+}
 
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
-	| { type: "extension_ui_request"; id: string; method: "select"; title: string; options: string[]; timeout?: number }
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "select";
+			title: string;
+			options: string[];
+			optionDetails?: RpcExtensionUISelectOptionDetail[];
+			timeout?: number;
+	  }
 	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
 	| {
 			type: "extension_ui_request";
@@ -439,6 +447,8 @@ export interface RpcHostToolDefinition {
 	hidden?: boolean;
 	/** How this host tool is presented when enabled; omission normalizes to `"discoverable"` at the adapter boundary. */
 	loadMode?: ToolLoadMode;
+	/** Whether this host tool can read `skill://` instruction content. */
+	readsSkillUris?: boolean;
 }
 
 /** Emitted by the RPC server when it needs the host to execute a registered tool. */

@@ -1,3 +1,6 @@
+// Deep import: the pi-utils barrel loads the host native addon, which is
+// absent on cross-compiling release runners.
+import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
@@ -43,12 +46,19 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},
+			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
+			// `omp --version` 256 ms -> 30 ms on M4 Max (+52 MB binary).
+			// Bytecode rejects top-level await in the bundle graph.
+			bytecode: true,
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,
 			},
 			plugins: [await createLegacyPiVirtualModulePlugin()],
 			compile: {
+				// Bun's process-wide fetch User-Agent default. Any explicit
+				// provider fingerprint (Anthropic/Codex OAuth) still wins.
+				execArgv: [`--user-agent=${USER_AGENT}`],
 				...(options.executablePath
 					? { executablePath: options.executablePath }
 					: options.target

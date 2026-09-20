@@ -2,14 +2,9 @@ import * as fs from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
 
-import { type GitRepository, repo } from "./git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
-export interface ActiveRepoContext {
-	cwd: string;
-	repoRoot: string;
-	relativeRepoRoot: string;
-	source: "single-direct-child-repo";
-}
+import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 
 function compareEntryNames(left: fs.Dirent, right: fs.Dirent): number {
 	if (left.name < right.name) return -1;
@@ -28,19 +23,12 @@ function buildContext(cwd: string, repoRoot: string): ActiveRepoContext {
 	};
 }
 
-async function resolveRepository(cwd: string): Promise<GitRepository | null> {
+/** Whether `cwd` already sits inside a VCS repository. */
+function insideRepository(cwd: string): boolean {
 	try {
-		return await repo.resolve(cwd);
+		return vcs.repo(cwd) !== null;
 	} catch {
-		return null;
-	}
-}
-
-function resolveRepositorySync(cwd: string): GitRepository | null {
-	try {
-		return repo.resolveSync(cwd);
-	} catch {
-		return null;
+		return false;
 	}
 }
 
@@ -88,19 +76,27 @@ function resolveDirectChildDirectorySync(cwd: string, entry: fs.Dirent): string 
 	}
 }
 
-async function hasGitMarker(childPath: string): Promise<boolean> {
+async function hasGitRepository(childPath: string): Promise<boolean> {
 	try {
+		// Skip markerless siblings before native discovery can walk their ancestors.
 		const stat = await fsPromises.stat(path.join(childPath, ".git"));
-		return stat.isDirectory() || stat.isFile();
+		if (!stat.isDirectory() && !stat.isFile()) return false;
+		const info = vcs.gitInfo(childPath);
+		// Resolve gitfiles through the shared parser, but never adopt an ancestor.
+		if (!info || path.resolve(info.repoRoot) !== childPath) return false;
+		return (await fsPromises.stat(info.headPath)).isFile();
 	} catch {
 		return false;
 	}
 }
 
-function hasGitMarkerSync(childPath: string): boolean {
+function hasGitRepositorySync(childPath: string): boolean {
 	try {
 		const stat = fs.statSync(path.join(childPath, ".git"));
-		return stat.isDirectory() || stat.isFile();
+		if (!stat.isDirectory() && !stat.isFile()) return false;
+		const info = vcs.gitInfo(childPath);
+		if (!info || path.resolve(info.repoRoot) !== childPath) return false;
+		return fs.statSync(info.headPath).isFile();
 	} catch {
 		return false;
 	}
@@ -111,7 +107,7 @@ async function findSingleDirectChildRepo(cwd: string): Promise<ActiveRepoContext
 	for (const entry of await readDirectChildren(cwd)) {
 		const childPath = await resolveDirectChildDirectory(cwd, entry);
 		if (!childPath) continue;
-		if (!(await hasGitMarker(childPath))) continue;
+		if (!(await hasGitRepository(childPath))) continue;
 		if (context) return null;
 		context = buildContext(cwd, childPath);
 	}
@@ -123,7 +119,7 @@ function findSingleDirectChildRepoSync(cwd: string): ActiveRepoContext | null {
 	for (const entry of readDirectChildrenSync(cwd)) {
 		const childPath = resolveDirectChildDirectorySync(cwd, entry);
 		if (!childPath) continue;
-		if (!hasGitMarkerSync(childPath)) continue;
+		if (!hasGitRepositorySync(childPath)) continue;
 		if (context) return null;
 		context = buildContext(cwd, childPath);
 	}
@@ -132,12 +128,12 @@ function findSingleDirectChildRepoSync(cwd: string): ActiveRepoContext | null {
 
 export async function resolveActiveRepoContext(cwd: string): Promise<ActiveRepoContext | null> {
 	const resolvedCwd = path.resolve(cwd);
-	if (await resolveRepository(resolvedCwd)) return null;
+	if (insideRepository(resolvedCwd)) return null;
 	return findSingleDirectChildRepo(resolvedCwd);
 }
 
 export function resolveActiveRepoContextSync(cwd: string): ActiveRepoContext | null {
 	const resolvedCwd = path.resolve(cwd);
-	if (resolveRepositorySync(resolvedCwd)) return null;
+	if (insideRepository(resolvedCwd)) return null;
 	return findSingleDirectChildRepoSync(resolvedCwd);
 }

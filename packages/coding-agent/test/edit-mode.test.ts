@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { type EditMode, type EditModeSessionLike, resolveEditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
+import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import { type EditModeSessionLike, resolveEditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 
 const originalEditVariant = Bun.env.PI_EDIT_VARIANT;
 const originalStrictEditMode = Bun.env.PI_STRICT_EDIT_MODE;
@@ -53,18 +54,37 @@ describe("resolveEditMode", () => {
 		expect(resolveEditMode(createSession({ activeModel: "xiaomi/MiMo-V2.5-Pro" }))).toBe("replace");
 	});
 
-	test("falls back from hashline to replace for DeepSeek V4 Flash models", () => {
+	test("falls back from hashline to replace for DeepSeek models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
 		expect(resolveEditMode(createSession({ activeModel: "tensormesh/deepseek-ai/DeepSeek-V4-Flash" }))).toBe(
 			"replace",
 		);
+		expect(resolveEditMode(createSession({ activeModel: "deepseek/deepseek-chat" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "deepseek/deepseek-reasoner" }))).toBe("replace");
 	});
 
 	test("falls back from hashline to replace for Step 3.7 Flash models", () => {
 		delete Bun.env.PI_EDIT_VARIANT;
 
 		expect(resolveEditMode(createSession({ activeModel: "kilo/stepfun/step-3.7-flash:free" }))).toBe("replace");
+	});
+
+	test("uses replace for Codex Spark without excluding other Codex models", () => {
+		expect(resolveEditMode(createSession({ activeModel: "openai-codex/gpt-5.3-codex-spark" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "openai-codex/gpt-5.3-codex" }))).toBe("hashline");
+	});
+
+	test("uses replace across MiniMax model families", () => {
+		expect(resolveEditMode(createSession({ activeModel: "openrouter/minimax/minimax-m1" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "minimax/MiniMax-M2.5" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "minimax/MiniMax-M3" }))).toBe("replace");
+	});
+
+	test("excludes GLM 5.3 Flash without excluding other GLM revisions or families", () => {
+		expect(resolveEditMode(createSession({ activeModel: "zai/glm-5.3-flash" }))).toBe("replace");
+		expect(resolveEditMode(createSession({ activeModel: "zai/glm-5.3" }))).toBe("hashline");
+		expect(resolveEditMode(createSession({ activeModel: "zai/glm-4.7-flash" }))).toBe("hashline");
 	});
 
 	test("does not exclude non-Kimi Moonshot models", () => {

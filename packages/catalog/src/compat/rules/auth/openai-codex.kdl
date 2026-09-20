@@ -1,0 +1,33 @@
+auth "openai-codex" {
+	name "ChatGPT Plus/Pro (Codex Subscription)"
+	login "oauth-code" {
+		client-id "app_EMoamEEZ73f0CkXaXp7hrann"
+		authorize-url "https://auth.openai.com/oauth/authorize"
+		scopes "openid" "profile" "email" "offline_access" "api.connectors.read" "api.connectors.invoke"
+		pkce #true
+		authorize-params {
+			id_token_add_organizations "true"
+			codex_cli_simplified_flow "true"
+			originator "omp"
+		}
+		instructions "A browser window should open. Complete login to finish."
+		// OpenAI only allowlists this exact URI; a busy port must fail rather than fall back.
+		callback port=1455 path="/auth/callback" redirect-uri="http://localhost:1455/auth/callback" port-fallback=#false
+		token url="https://auth.openai.com/oauth/token" body="form" timeout-ms=15000
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" skew-ms=0
+		}
+		after-exchange hook="openai-codex-profile"
+	}
+	refresh {
+		token url="https://auth.openai.com/oauth/token" body="form" timeout-ms=15000
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" skew-ms=0
+		}
+		after-refresh hook="openai-codex-profile"
+	}
+}

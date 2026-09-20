@@ -1,34 +1,35 @@
 import { describe, expect, it, vi } from "bun:test";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
 describe("InputController tool output expansion", () => {
-	it("expands children and forces a full display reset to bypass frozen snapshots", () => {
+	it("expands children and forces a full repaint so every live block re-renders", () => {
 		const expandable = { setExpanded: vi.fn() };
 		const inert = { render: vi.fn(() => []) };
 		const requestRender = vi.fn();
-		const resetDisplay = vi.fn();
+		const showStatus = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
 			chatContainer: { children: [expandable, inert] },
-			ui: { requestRender, resetDisplay },
+			ui: { requestRender },
+			showStatus,
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleToolOutputExpansion();
 
 		expect(ctx.toolOutputExpanded).toBe(true);
 		expect(expandable.setExpanded).toHaveBeenCalledWith(true);
-		// resetDisplay() is the only path that retires the transcript's frozen
-		// block snapshots and re-emits the whole transcript at its new heights.
-		// A plain requestRender would replay the stale (collapsed) snapshots.
-		expect(resetDisplay).toHaveBeenCalledTimes(1);
-		expect(requestRender).not.toHaveBeenCalled();
+		// Expansion mutates every live block; the forced repaint re-renders them
+		// at their new heights in the same frame.
+		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledWith(true);
+		expect(showStatus).toHaveBeenCalledWith("Tool output expansion: enabled");
 	});
 
 	it("does not expand hidden tool activity and explains why", () => {
 		const expandable = { setExpanded: vi.fn() };
-		const resetDisplay = vi.fn();
+		const requestRender = vi.fn();
 		const showStatus = vi.fn();
 		const ctx = {
 			hideToolActivity: true,
@@ -36,14 +37,14 @@ describe("InputController tool output expansion", () => {
 			chatContainer: { children: [expandable] },
 			keybindings: { getDisplayString: vi.fn(() => "Alt+H") },
 			showStatus,
-			ui: { resetDisplay },
+			ui: { requestRender },
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleToolOutputExpansion();
 
 		expect(ctx.toolOutputExpanded).toBe(false);
 		expect(expandable.setExpanded).not.toHaveBeenCalled();
-		expect(resetDisplay).not.toHaveBeenCalled();
+		expect(requestRender).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Alt+H"));
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("/settings"));
 	});

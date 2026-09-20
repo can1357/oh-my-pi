@@ -1,6 +1,6 @@
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { CustomToolContext } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import type { ReadonlySessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
@@ -43,6 +43,9 @@ function createAntigravityXAIContext(model: Model | undefined, fetchMock: typeof
 				return undefined;
 			},
 			getProviderBaseUrl: () => undefined,
+			find: () => undefined,
+			getProviderHeaders: async () => undefined,
+			resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 			getAll: () => [],
 			authStorage: {
 				hasNonEnvCredential: (provider: string) => provider === "xai-oauth",
@@ -137,6 +140,7 @@ describe("imageGenTool", () => {
 			modelRegistry: {
 				getApiKey: async () => "test-openai-key",
 				getApiKeyForProvider: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 				authStorage: { rotateSessionCredential: async () => false },
 				resolver: () => async () => "test-openai-key",
 			} as unknown as ModelRegistry,
@@ -205,6 +209,7 @@ describe("imageGenTool", () => {
 			modelRegistry: {
 				getApiKey: async () => "test-openai-key",
 				getApiKeyForProvider: async (provider: string) => (provider === "openai" ? "test-openai-key" : undefined),
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 				authStorage: { rotateSessionCredential: async () => false },
 				resolver: () => async () => "test-openai-key",
 			} as unknown as ModelRegistry,
@@ -300,6 +305,7 @@ describe("imageGenTool", () => {
 				getAll: () => [codexModel],
 				getApiKey: async () => codexToken,
 				getApiKeyForProvider: async (provider: string) => (provider === "openai-codex" ? codexToken : undefined),
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 				authStorage: { rotateSessionCredential: async () => false },
 				resolver: () => async () => codexToken,
 			} as unknown as ModelRegistry,
@@ -334,6 +340,13 @@ describe("imageGenTool", () => {
 
 	it("falls back when an openai-codex API key lacks a subscription account claim", async () => {
 		const antigravityCredentials = JSON.stringify({ token: "test-antigravity-token", projectId: "test-project" });
+		const codexModel = {
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			id: "gpt-5.5",
+			name: "GPT-5.5",
+			baseUrl: "HTTPS://CHATGPT.COM/ignored/../backend-api/",
+		} as Model;
 		let requestUrl: string | undefined;
 		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
 			requestUrl = input.toString();
@@ -366,6 +379,9 @@ describe("imageGenTool", () => {
 				getSessionId: () => "test-session",
 			} as unknown as ReadonlySessionManager,
 			modelRegistry: {
+				find: (provider: string, id: string) =>
+					provider === "openai-codex" && id === "gpt-5.5" ? codexModel : undefined,
+				getAll: () => [codexModel],
 				getApiKey: async () => "plain-openai-key",
 				getApiKeyForProvider: async (provider: string) => {
 					if (provider === "openai-codex") return "plain-openai-key";
@@ -417,6 +433,9 @@ describe("imageGenTool", () => {
 				getApiKeyForProvider: async (provider: string) =>
 					provider === "xai-oauth" || provider === "openai-codex" ? "test-token" : undefined,
 				getProviderBaseUrl: () => undefined,
+				find: () => undefined,
+				getProviderHeaders: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 				getAll: () => [],
 				authStorage: {
 					hasNonEnvCredential: (provider: string) => provider === "xai-oauth",
@@ -438,7 +457,7 @@ describe("imageGenTool", () => {
 		expect(captured.authorization).toBe("Bearer test-xai-token");
 		expect(result.details?.provider).toBe("xai");
 	});
-	it("sends Codex hosted image requests with opaque proxy bearer keys", async () => {
+	it("uses opaque Codex proxy credentials when the active model is not OpenAI", async () => {
 		let requestUrl: string | undefined;
 		let requestHeaders: Headers | undefined;
 
@@ -475,6 +494,12 @@ describe("imageGenTool", () => {
 			name: "GPT Codex",
 			baseUrl: "https://example-proxy.invalid/backend-api",
 		} as Model;
+		const activeModel = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-opus-4",
+			name: "Claude",
+		} as Model;
 		const ctx: CustomToolContext = {
 			fetch: fetchMock,
 			sessionManager: {
@@ -482,12 +507,20 @@ describe("imageGenTool", () => {
 				getSessionId: () => "test-session",
 			} as unknown as ReadonlySessionManager,
 			modelRegistry: {
+				find: (provider: string, id: string) =>
+					provider === "openai-codex" && id === "gpt-5.5-codex" ? model : undefined,
+				getAll: () => [model],
 				getApiKey: async () => "opaque-proxy-key",
-				getApiKeyForProvider: async () => undefined,
-				authStorage: { rotateSessionCredential: async () => false },
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "openai-codex" ? "opaque-proxy-key" : undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
 				resolver: () => async () => "opaque-proxy-key",
 			} as unknown as ModelRegistry,
-			model,
+			model: activeModel,
 			isIdle: () => true,
 			hasQueuedMessages: () => false,
 			abort: () => {},
@@ -501,7 +534,7 @@ describe("imageGenTool", () => {
 		expect(requestHeaders?.has("chatgpt-account-id")).toBe(false);
 		expect(requestHeaders?.has("x-openai-internal-codex-residency")).toBe(false);
 		expect(requestHeaders?.get("OpenAI-Beta")).toBe("responses=experimental");
-		expect(requestHeaders?.get("originator")).toBe("pi");
+		expect(requestHeaders?.get("originator")).toBe("omp");
 		expect(result.details?.provider).toBe("openai-codex");
 		expect(result.details?.imageCount).toBe(1);
 	});
@@ -559,6 +592,7 @@ describe("imageGenTool", () => {
 			modelRegistry: {
 				getApiKey: async () => codexJwt,
 				getApiKeyForProvider: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 				authStorage: { rotateSessionCredential: async () => false },
 				resolver: () => async () => codexJwt,
 			} as unknown as ModelRegistry,
@@ -608,6 +642,9 @@ describe("imageGenTool", () => {
 			modelRegistry: {
 				getApiKeyForProvider: async (provider: string) => (provider === "xai-oauth" ? "test-xai-token" : undefined),
 				getProviderBaseUrl: () => undefined,
+				find: () => undefined,
+				getProviderHeaders: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 				getAll: () => [],
 				authStorage: {
 					hasNonEnvCredential: (provider: string) => provider === "xai-oauth",
@@ -705,6 +742,9 @@ describe("imageGenTool", () => {
 				getApiKey: async () => "test-openai-key",
 				getApiKeyForProvider: async (provider: string) => (provider === "xai-oauth" ? "test-xai-token" : undefined),
 				getProviderBaseUrl: () => undefined,
+				find: () => undefined,
+				getProviderHeaders: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 				getAll: () => [],
 				authStorage: {
 					hasNonEnvCredential: (provider: string) => provider === "xai-oauth",
@@ -723,6 +763,231 @@ describe("imageGenTool", () => {
 
 		expect(requestUrls).toEqual(["https://api.openai.com/v1/responses", "https://api.x.ai/v1/images/generations"]);
 		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("uses the Antigravity image model advertised for the account", async () => {
+		setImageProviderOrder(["antigravity", "xai"]);
+		const requestUrls: string[] = [];
+		const requestedModels: string[] = [];
+		const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = input.toString();
+			requestUrls.push(url);
+			if (url.includes(":fetchAvailableModels")) {
+				return new Response(JSON.stringify({ imageGenerationModelIds: ["gemini-3.1-flash-image"] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url.includes("streamGenerateContent")) {
+				const request = JSON.parse(String(init?.body)) as { model?: string };
+				if (request.model) requestedModels.push(request.model);
+				if (request.model !== "gemini-3.1-flash-image") {
+					return new Response(JSON.stringify({ error: { message: "Requested entity was not found." } }), {
+						status: 404,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				return new Response(
+					`data: ${JSON.stringify({
+						response: {
+							candidates: [
+								{
+									content: {
+										parts: [
+											{
+												inlineData: {
+													data: Buffer.from("advertised-antigravity-image").toString("base64"),
+													mimeType: "image/png",
+												},
+											},
+										],
+									},
+								},
+							],
+						},
+					})}\n\n`,
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("unexpected-xai-fallback").toString("base64") }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+		const ctx = createAntigravityXAIContext(undefined, fetchMock);
+
+		const result = await imageGenTool.execute(
+			"call-advertised-antigravity-model",
+			{ subject: "a cat" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual([
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+		]);
+		expect(requestedModels).toEqual(["gemini-3.1-flash-image"]);
+		expect(result.details?.provider).toBe("antigravity");
+		expect(result.details?.model).toBe("gemini-3.1-flash-image");
+	});
+
+	it("fails over to the sandbox endpoint in auto mode after a production 5xx", async () => {
+		setImageProviderOrder(["antigravity"]);
+		const requestUrls: string[] = [];
+		const fetchMock = (async (input: string | URL | Request) => {
+			const url = input.toString();
+			if (url.includes(":fetchAvailableModels")) {
+				requestUrls.push(url);
+				return new Response(JSON.stringify({ imageGenerationModelIds: ["gemini-3.1-flash-image"] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url.includes("streamGenerateContent")) {
+				requestUrls.push(url);
+				if (url.startsWith("https://daily-cloudcode-pa.googleapis.com/")) {
+					return new Response(JSON.stringify({ error: { message: "backend unavailable" } }), {
+						status: 503,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				return new Response(
+					`data: ${JSON.stringify({
+						response: {
+							candidates: [
+								{
+									content: {
+										parts: [
+											{
+												inlineData: {
+													data: Buffer.from("sandbox-antigravity-image").toString("base64"),
+													mimeType: "image/png",
+												},
+											},
+										],
+									},
+								},
+							],
+						},
+					})}\n\n`,
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			throw new Error(`Unexpected provider request: ${url}`);
+		}) as unknown as typeof fetch;
+		const ctx = createAntigravityXAIContext(undefined, fetchMock);
+
+		const result = await imageGenTool.execute("call-antigravity-failover", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrls).toEqual([
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+			"https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+		]);
+		expect(result.details?.provider).toBe("antigravity");
+		expect(result.details?.model).toBe("gemini-3.1-flash-image");
+	});
+
+	it("re-discovers the image model when withAuth rotates to a sibling Antigravity account", async () => {
+		setImageProviderOrder(["antigravity", "xai"]);
+		const credsA = JSON.stringify({ token: "token-A", projectId: "proj-A" });
+		const credsB = JSON.stringify({ token: "token-B", projectId: "proj-B" });
+		const streamAttempts: Array<{ token: string; model: string }> = [];
+		const fetchMock = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = input.toString();
+			const auth = new Headers(init?.headers).get("authorization");
+			if (url.includes(":fetchAvailableModels")) {
+				// Account A still carries the legacy pro model; the rotated sibling B
+				// only advertises the flash model.
+				const modelId = auth === "Bearer token-B" ? "gemini-3.1-flash-image" : "gemini-3-pro-image";
+				return new Response(JSON.stringify({ imageGenerationModelIds: [modelId] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			if (url.includes("streamGenerateContent")) {
+				const token = auth?.replace("Bearer ", "") ?? "";
+				const request = JSON.parse(String(init?.body)) as { model?: string };
+				streamAttempts.push({ token, model: request.model ?? "" });
+				// Account A is out of quota, forcing withAuth to rotate to sibling B.
+				if (token === "token-A") {
+					return new Response(JSON.stringify({ error: { message: "quota exhausted" } }), {
+						status: 403,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				// Sibling B only serves its advertised model.
+				if (request.model !== "gemini-3.1-flash-image") {
+					return new Response(JSON.stringify({ error: { message: "Requested entity was not found." } }), {
+						status: 404,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				return new Response(
+					`data: ${JSON.stringify({
+						response: {
+							candidates: [
+								{
+									content: {
+										parts: [
+											{
+												inlineData: {
+													data: Buffer.from("sibling-antigravity-image").toString("base64"),
+													mimeType: "image/png",
+												},
+											},
+										],
+									},
+								},
+							],
+						},
+					})}\n\n`,
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				);
+			}
+			throw new Error(`Unexpected provider request: ${url}`);
+		}) as unknown as typeof fetch;
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => undefined,
+				getApiKeyForProvider: async (provider: string) => (provider === "google-antigravity" ? credsA : undefined),
+				getProviderBaseUrl: () => undefined,
+				find: () => undefined,
+				getProviderHeaders: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: (provider: string) =>
+					provider === "google-antigravity"
+						? (rctx: { lastChance?: boolean }) => (rctx.lastChance ? credsB : credsA)
+						: () => "test-xai-token",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute("call-antigravity-rotation", { subject: "a cat" }, undefined, ctx);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(streamAttempts).toEqual([
+			{ token: "token-A", model: "gemini-3-pro-image" },
+			{ token: "token-B", model: "gemini-3.1-flash-image" },
+		]);
+		expect(result.details?.provider).toBe("antigravity");
+		expect(result.details?.model).toBe("gemini-3.1-flash-image");
 	});
 
 	it("falls back to xAI after an earlier provider HTTP failure", async () => {
@@ -747,6 +1012,7 @@ describe("imageGenTool", () => {
 		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
 
 		expect(requestUrls).toEqual([
+			"https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
 			"https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
 			"https://api.x.ai/v1/images/generations",
 		]);
@@ -786,6 +1052,9 @@ describe("imageGenTool", () => {
 					return undefined;
 				},
 				getProviderBaseUrl: () => undefined,
+				find: () => undefined,
+				getProviderHeaders: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
 				getAll: () => [],
 				authStorage: {
 					hasNonEnvCredential: (provider: string) => provider === "xai-oauth",
@@ -810,5 +1079,118 @@ describe("imageGenTool", () => {
 
 		expect(requestUrls).toEqual(["https://api.x.ai/v1/images/generations"]);
 		expect(result.details?.provider).toBe("xai");
+	});
+
+	it("routes DeepInfra image generation through the OpenAI-compatible images endpoint", async () => {
+		let requestUrl: string | undefined;
+		let requestBody: Record<string, unknown> | undefined;
+		const captured: { authorization: string | null } = { authorization: null };
+
+		const fetchMock: typeof fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+			requestUrl = input.toString();
+			requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			captured.authorization = new Headers(init?.headers).get("authorization");
+			return new Response(
+				JSON.stringify({ data: [{ b64_json: Buffer.from("fake-deepinfra-image").toString("base64"), url: null }] }),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "deepinfra" ? "test-deepinfra-key" : undefined,
+				getProviderBaseUrl: () => undefined,
+				find: () => undefined,
+				getProviderHeaders: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
+				getAll: () => [],
+				authStorage: { rotateSessionCredential: async () => false },
+				resolver: () => async () => "test-deepinfra-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		const result = await imageGenTool.execute(
+			"call-deepinfra",
+			{ subject: "a cat", aspect_ratio: "16:9", provider: "deepinfra" },
+			undefined,
+			ctx,
+		);
+		generatedImagePaths.push(...(result.details?.imagePaths ?? []));
+
+		expect(requestUrl).toBe("https://api.deepinfra.com/v1/openai/images/generations");
+		expect(captured.authorization).toBe("Bearer test-deepinfra-key");
+		expect(requestBody).toMatchObject({
+			model: "black-forest-labs/FLUX-2-pro",
+			prompt: "a cat.",
+			n: 1,
+			response_format: "b64_json",
+			size: "1536x1024",
+		});
+		expect(result.details?.provider).toBe("deepinfra");
+		expect(result.details?.model).toBe("black-forest-labs/FLUX-2-pro");
+		expect(result.details?.imageCount).toBe(1);
+		const savedPath = result.details?.imagePaths[0];
+		if (!savedPath) throw new Error("Expected generated image path");
+		expect(await Bun.file(savedPath).bytes()).toEqual(Buffer.from("fake-deepinfra-image"));
+	});
+
+	it("skips DeepInfra for edit requests so an edit-capable provider can serve them", async () => {
+		const requestUrls: string[] = [];
+		const fetchMock: typeof fetch = (async (input: string | URL | Request) => {
+			requestUrls.push(input.toString());
+			throw new Error(`Unexpected provider request: ${input.toString()}`);
+		}) as unknown as typeof fetch;
+
+		const ctx: CustomToolContext = {
+			fetch: fetchMock,
+			sessionManager: {
+				getCwd: () => "/tmp",
+				getSessionId: () => "test-session",
+			} as unknown as ReadonlySessionManager,
+			modelRegistry: {
+				getApiKey: async () => undefined,
+				getApiKeyForProvider: async (provider: string) =>
+					provider === "deepinfra" ? "test-deepinfra-key" : undefined,
+				getProviderBaseUrl: () => undefined,
+				find: () => undefined,
+				getProviderHeaders: async () => undefined,
+				resolveModelHeaders: ModelRegistry.prototype.resolveModelHeaders,
+				getAll: () => [],
+				authStorage: {
+					hasNonEnvCredential: () => false,
+					rotateSessionCredential: async () => false,
+				},
+				resolver: () => async () => "test-deepinfra-key",
+			} as unknown as ModelRegistry,
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+
+		await expect(
+			imageGenTool.execute(
+				"call-deepinfra-edit",
+				{
+					subject: "a cat",
+					changes: ["make it noir"],
+					input: [{ data: Buffer.from("reference").toString("base64"), mime_type: "image/png" }],
+				},
+				undefined,
+				ctx,
+			),
+		).rejects.toThrow("deepinfra image generation is text-to-image only and cannot edit input images");
+		// DeepInfra was credentialed but must not receive the edit request.
+		expect(requestUrls).toEqual([]);
 	});
 });

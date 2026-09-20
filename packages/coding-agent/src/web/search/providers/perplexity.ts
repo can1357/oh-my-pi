@@ -22,13 +22,8 @@ import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-response
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { $env, readSseJson } from "@oh-my-pi/pi-utils";
-import type {
-	PerplexityRequest,
-	PerplexitySearchResult,
-	SearchCitation,
-	SearchResponse,
-	SearchSource,
-} from "../../../web/search/types";
+import type { PerplexityRequest, PerplexitySearchResult } from "../../../web/search/types";
+import type { SearchCitation, SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";

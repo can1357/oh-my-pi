@@ -1,5 +1,7 @@
 import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { slashCommandCapability } from "../capability/slash-command";
+import { slashCommandFrontmatterDisplay } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import { appendInlineArgsFallback, templateUsesInlineArgPlaceholders } from "../config/prompt-templates";
 import type { SlashCommand } from "../discovery";
 import { loadCapability } from "../discovery";
@@ -26,6 +28,8 @@ export type { BuiltinSlashCommand, SubcommandDef } from "../slash-commands/types
 export interface FileSlashCommand {
 	name: string;
 	description: string;
+	/** Argument hint from `argument-hint`/`argumentHint` frontmatter, shown as inline ghost text. */
+	argumentHint?: string;
 	content: string;
 	source: string; // e.g., "via Claude Code (User)"
 	/** Source metadata for display */
@@ -37,12 +41,12 @@ const EMBEDDED_SLASH_COMMANDS = EMBEDDED_COMMAND_TEMPLATES;
 function parseCommandTemplate(
 	content: string,
 	options: { source: string; level?: "off" | "warn" | "fatal" },
-): { description: string; body: string } {
+): { description: string; body: string; argumentHint?: string } {
 	const { frontmatter, body } = parseFrontmatter(content, options);
-	const frontmatterDesc = typeof frontmatter.description === "string" ? frontmatter.description.trim() : "";
+	const { description: frontmatterDesc, argumentHint } = slashCommandFrontmatterDisplay(frontmatter);
 
 	// Get description from frontmatter or first non-empty line
-	let description = frontmatterDesc;
+	let description = frontmatterDesc ?? "";
 	if (!description) {
 		const firstLine = body.split("\n").find(line => line.trim());
 		if (firstLine) {
@@ -51,12 +55,14 @@ function parseCommandTemplate(
 		}
 	}
 
-	return { description, body };
+	return { description, body, argumentHint };
 }
 
 export interface LoadSlashCommandsOptions {
 	/** Working directory for project-local commands. Default: getProjectDir() */
 	cwd?: string;
+	/** Session-local extension roots for post-startup reloads (explicit + mode + configured). */
+	extensionRoots?: EffectiveExtensionRoots;
 }
 
 /**
@@ -64,10 +70,13 @@ export interface LoadSlashCommandsOptions {
  * Loads from all registered providers (builtin, user, project).
  */
 export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}): Promise<FileSlashCommand[]> {
-	const result = await loadCapability<SlashCommand>(slashCommandCapability.id, { cwd: options.cwd });
+	const result = await loadCapability<SlashCommand>(slashCommandCapability.id, {
+		cwd: options.cwd,
+		extensionRoots: options.extensionRoots,
+	});
 
 	const fileCommands: FileSlashCommand[] = result.items.map(cmd => {
-		const { description, body } = parseCommandTemplate(cmd.content, {
+		const { description, body, argumentHint } = parseCommandTemplate(cmd.content, {
 			source: cmd.path ?? `slash-command:${cmd.name}`,
 			level: cmd.level === "native" ? "fatal" : "warn",
 		});
@@ -79,6 +88,7 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 		return {
 			name: cmd.name,
 			description,
+			argumentHint: cmd.argumentHint ?? argumentHint,
 			content: body,
 			source: sourceStr,
 			_source: { providerName: cmd._source.providerName, level: cmd.level },
@@ -90,13 +100,14 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 		const name = cmd.name.replace(/\.md$/, "");
 		if (seenNames.has(name)) continue;
 
-		const { description, body } = parseCommandTemplate(cmd.content, {
+		const { description, body, argumentHint } = parseCommandTemplate(cmd.content, {
 			source: `embedded:${cmd.name}`,
 			level: "fatal",
 		});
 		fileCommands.push({
 			name,
 			description,
+			argumentHint,
 			content: body,
 			source: "bundled",
 		});

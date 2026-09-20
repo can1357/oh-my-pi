@@ -34,14 +34,17 @@
  *    {@link GeminiHeaderRunDetector}.
  *
  * Scope: exact cycles are guarded for every model; semantic heuristics remain
- * limited to Gemini, DeepSeek, and Grok family streams before any tool call.
- * Native thinking is checked first; assistant text can also be checked for
- * providers that surface reasoning as visible prose. On a hit the failed turn is
- * emitted as an empty retryable stream-stall error; result-awaiting callers
- * (`complete`, `completeSimple`) re-sample at most three guarded attempts and
- * then fail closed. Disable detection with `PI_NO_THINKING_LOOP_GUARD=1`.
+ * limited to Gemini, DeepSeek, and Grok family streams. Thinking stays armed
+ * after a tool call starts — xAI/Grok can keep emitting `thinking_delta` after
+ * `toolcall_start`, and those deltas count as stream progress so the idle
+ * watchdog never fires. Visible assistant text still latches the thinking
+ * detector off. Native thinking is checked first; assistant text can also be
+ * checked for providers that surface reasoning as visible prose. On a hit the
+ * failed turn is emitted as an empty retryable stream-stall error;
+ * result-awaiting callers (`complete`, `completeSimple`) re-sample at most
+ * three guarded attempts and then fail closed. Disable detection with
+ * `PI_NO_THINKING_LOOP_GUARD=1`.
  */
-import { modelFamilyToken } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Api, AssistantMessage, Model, StreamOptions } from "../types";
@@ -106,23 +109,19 @@ const CONCRETE_ANCHOR =
 	/`[^`]+`|\b\w{2,}\.[a-zA-Z]\w{0,4}\b|[\w-]+(?:\/[\w-]+){2,}|\b\w+_\w+\b|\b[a-z]+[A-Z]\w*\b|\b[A-Z][a-z]+[A-Z]\w*\b/g;
 
 /**
- * True when `model.id` belongs to a family guarded by the semantic loop
- * heuristics: Gemini, DeepSeek, or Grok. Exact suffix-cycle detection applies to
- * every enabled model independently of this predicate.
- *
- * Model identity is derived only from its id; provider and compatibility metadata
- * do not opt opaque aliases into semantic detection.
+ * True when resolved compatibility policy enables semantic loop heuristics for
+ * this model. Exact suffix-cycle detection applies to every enabled model
+ * independently of this predicate.
  */
 export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
 	if (options?.loopGuard?.enabled === false) return false;
-	switch (modelFamilyToken(model.id)) {
-		case "gemini":
-		case "deepseek":
-		case "grok":
-			return true;
-		default:
-			return false;
-	}
+	const compat = model.compat;
+	if (compat !== undefined) return "thinkingLoopGuard" in compat && compat.thinkingLoopGuard !== undefined;
+	// Custom API surfaces resolve no compat record, so the KDL `thinking-loop-guard`
+	// axis cannot land on them; fall back to the class facts the axis encodes
+	// (classes/{gemini,deepseek,xai}.kdl).
+	const cls = model.identity?.class;
+	return cls === "gemini" || cls === "deepseek" || cls === "xai";
 }
 
 /**
@@ -188,7 +187,7 @@ export class ThinkingLoopDetector {
 				return null;
 			}
 			// An over-long segment is chunked so each piece stays comparable.
-			for (let rest = raw; rest.length > 0; ) {
+			for (let rest = raw; rest.length > 0;) {
 				const chunk = rest.length > SEGMENT_CHAR_CAP ? rest.slice(0, SEGMENT_CHAR_CAP) : rest;
 				rest = rest.slice(chunk.length);
 				const hit = this.#consumeSegment(chunk);
@@ -305,7 +304,7 @@ export class ThinkingLoopDetector {
  * real narration runaway burns dozens-to-hundreds of titles, so this still trips
  * fast on the actual pathology.
  */
-export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 24;
+export const GEMINI_HEADER_RUNAWAY_THRESHOLD = 36;
 
 /**
  * True when a single trimmed line is a Gemini reasoning-summary title: a markdown
@@ -386,21 +385,35 @@ export function guardThinkingLoopStream(
 	void (async () => {
 		let thinkingArmed = true;
 		let textArmed = checkAssistantContent;
+		let textStarted = false;
 		try {
 			for await (const event of inner) {
 				let detail: string | null = null;
-				if (thinkingArmed && event.type === "thinking_delta") {
-					detail = thinkingDetector.push(event.delta);
-				} else if (thinkingArmed && event.type === "thinking_end") {
-					detail = thinkingDetector.flush();
-					thinkingArmed = false;
-				} else if (event.type === "text_start" || event.type === "text_delta") {
-					thinkingArmed = false;
-					if (textArmed && event.type === "text_delta") {
+				if (event.type === "thinking_delta") {
+					// Re-arm after thinking_end / toolcall_start unless visible answer
+					// text has already latched the detector off. Grok/xAI Responses can
+					// keep reasoning after the first toolcall_start; those deltas still
+					// count as stream progress while the TUI sits on a streamed preview.
+					if (!textStarted) {
+						thinkingArmed = true;
+						detail = thinkingDetector.push(event.delta);
+					}
+				} else if (event.type === "thinking_end") {
+					if (thinkingArmed) {
+						detail = thinkingDetector.flush();
+					}
+				} else if (event.type === "text_start") {
+					// Responses emits this as soon as an empty message item is added.
+					// No visible answer text yet — do not latch the thinking detector.
+				} else if (event.type === "text_delta") {
+					if (event.delta.length > 0) {
+						thinkingArmed = false;
+						textStarted = true;
+					}
+					if (textArmed) {
 						detail = textDetector.push(event.delta);
 					}
 				} else if (event.type === "toolcall_start" || event.type === "toolcall_delta") {
-					thinkingArmed = false;
 					textArmed = false;
 				} else if (event.type === "done") {
 					if (thinkingArmed) {
@@ -465,7 +478,7 @@ export function withThinkingLoopGuard<
 	const controller = new AbortController();
 	const caller = options?.signal;
 	const signal = caller ? AbortSignal.any([caller, controller.signal]) : controller.signal;
-	const merged = { ...(options ?? {}), signal } as O;
+	const merged = { ...options, signal } as O;
 	return guardThinkingLoopStream(dispatch(merged), model, controller, options);
 }
 

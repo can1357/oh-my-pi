@@ -22,7 +22,7 @@
 #     FROM ${PI_BASE} AS pi-base
 ###############################################################################
 
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.2
 
 ############################
 # 1) natives-builder — Rust + Bun → pi_natives.linux-<arch>.node (local cargo)
@@ -42,7 +42,7 @@ ENV BUN_INSTALL=/opt/bun \
     OMP_NATIVE_CARGO_PROFILE=ci
 
 # clang/libclang-dev: bindgen for pipewire-sys/libspa-sys (Linux desktop capture);
-# cmake/make/ninja-build: audiopus_sys builds bundled libopus via CMake.
+# cmake/make/ninja-build: opusic-sys builds bundled libopus via CMake.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         curl ca-certificates pkg-config libssl-dev unzip git \

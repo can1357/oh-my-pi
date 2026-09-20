@@ -139,6 +139,7 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 	it("accepts well-formed payloads and rejects malformed ones", () => {
 		expect(isMcpConnectionStatusEvent({ type: "connecting", serverNames: ["a", "b"] })).toBe(true);
 		expect(isMcpConnectionStatusEvent({ type: "connecting", serverNames: [] })).toBe(true);
+		expect(isMcpConnectionStatusEvent({ type: "reconnecting", serverName: "a" })).toBe(true);
 		expect(isMcpConnectionStatusEvent({ type: "connected", serverName: "a" })).toBe(true);
 		expect(isMcpConnectionStatusEvent({ type: "failed", serverName: "a", error: "boom" })).toBe(true);
 		expect(
@@ -156,6 +157,7 @@ describe("mcp/startup-events — connection-status cross-module contract", () =>
 		expect(isMcpConnectionStatusEvent({})).toBe(false);
 		expect(isMcpConnectionStatusEvent({ type: "connecting", serverNames: "alpha" })).toBe(false);
 		expect(isMcpConnectionStatusEvent({ type: "connecting", serverNames: ["ok", 3] })).toBe(false);
+		expect(isMcpConnectionStatusEvent({ type: "reconnecting", serverName: 1 })).toBe(false);
 		expect(isMcpConnectionStatusEvent({ type: "connected", serverName: 1 })).toBe(false);
 		expect(isMcpConnectionStatusEvent({ type: "failed", serverName: "a" })).toBe(false);
 		expect(

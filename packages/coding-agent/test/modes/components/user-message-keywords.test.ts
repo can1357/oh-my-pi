@@ -3,9 +3,11 @@ import * as path from "node:path";
 import * as url from "node:url";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CustomEditor } from "@oh-my-pi/pi-coding-agent/modes/components/custom-editor";
-import { UserMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message";
-import { getEditorTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
+import { chipLabel, modelChipStyle, modelMentionChipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { imageReferenceHyperlink } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { Container } from "@oh-my-pi/pi-tui";
@@ -79,24 +81,50 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		expect(countOccurrences(raw, "\x1b]133;D;0\x07")).toBe(1);
 	});
 
-	it("bolds and underlines image references in the rendered message bubble", () => {
-		const raw = render("please inspect [Image #1] before continuing");
-		expect(Bun.stripANSI(raw)).toContain("[Image #1]");
+	it("collapses image markers to identity-colored chip tokens in the rendered bubble", () => {
+		// Wire format stays `[Image #1, WxH]`; the bubble shows the composer's compact chip.
+		const raw = render("please inspect [Image #1, 800x600] before continuing");
+		expect(Bun.stripANSI(raw)).toContain(`${chipLabel("image", 1)} before continuing`);
+		expect(Bun.stripANSI(raw)).not.toContain("[Image #1");
 		expect(raw).toContain("\x1b[1m");
-		expect(raw).toContain("\x1b[4m");
+	});
+
+	it("collapses model tags before Markdown and renders the visible label in model styling", () => {
+		const label = modelMentionChipLabel("Claude (Fast)");
+		const bubbleReset = `${theme.getFgOnBgAnsi("userMessageText", "userMessageBg")}${theme.getBgAnsi("userMessageBg")}`;
+		const raw = render('ask <model agent="m1" name="Claude (Fast)"/> then continue');
+		expect(Bun.stripANSI(raw)).toContain(`ask ${label} then continue`);
+		expect(raw).not.toContain("<model agent=");
+		expect(raw).toContain(modelChipStyle(label, bubbleReset));
+		expect(raw).toContain(theme.getFgAnsi("statusLineModel"));
 	});
 
 	it("wraps image references in file hyperlinks when a blob path is available", () => {
 		const imagePath = path.resolve("/tmp/omp-image.png");
 		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
-		const raw = new UserMessageComponent("please inspect [Image #1]", false, [imagePath]).render(80).join("\n");
-		expect(Bun.stripANSI(raw)).toContain("[Image #1]");
+		const raw = new UserMessageComponent("please inspect [Image #1]", { imageLinks: [imagePath] })
+			.render(80)
+			.join("\n");
+		expect(Bun.stripANSI(raw)).toContain(chipLabel("image", 1));
 		expect(raw).toContain("\x1b]8;id=");
 		expect(raw).toContain(imageUri);
 	});
 
+	it("renders a video marker as a video chip linked to its source", () => {
+		const videoPath = path.resolve("/tmp/omp-video.mp4");
+		const videoUri = url.pathToFileURL(videoPath).href;
+		const raw = new UserMessageComponent("please inspect [Video #1, 960x480]", { imageLinks: [videoPath] })
+			.render(80)
+			.join("\n");
+		expect(Bun.stripANSI(raw)).toContain(chipLabel("video", 1));
+		expect(Bun.stripANSI(raw)).not.toContain("[Video #1");
+		expect(raw).toContain("\x1b]8;id=");
+		expect(raw).toContain(videoUri);
+	});
+
 	it("wraps draft editor image references in file hyperlinks when a blob path is available", () => {
 		const editor = new CustomEditor(getEditorTheme());
+		editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		const imagePath = path.resolve("/tmp/omp-image.png");
 		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
 		editor.imageLinks = [imagePath];
@@ -123,7 +151,6 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		};
 		const helpers = new UiHelpers({
 			chatContainer,
-			getUserMessageText: () => "please inspect [Image #1]",
 			sessionManager: sessionManagerMock,
 			viewSession: { sessionManager: sessionManagerMock },
 			transcriptMessageComponents: new WeakMap(),
@@ -142,7 +169,7 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 		const component = chatContainer.children.at(-1);
 		if (!component) throw new Error("Expected user message component to be appended");
 		const raw = component.render(80).join("\n");
-		expect(Bun.stripANSI(raw)).toContain("[Image #1]");
+		expect(Bun.stripANSI(raw)).toContain(chipLabel("image", 1));
 		expect(raw).toContain("\x1b]8;id=");
 		expect(raw).toContain(displayUri);
 	});
@@ -160,6 +187,7 @@ describe("UserMessageComponent magic-keyword highlighting", () => {
 
 	it("hyperlinks the metadata-bearing image marker format", () => {
 		const editor = new CustomEditor(getEditorTheme());
+		editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		const imagePath = path.resolve("/tmp/omp-image.png");
 		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
 		editor.imageLinks = [imagePath];

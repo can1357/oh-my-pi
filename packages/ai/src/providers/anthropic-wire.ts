@@ -11,9 +11,13 @@
  * `scope`, tool `strict`/`eager_input_streaming`, mid-conversation `system`
  * role) are first-class here instead of being patched in via casts.
  */
-import type { TokenTaskBudget } from "../types";
+import type { ProviderInputTransformation, TokenTaskBudget } from "../types";
+import { isRecord } from "../utils";
 
 // ─── Cache control ──────────────────────────────────────────────────────────
+
+/** Beta enabling preserved-thinking block controls and transformation reports. */
+export const THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
 
 /** Ephemeral prefix-cache breakpoint marker. */
 export type CacheControlEphemeral = {
@@ -98,6 +102,21 @@ export type ToolSearchToolResultBlockParam = {
 	[key: string]: unknown;
 };
 
+export type ToolChangeReferenceParam = {
+	type: "tool_reference";
+	name: string;
+};
+
+export type ToolAdditionBlockParam = {
+	type: "tool_addition";
+	tool: ToolChangeReferenceParam;
+};
+
+export type ToolRemovalBlockParam = {
+	type: "tool_removal";
+	tool: ToolChangeReferenceParam;
+};
+
 /** Anthropic server-tool history variants omp can replay atomically. */
 export type AnthropicServerToolHistoryBlockParam =
 	| WebSearchServerToolUseBlockParam
@@ -149,6 +168,22 @@ export type FallbackBlockParam = {
 	to: { model: string };
 };
 
+/** Beta enabling server-side compaction (`compact_20260112` edit, `compaction` blocks). */
+export const COMPACTION_BETA = "compact-2026-01-12";
+
+/**
+ * Server-side compaction summary (compact-2026-01-12). Returned at the start
+ * of the assistant response that crossed the trigger; on replay the API drops
+ * every block that precedes it, so it may open the messages array. The
+ * `encrypted_content` is opaque provider state, round-tripped verbatim.
+ */
+export type CompactionBlockParam = {
+	type: "compaction";
+	content: string;
+	encrypted_content?: string | null;
+	cache_control?: CacheControlEphemeral | null;
+};
+
 export type ContentBlockParam =
 	| TextBlockParam
 	| ImageBlockParam
@@ -157,9 +192,12 @@ export type ContentBlockParam =
 	| ServerToolUseBlockParam
 	| WebSearchToolResultBlockParam
 	| ToolSearchToolResultBlockParam
+	| ToolAdditionBlockParam
+	| ToolRemovalBlockParam
 	| ThinkingBlockParam
 	| RedactedThinkingBlockParam
-	| FallbackBlockParam;
+	| FallbackBlockParam
+	| CompactionBlockParam;
 
 /**
  * A single conversation turn.
@@ -171,6 +209,10 @@ export type ContentBlockParam =
 export type MessageParam = {
 	role: "user" | "assistant" | "system";
 	content: string | ContentBlockParam[];
+	/** Turn-scoped system-message lifetime. */
+	clear_at?: "never" | "next_user_message";
+	/** Per-message effort override. */
+	output_config?: OutputConfig;
 };
 
 // ─── Tools ──────────────────────────────────────────────────────────────────
@@ -191,6 +233,8 @@ export type Tool = {
 	strict?: boolean;
 	/** Fine-grained tool streaming beta: stream tool input as it is generated. */
 	eager_input_streaming?: boolean;
+	/** Withhold this tool until a later `tool_addition` block references it. */
+	defer_loading?: boolean;
 };
 
 export type ToolChoiceAuto = { type: "auto"; disable_parallel_tool_use?: boolean };
@@ -204,11 +248,17 @@ export type ToolChoice = ToolChoiceAuto | ToolChoiceAny | ToolChoiceTool | ToolC
 
 export type Metadata = { user_id?: string | null };
 
+export type ThinkingBlockBinding = {
+	prefix_mismatch_behavior: "drop_block" | "error";
+};
+
 export type ThinkingConfigEnabled = {
 	type: "enabled";
 	budget_tokens: number;
 	/** Opus 4.7+ reasoning display mode. */
 	display?: "summarized" | "omitted";
+	/** Preserved-thinking prefix mismatch policy. */
+	block_binding?: ThinkingBlockBinding;
 };
 
 export type ThinkingConfigDisabled = { type: "disabled" };
@@ -217,6 +267,8 @@ export type ThinkingConfigAdaptive = {
 	type: "adaptive";
 	/** Opus 4.7+ reasoning display mode. */
 	display?: "summarized" | "omitted";
+	/** Preserved-thinking prefix mismatch policy. */
+	block_binding?: ThinkingBlockBinding;
 };
 
 export type ThinkingConfigParam = ThinkingConfigEnabled | ThinkingConfigDisabled | ThinkingConfigAdaptive;
@@ -241,9 +293,19 @@ export type FallbackParam = {
 	speed?: "fast";
 };
 
+/** Server-side compaction edit (compact-2026-01-12). */
+export type CompactionEdit = {
+	type: "compact_20260112";
+	/** `input_tokens` is the only trigger; `value` must be at least 50,000. */
+	trigger?: { type: "input_tokens"; value: number };
+	pause_after_compaction?: boolean;
+	/** Replaces the API's default summarization prompt entirely. */
+	instructions?: string;
+};
+
 /** Claude Code context-management beta payload. */
 export type ContextManagement = {
-	edits: Array<{ type: "clear_thinking_20251015"; keep: "all" }>;
+	edits: Array<{ type: "clear_thinking_20251015"; keep: "all" } | CompactionEdit>;
 };
 
 export type MessageCreateParams = {
@@ -265,6 +327,8 @@ export type MessageCreateParams = {
 	speed?: "fast";
 	/** Claude Code context-management beta. */
 	context_management?: ContextManagement;
+	/** Google Cloud rawPredict carries Anthropic beta names in the body. */
+	anthropic_beta?: string[];
 	/**
 	 * Server-side fallback beta chain — up to three fallback models the API
 	 * retries when a classifier blocks the primary. Required companion beta
@@ -285,7 +349,8 @@ export type StopReason =
 	| "pause_turn"
 	| "refusal"
 	| "sensitive"
-	| "model_context_window_exceeded";
+	| "model_context_window_exceeded"
+	| "compaction";
 
 export type CacheCreation = {
 	ephemeral_5m_input_tokens?: number | null;
@@ -299,12 +364,15 @@ export type ServerToolUsage = {
 
 /**
  * Per-attempt token accounting inside a multi-run turn
- * (server-side-fallback-2026-06-01). Populated whenever a fallback chain
- * ran, including sticky-served turns with no `fallback` content block.
- * A `fallback_message` entry is the definitive "served by fallback" signal.
+ * (server-side-fallback-2026-06-01, compact-2026-01-12). Populated whenever
+ * a fallback chain ran, including sticky-served turns with no `fallback`
+ * content block, and whenever the compaction beta is active. A
+ * `fallback_message` entry is the definitive "served by fallback" signal; a
+ * `compaction` entry is the summarization sampling the top-level usage
+ * excludes.
  */
 export type UsageIteration = {
-	type?: "message" | "fallback_message" | string;
+	type?: "message" | "fallback_message" | "compaction" | string;
 	model?: string | null;
 	input_tokens?: number | null;
 	output_tokens?: number | null;
@@ -323,6 +391,24 @@ export type Usage = {
 };
 
 /** The `message` envelope carried by `message_start`. */
+export type InputTransformation = {
+	type: string;
+	path?: string;
+	reason?: string;
+	[key: string]: unknown;
+};
+
+/** Parse Anthropic's forward-compatible input transformation list. */
+export function parseAnthropicInputTransformations(value: unknown): ProviderInputTransformation[] {
+	if (!Array.isArray(value)) return [];
+	const transformations: ProviderInputTransformation[] = [];
+	for (const entry of value) {
+		if (!isRecord(entry) || typeof entry.type !== "string") continue;
+		transformations.push({ ...entry, type: entry.type });
+	}
+	return transformations;
+}
+
 export type ResponseMessage = {
 	id: string;
 	type?: "message";
@@ -331,6 +417,7 @@ export type ResponseMessage = {
 	content?: unknown[];
 	stop_reason?: StopReason | null;
 	stop_sequence?: string | null;
+	input_transformations?: InputTransformation[];
 	usage: Usage;
 };
 
@@ -345,13 +432,15 @@ export type ResponseContentBlock =
 	| ServerToolUseBlockParam
 	| WebSearchToolResultBlockParam
 	| ToolSearchToolResultBlockParam
-	| { type: "fallback"; from: { model: string }; to: { model: string } };
+	| { type: "fallback"; from: { model: string }; to: { model: string } }
+	| { type: "compaction"; content?: string | null; encrypted_content?: string | null };
 
 export type ContentBlockDelta =
 	| { type: "text_delta"; text: string }
 	| { type: "input_json_delta"; partial_json: string }
 	| { type: "thinking_delta"; thinking: string }
-	| { type: "signature_delta"; signature: string };
+	| { type: "signature_delta"; signature: string }
+	| { type: "compaction_delta"; content?: string | null; encrypted_content?: string | null };
 
 export type StopDetails = {
 	type: string;
@@ -373,7 +462,12 @@ export type RawContentBlockStartEvent = {
 };
 export type RawContentBlockDeltaEvent = { type: "content_block_delta"; index: number; delta: ContentBlockDelta };
 export type RawContentBlockStopEvent = { type: "content_block_stop"; index: number };
-export type RawMessageDeltaEvent = { type: "message_delta"; delta: MessageDelta; usage: Usage };
+export type RawMessageDeltaEvent = {
+	type: "message_delta";
+	delta: MessageDelta;
+	usage: Usage;
+	input_transformations?: InputTransformation[];
+};
 export type RawMessageStopEvent = { type: "message_stop" };
 
 export type RawMessageStreamEvent =

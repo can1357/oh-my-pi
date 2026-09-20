@@ -7,7 +7,7 @@ import {
 	fetchMarketplace,
 	parseMarketplaceCatalog,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // Fixture lives at test/marketplace/fixtures/valid-marketplace/
@@ -87,6 +87,33 @@ describe("parseMarketplaceCatalog", () => {
 		expect(catalog.owner.name).toBe("Test Author");
 		expect(catalog.plugins).toHaveLength(1);
 		expect(catalog.plugins[0].name).toBe("hello-plugin");
+	});
+
+	it("parses a catalog whose name has uppercase letters (#10827)", () => {
+		const catalog = parseMarketplaceCatalog(
+			JSON.stringify({
+				name: "HexRaysSA",
+				owner: { name: "HexRaysSA" },
+				plugins: [{ name: "ida-mcp", source: "./plugins/ida-mcp" }],
+			}),
+			"/f.json",
+		);
+		expect(catalog.name).toBe("HexRaysSA");
+	});
+
+	it("skips plugin names that differ only by case to prevent cache collisions", () => {
+		const catalog = parseMarketplaceCatalog(
+			JSON.stringify({
+				name: "HexRaysSA",
+				owner: { name: "HexRaysSA" },
+				plugins: [
+					{ name: "IDA-MCP", source: "./plugins/ida-mcp" },
+					{ name: "ida-mcp", source: "./plugins/ida-mcp-lowercase" },
+				],
+			}),
+			"/f.json",
+		);
+		expect(catalog.plugins.map(plugin => plugin.name)).toEqual(["IDA-MCP"]);
 	});
 
 	it("throws on missing name", () => {
@@ -233,7 +260,7 @@ describe("fetchMarketplace", () => {
 	});
 
 	it("hides temp clone paths in cloned catalog validation errors", async () => {
-		const cloneSpy = spyOn(git, "clone").mockImplementation(async (_url, targetDir) => {
+		const cloneSpy = spyOn(vcs, "clone").mockImplementation(async (_url, targetDir) => {
 			fs.mkdirSync(path.join(targetDir, ".claude-plugin"), { recursive: true });
 			fs.writeFileSync(
 				path.join(targetDir, ".claude-plugin", "marketplace.json"),

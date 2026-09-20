@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
-import { postmortem } from "@oh-my-pi/pi-utils";
+import { postmortem, TempDir } from "@oh-my-pi/pi-utils";
 import { JsRuntime, type RuntimeHooks } from "../../src/eval/js/shared/runtime";
 import {
 	bindRunFacade,
@@ -229,6 +229,7 @@ describe("browser run cancellation", () => {
 				owner,
 				reason => floatingRejections.push(reason),
 				async () => {
+					// oxlint-disable unicorn/no-single-promise-in-promise-methods -- the combinators themselves are under test
 					const combined =
 						name === "all"
 							? Promise.all([facade.fail()])
@@ -243,6 +244,7 @@ describe("browser run cancellation", () => {
 					void combined.catch(reason => {
 						throw reason;
 					});
+					// oxlint-enable unicorn/no-single-promise-in-promise-methods
 					await Bun.sleep(20);
 				},
 			);
@@ -280,6 +282,7 @@ describe("browser run cancellation", () => {
 			reason => floatingRejections.push(reason),
 			async () => {
 				try {
+					// oxlint-disable-next-line unicorn/no-single-promise-in-promise-methods -- the tracked combinator is under test
 					await Promise.all([facade.fail()]);
 				} catch (error) {
 					caught = error;
@@ -294,7 +297,8 @@ describe("browser run cancellation", () => {
 
 	it("keeps a real worker alive after floating browser and continuation rejections", async () => {
 		vi.useRealTimers();
-		const workerPath = `/tmp/omp-browser-rejections-${process.pid}.ts`;
+		using workerDir = TempDir.createSync("@omp-browser-rejections-");
+		const workerPath = workerDir.join("worker.ts");
 		await Bun.write(
 			workerPath,
 			`

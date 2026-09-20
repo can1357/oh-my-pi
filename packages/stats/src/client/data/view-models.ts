@@ -74,6 +74,7 @@ export function buildAgentTokenShare(stats: AgentTypeStats[]): AgentTokenShareVi
 
 export interface CostSummaryView {
 	totalCost: number;
+	unpricedRequests: number;
 	avgDailyCost: number;
 	topModelName: string;
 	topModelCost: number;
@@ -111,6 +112,7 @@ export interface FolderRowView extends FolderStats {
 
 export function buildCostSummary(costSeries: CostTimeSeriesPoint[]): CostSummaryView {
 	const totalCost = costSeries.reduce((sum, p) => sum + p.cost, 0);
+	const unpricedRequests = costSeries.reduce((sum, point) => sum + point.unpricedRequests, 0);
 	const dayBuckets = new Set(costSeries.map(p => p.timestamp)).size;
 	const avgDailyCost = dayBuckets > 0 ? totalCost / dayBuckets : 0;
 
@@ -130,6 +132,7 @@ export function buildCostSummary(costSeries: CostTimeSeriesPoint[]): CostSummary
 
 	return {
 		totalCost,
+		unpricedRequests,
 		avgDailyCost,
 		topModelName,
 		topModelCost,

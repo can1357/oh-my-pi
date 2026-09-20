@@ -2,9 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
-import * as git from "../../src/utils/git";
 
 describe("git reference directory fallback", () => {
 	let repoDir: string;
@@ -55,17 +55,17 @@ describe("git reference directory fallback", () => {
 	});
 
 	test("resolves branch that has directory conflict via resolveSync on head", () => {
-		const headStateSync = git.head.resolveSync(repoDir);
+		const headStateSync = vcs.requireGit(repoDir).headSync();
 		expect(headStateSync).not.toBeNull();
 		if (!headStateSync) return;
 		expect(headStateSync.commit).toBe(commitSha);
 	});
 
 	test("resolves branch that has directory conflict via resolve on ref", async () => {
-		const repository = await git.repo.resolve(repoDir);
+		const repository = vcs.git(repoDir);
 		expect(repository).not.toBeNull();
 		if (!repository) return;
-		const resolved = await git.ref.resolve(repoDir, "refs/heads/pi-flash");
+		const resolved = await repository.resolveRef("refs/heads/pi-flash");
 		expect(resolved).toBe(commitSha);
 	});
 });

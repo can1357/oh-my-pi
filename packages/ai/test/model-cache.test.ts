@@ -118,4 +118,24 @@ describe("model cache migrations", () => {
 		expect(cached?.headerOmittedModelIds).toEqual(["gated-model"]);
 		expect(cached?.unrestorableHeaderModelIds).toEqual(["gated-model"]);
 	});
+
+	it("fails closed and securely deletes corrupt header provenance", () => {
+		const model = createModel("corrupt-provenance", "Corrupt Provenance");
+		writeModelCache("runtime-ext", Date.now(), [model], true, "static-v1", dbPath);
+
+		const db = new Database(dbPath);
+		db.run("UPDATE model_cache SET header_omitted_model_ids = ? WHERE provider_id = ?", [
+			JSON.stringify({ invalid: "not-an-id-list" }),
+			"runtime-ext",
+		]);
+		db.close();
+
+		expect(readModelCache("runtime-ext", TTL_MS, Date.now, dbPath)).toBeNull();
+		const verified = new Database(dbPath, { readonly: true });
+		const row = verified
+			.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM model_cache WHERE provider_id = 'runtime-ext'")
+			.get();
+		verified.close();
+		expect(row?.count).toBe(0);
+	});
 });

@@ -12,7 +12,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const mockTaskTool: AgentTool = {
@@ -136,10 +136,11 @@ describe("AgentSession magic keyword settings", () => {
 		}>;
 		const notice = promptMessages.find(message => message.customType === "workflow-notice");
 		expect(notice?.customType).toBe("workflow-notice");
-		expect(notice?.content).toContain("`eval`");
-		expect(notice?.content).toContain("`parallel(thunks)`");
-		expect(notice?.content).toContain("**Python (`eval`, Python backend):**");
-		expect(notice?.content).toContain("**JavaScript (`eval`, JavaScript backend):**");
+		expect(notice?.content).toContain("Default to `workpool()`");
+		expect(notice?.content).toContain('`hub` with `op:"wait", ids:["<pool-name>"]`');
+		expect(notice?.content).toContain("**Python:**");
+		expect(notice?.content).toContain("**JavaScript:**");
+		expect(notice?.content).not.toContain("parallel(thunks)");
 	});
 
 	it("updates the workflowz notice when scout is disabled during the session", async () => {

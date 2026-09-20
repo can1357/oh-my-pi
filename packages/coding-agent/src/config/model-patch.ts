@@ -4,16 +4,47 @@ import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { createConfigHeaderResolver } from "./resolve-config-value";
 import type { ModelOverride } from "./models-config-schema";
-/** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
+/** Provider override config (baseUrl, headers, apiKey, compat, transport). */
 export interface ProviderOverride {
 	baseUrl?: string;
+	/** APIs covered by the provider `baseUrl`: effective APIs of custom models
+	 * inheriting that URL, plus a provider-level `api` for override-only
+	 * configs. `undefined` preserves the historical provider-wide override. */
+	baseUrlApis?: readonly Api[];
 	headers?: Record<string, string>;
 	apiKey?: string;
 	authHeader?: boolean;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
 	transport?: Model<Api>["transport"];
+	guardrailIdentifier?: Model<Api>["guardrailIdentifier"];
+	guardrailVersion?: Model<Api>["guardrailVersion"];
+	guardrailTrace?: Model<Api>["guardrailTrace"];
+	requestMetadata?: Model<Api>["requestMetadata"];
+}
+
+/**
+ * Single decision point for provider `baseUrl` application, shared by every
+ * composition path (built-in load, cached load, discovery merge, runtime
+ * overrides). `undefined` `baseUrlApis` keeps the historical provider-wide
+ * override; an explicit scope applies only to models whose API it covers.
+ * `transport: "pi-native"` is provider-wide by documented contract
+ * (docs/models.md): every model under the provider rides the auth-gateway,
+ * so the gateway `baseUrl` follows the transport regardless of the model's
+ * own API — a model must never end up pi-native on a catalog upstream host
+ * (#2555).
+ */
+export function resolveProviderBaseUrl<TApi extends Api>(
+	modelApi: TApi,
+	modelBaseUrl: string | undefined,
+	override: Pick<ProviderOverride, "baseUrl" | "baseUrlApis" | "transport"> | undefined,
+): string | undefined {
+	if (override?.baseUrl === undefined) return modelBaseUrl;
+	if (override.transport === "pi-native") return override.baseUrl;
+	if (override.baseUrlApis !== undefined && !override.baseUrlApis.includes(modelApi)) return modelBaseUrl;
+	return override.baseUrl;
 }
 
 /**
@@ -39,20 +70,38 @@ export interface ProviderOverride {
  * default openai-completions transport after the background catalog
  * refresh — so the first `/model` switch after boot hits the raw OpenAI
  * chat-completions URL instead of the gateway's `/v1/pi/stream` (#2555).
- * See `xiaomi-tp-discovery-merge.test.ts` and the `refresh()` baseUrl-override
- * regression in `model-registry.test.ts`.
+ *
+ * Merged config headers are retained behind an async request-boundary
+ * resolver so discovery and catalog composition never execute `!command`
+ * values. `authHeader` is resolved through the same hook, allowing a 401
+ * invalidation to re-mint both the API key and header credentials before the
+ * retry without exposing command-evaluating property access.
  */
 export function mergeDiscoveredModel<TApi extends Api>(
 	model: Model<TApi>,
 	existing: Model<Api> | undefined,
-	providerOverride?: Pick<ProviderOverride, "baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport">,
+	providerOverride?: Pick<
+		ProviderOverride,
+		"baseUrl" | "baseUrlApis" | "compat" | "headers" | "remoteCompaction" | "transport" | "authHeader" | "apiKey"
+	>,
 ): Model<TApi> {
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
 		return buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
-			headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
+			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl ?? existing.baseUrl, providerOverride),
+			headers: undefined,
+			resolveHeaders: createConfigHeaderResolver(
+				[
+					existing.resolveHeaders ?? existing.headers,
+					model.resolveHeaders ?? model.headers,
+					providerOverride?.headers,
+				],
+				{
+					authHeader: providerOverride?.authHeader,
+					apiKeyConfig: providerOverride?.apiKey,
+				},
+			),
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				mergeRemoteCompactionConfig(existing.remoteCompaction, model.remoteCompaction),
@@ -65,8 +114,12 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	if (providerOverride) {
 		return buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
-			headers: providerOverride.headers ? { ...model.headers, ...providerOverride.headers } : model.headers,
+			baseUrl: resolveProviderBaseUrl(model.api, model.baseUrl, providerOverride),
+			headers: undefined,
+			resolveHeaders: createConfigHeaderResolver([model.resolveHeaders ?? model.headers, providerOverride.headers], {
+				authHeader: providerOverride.authHeader,
+				apiKeyConfig: providerOverride.apiKey,
+			}),
 			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
 				model.remoteCompaction,
@@ -182,7 +235,10 @@ export interface ModelPatch {
 	contextWindow?: number;
 	maxTokens?: number;
 	omitMaxOutputTokens?: boolean;
+	/** Whether Codex requests should prefer WebSocket transport. */
+	preferWebsockets?: boolean;
 	headers?: Record<string, string>;
+	resolveHeaders?: Model<Api>["resolveHeaders"];
 	compat?: ModelSpec<Api>["compat"];
 	contextPromotionTarget?: string;
 	compactionModel?: string;
@@ -210,6 +266,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.contextWindow !== undefined) result.contextWindow = patch.contextWindow;
 	if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 	if (patch.omitMaxOutputTokens !== undefined) result.omitMaxOutputTokens = patch.omitMaxOutputTokens;
+	if (patch.preferWebsockets !== undefined) result.preferWebsockets = patch.preferWebsockets;
 	if (patch.contextPromotionTarget !== undefined) result.contextPromotionTarget = patch.contextPromotionTarget;
 	if (patch.compactionModel !== undefined) result.compactionModel = patch.compactionModel;
 	if (patch.remoteCompaction !== undefined) {
@@ -228,12 +285,17 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	}
 	let compat: ModelSpec<Api>["compat"];
 	if (transport === "merge") {
-		if (patch.headers) {
-			result.headers = { ...base.headers, ...patch.headers };
+		if (patch.headers || patch.resolveHeaders) {
+			result.headers = undefined;
+			result.resolveHeaders = createConfigHeaderResolver([
+				base.resolveHeaders ?? base.headers,
+				patch.resolveHeaders ?? patch.headers,
+			]);
 		}
 		compat = mergeCompat(base.compatConfig, patch.compat);
 	} else {
 		result.headers = patch.headers;
+		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
 	}
 	const built = buildModel({ ...toModelSpec(result), compat } as ModelSpec<Api>);
@@ -242,6 +304,15 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		// first so non-reasoning and wire-disabled models still suppress it.
 		built.thinking = patch.thinking;
 	}
+	// Capacity already includes registry policy and runtime metadata; rebuilding
+	// compat must not replace it with the catalog's baseline limits.
+	built.contextWindow = result.contextWindow;
+	built.maxTokens = result.maxTokens;
+	// Explicit input and cost patches outrank catalog corrections.
+	if (patch.input !== undefined) built.input = patch.input;
+	// Patches never change model identity. Preserve already-resolved pricing,
+	// including earlier custom prices and the deliberate absence of a schedule.
+	built.cost = result.cost;
 	return built;
 }
 

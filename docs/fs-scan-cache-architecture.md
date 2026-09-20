@@ -14,7 +14,7 @@ Current native consumers:
 
 `crates/pi-natives/src/grep.rs` uses `WalkRequest` for candidate discovery but explicitly sets `.cache(false)`; the current public `GrepOptions` has no cache field.
 
-The public invalidation binding remains `invalidateFsScanCache(path?)` in `packages/natives/native/index.d.ts` / `index.js`. Coding-agent mutation helpers live in `packages/coding-agent/src/tools/fs-cache-invalidation.ts`.
+The N-API DTO layer that bridges walker results to JavaScript lives in `crates/pi-natives/src/iofs.rs`; per its own header, "`pi-walker` owns traversal and cache policy" and `iofs.rs` keeps only the JS-facing shapes and conversions. The public invalidation binding remains `invalidateFsScanCache(path?)` — declared in `iofs.rs` (forwarding to `pi_walker::invalidate_path_string` / `pi_walker::invalidate_all`) and exported in `packages/natives/native/index.d.ts` / `index.js`. Coding-agent mutation helpers live in `packages/coding-agent/src/tools/fs-cache-invalidation.ts`.
 
 ## Cache key partitioning
 
@@ -47,13 +47,15 @@ Global environment-overridable policy:
 - `FS_SCAN_CACHE_TTL_MS` — default `1000`
 - `FS_SCAN_EMPTY_RECHECK_MS` — default `200`
 - `FS_SCAN_CACHE_MAX_ENTRIES` — default `16`
+- `FS_SCAN_CACHE_MAX_BYTES` — default `67108864` (64 MiB of retained vector and path-string allocations)
 
 With caching enabled:
 
-- TTL `0` bypasses cache and returns a fresh scan with `cache_age_ms = 0`.
-- A hit younger than TTL clones the stored entries and reports its age.
-- An expired entry is removed and replaced by a fresh scan.
-- After insertion, entries above the configured maximum are evicted oldest-first by creation time.
+- TTL, entry limit, or byte limit `0` bypasses the cache and returns a fresh scan with `cache_age_ms = 0`.
+- A hit younger than TTL clones the stored entries outside the cache lock and reports its age. Cancellation is checked before and after copying.
+- Each lookup or insertion removes all expired entries. Idle processes retain at most the configured payload budget until the next cache operation; there is no background expiration thread.
+- Insertion evicts oldest entries until both limits are satisfied. The byte budget counts vector capacity and string capacity; it excludes allocator overhead, bounded map metadata, and caller-owned results.
+- An oversized scan or one already older than TTL is returned without retaining another copy. Concurrent scans cannot replace a newer scan with an older result.
 
 With caching disabled, collection scans fresh and neither reads nor populates the shared cache. It does not evict an existing cached entry for the same key.
 
@@ -90,6 +92,8 @@ The TUI `@`-mention autocomplete opts into cached `fuzzyFind`. Coding-agent's gr
 - with no path, clears all entries
 - with a path, removes every entry whose cached root is a prefix of the target
 
+Invalidation also prevents scans already in flight from repopulating the cache. A path-specific invalidation conservatively prevents admission of other concurrent scans, while preserving existing unrelated entries.
+
 Relative paths resolve against cwd. Invalidation canonicalizes the target; when it no longer exists, it attempts to canonicalize the parent and reattach the filename. This supports create, delete, and rename invalidation.
 
 Coding-agent helpers:
@@ -98,7 +102,7 @@ Coding-agent helpers:
 - `invalidateFsScanAfterDelete(path)`
 - `invalidateFsScanAfterRename(oldPath, newPath)` — invalidates both sides when different
 
-Current write, hashline, patch, and replace mutation paths call these helpers after successful changes. Any new filesystem mutation path must do the same.
+Current write, hashline, patch, replace, auto-repair, sloppy-edit, and ACP-bridge mutation paths call these helpers after successful changes. Any new filesystem mutation path must do the same.
 
 ## Adding a cache consumer
 
@@ -110,7 +114,11 @@ Current write, hashline, patch, and replace mutation paths call these helpers af
 
 ## Boundaries
 
-- The `DashMap` cache is process-local and is not persisted.
+- The cache is process-local and is not persisted. A mutex makes admission, eviction, expiration, and invalidation atomic; reference-counted payloads allow copying outside that lock.
 - Entries are full owned scan results, not final tool results.
 - Cache hits clone the stored entry vector.
 - Sharing occurs only for the same canonical root and complete effective traversal options.
+
+## Measuring the budget
+
+Run `FS_SCAN_CACHE_TTL_MS=60000 cargo run -p pi-walker --example scan-cache-bench -- /path/to/tree` to measure scan allocation bytes, owned-vector copying, and cache hits across 16 traversal-option partitions. Set `FS_SCAN_CACHE_MAX_BYTES` to compare budgets. The example leaves the supplied tree unchanged; use an optimized Cargo profile for timing comparisons.

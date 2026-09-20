@@ -93,6 +93,7 @@ export class SpeechEnhancer {
 						},
 						{
 							apiKey: registry.resolver(model, sessionId),
+							sessionId,
 							maxTokens: ANSWER_MAX_TOKENS,
 							disableReasoning: true,
 							metadata,
@@ -100,7 +101,7 @@ export class SpeechEnhancer {
 						},
 					);
 				},
-				{ signal },
+				{ signal, provider: model.provider },
 			);
 			if (response.stopReason === "error") {
 				logger.debug("speech-enhancer: rewrite errored", { error: response.errorMessage });

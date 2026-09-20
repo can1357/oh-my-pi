@@ -3,7 +3,13 @@ import { Line } from "react-chartjs-2";
 import { getToolDashboardStats } from "../api";
 import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
-import { formatCompact, formatCost, formatInteger, formatPercent, formatRelativeTime } from "../data/formatters";
+import {
+	formatCompact,
+	formatEstimatedCost,
+	formatInteger,
+	formatPercent,
+	formatRelativeTime,
+} from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildToolRows, type ToolRowView } from "../data/view-models";
 import type { TimeRange, ToolModelStats, ToolTimeSeriesPoint, ToolUsageStats } from "../types";
@@ -53,6 +59,7 @@ function ToolsSummaryPanel({ byTool }: { byTool: ToolUsageStats[] }) {
 		let tokens = 0;
 		let output = 0;
 		let cost = 0;
+		let unpricedRequests = 0;
 		let resultChars = 0;
 		let argsChars = 0;
 		for (const t of byTool) {
@@ -61,16 +68,17 @@ function ToolsSummaryPanel({ byTool }: { byTool: ToolUsageStats[] }) {
 			tokens += t.totalTokensShare;
 			output += t.outputTokensShare;
 			cost += t.costShare;
+			unpricedRequests += t.unpricedRequestsShare;
 			resultChars += t.resultChars;
 			argsChars += t.argsChars;
 		}
-		return { calls, errors, tokens, output, cost, resultChars, argsChars, tools: byTool.length };
+		return { calls, errors, tokens, output, cost, unpricedRequests, resultChars, argsChars, tools: byTool.length };
 	}, [byTool]);
 
 	return (
 		<Panel
 			title="Tool Usage"
-			subtitle="Tokens/cost are the invoking turns' real provider usage, split across each turn's tool calls"
+			subtitle="Tokens and API-equivalent estimates are split from invoking turns across each turn's tool calls"
 		>
 			<div className="stats-metric-cluster">
 				<div className="stats-metric-primary-grid">
@@ -89,8 +97,8 @@ function ToolsSummaryPanel({ byTool }: { byTool: ToolUsageStats[] }) {
 						</div>
 					</div>
 					<div className="stats-metric-card primary">
-						<div className="stats-metric-label">Attributed Cost</div>
-						<div className="stats-metric-value">{formatCost(totals.cost)}</div>
+						<div className="stats-metric-label">Attributed API-equivalent estimate</div>
+						<div className="stats-metric-value">{formatEstimatedCost(totals.cost, totals.unpricedRequests)}</div>
 					</div>
 				</div>
 
@@ -292,9 +300,11 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 			},
 			{
 				key: "cost",
-				header: "Attr. Cost",
+				header: "Attr. API-equivalent estimate",
 				numeric: true,
-				render: (item: ToolRowView) => <span className="font-mono">{formatCost(item.costShare)}</span>,
+				render: (item: ToolRowView) => (
+					<span className="font-mono">{formatEstimatedCost(item.costShare, item.unpricedRequestsShare)}</span>
+				),
 			},
 			{
 				key: "resultChars",
@@ -336,8 +346,10 @@ function ToolsTable({ byTool }: { byTool: ToolUsageStats[] }) {
 					</div>
 				</div>
 				<div>
-					<div className="stats-mobile-card-label">Attr. Cost</div>
-					<div className="stats-mobile-card-value font-mono">{formatCost(item.costShare)}</div>
+					<div className="stats-mobile-card-label">Attr. API-equivalent estimate</div>
+					<div className="stats-mobile-card-value font-mono">
+						{formatEstimatedCost(item.costShare, item.unpricedRequestsShare)}
+					</div>
 				</div>
 				<div>
 					<div className="stats-mobile-card-label">Result Text</div>
@@ -422,10 +434,10 @@ function ToolModelPanel({ byToolModel }: { byToolModel: ToolModelStats[] }) {
 			},
 			{
 				key: "cost",
-				header: "Attr. Cost",
+				header: "Attr. API-equivalent estimate",
 				numeric: true,
 				render: (item: ToolModelStats & { errorRate: number }) => (
-					<span className="font-mono">{formatCost(item.costShare)}</span>
+					<span className="font-mono">{formatEstimatedCost(item.costShare, item.unpricedRequestsShare)}</span>
 				),
 			},
 		],

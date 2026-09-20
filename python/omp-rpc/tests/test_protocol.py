@@ -7,6 +7,7 @@ from omp_rpc import (
     AutoCompactionEndEvent,
     AutoCompactionStartEvent,
     ExtensionUiRequest,
+    MessageUpdateEvent,
     SessionState,
     TodoReminderEvent,
     assistant_text,
@@ -17,6 +18,38 @@ from omp_rpc import (
 
 
 class ProtocolParsingTests(unittest.TestCase):
+    def test_parse_message_update_preserves_assistant_event_type(self) -> None:
+        assistant = {"role": "assistant"}
+        common = {"contentIndex": 0, "partial": assistant}
+        cases = {
+            "start": {"partial": assistant},
+            "text_start": common,
+            "thinking_start": common,
+            "toolcall_start": common,
+            "text_delta": {**common, "delta": "text"},
+            "thinking_delta": {**common, "delta": "thought"},
+            "toolcall_delta": {**common, "delta": "arguments"},
+            "text_end": {**common, "content": "text"},
+            "thinking_end": {**common, "content": "thought"},
+            "toolcall_end": {**common, "toolCall": {}},
+            "done": {"reason": "stop", "message": assistant},
+            "error": {"reason": "error", "error": assistant},
+        }
+
+        for event_type, event in cases.items():
+            with self.subTest(event_type=event_type):
+                parsed = parse_notification(
+                    {
+                        "type": "message_update",
+                        "message": assistant,
+                        "assistantMessageEvent": {"type": event_type, **event},
+                    }
+                )
+
+                self.assertIsInstance(parsed, MessageUpdateEvent)
+                assert isinstance(parsed, MessageUpdateEvent)
+                self.assertEqual(parsed.assistant_message_event["type"], event_type)
+
     def test_parse_session_state(self) -> None:
         state = parse_session_state(
             {
@@ -228,6 +261,33 @@ class ProtocolParsingTests(unittest.TestCase):
         self.assertTrue(notification.is_interactive())
         self.assertTrue(notification.requires_response())
         self.assertFalse(notification.is_passive())
+
+    def test_parse_select_option_details(self) -> None:
+        notification = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-2",
+                "method": "select",
+                "title": "Deploy",
+                "options": ["Keep", "Deploy"],
+                "optionDetails": [{}, {"description": "Push to production"}],
+            }
+        )
+
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertEqual(notification.options, ("Keep", "Deploy"))
+        self.assertEqual(
+            notification.option_details,
+            ({}, {"description": "Push to production"}),
+        )
+
+    def test_extension_ui_request_preserves_positional_constructor(self) -> None:
+        request = ExtensionUiRequest(
+            "ui-legacy", "confirm", "Confirm", None, "Continue?"
+        )
+
+        self.assertEqual(request.message, "Continue?")
+        self.assertIsNone(request.option_details)
 
     def test_parse_open_url_request(self) -> None:
         notification = parse_notification(

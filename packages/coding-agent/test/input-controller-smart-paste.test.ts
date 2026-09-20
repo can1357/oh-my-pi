@@ -13,24 +13,28 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 function createContext(options?: { focused?: { pasteText(text: string): void } }) {
 	const pasteText = vi.fn();
 	const insertText = vi.fn();
+	const insertAtom = vi.fn();
 	const requestRender = vi.fn();
 	const showStatus = vi.fn();
 	const ctx = {
-		editor: { pasteText, insertText } as unknown as InteractiveModeContext["editor"],
+		editor: { pasteText, insertText, insertAtom } as unknown as InteractiveModeContext["editor"],
 		ui: { requestRender, getFocused: () => options?.focused ?? null } as unknown as InteractiveModeContext["ui"],
 		showStatus,
 	} as unknown as InteractiveModeContext;
-	return { ctx, spies: { pasteText, insertText, requestRender, showStatus } };
+	return { ctx, spies: { pasteText, insertText, insertAtom, requestRender, showStatus } };
 }
 
 describe("InputController.handleImagePaste smart-paste fallback", () => {
-	it("prefers the clipboard image and never consults text when an image is present", async () => {
+	it("prefers the clipboard image and discards text when an image is present", async () => {
 		const { ctx, spies } = createContext();
 		const readText = vi.fn(async () => "text that must not be pasted");
 		const controller = new InputController(ctx, {
 			// Unsupported/undecodable payload keeps the test off the full image
-			// pipeline; the contract under test is the read order, and that an
-			// image failure must NOT silently degrade into a text paste.
+			// pipeline; the contract under test is image precedence, and that an
+			// image failure must NOT silently degrade into a text paste. The
+			// text bridge now starts alongside the image bridge (empty-clipboard
+			// stall fix), so readText may be consulted — its payload must
+			// never reach the editor when an image wins.
 			readImage: async () => ({ data: Buffer.from("not an image"), mimeType: "image/tiff" }),
 			readText,
 		});
@@ -38,9 +42,33 @@ describe("InputController.handleImagePaste smart-paste fallback", () => {
 		const result = await controller.handleImagePaste();
 
 		expect(result).toBe(false);
-		expect(readText).not.toHaveBeenCalled();
 		expect(spies.pasteText).not.toHaveBeenCalled();
 		expect(spies.showStatus).toHaveBeenCalledWith("Unsupported clipboard image format: image/tiff");
+	});
+
+	it("starts the text read without waiting for the image read", async () => {
+		const { ctx, spies } = createContext();
+		const { promise: imageGate, resolve: resolveImage } = Promise.withResolvers<null>();
+		const { promise: textStarted, resolve: markTextStarted } = Promise.withResolvers<void>();
+		const readText = vi.fn(async () => {
+			markTextStarted();
+			return "copied text";
+		});
+		const controller = new InputController(ctx, {
+			readImage: () => imageGate,
+			readText,
+		});
+
+		const pending = controller.handleImagePaste();
+		// Let the image read stay pending: the text bridge must already be
+		// in flight rather than queued behind it (serial awaits stalled an
+		// empty clipboard by the sum of both bridges).
+		await textStarted;
+		expect(readText).toHaveBeenCalled();
+		resolveImage(null);
+
+		expect(await pending).toBe(true);
+		expect(spies.pasteText).toHaveBeenCalledWith("copied text");
 	});
 
 	it("attaches nothing and pastes clipboard text when no image is present", async () => {

@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type {
@@ -42,10 +43,23 @@ interface CodexUsageAdditionalRateLimitPayload {
 	rate_limit?: CodexUsageRateLimitPayload | null;
 }
 
+interface CodexUsageCreditsPayload {
+	has_credits?: boolean;
+	unlimited?: boolean;
+	overage_limit_reached?: boolean;
+	balance?: string | number;
+}
+
+interface CodexUsageSpendControlPayload {
+	reached?: boolean;
+}
+
 interface CodexUsagePayload {
 	plan_type?: string;
 	rate_limit?: CodexUsageRateLimitPayload | null;
 	additional_rate_limits?: CodexUsageAdditionalRateLimitPayload[] | null;
+	credits?: CodexUsageCreditsPayload | null;
+	spend_control?: CodexUsageSpendControlPayload | null;
 }
 
 interface ParsedUsageWindow {
@@ -71,6 +85,13 @@ interface ParsedUsage {
 	primary?: ParsedUsageWindow;
 	secondary?: ParsedUsageWindow;
 	additional: ParsedAdditionalUsage[];
+	/**
+	 * True when the account can still serve requests on credits after its plan
+	 * windows report `limit_reached`. `/wham/usage` only describes the *plan*
+	 * allowance, so without this a credit-funded account looks permanently
+	 * exhausted until the weekly reset while `/responses` keeps accepting it.
+	 */
+	creditOverage: boolean;
 	raw: CodexUsagePayload;
 }
 
@@ -160,6 +181,28 @@ function parseAdditionalRateLimit(payload: unknown): ParsedAdditionalUsage | nul
 	return { limitName, meteredFeature, allowed, limitReached, primary, secondary };
 }
 
+/**
+ * True when paid credits can still fund plan-window overage. Codex CLI never
+ * gates on `/wham/usage`, so once the plan allowance is spent it keeps working
+ * off this balance; omp must mirror that or it parks a perfectly usable account
+ * until the weekly reset.
+ *
+ * Scoped to the plan verdict on purpose. `credits` describes the account's
+ * overage funding for the plan windows, and nothing in the payload says a
+ * balance covers a separate metered feature (Spark, reserve). A denial that is
+ * not plan exhaustion is left alone for the same reason: credits answer
+ * "allowance spent", not "request refused".
+ */
+function hasPlanCreditOverage(payload: Record<string, unknown>, planLimitReached: boolean | undefined): boolean {
+	if (planLimitReached !== true) return false;
+	const credits = isRecord(payload.credits) ? payload.credits : undefined;
+	if (!credits) return false;
+	if (credits.unlimited !== true && credits.has_credits !== true) return false;
+	if (credits.overage_limit_reached === true) return false;
+	const spendControl = isRecord(payload.spend_control) ? payload.spend_control : undefined;
+	return spendControl?.reached !== true;
+}
+
 function parseUsagePayload(payload: unknown): ParsedUsage | null {
 	if (!isRecord(payload)) return null;
 	const planType = typeof payload.plan_type === "string" ? payload.plan_type : undefined;
@@ -169,13 +212,15 @@ function parseUsagePayload(payload: unknown): ParsedUsage | null {
 		.map(parseAdditionalRateLimit)
 		.filter((value): value is ParsedAdditionalUsage => value !== null);
 	if (!rateLimit && additional.length === 0) return null;
+	const planLimitReached = rateLimit ? toBoolean(rateLimit.limit_reached) : undefined;
 	const parsed: ParsedUsage = {
 		planType,
 		allowed: rateLimit ? toBoolean(rateLimit.allowed) : undefined,
-		limitReached: rateLimit ? toBoolean(rateLimit.limit_reached) : undefined,
+		limitReached: planLimitReached,
 		primary: rateLimit ? parseUsageWindow(rateLimit.primary_window) : undefined,
 		secondary: rateLimit ? parseUsageWindow(rateLimit.secondary_window) : undefined,
 		additional,
+		creditOverage: hasPlanCreditOverage(payload, planLimitReached),
 		raw: payload as CodexUsagePayload,
 	};
 	if (
@@ -272,6 +317,17 @@ function buildUsageStatus(args: { usedFraction?: number; explicitlyAllowed: bool
 	return "ok";
 }
 
+/**
+ * Whether Codex will still serve this meter: an explicit positive verdict, or
+ * credits covering overage of a spent plan window. The credit override needs
+ * `limitReached === true`; a refusal for any other reason is not something a
+ * balance can pay for.
+ */
+function isCodexRequestAllowed(args: { allowed?: boolean; limitReached?: boolean; creditOverage?: boolean }): boolean {
+	if (args.creditOverage === true && args.limitReached === true) return true;
+	return args.allowed === true && args.limitReached === false;
+}
+
 function buildUsageLimit(args: {
 	key: "primary" | "secondary";
 	window: ParsedUsageWindow;
@@ -279,6 +335,7 @@ function buildUsageLimit(args: {
 	planType?: string;
 	allowed?: boolean;
 	limitReached?: boolean;
+	creditOverage?: boolean;
 	nowMs: number;
 }): UsageLimit {
 	const usageWindow = buildUsageWindow(args.window, args.key, args.nowMs);
@@ -295,11 +352,12 @@ function buildUsageLimit(args: {
 		amount,
 		// The shared account-level rejection flag cannot identify which window
 		// is binding, but an explicit positive verdict applies to both windows.
-		// Preserve 100% as a warning when Codex still allows requests; live
-		// usage_limit_reached responses remain authoritative for blocking.
+		// Preserve 100% as a warning when Codex still allows requests — either
+		// explicitly, or because credits fund overage past the plan window.
+		// Live usage_limit_reached responses remain authoritative for blocking.
 		status: buildUsageStatus({
 			usedFraction: amount.usedFraction,
-			explicitlyAllowed: args.allowed === true && args.limitReached === false,
+			explicitlyAllowed: isCodexRequestAllowed(args),
 		}),
 	};
 }
@@ -353,9 +411,11 @@ function buildAdditionalUsageLimit(args: {
 		amount,
 		// A positive meter verdict is authoritative even when the advisory
 		// percentage rounds to 100; negative shared verdicts remain window-local.
+		// Plan credits are deliberately not passed here: this meter is a separate
+		// allowance, and nothing in the payload says a balance funds its overage.
 		status: buildUsageStatus({
 			usedFraction: amount.usedFraction,
-			explicitlyAllowed: args.allowed === true && args.limitReached === false,
+			explicitlyAllowed: isCodexRequestAllowed(args),
 		}),
 	};
 }
@@ -366,7 +426,11 @@ function buildAdditionalUsageLimit(args: {
  * ingesting them lets credential selection block an exhausted account before
  * the next request burns a wire 429.
  */
-export function parseCodexRateLimitHeaders(headers: Record<string, string>, now = Date.now()): UsageReport | null {
+export function parseCodexRateLimitHeaders(
+	headers: Record<string, string>,
+	now = Date.now(),
+	context?: { responseStatus?: number },
+): UsageReport | null {
 	const parseWindow = (key: "primary" | "secondary"): ParsedUsageWindow | undefined => {
 		const usedPercent = toNumber(headers[`x-codex-${key}-used-percent`]);
 		if (usedPercent === undefined) return undefined;
@@ -382,14 +446,32 @@ export function parseCodexRateLimitHeaders(headers: Record<string, string>, now 
 	const secondary = parseWindow("secondary");
 	if (!primary && !secondary) return null;
 	const limits: UsageLimit[] = [];
-	if (primary) limits.push(buildUsageLimit({ key: "primary", window: primary, nowMs: now }));
-	if (secondary) limits.push(buildUsageLimit({ key: "secondary", window: secondary, nowMs: now }));
+	const requestSucceeded =
+		context?.responseStatus !== undefined && context.responseStatus >= 200 && context.responseStatus < 300;
+	const verdict = requestSucceeded ? { allowed: true, limitReached: false } : {};
+	if (primary) limits.push(buildUsageLimit({ key: "primary", window: primary, ...verdict, nowMs: now }));
+	if (secondary) limits.push(buildUsageLimit({ key: "secondary", window: secondary, ...verdict, nowMs: now }));
 	return {
 		provider: "openai-codex",
 		fetchedAt: now,
 		limits,
 		metadata: { source: "ratelimit-headers" },
 	};
+}
+
+/**
+ * Plan meter verdict as credential selection should see it. Credits funding
+ * overage flip a plan-level rejection back to serving, which is what lets a
+ * stale usage-limit block self-heal instead of parking the account until reset.
+ * Only the plan meter takes this override — {@link hasPlanCreditOverage}.
+ */
+function buildPlanMeterState(
+	allowed: boolean | undefined,
+	limitReached: boolean | undefined,
+	creditOverage: boolean,
+): { allowed?: boolean; limitReached?: boolean } {
+	if (!creditOverage) return { allowed, limitReached };
+	return { allowed: true, limitReached: false };
 }
 
 export const openaiCodexUsageProvider: UsageProvider = {
@@ -443,9 +525,10 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			parsed?.planType ??
 			(isRecord(payload) && typeof payload.plan_type === "string" ? payload.plan_type : undefined);
 
+		const creditOverage = parsed?.creditOverage === true;
 		const limits: UsageLimit[] = [];
 		const meterStates: Record<string, { allowed?: boolean; limitReached?: boolean }> = {
-			chat: { allowed: parsed?.allowed, limitReached: parsed?.limitReached },
+			chat: buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
 		};
 		if (parsed?.primary) {
 			limits.push(
@@ -456,6 +539,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					planType,
 					allowed: parsed.allowed,
 					limitReached: parsed.limitReached,
+					creditOverage,
 					nowMs,
 				}),
 			);
@@ -469,6 +553,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					planType,
 					allowed: parsed.allowed,
 					limitReached: parsed.limitReached,
+					creditOverage,
 					nowMs,
 				}),
 			);
@@ -547,8 +632,7 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			...(resetCredits ? { resetCredits } : {}),
 			metadata: {
 				planType,
-				allowed: parsed?.allowed,
-				limitReached: parsed?.limitReached,
+				...buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
 				email,
 				accountId,
 				meterStates,
@@ -579,7 +663,7 @@ function scopeCodexLimitsForRequest(report: UsageReport, context?: CredentialRan
 
 /** True when the requested model spends the separate Spark meter. */
 function isCodexSparkRequest(context?: CredentialRankingContext): boolean {
-	return (context?.modelId ?? "").toLowerCase().includes("-spark");
+	return context?.modelId !== undefined && quotaTierFor("openai-codex", context.modelId) === "spark";
 }
 
 export const codexRankingStrategy: CredentialRankingStrategy = {
@@ -611,8 +695,11 @@ export const codexRankingStrategy: CredentialRankingStrategy = {
 		return { primary: findLimit("primary"), secondary: findLimit("secondary") };
 	},
 	windowDefaults: { primaryMs: 60 * 60 * 1000, secondaryMs: 7 * 24 * 60 * 60 * 1000 },
-	hasPriorityBoost(primary) {
-		if (!primary) return false;
+	hasPriorityBoost(primary, primaryUncapped = false, context) {
+		// Chat plans can omit an uncapped primary window while retaining their
+		// weekly window. Spark always has a capped primary meter, so a missing
+		// Spark primary is incomplete rather than uncapped.
+		if (!primary) return primaryUncapped && !isCodexSparkRequest(context);
 		const windowId = primary.scope.windowId?.toLowerCase();
 		const durationMs = primary.window?.durationMs;
 		const isFiveHourWindow =

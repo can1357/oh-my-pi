@@ -17,6 +17,7 @@ describe("formatDuration", () => {
 
 	it("formats sub-second, sub-minute, sub-hour, sub-day, and multi-day ranges", () => {
 		expect(formatDuration(500)).toBe("500ms");
+		expect(formatDuration(289.99999999999994)).toBe("289ms");
 		expect(formatDuration(1_500)).toBe("1.5s");
 		expect(formatDuration(90_000)).toBe("1m30s");
 		expect(formatDuration(3_600_000)).toBe("1h");

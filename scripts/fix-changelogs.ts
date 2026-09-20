@@ -7,6 +7,10 @@ const CHANGELOG_GLOB = "packages/*/CHANGELOG.md";
 const ORDERED_SECTION_TITLES = ["Breaking Changes", "Added", "Changed", "Fixed", "Removed"] as const;
 const CHANGELOG_BASELINE_REF = "refs/clog";
 const CHANGELOG_BASELINE_NAME = "clog";
+/** Per-file size ceiling; larger changelogs get their oldest releases collapsed into an archive link. */
+export const MAX_CHANGELOG_BYTES = 256 * 1024;
+const ARCHIVE_REPO = process.env.OMP_REPO ?? process.env.GITHUB_REPOSITORY ?? "can1357/oh-my-pi";
+const ARCHIVE_LINK_PATTERN = /^Older entries are archived in \[[^\]]+@[0-9a-f]{7,40}\]\(https:\/\/[^)]+\)\.$/;
 
 export interface NumberedLine {
 	text: string;
@@ -69,6 +73,7 @@ interface RemovedItemOccurrence {
 
 export interface ChangedChangelogSummary extends FixCounters {
 	path: string;
+	collapsedReleases: number;
 }
 
 export interface RunChangelogFixerOptions {
@@ -76,6 +81,8 @@ export interface RunChangelogFixerOptions {
 	since?: string;
 	write?: boolean;
 	recover?: boolean;
+	/** Size ceiling override in bytes; defaults to {@link MAX_CHANGELOG_BYTES}. */
+	maxBytes?: number;
 }
 
 export interface RunChangelogFixerResult {
@@ -527,6 +534,85 @@ export function renderChangelog(document: ChangelogDocument): string {
 	}
 	return `${output.join("\n")}\n`;
 }
+/** Markdown line pointing at the last commit whose blob still contains the collapsed sections. */
+function archiveLinkLine(changelogPath: string, commit: string): string {
+	return `Older entries are archived in [${changelogPath}@${commit.slice(0, 12)}](https://github.com/${ARCHIVE_REPO}/blob/${commit}/${changelogPath}).`;
+}
+
+/**
+ * Split a trailing archive-link footer (written by a previous collapse) from
+ * `content` so the fixer never parses it as release-section body text. The
+ * returned body keeps its trailing newline; `archiveLink` is the bare footer
+ * line when present.
+ */
+export function splitArchiveFooter(content: string): { body: string; archiveLink: string | undefined } {
+	const lines = splitContentLines(content);
+	let end = lines.length;
+	while (end > 0 && (lines[end - 1] ?? "").trim() === "") end--;
+	const last = lines[end - 1];
+	if (!last || !ARCHIVE_LINK_PATTERN.test(last)) return { body: content, archiveLink: undefined };
+	let bodyEnd = end - 1;
+	while (bodyEnd > 0 && (lines[bodyEnd - 1] ?? "").trim() === "") bodyEnd--;
+	return { body: `${lines.slice(0, bodyEnd).join("\n")}\n`, archiveLink: last };
+}
+
+function appendArchiveFooter(body: string, archiveLink: string): string {
+	return `${body}\n${archiveLink}\n`;
+}
+
+/**
+ * Collapse the oldest release sections of a rendered changelog until the file
+ * (including the `archiveLink` footer) fits in `maxBytes`. The first two
+ * sections — `[Unreleased]` plus the newest release — are always kept, so the
+ * result may exceed `maxBytes` when those alone are over budget. Returns the
+ * body without the footer appended.
+ */
+export function collapseChangelogTail(
+	content: string,
+	archiveLink: string,
+	maxBytes: number = MAX_CHANGELOG_BYTES,
+): { content: string; collapsedReleases: number } {
+	const footerBytes = Buffer.byteLength(`\n${archiveLink}\n`, "utf8");
+	if (Buffer.byteLength(content, "utf8") + footerBytes <= maxBytes) {
+		return { content, collapsedReleases: 0 };
+	}
+
+	const lines = splitContentLines(content);
+	const headingLines: number[] = [];
+	for (let index = 0; index < lines.length; index++) {
+		if (isReleaseHeading(lines[index] ?? "")) headingLines.push(index);
+	}
+	if (headingLines.length <= 2) return { content, collapsedReleases: 0 };
+
+	// cumulativeBytes[i] = byte length of lines[0..i) with a trailing newline per line.
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+	const cumulativeBytes = new Array<number>(lines.length + 1);
+	cumulativeBytes[0] = 0;
+	for (let index = 0; index < lines.length; index++) {
+		cumulativeBytes[index + 1] = (cumulativeBytes[index] ?? 0) + Buffer.byteLength(lines[index] ?? "", "utf8") + 1;
+	}
+
+	const bodyEndBeforeLine = (headingLine: number): number => {
+		let end = headingLine;
+		while (end > 0 && (lines[end - 1] ?? "").trim() === "") end--;
+		return end;
+	};
+
+	const budget = maxBytes - footerBytes;
+	let keptSections = 2;
+	for (let candidate = headingLines.length - 1; candidate >= 2; candidate--) {
+		if ((cumulativeBytes[bodyEndBeforeLine(headingLines[candidate] ?? 0)] ?? 0) <= budget) {
+			keptSections = candidate;
+			break;
+		}
+	}
+
+	const bodyEnd = bodyEndBeforeLine(headingLines[keptSections] ?? 0);
+	return {
+		content: `${lines.slice(0, bodyEnd).join("\n")}\n`,
+		collapsedReleases: headingLines.length - keptSections,
+	};
+}
 
 export function fixChangelogContent(
 	content: string,
@@ -844,7 +930,8 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 
 	for (const changelogPath of paths) {
 		const absolutePath = path.join(repoRoot, changelogPath);
-		const currentContent = await Bun.file(absolutePath).text();
+		const rawContent = await Bun.file(absolutePath).text();
+		const { body: currentContent, archiveLink: existingArchiveLink } = splitArchiveFooter(rawContent);
 		const historicalRecovery = historicalRecoveryByPath.get(changelogPath);
 		const recoveredContent =
 			historicalRecovery === undefined
@@ -855,7 +942,30 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 			addedItemLines.get(changelogPath) ?? new Set<number>(),
 			historicalRecovery?.itemKeys ?? new Set<string>(),
 		);
-		if (result.content === currentContent) continue;
+
+		let body = result.content;
+		let archiveLink = existingArchiveLink;
+		let collapsedReleases = 0;
+		const maxBytes = options.maxBytes ?? MAX_CHANGELOG_BYTES;
+		const projectedBytes =
+			Buffer.byteLength(body, "utf8") + (archiveLink ? Buffer.byteLength(`\n${archiveLink}\n`, "utf8") : 0);
+		if (projectedBytes > maxBytes) {
+			// The last commit touching this file still holds every section being
+			// collapsed (plus any earlier footer, chaining further back).
+			const archiveCommit = (await gitMaybe(["rev-list", "-1", "HEAD", "--", changelogPath], repoRoot))?.trim();
+			if (archiveCommit) {
+				const candidateLink = archiveLinkLine(changelogPath, archiveCommit);
+				const collapsed = collapseChangelogTail(body, candidateLink, maxBytes);
+				if (collapsed.collapsedReleases > 0) {
+					body = collapsed.content;
+					collapsedReleases = collapsed.collapsedReleases;
+					archiveLink = candidateLink;
+				}
+			}
+		}
+
+		const finalContent = archiveLink ? appendArchiveFooter(body, archiveLink) : body;
+		if (finalContent === rawContent) continue;
 
 		changedFiles.push({
 			path: changelogPath,
@@ -863,10 +973,11 @@ export async function runChangelogFixer(options: RunChangelogFixerOptions = {}):
 			mergedDuplicateHeadings: result.mergedDuplicateHeadings,
 			droppedReleasedDuplicates: result.droppedReleasedDuplicates,
 			removedEmptyHeadings: result.removedEmptyHeadings,
+			collapsedReleases,
 		});
 
 		if (options.write !== false) {
-			await Bun.write(absolutePath, result.content);
+			await Bun.write(absolutePath, finalContent);
 		}
 	}
 
@@ -933,6 +1044,10 @@ function usage(): string {
 		"blank separators between adjacent bullet items, then removes duplicate or empty",
 		"### category headings.",
 		"",
+		`Changelogs over ${MAX_CHANGELOG_BYTES / 1024} KiB are collapsed: the oldest release sections are removed`,
+		"and replaced with a footer linking the last commit that still contains them. Repeated",
+		"collapses chain — each footer's commit carries the previous footer.",
+		"",
 		`The baseline defaults to the '${CHANGELOG_BASELINE_NAME}' ref (the last authoritative rewrite)`,
 		"when it is newer than the latest version tag, otherwise the latest version tag — so a",
 		"--recover is not undone by a later plain run.",
@@ -969,6 +1084,9 @@ function printSummary(result: RunChangelogFixerResult, mode: CliOptions["mode"])
 			`${file.droppedReleasedDuplicates} dropped released duplicate(s)`,
 			`${file.removedEmptyHeadings} removed empty heading(s)`,
 		];
+		if (file.collapsedReleases > 0) {
+			parts.push(`${file.collapsedReleases} collapsed release(s)`);
+		}
 		console.log(`  ${file.path}: ${parts.join(", ")}`);
 	}
 }

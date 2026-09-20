@@ -1,7 +1,11 @@
-import { extractRetryHint } from "@oh-my-pi/pi-utils";
 import * as AIError from "./error";
 import type { AssistantMessage } from "./types";
-import { getHeadersFromError, getRetryAfterMsFromHeaders, type HeadersLike } from "./utils/retry-after";
+import {
+	extractProviderRetryHint,
+	getHeadersFromError,
+	getRetryAfterMsFromHeaders,
+	type HeadersLike,
+} from "./utils/retry-after";
 
 /**
  * Transient-failure retry for **oneshot** (non-agent-loop) completions.
@@ -66,6 +70,12 @@ export interface OneshotRetryOptions {
 	 * Thrown errors need no wiring — headers are recovered from the error itself.
 	 */
 	getResponseHeaders?: () => HeadersLike;
+	/**
+	 * Provider id of the model being retried. Selects the catalog-declared
+	 * timezone for a timezone-naive absolute reset stamp (Z.AI/Zhipu report
+	 * Beijing time), so an over-cap wait is not misread as UTC and discarded.
+	 */
+	provider?: string;
 	/** Observability hook. Fires immediately before sleeping. */
 	onRetry?: (info: OneshotRetryInfo) => void;
 }
@@ -106,6 +116,7 @@ function isRetryableOneshotFailure(errorId: number, errorStatus: number | undefi
 	// identically on every attempt. Retrying burns the caller's deadline instead
 	// of reaching the fallback that can actually shrink the input.
 	if (AIError.is(errorId, AIError.Flag.ContextOverflow)) return false;
+	if (AIError.is(errorId, AIError.Flag.PayloadRejected)) return false;
 	return (
 		AIError.isTransientStatus(errorStatus) ||
 		AIError.is(errorId, AIError.Flag.Transient) ||
@@ -194,7 +205,7 @@ export async function retryTransientCompletion(
 		// errors (e.g. AnthropicApiError) carry their own headers.
 		const headers: HeadersLike = thrown !== undefined ? getHeadersFromError(thrown) : options?.getResponseHeaders?.();
 		const headerHintMs = getRetryAfterMsFromHeaders(headers);
-		const extractedTextHintMs = extractRetryHint(undefined, errorMessage);
+		const extractedTextHintMs = extractProviderRetryHint(options?.provider, errorMessage);
 		const suffixValue = RETRY_AFTER_MS_SUFFIX.exec(errorMessage)?.[1];
 		const parsedSuffixMs = suffixValue === undefined ? undefined : Number(suffixValue);
 		const suffixHintMs =

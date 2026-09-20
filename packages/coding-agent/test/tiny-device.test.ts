@@ -5,7 +5,8 @@ import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
 	TINY_MODEL_DEVICE_SETTING_VALUES,
-	type TinyModelDevice,
+	type TinyOnnxDevice,
+	tinyMlxSupported,
 	tinyModelDeviceLoadOrder,
 	tinyModelDeviceSettingToEnv,
 } from "@oh-my-pi/pi-coding-agent/tiny/device";
@@ -18,11 +19,23 @@ describe("tiny model device selection", () => {
 		expect(tinyModelDeviceLoadOrder(preference)).toEqual(["cpu"]);
 	});
 
-	it("accepts metal as a WebGPU alias without enabling unsafe macOS worker teardown", () => {
-		const expectedOrder: readonly TinyModelDevice[] = process.platform === "darwin" ? ["cpu"] : ["webgpu", "cpu"];
+	it("routes mlx and its metal alias to the MLX backend while ONNX workers stay CPU-only", () => {
+		expect(normalizeTinyModelDevice("metal")).toBe("mlx");
+		expect(normalizeTinyModelDevice("MLX")).toBe("mlx");
+		// STT/TTS only speak ONNX: `mlx` must never reach transformers.js as a device.
+		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("mlx"))).toEqual(["cpu"]);
+		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("metal"))).toEqual(["cpu"]);
+	});
 
-		expect(normalizeTinyModelDevice("metal")).toBe("webgpu");
-		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("metal"))).toEqual(expectedOrder);
+	it("keeps webgpu off the macOS worker but usable elsewhere", () => {
+		const expectedOrder: readonly TinyOnnxDevice[] = process.platform === "darwin" ? ["cpu"] : ["webgpu", "cpu"];
+		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("webgpu"))).toEqual(expectedOrder);
+	});
+
+	it("only offers MLX on Apple silicon", () => {
+		expect(tinyMlxSupported("darwin", "arm64")).toBe(true);
+		expect(tinyMlxSupported("darwin", "x64")).toBe(false);
+		expect(tinyMlxSupported("linux", "arm64")).toBe(false);
 	});
 
 	it("keeps explicit CPU runs CPU-only", () => {

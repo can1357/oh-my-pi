@@ -1,4 +1,5 @@
 import type { Settings } from "../config/settings";
+import type { SlashCommandIconName } from "@oh-my-pi/pi-tui/theme/symbols";
 import type { InteractiveModeContext, SubmittedUserInput } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
 import type { SessionManager } from "../session/session-manager";
@@ -16,6 +17,8 @@ export interface BuiltinSlashCommand {
 	name: string;
 	aliases?: string[];
 	description: string;
+	/** Autocomplete type-indicator icon. Defaults to "action" (generic terminal glyph). */
+	icon?: SlashCommandIconName;
 	/** Whether the command consumes text after the command name. */
 	allowArgs?: boolean;
 	/** Subcommands for dropdown completion (e.g. /mcp add, /mcp list). */
@@ -59,6 +62,8 @@ export interface SlashCommandRuntime {
 	sessionManager: SessionManager;
 	settings: Settings;
 	cwd: string;
+	/** Cancellation of the host prompt/request, when supported. */
+	signal?: AbortSignal;
 	/** Emit text to the operator. TUI maps to `ctx.showStatus`, ACP to `sessionUpdate`. */
 	output: (text: string) => Promise<void> | void;
 	/** Re-advertise the available command list (no-op outside ACP). */

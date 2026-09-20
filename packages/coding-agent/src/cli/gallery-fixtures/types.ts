@@ -2,7 +2,7 @@
  * Types for `omp gallery` sample data. See {@link ./index} for the aggregated
  * fixture registry and the contract each fixture must satisfy.
  */
-import type { EditMode } from "../../edit";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 
 /** A tool result snapshot, matching the shape `ToolExecutionComponent` consumes. */
 export interface GalleryResult {
@@ -12,6 +12,19 @@ export interface GalleryResult {
 }
 
 export type GalleryFixtureState = "streaming" | "progress" | "success" | "error";
+
+/** One named preview inside a composer or status-segment gallery section. */
+export interface GalleryPreviewVariant {
+	label: string;
+	render(width: number, expanded: boolean): readonly string[] | Promise<readonly string[]>;
+}
+
+/** Registry-derived gallery entry rendered through the shared section layout. */
+export interface GalleryPreviewEntry {
+	id: string;
+	heading: string;
+	variants: readonly GalleryPreviewVariant[];
+}
 
 export interface GalleryFixture {
 	/** Display label for the tool header (defaults to the tool name). */

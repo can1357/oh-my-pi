@@ -17,10 +17,8 @@
  * component output and never decides which rows are scrollback-bound — those
  * concerns belong to the caller in `tui.ts`.
  */
+import { SEGMENT_RESET } from "./tui";
 import { visibleWidth } from "./utils";
-
-/** Reset every attribute (SGR 0). Mirrors `tui.ts`'s per-line terminator. */
-const SEGMENT_RESET = "\x1b[0m";
 
 /** DECSACE — select the rectangle change extent so DECCARA fills a rectangle. */
 export const DECSACE_RECT = "\x1b[2*x";
@@ -239,7 +237,9 @@ export interface DeccaraPlan {
  */
 export function planDeccaraFills(lines: string[], width: number, firstScreenRow = 0): DeccaraPlan {
 	const n = lines.length;
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const texts: string[] = new Array(n);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const candidates: (FillCandidate | null)[] = new Array(n);
 
 	for (let k = 0; k < n; k++) {

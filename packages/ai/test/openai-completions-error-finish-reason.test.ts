@@ -108,6 +108,84 @@ describe("finish_reason: error", () => {
 	}, 10_000);
 });
 
+describe("in-band SSE error envelope", () => {
+	it("surfaces a queue-full error carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([
+			{
+				error: {
+					object: "error",
+					message: "The request queue is full.",
+					type: "SERVICE_UNAVAILABLE",
+					param: null,
+					code: 503,
+				},
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(503);
+		expect(result.errorMessage).toContain("The request queue is full.");
+	}, 10_000);
+
+	it("surfaces a flat error string carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([{ error: "rate limit exceeded" }, "[DONE]"]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("rate limit exceeded");
+	}, 10_000);
+
+	it("surfaces a flat message-only error carried inside a successful HTTP stream", async () => {
+		const fetchMock = createSseFetch([{ message: "provider temporarily unavailable" }, "[DONE]"]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("provider temporarily unavailable");
+	}, 10_000);
+
+	it("does not replay after content precedes an in-band error", async () => {
+		let attempts = 0;
+		const baseFetch = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Partial" } }] }),
+			{
+				error: {
+					message: "Request timed out in the queue.",
+					type: "REQUEST_TIMEOUT",
+				},
+			},
+			"[DONE]",
+		]);
+		const fetchMock: FetchImpl = async (input, init) => {
+			attempts++;
+			return baseFetch(input, init);
+		};
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(attempts).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(408);
+		expect(result.content).toEqual([{ type: "text", text: "Partial" }]);
+	}, 10_000);
+});
+
 describe("finish_reason: insufficient_system_resource", () => {
 	// DeepSeek interrupts the generation mid-stream when its inference system
 	// runs out of resources; the terminal chunk carries
@@ -195,5 +273,64 @@ describe("premature stream closure", () => {
 		expect(attempts).toBeGreaterThan(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "Hi" }]);
+	}, 10_000);
+});
+
+describe("uppercase finish_reason", () => {
+	// Some OpenAI-compatible gateways fronting Gemini backends emit the native
+	// uppercase reasons (`STOP`, `MAX_TOKENS`) instead of the lowercase OpenAI
+	// contract values. `mapStopReason` must fold case and map `MAX_TOKENS` to
+	// `length`, not surface a clean completion as an error.
+	it("maps STOP to a clean stop", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "STOP" }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+	}, 10_000);
+
+	it("maps MAX_TOKENS to length", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: "MAX_TOKENS" }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("length");
+		expect(result.errorMessage).toBeUndefined();
+	}, 10_000);
+});
+
+describe("non-string finish_reason", () => {
+	// A malformed provider SSE can put a non-string `finish_reason` on the
+	// chunk. Folding case must not throw on it — it falls through to the
+	// unknown-reason error path with the original value surfaced.
+	it("falls through to an error instead of throwing", async () => {
+		const fetchMock = createSseFetch([
+			completionChunk({ choices: [{ index: 0, delta: { role: "assistant", content: "Hel" } }] }),
+			completionChunk({ choices: [{ index: 0, delta: {}, finish_reason: 42 }] }),
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(completionsModel, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Provider finish_reason: 42");
 	}, 10_000);
 });

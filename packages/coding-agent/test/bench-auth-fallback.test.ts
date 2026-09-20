@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import type {
 	Api,
 	ApiKeyResolver,
@@ -8,18 +10,28 @@ import type {
 	Model,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { type BenchModelRegistry, type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { type BenchSummary, runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
+import { type BenchModelRegistry, resolveBenchTargets } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getModelDbPath, TempDir } from "@oh-my-pi/pi-utils";
 
 function fakeModel(provider: string, id: string): Model<Api> {
-	return {
+	return buildModel({
 		provider,
 		id,
 		name: id,
 		api: "openai-completions",
+		baseUrl: "https://example.test/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		maxTokens: 4096,
 		contextWindow: 128_000,
-	} as unknown as Model<Api>;
+	});
 }
 
 function fakeStream(): AssistantMessageEventStream {
@@ -94,6 +106,206 @@ async function runBench(
 	);
 	return { summary, stderr: stderr.join("") };
 }
+describe("bench discovery fallback", () => {
+	it("awaits a cache-aware discovery refresh and retries before failing on a cache-missed selector", async () => {
+		const model = fakeModel("lm-studio", "local-27b");
+		let models: Model<Api>[] = [];
+		let refreshCalls = 0;
+		const registry: BenchModelRegistry = {
+			getAll: () => models,
+			getAvailable: () => models,
+			hasConfiguredAuth: () => false,
+			getApiKey: async () => undefined,
+			resolver: () => (() => Promise.resolve("sk-test")) as unknown as ApiKeyResolver,
+			getDiscoverableProviders: () => ["lm-studio"],
+			refresh: async () => {
+				refreshCalls += 1;
+				models = [model];
+			},
+		};
+		const [target] = await resolveBenchTargets(["local-27b"], registry, undefined, () => {});
+		expect(refreshCalls).toBe(1);
+		expect(target.model.id).toBe("local-27b");
+	});
+
+	it("throws the original per-selector errors after the refreshed catalog still misses them", async () => {
+		let refreshCalls = 0;
+		const registry: BenchModelRegistry = {
+			getAll: () => [],
+			getAvailable: () => [],
+			hasConfiguredAuth: () => false,
+			getApiKey: async () => undefined,
+			resolver: () => (() => Promise.resolve("sk-test")) as unknown as ApiKeyResolver,
+			getDiscoverableProviders: () => ["lm-studio"],
+			refresh: async () => {
+				refreshCalls += 1;
+			},
+		};
+		await expect(resolveBenchTargets(["local-27b"], registry, undefined, () => {})).rejects.toThrow(/local-27b/);
+		expect(refreshCalls).toBe(1);
+	});
+	it("re-resolves already-resolved selectors from the refreshed catalog, dropping stale rows", async () => {
+		const staleSpec: ModelSpec<"openai-completions"> = {
+			provider: "lm-studio",
+			id: "model-a",
+			name: "model-a",
+			api: "openai-completions",
+			baseUrl: "https://stale.test/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			maxTokens: 4096,
+			contextWindow: 128_000,
+		};
+		const stale = buildModel(staleSpec);
+		const fresh = buildModel({
+			...staleSpec,
+			baseUrl: "https://fresh.test/v1",
+		});
+		let models: Model<Api>[] = [stale];
+		let refreshCalls = 0;
+		const registry: BenchModelRegistry = {
+			getAll: () => models,
+			getAvailable: () => models,
+			hasConfiguredAuth: () => true,
+			getApiKey: async () => "sk-test",
+			resolver: () => (() => Promise.resolve("sk-test")) as unknown as ApiKeyResolver,
+			getDiscoverableProviders: () => ["lm-studio"],
+			refresh: async () => {
+				refreshCalls += 1;
+				models = [fresh, fakeModel("lm-studio", "model-b")];
+			},
+		};
+
+		const [targetA, targetB] = await resolveBenchTargets(["model-a", "model-b"], registry, undefined, () => {});
+
+		expect(refreshCalls).toBe(1);
+		expect(targetA.model.baseUrl).toBe(fresh.baseUrl);
+		expect(targetB.model.id).toBe("model-b");
+	});
+
+	it("repeats no redirect warning when the fallback pass re-resolves an already-resolved selector", async () => {
+		let models: Model<Api>[] = [
+			fakeModel("groq", "openai/gpt-oss-20b"),
+			fakeModel("openrouter", "openai/gpt-oss-20b"),
+		];
+		const stderr: string[] = [];
+		const registry: BenchModelRegistry = {
+			getAll: () => models,
+			getAvailable: () => models.filter(model => model.provider === "openrouter"),
+			hasConfiguredAuth: model => model.provider === "openrouter",
+			getApiKey: async model => (model.provider === "openrouter" ? "sk-test" : undefined),
+			resolver: () => (() => Promise.resolve("sk-test")) as unknown as ApiKeyResolver,
+			getDiscoverableProviders: () => ["openrouter"],
+			refresh: async () => {
+				models = [...models, fakeModel("acme", "other")];
+			},
+		};
+
+		const [redirected] = await resolveBenchTargets(["openai/gpt-oss-20b", "other"], registry, undefined, text =>
+			stderr.push(text),
+		);
+
+		expect(redirected.model.provider).toBe("openrouter");
+		expect(stderr.filter(text => text.includes("no credentials for")).length).toBe(1);
+	});
+
+	it("drops the first-pass redirect warning when the refreshed catalog no longer redirects", async () => {
+		let models: Model<Api>[] = [
+			fakeModel("groq", "openai/gpt-oss-20b"),
+			fakeModel("openrouter", "openai/gpt-oss-20b"),
+		];
+		const stderr: string[] = [];
+		const registry: BenchModelRegistry = {
+			getAll: () => models,
+			getAvailable: () => models.filter(model => model.provider === "openrouter"),
+			hasConfiguredAuth: model => model.provider === "openrouter",
+			getApiKey: async model => (model.provider === "openrouter" ? "sk-test" : undefined),
+			resolver: () => (() => Promise.resolve("sk-test")) as unknown as ApiKeyResolver,
+			getDiscoverableProviders: () => ["openrouter"],
+			refresh: async () => {
+				models = [fakeModel("groq", "openai/gpt-oss-20b"), fakeModel("acme", "other")];
+			},
+		};
+
+		const [pinned] = await resolveBenchTargets(["openai/gpt-oss-20b", "other"], registry, undefined, text =>
+			stderr.push(text),
+		);
+
+		expect(pinned.model.provider).toBe("groq");
+		expect(stderr).toEqual([]);
+	});
+});
+
+describe("default bench runtime", () => {
+	it("hydrates credential-scoped model caches before selector resolution", async () => {
+		const tempDir = TempDir.createSync("@omp-bench-runtime-");
+		const apiKey = "bench-cache-test-key";
+		const modelId = "cached-bench-model";
+		const cacheDbPath = getModelDbPath(tempDir.path());
+		await fs.mkdir(path.dirname(cacheDbPath), { recursive: true });
+		try {
+			writeModelCache(
+				resolveModelCacheProviderId("opencode-go", { apiKey }),
+				Date.now(),
+				[
+					buildModel({
+						id: modelId,
+						name: "Cached Bench Model",
+						provider: "opencode-go",
+						api: "openai-completions",
+						baseUrl: "https://opencode.ai/zen/go/v1",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 128_000,
+						maxTokens: 4096,
+					}),
+				],
+				true,
+				"",
+				cacheDbPath,
+			);
+			const script = `
+				import { createDefaultBenchRuntime, resolveBenchTargets } from "./packages/coding-agent/src/cli/bench-runtime.ts";
+				const runtime = await createDefaultBenchRuntime();
+				try {
+				const [target] = await resolveBenchTargets(
+						["opencode-go/${modelId}"],
+						runtime.modelRegistry,
+						runtime.settings,
+						() => {},
+					);
+					console.log(target.model.provider + "/" + target.model.id);
+				} finally {
+					runtime.close?.();
+				}
+			`;
+			const child = Bun.spawn([process.execPath, "-e", script], {
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: {
+					...process.env,
+					NO_COLOR: "1",
+					OPENCODE_API_KEY: apiKey,
+					PI_CODING_AGENT_DIR: tempDir.path(),
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stdout, stderr, exitCode] = await Promise.all([
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+				child.exited,
+			]);
+
+			expect(exitCode).toBe(0);
+			expect(stderr).toBe("");
+			expect(stdout.trim()).toBe(`opencode-go/${modelId}`);
+		} finally {
+			await tempDir.remove();
+		}
+	});
+});
 
 describe("bench credential-aware provider selection", () => {
 	it("redirects an ambiguous shared-id selector to an authenticated provider", async () => {
@@ -183,7 +395,7 @@ describe("bench empty-output guard", () => {
 		const run = summary.models[0].results[0];
 		expect(run.ok).toBe(false);
 		if (!run.ok) expect(run.error).toContain("no output");
-		expect(summary.models[0].average).toBeNull();
+		expect(summary.models[0].stats).toBeNull();
 	});
 });
 

@@ -14,6 +14,7 @@ const BASE_SETTINGS = {
 	"async.enabled": false,
 	"bash.autoBackground.enabled": false,
 	"bashInterceptor.enabled": false,
+	"bash.patterns": [{ match: "rm -rf *", approval: "deny" }],
 } as const;
 
 function emptyWorkspaceTree(cwd: string) {
@@ -95,6 +96,20 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("ok");
 	});
 
+	it("omitted execute-time context inherits the session runner settings", async () => {
+		const result = await bashTool().execute("inherit-session", { command: "echo inherited" });
+		expect(textOf(result)).toContain("inherited");
+	});
+
+	it("missing execute-time context fails closed for an exec-tier tool", async () => {
+		// Explicit empty context: no settings and no --auto-approve. Omitting the
+		// argument inherits the session runner's settings (schema default yolo),
+		// which is the live-session path used by direct execute() callers.
+		await expect(
+			bashTool().execute("no-context", { command: "echo leaked" }, undefined, undefined, {} as AgentToolContext),
+		).rejects.toThrow(/requires approval but no interactive UI available/);
+	});
+
 	it("always-ask mode rejects exec tools when no UI is available", async () => {
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
 		await expect(
@@ -156,6 +171,18 @@ describe("tools.approvalMode setting", () => {
 		expect(textOf(result)).toContain("(no output)");
 	});
 
+	it("attributes bash pattern denies to tool policy", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "yolo",
+			"tools.approval": { bash: "allow" },
+		});
+		await expect(
+			bashTool().execute("pattern-deny", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
+				settings,
+			} as AgentToolContext),
+		).rejects.toThrow('Tool "bash" is blocked by tool policy.\nReason: Blocked by bash pattern: rm -rf *');
+	});
+
 	it("CLI --auto-approve forces yolo mode for non-overriding tool calls", async () => {
 		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
 		const result = await bashTool().execute("cli-override", { command: "echo override" }, undefined, undefined, {
@@ -213,6 +240,69 @@ describe("tools.approvalMode setting", () => {
 				xdevApproved: true,
 			} as AgentToolContext),
 		).rejects.toThrow(/blocked by user policy/);
+	});
+
+	it("ACP-approved arguments satisfy explicit user and tool-override prompts", async () => {
+		const promptSettings = approvalSettings({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: "prompt" },
+		});
+		const explicitResult = await bashTool().execute(
+			"acp-explicit-prompt",
+			{ command: "echo acp-explicit" },
+			undefined,
+			undefined,
+			{
+				settings: promptSettings,
+				acpApprovedArgs: { command: "echo acp-explicit" },
+			} as AgentToolContext,
+		);
+		expect(textOf(explicitResult)).toContain("acp-explicit");
+
+		const overrideSettings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		const overrideResult = await bashTool().execute(
+			"acp-tool-override",
+			{ command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			undefined,
+			undefined,
+			{
+				settings: overrideSettings,
+				acpApprovedArgs: { command: "rm -f /tmp/bun-fake-timer-probe.test.ts" },
+			} as AgentToolContext,
+		);
+		expect(textOf(overrideResult)).toContain("(no output)");
+	});
+
+	it("ACP-approved arguments do not bypass deny policies", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			bashTool().execute("acp-denied", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
+				settings,
+				acpApprovedArgs: { command: "rm -rf /tmp/never-run" },
+			} as AgentToolContext),
+		).rejects.toThrow(/blocked by tool policy/);
+	});
+
+	it("ACP-approved arguments do not bypass provider safety checks", async () => {
+		const settings = approvalSettings({ "tools.approvalMode": "always-ask" });
+		await expect(
+			bashTool().execute("acp-safety", { command: "echo blocked" }, undefined, undefined, {
+				settings,
+				acpApprovedArgs: { command: "echo blocked" },
+				toolCall: {
+					batchId: "safety-batch",
+					index: 0,
+					total: 1,
+					toolCalls: [],
+					providerMetadata: {
+						type: "computer",
+						providerItemId: "computer-call",
+						actions: [],
+						pendingSafetyChecks: [{ id: "safety-check" }],
+					},
+				},
+			} as never),
+		).rejects.toThrow(/pending provider safety checks but no interactive UI/);
 	});
 
 	it("constructs an extensionRunner unconditionally so the approval gate is always installed", async () => {

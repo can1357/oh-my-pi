@@ -43,7 +43,7 @@ function readVarint(bytes: Uint8Array, offset: number): [number, number] {
 
 function protobufFields(bytes: Uint8Array): ProtobufField[] {
 	const fields: ProtobufField[] = [];
-	for (let offset = 0; offset < bytes.length; ) {
+	for (let offset = 0; offset < bytes.length;) {
 		const [tag, nextOffset] = readVarint(bytes, offset);
 		offset = nextOffset;
 		const wireType = tag & 7;
@@ -123,8 +123,6 @@ const base = `http://localhost:${server.port}`;
 process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = `${base}/v1/logs`;
 process.env.OTEL_EXPORTER_OTLP_METRICS_ENDPOINT = `${base}/v1/metrics`;
 process.env.OTEL_SERVICE_NAME = "oh-my-pi-signals-probe";
-// Force a short metric export interval so the periodic reader flushes fast.
-process.env.OTEL_METRIC_EXPORT_INTERVAL = "500";
 
 await initTelemetryExport();
 if (!isTelemetryExportEnabled()) {
@@ -194,9 +192,6 @@ const coverage: AgentRunCoverage = {
 };
 config.onRunEnd?.(summary, coverage);
 
-await flushTelemetryExport();
-// The metric reader exports on its own interval; wait one cycle then flush.
-await Bun.sleep(700);
 await flushTelemetryExport();
 assertSingleMetricPoint("pi.omp.agent.chat.calls");
 assertSingleMetricPoint("pi.omp.agent.tool.calls");

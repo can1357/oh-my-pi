@@ -2,7 +2,7 @@
  * Built-in model roles and role metadata helpers.
  */
 
-import { isValidThemeColor, type ThemeColor } from "../modes/theme/theme";
+import { isValidThemeColor, type ThemeColor } from "@oh-my-pi/pi-tui/theme";
 import type { Settings } from "./settings";
 
 /** Canonical prefix for a configured model role selector. */
@@ -19,17 +19,8 @@ export function formatModelRoleAlias(role: string): string {
 	return `${MODEL_ROLE_ALIAS_PREFIX}${role}`;
 }
 
-export type ModelRole =
-	| "default"
-	| "smol"
-	| "slow"
-	| "vision"
-	| "plan"
-	| "designer"
-	| "commit"
-	| "tiny"
-	| "task"
-	| "advisor";
+import type { ModelRole } from "@oh-my-pi/pi-tui/overlays/model-browser";
+export type { ModelRole } from "@oh-my-pi/pi-tui/overlays/model-browser";
 
 export interface ModelRoleInfo {
 	tag?: string;
@@ -45,25 +36,14 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	slow: { tag: "SLOW", name: "Thinking", color: "accent" },
 	vision: { tag: "VISION", name: "Vision", color: "error" },
 	plan: { tag: "PLAN", name: "Architect", color: "muted" },
-	designer: { tag: "DESIGNER", name: "Designer", color: "muted" },
 	commit: { tag: "COMMIT", name: "Commit", color: "dim" },
 	tiny: { tag: "TINY", name: "Tiny", color: "dim" },
 	task: { tag: "TASK", name: "Subtask", color: "muted" },
 	advisor: { tag: "ADVISOR", name: "Advisor", color: "accent" },
 };
 
-export const MODEL_ROLE_IDS: ModelRole[] = [
-	"default",
-	"smol",
-	"slow",
-	"vision",
-	"plan",
-	"designer",
-	"commit",
-	"tiny",
-	"task",
-	"advisor",
-];
+import { MODEL_ROLE_IDS } from "@oh-my-pi/pi-tui/overlays/model-browser";
+export { MODEL_ROLE_IDS } from "@oh-my-pi/pi-tui/overlays/model-browser";
 
 export type RoleInfo = ModelRoleInfo;
 

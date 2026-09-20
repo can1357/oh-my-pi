@@ -10,10 +10,9 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
-import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -23,9 +22,15 @@ import {
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
-import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
+import {
+	type BuiltSkillPromptMessage,
+	buildSkillPromptMessage,
+	parseSkillInvocation,
+	type Skill,
+	type SkillPromptInput,
+} from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
-import { type Theme, theme } from "../../modes/theme/theme";
+import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
@@ -33,17 +38,20 @@ import { buildAvailableSlashCommands } from "../../slash-commands/available-comm
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
+import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "../persistence-failure";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { RpcOutputWriter } from "./rpc-output";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcExtensionUISelectOptionDetail,
 	RpcHostToolCallRequest,
 	RpcHostToolCancelRequest,
 	RpcHostToolDefinition,
@@ -104,6 +112,11 @@ export type RpcSessionChangeCommand = Extract<
 	{ type: "new_session" } | { type: "switch_session" } | { type: "branch" }
 >;
 
+export type RpcQueueModeCommand = Extract<
+	RpcCommand,
+	{ type: "set_steering_mode" } | { type: "set_follow_up_mode" } | { type: "set_interrupt_mode" }
+>;
+
 export type RpcSessionChangeResult =
 	| { type: "new_session"; data: { cancelled: boolean } }
 	| { type: "switch_session"; data: { cancelled: boolean } }
@@ -114,18 +127,39 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 export type RpcSkillCommandSession = Pick<AgentSession, "promptCustomMessage" | "skills" | "skillsSettings">;
 export type RpcSkillCommandResult = { agentInvoked: true };
 
-export async function tryRunRpcSkillCommand(
-	session: RpcSkillCommandSession,
-	text: string,
-	streamingBehavior: "steer" | "followUp" = "steer",
-): Promise<RpcSkillCommandResult | false> {
-	if (!session.skillsSettings?.enableSkillCommands) return false;
+export interface RpcSkillInvocation extends SkillPromptInput {
+	skill: Skill;
+}
+
+/**
+ * Fast in-memory pre-check for a skill invocation: settings gate, text shape,
+ * and skill lookup. Returns null when the message is not a runnable skill
+ * command. Performs no I/O — safe to run on the RPC serial queue.
+ */
+export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text: string): RpcSkillInvocation | null {
+	if (!session.skillsSettings?.enableSkillCommands) return null;
 	const parsed = parseSkillInvocation(text);
-	if (!parsed) return false;
+	if (!parsed) return null;
 	const skill = session.skills.find(candidate => candidate.name === parsed.name);
-	if (!skill) return false;
-	const built = await buildSkillPromptMessage(skill, parsed.args, "user");
-	await session.promptCustomMessage(
+	if (!skill) return null;
+	return { skill, args: parsed.args, prompt: parsed.prompt };
+}
+
+/**
+ * Slow half of a skill invocation: builds the skill prompt message (file I/O)
+ * and dispatches it through the full prompt pipeline (usage preflight,
+ * compaction checks, provider calls). Resolves once the turn is scheduled.
+ * Must not run on the RPC serial queue's response path — register it with
+ * watchAndReportLocalOnlyPromptResult and answer the command first.
+ */
+export async function runRpcSkillCommand(
+	session: RpcSkillCommandSession,
+	invocation: RpcSkillInvocation,
+	streamingBehavior: "steer" | "followUp" = "steer",
+	prebuilt?: BuiltSkillPromptMessage,
+): Promise<boolean> {
+	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
+	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
 			content: built.message,
@@ -135,6 +169,51 @@ export async function tryRunRpcSkillCommand(
 		},
 		{ streamingBehavior },
 	);
+}
+
+/**
+ * Skill branch of the `prompt` command: resolves the invocation cheaply, then
+ * registers the slow dispatch with watchAndReportLocalOnlyPromptResult and
+ * returns immediately. The caller answers the command right away — building
+ * the skill prompt and running the prompt pipeline (usage preflight,
+ * compaction, provider calls) can outlast any client's prompt timeout under
+ * provider stress; the plain-prompt path responds first for the same reason.
+ */
+export async function dispatchRpcSkillPrompt(input: {
+	id: string | undefined;
+	session: RpcSkillCommandSession;
+	message: string;
+	streamingBehavior: "steer" | "followUp" | undefined;
+	output: (obj: object) => void;
+	onError: (error: Error) => void;
+	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
+}): Promise<RpcSkillCommandResult | null> {
+	const invocation = resolveRpcSkillInvocation(input.session, input.message);
+	if (!invocation) return null;
+	// buildSkillPromptMessage is cheap file I/O and covers the failure the old
+	// synchronous path reported immediately (a removed or unreadable SKILL.md);
+	// keep that error contract by awaiting it before answering. The expensive
+	// promptCustomMessage pipeline (usage preflight, compaction, provider
+	// calls) is what moves behind the acknowledgement.
+	const built = await buildSkillPromptMessage(invocation.skill, invocation, "user");
+	watchAndReportLocalOnlyPromptResult({
+		id: input.id,
+		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
+		output: input.output,
+		onError: input.onError,
+		extensionUserMessageTracker: input.extensionUserMessageTracker,
+	});
+	return { agentInvoked: true };
+}
+
+export async function tryRunRpcSkillCommand(
+	session: RpcSkillCommandSession,
+	text: string,
+	streamingBehavior: "steer" | "followUp" = "steer",
+): Promise<RpcSkillCommandResult | false> {
+	const invocation = resolveRpcSkillInvocation(session, text);
+	if (!invocation) return false;
+	await runRpcSkillCommand(session, invocation, streamingBehavior);
 	return { agentInvoked: true };
 }
 
@@ -514,6 +593,7 @@ function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostTo
 			parameters: tool.parameters,
 			hidden: tool.hidden === true,
 			loadMode: defaultLoadModeForToolName(name, tool.loadMode),
+			readsSkillUris: tool.readsSkillUris,
 		};
 	});
 }
@@ -539,6 +619,43 @@ function shouldEmitRpcTitles(): boolean {
 
 function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscriptionLevel {
 	return value === "off" || value === "progress" || value === "events";
+}
+
+/** Sends an RPC select request while retaining aligned option descriptions. */
+export function requestRpcSelect(
+	pendingRequests: Map<string, PendingExtensionRequest>,
+	output: RpcOutput,
+	title: string,
+	options: ExtensionUISelectItem[],
+	dialogOptions?: ExtensionUIDialogOptions,
+): Promise<string | undefined> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+	const labels = new Array<string>(options.length);
+	let optionDetails: RpcExtensionUISelectOptionDetail[] | undefined;
+	for (let index = 0; index < options.length; index++) {
+		const option = options[index]!;
+		labels[index] = getExtensionUISelectOptionLabel(option);
+		if (typeof option === "string") continue;
+		const description = option.description?.trim();
+		if (!description) continue;
+		optionDetails ??= Array.from({ length: options.length }, () => ({}));
+		optionDetails[index] = { description };
+	}
+
+	return requestRpcDialog(
+		pendingRequests,
+		output,
+		dialogOptions,
+		undefined,
+		{
+			method: "select",
+			title,
+			options: labels,
+			...(optionDetails ? { optionDetails } : {}),
+			timeout: dialogOptions?.timeout,
+		},
+		response => parseValueDialogResponse(response, dialogOptions),
+	);
 }
 
 export function requestRpcEditor(
@@ -656,13 +773,55 @@ export function requestRpcDialog<T>(
 	return promise;
 }
 /**
+ * Applies a queue-mode RPC command to the calling session only. Owns the
+ * `persist: false` contract (#11555) in one place so no dispatcher arm can
+ * silently restore machine-global writes.
+ */
+export function applyRpcQueueModeCommand(session: AgentSession, command: RpcQueueModeCommand): void {
+	switch (command.type) {
+		case "set_steering_mode":
+			session.setSteeringMode(command.mode, false);
+			break;
+		case "set_follow_up_mode":
+			session.setFollowUpMode(command.mode, false);
+			break;
+		case "set_interrupt_mode":
+			session.setInterruptMode(command.mode, false);
+			break;
+	}
+}
+
+/**
+ * Report a store failure as a `notice` frame (plus a stderr mirror) — issue
+ * #11493. The frame goes straight through the mode's `output` rather than
+ * `session.emitNotice`: dispose clears the session's event listeners before it
+ * closes the store (agent-session.ts `#doDispose`), so a failure latched during
+ * `close()` would have no subscriber left to forward it and the client would
+ * see a nonzero exit with no notice at all. `onFailure` records the failure for
+ * the mode's own teardown attribution: a failure still latched at dispose is
+ * what makes `session.dispose()` reject.
+ */
+export function registerRpcPersistenceSurface(
+	session: Pick<AgentSession, "sessionManager">,
+	output: (frame: object) => void,
+	onFailure?: (error: Error) => void,
+): () => void {
+	return session.sessionManager.onPersistenceError(error => {
+		onFailure?.(error);
+		const message = formatPersistenceFailure(error.message);
+		output({ type: "notice", level: "error", message, source: "session-persistence" });
+		process.stderr.write(`${message}\n`);
+	});
+}
+
+/**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
-	eventBus?: EventBus,
+	subagentEventBus?: EventBus,
 	input: ReadableStream<Uint8Array> = claimRpcInput(),
 ): Promise<never> {
 	// Signal to RPC clients that the server is ready to accept commands
@@ -673,21 +832,11 @@ export async function runRpcMode(
 	process.env.PI_NOTIFICATIONS = "off";
 
 	const frameEncoder = new RpcFrameEncoder();
-	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
-	// lazily by the encoder and written one physical line at a time, so a near-limit
-	// logical frame never materializes its full base64 transport in memory.
-	let stdoutQueue: Promise<void> = Promise.resolve();
-	const writeFrames = (frames: Iterable<string>) => {
-		stdoutQueue = stdoutQueue
-			.then(async () => {
-				for (const line of frames) {
-					if (!process.stdout.write(line)) await once(process.stdout, "drain");
-				}
-			})
-			// stdout gone (host exited) — nothing left to deliver; keep the queue alive.
-			.catch(() => {});
-	};
-	writeFrames(
+	const outputWriter = new RpcOutputWriter(process.stdout, failure => {
+		logger.error("RPC output delivery failed", { error: String(failure) });
+		void session.dispose().finally(() => process.exit(1));
+	});
+	outputWriter.write(
 		frameEncoder.encodeFrames({
 			type: "ready",
 			protocolVersion: 1,
@@ -697,7 +846,7 @@ export async function runRpcMode(
 		}),
 	);
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		writeFrames(frameEncoder.encodeFrames(obj));
+		outputWriter.write(frameEncoder.encodeFrames(obj));
 		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
 			frameEncoder.setProtocolVersion(2);
 	};
@@ -723,7 +872,7 @@ export async function runRpcMode(
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
-	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	const subagentRegistry = subagentEventBus ? new RpcSubagentRegistry(subagentEventBus, output) : undefined;
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
@@ -742,19 +891,7 @@ export async function runRpcMode(
 			options: ExtensionUISelectItem[],
 			dialogOptions?: ExtensionUIDialogOptions,
 		): Promise<string | undefined> {
-			return requestRpcDialog(
-				this.pendingRequests,
-				this.output,
-				dialogOptions,
-				undefined,
-				{
-					method: "select",
-					title,
-					options: options.map(getExtensionUISelectOptionLabel),
-					timeout: dialogOptions?.timeout,
-				},
-				response => parseValueDialogResponse(response, dialogOptions),
-			);
+			return requestRpcSelect(this.pendingRequests, this.output, title, options, dialogOptions);
 		}
 
 		confirm(title: string, message: string, dialogOptions?: ExtensionUIDialogOptions): Promise<boolean> {
@@ -954,6 +1091,59 @@ export async function runRpcMode(
 		output(event);
 	});
 
+	// Discriminates a store failure from any other dispose rejection below.
+	let persistenceFailure: Error | undefined;
+	registerRpcPersistenceSurface(
+		session,
+		frame => output(frame),
+		error => {
+			persistenceFailure = error;
+		},
+	);
+
+	/**
+	 * Dispose the session, then end the process. A store failure still latched
+	 * at dispose makes `dispose()` reject, and the `notice` frame it emits is
+	 * queued on the asynchronous `outputWriter`: drain that writer before exiting
+	 * or the client never learns the failure (review 3983906393). The durability
+	 * loss is mirrored on stderr and the exit code is nonzero. A dispose
+	 * rejection with no latched store failure still surfaces to the caller.
+	 */
+	const disposeAndExit = async (): Promise<never> => {
+		try {
+			await session.dispose();
+		} catch (error) {
+			if (!persistenceFailure || error !== persistenceFailure) throw error;
+			// The notice frame this failure queued must reach the client before the
+			// process ends (review 3983906393).
+			await outputWriter.close();
+			try {
+				if (!process.stderr.write(`${formatPersistenceDurabilityFailure(persistenceFailure.message)}\n`)) {
+					const { promise, resolve } = Promise.withResolvers<void>();
+					// A closed stream never emits `drain`; resolve on error/close too
+					// so an undeliverable mirror cannot strand the exit.
+					const settle = (): void => {
+						process.stderr.off("drain", settle);
+						process.stderr.off("error", settle);
+						process.stderr.off("close", settle);
+						resolve();
+					};
+					process.stderr.on("drain", settle);
+					process.stderr.on("error", settle);
+					process.stderr.on("close", settle);
+					await promise;
+				}
+			} catch {
+				// A mirror that cannot be written must not cost the exit code.
+			}
+			process.exit(1);
+		}
+		// A failure that already reported and then recovered still leaves its notice
+		// queued here, so the success path drains the same queue before it exits.
+		await outputWriter.close();
+		process.exit(0);
+	};
+
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
 	const reloadPluginState = async () => {
 		const cwd = session.sessionManager.getCwd();
@@ -961,7 +1151,12 @@ export async function runRpcMode(
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		resetCapabilities();
 		await session.refreshSkills();
-		session.setSlashCommands(await loadSlashCommands({ cwd }));
+		session.setSlashCommands(
+			await loadSlashCommands({
+				cwd,
+				extensionRoots: session.effectiveExtensionRoots,
+			}),
+		);
 		await emitAvailableCommandsUpdate();
 	};
 	const emitAvailableCommandsUpdate = async () => {
@@ -988,7 +1183,15 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
-				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
+				const skillResult = await dispatchRpcSkillPrompt({
+					id,
+					session,
+					message: command.message,
+					streamingBehavior: command.streamingBehavior,
+					output,
+					onError: promptError => output(error(id, "prompt", promptError.message)),
+					extensionUserMessageTracker,
+				});
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
 				}
@@ -1244,17 +1447,17 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "set_steering_mode": {
-				session.setSteeringMode(command.mode);
+				applyRpcQueueModeCommand(session, command);
 				return success(id, "set_steering_mode");
 			}
 
 			case "set_follow_up_mode": {
-				session.setFollowUpMode(command.mode);
+				applyRpcQueueModeCommand(session, command);
 				return success(id, "set_follow_up_mode");
 			}
 
 			case "set_interrupt_mode": {
-				session.setInterruptMode(command.mode);
+				applyRpcQueueModeCommand(session, command);
 				return success(id, "set_interrupt_mode");
 			}
 
@@ -1424,6 +1627,12 @@ export async function runRpcMode(
 							uiCtx.notify(message, "info");
 						},
 						onPrompt: async prompt => {
+							if (prompt.secret) {
+								throw new Error(
+									`Provider '${command.providerId}' requires secret input, ` +
+										"which is not supported in RPC mode. Use the terminal UI to log in.",
+								);
+							}
 							if (!authEmitted) {
 								// onPrompt called before any auth URL — provider requires
 								// interactive input that cannot be satisfied headlessly.
@@ -1466,8 +1675,7 @@ export async function runRpcMode(
 			// the process exits. dispose() also emits `session_shutdown`, so we
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
-			await session.dispose();
-			process.exit(0);
+			await disposeAndExit();
 		},
 	});
 
@@ -1510,7 +1718,8 @@ export async function runRpcMode(
 	// Dispose the main session before exiting so the browser reaper and other
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a
 	// prior pi.shutdown() through the coordinator makes this await settle
-	// immediately.
-	await session.dispose();
-	process.exit(0);
+	// immediately. Returned rather than awaited: `runRpcMode` is typed
+	// `Promise<never>`, and only returning the `Promise<never>` keeps this end
+	// point unreachable for the compiler.
+	return disposeAndExit();
 }

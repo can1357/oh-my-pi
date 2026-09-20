@@ -34,8 +34,8 @@ Does not cover extension authoring UX or command UI.
 - Message shapes are defined in `types.ts` (`JsonRpcRequest`, `JsonRpcNotification`, `JsonRpcResponse`, `JsonRpcMessage`).
 - MCP client logic (`client.ts`) decides method order and session handshake:
   1. `initialize` request
-  2. for Streamable HTTP transports, start the optional background SSE listener after the initialize response has established any session id
-  3. `notifications/initialized` notification
+  2. `notifications/initialized` notification, sent before any further session traffic
+  3. for Streamable HTTP transports, start the optional background SSE listener once the initialize response has established any session id
   4. method calls like `tools/list`, `tools/call`
 
 ### Transport layer (`MCPTransport`)
@@ -212,13 +212,13 @@ Two SSE paths exist:
 
 2. **Background SSE listener** (`startSSEListener()`)
    - optional GET listener for server-initiated notifications and server-to-client requests
-   - `connectToServer()` starts it for Streamable HTTP transports after `initialize` and before `notifications/initialized`
+   - `connectToServer()` starts it for Streamable HTTP transports after the `notifications/initialized` notification
    - listener startup waits up to one second, or less for very small request timeouts; `timeout: 0` / `OMP_MCP_TIMEOUT_MS=0` disables that startup deadline
    - if GET returns `405`, another non-OK status, no body, or times out, listener silently disables itself
 
 ## Malformed payload and disconnect handling
 
-SSE JSON parsing errors bubble out of `readSseJson` and reject request/listener.
+The shared `readSseEvents` decoder supports LF, CRLF, and lone CR, including delimiters split across chunks. JSON parsing errors in transport consumers reject the request/listener.
 
 - Request SSE parse errors reject the active request.
 - Background listener errors trigger `onError` (except AbortError), and an established listener ending while still connected triggers `onClose` so the manager can reconnect.
@@ -232,19 +232,18 @@ SSE JSON parsing errors bubble out of `readSseJson` and reject request/listener.
 - The first `endpoint` event is control data, not JSON; its `data` value is resolved against the configured URL and stored as the JSON-RPC POST endpoint.
 - `request()` and `notify()` POST JSON-RPC frames to the discovered endpoint.
 - JSON-RPC responses, notifications, and server-to-client requests are read from `event: message` stream events and correlated by request id.
-- If the stream ends, pending requests fail with `Legacy SSE stream closed`; managed connections may reconnect through `onClose`.
+- If the stream ends, pending requests fail with `Transport closed: legacy SSE stream closed`; managed connections may reconnect through `onClose`.
 
 ## `json-rpc.ts` utility vs transport abstraction
 
-`src/mcp/json-rpc.ts` provides `callMCP()` and `parseSSE()` helpers for direct HTTP MCP calls (used by Exa integration), not the `MCPTransport` abstraction used by `MCPClient`/`MCPManager`.
+`src/mcp/json-rpc.ts` provides `callMCP()` and `readMcpJsonRpcResponse()` for direct HTTP MCP calls used by Exa, separate from the `MCPTransport` abstraction used by `MCPClient`/`MCPManager`.
 
-Notable differences from `HttpTransport`:
-
-- parses entire response text first, then extracts first `data: ` line (`parseSSE`), with JSON fallback
-- optional caller `AbortSignal` (`CallMcpOptions`), with a hard 60s `AbortSignal.timeout` default when none is given; no session-id handling, no transport lifecycle
-- returns raw JSON-RPC envelope object
-
-This path is lightweight but less robust than full transport implementation.
+- `callMCP()` retains the posted request ID; `readMcpJsonRpcResponse(response, expectedId, signal?)` decodes JSON or SSE according to the response content type.
+- SSE uses the shared `readSseEvents` decoder, including multiline data and `data:` fields without a following space.
+- Only a result/error envelope matching the request ID completes the call. Valid notifications, server requests, and other response IDs are skipped; malformed messages or an exhausted stream without a matching response fail.
+- Caller cancellation remains an abort, not a missing-response error. A hard 60s timeout applies only when no caller signal is supplied.
+- The returned shared `JsonRpcResponse` has an `unknown` result; consumers narrow their payloads.
+- This lightweight path does not manage sessions, answer server requests, or resume streams.
 
 ## Retry/reconnect responsibilities
 
@@ -271,7 +270,7 @@ They fail fast and propagate errors.
 - **Stdio stream/process ends**: transport closes; pending requests rejected as `Transport closed`; manager-managed connections trigger reconnect.
 - **HTTP non-2xx**: request/notify throws HTTP error; managed OAuth requests can refresh auth and retry once on 401/403.
 - **Invalid JSON response**: parse exception propagated.
-- **Legacy SSE stream ends**: pending requests fail with `Legacy SSE stream closed`; manager-managed connections trigger reconnect.
+- **Legacy SSE stream ends**: pending requests fail with `Transport closed: legacy SSE stream closed`; manager-managed connections trigger reconnect.
 - **SSE ends without matching id**: request fails with `No response received for request ID ...`.
 - **Timeout**: transport-specific timeout error.
 - **Caller abort**: AbortError/reason propagated from caller signal where the method accepts one.

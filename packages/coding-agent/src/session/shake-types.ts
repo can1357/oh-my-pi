@@ -6,7 +6,7 @@
  */
 
 /** Mode selector for `AgentSession.shake`. */
-export type ShakeMode = "elide" | "images";
+export type ShakeMode = "elide" | "images" | "thinking";
 
 /** Outcome of an `AgentSession.shake` run. */
 export interface ShakeResult {
@@ -17,6 +17,8 @@ export interface ShakeResult {
 	blocksDropped: number;
 	/** Image blocks removed (images mode only). */
 	imagesDropped?: number;
+	/** Thinking blocks dropped (thinking mode only). */
+	thinkingBlocksDropped?: number;
 	/** Estimated context tokens reclaimed. */
 	tokensFreed: number;
 	/** Session artifact holding the dropped originals, when persisted. */
@@ -30,6 +32,12 @@ export function formatShakeSummary(result: ShakeResult): string {
 		return n === 0
 			? "No images found in this session."
 			: `Dropped ${n} image${n === 1 ? "" : "s"} from this session.`;
+	}
+	if (result.mode === "thinking") {
+		const n = result.thinkingBlocksDropped ?? 0;
+		return n === 0
+			? "No thinking blocks found in this session."
+			: `Dropped ${n} thinking block${n === 1 ? "" : "s"} from this session.`;
 	}
 	const parts: string[] = [];
 	if (result.toolResultsDropped > 0) {

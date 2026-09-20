@@ -4,13 +4,14 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
+import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { InteractiveMode, shouldEnterPlanModeOnStartup } from "../src/modes/interactive-mode";
 import { resolveXdevTool, type XdevState } from "../src/tools/xdev";
 
@@ -26,9 +27,26 @@ function makeTool(name: string): AgentTool {
 	};
 }
 
+function makeMcpTool(): CustomTool {
+	return {
+		name: "mcp__ambient_search",
+		label: "ambient/search",
+		description: "Search ambient data",
+		parameters: type({}),
+		loadMode: "discoverable",
+		mcpServerName: "ambient",
+		mcpToolName: "search",
+		async execute() {
+			return { content: [{ type: "text", text: "ok" }] };
+		},
+	};
+}
+
 interface HarnessOptions {
 	extraRegistryTools?: readonly AgentTool[];
 	builtInToolNames?: Iterable<string>;
+	/** Registry tools active from the first turn, alongside the built-in `read`. */
+	initialActiveTools?: readonly AgentTool[];
 	rebuildGate?: { fail: boolean; calls?: number };
 	xdev?: XdevState;
 	/** Provider/id of the initial model; defaults to `anthropic/claude-sonnet-4-5`. */
@@ -103,7 +121,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 				initialState: {
 					model: initialModel,
 					systemPrompt: ["Test"],
-					tools: [readTool],
+					tools: [readTool, ...(options.initialActiveTools ?? [])],
 					messages: [],
 					thinkingLevel: Effort.Medium,
 				},
@@ -212,6 +230,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			{
 				extraRegistryTools: [makeTool("write"), evalTool],
 				builtInToolNames: ["read", "write"],
+				initialActiveTools: [evalTool],
 				initialModel: { provider: "openai-codex", id: "gpt-5.6-sol" },
 			},
 		);
@@ -220,6 +239,9 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getActiveToolNames()).toContain("write");
+		// The eval tool advertises the bridge from this set, so a direct `write`
+		// must never appear as `tool.write()`.
+		expect(session?.getCodeModeDirectToolNames()).toContain("write");
 		expect(session?.getActiveToolNames()).toContain("eval");
 	});
 
@@ -251,6 +273,57 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getActiveToolNames()).toEqual(["read"]);
 	});
 
+	it("keeps MCP tools discovered after startup when exiting plan mode", async () => {
+		const mcpTool = makeMcpTool();
+		const writeTool = makeTool("write");
+		const xdev: XdevState = {
+			tools: new Map(),
+			mountedNames: new Set(),
+			builtInNames: new Set(["read", "write"]),
+			isActive: name => session?.getActiveToolNames().includes(name) === true,
+		};
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			initialActiveTools: [writeTool],
+			xdev,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+
+		await session!.refreshMCPTools([mcpTool]);
+		expect(session!.getEnabledToolNames()).toContain(mcpTool.name);
+		expect(session!.getMountedXdevToolNames()).toContain(mcpTool.name);
+
+		await created.handlePlanModeCommand();
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session!.getEnabledToolNames()).toContain(mcpTool.name);
+		expect(session!.getMountedXdevToolNames()).toContain(mcpTool.name);
+		expect(resolveXdevTool(xdev, mcpTool.name)).toBeDefined();
+	});
+
+	it("keeps MCP tools discovered after startup when approving the plan", async () => {
+		const planFilePath = "local://PLAN.md";
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
+		await created.init({ suppressWelcomeIntro: true });
+		const mcpTool = makeMcpTool();
+		await session!.refreshMCPTools([mcpTool]);
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session!.sessionManager.getArtifactsDir(),
+			getSessionId: () => session!.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nUse the MCP tool.");
+		vi.spyOn(session!, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(created, "showPlanReview").mockResolvedValue("Approve and keep context");
+		vi.spyOn(session!, "prompt").mockResolvedValue(undefined as never);
+
+		await created.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session!.getEnabledToolNames()).toContain(mcpTool.name);
+		expect(session!.getActiveToolNames()).toContain(mcpTool.name);
+	});
+
 	it("keeps plan mode retryable when prior-tool restoration fails", async () => {
 		const writeTool = makeTool("write");
 		const rebuildGate = { fail: false };
@@ -280,18 +353,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		settings.setModelRole("plan", "anthropic/claude-haiku-4-5:high");
 		const writeTool = makeTool("write");
 		const planSelectedTool = makeTool("plan_selected");
-		const mountedTool: CustomTool = {
-			name: "mcp__ambient_search",
-			label: "ambient/search",
-			description: "Search ambient data",
-			parameters: type({}),
-			loadMode: "discoverable",
-			mcpServerName: "ambient",
-			mcpToolName: "search",
-			async execute() {
-				return { content: [{ type: "text", text: "ok" }] };
-			},
-		};
+		const mountedTool = makeMcpTool();
 		const xdev: XdevState = {
 			tools: new Map(),
 			mountedNames: new Set(),
@@ -340,12 +402,13 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(created.planModeEnabled).toBe(false);
 		expect(session?.getPlanModeState()).toBeUndefined();
 		expect(session?.model?.id).toBe(previousModel?.id);
-		// Pre-existing successful-exit behavior (unchanged by this fix): restoring the
-		// pre-plan tool set drops the MCP device and plan-only selections entirely.
-		expect(session?.getActiveToolNames()).toEqual(["read"]);
+		// The plan-only selections are removed while the live MCP tool survives
+		// top-level because restoring the read-only snapshot removes its device transport.
+		expect(session?.getActiveToolNames()).toContain(mountedTool.name);
+		expect(session?.getActiveToolNames()).not.toContain(planSelectedTool.name);
 		expect(session?.getMountedXdevToolNames()).toEqual([]);
 		expect(xdev.tools.has(mountedTool.name)).toBe(true);
-		expect(resolveXdevTool(xdev, mountedTool.name)).toBeUndefined();
+		expect(resolveXdevTool(xdev, mountedTool.name)).toBeDefined();
 	});
 
 	it("clears old plan UI state when target-session reconciliation restore fails", async () => {

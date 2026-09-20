@@ -9,6 +9,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import { createEvalCustomTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import {
@@ -18,7 +19,8 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const AGENT: AgentDefinition = {
@@ -32,25 +34,34 @@ const AGENT: AgentDefinition = {
 
 function session(
 	options: {
+		cwd?: string;
+		settings?: Settings;
 		planMode?: boolean;
 		outputSchema?: unknown;
 		maxDepth?: number;
-		isolationMode?: "none" | "worktree";
+		isolationEnabled?: boolean;
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
+		agentServiceTierOverrides?: Record<string, string>;
 	} = {},
 ): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
 		outputSchema: options.outputSchema,
-		settings: Settings.isolated({
-			"task.maxRecursionDepth": options.maxDepth ?? 2,
-			"task.isolation.mode": options.isolationMode ?? "none",
-			"task.enableLsp": true,
-			...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
-			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
-		}),
+		settings:
+			options.settings ??
+			Settings.isolated({
+				"task.maxRecursionDepth": options.maxDepth ?? 2,
+				"task.isolation.enabled": options.isolationEnabled ?? false,
+				"isolation.backend": "rcopy",
+				"task.enableLsp": true,
+				...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
+				...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
+				...(options.agentServiceTierOverrides
+					? { "task.agentServiceTierOverrides": options.agentServiceTierOverrides }
+					: {}),
+			}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
@@ -94,6 +105,30 @@ afterEach(() => {
 });
 
 describe("structured subagent primitive", () => {
+	it("resolves user-tagged model agents for task and eval but rejects untagged names", async () => {
+		mockDiscovery();
+		const taggedSession = session();
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		for (const invocationKind of ["task", "eval"] satisfies StructuredSubagentRequest["invocationKind"][]) {
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: taggedSession, agent: "m1", invocationKind }),
+			);
+			expect(policy.agent.name).toBe("m1");
+			expect(policy.modelOverride).toEqual(["a/x"]);
+		}
+		await expect(resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m9" }))).rejects.toThrow(
+			'Unknown agent "m9". Available: worker, m1',
+		);
+	});
+
+	it("keeps discovered agents authoritative on pseudonym collisions", async () => {
+		mockDiscovery({ ...AGENT, name: "m1", model: ["b/y"] });
+		const taggedSession = session();
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m1" }));
+		expect(policy.modelOverride).toEqual(["b/y"]);
+	});
+
 	it("uses caller, agent, then session schemas in precedence order", async () => {
 		mockDiscovery();
 		const callerSchema = { type: "object", properties: { caller: { type: "string" } } };
@@ -165,13 +200,30 @@ describe("structured subagent primitive", () => {
 				request({ session: session({ planMode: true }), isolation: { requested: false } }),
 			),
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+
+		const planSession = session({ planMode: true });
+		const customTools = createEvalCustomTools(planSession, [
+			{
+				name: "word_count",
+				description: "Count words",
+				parameters: { type: "object", properties: {} },
+				language: "python",
+			},
+		]);
+		await expect(resolveEffectiveSubagentPolicy(request({ session: planSession, customTools }))).rejects.toThrow(
+			"Eval-defined tools are unavailable in plan mode.",
+		);
 		expect(discover).not.toHaveBeenCalled();
 	});
-	it("reloads model roles before resolving an agent added during the session", async () => {
+	it("reloads project task and retry policy before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
 		const projectDir = path.join(root, "project");
 		const agentDir = path.join(root, "agent");
 		await fs.mkdir(projectDir, { recursive: true });
+		await Bun.write(
+			path.join(agentDir, "config.yml"),
+			"task:\n  enableEffort: true\nretry:\n  modelFallback: true\n",
+		);
 		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 		const liveSession = {
 			...session(),
@@ -180,16 +232,59 @@ describe("structured subagent primitive", () => {
 		} as ToolSession;
 
 		try {
-			await Bun.write(path.join(projectDir, ".omp", "config.yml"), "modelRoles:\n  hot_worker: kimi-code/k3:max\n");
+			await Bun.write(
+				path.join(projectDir, ".omp", "config.yml"),
+				"task:\n  agentModelOverrides:\n    hot-worker: xai-oauth/grok-4.6:medium\n  enableEffort: false\nretry:\n  modelFallback: false\n",
+			);
 			await Bun.write(
 				path.join(projectDir, ".omp", "agents", "hot-worker.md"),
-				'---\nname: hot-worker\ndescription: Newly added worker.\nmodel: "@hot_worker"\n---\n\nInspect the assignment.\n',
+				"---\nname: hot-worker\ndescription: Newly added worker.\nmodel: openai/gpt-4o\n---\n\nInspect the assignment.\n",
 			);
 
 			const policy = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "hot-worker" }));
 
-			expect(policy.modelRole).toBe("hot_worker");
-			expect(policy.modelOverride).toEqual(["kimi-code/k3:max"]);
+			expect(policy.modelOverride).toEqual(["xai-oauth/grok-4.6:medium"]);
+			expect(liveSettings.get("task.enableEffort")).toBe(false);
+			expect(liveSettings.get("retry.modelFallback")).toBe(false);
+		} finally {
+			liveSettings.cancelPendingSaves();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves only the exact case-sensitive service-tier override into the policy", async () => {
+		mockDiscovery({ ...AGENT, name: "scout" });
+
+		const exact = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ agentServiceTierOverrides: { scout: "priority" } }), agent: "scout" }),
+		);
+		expect(exact.serviceTierOverride).toBe("priority");
+
+		const differentCase = await resolveEffectiveSubagentPolicy(
+			request({ session: session({ agentServiceTierOverrides: { Scout: "priority" } }), agent: "scout" }),
+		);
+		expect(differentCase.serviceTierOverride).toBeUndefined();
+	});
+
+	it("reloads persisted per-agent service-tier overrides before each launch", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-tier-reload-"));
+		const projectDir = path.join(root, "project");
+		const agentDir = path.join(root, "agent");
+		await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+		await fs.mkdir(agentDir, { recursive: true });
+		const liveSettings = await Settings.loadIsolated({ cwd: projectDir, agentDir });
+		const liveSession = session({ cwd: projectDir, settings: liveSettings });
+		mockDiscovery({ ...AGENT, name: "scout" });
+		const configPath = path.join(agentDir, "config.yml");
+
+		try {
+			await Bun.write(configPath, "task:\n  agentServiceTierOverrides:\n    scout: priority\n");
+			const first = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "scout" }));
+			expect(first.serviceTierOverride).toBe("priority");
+
+			await Bun.write(configPath, "task:\n  agentServiceTierOverrides:\n    scout: none\n");
+			const second = await resolveEffectiveSubagentPolicy(request({ session: liveSession, agent: "scout" }));
+			expect(second.serviceTierOverride).toBe("none");
 		} finally {
 			liveSettings.cancelPendingSaves();
 			await fs.rm(root, { recursive: true, force: true });
@@ -351,6 +446,30 @@ describe("structured subagent primitive", () => {
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
+
+	it("retains temporary artifacts when the run failed but yielded schema-valid structured output", async () => {
+		// Regression: a task can produce schema-valid data and then fail (or
+		// exceed its runtime limit). The async notice still advertises the
+		// full payload at `agent://<id>` for schema-valid output, so
+		// retention must not require `exitCode === 0` too — otherwise the
+		// directory is already gone by the time the model follows that URL
+		// (PR #10625 review).
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => {
+			return {
+				...result(),
+				exitCode: 1,
+				error: "runtime limit exceeded",
+				structuredOutput: { source: "agent", mode: "permissive", status: "valid", data: { ok: true } },
+			};
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true }));
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.structuredOutput?.status).toBe("valid");
+		await expect(fs.stat(settled.artifactsDir)).resolves.toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
 	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
 		mockDiscovery();
 		const taskPolicy = await resolveEffectiveSubagentPolicy(request());
@@ -423,13 +542,29 @@ describe("structured subagent primitive", () => {
 		await fs.rm(artifactsDir, { recursive: true, force: true });
 	});
 
+	it("names the failure when nested patches cannot be written as a fallback", async () => {
+		// `Bun.write` creates missing parents, so a genuine failure needs a path
+		// that cannot become a directory: a regular file in its place.
+		const parent = await fs.mkdtemp(path.join(os.tmpdir(), "omp-structured-subagent-unwritable-"));
+		const artifactsDir = path.join(parent, "artifacts");
+		await fs.writeFile(artifactsDir, "");
+		const completed = result();
+		completed.nestedPatches = [{ relativePath: "sub/nested", patch: "diff --git a/file b/file\n" }];
+
+		const hint = await buildStructuredSubagentRecoveryHint(completed, artifactsDir);
+
+		expect(hint).toMatch(/Nested patches could not be written: .*(ENOTDIR|EEXIST)/);
+		expect(hint).not.toContain("Captured nested patch preserved");
+		await fs.rm(parent, { recursive: true, force: true });
+	});
+
 	it("cleans ephemeral artifacts when isolation setup fails without recovery", async () => {
 		mockDiscovery();
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("not a repository"));
 
 		await expect(
 			runStructuredSubagent(
-				request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
+				request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
 			),
 		).rejects.toThrow("Isolated subagent execution could not be prepared: not a repository");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
@@ -462,13 +597,34 @@ describe("structured subagent primitive", () => {
 		mockDiscovery();
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
 		const extensionPaths = ["/plugins/example.ts"];
+		const preparedExtensions = [
+			{
+				path: extensionPaths[0]!,
+				resolvedPath: extensionPaths[0]!,
+				factory: () => {},
+				error: null,
+			},
+		] as NonNullable<ToolSession["preparedExtensions"]>;
 		const customToolPaths = [{ path: "/tools/example.ts", source: "project" }] as unknown as NonNullable<
 			ToolSession["customToolPaths"]
 		>;
 		const planSession = session({ planMode: true });
 		Object.assign(planSession, { mcpManager, extensionPaths, customToolPaths });
 		const nonPlanSession = session();
-		Object.assign(nonPlanSession, { mcpManager, extensionPaths, customToolPaths });
+		let explicitRoot = "/plugins/explicit";
+		const extensionRoots = () => ({
+			explicit: [explicitRoot],
+			mode: "explicit-only" as const,
+			configured: ["/plugins/configured"],
+			configuredLevel: "project" as const,
+		});
+		Object.assign(nonPlanSession, {
+			mcpManager,
+			extensionPaths,
+			customToolPaths,
+			preparedExtensions,
+			effectiveExtensionRoots: extensionRoots,
+		});
 		const mcpDisabledSession = session();
 		mcpDisabledSession.enableMCP = false;
 		const restrictedSession = session();
@@ -504,9 +660,13 @@ describe("structured subagent primitive", () => {
 			enableMCP: true,
 			mcpManager,
 			preloadedExtensionPaths: extensionPaths,
+			preloadedPreparedExtensions: preparedExtensions,
 			preloadedCustomToolPaths: customToolPaths,
 		});
 		expect(options[1]?.restrictToolNames).toBe(false);
+		expect(options[1]?.extensionRoots?.()).toEqual(extensionRoots());
+		explicitRoot = "/plugins/explicit-after-spawn";
+		expect(options[1]?.extensionRoots?.().explicit).toEqual([explicitRoot]);
 		expect(options[2]).toMatchObject({ enableMCP: false });
 		expect(options[2]?.mcpManager).toBeUndefined();
 		expect(options[3]).toMatchObject({
@@ -570,6 +730,28 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
 	});
 
+	it("retains a detached task's artifacts on failure even without valid structured output", async () => {
+		// Regression: a detached (async) task job that fails with schema
+		// status "invalid" (not "valid") previously had its temp dir wiped
+		// immediately, breaking the "failed agent stays interrogable"
+		// invariant (task/index.ts) — the model could no longer read the
+		// failure via agent://<id> or history://<id> (PR #10625 review).
+		mockDiscovery();
+		let artifactsDir: string | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			artifactsDir = options.artifactsDir;
+			return { ...result(), exitCode: 1, error: "agent failed" };
+		});
+
+		const settled = await runStructuredSubagent(request({ retainArtifacts: true, detached: true }));
+
+		expect(settled.result.exitCode).toBe(1);
+		expect(settled.result.structuredOutput?.status).toBe("invalid");
+		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
+		await expect(fs.stat(artifactsDir ?? "")).resolves.toBeDefined();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("retains isolated failure artifacts needed for recovery", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
@@ -580,7 +762,7 @@ describe("structured subagent primitive", () => {
 		});
 
 		const settled = await runStructuredSubagent(
-			request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
+			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
 		);
 
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
@@ -588,16 +770,35 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("names the preserved branch when nested persistence fails after a branch commit", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async () => ({
+			...result(),
+			branchName: "omp/task/Worker",
+			branchBaseSha: "base",
+			nestedPatches: [{ relativePath: "inner", patch: "diff --git a/b.txt b/b.txt\n" }],
+			error: "Nested patch capture failed: ENOSPC. Isolation workspace retained at /wt/abc.",
+		}));
+
+		const settled = await runStructuredSubagent(
+			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
+		);
+
+		expect(settled.mergeSummary).toContain("omp/task/Worker");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
 	it("defaults task isolation to auto-apply and lets config retain artifacts", async () => {
 		mockDiscovery();
 		const defaultPolicy = await resolveEffectiveSubagentPolicy(
-			request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
+			request({ session: session({ isolationEnabled: true }), isolation: { requested: true } }),
 		);
 		expect(defaultPolicy.applyChanges).toBe(true);
 
 		const capturePolicy = await resolveEffectiveSubagentPolicy(
 			request({
-				session: session({ isolationMode: "worktree", isolationApply: false }),
+				session: session({ isolationEnabled: true, isolationApply: false }),
 				isolation: { requested: true },
 			}),
 		);
@@ -606,7 +807,7 @@ describe("structured subagent primitive", () => {
 		const evalPolicy = await resolveEffectiveSubagentPolicy(
 			request({
 				invocationKind: "eval",
-				session: session({ isolationMode: "worktree", isolationApply: false }),
+				session: session({ isolationEnabled: true, isolationApply: false }),
 				isolation: { requested: true },
 			}),
 		);
@@ -625,7 +826,7 @@ describe("structured subagent primitive", () => {
 
 		const settled = await runStructuredSubagent(
 			request({
-				session: session({ isolationMode: "worktree", isolationApply: false }),
+				session: session({ isolationEnabled: true, isolationApply: false }),
 				isolation: { requested: true },
 			}),
 		);

@@ -533,7 +533,7 @@ function renderTranscript(messages: readonly Message[], options: DialectRenderOp
 	if (messages.length === 0) return "";
 	let out = "<bos>";
 	let pendingUserPreamble = "";
-	for (let i = 0; i < messages.length; ) {
+	for (let i = 0; i < messages.length;) {
 		const message = messages[i]!;
 		if (message.role === "developer") {
 			pendingUserPreamble = joinUserBodies(pendingUserPreamble, messageContentText(message.content));

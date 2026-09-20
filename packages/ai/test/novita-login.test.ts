@@ -1,7 +1,9 @@
 import { describe, expect, test, vi } from "bun:test";
-import { loginNovita } from "../src/registry/novita";
 import { getOAuthProviders } from "../src/registry/oauth";
+import { getProviderDefinition } from "../src/registry/registry";
 import type { FetchImpl } from "../src/types";
+
+const loginNovita = getProviderDefinition("novita")!.login!;
 
 describe("Novita login", () => {
 	test("registers Novita as an available API-key provider", () => {

@@ -1,7 +1,7 @@
-import { supportsHashlineEdits } from "@oh-my-pi/pi-catalog/identity";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { $env, $flag } from "@oh-my-pi/pi-utils";
 
-export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "sloppy";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 
 export const DEFAULT_EDIT_MODE: EditMode = "hashline";
 
@@ -40,8 +40,19 @@ export function resolveEditMode(session: EditModeSessionLike): EditMode {
 
 	const settingsMode = normalizeEditMode(String(session.settings.get("edit.mode") ?? ""));
 	const mode = settingsMode ?? DEFAULT_EDIT_MODE;
-	if (mode === "hashline" && !$flag("PI_STRICT_EDIT_MODE") && activeModel && !supportsHashlineEdits(activeModel)) {
-		return "replace";
+	if (mode === "hashline" && !$flag("PI_STRICT_EDIT_MODE") && activeModel) {
+		const identity = classifyModel("", activeModel, { lenient: true });
+		if (
+			identity.class === "kimi" ||
+			identity.class === "mimo" ||
+			identity.class === "minimax" ||
+			identity.class === "deepseek" ||
+			identity.class === "stepfun" ||
+			identity.family === "codex-spark" ||
+			(identity.class === "glm" && identity.family === "flash" && identity.revision === "5.3.0")
+		) {
+			return "replace";
+		}
 	}
 	return mode;
 }

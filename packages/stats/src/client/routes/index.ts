@@ -8,3 +8,4 @@ export * from "./ProjectsRoute";
 export * from "./ProvidersRoute";
 export * from "./RequestsRoute";
 export * from "./ToolsRoute";
+export * from "./TracesRoute";

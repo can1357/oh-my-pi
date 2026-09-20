@@ -373,6 +373,21 @@
 	border-radius: var(--radius-sm);
 }
 
+/* Math is native MathML (see transcript/math.ts): it must opt out of the
+ * `pre-wrap` on `.tr-md p`/`li`. Display equations scroll inside `.tr-math`
+ * rather than inside the `math` element, whose ink overflows its own box; the
+ * vertical padding absorbs that ink so the box never scrolls vertically. */
+.tr-md math {
+	white-space: normal;
+}
+
+.tr-md .tr-math {
+	display: block;
+	margin: 4px 0;
+	padding-block: 0.5em;
+	overflow-x: auto;
+}
+
 /* ---- compact variant (agent drawer) ---- */
 
 .tr-root--compact {

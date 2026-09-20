@@ -56,6 +56,7 @@ test("models config validation resources are retained only for a custom config",
 				mode: "effort",
 				efforts: ["low", "medium", "high"],
 				defaultLevel: "medium",
+				requiresEffort: false,
 			},
 		});
 		expect(custom.schemaIdentityStable).toBe(true);

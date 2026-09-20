@@ -10,11 +10,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import {
-	AUTO_THINKING,
-	clampAutoThinkingEffort,
-	resolveProvisionalAutoLevel,
-} from "@oh-my-pi/pi-coding-agent/thinking";
+import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } from "@oh-my-pi/pi-tui/thinking";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -375,6 +371,48 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.agent.state.thinkingLevel).toBe(Effort.Medium);
 	});
 
+	it("does not record late classifier usage in a replacement session after abort", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const classifierStarted = Promise.withResolvers<void>();
+		const releaseClassifier = Promise.withResolvers<void>();
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+			classifierStarted.resolve();
+			await releaseClassifier.promise;
+			options.onUsage?.({
+				role: "smol",
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				usage: {
+					input: 3,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 4,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			});
+			return Effort.Low;
+		});
+
+		session.setThinkingLevel(AUTO_THINKING);
+		const prompt = session.prompt("Classify this turn");
+		await classifierStarted.promise;
+		await session.abort();
+		await session.newSession();
+		releaseClassifier.resolve();
+		await prompt;
+
+		expect(session.sessionManager.getEntries().some(entry => entry.type === "model_usage")).toBe(false);
+	});
+
 	it("classifies a user-invoked /skill turn under auto (resolves concrete effort)", async () => {
 		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		await createSession({
@@ -571,11 +609,12 @@ describe("AgentSession role model thinking behavior", () => {
 			initialThinkingLevel: Effort.High,
 			modelRoles: { default: `${model.provider}/${model.id}` },
 		});
+		sessionSettings.set("providers.autoThinkingMaxEffort", Effort.High);
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockRejectedValue(new Error("classifier down"));
 
 		session.setThinkingLevel(AUTO_THINKING);
-		const fallback = resolveProvisionalAutoLevel(model);
+		const fallback = Effort.High;
 		await session.prompt("Investigate a regression");
 
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);

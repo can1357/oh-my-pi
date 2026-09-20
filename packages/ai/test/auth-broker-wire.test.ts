@@ -578,6 +578,26 @@ describe("auth-broker wire surface", () => {
 		expect(second?.hostname).toBeUndefined();
 		expect(second?.providers[0]).toMatchObject({ provider: "openai-codex", requests: 1 });
 
+		// App-labeled usage lands in its own (install, app, provider) aggregate
+		// row — "what did robomp spend" must not fold into the unlabeled bucket.
+		await client.reportClientUsage({
+			installId: "install-2",
+			app: "robomp",
+			entries: [{ ...entry, provider: "openai-codex", model: "gpt-y", requests: 4, costUsd: 1.5 }],
+		});
+		const withApps = await client.fetchClientUsageSummary();
+		const labeled = withApps.clients.find(c => c.installId === "install-2");
+		expect(labeled?.providers).toHaveLength(2);
+		expect(labeled?.providers.find(p => p.app === "robomp")).toMatchObject({
+			provider: "openai-codex",
+			requests: 4,
+			costUsd: 1.5,
+		});
+		expect(labeled?.providers.find(p => p.app === undefined)).toMatchObject({
+			provider: "openai-codex",
+			requests: 1,
+		});
+
 		// sinceMs beyond the recorded timestamps returns clients with no aggregates.
 		const future = await client.fetchClientUsageSummary({ sinceMs: now + 60_000 });
 		expect(future.clients.every(c => c.providers.length === 0)).toBe(true);
@@ -881,6 +901,87 @@ describe("auth-broker wire surface", () => {
 			await expect(iter.next()).rejects.toThrow(/initial snapshot/);
 		} finally {
 			dummy.stop(true);
+		}
+	});
+});
+
+describe("client_usage app column migration", () => {
+	test("pre-app broker DBs gain the app column; legacy rows stay queryable as unlabeled", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-broker-migrate-"));
+		const dbPath = path.join(dir, "agent.db");
+		// Replicate the pre-app schema exactly as older brokers created it, plus
+		// one recorded legacy row — `CREATE TABLE IF NOT EXISTS` must skip it and
+		// the ALTER-based migration must add the column without losing the row.
+		const legacy = new Database(dbPath);
+		legacy.run(`
+			CREATE TABLE clients (
+				install_id TEXT PRIMARY KEY,
+				hostname TEXT,
+				first_seen INTEGER NOT NULL,
+				last_seen INTEGER NOT NULL
+			);
+			CREATE TABLE client_usage (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				recorded_at INTEGER NOT NULL,
+				install_id TEXT NOT NULL,
+				provider TEXT NOT NULL,
+				model TEXT NOT NULL,
+				requests INTEGER NOT NULL,
+				input_tokens INTEGER NOT NULL,
+				output_tokens INTEGER NOT NULL,
+				cache_read_tokens INTEGER NOT NULL,
+				cache_write_tokens INTEGER NOT NULL,
+				cost_usd REAL NOT NULL DEFAULT 0
+			);
+		`);
+		const now = Date.now();
+		legacy.run("INSERT INTO clients (install_id, hostname, first_seen, last_seen) VALUES (?, ?, ?, ?)", [
+			"legacy-install",
+			"legacy-host",
+			now,
+			now,
+		]);
+		legacy.run(
+			`INSERT INTO client_usage (recorded_at, install_id, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[now, "legacy-install", "anthropic", "claude-x", 5, 100, 50, 10, 5, 2.5],
+		);
+		legacy.close();
+
+		const migrated = await SqliteAuthCredentialStore.open(dbPath);
+		try {
+			migrated.recordClientUsage({
+				installId: "legacy-install",
+				app: "robomp",
+				entries: [
+					{
+						at: now,
+						provider: "anthropic",
+						model: "claude-x",
+						requests: 1,
+						inputTokens: 10,
+						outputTokens: 5,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						costUsd: 0.1,
+					},
+				],
+			});
+			const summary = migrated.getClientUsageSummary(0);
+			const client = summary.clients.find(c => c.installId === "legacy-install");
+			expect(client?.providers.find(p => p.app === undefined)).toMatchObject({
+				provider: "anthropic",
+				requests: 5,
+				inputTokens: 100,
+			});
+			expect(client?.providers.find(p => p.app === "robomp")).toMatchObject({
+				provider: "anthropic",
+				requests: 1,
+				inputTokens: 10,
+			});
+		} finally {
+			migrated.close();
+			await removeWithRetries(dir);
 		}
 	});
 });

@@ -157,6 +157,40 @@ describe("OpenCode MCP discovery", () => {
 		expect(shared[0]).toMatchObject({ command: "project-jsonc-server", enabled: false });
 	});
 
+	test("preserves OAuth settings from remote OpenCode MCP servers", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "opencode.json"),
+			JSON.stringify({
+				mcp: {
+					service: {
+						type: "remote",
+						url: "https://mcp.example.com/mcp",
+						oauth: {
+							clientId: "configured-client",
+							clientSecret: "configured-secret",
+							scope: "mcp:read mcp:write",
+							callbackPort: 53192,
+							redirectUri: "http://127.0.0.1:53192/callback",
+						},
+					},
+				},
+			}),
+		);
+
+		const [server] = await loadOpenCodeMcpConfig(tempDir);
+
+		expect(server).toMatchObject({
+			name: "service",
+			oauth: {
+				clientId: "configured-client",
+				clientSecret: "configured-secret",
+				scope: "mcp:read mcp:write",
+				callbackPort: 53192,
+				redirectUri: "http://127.0.0.1:53192/callback",
+			},
+		});
+	});
+
 	test("inherits lower-precedence fields on partial overrides", async () => {
 		const projectDir = path.join(tempDir, "project");
 		const userConfigDir = path.join(tempDir, ".config", "opencode");

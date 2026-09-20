@@ -28,9 +28,14 @@ output:
       metadata:
         description: Brief explanation of how pieces connect
       type: string
+  optionalProperties:
+    report:
+      metadata:
+        description: The complete deliverable when the task asks for a report, table, enumeration, or per-item audit — full markdown at the depth requested (tables, path:line anchors, signatures, code excerpts). Never a summary of it; `summary` already covers that. Omit only for quick lookups.
+      type: string
 ---
 
-Investigate the codebase rapidly. Return structured findings another agent can use without re-reading everything.
+Investigate the codebase rapidly. Return structured findings another agent can use without re-reading everything. `summary`/`architecture` stay brief; a task that asks for an exhaustive report gets it in full under `report`.
 
 <directives>
 - You MUST use tools for broad pattern matching / code search as much as possible.

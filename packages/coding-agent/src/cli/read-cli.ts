@@ -7,17 +7,21 @@
  */
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
+import { initializeWithSettings } from "../discovery";
+import { loadSkills } from "../extensibility/skills";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { closeDaemonClients } from "../launch/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
+import { loadCliExtensionProviders } from "../sdk";
 import { discoverAuthStorage } from "../session/auth-broker-config";
 import type { AuthStorage } from "../session/auth-storage";
 import type { ToolSession } from "../tools";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
-import { ReadTool } from "../tools/read";
+import { ReadTool, splitImageQuestionTarget } from "../tools/read";
 import { renderError } from "../tools/tool-errors";
 
 export interface ReadCommandArgs {
@@ -57,18 +61,49 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	let failed = false;
 
 	try {
+		if (extractUriScheme(cmd.path) === "skill") {
+			initializeWithSettings(settings);
+			const discovered = await loadSkills({
+				...settings.getGroup("skills"),
+				cwd,
+				disabledExtensions: settings.get("disabledExtensions") ?? [],
+				extensionRoots: {
+					explicit: [],
+					mode: "merge",
+					configured: settings.get("extensions") ?? [],
+					configuredLevel: settings.extensionsSourceLevel(),
+				},
+			});
+			session.skills = discovered.skills;
+		}
+
 		if (shouldDiscoverMcp(cmd.path)) {
 			authStorage = await discoverAuthStorage();
 			const result = await discoverAndLoadMCPTools(cwd, {
 				enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
 				filterExa: true,
-				filterBrowser: settings.get("browser.enabled") ?? false,
+				// `omp read` has no Eval prelude, so browser MCP remains available.
+				filterBrowser: false,
 				cacheStorage: settings.getStorage(),
 				authStorage,
 			});
 			mcpManager = result.manager;
 			session.mcpManager = mcpManager;
 			MCPManager.setInstance(mcpManager);
+		}
+
+		// `read <image>?q=<question>` delegates to a vision model, which needs a
+		// model registry to resolve modelRoles.vision / @default and fetch its
+		// credentials. The lightweight session above omits it (plain reads never
+		// touch a model), so build one on demand — otherwise the tool aborts with
+		// "Model registry is unavailable for image questions." before resolving
+		// anything (issue #11338).
+		if (splitImageQuestionTarget(cmd.path).question) {
+			authStorage ??= await discoverAuthStorage();
+			const modelRegistry = new ModelRegistry(authStorage);
+			await modelRegistry.hydrateCredentialScopedModelCaches();
+			await loadCliExtensionProviders(modelRegistry, settings, cwd);
+			session.modelRegistry = modelRegistry;
 		}
 
 		const tool = wrapToolWithMetaNotice(new ReadTool(session));

@@ -65,7 +65,10 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		restoreEnv("TMUX", originalTmux);
 	});
 
-	function setupTerminal() {
+	// conpty defaults false so kitty-flag assertions stay hermetic under WSL,
+	// where isConPTYHosted() would otherwise read the live WSL_* env. The two
+	// ConPTY cases opt in explicitly.
+	function setupTerminal({ conpty = false }: { conpty?: boolean } = {}) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		vi.spyOn(process, "kill").mockReturnValue(true);
@@ -77,7 +80,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 			return true;
 		});
 
-		const terminal = new ProcessTerminal();
+		const terminal = new ProcessTerminal({ conpty });
 		terminal.start(
 			data => received.push(data),
 			() => {},
@@ -653,10 +656,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 	});
 
 	it("uses disambiguation-only keyboard reporting on ConPTY", () => {
-		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-		Bun.env.WSL_DISTRO_NAME = "Ubuntu";
-
-		const { terminal, writes } = setupTerminal();
+		const { terminal, writes } = setupTerminal({ conpty: true });
 		writes.length = 0;
 		process.stdin.emit("data", "\x1b[?0u");
 
@@ -666,16 +666,29 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 	});
 
 	it("avoids alternate-key reporting on ConPTY while preserving parent event reporting", () => {
-		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-		Bun.env.WSL_INTEROP = "/run/WSL/1_interop";
-
-		const { terminal, writes } = setupTerminal();
+		const { terminal, writes } = setupTerminal({ conpty: true });
 		writes.length = 0;
 		process.stdin.emit("data", "\x1b[?3u");
 
 		expect(writes).toContain("\x1b[>3u");
 		expect(writes).not.toContain("\x1b[>7u");
 		terminal.stop();
+	});
+
+	it("routes resize by the injected ConPTY override, not the ambient platform", () => {
+		// The override must gate every ConPTY-dependent path uniformly. Reading
+		// isConPTYHosted() here instead made a { conpty: false } terminal report
+		// non-ConPTY writes and kitty flags but ConPTY resize routing on Windows
+		// and WSL, so no test could model the opposite host.
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		const posix = setupTerminal({ conpty: false });
+		expect(posix.terminal.hostOwnsGridOnResize).toBe(false);
+		posix.terminal.stop();
+
+		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+		const conpty = setupTerminal({ conpty: true });
+		expect(conpty.terminal.hostOwnsGridOnResize).toBe(true);
+		conpty.terminal.stop();
 	});
 
 	it("shutdown balances the single kitty push performed on detection", () => {
@@ -778,6 +791,19 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		const { terminal, reports } = setup();
 		process.stdin.emit("data", "\x1b[?2026;0$y");
 		expect(reports).toContainEqual({ mode: 2026, supported: false });
+		terminal.stop();
+	});
+
+	it("forwards DECRPM status so subscribers can distinguish unrecognized from permanently reset", () => {
+		const { terminal } = setup();
+		const statuses: Array<{ mode: number; status?: number }> = [];
+		terminal.onPrivateModeReport?.((mode, _supported, _confirmed, status) => {
+			statuses.push({ mode, status });
+		});
+		process.stdin.emit("data", "\x1b[?2026;0$y");
+		process.stdin.emit("data", "\x1b[?2048;4$y");
+		expect(statuses).toContainEqual({ mode: 2026, status: 0 });
+		expect(statuses).toContainEqual({ mode: 2048, status: 4 });
 		terminal.stop();
 	});
 
@@ -1038,9 +1064,9 @@ describe("OSC 66 text-sizing capability", () => {
 	it("advertises text sizing only for Kitty", () => {
 		// OSC 66 is a Kitty-only protocol; any other terminal must report the
 		// capability as false so the renderer never emits raw escape bytes there.
-		expect(getTerminalInfo("kitty").textSizing).toBe(true);
+		expect(getTerminalInfo("kitty").supportsTextSizing).toBe(true);
 		for (const id of ["ghostty", "wezterm", "iterm2", "vscode", "alacritty", "base", "trueColor"] as const) {
-			expect(getTerminalInfo(id).textSizing).toBe(false);
+			expect(getTerminalInfo(id).supportsTextSizing).toBe(false);
 		}
 	});
 });

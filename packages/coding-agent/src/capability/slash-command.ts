@@ -18,6 +18,10 @@ export interface SlashCommand {
 	content: string;
 	/** Source level */
 	level: "user" | "project" | "native";
+	/** Already-parsed display description, when discovery stripped frontmatter from `content`. */
+	description?: string;
+	/** Already-parsed argument hint (`argumentHint` or `argument-hint`). */
+	argumentHint?: string;
 	/** Source metadata */
 	_source: SourceMeta;
 }

@@ -1,5 +1,6 @@
 MIT License
 
+Copyright (c) 2025 Mario Zechner
 Copyright (c) 2025-2026 Can Bölük
 Copyright (c) 2026 Stencil Labs, Inc.
 

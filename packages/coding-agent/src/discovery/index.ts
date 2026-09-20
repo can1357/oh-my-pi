@@ -22,6 +22,7 @@ import "../capability/tool";
 // Import providers (each registers itself on import)
 import "./agent-plugins";
 import "./agents-md";
+import "./claude-md";
 import "./builtin";
 import "./builtin-defaults";
 import "./claude";
@@ -44,24 +45,31 @@ export {
 	cacheStats,
 	// Provider management
 	disableProvider,
+	disableUserSource,
 	enableProvider,
+	enableUserSource,
 	getAllCapabilitiesInfo,
 	getAllProvidersInfo,
 	// Introspection
 	getCapability,
 	getCapabilityInfo,
 	getDisabledProviders,
+	getEnabledProviders,
 	getProviderInfo,
 	// Initialization
 	initializeWithSettings,
 	invalidate,
+	isForeignUserProvider,
 	isProviderEnabled,
+	isUserSourceEnabled,
 	listCapabilities,
 	// Loading API
 	loadCapability,
 	// Cache management
 	reset,
+	resetCapabilityForTests,
 	setDisabledProviders,
+	setEnabledProviders,
 } from "../capability";
 export type { ContextFile } from "../capability/context-file";
 export type { Extension, ExtensionManifest } from "../capability/extension";

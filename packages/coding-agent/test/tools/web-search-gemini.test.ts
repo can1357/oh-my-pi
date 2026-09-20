@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { serializeCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import { GeminiProvider, searchGemini } from "@oh-my-pi/pi-coding-agent/web/search/providers/gemini";
 
 const SSE_RESPONSE =
@@ -130,7 +131,9 @@ describe("searchGemini tools serialization", () => {
 				return provider === "cloudflare-ai-gateway";
 			},
 			async getApiKey(provider: string) {
-				return provider === "cloudflare-ai-gateway" ? "test-cloudflare-key" : undefined;
+				return provider === "cloudflare-ai-gateway"
+					? serializeCloudflareAiGatewayCredential("test-cloudflare-key", "account", "gateway")
+					: undefined;
 			},
 		} as unknown as AuthStorage;
 		const fetchMock = mockGeminiFetch(DEVELOPER_SSE_RESPONSE);

@@ -1,7 +1,7 @@
 {
   "type": "module",
   "name": "@oh-my-pi/pi-coding-agent",
-  "version": "17.4.0",
+  "version": "18.2.6",
   "description": "Coding agent CLI with read, bash, edit, write tools and session management",
   "homepage": "https://omp.sh",
   "author": "Stencil Labs, Inc.",
@@ -32,12 +32,12 @@
   },
   "scripts": {
     "build": "bun scripts/build-binary.ts",
-    "check": "biome check . && bun run check:types",
+    "check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
     "check:types": "tsgo -p tsconfig.json --noEmit",
-    "lint": "biome lint .",
+    "lint": "oxlint .",
     "test": "bun ../../scripts/ci-test-ts.ts coding-agent-heavy --full",
-    "fix": "biome check --write --unsafe . && bun run format-prompts",
-    "fmt": "biome format --write . && bun run format-prompts",
+    "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
+    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run format-prompts",
     "format-prompts": "bun scripts/format-prompts.ts",
     "gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
     "gen:bundle": "bun scripts/bundle-dist.ts",
@@ -48,7 +48,6 @@
   },
   "dependencies": {
     "@babel/parser": "catalog:",
-    "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
     "@oh-my-pi/pi-agent-core": "catalog:",
@@ -195,17 +194,17 @@
       "types": "./src/commit/changelog/*.ts",
       "import": "./src/commit/changelog/*.ts"
     },
+    "./commit/conventional": {
+      "types": "./src/commit/conventional/index.ts",
+      "import": "./src/commit/conventional/index.ts"
+    },
+    "./commit/conventional/*": {
+      "types": "./src/commit/conventional/*.ts",
+      "import": "./src/commit/conventional/*.ts"
+    },
     "./commit/git/*": {
       "types": "./src/commit/git/*.ts",
       "import": "./src/commit/git/*.ts"
-    },
-    "./commit/map-reduce": {
-      "types": "./src/commit/map-reduce/index.ts",
-      "import": "./src/commit/map-reduce/index.ts"
-    },
-    "./commit/map-reduce/*": {
-      "types": "./src/commit/map-reduce/*.ts",
-      "import": "./src/commit/map-reduce/*.ts"
     },
     "./commit/utils/*": {
       "types": "./src/commit/utils/*.ts",
@@ -246,10 +245,6 @@
     "./edit/*": {
       "types": "./src/edit/*.ts",
       "import": "./src/edit/*.ts"
-    },
-    "./edit/modes/*": {
-      "types": "./src/edit/modes/*.ts",
-      "import": "./src/edit/modes/*.ts"
     },
     "./exa": {
       "types": "./src/exa/index.ts",
@@ -347,6 +342,14 @@
       "types": "./src/eval/index.ts",
       "import": "./src/eval/index.ts"
     },
+    "./if-bench": {
+      "types": "./src/if-bench/index.ts",
+      "import": "./src/if-bench/index.ts"
+    },
+    "./if-bench/*": {
+      "types": "./src/if-bench/*.ts",
+      "import": "./src/if-bench/*.ts"
+    },
     "./eval/js/*": {
       "types": "./src/eval/js/*.ts",
       "import": "./src/eval/js/*.ts"
@@ -370,6 +373,10 @@
     "./lsp/clients/*": {
       "types": "./src/lsp/clients/*.ts",
       "import": "./src/lsp/clients/*.ts"
+    },
+    "./judgment": {
+      "types": "./src/judgment/index.ts",
+      "import": "./src/judgment/index.ts"
     },
     "./markit": {
       "types": "./src/markit/index.ts",
@@ -443,45 +450,17 @@
       "types": "./src/modes/components/*.ts",
       "import": "./src/modes/components/*.ts"
     },
-    "./modes/components/extensions": {
-      "types": "./src/modes/components/extensions/index.ts",
-      "import": "./src/modes/components/extensions/index.ts"
-    },
     "./modes/components/extensions/*": {
       "types": "./src/modes/components/extensions/*.ts",
       "import": "./src/modes/components/extensions/*.ts"
-    },
-    "./modes/components/status-line": {
-      "types": "./src/modes/components/status-line/index.ts",
-      "import": "./src/modes/components/status-line/index.ts"
-    },
-    "./modes/components/status-line/*": {
-      "types": "./src/modes/components/status-line/*.ts",
-      "import": "./src/modes/components/status-line/*.ts"
     },
     "./modes/controllers/*": {
       "types": "./src/modes/controllers/*.ts",
       "import": "./src/modes/controllers/*.ts"
     },
-    "./modes/setup-wizard": {
-      "types": "./src/modes/setup-wizard/index.ts",
-      "import": "./src/modes/setup-wizard/index.ts"
-    },
-    "./modes/setup-wizard/*": {
-      "types": "./src/modes/setup-wizard/*.ts",
-      "import": "./src/modes/setup-wizard/*.ts"
-    },
     "./modes/rpc/*": {
       "types": "./src/modes/rpc/*.ts",
       "import": "./src/modes/rpc/*.ts"
-    },
-    "./modes/theme/*": {
-      "types": "./src/modes/theme/*.ts",
-      "import": "./src/modes/theme/*.ts"
-    },
-    "./modes/theme/defaults": {
-      "types": "./src/modes/theme/defaults/index.ts",
-      "import": "./src/modes/theme/defaults/index.ts"
     },
     "./modes/utils/*": {
       "types": "./src/modes/utils/*.ts",
@@ -491,7 +470,10 @@
       "types": "./src/plan-mode/*.ts",
       "import": "./src/plan-mode/*.ts"
     },
-    "./prompts/*": "./src/prompts/*.md",
+    "./registry/*": {
+      "types": "./src/registry/*.ts",
+      "import": "./src/registry/*.ts"
+    },
     "./secrets": {
       "types": "./src/secrets/index.ts",
       "import": "./src/secrets/index.ts"
@@ -544,14 +526,6 @@
       "types": "./src/tools/*.ts",
       "import": "./src/tools/*.ts"
     },
-    "./tui": {
-      "types": "./src/tui/index.ts",
-      "import": "./src/tui/index.ts"
-    },
-    "./tui/*": {
-      "types": "./src/tui/*.ts",
-      "import": "./src/tui/*.ts"
-    },
     "./utils/*": {
       "types": "./src/utils/*.ts",
       "import": "./src/utils/*.ts"
@@ -580,6 +554,7 @@
       "types": "./src/web/search/providers/*.ts",
       "import": "./src/web/search/providers/*.ts"
     },
+    "./prompts/*": "./src/prompts/*.md",
     "./*.js": "./src/*.ts"
   }
 }

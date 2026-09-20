@@ -198,18 +198,16 @@ function readSnapcompactSnapshot(jobDir: string): BenchmarkSnapshot {
 		.split("\n")
 		.filter(Boolean)
 		.map(line => JSON.parse(line) as SnapRecord);
-	const traces = records.map(
-		(record, index): BenchmarkTrace => ({
-			name: `${record.cond}__${record.chunk}__${index + 1}`,
-			task: `${record.cond}:${record.chunk}`,
-			status: record.f1 > 0 ? "pass" : "fail",
-			reward: record.f1,
-			costUsd: 0,
-			durationMs: 0,
-			detail: JSON.stringify({ question: record.q, answer: record.answer, golds: record.golds, em: record.em }),
-			tracePath: `record:${index + 1}`,
-		}),
-	);
+	const traces = records.map((record, index): BenchmarkTrace => ({
+		name: `${record.cond}__${record.chunk}__${index + 1}`,
+		task: `${record.cond}:${record.chunk}`,
+		status: record.f1 > 0 ? "pass" : "fail",
+		reward: record.f1,
+		costUsd: 0,
+		durationMs: 0,
+		detail: JSON.stringify({ question: record.q, answer: record.answer, golds: record.golds, em: record.em }),
+		tracePath: `record:${index + 1}`,
+	}));
 	let rows: SnapSummaryRow[] = [];
 	if (fs.existsSync(summaryFile)) {
 		const summary: SnapSummary = JSON.parse(fs.readFileSync(summaryFile, "utf8"));

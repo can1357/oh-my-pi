@@ -1,0 +1,19 @@
+{
+	"source": "packages/coding-agent/test/edit-streaming-preview.test.ts",
+	"cases": [
+		{ "name": "keeps section A's preview when section B's header just arrived", "scenario": "trailing-header" },
+		{ "name": "ignores parse errors from the trailing in-progress section", "scenario": "trailing-error" },
+		{ "name": "renders both sections once each has at least one valid op", "scenario": "two-sections" },
+		{ "name": "renders a live diff while the sole payload line is still being typed", "scenario": "live-line" },
+		{ "name": "does not surface stale hash errors while streaming", "scenario": "stream-stale" },
+		{ "name": "final preview accepts a live content hash even when the snapshot store has no history", "scenario": "live-tag" },
+		{ "name": "final preview recovers a stale tag from snapshot history", "scenario": "recover-stale" },
+		{ "name": "surfaces stale hash errors once streaming is complete", "scenario": "final-stale" },
+		{ "name": "yields no preview (not an error) before the first payload byte arrives", "scenario": "empty-body" },
+		{ "name": "hashline: digests stripped `+` body rows only, never headers or op lines", "scenario": "digest" },
+		{ "name": "hashline: grammar-only payload digests to empty, missing input to undefined", "scenario": "empty-digest" },
+		{ "name": "streaming: recovers the bare header onto its nested file instead of blanking", "scenario": "path-recovery-stream" },
+		{ "name": "args-complete: recovers the bare header for the final Myers diff too", "scenario": "path-recovery-final" },
+		{ "name": "no unique basename+tag match: surfaces the read error instead of recovering", "scenario": "path-recovery-miss" }
+	]
+}

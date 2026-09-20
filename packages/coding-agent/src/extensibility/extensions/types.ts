@@ -8,6 +8,22 @@
  * - Interact with the user via UI primitives
  */
 
+import {
+	type ExtensionUiComponent,
+	type ExtensionUiComponentFactory,
+	type ExtensionWidgetContent,
+	type MessageRenderer,
+	type AssistantThinkingRenderer,
+} from "@oh-my-pi/pi-tui/chat/extension-types";
+export {
+	type ExtensionUiComponent,
+	type ExtensionUiComponentFactory,
+	type ExtensionWidgetContent,
+	type MessageRenderOptions,
+	type MessageRenderer,
+	type AssistantThinkingRenderContext,
+	type AssistantThinkingRenderer,
+} from "@oh-my-pi/pi-tui/chat/extension-types";
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
@@ -20,6 +36,7 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
+import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type {
 	Api,
 	AssistantMessageEvent,
@@ -43,7 +60,6 @@ import type {
 	AutocompleteItem,
 	AutocompleteProvider,
 	Component,
-	ComposerStyle,
 	EditorTheme,
 	KeyId,
 	OverlayHandle,
@@ -51,33 +67,29 @@ import type {
 	TUI,
 } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
-import type { KeybindingsManager } from "../../config/keybindings";
+import type { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+export type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type { ModelRegistry } from "../../config/model-registry";
-import type { EditToolDetails } from "../../edit";
+import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
-import type { CustomEditor } from "../../modes/components/custom-editor";
-import type { Theme } from "../../modes/theme/theme";
-import type { AsyncJobSnapshot } from "../../session/agent-session";
+import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { CompactMode } from "../../session/compact-modes";
-import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
+import type { CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
-import type {
-	BashToolDetails,
-	BashToolInput,
-	GlobToolDetails,
-	GlobToolInput,
-	GrepToolDetails,
-	GrepToolInput,
-	ReadToolDetails,
-	ReadToolInput,
-	WriteToolInput,
-} from "../../tools";
+import type { BashToolInput, GlobToolInput, GrepToolInput, ReadToolInput, WriteToolInput } from "../../tools";
+import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
+import type { GrepToolDetails } from "@oh-my-pi/pi-tui/tools/grep";
+import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import type { ApprovalMode } from "../../tools/approval";
+import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
 import type {
@@ -120,7 +132,7 @@ import type {
 import type { SlashCommandInfo } from "../slash-commands";
 
 export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
-export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
+export type { AppKeybinding, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 export type { AgentToolResult, AgentToolUpdateCallback };
 
@@ -135,45 +147,15 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
-export interface ExtensionAskDialogOption {
-	label: string;
-	description?: string;
-	preview?: string;
-}
-
-export interface ExtensionAskDialogQuestion {
-	id: string;
-	question: string;
-	header?: string;
-	options: ExtensionAskDialogOption[];
-	multi?: boolean;
-	recommended?: number;
-}
-
-export interface ExtensionAskDialogResultItem {
-	id: string;
-	question: string;
-	options: string[];
-	multi: boolean;
-	selectedOptions: string[];
-	customInput?: string;
-	note?: string;
-	timedOut?: boolean;
-}
-
-export interface ExtensionAskDialogSubmitResult {
-	kind: "submit";
-	results: ExtensionAskDialogResultItem[];
-}
-
-/** Chat-redirect result: the user chose "Chat about this" instead of
- *  answering. Distinct from `undefined` (cancel) so AskTool can hand off to
- *  the chat loop rather than aborting. */
-export interface ExtensionAskDialogChatResult {
-	kind: "chat";
-}
-
-export type ExtensionAskDialogResult = ExtensionAskDialogSubmitResult | ExtensionAskDialogChatResult;
+import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+export type {
+	ExtensionAskDialogOption,
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResultItem,
+	ExtensionAskDialogSubmitResult,
+	ExtensionAskDialogChatResult,
+	ExtensionAskDialogResult,
+} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 
 export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): string {
 	return typeof option === "string" ? option : option.label;
@@ -224,10 +206,6 @@ export type WidgetPlacement = "aboveEditor" | "belowEditor";
 export interface ExtensionWidgetOptions {
 	placement?: WidgetPlacement;
 }
-
-export type ExtensionUiComponent = Component & { dispose?(): void };
-export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionUiComponent;
-export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | undefined;
 
 /** Options for `ExtensionUIContext.custom()` (overlay rendering of a custom component). */
 export interface ExtensionCustomOptions {
@@ -370,27 +348,11 @@ export interface ExtensionUIContext {
 	setToolsExpanded(expanded: boolean): void;
 }
 
-/** Visual composer style and selector copy registered by an extension. */
-export interface ComposerShapeDefinition {
-	/** User-facing name shown in composer-shape selectors. */
-	label: string;
-	/** Optional detail shown under the selector label. */
-	description?: string;
-	/** Renderer contract; its id becomes the persisted `composer.shape` value. */
-	style: ComposerStyle;
-}
-
 // ============================================================================
 // Extension Context
 // ============================================================================
 
-export interface ContextUsage {
-	/** Estimated context tokens. */
-	tokens: number;
-	contextWindow: number;
-	/** Context usage as percentage of context window. */
-	percent: number;
-}
+export type { ContextUsage };
 
 export interface CompactOptions {
 	onComplete?: (result: CompactionResult) => void;
@@ -413,6 +375,17 @@ export interface CompactOptions {
 	 * `customInstructions`.
 	 */
 	internalGuidance?: string;
+	/**
+	 * A manual compaction aborts any turn in flight and, once the summary is
+	 * committed (or at once when there was nothing to compact), resumes it with
+	 * the auto-continue nudge. Set this when the caller dispatches its own
+	 * follow-up turn after compaction — plan-mode "Approve and compact context" —
+	 * so the two don't double-prompt. Compactions that interrupt nothing never
+	 * continue. Steer/follow-up messages queued during the compaction are
+	 * unaffected: they always drain once compaction ends (issue #5800), before
+	 * and independent of this option.
+	 */
+	suppressContinuation?: boolean;
 }
 
 /**
@@ -485,6 +458,14 @@ export interface ExtensionContext {
 	hasPendingMessages(): boolean;
 	/** Gracefully shutdown and exit. */
 	shutdown(): void;
+	/**
+	 * Whether the current project/workspace is trusted. OMP performs no
+	 * project-trust gating — project-level settings and extensions load
+	 * unconditionally — so this always returns `true`. Exposed for
+	 * compatibility with extensions authored against upstream Pi, whose
+	 * `SettingsManager` accepts a `projectTrusted` flag.
+	 */
+	isProjectTrusted(): boolean;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string[];
 	/** Structured memory runtime for status/search/save across the configured backend. */
@@ -598,6 +579,16 @@ export interface ToolSessionEvent {
 	previousSessionFile: string | undefined;
 }
 
+/** Shell invocation details supplied to a registered tool's environment hook. */
+export interface ToolShellEnvironmentContext {
+	command: string;
+	cwd: string;
+	env: Record<string, string | undefined>;
+}
+
+/** Supplies environment values for a user-initiated shell invocation. */
+export type ToolShellEnvironmentHook = (context: ToolShellEnvironmentContext) => Record<string, string> | undefined;
+
 /**
  * Tool definition for registerTool().
  */
@@ -619,6 +610,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	loadMode?: ToolLoadMode;
 	/** If true, tool may stage deferred changes that require explicit resolve/discard. */
 	deferrable?: boolean;
+	/** Whether this tool can read `skill://` instruction content. */
+	readsSkillUris?: boolean;
 	/** Tool approval tier. Defaults to `"exec"` when omitted.
 	 *  `"read"`: read-only operations. `"write"`: mutations. `"exec"`: code execution. */
 	approval?: ToolApproval;
@@ -629,6 +622,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** Previous public name when a rename changed minting. Forwarded through
+	 *  RegisteredToolAdapter so approval falls back to legacy `deny`/`prompt`. */
+	legacyName?: string;
+	/** Optional environment hook applied when the interactive user shell invokes this tool's shell surface. */
+	shellEnv?: ToolShellEnvironmentHook;
+	/** Authoritative originating file for a discovered custom-tool module. */
+	sourcePath?: string;
 	/** Execute the tool. */
 	execute(
 		toolCallId: string,
@@ -738,10 +738,12 @@ export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
 	type: "after_provider_response";
 }
 
-/** Fired after user submits prompt but before agent loop. */
+/** Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider. */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
+	/** Already-transformed text; queued batches join user messages with two newlines, excluding agent companions. */
 	prompt: string;
+	/** Already-normalized user images in delivery order. */
 	images?: ImageContent[];
 	systemPrompt: string[];
 }
@@ -771,6 +773,7 @@ export interface MessageUpdateEvent {
 /**
  * Fired when a message ends. Notification-only: the message is a detached
  * snapshot, so in-place changes do not rewrite agent or provider context.
+ * Persistence and subscriber delivery do not wait for this handler to finish.
  */
 export interface MessageEndEvent {
 	type: "message_end";
@@ -1126,7 +1129,7 @@ export type { ToolResultEventResult } from "../shared-events";
 
 export interface BeforeAgentStartEventResult {
 	message?: CustomMessagePayload;
-	/** Replace the system prompt for this turn. If multiple extensions return this, they are chained. */
+	/** Replace policy for the next request and its continuations, until the next preparation. Extensions chain in order. */
 	systemPrompt?: string[];
 }
 
@@ -1141,28 +1144,6 @@ export type {
 // ============================================================================
 // Message Rendering
 // ============================================================================
-
-export interface MessageRenderOptions {
-	expanded: boolean;
-}
-
-export type MessageRenderer<T = unknown> = (
-	message: CustomMessage<T>,
-	options: MessageRenderOptions,
-	theme: Theme,
-) => Component | undefined;
-
-export interface AssistantThinkingRenderContext {
-	contentIndex: number;
-	thinkingIndex: number;
-	text: string;
-	requestRender(): void;
-}
-
-export type AssistantThinkingRenderer = (
-	context: AssistantThinkingRenderContext,
-	theme: Theme,
-) => Component | undefined;
 
 // ============================================================================
 // Command Registration
@@ -1408,17 +1389,20 @@ export interface ExtensionAPI {
 	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
 	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules
 	 * an internal continuation that consumes the message on the next turn.
+	 *
+	 * `deliverAs: "aside"` injects the message at the next agent step boundary without interrupting
+	 * the in-flight tool batch; when the session is idle it starts a turn regardless of `triggerTurn`
+	 * (plan mode folds it into context instead).
 	 */
 	sendMessage<T = unknown>(
 		message: CustomMessagePayload<T>,
-		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 	): void;
 
-	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set. */
-	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp" },
-	): void;
+	/** Send a user prompt: idle starts a turn; streaming queues as steer unless deliverAs is set.
+	 *  `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
+	 *  batch while streaming; idle still starts a turn. */
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -1555,7 +1539,8 @@ export interface ProviderConfig {
 	 * Async factory that fetches the live model list from the provider endpoint.
 	 * Runs through the same SQLite model-cache as built-in providers (keyed by
 	 * provider name, default 24 h TTL). Receives the resolved API key (undefined
-	 * when unauthenticated). Mutually exclusive with `models`.
+	 * when unauthenticated). When combined with `models`, the static models remain as fallbacks
+	 * alongside the live catalog.
 	 */
 	fetchDynamicModels?: (apiKey: string | undefined) => Promise<readonly ProviderModelConfig[]>;
 }
@@ -1582,6 +1567,8 @@ export interface ProviderModelConfig {
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
+	/** Whether Codex requests should prefer WebSocket transport. */
+	preferWebsockets?: boolean;
 	/** Custom headers for this model. */
 	headers?: Record<string, string>;
 	/** OpenAI compatibility settings. */
@@ -1598,6 +1585,13 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = unknown> {
 	definition: ToolDefinition<TParams, TDetails>;
 	extensionPath: string;
+	/**
+	 * Upstream-shaped provenance mirroring {@link SourceInfo}. Extensions authored
+	 * against `@earendil-works/pi-coding-agent` — whose registered tools expose
+	 * `sourceInfo` — read `sourceInfo.path` off `getAllRegisteredTools()` entries,
+	 * so it carries the same value `SessionTools.getAllToolInfos()` synthesizes.
+	 */
+	sourceInfo: SourceInfo;
 }
 
 /** Internal observer invoked when an already-loaded extension registers or replaces a tool. */
@@ -1626,13 +1620,17 @@ export type SendMessageHandler = <T = unknown>(
 	 * `deliverAs: "nextTurn"` queues hidden custom context for the next turn.
 	 * When paired with `triggerTurn: true` during prompt teardown, the session schedules
 	 * an internal continuation without surfacing the message in the editable pending queue.
+	 * `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight
+	 * tool batch; idle starts a turn regardless of `triggerTurn` (plan mode folds into context).
 	 */
-	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" | "aside" },
 ) => void;
 
+/** `deliverAs: "aside"` injects at the next step boundary without interrupting the in-flight tool
+ *  batch while streaming; idle still starts a turn. */
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
-	options?: { deliverAs?: "steer" | "followUp" },
+	options?: SendUserMessageOptions,
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
@@ -1736,11 +1734,25 @@ export interface Extension {
 	shortcuts: Map<KeyId, ExtensionShortcut>;
 }
 
+/**
+ * Imported extension factory detached from any session runtime. The same
+ * prepared module may be rebound to multiple session-scoped ExtensionAPI
+ * instances without evaluating its module graph again.
+ */
+export interface PreparedExtension {
+	path: string;
+	resolvedPath: string;
+	factory: ExtensionFactory | null;
+	error: string | null;
+}
+
 /** Result of loading extensions. */
 export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
 	runtime: ExtensionRuntime;
+	/** Session-independent imported factories safe to rebind in child sessions. */
+	preparedExtensions?: PreparedExtension[];
 }
 
 // ============================================================================

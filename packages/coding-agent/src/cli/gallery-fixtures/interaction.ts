@@ -2,6 +2,35 @@
 import type { GalleryFixture } from "./types";
 
 export const interactionFixtures: Record<string, GalleryFixture> = {
+	// The resolution devices: one `reason` decides the latest staged proposal.
+	// The details carry the decision only; the proposal's own label is the
+	// staging tool's, so the renderer falls back to `pending action`.
+	resolve: {
+		streamingArgs: { action: "apply", reason: "The rename touches only" },
+		args: { action: "apply", reason: "The rename touches only tokens.ts and matches the request." },
+		result: {
+			content: [{ type: "text", text: "Applied the staged proposal." }],
+			details: { action: "apply", reason: "The rename touches only tokens.ts and matches the request." },
+		},
+		errorResult: {
+			content: [{ type: "text", text: "Error: the staged proposal no longer applies cleanly" }],
+			isError: true,
+			details: { action: "apply", reason: "The rename touches only tokens.ts and matches the request." },
+		},
+	},
+	reject: {
+		streamingArgs: { action: "reject", reason: "The patch would also" },
+		args: { action: "reject", reason: "The patch would also delete the migration script." },
+		result: {
+			content: [{ type: "text", text: "Rejected the staged proposal." }],
+			details: { action: "reject", reason: "The patch would also delete the migration script." },
+		},
+		errorResult: {
+			content: [{ type: "text", text: "Error: no staged proposal is pending" }],
+			isError: true,
+			details: { action: "reject", reason: "The patch would also delete the migration script." },
+		},
+	},
 	todo: {
 		label: "Todo",
 		streamingArgs: {

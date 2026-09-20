@@ -183,7 +183,7 @@ pub fn iso_is_unavailable_error(message: napi::JsString) -> Result<bool> {
 		|| message.contains(ISO_UNAVAILABLE_WITH_LEADING_SPACE))
 }
 
-const fn to_napi_kind(kind: BackendKind) -> IsoBackendKind {
+pub(crate) const fn to_napi_kind(kind: BackendKind) -> IsoBackendKind {
 	match kind {
 		BackendKind::Apfs => IsoBackendKind::Apfs,
 		BackendKind::Btrfs => IsoBackendKind::Btrfs,
@@ -196,7 +196,7 @@ const fn to_napi_kind(kind: BackendKind) -> IsoBackendKind {
 	}
 }
 
-const fn from_napi_kind(kind: IsoBackendKind) -> BackendKind {
+pub(crate) const fn from_napi_kind(kind: IsoBackendKind) -> BackendKind {
 	match kind {
 		IsoBackendKind::Apfs => BackendKind::Apfs,
 		IsoBackendKind::Btrfs => BackendKind::Btrfs,

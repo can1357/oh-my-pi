@@ -11,6 +11,7 @@ const RIGHT_CAP = "▌";
 /** One-row filled field with accent caps. */
 export const fieldComposerStyle: ComposerStyle = {
 	id: "field",
+	filledSurface: true,
 	sideBorders: true,
 	verticalChrome: 0,
 	statusAttachment: "none",

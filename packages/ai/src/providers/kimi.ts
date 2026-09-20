@@ -21,7 +21,7 @@ import {
 export type KimiApiFormat = OpenAIAnthropicApiFormat;
 
 export interface KimiOptions extends OpenAIAnthropicShimOptions {
-	/** Explicit API format override. Defaults to the model's discovered protocol. */
+	/** Explicit API format override. Defaults to the model's resolved protocol policy. */
 	format?: KimiApiFormat;
 }
 
@@ -34,9 +34,13 @@ export function streamKimi(
 	context: Context,
 	options?: KimiOptions,
 ): AssistantMessageEventStream {
+	const defaultFormat = model.compat.kimiApiFormat ?? options?.format;
+	if (defaultFormat === undefined) {
+		throw new Error(`Kimi Code model ${model.id} has no resolved API format`);
+	}
 	return streamOpenAIAnthropicShim(model, context, options, {
 		anthropicBaseUrl: model.baseUrl.replace(/\/v1\/?$/, ""),
-		defaultFormat: model.compat.kimiApiFormat ?? "anthropic",
+		defaultFormat,
 		anthropicThinkingMode: model.compat.thinkingFormat === "kimi" ? "anthropic-adaptive" : undefined,
 		forwardCacheOptions: true,
 		extraHeaders: getKimiCommonHeaders,

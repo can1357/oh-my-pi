@@ -1,0 +1,9 @@
+auth "huggingface" {
+	name "Hugging Face Inference"
+	login "api-key" {
+		auth-url "https://huggingface.co/settings/tokens/new?ownUserPermissions=inference.serverless.write&tokenType=fineGrained"
+		instructions "Create/copy a token with Make calls to Inference Providers permission (usable as HUGGINGFACE_HUB_TOKEN or HF_TOKEN)"
+		prompt "Paste your Hugging Face token (HUGGINGFACE_HUB_TOKEN / HF_TOKEN)" placeholder="hf_..."
+		validate "chat-completions" label="Hugging Face" base-url="https://router.huggingface.co/v1" model="openai/gpt-oss-120b"
+	}
+}

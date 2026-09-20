@@ -1,0 +1,20 @@
+// Provider-wire compat for "google"; regenerated from the frozen census using deployment contract selectors.
+
+provider "google" {
+	default-model "gemini-3.1-pro-preview"
+	env "GEMINI_API_KEY"
+
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*latest" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "gemini-2.5-computer-use-preview-10-2025" "gemini-robotics-er-1.6-preview" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+}

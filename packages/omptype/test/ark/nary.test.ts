@@ -385,7 +385,6 @@ describe("merge", () => {
 
 		const T = type.merge(...types);
 
-		// biome-ignore lint/complexity/noBannedTypes: empty object type assertion test
 		const _36: Eq<typeof T.t, {}> = true;
 		expect(T.expression).toEqual("object");
 	});

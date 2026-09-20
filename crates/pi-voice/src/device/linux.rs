@@ -82,23 +82,28 @@ impl PulseApi {
 		let simple = open_library(c"libpulse-simple.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 		let pulse = open_library(c"libpulse.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
 
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_new = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleNew>(symbol(simple, c"pa_simple_new")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_free = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleFree>(symbol(simple, c"pa_simple_free")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_write = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleWrite>(symbol(simple, c"pa_simple_write")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let simple_read = unsafe {
 			std::mem::transmute::<*mut c_void, PaSimpleRead>(symbol(simple, c"pa_simple_read")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let strerror =
 			unsafe { std::mem::transmute::<*mut c_void, PaStrerror>(symbol(pulse, c"pa_strerror")?) };
 
@@ -106,8 +111,8 @@ impl PulseApi {
 	}
 
 	fn error(&self, code: c_int) -> String {
-		// SAFETY: pa_strerror accepts every PulseAudio error code and returns a static
-		// string.
+		// SAFETY: pa_strerror accepts every PulseAudio error code and returns a
+		// static string.
 		let message = unsafe { (self.strerror)(code) };
 		cstring_lossy(message, "unknown PulseAudio error")
 	}
@@ -143,42 +148,51 @@ impl AlsaApi {
 
 	fn load() -> Result<&'static Self, String> {
 		let library = open_library(c"libasound.so.2", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_open = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmOpen>(symbol(library, c"snd_pcm_open")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_set_params = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmSetParams>(symbol(
 				library,
 				c"snd_pcm_set_params",
 			)?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_writei = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmIo>(symbol(library, c"snd_pcm_writei")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_readi = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmIo>(symbol(library, c"snd_pcm_readi")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_recover = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmRecover>(symbol(library, c"snd_pcm_recover")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_wait = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmWait>(symbol(library, c"snd_pcm_wait")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_start = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmControl>(symbol(library, c"snd_pcm_start")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let pcm_close = unsafe {
 			std::mem::transmute::<*mut c_void, SndPcmControl>(symbol(library, c"snd_pcm_close")?)
 		};
-		// SAFETY: each symbol is resolved from the library defining this exact C API.
+		// SAFETY: each symbol is resolved from the library defining this exact C
+		// API.
 		let strerror = unsafe {
 			std::mem::transmute::<*mut c_void, SndStrerror>(symbol(library, c"snd_strerror")?)
 		};
@@ -197,7 +211,8 @@ impl AlsaApi {
 	}
 
 	fn error(&self, code: c_int) -> String {
-		// SAFETY: snd_strerror accepts ALSA status codes and returns a static string.
+		// SAFETY: snd_strerror accepts ALSA status codes and returns a static
+		// string.
 		let message = unsafe { (self.strerror)(code) };
 		cstring_lossy(message, "unknown ALSA error")
 	}
@@ -215,7 +230,8 @@ fn open_library(name: &CStr, flags: c_int) -> Result<*mut c_void, String> {
 }
 
 fn symbol(library: *mut c_void, name: &CStr) -> Result<*mut c_void, String> {
-	// SAFETY: library is a live handle deliberately retained for process lifetime.
+	// SAFETY: library is a live handle deliberately retained for process
+	// lifetime.
 	unsafe { libc::dlerror() };
 	// SAFETY: library is live and name is a valid NUL-terminated symbol name.
 	let address = unsafe { libc::dlsym(library, name.as_ptr()) };
@@ -233,7 +249,8 @@ fn symbol(library: *mut c_void, name: &CStr) -> Result<*mut c_void, String> {
 }
 
 fn dlerror() -> String {
-	// SAFETY: dlerror returns either null or a thread-local NUL-terminated string.
+	// SAFETY: dlerror returns either null or a thread-local NUL-terminated
+	// string.
 	let error = unsafe { libc::dlerror() };
 	cstring_lossy(error, "unknown dynamic-loader error")
 }
@@ -242,8 +259,8 @@ fn cstring_lossy(value: *const c_char, fallback: &str) -> String {
 	if value.is_null() {
 		fallback.to_owned()
 	} else {
-		// SAFETY: callers only pass pointers returned by APIs specifying NUL-terminated
-		// strings.
+		// SAFETY: callers only pass pointers returned by APIs specifying
+		// NUL-terminated strings.
 		unsafe { CStr::from_ptr(value) }
 			.to_string_lossy()
 			.into_owned()
@@ -335,8 +352,8 @@ impl AlsaStream {
 			)));
 		}
 		let stream = Self(pcm);
-		// SAFETY: pcm is an open handle owned by this thread and all enum values match
-		// ALSA.
+		// SAFETY: pcm is an open handle owned by this thread and all enum values
+		// match ALSA.
 		let status = unsafe {
 			(api.pcm_set_params)(
 				stream.0,
@@ -375,22 +392,111 @@ impl AlsaOpenError {
 	}
 }
 
-fn pulse_attr(config: DeviceConfig) -> Result<PaBufferAttr, String> {
-	let period_bytes = config
-		.period_samples()
-		.checked_mul(size_of::<f32>())
-		.and_then(|value| u32::try_from(value).ok())
-		.ok_or_else(|| "audio period is too large".to_owned())?;
-	let target_bytes = period_bytes
-		.checked_mul(3)
-		.ok_or_else(|| "audio period is too large".to_owned())?;
-	Ok(PaBufferAttr {
-		maxlength: target_bytes,
-		tlength:   period_bytes,
-		prebuf:    u32::MAX,
-		minreq:    u32::MAX,
-		fragsize:  period_bytes,
+/// Network-safe playback target when `PULSE_SERVER` points at a remote
+/// server: deep enough to ride SSH/VPN jitter, shallow enough for
+/// conversation-grade latency.
+const REMOTE_PULSE_LATENCY_MS: u32 = 200;
+
+/// Latency target for pulse streams. `PULSE_LATENCY_MSEC` wins when set to a
+/// positive integer (the `pacat`/`paplay` convention); otherwise a remote
+/// `PULSE_SERVER` gets the network-safe default and local servers keep the
+/// low-latency callback period.
+fn pulse_latency_ms(period_ms: u32) -> u32 {
+	let latency_override = std::env::var("PULSE_LATENCY_MSEC")
+		.ok()
+		.and_then(|raw| parse_latency_msec(&raw));
+	let pulse_server_configured = latency_override.is_none()
+		&& std::env::var_os("PULSE_SERVER").is_some_and(|server| !server.is_empty());
+	select_pulse_latency_ms(period_ms, latency_override, pulse_server_configured)
+}
+
+fn select_pulse_latency_ms(
+	period_ms: u32,
+	latency_override: Option<u32>,
+	pulse_server_configured: bool,
+) -> u32 {
+	latency_override
+		.unwrap_or(if pulse_server_configured {
+			REMOTE_PULSE_LATENCY_MS
+		} else {
+			period_ms
+		})
+		.max(period_ms)
+}
+
+fn parse_latency_msec(raw: &str) -> Option<u32> {
+	raw.trim().parse::<u32>().ok().filter(|ms| *ms > 0)
+}
+
+/// Bytes of mono `f32` covering `ms` at the stream's logical rate (never zero).
+fn pulse_bytes(config: DeviceConfig, ms: u32) -> Result<u32, String> {
+	(config.sample_rate as usize)
+		.checked_mul(ms as usize)
+		.map(|samples| (samples / 1000).max(1))
+		.and_then(|samples| samples.checked_mul(size_of::<f32>()))
+		.and_then(|bytes| u32::try_from(bytes).ok())
+		.ok_or_else(|| "audio buffer is too large".to_owned())
+}
+
+/// Playback periods `pulse_attr` keeps queued server-side (`maxlength`) for
+/// the chosen latency target. `playback_drain_periods` mirrors this so the
+/// drain-callback grace period always covers the real backlog depth.
+const PULSE_BACKLOG_PERIODS: u32 = 3;
+
+/// Server-side buffer geometry for one `pa_simple` stream.
+///
+/// Local servers keep period-sized buffers: the sink holds one callback
+/// period and requests the next, minimizing mouth-to-ear latency. When the
+/// server is remote every refill request crosses the network, so a
+/// period-sized target underruns into staccato audio; `latency_ms` widens the
+/// playback target and the capture backlog instead, trading fixed delay for
+/// jitter tolerance. Fields the server ignores for a direction stay at the
+/// "server default" sentinel.
+fn pulse_attr(
+	config: DeviceConfig,
+	direction: c_int,
+	latency_ms: u32,
+) -> Result<PaBufferAttr, String> {
+	let period_bytes = pulse_bytes(config, config.period_ms)?;
+	let latency_bytes = pulse_bytes(config, latency_ms.max(config.period_ms))?;
+	let backlog_bytes = latency_bytes
+		.checked_mul(PULSE_BACKLOG_PERIODS)
+		.ok_or_else(|| "audio buffer is too large".to_owned())?;
+	Ok(if direction == PA_STREAM_RECORD {
+		PaBufferAttr {
+			maxlength: backlog_bytes,
+			tlength:   u32::MAX,
+			prebuf:    u32::MAX,
+			minreq:    u32::MAX,
+			fragsize:  period_bytes,
+		}
+	} else {
+		PaBufferAttr {
+			maxlength: backlog_bytes,
+			tlength:   latency_bytes,
+			prebuf:    u32::MAX,
+			minreq:    u32::MAX,
+			fragsize:  u32::MAX,
+		}
 	})
+}
+
+/// Periods `PulseAudio` may hold queued server-side for a playback stream
+/// opened with this config, before a fill callback observing no new data
+/// reflects genuine drain rather than an in-flight refill. Mirrors the
+/// `PULSE_BACKLOG_PERIODS` multiplier `pulse_attr` applies to the same
+/// latency target. ALSA (the fallback backend when `PulseAudio` is
+/// unavailable) never widens beyond the base period, so this stays a safe
+/// upper bound even if the stream falls back.
+pub(crate) fn playback_drain_periods(config: DeviceConfig) -> u32 {
+	drain_periods_for_latency(config.period_ms, pulse_latency_ms(config.period_ms))
+}
+
+fn drain_periods_for_latency(period_ms: u32, latency_ms: u32) -> u32 {
+	latency_ms
+		.max(period_ms)
+		.saturating_mul(PULSE_BACKLOG_PERIODS)
+		.div_ceil(period_ms.max(1))
 }
 
 fn remember_error(slot: &Mutex<Option<String>>, error: String) {
@@ -439,7 +545,8 @@ fn pulse_playback_loop(
 			break;
 		}
 		let mut error = 0;
-		// SAFETY: stream is open and buffer contains exactly the supplied byte count.
+		// SAFETY: stream is open and buffer contains exactly the supplied byte
+		// count.
 		let status = unsafe {
 			(api.simple_write)(
 				stream.0,
@@ -470,8 +577,8 @@ fn pulse_capture_loop(
 	let mut buffer = vec![0.0_f32; samples];
 	while !stop.load(Ordering::Acquire) {
 		let mut error = 0;
-		// SAFETY: stream is open and buffer has writable storage for the supplied byte
-		// count.
+		// SAFETY: stream is open and buffer has writable storage for the supplied
+		// byte count.
 		let status = unsafe {
 			(api.simple_read)(
 				stream.0,
@@ -550,8 +657,8 @@ fn alsa_playback_loop(
 					"audio period exceeds ALSA frame range".to_owned(),
 				);
 			};
-			// SAFETY: stream is open and the remaining buffer contains frames of mono f32
-			// audio.
+			// SAFETY: stream is open and the remaining buffer contains frames of
+			// mono f32 audio.
 			let status = unsafe {
 				(api.pcm_writei)(stream.0, buffer.as_ptr().add(offset).cast_mut().cast(), frames)
 			};
@@ -579,7 +686,8 @@ fn alsa_playback_loop(
 					);
 				};
 				if written > samples - offset {
-					// SAFETY: stream is still open and exclusively owned by this thread.
+					// SAFETY: stream is still open and exclusively owned by this
+					// thread.
 					unsafe { (api.pcm_close)(stream.0) };
 					return Err(format!(
 						"ALSA wrote {written} frames after receiving {}",
@@ -613,8 +721,8 @@ fn alsa_capture_loop(
 		);
 	};
 	while !stop.load(Ordering::Acquire) {
-		// SAFETY: stream is open and buffer has writable storage for frames mono f32
-		// frames.
+		// SAFETY: stream is open and buffer has writable storage for frames mono
+		// f32 frames.
 		let status = unsafe { (api.pcm_readi)(stream.0, buffer.as_mut_ptr().cast(), frames) };
 		if status == -c_long::from(libc::EAGAIN) {
 			if let Err(error) = wait_for_alsa(api, stream, timeout_ms) {
@@ -644,7 +752,8 @@ fn alsa_capture_loop(
 				);
 			};
 			if captured > samples {
-				// SAFETY: stream is still open and exclusively owned by this thread.
+				// SAFETY: stream is still open and exclusively owned by this
+				// thread.
 				unsafe { (api.pcm_close)(stream.0) };
 				return Err(format!("ALSA captured {captured} frames into a {samples}-frame buffer"));
 			}
@@ -705,8 +814,9 @@ fn finish(
 				.map_err(|_| "audio worker thread panicked".to_owned())?;
 		} else {
 			// A pathological PulseAudio server can stall pa_simple I/O forever.
-			// Detaching keeps stop/Drop bounded; the worker owns and eventually frees
-			// the handle if the server ever unblocks. The delivery gate prevents callbacks.
+			// Detaching keeps stop/Drop bounded; the worker owns and eventually
+			// frees the handle if the server ever unblocks. The delivery gate
+			// prevents callbacks.
 			drop(handle);
 		}
 	}
@@ -729,7 +839,7 @@ impl PlaybackDevice {
 	/// Opens the default playback device and starts its worker thread.
 	pub fn start(config: DeviceConfig, mut fill: PlaybackFill) -> VoiceResult<Self> {
 		let samples = config.period_samples();
-		let attr = pulse_attr(config)?;
+		let attr = pulse_attr(config, PA_STREAM_PLAYBACK, pulse_latency_ms(config.period_ms))?;
 		let timeout_ms = c_int::try_from(config.period_ms)
 			.unwrap_or(c_int::MAX)
 			.max(1);
@@ -829,7 +939,7 @@ impl CaptureDevice {
 	/// Opens the default capture device and starts its worker thread.
 	pub fn start(config: DeviceConfig, mut sink: CaptureSink) -> VoiceResult<Self> {
 		let samples = config.period_samples();
-		let attr = pulse_attr(config)?;
+		let attr = pulse_attr(config, PA_STREAM_RECORD, pulse_latency_ms(config.period_ms))?;
 		let timeout_ms = c_int::try_from(config.period_ms)
 			.unwrap_or(c_int::MAX)
 			.max(1);
@@ -915,5 +1025,72 @@ impl CaptureDevice {
 impl Drop for CaptureDevice {
 	fn drop(&mut self) {
 		let _ = self.stop();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn config(sample_rate: u32, period_ms: u32) -> DeviceConfig {
+		DeviceConfig { sample_rate, period_ms }
+	}
+
+	/// Regression guard: the remote-server support must not change the local
+	/// low-latency geometry (period-sized target, 3x cap).
+	#[test]
+	fn local_playback_keeps_period_sized_target() {
+		let attr = pulse_attr(config(24_000, 20), PA_STREAM_PLAYBACK, 20).unwrap();
+		assert_eq!(attr.tlength, 1920);
+		assert_eq!(attr.maxlength, 5760);
+	}
+
+	/// A remote latency target must deepen the playback buffer, or the sink
+	/// starves on network round trips and audio arrives as staccato bursts.
+	#[test]
+	fn remote_playback_widens_target_to_latency() {
+		let attr = pulse_attr(config(24_000, 20), PA_STREAM_PLAYBACK, 200).unwrap();
+		assert_eq!(attr.tlength, 19_200);
+		assert_eq!(attr.maxlength, 57_600);
+	}
+
+	/// Capture keeps its callback cadence (fragsize) while the backlog widens
+	/// to absorb network delivery bursts instead of dropping samples.
+	#[test]
+	fn remote_capture_keeps_cadence_and_widens_backlog() {
+		let attr = pulse_attr(config(16_000, 20), PA_STREAM_RECORD, 200).unwrap();
+		assert_eq!(attr.fragsize, 1280);
+		assert_eq!(attr.maxlength, 38_400);
+		assert_eq!(attr.tlength, u32::MAX);
+	}
+
+	/// `PULSE_LATENCY_MSEC` accepts only positive integers; anything else
+	/// falls through to the computed default instead of misconfiguring the
+	/// stream.
+	#[test]
+	fn latency_override_parses_positive_integers_only() {
+		assert_eq!(parse_latency_msec(" 150 "), Some(150));
+		assert_eq!(parse_latency_msec("0"), None);
+		assert_eq!(parse_latency_msec("abc"), None);
+	}
+	/// The environment-derived latency policy keeps local streams at the
+	/// callback period, widens explicit servers, and gives a valid override
+	/// precedence without allowing it below the callback period.
+	#[test]
+	fn latency_selection_obeys_local_remote_and_override_precedence() {
+		assert_eq!(select_pulse_latency_ms(50, None, false), 50);
+		assert_eq!(select_pulse_latency_ms(50, None, true), 200);
+		assert_eq!(select_pulse_latency_ms(50, Some(150), true), 150);
+		assert_eq!(select_pulse_latency_ms(50, Some(10), true), 50);
+	}
+
+	/// Regression guard: drain accounting must scale with the same
+	/// `PULSE_BACKLOG_PERIODS` multiplier `pulse_attr` uses for `maxlength`,
+	/// or a widened remote/latency-override target can be declared drained
+	/// while queued audio still awaits an OS-side flush.
+	#[test]
+	fn drain_periods_scale_with_widened_latency() {
+		assert_eq!(drain_periods_for_latency(20, 20), 3);
+		assert_eq!(drain_periods_for_latency(20, 200), 30);
 	}
 }

@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseCodexRateLimitHeaders } from "@oh-my-pi/pi-ai";
+import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import {
 	AuthBrokerClient,
 	RemoteAuthCredentialStore,
@@ -57,6 +58,20 @@ function readLegacyCodexSharedBlock(dbPath: string, credentialId: number): numbe
 				"SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' AND block_scope = 'shared' AND blocked_until_ms > ?",
 			)
 			.get(credentialId, Date.now()) as { blocked_until_ms?: number } | undefined;
+		return row?.blocked_until_ms;
+	} finally {
+		db.close();
+	}
+}
+
+function readCodexBlock(dbPath: string, credentialId: number, blockScope: string): number | undefined {
+	const db = new Database(dbPath, { readonly: true });
+	try {
+		const row = db
+			.prepare(
+				"SELECT blocked_until_ms FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = 'openai-codex:oauth' AND block_scope = ? AND blocked_until_ms > ?",
+			)
+			.get(credentialId, blockScope, Date.now()) as { blocked_until_ms?: number } | undefined;
 		return row?.blocked_until_ms;
 	} finally {
 		db.close();
@@ -212,15 +227,82 @@ function createCredential(accountId: string, email: string): OAuthCredentials {
 	};
 }
 
+/**
+ * Report parsed from a real `/wham/usage` payload of an account whose weekly
+ * plan window is fully spent. `credits` decides whether the account can still
+ * serve the request out of its credit balance (overage) or is truly finished.
+ */
+async function fetchCodexPlanExhaustedReport(
+	accountId: string,
+	credits: Record<string, unknown>,
+): Promise<UsageReport> {
+	const payload = {
+		plan_type: "pro",
+		rate_limit: {
+			allowed: false,
+			limit_reached: true,
+			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			secondary_window: null,
+		},
+		// Untouched side meters, as the live payload carries them: the Spark and
+		// reserve meters are separate allowances the spent chat window does not
+		// gate, and each block scope heals against its own meter.
+		additional_rate_limits: [
+			{
+				limit_name: "GPT-5.3-Codex-Spark",
+				metered_feature: "codex_bengalfox",
+				rate_limit: {
+					allowed: true,
+					limit_reached: false,
+					primary_window: { used_percent: 0, limit_window_seconds: 18000, reset_at: 2_000_500_000 },
+					secondary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+				},
+			},
+			{
+				limit_name: "gpt-reserve",
+				metered_feature: "base_model_inference",
+				rate_limit: {
+					allowed: true,
+					limit_reached: false,
+					primary_window: { used_percent: 0, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+					secondary_window: null,
+				},
+			},
+		],
+		credits,
+		spend_control: { reached: false },
+	};
+	const report = await openaiCodexUsageProvider.fetchUsage(
+		{ provider: "openai-codex", credential: { type: "oauth", accessToken: "access-token", accountId } },
+		{
+			fetch: (async () =>
+				new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				})) as unknown as typeof fetch,
+		},
+	);
+	if (!report) throw new Error(`expected a usage report for ${accountId}`);
+	return report;
+}
+
+const CODEX_CREDIT_BALANCE = { has_credits: true, overage_limit_reached: false, balance: "489.25" };
+const CODEX_NO_BALANCE = { has_credits: false, balance: "0" };
+
 async function countApiKeySelections(
 	authStorage: AuthStorage,
 	provider: string,
 	sessionPrefix: string,
 	samples = 150,
+	modelId?: string,
 ): Promise<Map<string, number>> {
 	const counts = new Map<string, number>();
 	for (let index = 0; index < samples; index += 1) {
-		const apiKey = await authStorage.getApiKey(provider, `${sessionPrefix}-${index}`);
+		const apiKey = await authStorage.getApiKey(
+			provider,
+			`${sessionPrefix}-${index}`,
+			modelId === undefined ? undefined : { modelId },
+		);
 		if (!apiKey) continue;
 		counts.set(apiKey, (counts.get(apiKey) ?? 0) + 1);
 	}
@@ -389,6 +471,139 @@ describe("AuthStorage codex oauth ranking", () => {
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "weighted-codex-zero");
 		expectExclusivePreference(counts, "api-acct-zero", "api-acct-progress");
 	});
+	test("preserves the uncapped-Pro priority signal when only the secondary window is reported", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-uncapped-pro", "uncapped-pro@example.com") },
+			{ type: "oauth", ...createCredential("acct-capped", "capped@example.com") },
+		]);
+
+		const uncapped = createCodexUsageReport({
+			accountId: "acct-uncapped-pro",
+			primary: { usedFraction: 0, resetInMs: FIVE_HOUR_MS },
+			secondary: { usedFraction: 0.9, resetInMs: WEEK_MS },
+			metadata: { planType: "pro", allowed: true, limitReached: false },
+		});
+		uncapped.limits = uncapped.limits.filter(limit => limit.id !== "openai-codex:primary");
+		usageByAccount.set("acct-uncapped-pro", uncapped);
+		usageByAccount.set(
+			"acct-capped",
+			createCodexUsageReport({
+				accountId: "acct-capped",
+				primary: { usedFraction: 0, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.5, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "uncapped-pro");
+		expectExclusivePreference(counts, "api-acct-uncapped-pro", "api-acct-capped");
+	});
+
+	test("does not boost incomplete or differently-scoped Codex usage over measured quota", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-status", "status@example.com") },
+			{ type: "oauth", ...createCredential("acct-chat", "chat@example.com") },
+			{ type: "oauth", ...createCredential("acct-chat-only", "chat-only@example.com") },
+			{ type: "oauth", ...createCredential("acct-spark", "spark@example.com") },
+		]);
+
+		usageByAccount.set("acct-status", {
+			provider: "openai-codex",
+			fetchedAt: Date.now(),
+			limits: [],
+			metadata: { accountId: "acct-status", allowed: true, limitReached: false },
+		});
+		usageByAccount.set(
+			"acct-chat",
+			createCodexUsageReport({
+				accountId: "acct-chat",
+				primary: { usedFraction: 0.8, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.8, resetInMs: WEEK_MS },
+			}),
+		);
+		const sparkOnlyReport = addSparkUsage(
+			createCodexUsageReport({
+				accountId: "acct-spark",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+			0.1,
+			0.1,
+		);
+		sparkOnlyReport.limits = sparkOnlyReport.limits.filter(limit => limit.id.includes(":spark:"));
+		usageByAccount.set("acct-spark", sparkOnlyReport);
+		const otherMeterReport = addSparkUsage(
+			createCodexUsageReport({
+				accountId: "acct-chat-only",
+				primary: { usedFraction: 0.9, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.9, resetInMs: WEEK_MS },
+			}),
+			0.9,
+			0.9,
+		);
+		otherMeterReport.limits = otherMeterReport.limits.filter(limit => limit.id.includes(":spark:"));
+		usageByAccount.set("acct-chat-only", otherMeterReport);
+
+		const chatCounts = await countApiKeySelections(authStorage, "openai-codex", "incomplete-chat");
+		expectExclusivePreference(chatCounts, "api-acct-chat", "api-acct-status");
+		expect(countFor(chatCounts, "api-acct-spark")).toBe(0);
+		expect(countFor(chatCounts, "api-acct-chat-only")).toBe(0);
+
+		const sparkCounts = await countApiKeySelections(
+			authStorage,
+			"openai-codex",
+			"incomplete-spark",
+			150,
+			"gpt-5.3-codex-spark",
+		);
+		expectExclusivePreference(sparkCounts, "api-acct-spark", "api-acct-chat-only");
+	});
+
+	test("does not treat a secondary-only Spark report as an uncapped primary meter", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-incomplete", "incomplete@example.com") },
+			{ type: "oauth", ...createCredential("acct-measured", "measured@example.com") },
+		]);
+
+		const incomplete = addSparkUsage(
+			createCodexUsageReport({
+				accountId: "acct-incomplete",
+				primary: { usedFraction: 0.9, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.9, resetInMs: WEEK_MS },
+			}),
+			0.9,
+			0.9,
+		);
+		incomplete.limits = incomplete.limits.filter(limit => limit.id === "openai-codex:spark:secondary");
+		usageByAccount.set("acct-incomplete", incomplete);
+		usageByAccount.set(
+			"acct-measured",
+			addSparkUsage(
+				createCodexUsageReport({
+					accountId: "acct-measured",
+					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+				}),
+				0.1,
+				0.1,
+			),
+		);
+
+		const counts = await countApiKeySelections(
+			authStorage,
+			"openai-codex",
+			"incomplete-spark-primary",
+			150,
+			"gpt-5.3-codex-spark",
+		);
+		expectExclusivePreference(counts, "api-acct-measured", "api-acct-incomplete");
+	});
+
 	test("skips exhausted weekly account even when reset is near", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
@@ -2325,7 +2540,9 @@ describe("AuthStorage codex oauth ranking", () => {
 			...healthyHeaders,
 			"x-codex-secondary-used-percent": "100",
 		};
-		expect(authStorage.ingestUsageHeaders("openai-codex", exhaustedHeaders, { sessionId })).toBe(true);
+		expect(authStorage.ingestUsageHeaders("openai-codex", exhaustedHeaders, { sessionId, responseStatus: 429 })).toBe(
+			true,
+		);
 
 		// The next request for the same session must rotate to the sibling
 		// without a wire 429: the ingested snapshot blocks the sticky account.
@@ -2487,7 +2704,18 @@ describe("AuthStorage codex oauth ranking", () => {
 		["gpt-5.3-codex-spark", 1, 1, false, true, 0.06, 0.09, true, false, "chat"],
 	] as const)(
 		"reports %s healthy after splitting a legacy shared block when only its meter has headroom",
-		async (modelId, chatPrimary, chatSecondary, chatAllowed, chatLimitReached, sparkPrimary, sparkSecondary, sparkAllowed, sparkLimitReached, remainingBlockScope) => {
+		async (
+			modelId,
+			chatPrimary,
+			chatSecondary,
+			chatAllowed,
+			chatLimitReached,
+			sparkPrimary,
+			sparkSecondary,
+			sparkAllowed,
+			sparkLimitReached,
+			remainingBlockScope,
+		) => {
 			if (!authStorage || !store?.listCredentialBlocks) throw new Error("test setup failed");
 			await authStorage.set("openai-codex", [
 				{ type: "oauth", ...createCredential("acct-legacy-meter", "legacy-meter@example.com") },
@@ -2707,6 +2935,81 @@ describe("AuthStorage codex oauth ranking", () => {
 		});
 
 		expect(await authStorage.getApiKey("openai-codex", sessionId, { modelId })).toBe(`api-${siblingAccountId}`);
+	});
+
+	// Regression: a Pro account whose weekly plan window is spent keeps serving
+	// requests off its credit balance, but `/wham/usage` reports only the plan
+	// verdict (`allowed:false`/`limit_reached:true`/`used_percent:100`). Reading
+	// that as exhaustion re-blocked a usable account on every ranking pass and
+	// left an existing block unhealable until the weekly reset, so requests kept
+	// landing on a drained sibling and coming back `usage_limit_reached` while
+	// `codex` on the same login worked.
+	test("keeps serving a credit-funded account whose plan window is spent", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		usageByAccount.set("acct-credits", await fetchCodexPlanExhaustedReport("acct-credits", CODEX_CREDIT_BALANCE));
+		usageByAccount.set("acct-dry", await fetchCodexPlanExhaustedReport("acct-dry", CODEX_NO_BALANCE));
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-credits", "credits@example.com") },
+			{ type: "oauth", ...createCredential("acct-dry", "dry@example.com") },
+		]);
+		const creditRow = store
+			.listAuthCredentials("openai-codex")
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-credits");
+		const dryRow = store
+			.listAuthCredentials("openai-codex")
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-dry");
+		if (!creditRow || !dryRow) throw new Error("expected both credential rows");
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "codex-credit-overage");
+		expectExclusivePreference(counts, "api-acct-credits", "api-acct-dry");
+		expect(readCodexBlock(dbPath, creditRow.id, "chat")).toBeUndefined();
+
+		const sessionId = "codex-credit-overage-headers";
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("api-acct-credits");
+		expect(
+			authStorage.ingestUsageHeaders(
+				"openai-codex",
+				{
+					"x-codex-primary-used-percent": "100",
+					"x-codex-primary-window-minutes": String(7 * 24 * 60),
+					"x-codex-primary-reset-at": "2000500000",
+				},
+				{ sessionId, responseStatus: 200 },
+			),
+		).toBe(true);
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("api-acct-credits");
+		expect(readCodexBlock(dbPath, creditRow.id, "chat")).toBeUndefined();
+
+		// The genuinely drained sibling still gets blocked until its plan resets.
+		expect(readCodexBlock(dbPath, dryRow.id, "chat")).toBe(2_000_500_000_000);
+	});
+
+	test("heals a stale block on a credit-funded account whose plan window is spent", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		usageByAccount.set("acct-credits", await fetchCodexPlanExhaustedReport("acct-credits", CODEX_CREDIT_BALANCE));
+		usageByAccount.set("acct-dry", await fetchCodexPlanExhaustedReport("acct-dry", CODEX_NO_BALANCE));
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-credits", "credits@example.com") },
+			{ type: "oauth", ...createCredential("acct-dry", "dry@example.com") },
+		]);
+		const creditRow = store
+			.listAuthCredentials("openai-codex")
+			.find(row => row.credential.type === "oauth" && row.credential.accountId === "acct-credits");
+		if (!creditRow) throw new Error("expected the credit-funded credential row");
+		// Written straight into SQLite: a block persisted by the process that hit
+		// the plan limit carries no in-memory probe deadline here, and ageing the
+		// row past the usage-report TTL clears the persisted probe guard.
+		insertLegacyCodexSharedBlock(dbPath, creditRow.id, Date.now() + WEEK_MS);
+		ageCredentialBlockRows(dbPath);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "codex-credit-overage-heal");
+		expectExclusivePreference(counts, "api-acct-credits", "api-acct-dry");
+		expect(readCodexBlock(dbPath, creditRow.id, "chat")).toBeUndefined();
+		// The meter→shared delete trigger must take the legacy row with it, or a
+		// pre-meter reader would still see the account blocked.
+		expect(readLegacyCodexSharedBlock(dbPath, creditRow.id)).toBeUndefined();
 	});
 });
 

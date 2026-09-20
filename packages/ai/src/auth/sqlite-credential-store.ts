@@ -4,16 +4,18 @@
  * The public AuthCredentialStore interface remains in ../auth-storage so local
  * and remote stores share the same contract.
  */
-import { Database, type Statement } from "bun:sqlite";
+import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
+import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
 import {
 	getAgentDbPath,
 	getDbBusyTimeoutMs,
 	isSqliteBusyError,
 	isSqliteCorruptionError,
 	logger,
+	openSqliteDatabase,
 } from "@oh-my-pi/pi-utils";
 import type {
 	AuthCredential,
@@ -24,7 +26,6 @@ import type {
 	StoredAuthCredential,
 	StoredCredentialBlock,
 } from "../auth-storage";
-import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type {
@@ -215,10 +216,17 @@ function matchesReplacementCredential(
 	if (incoming.type === "api_key") {
 		if (existing.type !== "api_key") return false;
 		if (existing.key === incoming.key) return true;
-		if (provider !== "alibaba-token-plan") return false;
-		const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
-		const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
-		return existingToken !== undefined && existingToken === incomingToken;
+		if (provider === "alibaba-token-plan") {
+			const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
+			const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		if (provider === "cloudflare-ai-gateway") {
+			const existingToken = parseCloudflareAiGatewayCredential(existing.key)?.token;
+			const incomingToken = parseCloudflareAiGatewayCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		return false;
 	}
 	const incomingIdentifiers = extractOAuthCredentialIdentifiers(incoming);
 	const incomingIdentityKey = resolveProviderCredentialIdentityKey(provider, incomingIdentifiers);
@@ -501,6 +509,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 	}
 
+	/** Opens credential storage with bounded busy retries and one-shot corruption recovery. */
 	static async open(dbPath: string = getAgentDbPath()): Promise<SqliteAuthCredentialStore> {
 		const dir = path.dirname(dbPath);
 		const dirExists = await fs
@@ -511,23 +520,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			await fs.mkdir(dir, { recursive: true, mode: 0o700 });
 		}
 
-		// Concurrent omp startups can race against WAL recovery and the schema
-		// init's first lock-taking statement. Bun's default `busy_timeout` is 0,
-		// so retry the open on `SQLITE_BUSY` / `SQLITE_BUSY_RECOVERY` with bounded
-		// exponential backoff before surfacing the failure. See issue #2421.
-		const maxAttempts = 4;
-		const baseDelayMs = 100;
-		let lastBusyError: Error | undefined;
-		for (let attempt = 0; attempt < maxAttempts; attempt++) {
-			let db: Database | undefined;
-			try {
-				db = new Database(dbPath);
-				// Install the busy handler BEFORE the first lock-taking statement
-				// on this connection. The leases DDL below and the constructor's
-				// schema init both acquire locks during WAL recovery; without a
-				// non-zero `busy_timeout` they fail immediately with SQLITE_BUSY.
-				// See issue #2421.
-				SqliteAuthCredentialStore.#installBusyTimeout(db);
+		return openSqliteDatabase(
+			dbPath,
+			async db => {
 				try {
 					await fs.chmod(dbPath, 0o600);
 				} catch {
@@ -535,20 +530,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				}
 				SqliteAuthCredentialStore.#ensureAuthCredentialRefreshLeasesTable(db);
 				return new SqliteAuthCredentialStore(db);
-			} catch (err) {
-				db?.close();
-				if (!isSqliteBusyError(err)) {
-					throw err;
-				}
-				lastBusyError = err instanceof Error ? err : new Error(String(err));
-				if (attempt < maxAttempts - 1) {
-					await Bun.sleep(baseDelayMs * 2 ** attempt);
-				}
-			}
-		}
-		throw new AIError.ConfigurationError(
-			`Failed to open auth database at '${dbPath}' after ${maxAttempts} attempts: ${lastBusyError?.message}`,
-			{ cause: lastBusyError },
+			},
+			{ recoverCorruption: true },
 		);
 	}
 
@@ -622,6 +605,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				recorded_at INTEGER NOT NULL,
 				install_id TEXT NOT NULL,
+				app TEXT NOT NULL DEFAULT '',
 				provider TEXT NOT NULL,
 				model TEXT NOT NULL,
 				requests INTEGER NOT NULL,
@@ -634,6 +618,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			CREATE INDEX IF NOT EXISTS idx_client_usage_series ON client_usage(install_id, provider, model, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
 		`);
+		this.#ensureClientUsageAppColumn();
 
 		if (!this.#authCredentialsTableExists()) {
 			this.#createAuthCredentialsTable();
@@ -1739,6 +1724,18 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
+	/**
+	 * Add the `app` attribution column to `client_usage` tables created before
+	 * it existed. `CREATE TABLE IF NOT EXISTS` skips established broker DBs, so
+	 * the column arrives via ALTER; legacy rows keep the `''` (unlabeled) app.
+	 */
+	#ensureClientUsageAppColumn(): void {
+		const columns = this.#db.query("PRAGMA table_info(client_usage)").all() as Array<{ name: string }>;
+		if (!columns.some(column => column.name === "app")) {
+			this.#db.run("ALTER TABLE client_usage ADD COLUMN app TEXT NOT NULL DEFAULT ''");
+		}
+	}
+
 	recordClientUsage(report: ClientUsageReport): void {
 		const now = Date.now();
 		this.#db
@@ -1747,9 +1744,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				 ON CONFLICT(install_id) DO UPDATE SET hostname = COALESCE(excluded.hostname, hostname), last_seen = excluded.last_seen`,
 			)
 			.run(report.installId, report.hostname ?? null, now, now);
+		const app = report.app?.trim() ?? "";
 		const findBucket = this.#db.query(
 			`SELECT id FROM client_usage
-			 WHERE install_id = ? AND provider = ? AND model = ? AND recorded_at >= ?
+			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND recorded_at >= ?
 			 ORDER BY recorded_at DESC LIMIT 1`,
 		);
 		const merge = this.#db.query(
@@ -1758,14 +1756,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				cache_write_tokens = cache_write_tokens + ?, cost_usd = cost_usd + ? WHERE id = ?`,
 		);
 		const insert = this.#db.query(
-			`INSERT INTO client_usage (recorded_at, install_id, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO client_usage (recorded_at, install_id, app, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		for (const entry of report.entries) {
 			// Merge into the newest row of the same (install, provider, model)
 			// bucket so 10s client flushes don't accrete one row apiece forever.
 			const bucketFloor = entry.at - CLIENT_USAGE_BUCKET_MS;
-			const existing = findBucket.get(report.installId, entry.provider, entry.model, bucketFloor) as {
+			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor) as {
 				id: number;
 			} | null;
 			if (existing) {
@@ -1784,6 +1782,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			insert.run(
 				entry.at,
 				report.installId,
+				app,
 				entry.provider,
 				entry.model,
 				entry.requests,
@@ -1802,14 +1801,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			.all() as Array<{ install_id: string; hostname: string | null; first_seen: number; last_seen: number }>;
 		const aggregates = this.#db
 			.query(
-				`SELECT install_id, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
+				`SELECT install_id, app, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
 					SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens,
 					SUM(cache_write_tokens) cache_write_tokens, SUM(cost_usd) cost_usd
-				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, provider
+				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, app, provider
 				 ORDER BY install_id, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC`,
 			)
 			.all(sinceMs) as Array<{
 			install_id: string;
+			app: string;
 			provider: string;
 			requests: number;
 			input_tokens: number;
@@ -1826,6 +1826,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				providersByInstall.set(row.install_id, list);
 			}
 			list.push({
+				app: row.app === "" ? undefined : row.app,
 				provider: row.provider,
 				requests: row.requests,
 				inputTokens: row.input_tokens,

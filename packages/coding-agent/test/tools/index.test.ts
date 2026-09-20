@@ -157,15 +157,17 @@ describe("createTools", () => {
 		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp", "write"]);
 	});
 
-	it("skips xd:// state entirely when the session grants no write tool", async () => {
-		// The xd:// transport rides `write xd://<tool>`; without a granted write
-		// tool nothing can dispatch a device, so no state is allocated and later
-		// SDK assembly exposes custom/MCP tools top-level instead.
+	it("grants a device-only xd:// transport write when an explicit list keeps read but omits write", async () => {
+		// The xd:// transport rides `write xd://<tool>`; with no write at all the
+		// session would allocate no xd:// state and later SDK assembly would
+		// expose custom/MCP tools top-level. A device-only write restores
+		// mounting while filesystem writes stay rejected (see WriteTool).
 		const session = createTestSession();
 		const tools = await createTools(session, ["read", "lsp"]);
 
-		expect(session.xdev).toBeUndefined();
-		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp"]);
+		expect(session.deviceOnlyWrite).toBe(true);
+		expect(session.xdev).toBeDefined();
+		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp", "write"]);
 	});
 
 	it("lowercases requested tool subset", async () => {
@@ -190,6 +192,25 @@ describe("createTools", () => {
 		const names = tools.map(t => t.name);
 
 		expect(names).toContain("yield");
+	});
+
+	it("updates an already-created yield tool to the active workpool key schema", async () => {
+		let items: Array<{ id: string; index: number }> = [];
+		const session = createTestSession({
+			requireYieldTool: true,
+			getWorkPoolYieldItems: () => items,
+		});
+		const tools = await createTools(session);
+		const yieldTool = tools.find(tool => tool.name === "yield");
+		if (!yieldTool) throw new Error("Missing yield tool");
+		expect(Reflect.get(yieldTool.parameters, "properties")).toHaveProperty("type");
+		expect(Reflect.get(yieldTool.parameters, "properties")).not.toHaveProperty("key");
+
+		items = [{ id: "pool#1", index: 1 }];
+		expect(Reflect.get(yieldTool.parameters, "required")).toEqual(["key"]);
+		const properties = Reflect.get(yieldTool.parameters, "properties");
+		expect(properties).toHaveProperty("key");
+		expect(properties).not.toHaveProperty("type");
 	});
 	it("excludes todo from yield sessions unless prewalk is armed", async () => {
 		// Subagents (requireYieldTool) never get todo — except when the spawn is
@@ -233,7 +254,8 @@ describe("createTools", () => {
 			}),
 			["ask", "read"],
 		);
-		expect(requested.map(t => t.name)).toEqual(["read"]);
+		// write joins as the device-only xd:// transport (read granted, ask disabled).
+		expect(requested.map(t => t.name)).toEqual(["read", "write"]);
 	});
 
 	it("includes ask tool when ask.enabled is true and hasUI is true", async () => {
@@ -256,7 +278,6 @@ describe("createTools", () => {
 				"launch.enabled": false,
 				"web_search.enabled": false,
 				"browser.enabled": false,
-				"inspect_image.enabled": false,
 			}),
 		});
 		const tools = await createTools(session);
@@ -270,10 +291,11 @@ describe("createTools", () => {
 		expect(names).not.toContain("ast_edit");
 		expect(names).not.toContain("web_search");
 		expect(names).not.toContain("browser");
-		expect(names).not.toContain("inspect_image");
 
 		const requestedTools = await createTools(createTestSession({ settings: session.settings }), ["bash", "read"]);
-		expect(requestedTools.map(t => t.name)).toEqual(["read"]);
+		// `write` joins as the device-only xd:// transport: read was granted,
+		// write omitted (see the "device-only xd:// transport write" test).
+		expect(requestedTools.map(t => t.name)).toEqual(["read", "write"]);
 	});
 
 	it("auto-includes goal when goal mode is active", async () => {
@@ -286,7 +308,8 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["read"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "goal"]);
+		// `write` joins last as the device-only xd:// transport (see above).
+		expect(names).toEqual(["read", "goal", "write"]);
 	});
 
 	it("does not widen a restricted explicit tool list for an active goal", async () => {

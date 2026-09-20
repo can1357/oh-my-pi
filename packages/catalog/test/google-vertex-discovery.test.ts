@@ -1,10 +1,21 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
-import { googleVertexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/google";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import {
+	googleModelManagerOptions,
+	googleVertexModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/google";
 import {
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { Api, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const googleVertexModelsDevPayload = {
 	"google-vertex": {
@@ -42,6 +53,24 @@ const googleVertexModelsDevPayload = {
 		},
 	},
 } satisfies Record<string, unknown>;
+
+function geminiSpec<TApi extends Api>(provider: "google" | "google-vertex", api: TApi, id: string): ModelSpec<TApi> {
+	return {
+		id,
+		name: "Gemini 2.5 Flash-Lite",
+		api,
+		provider,
+		baseUrl:
+			provider === "google-vertex"
+				? "https://{location}-aiplatform.googleapis.com"
+				: "https://generativelanguage.googleapis.com/v1beta",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.1, output: 0.4, cacheRead: 0.01, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 65_536,
+	};
+}
 
 describe("google-vertex model catalog", () => {
 	it("maps the stencil.so Vertex catalog instead of the project discovery endpoint", () => {
@@ -90,5 +119,79 @@ describe("google-vertex model catalog", () => {
 		expect(result.models.some(model => model.id.endsWith("-maas") && model.api === "openai-completions")).toBe(true);
 		expect(result.models.some(model => model.id === "gemini-3.5-flash")).toBe(true);
 		expect(result.models.some(model => model.id === "gemini-1.5-pro")).toBe(false);
+	});
+
+	it("invalidates cached Gemini 3.7/3.8 Flash effort metadata on upgrade (#10543)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-google-flash37-cache-"));
+		try {
+			for (const [providerId, options] of [
+				["google", googleModelManagerOptions()],
+				["google-vertex", googleVertexModelManagerOptions()],
+			] as const) {
+				const bundledModels = getBundledModels(providerId);
+				const currentIds = ["gemini-3.7-flash", "gemini-3.8-flash"];
+				const stale = currentIds.map(id => {
+					const current = bundledModels.find(model => model.id === id);
+					if (!current?.thinking) throw new Error(`${providerId} ${id} is missing thinking metadata`);
+					return {
+						...current,
+						thinking: {
+							...current.thinking,
+							efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+						},
+					};
+				});
+				const cacheDbPath = path.join(tempDir, `${providerId}.db`);
+				writeModelCache(providerId, Date.now(), stale, true, "merge-v3:pre-10543", cacheDbPath);
+
+				const result = await resolveProviderModels(
+					{ ...options, staticModels: bundledModels, cacheDbPath },
+					"offline",
+				);
+				for (const id of currentIds) {
+					expect(result.models.find(model => model.id === id)?.thinking?.efforts).toEqual([
+						Effort.Low,
+						Effort.Medium,
+						Effort.High,
+					]);
+				}
+			}
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("clamps Gemini 2.5 Flash Lite output cap to 65535 on Vertex and drops stale caches", async () => {
+		// Vertex rejects maxOutputTokens=65536 for the 2.5 Lite line with
+		// "supported range is from 1 (inclusive) to 65536 (exclusive)"; the 2.5
+		// Flash/Pro siblings accept 65536 on the same endpoint. The clamp is
+		// owned by the google-vertex limits-patch rule, so the contract is
+		// proven on representative specs through buildModel instead of the
+		// bundled snapshot.
+		const vertexLite = buildModel(geminiSpec("google-vertex", "google-vertex", "gemini-2.5-flash-lite"));
+		expect(vertexLite.maxTokens).toBe(65_535);
+		expect(buildModel(geminiSpec("google-vertex", "google-vertex", "gemini-2.5-flash")).maxTokens).toBe(65_536);
+		expect(buildModel(geminiSpec("google-vertex", "google-vertex", "gemini-2.5-pro")).maxTokens).toBe(65_536);
+		// The public-API host keeps the documented value until verified there.
+		expect(buildModel(geminiSpec("google", "google-generative-ai", "gemini-2.5-flash-lite")).maxTokens).toBe(65_536);
+
+		// Rows cached before the clamp must not resurrect the rejected 65536.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-google-lite25-cap-"));
+		try {
+			const bundled = getBundledModels("google-vertex");
+			const lite = bundled.find(model => model.id === "gemini-2.5-flash-lite");
+			if (!lite) throw new Error("google-vertex Gemini 2.5 Flash Lite missing from bundled catalog");
+			const stale = { ...lite, maxTokens: 65_536 };
+			const cacheDbPath = path.join(tempDir, "google-vertex.db");
+			writeModelCache("google-vertex", Date.now(), [stale], true, "merge-v3:pre-lite25-cap", cacheDbPath);
+
+			const result = await resolveProviderModels(
+				{ ...googleVertexModelManagerOptions(), staticModels: bundled, cacheDbPath },
+				"offline",
+			);
+			expect(result.models.find(model => model.id === "gemini-2.5-flash-lite")?.maxTokens).toBe(65_535);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

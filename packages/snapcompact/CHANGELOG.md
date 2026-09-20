@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [18.2.1] - 2026-09-15
+
+### Changed
+
+- `historyBlocks()` now resolves persisted frame payloads lazily, keeps the newest frames within a byte budget, and drops unresolved blob references instead of sending them to providers ([#10227](https://github.com/can1357/oh-my-pi/pull/10227) by [@lemonleks](https://github.com/lemonleks)).
+
+## [18.1.18] - 2026-09-11
+
+### Fixed
+
+- A snapcompact pass now also strips a superseded Anthropic server-compaction payload (`preserveData.anthropicCompaction`) alongside the OpenAI replacement history, so a stale native summary can never replay ahead of the archived frames.
+
+## [18.1.0] - 2026-09-01
+
+### Added
+
+- Added a declarative compatibility rules system for consistent model identification, capabilities, policies, and provider-specific behavior across model classes, families, and revisions.
+- Added the compat-compiler CLI for managing model identity and capability rules through KDL configuration files.
+
+### Changed
+
+- Standardized model revision handling and compatibility resolution across model discovery and runtime behavior.
+
+## [17.4.1] - 2026-08-21
+
 ### Added
 
 - Restored `providerFrameBudget()` to allow callers to size archives according to the maximum frame budget the provider will send.

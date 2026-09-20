@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from "bun:test";
 import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { createExactSecurityOAuthResolver, selectSecurityAccount } from "../../src/security";
+import { createExactSecurityOAuthResolver, createSecurityAuthResolver, selectSecurityAuth } from "../../src/security";
 import type { AuthStorage } from "../../src/session/auth-storage";
 
 function model() {
@@ -16,14 +16,47 @@ describe("exact security OAuth resolver", () => {
 			{ credentialId: 11, position: 0, active: true, accountId: "workspace-a" },
 			{ credentialId: 42, position: 1, active: false, accountId: "workspace-b" },
 		]);
-		const selected = selectSecurityAccount(
-			{ listOAuthAccounts } as unknown as AuthStorage,
-			"openai-codex",
-			42,
-			"session-a",
-		);
+		const selected = selectSecurityAuth({ listOAuthAccounts } as unknown as AuthStorage, model(), 42, "session-a");
 		expect(selected).toEqual({ provider: "openai-codex", credentialId: 42, accountId: "workspace-b" });
 		expect(listOAuthAccounts).toHaveBeenCalledWith("openai-codex", "session-a");
+	});
+
+	test("plans provider-owned authentication for recognized Bedrock routes without OAuth", () => {
+		const authStorage = { listOAuthAccounts: vi.fn(() => []) } as unknown as AuthStorage;
+		for (const [provider, modelId, api] of [
+			["amazon-bedrock", "us.anthropic.claude-opus-4-8", "bedrock-converse-stream"],
+			["bedrock-mantle", "openai.gpt-5.6-terra", "openai-responses"],
+		] as const) {
+			const bedrockModel = getBundledModel(provider, modelId);
+			if (!bedrockModel) throw new Error(`Expected bundled model ${provider}/${modelId}`);
+			expect(selectSecurityAuth(authStorage, bedrockModel)).toEqual({ provider, api });
+		}
+	});
+
+	test("rejects unsupported provider-owned authentication routes", () => {
+		const authStorage = { listOAuthAccounts: vi.fn(() => []) } as unknown as AuthStorage;
+		expect(() => selectSecurityAuth(authStorage, { provider: "openai", api: "openai-responses" })).toThrow(
+			"require a stored OAuth account",
+		);
+		expect(() => selectSecurityAuth(authStorage, { provider: "amazon-bedrock", api: "openai-responses" })).toThrow(
+			"do not support provider authentication",
+		);
+	});
+
+	test("provider-owned resolver stays within the pinned provider and API", () => {
+		const bedrockModel = getBundledModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+		const mantleModel = getBundledModel("bedrock-mantle", "openai.gpt-5.6-terra");
+		if (!bedrockModel || !mantleModel) throw new Error("Expected bundled Bedrock models");
+		const providerResolver = vi.fn(() => "provider-owned");
+		const resolver = createSecurityAuthResolver({
+			authStorage: {} as unknown as AuthStorage,
+			auth: { provider: bedrockModel.provider, api: bedrockModel.api },
+			providerResolver,
+		});
+		expect(resolver(bedrockModel)).toBe("provider-owned");
+		expect(() => resolver(mantleModel)).toThrow("provider mismatch");
+		expect(() => resolver({ ...bedrockModel, api: "openai-responses" })).toThrow("API mismatch");
+		expect(providerResolver).toHaveBeenCalledTimes(1);
 	});
 
 	test("resolves and refreshes only the pinned durable row", async () => {

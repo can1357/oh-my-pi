@@ -33,6 +33,7 @@ Supported publish tags are:
 - `darwin-x64`
 - `darwin-arm64`
 - `win32-x64`
+- `win32-arm64`
 
 An unsupported tag is reported only after probing candidates.
 

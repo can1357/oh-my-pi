@@ -22,7 +22,8 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
 
@@ -188,7 +189,7 @@ describe("task.batch schema gating", () => {
 		mockDiscovery();
 
 		const tool = await TaskTool.create(
-			createSession({ settings: { "task.batch": true, "task.isolation.mode": "auto" } }),
+			createSession({ settings: { "task.batch": true, "task.isolation.enabled": true } }),
 		);
 		const properties = getSchemaProperties(tool);
 		expect(properties.isolated).toBeUndefined();
@@ -206,7 +207,7 @@ describe("task.batch schema gating", () => {
 		const tool = await TaskTool.create(
 			createSession({
 				planMode: true,
-				settings: { "task.batch": true, "task.isolation.mode": "auto" },
+				settings: { "task.batch": true, "task.isolation.enabled": true },
 			}),
 		);
 		const itemProperties = getBatchItemProperties(tool);
@@ -612,6 +613,27 @@ describe("task.batch spawning", () => {
 			"# Goal\nShared synchronous context.",
 			"# Goal\nShared synchronous context.",
 		]);
+	});
+
+	it("keeps a long result inline when no readable output artifact exists", async () => {
+		mockDiscovery();
+		const fullOutput = `REPORT:${"x".repeat(6_000)}:END`;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+			makeResult(options.id ?? "?", {
+				output: fullOutput,
+				outputMeta: { lineCount: 1, charCount: fullOutput.length },
+			}),
+		);
+
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": false } }));
+		const result = await tool.execute("tc-missing-artifact", {
+			name: "MissingArtifact",
+			task: "Return a long report.",
+		} as TaskParams);
+		const text = getFirstText(result);
+
+		expect(text).not.toContain("agent://MissingArtifact");
+		expect(text).toContain(":END");
 	});
 
 	it("settles the batch async aggregate when a queued spawn is cancelled mid-flight", async () => {

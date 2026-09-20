@@ -23,6 +23,10 @@ services:
         PI_BASE: oh-my-pi/pi:dev
     image: robomp:dev
     container_name: robomp
+    # Stable hostname: os.hostname() inside the container feeds usage
+    # attribution (x-omp-hostname → broker `clients.hostname`); without this
+    # it reports the random docker container id.
+    hostname: robomp
     # Phase B (graceful shutdown): gives the orchestrator at least
     # ROBOMP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + ROBOMP_SHUTDOWN_KILL_TIMEOUT_SECONDS
     # before SIGKILL. Defaults: 25 + 5 = 30s.

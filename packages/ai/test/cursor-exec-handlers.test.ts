@@ -33,7 +33,7 @@ import {
 	ReadResultSchema,
 	ReadSuccessSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
-import { create } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { create, encodeJsonValue } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { logger } from "@oh-my-pi/pi-utils";
 
 afterEach(() => {
@@ -290,16 +290,16 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 			expect(toolResult).toMatchObject({ toolCallId: "exec-1", isError: false });
 		});
 
-		it("records a rejected TResult-only return as a failed call", async () => {
-			// TResult-only is a supported handler form, so the transcript entry has
+		it("records a rejected R-only return as a failed call", async () => {
+			// R-only is a supported handler form, so the transcript entry has
 			// to be synthesized. A `rejected` result means Cursor was told the call
 			// failed - recording it as successful hides that from the user and from
 			// downstream lifecycle logic.
 			const rejected = create(ReadResultSchema, {
 				result: { case: "rejected", value: create(ReadRejectedSchema, { path: "/tmp/foo", reason: "denied" }) },
 			});
-			// Explicit TResult: `ReadResult` has its own `result` field, so inference
-			// would otherwise match the `{ result?: TResult }` handler-return variant
+			// Explicit R: `ReadResult` has its own `result` field, so inference
+			// would otherwise match the `{ result?: R }` handler-return variant
 			// and unwrap the oneof as the exec result.
 			const { execResult, toolResult } = await resolveExecHandler<{ path: string }, ReadResult>(
 				{ path: "/tmp/foo" },
@@ -320,7 +320,7 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 			});
 		});
 
-		it("records an errored TResult-only return as a failed call", async () => {
+		it("records an errored R-only return as a failed call", async () => {
 			const errored = create(ReadResultSchema, {
 				result: { case: "error", value: create(ReadErrorSchema, { path: "/tmp/foo", error: "EIO" }) },
 			});
@@ -337,7 +337,7 @@ describe("Cursor resolveExecHandler execHandlers binding", () => {
 			expect(toolResult).toMatchObject({ content: [{ type: "text", text: "EIO" }], isError: true });
 		});
 
-		it("keeps a successful TResult-only return successful", async () => {
+		it("keeps a successful R-only return successful", async () => {
 			// `success` is the only non-failure variant; the placeholder text still
 			// applies because the handler gave the transcript nothing to show.
 			const ok = create(ReadResultSchema, {
@@ -606,6 +606,29 @@ describe("Cursor history encoding", () => {
 		]);
 	});
 
+	it("folds an orphaned tool result into assistant text for Cursor replay", () => {
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Wait for the background task.", timestamp: 1 },
+			{
+				role: "toolResult",
+				toolCallId: "call-orphan",
+				toolName: "hub",
+				content: [{ type: "text", text: "The background task was cancelled." }],
+				isError: false,
+				timestamp: 2,
+			},
+			{ role: "user", content: "Continue.", timestamp: 3 },
+		];
+
+		const history = buildCursorHistoryForTest(messages);
+		const repairedText = "[Tool Result]\nThe background task was cancelled.";
+		expect(history.rootPromptMessagesJson).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Wait for the background task." }] },
+			{ role: "assistant", content: [{ type: "text", text: repairedText }] },
+		]);
+		expect(history.turnStepMessagesJson).toEqual([[{ assistantMessage: { text: repairedText } }]]);
+	});
+
 	it("omits undefined optional tool arguments from protobuf replay", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Search for TODOs.", timestamp: 1 },
@@ -664,6 +687,128 @@ describe("Cursor history encoding", () => {
 				}),
 			],
 		]);
+	});
+
+	it("normalizes non-JSON MCP arguments instead of aborting history replay", () => {
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Run the MCP tool.", timestamp: 1 },
+			cursorAssistant(
+				"cursor-composer-2.5",
+				[
+					{
+						type: "toolCall",
+						id: "call-mcp",
+						name: "mcp__example_tool",
+						arguments: {
+							expectedHash: Number.POSITIVE_INFINITY,
+							notANumber: Number.NaN,
+							counter: 10n,
+							nested: { value: Number.NEGATIVE_INFINITY, list: [1, 2n, Number.NaN] },
+						},
+					},
+				],
+				2,
+				"toolUse",
+			),
+			{ role: "user", content: "Continue.", timestamp: 3 },
+		];
+
+		const history = buildCursorHistoryForTest(messages);
+		expect(history.rootPromptMessagesJson[1]).toEqual({
+			role: "assistant",
+			content: [
+				{
+					type: "tool-call",
+					toolCallId: "call-mcp",
+					toolName: "mcp__example_tool",
+					args: {
+						expectedHash: null,
+						notANumber: null,
+						nested: { value: null, list: [1, null, null] },
+					},
+				},
+			],
+		});
+	});
+
+	it("keeps a __proto__ argument key as an own property during replay", () => {
+		// A JSON.parse'd object carries `__proto__` as an own enumerable data
+		// key. Building the normalized record with a plain `{}` would route the
+		// assignment through the prototype setter and drop the key.
+		const pollutedArguments = JSON.parse('{"__proto__":{"polluted":true},"safe":"ok"}') as Record<string, unknown>;
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Run the MCP tool.", timestamp: 1 },
+			cursorAssistant(
+				"cursor-composer-2.5",
+				[{ type: "toolCall", id: "call-mcp", name: "mcp__example_tool", arguments: pollutedArguments }],
+				2,
+				"toolUse",
+			),
+			{ role: "user", content: "Continue.", timestamp: 3 },
+		];
+
+		const history = buildCursorHistoryForTest(messages);
+		const assistant = history.rootPromptMessagesJson[1] as {
+			content: { args: Record<string, unknown> }[];
+		};
+		const args = assistant.content[0].args;
+		expect(Object.hasOwn(args, "__proto__")).toBe(true);
+		expect(Reflect.get(args, "__proto__")).toEqual({ polluted: true });
+		expect(args.safe).toBe("ok");
+
+		// The protobuf argument map must carry the same own keys — a plain `{}`
+		// map would retarget its prototype to the encoded bytes and replay
+		// inherited numeric indices instead of `__proto__`.
+		const step = history.turnStepMessagesJson[0][0] as {
+			toolCall: { mcpToolCall: { args: { args: Record<string, string> } } };
+		};
+		const encodedArgs = step.toolCall.mcpToolCall.args.args;
+		expect(Object.keys(encodedArgs).sort()).toEqual(["__proto__", "safe"]);
+	});
+
+	it("excludes enumerable prototype properties from MCP history replay", () => {
+		const nested: Record<string, unknown> = Object.create({ inheritedNested: "drop" });
+		nested.own = "keep";
+		const inheritedArguments: Record<string, unknown> = Object.create({ admin: true });
+		inheritedArguments.safe = "ok";
+		inheritedArguments.nested = nested;
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Run the MCP tool.", timestamp: 1 },
+			cursorAssistant(
+				"cursor-composer-2.5",
+				[{ type: "toolCall", id: "call-mcp", name: "mcp__example_tool", arguments: inheritedArguments }],
+				2,
+				"toolUse",
+			),
+			{ role: "user", content: "Continue.", timestamp: 3 },
+		];
+
+		const history = buildCursorHistoryForTest(messages);
+		expect(history.rootPromptMessagesJson[1]).toEqual({
+			role: "assistant",
+			content: [
+				{
+					type: "tool-call",
+					toolCallId: "call-mcp",
+					toolName: "mcp__example_tool",
+					args: { safe: "ok", nested: { own: "keep" } },
+				},
+			],
+		});
+		expect(history.turnStepMessagesJson[0][0]).toEqual({
+			toolCall: {
+				toolCallId: "call-mcp",
+				mcpToolCall: {
+					args: {
+						name: "mcp__example_tool",
+						args: { safe: expect.any(String), nested: expect.any(String) },
+						toolCallId: "call-mcp",
+						providerIdentifier: "pi-agent",
+						toolName: "mcp__example_tool",
+					},
+				},
+			},
+		});
 	});
 
 	it("preserves same-model K3 thinking and paired tool structure in request history", () => {
@@ -880,6 +1025,65 @@ describe("Cursor history encoding", () => {
 				expect(step).not.toHaveProperty("thinkingMessage");
 			}
 		}
+	});
+
+	it("sanitizes foreign responses composite tool-call ids for Cursor replay", () => {
+		// openai-codex/responses history stores composite `"{callId}|{itemId}"`
+		// tool-call ids (encodeResponsesToolCallId). The `|` is invalid for
+		// Cursor's tool-call-id charset and gets the whole Run rejected as
+		// resource_exhausted, so it must be normalized identically on the call
+		// and result sides.
+		const compositeId = "call_abc123|fc_def456";
+		const sanitizedId = "call_abc123_fc_def456";
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Read package.json", timestamp: 1 },
+			{
+				...cursorAssistant(
+					"gpt-5.6-sol",
+					[{ type: "toolCall", id: compositeId, name: "read", arguments: { path: "package.json" } }],
+					2,
+					"toolUse",
+				),
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+			},
+			{
+				role: "toolResult",
+				toolCallId: compositeId,
+				toolName: "read",
+				content: [{ type: "text", text: "{}" }],
+				isError: false,
+				timestamp: 3,
+			},
+			{ role: "user", content: "Continue.", timestamp: 4 },
+		];
+
+		const history = buildCursorHistoryForTest(messages, undefined, "cursor-composer-2.5");
+		expect(history.rootPromptMessagesJson).toEqual([
+			{ role: "user", content: [{ type: "text", text: "Read package.json" }] },
+			{
+				role: "assistant",
+				content: [{ type: "tool-call", toolCallId: sanitizedId, toolName: "read", args: { path: "package.json" } }],
+			},
+			{
+				role: "tool",
+				id: sanitizedId,
+				content: [{ type: "tool-result", toolName: "read", toolCallId: sanitizedId, result: "{}" }],
+			},
+		]);
+		expect(history.turnStepMessagesJson).toEqual([
+			[
+				expect.objectContaining({
+					toolCall: expect.objectContaining({
+						toolCallId: sanitizedId,
+						mcpToolCall: expect.objectContaining({
+							args: expect.objectContaining({ toolCallId: sanitizedId }),
+						}),
+					}),
+				}),
+			],
+		]);
+		expect(JSON.stringify(history)).not.toContain("|");
 	});
 
 	it("preserves image-only user turns in root prompt history and conversation turns", () => {
@@ -1239,7 +1443,7 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(written.length).toBe(1);
 	});
 
-	it("synthesizes an MCP call when the exec frame precedes its streamed block", async () => {
+	it("synthesizes an MCP call while preserving opaque string arguments", async () => {
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
@@ -1257,7 +1461,16 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 							toolName: "mcp__fixture_report",
 							toolCallId: "call-mcp-1",
 							providerIdentifier: "pi-agent",
-							args: { query: new TextEncoder().encode(JSON.stringify("latest chess news")) },
+							args: {
+								query: new TextEncoder().encode(JSON.stringify("latest chess news")),
+								numericHash: encodeJsonValue("57785654"),
+								exponentHash: encodeJsonValue("1e234567"),
+								booleanToken: encodeJsonValue("true"),
+								nullToken: encodeJsonValue("null"),
+								nested: encodeJsonValue('{"enabled":true}'),
+								array: encodeJsonValue("[1,2]"),
+								quoted: encodeJsonValue('"label"'),
+							},
 						}),
 					},
 				}),
@@ -1304,7 +1517,16 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 			type: "toolCall",
 			id: "call-mcp-1",
 			name: "mcp__fixture_report",
-			arguments: { query: "latest chess news" },
+			arguments: {
+				query: "latest chess news",
+				numericHash: "57785654",
+				exponentHash: "1e234567",
+				booleanToken: "true",
+				nullToken: "null",
+				nested: { enabled: true },
+				array: [1, 2],
+				quoted: "label",
+			},
 		});
 		expect(output.content[1]).toMatchObject({ type: "text", text: "Final synthesized answer" });
 		expect(state.resolvedMcpToolCallIds.has("call-mcp-1")).toBe(true);

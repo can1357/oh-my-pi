@@ -1,18 +1,16 @@
 import { describe, expect, it, vi } from "bun:test";
+import { createMCPJsonRpcError, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
 import type { MCPReconnect } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
+	createLegacyMCPToolName,
 	createMCPToolName,
 	DeferredMCPTool,
 	deduplicateMCPToolsByName,
 	isRetriableConnectionError,
 	MCPTool,
 } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
-import type {
-	MCPImageContent,
-	MCPServerConnection,
-	MCPToolCallResult,
-	MCPTransport,
-} from "@oh-my-pi/pi-coding-agent/mcp/types";
+import type { MCPImageContent } from "@oh-my-pi/pi-tui/tools/mcp";
+import type { MCPServerConnection, MCPToolCallResult, MCPTransport } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { logger } from "@oh-my-pi/pi-utils";
 
@@ -91,6 +89,40 @@ describe("createMCPToolName", () => {
 		expect(createMCPToolName("puppeteer", "puppeteer_screenshot")).toBe("mcp__puppeteer_screenshot");
 	});
 
+	it("keeps digits, so servers differing only by a digit stay distinct", () => {
+		// The sanitizer used to strip 0-9, minting mcp__context_query_docs for
+		// server "context7" and collapsing "foo1"/"foo2" onto one name, which
+		// then cost one of them a tool via deduplicateMCPToolsByName().
+		expect(createMCPToolName("context7", "query-docs")).toBe("mcp__context7_query_docs");
+		expect(createMCPToolName("s3-storage", "get_object")).toBe("mcp__s3_storage_get_object");
+		expect(createMCPToolName("foo1", "run")).not.toBe(createMCPToolName("foo2", "run"));
+	});
+
+	it("mints the pre-rename legacy name only for digit-bearing servers/tools", () => {
+		expect(createLegacyMCPToolName("context7", "query-docs")).toBe("mcp__context_query_docs");
+		expect(createLegacyMCPToolName("s3-storage", "get_object")).toBe("mcp__s_storage_get_object");
+		expect(createLegacyMCPToolName("puppeteer", "puppeteer_screenshot")).toBeUndefined();
+		expect(createLegacyMCPToolName("plain", "tool")).toBeUndefined();
+	});
+
+	it("exposes the legacy alias on both live and deferred tools", () => {
+		// Slow-startup servers register DeferredMCPTool instead of MCPTool;
+		// approval fallback must not depend on connection timing (#10810 review).
+		const digitTool = { name: "query-docs", inputSchema: { type: "object" as const } };
+		const live = new MCPTool(
+			makeConnection(
+				mockTransport(async () => ({})),
+				"context7",
+			),
+			digitTool,
+		);
+		const deferred = new DeferredMCPTool("context7", digitTool, async () => {
+			throw new Error("unneeded");
+		});
+		expect(live.legacyName).toBe("mcp__context_query_docs");
+		expect(deferred.legacyName).toBe("mcp__context_query_docs");
+	});
+
 	it("is deterministic and keeps distinct overlong names distinct", () => {
 		const a = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");
 		const b = createMCPToolName("chrome-devtools-mcp", "chrome_devtools_performance_analyze_insight");
@@ -142,6 +174,31 @@ describe("isRetriableConnectionError", () => {
 			expect(isRetriableConnectionError(new Error(msg))).toBe(false);
 		});
 	}
+
+	it("uses typed transport metadata without retrying ambiguous timeouts", () => {
+		expect(
+			isRetriableConnectionError(
+				new MCPTransportError({
+					transport: "http",
+					stage: "send",
+					failure: "reset",
+					message: "Connection reset",
+					retryable: true,
+				}),
+			),
+		).toBe(true);
+		expect(
+			isRetriableConnectionError(
+				new MCPTransportError({
+					transport: "http",
+					stage: "receive",
+					failure: "timeout",
+					message: "Request timeout",
+					retryable: false,
+				}),
+			),
+		).toBe(false);
+	});
 
 	it("returns false for non-Error values", () => {
 		expect(isRetriableConnectionError("ECONNREFUSED")).toBe(false);
@@ -267,7 +324,10 @@ describe("MCPTool.execute retry on connection error", () => {
 		const result = await tool.execute("call-1", {}, noop, noCtx);
 
 		expect(result.details?.isError).toBe(true);
-		expect(result.content[0]).toEqual({ type: "text", text: "MCP error: ECONNRESET" });
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("failure: reset"),
+		});
 	});
 
 	it("does not retry on non-retriable error", async () => {
@@ -287,6 +347,86 @@ describe("MCPTool.execute retry on connection error", () => {
 		expect(result.details?.isError).toBe(true);
 	});
 
+	it("does not reconnect and replay a non-retryable accepted SSE EOF", async () => {
+		let calls = 0;
+		let reconnects = 0;
+		const failTransport = mockTransport(async () => {
+			calls++;
+			throw new MCPTransportError({
+				transport: "http",
+				stage: "receive",
+				failure: "eof",
+				message: "No response received after the server accepted the POST",
+				retryable: false,
+			});
+		});
+		const reconnect: MCPReconnect = async () => {
+			reconnects++;
+			return makeConnection(mockTransport(async () => toolCallResult("duplicated")));
+		};
+		const tool = new MCPTool(makeConnection(failTransport), TOOL_DEF, reconnect);
+
+		const result = await tool.execute("call-1", {}, noop, noCtx);
+
+		expect(calls).toBe(1);
+		expect(reconnects).toBe(0);
+		expect(result.details?.isError).toBe(true);
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("retryable: no"),
+		});
+	});
+
+	it("renders server, tool, protocol data, trace ID, retryability, and one next step", async () => {
+		const failTransport = mockTransport(async () => {
+			throw createMCPJsonRpcError("stdio", {
+				code: -32042,
+				message: "upstream rejected the call",
+				data: { detail: "invalid input", token: "server-secret", traceId: "trace-abc123" },
+			});
+		});
+		const tool = new MCPTool(makeConnection(failTransport), TOOL_DEF);
+
+		const result = await tool.execute("call-1", {}, noop, noCtx);
+		const content = result.content[0];
+		if (content?.type !== "text") throw new Error("Expected an MCP text diagnostic");
+
+		expect(content.text).toContain("server: test-server");
+		expect(content.text).toContain("tool: do_stuff");
+		expect(content.text).toContain("transport: stdio");
+		expect(content.text).toContain("stage: protocol");
+		expect(content.text).toContain("failure: json_rpc");
+		expect(content.text).toContain("retryable: no");
+		expect(content.text).toContain("code: -32042");
+		expect(content.text).toContain("trace_id: trace-abc123");
+		expect(content.text).toContain('"token":"[redacted]"');
+		expect(content.text).not.toContain("server-secret");
+		expect(content.text.match(/^next: /gm)).toHaveLength(1);
+	});
+
+	it("redacts compound credential keys in JSON-RPC error data", () => {
+		const error = createMCPJsonRpcError("http", {
+			code: -32001,
+			message: "server echoed its OAuth config",
+			data: {
+				client_secret: "cs-leak",
+				clientSecret: "cs-camel-leak",
+				private_key: "pk-leak",
+				signingSecret: "sign-leak",
+				access_token: "at-leak",
+				apiKey: "ak-leak",
+				note: "safe-detail",
+			},
+		});
+		if (error.data === undefined) throw new Error("Expected serialized error data");
+
+		for (const leaked of ["cs-leak", "cs-camel-leak", "pk-leak", "sign-leak", "at-leak", "ak-leak"]) {
+			expect(error.data).not.toContain(leaked);
+		}
+		expect(error.data).toContain('"note":"safe-detail"');
+		expect(error.data).toContain("[redacted]");
+	});
+
 	it("does not retry when no reconnect callback", async () => {
 		const failTransport = mockTransport(async () => {
 			throw new Error("ECONNREFUSED");
@@ -296,7 +436,10 @@ describe("MCPTool.execute retry on connection error", () => {
 		const result = await tool.execute("call-1", {}, noop, noCtx);
 
 		expect(result.details?.isError).toBe(true);
-		expect(result.content[0]).toEqual({ type: "text", text: "MCP error: ECONNREFUSED" });
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("failure: connect"),
+		});
 	});
 
 	it("returns error from retry when retry also fails", async () => {
@@ -312,7 +455,10 @@ describe("MCPTool.execute retry on connection error", () => {
 		const result = await tool.execute("call-1", {}, noop, noCtx);
 
 		expect(result.details?.isError).toBe(true);
-		expect(result.content[0]).toEqual({ type: "text", text: "MCP error: HTTP 503: Service Unavailable" });
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("failure: http_status"),
+		});
 	});
 
 	it("preserves provider info from new connection on successful retry", async () => {

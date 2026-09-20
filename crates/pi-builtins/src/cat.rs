@@ -68,10 +68,7 @@ impl LineNumber {
 enum CatError {
 	/// Wrapper around `io::Error`.
 	#[error("{}", strip_errno(.0))]
-	Io(io::Error),
-	/// The downstream reader closed its pipe; this ends the copy quietly.
-	#[error("broken pipe")]
-	BrokenPipe,
+	Io(#[from] io::Error),
 	/// Unknown file type; it is not a regular file, socket, or known device.
 	#[error("unknown filetype: {ft_debug}")]
 	UnknownFiletype { ft_debug: String },
@@ -82,16 +79,6 @@ enum CatError {
 	NoSuchDeviceOrAddress,
 	#[error("Too many levels of symbolic links")]
 	TooManySymlinks,
-}
-
-impl From<io::Error> for CatError {
-	fn from(error: io::Error) -> Self {
-		if error.kind() == ErrorKind::BrokenPipe {
-			Self::BrokenPipe
-		} else {
-			Self::Io(error)
-		}
-	}
 }
 
 fn strip_errno(error: &io::Error) -> String {
@@ -382,7 +369,9 @@ where
 	for path in files {
 		match cat_path(path, options, &mut state, host, stdout) {
 			Ok(()) => {},
-			Err(CatError::BrokenPipe) => return host.exit_code(),
+			Err(CatError::Io(error)) if error.kind() == ErrorKind::BrokenPipe => {
+				return crate::host::SIGPIPE_EXIT_CODE;
+			},
 			Err(error) => host.error(format!("{}: {error}", path.maybe_quote()), 1),
 		}
 	}

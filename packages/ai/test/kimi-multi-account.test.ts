@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type AuthCredentialStore, AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
-import * as kimiOauth from "@oh-my-pi/pi-ai/registry/oauth/kimi";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -156,7 +156,9 @@ describe("Kimi OAuth account identity", () => {
 			),
 		);
 
-		const refreshed = await kimiOauth.refreshKimiToken("refresh-0");
+		const refreshToken = getProviderDefinition("kimi-code")?.refreshToken;
+		if (!refreshToken) throw new Error("expected kimi-code refresh");
+		const refreshed = await refreshToken({ access: "access-0", refresh: "refresh-0", expires: 0 });
 
 		expect(refreshed.accountId).toBe("kimi-user-42");
 	});

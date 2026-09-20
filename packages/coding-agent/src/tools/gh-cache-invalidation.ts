@@ -17,11 +17,12 @@
  * number, all auth_keys) because the upside of staleness elimination
  * dwarfs the cost of one cache miss.
  */
+import { formatRepoRef } from "./gh-common";
 import { invalidateAllForNumber, invalidateAllForRepo } from "./github-cache";
 import { tokenizeShellSegments } from "./shell-tokenize";
 
-const PR_URL_PATTERN = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
-const ISSUE_URL_PATTERN = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/issues\/(\d+)(?:[/?#].*)?$/i;
+const PR_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/i;
+const ISSUE_URL_PATTERN = /^https:\/\/([^/\s]+)\/([^/\s]+\/[^/\s]+)\/issues\/(\d+)(?:[/?#].*)?$/i;
 
 /** Subcommands that mutate the rendered issue/PR view in any meaningful way. */
 const MUTATING_ISSUE_SUBCMDS: Record<string, true> = {
@@ -143,10 +144,10 @@ function detectGhMutation(tokens: readonly string[]): { number?: number; repo?: 
 		}
 		const urlMatch = (subject === "pr" ? PR_URL_PATTERN : ISSUE_URL_PATTERN).exec(token);
 		if (urlMatch) {
-			const num = Number(urlMatch[2]);
+			const num = Number(urlMatch[3]);
 			if (Number.isSafeInteger(num) && num > 0) {
 				// URL carries its own repo and wins over a stray --repo flag.
-				return { number: num, repo: urlMatch[1] };
+				return { number: num, repo: formatRepoRef(urlMatch[1], urlMatch[2]) };
 			}
 		}
 	}

@@ -1115,102 +1115,7 @@ fn parse_command_ending(
 	Ok(())
 }
 
-/// Convert a primitive BRE pattern to a safe ERE-compatible pattern string.
-/// - Replaces `\(`, `\)`, `\?`, `\+`, `\|`, `\{` and `\}` with `(`, `)`, `?`,
-///   `+`, `|`, `{` and `}`.
-/// - Puts single-digit back-references in non-capturing groups..
-/// - Escapes ERE-only metacharacters: `+ ? { } | ( )`.
-/// - Leaves all other characters as-is.
-fn bre_to_ere(pattern: &str) -> String {
-	let mut result = String::with_capacity(pattern.len());
-	let mut chars = pattern.chars().peekable();
-
-	let mut at_beginning = true;
-	let mut previous: Option<char> = None;
-	while let Some(c) = chars.next() {
-		if c == '\\' {
-			match chars.peek() {
-				Some('(') => {
-					chars.next();
-					result.push('('); // Group start
-				},
-				Some(')') => {
-					chars.next();
-					result.push(')'); // Group end
-				},
-				Some('?') => {
-					chars.next();
-					result.push('?'); // Quantifier 0 or 1
-				},
-				Some('+') => {
-					chars.next();
-					result.push('+'); // Quantifier 1 or more
-				},
-				Some('|') => {
-					chars.next();
-					result.push('|'); // Alternation operator
-				},
-				Some('{') => {
-					chars.next();
-					result.push('{'); // Brace quantifier start
-				},
-				Some('}') => {
-					chars.next();
-					result.push('}'); // Brace quantifier end
-				},
-				Some(v) if v.is_ascii_digit() => {
-					// Back-reference.  In sed BREs these are single-digit
-					// (\1-\9) whereas fancy_regex supports multi-digit
-					// back-references. Put them in a non-capturing group
-					// to avoid having the number extend beyond the single
-					// digit. Example: In sed \11 matches group 1 followed
-					// by '1', not group 11.
-					result.push_str(&format!(r"(?:\{v})"));
-					chars.next();
-				},
-				Some(&next) => {
-					// Preserve other escaped characters.
-					chars.next();
-					result.push('\\');
-					result.push(next);
-				},
-				None => {
-					// Trailing backslash; keep it.
-					result.push('\\');
-				},
-			}
-		} else {
-			match c {
-				'+' | '?' | '{' | '}' | '|' | '(' | ')' => {
-					// Escape unsupported ERE metacharacters.
-					result.push('\\');
-					result.push(c);
-				},
-				'^' if !at_beginning && previous != Some('[') => {
-					// In BREs ^ has special meaning at the beginning
-					// and as bracket negation.  This heuristic escapes
-					// all other uses, which per POSIX are valid in EREs.
-					// "the ERE "a^b" is valid, but can never match because
-					// the 'a' prevents the expression "^b" from matching
-					// starting at the first character."
-					// POSIX 9.4.9 ERE Expression Anchoring
-					result.push('\\');
-					result.push(c);
-				},
-				'$' if chars.peek().is_some() => {
-					// Similarly for $ appearing not at the end.
-					result.push('\\');
-					result.push(c);
-				},
-				_ => result.push(c),
-			}
-		}
-		at_beginning = false;
-		previous = Some(c);
-	}
-
-	result
-}
+// The BRE→ERE translation lives in `crate::bre`, shared with `grep`.
 
 /// Compile the provided regular expression string into a corresponding engine.
 /// An empty pattern results in None, which means that the last RE employed
@@ -1227,12 +1132,20 @@ fn compile_regex(
 		return Ok(None);
 	}
 
-	// Convert basic to extended regular expression if needed.
-	let pattern = if context.regex_extended {
-		pattern
+	// Convert basic to extended regular expression if needed. A BRE the
+	// dialect cannot express is a compilation error, matching real sed:
+	// `sed 's/\{1,3\}/X/'` reports an invalid RE rather than substituting.
+	let translated = if context.regex_extended {
+		None
 	} else {
-		&bre_to_ere(pattern)
+		Some(
+			crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported).map_err(|e| {
+				compilation_error::<Regex>(lines, line, format!("invalid regex '{pattern}': {}", e.message()))
+					.unwrap_err()
+			})?,
+		)
 	};
+	let pattern = translated.as_deref().unwrap_or(pattern);
 
 	let mut modifiers = String::new();
 	if icase {
@@ -2188,6 +2101,47 @@ mod tests {
 	}
 
 	#[test]
+	fn test_compile_re_basic_leading_plus_is_a_literal() {
+		// REGRESSION: `s/^\+/X/` used to substitute at the start of EVERY
+		// line, because `\+` became `+` unconditionally and `^+` compiles as
+		// `(?:^)+`. Real sed changes only lines that begin with a plus.
+		let (lines, chars) = dummy_providers();
+		let regex = compile_regex(&lines, &chars, r"^\+", &ctx(), false, false)
+			.unwrap()
+			.expect("regex should be present");
+		assert!(regex.is_match(&mut IOChunk::new_from_str("+added")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str("alpha")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str(" context")).unwrap());
+	}
+
+	#[test]
+	fn test_compile_re_basic_no_operand_brace_is_rejected() {
+		// Real sed refuses this rather than substituting: emitting the
+		// operator would give `{1,3}` or, after an anchor, `^{1,3}` - which
+		// fancy-regex accepts and matches at every line start.
+		let (lines, chars) = dummy_providers();
+		for pattern in [r"\{1,3\}", r"^\{1,3\}"] {
+			let err = compile_regex(&lines, &chars, pattern, &ctx(), false, false)
+				.expect_err("a brace quantifier with no operand must not compile");
+			assert!(
+				err.to_string().contains("repetition-operator operand invalid"),
+				"{pattern}: {err}"
+			);
+		}
+	}
+
+	#[test]
+	fn test_compile_re_basic_caret_is_an_anchor_inside_a_group() {
+		// `\(^a\)` anchors in a BRE; escaping the caret matched nothing.
+		let (lines, chars) = dummy_providers();
+		let regex = compile_regex(&lines, &chars, r"\(^alpha\)", &ctx(), false, false)
+			.unwrap()
+			.expect("regex should be present");
+		assert!(regex.is_match(&mut IOChunk::new_from_str("alpha")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str("xalpha")).unwrap());
+	}
+
+	#[test]
 	fn test_compile_re_case_insensitive() {
 		let (lines, chars) = dummy_providers();
 		let regex = compile_regex(&lines, &chars, "abc", &ctx(), true, false)
@@ -2949,59 +2903,7 @@ mod tests {
 		assert!(err.to_string().contains("invalid reference \\2"));
 	}
 
-	// bre_to_ere
-	#[test]
-	fn test_bre_group_translation() {
-		assert_eq!(bre_to_ere(r"\(a\?b\+c\|\)"), "(a?b+c|)");
-		assert_eq!(bre_to_ere(r"a\(b\)c"), "a(b)c");
-	}
-
-	#[test]
-	fn test_bre_brace_quantifier_translation() {
-		assert_eq!(bre_to_ere(r"\{1,4\}"), "{1,4}");
-	}
-
-	#[test]
-	fn test_ere_metacharacters_escaped() {
-		assert_eq!(bre_to_ere(r"a+b?c{1}|(d)"), r"a\+b\?c\{1\}\|\(d\)");
-	}
-
-	#[test]
-	fn test_literal_backslashes_preserved() {
-		assert_eq!(bre_to_ere(r"foo\\bar"), r"foo\\bar");
-		assert_eq!(bre_to_ere(r"\."), r"\.");
-	}
-
-	#[test]
-	fn test_character_classes_unchanged() {
-		assert_eq!(bre_to_ere(r"[a-z]"), "[a-z]");
-		assert_eq!(bre_to_ere(r"[^0-9]"), "[^0-9]");
-	}
-
-	#[test]
-	fn test_anchors_and_dot_and_star() {
-		assert_eq!(bre_to_ere(r"^a.*b$"), "^a.*b$");
-	}
-
-	#[test]
-	fn test_trailing_backslash_is_preserved() {
-		assert_eq!(bre_to_ere(r"abc\"), r"abc\");
-	}
-
-	#[test]
-	fn test_caret_escaped_in_middle() {
-		assert_eq!(bre_to_ere(r"^a^[^x]c"), r"^a\^[^x]c");
-	}
-
-	#[test]
-	fn test_dollar_escaped_in_middle() {
-		assert_eq!(bre_to_ere(r"a$c$"), r"a\$c$");
-	}
-
-	#[test]
-	fn test_bre_back_reference() {
-		assert_eq!(bre_to_ere(r"\(.\)\1\(.\)\2"), r"(.)(?:\1)(.)(?:\2)");
-	}
+	// The BRE→ERE translation and its tests live in `crate::bre`.
 
 	// patch_block_endings
 
@@ -9593,6 +9495,43 @@ mod tests {
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "world\n");
 		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn builtin_substitutes_only_plus_prefixed_lines() {
+		// THE OBSERVABLE DEFECT this change exists for, covered end to end:
+		// argument parsing, BRE compilation and substitution together.
+		// `s/^\+/PLUS/` used to rewrite the start of EVERY line, because
+		// `\+` became `+` unconditionally and `^+` compiles as `(?:^)+`.
+		let input = "alpha\n+added\n-removed\n context\n+another\n";
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&[r"s/^\+/PLUS/"], input, "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "alpha\nPLUSadded\n-removed\n context\nPLUSanother\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn builtin_rejects_a_brace_quantifier_with_no_operand() {
+		// Real sed refuses this. Emitting the operator gave `^{1,3}`, which
+		// fancy-regex accepts and matches at every line start.
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&[r"s/^\{1,3\}/X/"], "alpha\n+added\n", "/");
+		assert_ne!(code, 0, "must not substitute: {:?}", capture.out());
+		assert!(
+			capture.err().contains("repetition-operator operand invalid"),
+			"{}",
+			capture.err()
+		);
+	}
+
+	#[test]
+	fn builtin_treats_only_the_first_caret_of_a_branch_as_an_anchor() {
+		// Measured: `sed 's/^^/X/'` rewrites only lines that begin with a
+		// literal caret, consuming one of them.
+		let (code, capture) = crate::host::run_util::<Sed>(&["s/^^/X/"], "^a\naaa\n^^b\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "Xa\naaa\nX^b\n");
 	}
 
 	#[test]

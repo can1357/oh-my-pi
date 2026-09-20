@@ -1,0 +1,11 @@
+auth "alibaba-token-plan" {
+	name "QwenCloud Token Plan"
+	// The Token Plan ships as two regionally separate products with
+	// non-interchangeable keys — International (Singapore) and China (Beijing) —
+	// so login first selects the region (or a custom base URL) before pasting the
+	// key, mirroring Alibaba Coding Plan. The chosen region is validated against
+	// its own `/models` endpoint and, when it diverges from the default
+	// international endpoint, stored in the credential so inference and discovery
+	// both target it (#6682).
+	login "custom" hook="alibaba-token-plan"
+}

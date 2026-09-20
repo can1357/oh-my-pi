@@ -40,7 +40,7 @@ export type EmitExt = ".d.ts" | ".js";
 export async function resolveEmitSpecifier(fromDir: string, spec: string, ext: EmitExt): Promise<string | null> {
 	// Already has a JS/JSON extension, or a declaration extension we map to .js.
 	if (/\.(js|json|mjs|cjs)$/.test(spec)) return null;
-	if (/\.d\.ts$/.test(spec)) return `${spec.slice(0, -".d.ts".length)}.js`;
+	if (spec.endsWith(".d.ts")) return `${spec.slice(0, -".d.ts".length)}.js`;
 
 	const abs = path.join(fromDir, spec);
 	// Sibling emitted file: `./sdk` → `./sdk.js`.

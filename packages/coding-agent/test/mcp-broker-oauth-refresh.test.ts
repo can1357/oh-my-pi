@@ -78,7 +78,9 @@ describe("broker-backed MCP OAuth refresh", () => {
 		// vault holds it. Spread bypasses the excess-property check for the
 		// MCP-only extension fields the base OAuthCredential type omits.
 		const credential: OAuthCredential = {
+			// oxlint-disable-next-line unicorn/no-useless-spread -- spread bypasses excess-property checking
 			...{ type: "oauth", access: "stale-access", refresh: "real-refresh-token", expires: Date.now() - 60_000 },
+			// oxlint-disable-next-line unicorn/no-useless-spread -- spread bypasses excess-property checking
 			...{ tokenUrl, clientId: "client-xyz" },
 		};
 		await serverStorage.set(MCP_PROVIDER, credential);

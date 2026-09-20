@@ -66,6 +66,11 @@ Without `SYSTEM.md`, append text is rendered at the end of `project-prompt.md`, 
 With `SYSTEM.md`, append text is rendered immediately after the custom text in `custom-system-prompt.md`. Context, skills, and rules follow it, and the separate project/environment footer follows that block. The templates prevent the append text and context files from being emitted twice.
 
 SDK-generated append content (for enabled memory/auto-learn features and MCP guidance) is combined before the user-supplied append text.
+Those generated blocks can end with `## MCP Server Instructions`, whose text declares
+itself server-controlled and unverified. Whenever a generated block precedes the
+user-supplied text, the text is rendered under its own `## User Instructions` heading
+so it cannot read as a trailing paragraph of a server-owned section. On its own — no
+generated block, no `SYSTEM.md` — the append text is emitted unchanged, without a heading.
 
 ## Plain-text contract
 
@@ -105,6 +110,17 @@ Cite paths with backticks.
 
 OMP still adds the generated context, skills, rules, and project/environment footer, but not the default instruction template's tool and workflow guidance.
 
+### Replace the personality block
+
+The default template renders a personality block chosen by the `personality` setting (`default`, `friendly`, `pragmatic`, `none`). A user-level `PERSONALITY.md` replaces the selected preset's text:
+
+```text
+# ~/.omp/agent/PERSONALITY.md
+Follow ASD-STE100 Simplified Technical English for all responses.
+```
+
+Only the agent directory is checked (`~/.omp/agent` by default; profile- and XDG-aware) — there is no project-level or other-config-base lookup. `personality: none` still omits the block entirely (subagents always run with `none`), and an empty or unreadable file falls back to the configured preset with a logged warning.
+
 ### Customize automatic session titles
 
 `SYSTEM.md` and `APPEND_SYSTEM.md` do not affect title-generation calls. Use `TITLE_SYSTEM.md`:
@@ -138,6 +154,7 @@ The CLI flags and files do **not** set this property: they set `customSystemProm
 | Replace the default instruction template but keep generated context, skills, and rules | `SYSTEM.md` or `--system-prompt`                                         |
 | Replace every provider-facing system block                                             | SDK `CreateAgentSessionOptions.systemPrompt`                             |
 | Customize automatic session titles                                                     | `TITLE_SYSTEM.md`                                                        |
+| Replace the personality block while keeping the rest of the default prompt            | `PERSONALITY.md`                                                         |
 | Use `{{cwd}}` or other internal variables in a user file                               | Not supported; user content is inserted verbatim                         |
 | Inherit selected default-template sections                                             | Not supported; append to the default or copy the required text           |
 | Per-directory override                                                                 | A supported config base directly under the cwd used to launch OMP        |

@@ -51,8 +51,12 @@ async function drainResponses(
 	if (model.api === "openrouter") Bun.env.PI_OPENROUTER_RESPONSES = "1";
 	try {
 		const { fetchMock, captured } = captureResponsesBody();
+		const apiKey =
+			model.provider === "muse-code"
+				? JSON.stringify({ oauthAccessToken: "meta-account-access", apiKey: "muse-subscription-key" })
+				: "k";
 		const stream = streamSimple(model, ctx, {
-			apiKey: "k",
+			apiKey,
 			...(maxTokens === undefined ? {} : { maxTokens }),
 			fetch: fetchMock,
 		});
@@ -158,6 +162,23 @@ function directCompletionsModel(maxTokens: number): Model<"openai-completions"> 
 	});
 }
 
+// First-party DeepSeek Flash: synthetic spec exercises the KDL clamp rule via
+// buildModel instead of the bundled snapshot.
+function deepseekFlashModel(id: string): Model<"openai-completions"> {
+	return buildModel({
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "deepseek",
+		baseUrl: "https://api.deepseek.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 384_000,
+	});
+}
+
 // Kimi via OpenRouter stays exempt from the omit (TPM rate limits need max_tokens).
 function kimiOpenRouterModel(maxTokens: number): Model<"openai-completions"> {
 	return buildModel({
@@ -187,8 +208,11 @@ describe("OpenAI-family output-token cap", () => {
 		expect(body.max_output_tokens).toBe(OPENAI_MAX_OUTPUT_TOKENS);
 	});
 
-	it("lets native Meta Responses requests use the advertised model cap", async () => {
-		const model = getBundledModel("meta", "muse-spark-1.1") as Model<"openai-responses">;
+	it.each([
+		["Meta Model API", "meta"],
+		["Muse Code", "muse-code"],
+	] as const)("lets %s Responses requests use the advertised model cap", async (_label, provider) => {
+		const model = getBundledModel(provider, "muse-spark-1.1") as Model<"openai-responses">;
 		const body = await drainResponses(model);
 		expect(body.max_output_tokens).toBe(131_072);
 	});
@@ -202,6 +226,15 @@ describe("OpenAI-family output-token cap", () => {
 		const body = await drainResponses(openRouterResponsesModel(131_072), 2_048);
 		expect(body.max_output_tokens).toBe(2_048);
 	});
+
+	it.each(["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])(
+		"lets first-party DeepSeek %s requests use the documented 384k output cap",
+		async id => {
+			const model = deepseekFlashModel(id);
+			const body = await captureCompletionsBody(model, model.maxTokens ?? undefined);
+			expect(body.max_tokens).toBe(384_000);
+		},
+	);
 
 	it("clamps non-aggregator completions output to the 64k ceiling", async () => {
 		const body = await captureCompletionsBody(directCompletionsModel(131_072), 131_072);

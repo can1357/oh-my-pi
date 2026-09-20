@@ -4,14 +4,14 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
-import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import type { NativeScrollbackLiveRegion } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 function renderTodos(mode: InteractiveMode): string {
@@ -26,7 +26,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 	let eventBus: EventBus;
 	let modelRegistry: ModelRegistry;
 
-	async function replaceMode(): Promise<void> {
+	async function replaceMode(sessionManager?: SessionManager): Promise<void> {
 		if (mode) {
 			mode.stop();
 			await session.dispose();
@@ -43,7 +43,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 					messages: [],
 				},
 			}),
-			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			sessionManager: sessionManager ?? SessionManager.create(tempDir.path(), tempDir.path()),
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
@@ -79,7 +79,8 @@ describe("InteractiveMode todo HUD persistence", () => {
 		session.settings.override("tasks.todoClearDelay", todoClearDelay);
 	}
 
-	it("clears closed todos from the panel instantly without mutating session history", () => {
+	it("clears closed todos from the panel instantly without mutating session history", async () => {
+		vi.useFakeTimers();
 		setTodoClearDelay(0);
 		const phases: TodoPhase[] = [
 			{
@@ -90,10 +91,12 @@ describe("InteractiveMode todo HUD persistence", () => {
 				],
 			},
 		];
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
 		session.setTodoPhases(phases);
-
 		mode.setTodos(session.getTodoPhases());
-
+		vi.advanceTimersByTime(0);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
 		expect(renderTodos(mode)).not.toContain("done task");
 		expect(renderTodos(mode)).not.toContain("abandoned task");
 		expect(session.getTodoPhases()).toEqual(phases);
@@ -149,11 +152,53 @@ describe("InteractiveMode todo HUD persistence", () => {
 		expect(renderTodos(mode)).toContain("done task");
 	});
 
-	it("clears closed todos after the configured delay", () => {
+	it("reloads the visible HUD from the explicitly attached session", async () => {
+		setTodoClearDelay(-1);
+		const focusedDir = TempDir.createSync("@pi-focused-todo-");
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		const focusedSession = new AgentSession({
+			agent: new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.create(focusedDir.path(), focusedDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		try {
+			session.setTodoPhases([{ name: "Main plan", tasks: [{ content: "stale main task", status: "in_progress" }] }]);
+			mode.setTodos(session.getTodoPhases());
+			focusedSession.setTodoPhases([
+				{
+					name: "Worker plan",
+					tasks: [
+						{ content: "finished worker task", status: "completed" },
+						{ content: "current worker task", status: "in_progress" },
+					],
+				},
+			]);
+
+			await mode.reloadTodos(focusedSession);
+
+			const rendered = renderTodos(mode);
+			expect(rendered).toContain("Worker plan");
+			expect(rendered).toContain("1/2");
+			expect(rendered).toContain("current worker task");
+			expect(rendered).not.toContain("stale main task");
+		} finally {
+			await focusedSession.dispose();
+			focusedDir.removeSync();
+		}
+	});
+
+	it("clears closed todos after the configured delay", async () => {
 		setTodoClearDelay(1);
 		vi.useFakeTimers();
 
-		mode.setTodos([{ name: "Implementation", tasks: [{ content: "done task", status: "completed" }] }]);
+		const phases: TodoPhase[] = [{ name: "Implementation", tasks: [{ content: "done task", status: "completed" }] }];
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
+		mode.setTodos(session.getTodoPhases());
 		expect(renderTodos(mode)).toContain("done task");
 
 		vi.advanceTimersByTime(999);
@@ -161,32 +206,23 @@ describe("InteractiveMode todo HUD persistence", () => {
 		expect(renderTodos(mode)).toContain("TODO");
 
 		vi.advanceTimersByTime(1);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
 		expect(renderTodos(mode)).not.toContain("done task");
 	});
 
-	it("keeps the anchored todo panel in the live region while visible", () => {
-		setTodoClearDelay(-1);
-
-		mode.setTodos([{ name: "Implementation", tasks: [{ content: "pending task", status: "pending" }] }]);
-		const liveRegion = mode.todoContainer as unknown as NativeScrollbackLiveRegion;
-		expect(liveRegion.getNativeScrollbackLiveRegionStart?.()).toBe(0);
-
-		mode.setTodos([]);
-		expect(liveRegion.getNativeScrollbackLiveRegionStart?.()).toBeUndefined();
-	});
-
-	it("marks todos complete when subagent reconciliation reports a finished agent", async () => {
+	it("marks reconciled todos complete and auto-dismisses the durable plan", async () => {
 		await replaceMode();
-		setTodoClearDelay(-1);
+		setTodoClearDelay(0);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		session.sessionManager.appendCustomEntry("user_todo_edit", {
+			phases: [{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] }],
+		});
 		session.setTodoPhases([
 			{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] },
 		]);
 		mode.setTodos(session.getTodoPhases());
-
 		await mode.init();
-		// Subagent lifecycle changes coalesce behind a 100ms observer UI sync
-		// timer before todo reconciliation runs; flush it deterministically.
 		vi.useFakeTimers();
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 			id: "ReviewFixer",
@@ -197,8 +233,138 @@ describe("InteractiveMode todo HUD persistence", () => {
 			detached: true,
 		});
 		vi.advanceTimersByTime(100);
-
+		vi.advanceTimersByTime(0);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
 		expect(session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+		expect(renderTodos(mode)).toBe("");
+	});
+
+	it("reconciles focused worker todos without overwriting the main session", async () => {
+		await replaceMode();
+		setTodoClearDelay(-1);
+		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		const mainPhases: TodoPhase[] = [
+			{ name: "Main plan", tasks: [{ content: "orchestrate the main work", status: "in_progress" }] },
+		];
+		session.setTodoPhases(mainPhases);
+		mode.setTodos(session.getTodoPhases());
+		await mode.init();
+
+		const focusedDir = TempDir.createSync("@pi-focused-reconcile-");
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		const focusedSession = new AgentSession({
+			agent: new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.create(focusedDir.path(), focusedDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		focusedSession.setTodoPhases([
+			{
+				name: "Worker plan",
+				tasks: [
+					{ content: "apply nested review fixes", status: "pending" },
+					{ content: "verify worker changes", status: "in_progress" },
+				],
+			},
+		]);
+		const registry = AgentRegistry.global();
+		const agentId = "FocusedTodoParent";
+		const ref = registry.register({
+			id: agentId,
+			displayName: agentId,
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: focusedSession,
+			status: "running",
+		});
+		try {
+			await mode.focusAgentSession(agentId);
+			expect(renderTodos(mode)).toContain("apply nested review fixes");
+
+			vi.useFakeTimers();
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: `${agentId}/NestedFixer`,
+				index: 0,
+				agent: "task",
+				description: "apply nested review fixes",
+				status: "completed",
+				detached: true,
+			});
+			vi.advanceTimersByTime(100);
+
+			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+			expect(session.getTodoPhases()).toEqual(mainPhases);
+			expect(renderTodos(mode)).toContain("1/2");
+
+			await mode.unfocusSession();
+			expect(renderTodos(mode)).toContain("orchestrate the main work");
+			expect(renderTodos(mode)).not.toContain("apply nested review fixes");
+		} finally {
+			vi.useRealTimers();
+			if (mode.focusedAgentId) await mode.unfocusSession();
+			registry.unregister(agentId, ref);
+			await focusedSession.dispose();
+			focusedDir.removeSync();
+		}
+	});
+
+	it("reconciles into the snapshot's owning session even when viewSession has moved on", async () => {
+		// Reproduces the focus-attach window deterministically: the HUD snapshot is
+		// reloaded from the worker (making it the owner) while viewSession is still
+		// the main session. A subagent completing here must land in the worker, not
+		// be written over the main session's canonical plan (#9575 review).
+		await replaceMode();
+		setTodoClearDelay(-1);
+		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		const mainPhases: TodoPhase[] = [
+			{ name: "Main plan", tasks: [{ content: "orchestrate the main work", status: "in_progress" }] },
+		];
+		session.setTodoPhases(mainPhases);
+		mode.setTodos(session.getTodoPhases());
+		await mode.init();
+
+		const workerDir = TempDir.createSync("@pi-owner-reconcile-");
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		const workerSession = new AgentSession({
+			agent: new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: SessionManager.create(workerDir.path(), workerDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		workerSession.setTodoPhases([
+			{ name: "Worker plan", tasks: [{ content: "run the delegated fix", status: "in_progress" }] },
+		]);
+		try {
+			// Owner := worker, viewSession still := main.
+			await mode.reloadTodos(workerSession);
+			expect(renderTodos(mode)).toContain("run the delegated fix");
+
+			vi.useFakeTimers();
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: "DelegatedFixer",
+				index: 0,
+				agent: "task",
+				description: "run the delegated fix",
+				status: "completed",
+				detached: true,
+			});
+			vi.advanceTimersByTime(100);
+
+			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+			expect(session.getTodoPhases()).toEqual(mainPhases);
+			expect(renderTodos(mode)).toContain("1/1");
+		} finally {
+			vi.useRealTimers();
+			await workerSession.dispose();
+			workerDir.removeSync();
+		}
 	});
 
 	it("completes a blocked todo when the detached subagent it waits on finishes", async () => {
@@ -232,6 +398,183 @@ describe("InteractiveMode todo HUD persistence", () => {
 		expect(task?.status).toBe("completed");
 		// The blocker note is dropped with the blocked status — the wait is over.
 		expect(task?.blocker).toBeUndefined();
+	});
+	it("does not persist a stale reveal after the owning snapshot changes", async () => {
+		await replaceMode();
+		vi.useFakeTimers();
+		const settle = Promise.withResolvers<void>();
+		vi.spyOn(session, "settleInFlightMessagePersistence").mockReturnValue(settle.promise);
+		const oldPhases: TodoPhase[] = [{ name: "Old", tasks: [{ content: "old", status: "completed" }] }];
+		const newPhases: TodoPhase[] = [{ name: "New", tasks: [{ content: "new", status: "in_progress" }] }];
+		mode.setTodos(oldPhases);
+		mode.setTodoExpanded(true);
+		mode.setTodos(newPhases);
+		settle.resolve();
+		await Promise.resolve();
+		expect(
+			session.sessionManager
+				.getBranch()
+				.some(entry => entry.type === "custom" && entry.customType === "todo_hud_state"),
+		).toBe(false);
+		expect(renderTodos(mode)).toContain("new");
+	});
+
+	it("keeps a newer canonical TODO edit after an older result finishes persisting", async () => {
+		await replaceMode();
+		const settle = Promise.withResolvers<void>();
+		vi.spyOn(session, "settleInFlightMessagePersistence").mockReturnValue(settle.promise);
+		const older: TodoPhase[] = [{ name: "Old", tasks: [{ content: "old task", status: "in_progress" }] }];
+		const newer: TodoPhase[] = [{ name: "New", tasks: [{ content: "new task", status: "in_progress" }] }];
+		session.setTodoPhases(older);
+		mode.setTodos(older);
+		const pending = mode.eventController.handleEvent({
+			type: "message_end",
+			message: {
+				role: "toolResult",
+				toolName: "todo",
+				toolCallId: "old-todo",
+				content: [],
+				isError: false,
+				timestamp: Date.now(),
+				details: { phases: older },
+			},
+		});
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases: newer });
+		session.setTodoPhases(newer);
+		mode.setTodos(newer);
+		settle.resolve();
+		await pending;
+		expect(session.getTodoPhases()).toEqual(newer);
+		expect(renderTodos(mode)).toContain("new task");
+		expect(renderTodos(mode)).not.toContain("old task");
+	});
+
+	it("cancels an old dismissal timer when a replacement plan becomes visible", async () => {
+		await replaceMode();
+		vi.useFakeTimers();
+		session.settings.override("tasks.todoClearDelay", 1);
+		const completed: TodoPhase[] = [{ name: "Old", tasks: [{ content: "old", status: "completed" }] }];
+		const replacement: TodoPhase[] = [{ name: "New", tasks: [{ content: "new", status: "in_progress" }] }];
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases: completed });
+		mode.setTodos(completed);
+		vi.advanceTimersByTime(500);
+		mode.setTodos(replacement);
+		vi.advanceTimersByTime(1000);
+		await Promise.resolve();
+		expect(renderTodos(mode)).toContain("new");
+		expect(renderTodos(mode)).not.toContain("old");
+	});
+
+	it("treats identical canonical todo edits as new snapshots after dismissal", async () => {
+		await replaceMode();
+		vi.useFakeTimers();
+		setTodoClearDelay(1);
+		const phases: TodoPhase[] = [{ name: "Done", tasks: [{ content: "same task", status: "completed" }] }];
+		const oldSourceEntryId = session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
+		mode.setTodos(phases);
+		vi.advanceTimersByTime(1000);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
+		expect(renderTodos(mode)).toBe("");
+
+		const newSourceEntryId = session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
+		mode.setTodos(phases);
+		expect(newSourceEntryId).not.toBe(oldSourceEntryId);
+		expect(renderTodos(mode)).toContain("same task");
+
+		vi.advanceTimersByTime(1000);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
+		expect(renderTodos(mode)).toBe("");
+		expect(session.getTodoPhases()).toEqual(phases);
+		expect(
+			session.sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "custom" && entry.customType === "user_todo_edit")
+				.map(entry => entry.id),
+		).toEqual([oldSourceEntryId, newSourceEntryId]);
+	});
+
+	it("does not carry a pending dismissal into a new session with identical todos", async () => {
+		await replaceMode();
+		vi.useFakeTimers();
+		setTodoClearDelay(1);
+		const settle = Promise.withResolvers<void>();
+		vi.spyOn(session, "settleInFlightMessagePersistence").mockReturnValue(settle.promise);
+		const phases: TodoPhase[] = [{ name: "Done", tasks: [{ content: "same task", status: "completed" }] }];
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
+		mode.setTodos(phases);
+		const oldSessionId = session.sessionManager.getSessionId();
+		vi.advanceTimersByTime(1000);
+
+		await session.sessionManager.newSession();
+		const newSessionId = session.sessionManager.getSessionId();
+		const newSourceEntryId = session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
+		mode.setTodos(phases);
+		expect(newSessionId).not.toBe(oldSessionId);
+		expect(renderTodos(mode)).toContain("same task");
+
+		settle.resolve();
+		await Promise.resolve();
+		await session.sessionManager.flush();
+		await Promise.resolve();
+		expect(renderTodos(mode)).toContain("same task");
+		expect(session.getTodoPhases()).toEqual(phases);
+		expect(
+			session.sessionManager.getBranch().map(entry => ({
+				id: entry.id,
+				customType: entry.type === "custom" ? entry.customType : undefined,
+			})),
+		).toEqual([{ id: newSourceEntryId, customType: "user_todo_edit" }]);
+	});
+
+	it("persists dismissal and explicit reveal across fresh session loads without losing tasks", async () => {
+		await replaceMode();
+		vi.useFakeTimers();
+		const phases: TodoPhase[] = [{ name: "Done", tasks: [{ content: "ship", status: "completed" }] }];
+		session.settings.override("tasks.todoClearDelay", 0);
+		session.sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "Finished the plan." }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		session.sessionManager.appendCustomEntry("user_todo_edit", { phases });
+		session.setTodoPhases(phases);
+		mode.setTodos(phases);
+		vi.advanceTimersByTime(0);
+		await session.settleInFlightMessagePersistence();
+		await session.sessionManager.flush();
+		expect(renderTodos(mode)).toBe("");
+		expect(session.getTodoPhases()).toEqual(phases);
+		const file = session.sessionManager.getSessionFile()!;
+		await replaceMode(await SessionManager.open(file));
+		await mode.reloadTodos();
+		expect(renderTodos(mode)).toBe("");
+		expect(session.getTodoPhases()).toEqual(phases);
+		mode.todoExpanded = true;
+		await mode.handleTodoCommand("expand");
+		expect(renderTodos(mode)).toContain("ship");
+		await session.sessionManager.flush();
+		await replaceMode(await SessionManager.open(file));
+		await mode.reloadTodos();
+		expect(renderTodos(mode)).toContain("ship");
+		expect(session.getTodoPhases()).toEqual(phases);
 	});
 });
 
@@ -374,15 +717,143 @@ describe("InteractiveMode todo HUD anchor", () => {
 		expect(root?.trim()).toBe("TODO");
 	});
 
-	it("anchors the todo HUD as a native-scrollback live region while populated", () => {
-		// The loader sits below this HUD, so the HUD must report its own seam or
-		// its rows commit to scrollback as stale duplicates on short terminals.
-		const seam = () =>
-			(mode.todoContainer as Partial<NativeScrollbackLiveRegion>).getNativeScrollbackLiveRegionStart?.();
-		expect(seam()).toBeUndefined();
-		mode.setTodos([{ name: "Tasks", tasks: [{ content: "alpha", status: "pending" }] }]);
-		expect(seam()).toBe(0);
-		mode.setTodos([]);
-		expect(seam()).toBeUndefined();
+	it("expands and collapses the complete todo HUD through /todo", async () => {
+		mode.setTodos([
+			{
+				name: "Implementation",
+				tasks: Array.from({ length: 8 }, (_, index): TodoItem => ({
+					content: `Task ${index + 1}`,
+					status: index === 0 ? "in_progress" : "pending",
+				})),
+			},
+		]);
+
+		await mode.handleTodoCommand("expand");
+		await mode.handleTodoCommand("expand");
+
+		expect(renderTodos(mode)).toContain("Task 8");
+		expect(renderTodos(mode)).not.toContain("more todo");
+
+		await mode.handleTodoCommand("collapse");
+		await mode.handleTodoCommand("collapse");
+
+		expect(renderTodos(mode)).not.toContain("Task 8");
+		expect(renderTodos(mode)).toContain("3 more todos");
+	});
+
+	describe("compact todo for small terminal height (< 18 rows)", () => {
+		function setTerminalRows(rows: number): void {
+			Object.defineProperty(mode.ui.terminal, "rows", {
+				get: () => rows,
+				configurable: true,
+			});
+		}
+
+		afterEach(() => {
+			setTerminalRows(24);
+			mode.loadingAnimation = undefined;
+			mode.statusContainer.disposeChildren();
+		});
+
+		it("renders todo as a single line item aligned to the right when terminal height < 18", () => {
+			setTerminalRows(15);
+			mode.setTodos([
+				{
+					name: "Phase 1",
+					tasks: [
+						{ content: "Setup database", status: "completed" },
+						{ content: "Create API endpoints", status: "in_progress" },
+						{ content: "Write tests", status: "pending" },
+					],
+				},
+			]);
+
+			// todoContainer is empty in compact mode
+			expect(mode.todoContainer.render(100)).toHaveLength(0);
+
+			// statusContainer renders the compact right-aligned todo above editor
+			const rendered = mode.statusContainer.render(100);
+			expect(rendered.length).toBeGreaterThan(0);
+			const lastLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
+			expect(lastLine).toContain("TODO 1/3");
+			expect(lastLine).toContain("Create API endpoints");
+			// Right-aligned: ends with the todo text (with trailing space)
+			expect(lastLine.trimEnd().endsWith("Create API endpoints")).toBe(true);
+			expect(lastLine.startsWith(" ")).toBe(true);
+		});
+
+		it("places compact todo on the right side of the active loader / intent spinner", () => {
+			setTerminalRows(14);
+			mode.setTodos([
+				{
+					name: "Tasks",
+					tasks: [
+						{ content: "Inspect server", status: "in_progress" },
+						{ content: "Deploy fix", status: "pending" },
+					],
+				},
+			]);
+
+			mode.ensureLoadingAnimation();
+			mode.setWorkingMessage("Reading src/index.ts (esc to interrupt)");
+
+			expect(mode.todoContainer.render(120)).toHaveLength(0);
+
+			const rendered = mode.statusContainer.render(120);
+			expect(rendered.length).toBeGreaterThanOrEqual(2);
+			const lastLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
+			// Left side has the intent spinner/message
+			expect(lastLine).toContain("Reading src/index.ts");
+			// Right side has the compact todo
+			expect(lastLine).toContain("TODO 0/2");
+			expect(lastLine).toContain("Inspect server");
+			// Left message comes before right todo
+			expect(lastLine.indexOf("Reading src/index.ts")).toBeLessThan(lastLine.indexOf("TODO 0/2"));
+		});
+
+		it("shows completed summary when all tasks are done in compact mode", () => {
+			setTerminalRows(16);
+			mode.setTodos([
+				{
+					name: "Tasks",
+					tasks: [
+						{ content: "Task 1", status: "completed" },
+						{ content: "Task 2", status: "completed" },
+					],
+				},
+			]);
+
+			const rendered = mode.statusContainer.render(100);
+			const lastLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
+			expect(lastLine).toContain("TODO 2/2");
+			expect(lastLine).toContain("done");
+		});
+
+		it("switches dynamically between multi-line HUD and compact single line on resize", () => {
+			mode.setTodos([
+				{
+					name: "Tasks",
+					tasks: [{ content: "Refactor router", status: "in_progress" }],
+				},
+			]);
+
+			// Terminal >= 18 rows: full tree HUD
+			setTerminalRows(24);
+			expect(mode.todoContainer.render(100).length).toBeGreaterThan(0);
+			expect(mode.statusContainer.render(100)).toHaveLength(0);
+
+			// Terminal < 18 rows: compact mode
+			setTerminalRows(15);
+			expect(mode.todoContainer.render(100)).toHaveLength(0);
+			expect(mode.statusContainer.render(100).length).toBeGreaterThan(0);
+			const compactLine = Bun.stripANSI(mode.statusContainer.render(100).slice(-1)[0] ?? "");
+			expect(compactLine).toContain("TODO 0/1");
+			expect(compactLine).toContain("Refactor router");
+
+			// Resize back >= 18 rows
+			setTerminalRows(24);
+			expect(mode.todoContainer.render(100).length).toBeGreaterThan(0);
+			expect(mode.statusContainer.render(100)).toHaveLength(0);
+		});
 	});
 });

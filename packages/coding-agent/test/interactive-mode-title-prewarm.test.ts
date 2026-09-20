@@ -3,7 +3,7 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -87,7 +87,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 	});
 
 	it("prewarms the configured local worker on startup for an unnamed session", async () => {
-		session.settings.set("providers.tinyModel", "lfm2-350m");
+		session.settings.set("providers.tinyModel", "lfm2.5-230m");
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
@@ -100,11 +100,11 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		setImmediate(immediateFlushed.resolve);
 		await immediateFlushed.promise;
 
-		expect(prewarm).toHaveBeenCalledWith("lfm2-350m");
+		expect(prewarm).toHaveBeenCalledWith("lfm2.5-230m");
 	});
 
 	it("does not prewarm when the session is already named", async () => {
-		session.settings.set("providers.tinyModel", "lfm2-350m");
+		session.settings.set("providers.tinyModel", "lfm2.5-230m");
 		vi.spyOn(mode.sessionManager, "getSessionName").mockReturnValue("resumed-session");
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 

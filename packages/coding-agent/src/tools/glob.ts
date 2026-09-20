@@ -1,23 +1,19 @@
+import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import * as natives from "@oh-my-pi/pi-natives";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
 import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import { splitMemoryGlobPattern } from "../internal-urls/memory-protocol";
-import type { Theme } from "../modes/theme/theme";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
-import { type TruncationResult, truncateHead } from "../session/streaming-output";
+import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
-import { Ellipsis, fileHyperlink, renderFileList, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
-import { applyListLimit } from "./list-limit";
-import { formatFullOutputReference, type OutputMeta } from "./output-meta";
+import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import {
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
@@ -28,16 +24,10 @@ import {
 	partitionExistingPaths,
 	resolveExplicitFindPatterns,
 	resolveToCwd,
-	toPathList,
 } from "./path-utils";
-import {
-	createCachedComponent,
-	formatCount,
-	formatEmptyMessage,
-	formatErrorMessage,
-	PREVIEW_LIMITS,
-} from "./render-utils";
-import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
+import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
+import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 
 const findSchema = type({
@@ -54,25 +44,6 @@ export type GlobToolInput = typeof findSchema.infer;
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 200;
 const DEFAULT_GLOB_TIMEOUT_MS = 5000;
-
-export interface GlobToolDetails {
-	truncation?: TruncationResult;
-	resultLimitReached?: number;
-	meta?: OutputMeta;
-	// Fields for TUI rendering
-	scopePath?: string;
-	fileCount?: number;
-	files?: string[];
-	truncated?: boolean;
-	error?: string;
-	/** Working directory at search time. Used by the renderer to resolve relative
-	 * file paths to absolute paths for OSC 8 hyperlinks. */
-	cwd?: string;
-	/** User-supplied paths whose base directory was missing on disk. The tool
-	 * skipped these and continued with the surviving entries; surfaced as a
-	 * non-fatal warning in the renderer and in the model-facing text. */
-	missingPaths?: string[];
-}
 
 /**
  * Pluggable operations for the find tool.
@@ -94,12 +65,23 @@ export interface GlobToolOptions {
 	operations?: GlobOperations;
 	/** Remap slash-only paths to the session cwd before root-search validation. */
 	rootPathAlias?: boolean;
+	/** Native glob binding. Override only in tests. */
+	nativeGlob?: typeof natives.glob;
+	/** Filesystem stat used before native scans. Override only in tests. */
+	stat?: typeof fs.promises.stat;
+	/** Native and user-facing scan timeout. Override only in tests. */
+	timeoutMs?: number;
 }
 
 interface GlobTarget {
 	searchPath: string;
 	globPattern: string;
 	hasGlob: boolean;
+}
+
+interface NativePreparedTarget {
+	target: GlobTarget;
+	result?: Array<{ path: string; mtime: number }>;
 }
 
 export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
@@ -109,6 +91,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly label = "Glob";
 	get description(): string {
 		return prompt.render(globDescription, {
+			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
@@ -139,6 +122,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 	readonly #customOps?: GlobOperations;
 	readonly #rootPathAlias: boolean;
+	readonly #nativeGlob: typeof natives.glob;
+	readonly #stat: typeof fs.promises.stat;
+	readonly #timeoutMs: number;
 
 	constructor(
 		private readonly session: ToolSession,
@@ -146,6 +132,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	) {
 		this.#customOps = options?.operations;
 		this.#rootPathAlias = options?.rootPathAlias === true;
+		this.#nativeGlob = options?.nativeGlob ?? natives.glob;
+		this.#stat = options?.stat ?? fs.promises.stat;
+		this.#timeoutMs = options?.timeoutMs ?? DEFAULT_GLOB_TIMEOUT_MS;
+		if (!Number.isFinite(this.#timeoutMs) || this.#timeoutMs <= 0) {
+			throw new TypeError("Glob timeout must be a positive number");
+		}
 	}
 
 	async execute(
@@ -157,7 +149,19 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	): Promise<AgentToolResult<GlobToolDetails>> {
 		const { path: pathInput, limit, hidden, gitignore } = params;
 
-		return untilAborted(signal, async () => {
+		throwIfAborted(signal);
+		// Preparation still rejects immediately on caller abort. Once every
+		// filesystem stat has settled, detach this proxy before launching native
+		// scans so execute can drain each worker through the real caller signal.
+		// Custom operations have no signal API and keep immediate abort coverage
+		// for their entire execution.
+		const preparationController = !this.#customOps?.glob && signal ? new AbortController() : undefined;
+		const abortPreparation = (): void => preparationController?.abort();
+		if (preparationController && signal) {
+			signal.addEventListener("abort", abortPreparation, { once: true });
+		}
+		const immediateAbortSignal = this.#customOps?.glob ? signal : preparationController?.signal;
+		const execution = untilAborted(immediateAbortSignal, async () => {
 			const formatScopePath = (targetPath: string): string => formatPathRelativeToCwd(targetPath, this.session.cwd);
 			const scopedPaths = toPathList(pathInput);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
@@ -192,8 +196,13 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						cwd: this.session.cwd,
 						settings: this.session.settings,
 						signal,
+						sessionFile: this.session.getSessionFile() ?? undefined,
+						sessionId:
+							this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
+						agentRegistry: this.session.agentRegistry,
 						localProtocolOptions: this.session.localProtocolOptions,
 						skills: this.session.skills,
+						rules: this.session.activeRules,
 						pathOnly: true,
 					});
 					if (!resource.sourcePath) {
@@ -208,8 +217,12 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					cwd: this.session.cwd,
 					settings: this.session.settings,
 					signal,
+					sessionFile: this.session.getSessionFile() ?? undefined,
+					sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
+					agentRegistry: this.session.agentRegistry,
 					localProtocolOptions: this.session.localProtocolOptions,
 					skills: this.session.skills,
+					rules: this.session.activeRules,
 					pathOnly: true,
 				});
 				if (!resource.sourcePath) {
@@ -269,7 +282,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const effectiveLimit = Math.min(MAX_LIMIT, Math.max(1, Math.floor(requestedLimit)));
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
-			const timeoutMs = DEFAULT_GLOB_TIMEOUT_MS;
+			const timeoutMs = this.#timeoutMs;
 			const timeoutSignal = AbortSignal.timeout(timeoutMs);
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			const formatMatchPath = (matchPath: string, base: string, fileType?: natives.FileType): string => {
@@ -375,6 +388,40 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				return buildResult(merged);
 			}
 
+			const preparedTargets: NativePreparedTarget[] = await Promise.all(
+				targets.map(async target => {
+					throwIfAborted(signal);
+					let stat: fs.Stats;
+					try {
+						stat = await this.#stat(target.searchPath);
+					} catch (err) {
+						// ENAMETOOLONG can never name a real target; surface a clean
+						// "Path not found" instead of leaking the raw errno (issue #7597).
+						if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
+							if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
+							return { target, result: [] };
+						}
+						throw err;
+					}
+					if (!target.hasGlob && stat.isFile()) {
+						return {
+							target,
+							result: [{ path: formatScopePath(target.searchPath), mtime: stat.mtimeMs }],
+						};
+					}
+					if (!stat.isDirectory()) {
+						if (isSingle) throw new ToolError(`Path is not a directory: ${target.searchPath}`);
+						return { target, result: [] };
+					}
+					return { target };
+				}),
+			);
+			const nativeScanPending = preparedTargets.some(prepared => prepared.result === undefined);
+			if (nativeScanPending && preparationController && signal) {
+				signal.removeEventListener("abort", abortPreparation);
+			}
+			throwIfAborted(signal);
+
 			const onUpdateMatches: string[] = [];
 			const onUpdateMtimes: number[] = [];
 			const updateIntervalMs = 200;
@@ -409,48 +456,29 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				};
 
 			let timedOut = false;
-			const runTarget = async (target: GlobTarget): Promise<Array<{ path: string; mtime: number }>> => {
-				throwIfAborted(signal);
-				let stat: fs.Stats;
+			const runTarget = async (prepared: NativePreparedTarget): Promise<Array<{ path: string; mtime: number }>> => {
+				if (prepared.result) return prepared.result;
+				const { target } = prepared;
 				try {
-					stat = await fs.promises.stat(target.searchPath);
-				} catch (err) {
-					// ENAMETOOLONG can never name a real target; surface a clean
-					// "Path not found" instead of leaking the raw errno (issue #7597).
-					if (isEnoent(err) || hasFsCode(err, "ENAMETOOLONG")) {
-						if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
-						return [];
-					}
-					throw err;
-				}
-				if (!target.hasGlob && stat.isFile()) {
-					return [{ path: formatScopePath(target.searchPath), mtime: stat.mtimeMs }];
-				}
-				if (!stat.isDirectory()) {
-					if (isSingle) throw new ToolError(`Path is not a directory: ${target.searchPath}`);
-					return [];
-				}
-				try {
-					const result = await untilAborted(combinedSignal, () =>
-						natives.glob(
-							{
-								pattern: target.globPattern,
-								path: target.searchPath,
-								hidden: includeHidden,
-								maxResults: effectiveLimit,
-								sortByMtime: true,
-								gitignore: useGitignore,
-								// parseFindPattern explicitly prepends "**/" when the user's
-								// pattern begins with a glob (so `*.ts` becomes `**/*.ts`).
-								// Anything that arrives here without "**/" was scoped to a
-								// single directory by the user (e.g. `dir/*`); disable the
-								// native auto-recursion so `dir/*` does not silently match
-								// `dir/sub/nested.ts`.
-								recursive: false,
-								signal: combinedSignal,
-							},
-							makeOnMatch(target.searchPath),
-						),
+					const result = await this.#nativeGlob(
+						{
+							pattern: target.globPattern,
+							path: target.searchPath,
+							hidden: includeHidden,
+							maxResults: effectiveLimit,
+							sortByMtime: true,
+							gitignore: useGitignore,
+							// parseFindPattern explicitly prepends "**/" when the user's
+							// pattern begins with a glob (so `*.ts` becomes `**/*.ts`).
+							// Anything that arrives here without "**/" was scoped to a
+							// single directory by the user (e.g. `dir/*`); disable the
+							// native auto-recursion so `dir/*` does not silently match
+							// `dir/sub/nested.ts`.
+							recursive: false,
+							signal: combinedSignal,
+							timeoutMs,
+						},
+						makeOnMatch(target.searchPath),
 					);
 					throwIfAborted(signal);
 					const out: Array<{ path: string; mtime: number }> = [];
@@ -463,8 +491,14 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					}
 					return out;
 				} catch (error) {
-					if (error instanceof Error && error.name === "AbortError") {
-						if (timeoutSignal.aborted && !signal?.aborted) {
+					const nativeAbort =
+						error instanceof Error &&
+						(error.name === "AbortError" || error.name === "TimeoutError" || error.message.includes("Aborted:"));
+					if (nativeAbort) {
+						if (
+							!signal?.aborted &&
+							(timeoutSignal.aborted || (error instanceof Error && error.message.includes("Aborted: Timeout")))
+						) {
 							timedOut = true;
 							return [];
 						}
@@ -474,7 +508,11 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				}
 			};
 
-			const perTarget = await Promise.all(targets.map(runTarget));
+			const settledTargets = await Promise.allSettled(preparedTargets.map(runTarget));
+			const perTarget = settledTargets.map(result => {
+				if (result.status === "rejected") throw result.reason;
+				return result.value;
+			});
 
 			if (timedOut) {
 				// Drain the partial matches accumulated during streaming and return them
@@ -510,182 +548,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			merged.sort((a, b) => b.mtime - a.mtime);
 			return buildResult(merged.map(entry => entry.path));
 		});
+		return execution.finally(() => {
+			signal?.removeEventListener("abort", abortPreparation);
+		});
 	}
 }
-
-// =============================================================================
-// TUI Renderer
-// =============================================================================
-
-interface GlobRenderArgs {
-	path?: string | string[];
-	/** Legacy pre-`path` argument name; kept so historical transcripts still render a scope. */
-	paths?: string | string[];
-	limit?: number;
-}
-
-function formatGlobRenderPaths(args: GlobRenderArgs | undefined): string | undefined {
-	const list = toPathList(args?.path ?? args?.paths);
-	return list.length > 0 ? list.join(", ") : undefined;
-}
-
-const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
-
-function globStatusIcon(uiTheme: Theme): string {
-	return uiTheme.fg("toolTitle", uiTheme.symbol("icon.search"));
-}
-
-export const globToolRenderer = {
-	inline: true,
-	renderCall(args: GlobRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const meta: string[] = [];
-		if (args.limit !== undefined) meta.push(`limit:${args.limit}`);
-
-		const text = renderStatusLine(
-			{
-				icon: "pending",
-				title: "Glob",
-				titleColor: "toolTitle",
-				description: formatGlobRenderPaths(args) || "*",
-				meta,
-			},
-			uiTheme,
-		);
-		return new Text(text, 1, 0);
-	},
-
-	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: GlobToolDetails; isError?: boolean },
-		options: RenderResultOptions,
-		uiTheme: Theme,
-		args?: GlobRenderArgs,
-	): Component {
-		const details = result.details;
-
-		if (result.isError || details?.error) {
-			const errorText = details?.error || result.content?.find(c => c.type === "text")?.text || "Unknown error";
-			return new Text(formatErrorMessage(errorText, uiTheme), 1, 0);
-		}
-
-		const hasDetailedData = details?.fileCount !== undefined;
-		const textContent = result.content?.find(c => c.type === "text")?.text;
-
-		if (!hasDetailedData) {
-			if (
-				!textContent ||
-				textContent.includes("No files matching") ||
-				textContent.includes("No files found") ||
-				textContent.trim() === ""
-			) {
-				return new Text(formatEmptyMessage("No files found", uiTheme), 1, 0);
-			}
-
-			const lines = textContent.split("\n").filter(l => l.trim());
-			const header = renderStatusLine(
-				{
-					iconOverride: globStatusIcon(uiTheme),
-					title: "Glob",
-					titleColor: "toolTitle",
-					description: formatGlobRenderPaths(args),
-					meta: [formatCount("file", lines.length)],
-				},
-				uiTheme,
-			);
-			return createCachedComponent(
-				() => options.expanded,
-				width => {
-					const listLines = renderTreeList(
-						{
-							items: lines,
-							expanded: options.expanded,
-							maxCollapsed: COLLAPSED_LIST_LIMIT,
-							itemType: "file",
-							renderItem: line => uiTheme.fg("accent", line),
-						},
-						uiTheme,
-					);
-					return [header, ...listLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
-				},
-				{ paddingX: 1 },
-			);
-		}
-
-		const fileCount = details?.fileCount ?? 0;
-		const truncation = details?.truncation ?? details?.meta?.truncation;
-		const limits = details?.meta?.limits;
-		const truncated = Boolean(details?.truncated || truncation || details?.resultLimitReached || limits?.resultLimit);
-		const files = details?.files ?? [];
-
-		const missingPaths = details?.missingPaths ?? [];
-		const missingNote =
-			missingPaths.length > 0 ? uiTheme.fg("warning", `skipped missing: ${missingPaths.join(", ")}`) : undefined;
-
-		if (fileCount === 0) {
-			// `truncated` on an empty result means the scan timed out mid-walk —
-			// render "incomplete", not a definitive "No files found".
-			const emptyLabel = truncated ? "No matches before timeout (scan incomplete)" : "No files found";
-			const header = renderStatusLine(
-				{
-					icon: "warning",
-					title: "Glob",
-					titleColor: "toolTitle",
-					description: formatGlobRenderPaths(args),
-					meta: truncated ? ["0 files", uiTheme.fg("warning", "timed out")] : ["0 files"],
-				},
-				uiTheme,
-			);
-			const lines = [header, formatEmptyMessage(emptyLabel, uiTheme)];
-			if (missingNote) lines.push(missingNote);
-			return new Text(lines.join("\n"), 1, 0);
-		}
-		const meta: string[] = [formatCount("file", fileCount)];
-		if (details?.scopePath) meta.push(`in ${details.scopePath}`);
-		if (truncated) meta.push(uiTheme.fg("warning", "truncated"));
-		const header = renderStatusLine(
-			{
-				...(truncated ? { icon: "warning" as const } : { iconOverride: globStatusIcon(uiTheme) }),
-				title: "Glob",
-				titleColor: "toolTitle",
-				description: formatGlobRenderPaths(args),
-				meta,
-			},
-			uiTheme,
-		);
-
-		const truncationReasons: string[] = [];
-		if (details?.resultLimitReached) truncationReasons.push(`limit ${details.resultLimitReached} results`);
-		if (limits?.resultLimit) truncationReasons.push(`limit ${limits.resultLimit.reached} results`);
-		if (truncation) truncationReasons.push(truncation.truncatedBy === "lines" ? "line limit" : "size limit");
-		const artifactId = truncation && "artifactId" in truncation ? truncation.artifactId : undefined;
-		if (artifactId) truncationReasons.push(formatFullOutputReference(artifactId));
-
-		const extraLines: string[] = [];
-		if (truncationReasons.length > 0) {
-			extraLines.push(uiTheme.fg("warning", `truncated: ${truncationReasons.join(", ")}`));
-		}
-		if (missingNote) extraLines.push(missingNote);
-
-		return createCachedComponent(
-			() => options.expanded,
-			width => {
-				const cwd = details?.cwd;
-				const fileLines = renderFileList(
-					{
-						files: files.map(entry => ({
-							path: entry,
-							isDirectory: entry.endsWith("/"),
-							absPath: cwd && !entry.endsWith("/") ? path.resolve(cwd, entry) : undefined,
-						})),
-						expanded: options.expanded,
-						maxCollapsed: COLLAPSED_LIST_LIMIT,
-						hyperlinkFn: fileHyperlink,
-					},
-					uiTheme,
-				);
-				return [header, ...fileLines, ...extraLines].map(l => truncateToWidth(l, width, Ellipsis.Omit));
-			},
-			{ paddingX: 1 },
-		);
-	},
-	mergeCallAndResult: true,
-};

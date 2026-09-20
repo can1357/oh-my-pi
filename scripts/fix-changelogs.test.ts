@@ -3,7 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import { collectPromotableAddedItemLines, fixChangelogContent, runChangelogFixer } from "./fix-changelogs";
+import {
+	collapseChangelogTail,
+	collectPromotableAddedItemLines,
+	fixChangelogContent,
+	runChangelogFixer,
+	splitArchiveFooter,
+} from "./fix-changelogs";
 
 describe("collectPromotableAddedItemLines", () => {
 	it("keeps new changelog item additions while ignoring moves and edits", () => {
@@ -253,6 +259,88 @@ describe("fixChangelogContent", () => {
 	});
 });
 
+const ARCHIVE_LINK =
+	"Older entries are archived in [packages/foo/CHANGELOG.md@abc123def456](https://github.com/can1357/oh-my-pi/blob/abc123def456abc123def456abc123def456abc1/packages/foo/CHANGELOG.md).";
+
+const FOUR_SECTIONS = [
+	"# Changelog",
+	"",
+	"## [Unreleased]",
+	"",
+	"### Added",
+	"",
+	"- New feature.",
+	"",
+	"## [1.2.0] - 2026-03-01",
+	"",
+	"### Fixed",
+	"",
+	"- Fix three.",
+	"",
+	"## [1.1.0] - 2026-02-01",
+	"",
+	"### Fixed",
+	"",
+	"- Fix two.",
+	"",
+	"## [1.0.0] - 2026-01-01",
+	"",
+	"### Fixed",
+	"",
+	"- Fix one.",
+	"",
+].join("\n");
+
+describe("collapseChangelogTail", () => {
+	const footerBytes = Buffer.byteLength(`\n${ARCHIVE_LINK}\n`, "utf8");
+
+	it("drops the oldest release sections until the file plus footer fits the budget", () => {
+		const keptThroughOneOne = `${FOUR_SECTIONS.slice(0, FOUR_SECTIONS.indexOf("\n\n## [1.0.0]"))}\n`;
+		const maxBytes = Buffer.byteLength(keptThroughOneOne, "utf8") + footerBytes;
+
+		const result = collapseChangelogTail(FOUR_SECTIONS, ARCHIVE_LINK, maxBytes);
+
+		expect(result.collapsedReleases).toBe(1);
+		expect(result.content).toBe(keptThroughOneOne);
+		expect(Buffer.byteLength(result.content, "utf8") + footerBytes).toBeLessThanOrEqual(maxBytes);
+	});
+
+	it("always keeps Unreleased plus the newest release even when still over budget", () => {
+		const result = collapseChangelogTail(FOUR_SECTIONS, ARCHIVE_LINK, 16);
+
+		expect(result.collapsedReleases).toBe(2);
+		expect(result.content).toContain("## [Unreleased]");
+		expect(result.content).toContain("## [1.2.0]");
+		expect(result.content).not.toContain("## [1.1.0]");
+		expect(result.content).not.toContain("## [1.0.0]");
+	});
+
+	it("leaves content under the budget untouched", () => {
+		const result = collapseChangelogTail(FOUR_SECTIONS, ARCHIVE_LINK, 1024 * 1024);
+
+		expect(result.collapsedReleases).toBe(0);
+		expect(result.content).toBe(FOUR_SECTIONS);
+	});
+});
+
+describe("splitArchiveFooter", () => {
+	it("strips a trailing archive footer so it is not parsed as section body", () => {
+		const withFooter = `${FOUR_SECTIONS}\n${ARCHIVE_LINK}\n`;
+
+		const result = splitArchiveFooter(withFooter);
+
+		expect(result.archiveLink).toBe(ARCHIVE_LINK);
+		expect(result.body).toBe(FOUR_SECTIONS);
+	});
+
+	it("passes through content without a footer", () => {
+		const result = splitArchiveFooter(FOUR_SECTIONS);
+
+		expect(result.archiveLink).toBeUndefined();
+		expect(result.body).toBe(FOUR_SECTIONS);
+	});
+});
+
 const RELEASED_ONLY = `# Changelog
 
 ## [Unreleased]
@@ -320,6 +408,64 @@ describe("runChangelogFixer baseline pin", () => {
 			const withPin = await runChangelogFixer({ repoRoot, write: false });
 			expect(withPin.since).toBe("refs/clog");
 			expect(withPin.changedFiles).toHaveLength(0);
+		} finally {
+			await fs.rm(repoRoot, { recursive: true, force: true });
+		}
+	});
+});
+describe("runChangelogFixer size limit", () => {
+	it("collapses oversized changelogs behind a link to the last commit containing them, idempotently", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "clog-collapse-"));
+		const git = (...args: string[]) =>
+			$`git ${args}`
+				.cwd(repoRoot)
+				.quiet()
+				.env({
+					...process.env,
+					GIT_CONFIG_GLOBAL: "/dev/null",
+					GIT_CONFIG_SYSTEM: "/dev/null",
+					GIT_AUTHOR_NAME: "t",
+					GIT_AUTHOR_EMAIL: "t@t",
+					GIT_COMMITTER_NAME: "t",
+					GIT_COMMITTER_EMAIL: "t@t",
+				});
+		try {
+			const changelogPath = path.join(repoRoot, "packages/foo/CHANGELOG.md");
+			await git("init", "-b", "main");
+			// The oldest section must outweigh the footer for a collapse to shrink the file.
+			const content = FOUR_SECTIONS.replace("- Fix one.", `- Fix one. ${"x".repeat(400)}`);
+			await Bun.write(changelogPath, content);
+			await git("add", "-A");
+			await git("commit", "-m", "release 1.2.0");
+			await git("tag", "v1.2.0");
+			const head = (await git("rev-parse", "HEAD")).text().trim();
+			const repo = process.env.OMP_REPO ?? process.env.GITHUB_REPOSITORY ?? "can1357/oh-my-pi";
+			const expectedLink = `Older entries are archived in [packages/foo/CHANGELOG.md@${head.slice(0, 12)}](https://github.com/${repo}/blob/${head}/packages/foo/CHANGELOG.md).`;
+
+			// Budget only fits Unreleased + the two newest releases; 1.0.0 collapses.
+			const maxBytes = content.indexOf("\n\n## [1.0.0]") + 1 + Buffer.byteLength(`\n${expectedLink}\n`, "utf8");
+			const first = await runChangelogFixer({ repoRoot, maxBytes });
+			expect(first.changedFiles).toEqual([
+				{
+					path: "packages/foo/CHANGELOG.md",
+					promotedItems: 0,
+					mergedDuplicateHeadings: 0,
+					droppedReleasedDuplicates: 0,
+					removedEmptyHeadings: 0,
+					collapsedReleases: 1,
+				},
+			]);
+
+			const collapsed = await Bun.file(changelogPath).text();
+			expect(collapsed).not.toContain("## [1.0.0]");
+			expect(collapsed).toContain("## [1.1.0]");
+			expect(collapsed).toEndWith(`\n${expectedLink}\n`);
+			expect(Buffer.byteLength(collapsed, "utf8")).toBeLessThanOrEqual(maxBytes);
+
+			// The footer survives a second run verbatim and nothing is re-collapsed.
+			const second = await runChangelogFixer({ repoRoot, maxBytes });
+			expect(second.changedFiles).toHaveLength(0);
+			expect(await Bun.file(changelogPath).text()).toBe(collapsed);
 		} finally {
 			await fs.rm(repoRoot, { recursive: true, force: true });
 		}

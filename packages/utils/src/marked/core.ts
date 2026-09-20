@@ -343,8 +343,15 @@ const DEFAULTS: MarkedOptions = {
 };
 const PUNCTUATION = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/;
 
-function tokenList(links: Links = {}): TokensList {
+function tokenList(links: Links = Object.create(null)): TokensList {
 	const list = [] as unknown as TokensList;
+	// The reference-definition map is keyed by user-controlled labels. A plain
+	// `{}` inherits `Object.prototype`, so a reference-style link whose label is
+	// an inherited member (`[x][constructor]`, `[x][__proto__]`) resolves to a
+	// truthy non-definition and yields a link token with `href: undefined`
+	// (issue #10283). A null-prototype map makes such lookups miss, so the link
+	// correctly falls back to literal text, and label writes cannot pollute the
+	// prototype.
 	list.links = links;
 	return list;
 }

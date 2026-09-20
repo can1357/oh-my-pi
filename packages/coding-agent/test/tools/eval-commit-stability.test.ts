@@ -1,8 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { EvalStatusEvent, EvalToolDetails } from "@oh-my-pi/pi-coding-agent/eval/types";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { EvalStatusEvent, EvalToolDetails } from "@oh-my-pi/pi-tui/tools/eval";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
 const uiStub = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
@@ -33,12 +33,10 @@ function evalAgentResult(events: EvalStatusEvent[], text = "") {
 
 function expectLive(component: ToolExecutionComponent): void {
 	expect(component.isTranscriptBlockFinalized()).toBe(false);
-	expect(component.getNativeScrollbackLiveRegionStart()).toBe(0);
 }
 
 function expectFinal(component: ToolExecutionComponent): void {
 	expect(component.isTranscriptBlockFinalized()).toBe(true);
-	expect(component.getNativeScrollbackLiveRegionStart()).toBeUndefined();
 }
 
 describe("eval tool transcript finalization", () => {

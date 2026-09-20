@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
-import type { ConversationStep, CursorRule, McpToolDefinition } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import type {
+	ConversationStep,
+	CursorRule,
+	McpToolDefinition,
+	RequestedModel_ModelParameterbytes,
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import {
 	AgentClientMessageSchema,
 	AgentConversationTurnStructureSchema,
@@ -106,6 +113,7 @@ import {
 	RequestContextResultSchema,
 	RequestContextSchema,
 	RequestContextSuccessSchema,
+	RequestedModel_ModelParameterbytesSchema,
 	RequestedModelSchema,
 	ResumeActionSchema,
 	SelectedContextSchema,
@@ -151,7 +159,7 @@ import {
 	toBinary,
 	toJson,
 } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	$env,
@@ -187,7 +195,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types";
-import { normalizeSystemPrompts } from "../utils";
+import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import {
 	type CursorExecResolvedCarrier,
 	clearStreamingPartialJson,
@@ -202,7 +210,9 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
-import { toolWireSchema } from "../utils/schema/wire";
+import { sanitizeSchemaForCursor, toolWireSchema } from "../utils/schema";
+import { formatConnectEndStreamError } from "./connect-error-detail";
+import mcpExternalHandoffMessage from "./cursor-external-tool-handoff.md" with { type: "text" };
 import {
 	buildMcpStateResult,
 	buildNeutralHookResult,
@@ -309,6 +319,8 @@ const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
 /** Bare gRPC `resource_exhausted` end-streams (also inside a Connect error message). */
 const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/i;
+/** Model-resolution failures that can safely retry the exact discovery id before any server output. */
+const CURSOR_MODEL_NOT_FOUND_PATTERN = /^(?:Connect error not_found:|gRPC error 5:)/i;
 const NOT_IMPLEMENTED = `Not implemented by this client`;
 
 const conversationStateCache = new Map<string, ConversationStateStructure>();
@@ -317,19 +329,50 @@ const warnedCursorKimiK3ReplayMessages = new Set<string>();
 /**
  * Base conversation id → rotated wire id (#8345). Cursor's backend can pin a
  * per-conversation rejection (bare `resource_exhausted`, zero tokens) to one
- * conversationId forever; the session is then unusable until /fork mints a
- * new id. On the first such failure the id is rotated once and the cached
- * state migrates, so the retry loop's next attempt starts a fresh
- * conversation — the same recovery /fork performs. Keyed by the base id the
- * caller derived, so a failed rotation is never repeated.
+ * conversationId forever. On such a failure the id is rotated and the next
+ * attempt rebuilds a fresh conversation from `context` (no cached-state
+ * migration). A failed rotation is not repeated, so real account exhaustion
+ * is not hidden. After the rotated id completes a turn, a later poison of
+ * that id is allowed to rotate again.
  */
 const rotatedConversationIds = new Map<string, string>();
+const successfulRotatedConversationIds = new Set<string>();
+const freshRotatedConversationIds = new Set<string>();
 
 export interface CursorOptions extends StreamOptions {
 	customSystemPrompt?: string;
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
+	/** Treat unhandled MCP calls as accepted handoffs to an external executor. */
+	externalToolExecutor?: boolean;
+	/** Wire model id selected after thinking-effort routing (`resolveWireModelId`). */
+	wireModelId?: string;
+}
+
+type CursorWireMode = "normalized" | "discovered";
+
+interface CursorStreamTiming {
+	startTime: number;
+	timestamp: number;
+}
+
+interface CursorRequestState {
+	conversationId: string;
+	blobStore: Map<string, Uint8Array>;
+	conversationState?: ConversationStateStructure;
+	rotatedFresh?: boolean;
+}
+
+interface CursorGrpcRequest {
+	requestBytes: Uint8Array;
+	blobStore: Map<string, Uint8Array>;
+	conversationState: ConversationStateStructure;
+}
+
+interface CursorTransportRequest extends CursorGrpcRequest {
+	/** Exact discovery id eligible for a retry because the normalized effort payload was serialized unchanged. */
+	fallbackWireModelId?: string;
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -369,6 +412,15 @@ function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	return frame;
 }
 
+class ConnectEndStreamError extends AIError.ProviderResponseError {
+	readonly diagnosticMessage: string;
+
+	constructor(classificationMessage: string, diagnosticMessage: string) {
+		super(classificationMessage, { kind: "envelope" });
+		this.diagnosticMessage = diagnosticMessage;
+	}
+}
+
 function parseConnectEndStream(data: Uint8Array): Error | null {
 	try {
 		const payload = JSON.parse(new TextDecoder().decode(data));
@@ -376,7 +428,8 @@ function parseConnectEndStream(data: Uint8Array): Error | null {
 		if (error) {
 			const code = typeof error.code === "string" ? error.code : "unknown";
 			const message = typeof error.message === "string" ? error.message : "Unknown error";
-			return new AIError.ProviderResponseError(`Connect error ${code}: ${message}`, { kind: "envelope" });
+			const classificationMessage = `Connect error ${code}: ${message}`;
+			return new ConnectEndStreamError(classificationMessage, formatConnectEndStreamError(error));
 		}
 		return null;
 	} catch {
@@ -517,15 +570,17 @@ function omitTypeName(record: Record<string, unknown>): Record<string, unknown> 
 	return rest;
 }
 
-export const streamCursor: StreamFunction<"cursor-agent"> = (
+function streamCursorWithWireMode(
 	model: Model<"cursor-agent">,
 	context: Context,
-	options?: CursorOptions,
-): AssistantMessageEventStream => {
+	options: CursorOptions | undefined,
+	wireMode: CursorWireMode,
+	timing?: CursorStreamTiming,
+): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {
-		const startTime = performance.now();
+		const startTime = timing?.startTime ?? performance.now();
 		let firstTokenTime: number | undefined;
 
 		const output: AssistantMessage = {
@@ -543,7 +598,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "stop",
-			timestamp: Date.now(),
+			timestamp: timing?.timestamp ?? Date.now(),
 		};
 
 		// Declared outside the `try` because BOTH exits must drain it: an exec
@@ -567,7 +622,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const signal = options?.signal;
 			while (inFlightDispatches.size > 0) {
 				if (signal?.aborted) return;
-				const settled = Promise.all([...inFlightDispatches]);
+				const settled = Promise.all(inFlightDispatches);
 				if (!signal) {
 					await settled;
 					continue;
@@ -587,6 +642,11 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let h2Settled = false;
 		let sawTurnEnded = false;
 		let endStreamError: Error | null = null;
+		// Blocks the discovered-id retry once the turn produced observable output or
+		// ran a side effect (streamed content/tool call, exec bridge, permission
+		// reply). Pure keepalive heartbeats never set it, so a `not_found` that
+		// arrives after a heartbeat but before any real work still falls back.
+		let sawProgressOrSideEffect = false;
 		// Reachable from the catch: a stream that dies mid-turn must still close
 		// and pair the blocks it left open, and `state` itself is scoped to the
 		// try below.
@@ -618,6 +678,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let baseConversationId: string | undefined;
 		let conversationId: string | undefined;
 		let usageState: UsageState | undefined;
+		let serializedFallbackWireModelId: string | undefined;
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -626,16 +687,29 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 			baseConversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			conversationId = rotatedConversationIds.get(baseConversationId) ?? baseConversationId;
+			const rotatedFresh = freshRotatedConversationIds.has(conversationId);
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
 			conversationBlobStores.set(conversationId, blobStore);
-			const cachedState = conversationStateCache.get(conversationId);
-			const { requestBytes, conversationState } = await buildGrpcRequest(model, context, options, {
-				conversationId,
-				blobStore,
-				conversationState: cachedState,
-			});
+			const cachedState = rotatedFresh ? undefined : conversationStateCache.get(conversationId);
+			const builtRequest = await buildGrpcRequestForWireMode(
+				model,
+				context,
+				options,
+				{
+					conversationId,
+					blobStore,
+					conversationState: cachedState,
+					rotatedFresh,
+				},
+				wireMode,
+			);
+			const { requestBytes, conversationState } = builtRequest;
+			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
 			conversationStateCache.set(conversationId, conversationState);
-			const requestContextTools = buildMcpToolDefinitions(context.tools);
+			const requestContextTools = buildMcpToolDefinitions(
+				context.tools,
+				model.requiresCursorToolSchemaProjection === true,
+			);
 			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
@@ -774,9 +848,14 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 					try {
 						const serverMessage = fromBinary(AgentServerMessageSchema, messageBytes);
-						const isTurnEnded =
-							serverMessage.message.case === "interactionUpdate" &&
-							serverMessage.message.value.message?.case === "turnEnded";
+						const interaction =
+							serverMessage.message.case === "interactionUpdate" ? serverMessage.message.value : undefined;
+						const interactionCase = interaction?.message?.case;
+						// A heartbeat is a pure keepalive `processInteractionUpdate` ignores;
+						// every other frame is progress or a side effect that must block the
+						// discovered-id retry.
+						if (interactionCase !== "heartbeat") sawProgressOrSideEffect = true;
+						const isTurnEnded = interactionCase === "turnEnded";
 						// Dispatch is fire-and-forget so the socket keeps draining while a
 						// handler runs, but the promise is tracked: `done` must not be
 						// pushed while an exec handler is still resolving, or the Agent
@@ -796,6 +875,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							requestContextTools,
 							requestContextRules,
 							onConversationCheckpoint,
+							options?.externalToolExecutor,
 						).catch(error => {
 							log("error", "handleServerMessage", { error: String(error) });
 						});
@@ -862,6 +942,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			h2Request.write(frameConnectMessage(requestBytes));
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
 			await h2Completion.promise;
+			if (conversationId && baseConversationId && conversationId !== baseConversationId) {
+				successfulRotatedConversationIds.add(conversationId);
+				freshRotatedConversationIds.delete(conversationId);
+			}
 			// The transport is done, but a handler decoded from the last chunk may
 			// still be running: exec handlers and `onToolResult` transformers are
 			// async. Pushing `done` now would let the Agent drain its Cursor result
@@ -874,7 +958,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			endCurrentThinkingBlock(output, stream, state);
 			flushOpenToolCalls(output, stream, state);
 
-			calculateCost(model, output.usage);
+			calculateCost(model, output.usage, output.timestamp);
 
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -885,6 +969,43 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			});
 			stream.end();
 		} catch (error) {
+			const fallbackWireModelId =
+				wireMode === "normalized" &&
+				!sawProgressOrSideEffect &&
+				!options?.signal?.aborted &&
+				error instanceof Error &&
+				CURSOR_MODEL_NOT_FOUND_PATTERN.test(error.message)
+					? serializedFallbackWireModelId
+					: undefined;
+			if (fallbackWireModelId !== undefined) {
+				if (heartbeatTimer) {
+					clearInterval(heartbeatTimer);
+					heartbeatTimer = null;
+				}
+				h2Request?.close();
+				h2Client?.close();
+
+				const fallbackStream = streamCursorWithWireMode(model, context, options, "discovered", {
+					startTime,
+					timestamp: output.timestamp,
+				});
+				// The lazy watchdog observes THIS outer stream; the fallback's exec
+				// bridge marks the inner stream busy via `trackLocalWork`. Forward
+				// that busy state so a local tool on the retry turn is not aborted as
+				// a stalled provider stream (#4593 protection must survive the retry).
+				stream.forwardLocalWorkFrom(fallbackStream);
+				try {
+					for await (const event of fallbackStream) {
+						if (event.type === "start") continue;
+						stream.push(event);
+					}
+					const fallbackResult = await fallbackStream.result();
+					if (!stream.resultSettled) stream.end(fallbackResult);
+				} finally {
+					stream.forwardLocalWorkFrom(undefined);
+				}
+				return;
+			}
 			// Same reason as the success path: the Agent finalizes the synthesized
 			// call from this terminal error and clears its Cursor result buffer, so
 			// a handler still running would land its real result after `agent_end`
@@ -909,30 +1030,41 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const result = await AIError.finalize(error, { api: model.api, signal: options?.signal });
 			// #8345: a server-side per-conversation rejection surfaces as a bare
 			// resource_exhausted with zero tokens — the conversation is poisoned,
-			// not the account (sibling conversations keep working). Rotate the
-			// wire id once and migrate the cached state so the next attempt (the
-			// caller's retry loop) starts a fresh conversation, exactly like
-			// /fork. Only the first failure rotates; repeated failures keep the
-			// rotated id so a genuine account-level exhaustion is not hidden.
+			// not the account. Rotate the wire id and rebuild from `context` on
+			// the next attempt (the caller's retry loop). Do not migrate cached
+			// side-state: pendingToolCalls from a mid-turn checkpoint re-poison
+			// the new id. One rotation per failure streak; a new rotation is
+			// allowed only after the current rotated id completed a turn.
+			const currentRotated =
+				baseConversationId === undefined ? undefined : rotatedConversationIds.get(baseConversationId);
+			const canRotate = currentRotated === undefined || successfulRotatedConversationIds.has(currentRotated);
 			if (
 				conversationId !== undefined &&
 				baseConversationId !== undefined &&
 				usageState !== undefined &&
 				!usageState.sawTokenDelta &&
 				RESOURCE_EXHAUSTED_PATTERN.test(result.message) &&
-				!rotatedConversationIds.has(baseConversationId)
+				canRotate
 			) {
 				const rotated = crypto.randomUUID();
+				if (currentRotated) successfulRotatedConversationIds.delete(currentRotated);
 				rotatedConversationIds.set(baseConversationId, rotated);
-				const state = conversationStateCache.get(conversationId);
-				if (state) conversationStateCache.set(rotated, state);
-				const blobs = conversationBlobStores.get(conversationId);
-				if (blobs) conversationBlobStores.set(rotated, blobs);
+				freshRotatedConversationIds.add(rotated);
+				logger.debug("cursor conversation rotated", {
+					base: baseConversationId,
+					from: conversationId,
+					to: rotated,
+				});
 			}
 			output.stopReason = result.stopReason;
 			output.errorStatus = result.status;
 			output.errorId = result.id;
-			output.errorMessage = result.message;
+			if (error instanceof ConnectEndStreamError) {
+				output.errorClassificationMessage = result.message;
+				output.errorMessage = error.diagnosticMessage;
+			} else {
+				output.errorMessage = result.message;
+			}
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -950,7 +1082,11 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 	})();
 
 	return stream;
-};
+}
+
+/** Streams a Cursor Agent turn, retrying a discovered effort id when its normalized wire id is unavailable. */
+export const streamCursor: StreamFunction<"cursor-agent"> = (model, context, options) =>
+	streamCursorWithWireMode(model, context, options, "normalized");
 
 export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
@@ -1026,6 +1162,7 @@ export async function handleServerMessage(
 	requestContextTools: McpToolDefinition[],
 	requestContextRules: CursorRule[] = [],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
+	externalToolExecutor = false,
 ): Promise<void> {
 	const msgCase = msg.message.case;
 
@@ -1051,6 +1188,7 @@ export async function handleServerMessage(
 				output,
 				stream,
 				state,
+				externalToolExecutor,
 			),
 		);
 	} else if (msgCase === "interactionQuery") {
@@ -1469,6 +1607,7 @@ async function handleExecServerMessage(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
+	externalToolExecutor: boolean,
 ): Promise<void> {
 	const execCase = execMsg.message.case;
 	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
@@ -1817,7 +1956,10 @@ async function handleExecServerMessage(
 				execHandlers?.mcp?.bind(execHandlers),
 				onToolResult,
 				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
-				_reason => buildMcpToolNotFoundResult(mcpCall),
+				_reason =>
+					externalToolExecutor && !execHandlers?.mcp
+						? buildMcpExternalHandoffResult()
+						: buildMcpToolNotFoundResult(mcpCall),
 				error => buildMcpErrorResult(error),
 				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
 			);
@@ -2473,15 +2615,15 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
  * and nullable for the one caller whose block is NOT pre-resolved: MCP without
  * an `mcp` handler, which `agent-loop.ts` runs locally and pairs itself.
  */
-export async function resolveExecHandler<TArgs, TResult>(
+export async function resolveExecHandler<TArgs, R>(
 	args: TArgs,
-	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<TResult>>) | undefined,
+	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<R>>) | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
-	buildFromToolResult: (toolResult: ToolResultMessage) => TResult,
-	buildRejected: (reason: string) => TResult,
-	buildError: (error: string) => TResult,
+	buildFromToolResult: (toolResult: ToolResultMessage) => R,
+	buildRejected: (reason: string) => R,
+	buildError: (error: string) => R,
 	pairing: CursorExecPairing | null,
-): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> {
+): Promise<{ execResult: R; toolResult?: ToolResultMessage }> {
 	const pair = async (text: string, isError: boolean): Promise<ToolResultMessage | undefined> => {
 		// `null` only for MCP without a handler: that block is never marked
 		// resolved, so `agent-loop.ts` runs it locally and pairs its own result.
@@ -2509,7 +2651,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 		const finalToolResult = await applyToolResultHandler(toolResult, onToolResult);
 
 		if (execResult) {
-			// TResult-only is a supported return form, so the transcript entry has to
+			// R-only is a supported return form, so the transcript entry has to
 			// be synthesized here. Deriving its state from the raw result keeps the
 			// two views consistent: every exec result is a proto oneof whose only
 			// non-failure variant is `success`, so a `rejected`/`error`/
@@ -2532,7 +2674,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 
 /**
  * Derive the transcript state of an exec result the SDK handler returned in the
- * TResult-only form, which carries no `toolResult` to copy it from.
+ * R-only form, which carries no `toolResult` to copy it from.
  *
  * Every exec result in `agent.proto` is a `oneof result` whose success variant
  * is named `success` — the rest (`error`, `rejected`, `file_not_found`,
@@ -2575,8 +2717,8 @@ function mcpContentToText(content: unknown[] | undefined): string {
 	return parts.join("\n");
 }
 
-function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult>): {
-	execResult?: TResult;
+function splitExecHandlerResult<R>(result: CursorExecHandlerResult<R>): {
+	execResult?: R;
 	toolResult?: ToolResultMessage;
 } {
 	if (isToolResultMessage(result)) {
@@ -2586,27 +2728,27 @@ function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult
 		const record = result as Record<string, unknown>;
 		if ("execResult" in record) {
 			const { execResult, toolResult } = record as {
-				execResult: TResult;
+				execResult: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 		if ("toolResult" in record && !isToolResultMessage(record)) {
 			const { result: execResult, toolResult } = record as {
-				result?: TResult;
+				result?: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 		if ("result" in record && !("$typeName" in record)) {
 			const { result: execResult, toolResult } = record as {
-				result: TResult;
+				result: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 	}
-	return { execResult: result as TResult };
+	return { execResult: result as R };
 }
 
 function isToolResultMessage(value: unknown): value is ToolResultMessage {
@@ -3155,7 +3297,8 @@ function decodeMcpArgValue(value: Uint8Array): unknown {
 	try {
 		const jsonValue = decodeJsonValue(value);
 		if (typeof jsonValue === "string") {
-			return parseToolArgsJson(jsonValue);
+			const first = jsonValue.trimStart()[0];
+			return first === "{" || first === "[" || first === '"' ? parseToolArgsJson(jsonValue) : jsonValue;
 		}
 		return jsonValue;
 	} catch {}
@@ -3407,13 +3550,10 @@ function describeEditResult(toolCall: CursorEditToolCallCarrier | undefined): { 
 	return { text: "Edit reported no result", isError: true };
 }
 
-function remapExecHandlerToolName<TResult>(
-	result: CursorExecHandlerResult<TResult>,
-	toolName: string,
-): CursorExecHandlerResult<TResult> {
+function remapExecHandlerToolName<R>(result: CursorExecHandlerResult<R>, toolName: string): CursorExecHandlerResult<R> {
 	if (isToolResultMessage(result)) return { ...result, toolName };
 	if (result && typeof result === "object" && "toolResult" in result) {
-		const record = result as { result?: TResult; toolResult?: ToolResultMessage };
+		const record = result as { result?: R; toolResult?: ToolResultMessage };
 		if (record.toolResult && record.result !== undefined) {
 			return { result: record.result, toolResult: { ...record.toolResult, toolName } };
 		}
@@ -3880,6 +4020,27 @@ function buildMcpResultFromToolResult(_mcpCall: CursorMcpCall, toolResult: ToolR
 	});
 }
 
+const MCP_EXTERNAL_HANDOFF_MESSAGE = mcpExternalHandoffMessage.trim();
+
+function buildMcpExternalHandoffResult() {
+	return create(McpResultSchema, {
+		result: {
+			case: "success",
+			value: create(McpSuccessSchema, {
+				content: [
+					create(McpToolResultContentItemSchema, {
+						content: {
+							case: "text",
+							value: create(McpTextContentSchema, { text: MCP_EXTERNAL_HANDOFF_MESSAGE }),
+						},
+					}),
+				],
+				isError: false,
+			}),
+		},
+	});
+}
+
 function buildMcpToolNotFoundResult(mcpCall: CursorMcpCall) {
 	return create(McpResultSchema, {
 		result: {
@@ -3918,7 +4079,7 @@ export function mergeCursorMcpToolCallArgs(
 	streamed: Record<string, unknown> | undefined,
 	completion: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
-	const merged: Record<string, unknown> = { ...(streamed ?? {}) };
+	const merged: Record<string, unknown> = { ...streamed };
 	if (!completion) return merged;
 	for (const [key, completionValue] of Object.entries(completion)) {
 		const streamedValue = merged[key];
@@ -4146,9 +4307,8 @@ export function processInteractionUpdate(
 					// what the exec channel pairs its result under. Diverging here would
 					// name the block one thing and its result another.
 					name: args.toolName || args.name || "",
-					arguments: {},
+					arguments: decodeMcpArgsMap(args.args) ?? {},
 					[kStreamingBlockIndex]: output.content.length,
-					[kStreamingPartialJson]: "",
 					[kStreamingBlockKind]: "mcp",
 					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
 				};
@@ -4271,7 +4431,7 @@ export function processInteractionUpdate(
 				// Authoritative full parse of the accumulated argument buffer; the delta
 				// path throttles mid-stream parses, so `arguments` may lag the buffer.
 				const partial = settled[kStreamingPartialJson];
-				if (partial !== undefined) {
+				if (partial) {
 					settled.arguments = parseStreamingJson(partial);
 				}
 				const decodedArgs = decodeMcpArgsMap(selectMcpCall(toolCall)?.args?.args);
@@ -4345,7 +4505,13 @@ export function processInteractionUpdate(
 				let persisted: ToolResultMessage | undefined;
 				let hostError: string | null = null;
 				try {
-					persisted = state.onTodoSnapshot?.(snapshot, settled.id, error) ?? undefined;
+					persisted =
+						state.onTodoSnapshot?.(
+							snapshot,
+							settled.id,
+							error,
+							toolCall && selectTodoCalls(toolCall).read ? "read" : "update",
+						) ?? undefined;
 				} catch (callbackError) {
 					// A throwing host callback (e.g. session persistence failing on
 					// disk error) must not leave the resolved block unpaired: the
@@ -4385,7 +4551,7 @@ export function processInteractionUpdate(
 	} else if (updateCase === "turnEnded") {
 		output.stopReason = "stop";
 		if (
-			isKimiK3ModelId(output.model) &&
+			classifyModel("cursor", output.model).family === "k3" &&
 			!output.content.some(item => item.type === "thinking" && item.thinking.length > 0)
 		) {
 			logger.warn(
@@ -4473,7 +4639,21 @@ export function buildCursorRequestContextRules(systemPrompt: readonly string[] |
  */
 const CURSOR_NATIVE_TOOL_NAMES = new Set(["bash", "read", "write", "delete", "ls", "grep", "todo"]);
 
-export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefinition[] {
+function isJsonValue(value: unknown): value is JsonValue {
+	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
+	if (typeof value === "number") return Number.isFinite(value);
+	if (Array.isArray(value)) return value.every(isJsonValue);
+	if (!isRecord(value)) return false;
+	for (const key in value) {
+		if (!isJsonValue(value[key])) return false;
+	}
+	return true;
+}
+
+export function buildMcpToolDefinitions(
+	tools: Tool[] | undefined,
+	requiresCursorToolSchemaProjection = false,
+): McpToolDefinition[] {
 	if (!tools || tools.length === 0) {
 		return [];
 	}
@@ -4493,7 +4673,8 @@ export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefin
 	const forwarded = writeTool ? [...advertisedTools, writeTool] : advertisedTools;
 
 	return forwarded.map(tool => {
-		const jsonSchema = toolWireSchema(tool);
+		const wireSchema = toolWireSchema(tool);
+		const jsonSchema = requiresCursorToolSchemaProjection ? sanitizeSchemaForCursor(wireSchema) : wireSchema;
 		const schemaValue: JsonValue =
 			jsonSchema !== null && !Array.isArray(jsonSchema) && isJsonValue(jsonSchema)
 				? jsonSchema
@@ -4582,7 +4763,7 @@ type CursorRootPromptAssistantContentPart =
 function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | undefined): boolean {
 	return (
 		targetModelId !== undefined &&
-		isKimiK3ModelId(targetModelId) &&
+		classifyModel("cursor", targetModelId).family === "k3" &&
 		msg.api === "cursor-agent" &&
 		msg.provider === "cursor" &&
 		msg.model === targetModelId
@@ -4608,11 +4789,17 @@ function buildCursorAssistantContent(
 				});
 			}
 		} else if (item.type === "toolCall") {
+			// Foreign responses-family history carries composite `"{callId}|{itemId}"`
+			// tool-call ids (encodeResponsesToolCallId). The `|` violates Cursor's
+			// tool-call-id charset (`^[a-zA-Z0-9_-]+$`), so replaying it verbatim
+			// gets the whole Run rejected as opaque resource_exhausted. Sanitize the
+			// id everywhere it reaches the wire; the tool-result side normalizes the
+			// same id identically, so the call/result pairing stays intact.
 			content.push({
 				type: "tool-call",
-				toolCallId: item.id,
+				toolCallId: normalizeToolCallId(item.id),
 				toolName: item.name,
-				args: item.arguments,
+				args: normalizeCursorMcpArguments(item.arguments),
 			});
 		}
 	}
@@ -4624,7 +4811,7 @@ function assertCursorKimiK3HistoryReplayable(
 	activeUserMessageIndex: number,
 	targetModelId: string | undefined,
 ): void {
-	if (!targetModelId || !isKimiK3ModelId(targetModelId)) return;
+	if (!targetModelId || classifyModel("cursor", targetModelId).family !== "k3") return;
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
 	const missingThinkingTurns: number[] = [];
 	const newlyWarnedKeys: string[] = [];
@@ -4699,6 +4886,27 @@ export function buildCursorSystemPromptJsons(systemPrompt: readonly string[] | u
 	return systemPrompts.map(content => JSON.stringify({ role: "system", content }));
 }
 
+function collectCursorToolHistory(messages: Message[], historyEnd: number) {
+	const toolResults = new Map<string, ToolResultMessage>();
+	const pairedToolCallIds = new Set<string>();
+	for (let index = 0; index < historyEnd; index++) {
+		const message = messages[index];
+		if (message.role === "toolResult") {
+			toolResults.set(message.toolCallId, message);
+		} else if (message.role === "assistant") {
+			for (const item of message.content) {
+				if (item.type === "toolCall") pairedToolCallIds.add(item.id);
+			}
+		}
+	}
+	return { toolResults, pairedToolCallIds };
+}
+
+function cursorOrphanToolResultText(result: ToolResultMessage): string {
+	const prefix = result.isError ? "[Tool Error]" : "[Tool Result]";
+	return `${prefix}\n${toolResultToText(result) || "(empty result)"}`;
+}
+
 function buildRootPromptMessagesJson(
 	messages: Message[],
 	systemPromptIds: Uint8Array[],
@@ -4707,6 +4915,8 @@ function buildRootPromptMessagesJson(
 	targetModelId?: string,
 ): Uint8Array[] {
 	assertCursorKimiK3HistoryReplayable(messages, activeUserMessageIndex, targetModelId);
+	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
+	const { pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 	const entries: Uint8Array[] = [...systemPromptIds];
 	const pushJson = (obj: unknown) => {
 		const bytes = new TextEncoder().encode(JSON.stringify(obj));
@@ -4725,16 +4935,24 @@ function buildRootPromptMessagesJson(
 			if (content.length === 0) continue;
 			pushJson({ role: "assistant", content });
 		} else if (msg.role === "toolResult") {
+			if (!pairedToolCallIds.has(msg.toolCallId)) {
+				pushJson({
+					role: "assistant",
+					content: [{ type: "text", text: cursorOrphanToolResultText(msg) }],
+				});
+				continue;
+			}
 			// Emit even when the result text is empty: the assistant `tool-call` is
 			// already in history, so dropping the pair would replay an orphaned call.
+			const toolCallId = normalizeToolCallId(msg.toolCallId);
 			pushJson({
 				role: "tool",
-				id: msg.toolCallId,
+				id: toolCallId,
 				content: [
 					{
 						type: "tool-result",
 						toolName: msg.toolName,
-						toolCallId: msg.toolCallId,
+						toolCallId,
 						result: toolResultToText(msg),
 						...(msg.isError ? { isError: true } : {}),
 					},
@@ -4746,26 +4964,46 @@ function buildRootPromptMessagesJson(
 	return entries;
 }
 
-function isJsonValue(value: unknown): value is JsonValue {
-	if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-	if (typeof value === "number") return Number.isFinite(value);
-	if (Array.isArray(value)) return value.every(isJsonValue);
-	if (!isRecord(value)) return false;
-	for (const key in value) {
-		if (!isJsonValue(value[key])) return false;
+function normalizeCursorMcpArgument(value: unknown, seen: Set<object>): JsonValue | undefined {
+	if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+	if (typeof value === "number") return Number.isFinite(value) ? value : null;
+	if (typeof value !== "object") return undefined;
+	if (seen.has(value)) return undefined;
+
+	seen.add(value);
+	try {
+		if (Array.isArray(value)) {
+			return value.map(item => normalizeCursorMcpArgument(item, seen) ?? null);
+		}
+		if (!isRecord(value)) return undefined;
+		const normalized: Record<string, JsonValue> = Object.create(null);
+		for (const key in value) {
+			if (!Object.hasOwn(value, key)) continue;
+			const normalizedItem = normalizeCursorMcpArgument(value[key], seen);
+			if (normalizedItem !== undefined) normalized[key] = normalizedItem;
+		}
+		return normalized;
+	} finally {
+		seen.delete(value);
 	}
-	return true;
+}
+
+function normalizeCursorMcpArguments(args: Record<string, unknown>): Record<string, JsonValue> {
+	const normalized: Record<string, JsonValue> = Object.create(null);
+	const seen = new Set<object>();
+	for (const name in args) {
+		if (!Object.hasOwn(args, name)) continue;
+		const normalizedValue = normalizeCursorMcpArgument(args[name], seen);
+		if (normalizedValue !== undefined) normalized[name] = normalizedValue;
+	}
+	return normalized;
 }
 
 function encodeCursorMcpArguments(toolCall: ToolCall): Record<string, Uint8Array> {
-	const encoded: Record<string, Uint8Array> = {};
-	for (const name in toolCall.arguments) {
-		const value = toolCall.arguments[name];
-		if (value === undefined) continue;
-		if (!isJsonValue(value)) {
-			throw new AIError.ValidationError(`Cursor tool argument ${toolCall.name}.${name} is not JSON-serializable`);
-		}
-		encoded[name] = encodeJsonValue(value);
+	const encoded: Record<string, Uint8Array> = Object.create(null);
+	const normalized = normalizeCursorMcpArguments(toolCall.arguments);
+	for (const name in normalized) {
+		encoded[name] = encodeJsonValue(normalized[name]);
 	}
 	return encoded;
 }
@@ -4804,11 +5042,12 @@ function createCursorMcpResult(result: ToolResultMessage) {
 }
 
 function createCursorToolCallStep(toolCall: ToolCall, result: ToolResultMessage | undefined) {
+	const toolCallId = normalizeToolCallId(toolCall.id);
 	const mcpCall = create(McpToolCallSchema, {
 		args: create(McpArgsSchema, {
 			name: toolCall.name,
 			args: encodeCursorMcpArguments(toolCall),
-			toolCallId: toolCall.id,
+			toolCallId,
 			providerIdentifier: "pi-agent",
 			toolName: toolCall.name,
 		}),
@@ -4819,7 +5058,7 @@ function createCursorToolCallStep(toolCall: ToolCall, result: ToolResultMessage 
 			case: "toolCall",
 			value: create(ToolCallSchema, {
 				tool: { case: "mcpToolCall", value: mcpCall },
-				toolCallId: toolCall.id,
+				toolCallId,
 			}),
 		},
 	});
@@ -4841,18 +5080,7 @@ function buildConversationTurns(
 ): Uint8Array[] {
 	const turns: Uint8Array[] = [];
 	const historyEnd = activeUserMessageIndex >= 0 ? activeUserMessageIndex : messages.length;
-	const toolResults = new Map<string, ToolResultMessage>();
-	const pairedToolCallIds = new Set<string>();
-	for (let index = 0; index < historyEnd; index++) {
-		const message = messages[index];
-		if (message.role === "toolResult") {
-			toolResults.set(message.toolCallId, message);
-		} else if (message.role === "assistant") {
-			for (const item of message.content) {
-				if (item.type === "toolCall") pairedToolCallIds.add(item.id);
-			}
-		}
-	}
+	const { toolResults, pairedToolCallIds } = collectCursorToolHistory(messages, historyEnd);
 
 	let i = 0;
 	while (i < messages.length) {
@@ -4910,17 +5138,13 @@ function buildConversationTurns(
 					stepBlobIds.push(storeCursorBlob(blobStore, toBinary(ConversationStepSchema, step)));
 				}
 			} else if (stepMsg.role === "toolResult" && !pairedToolCallIds.has(stepMsg.toolCallId)) {
-				const text = toolResultToText(stepMsg);
-				if (text) {
-					const prefix = stepMsg.isError ? "[Tool Error]" : "[Tool Result]";
-					const step = create(ConversationStepSchema, {
-						message: {
-							case: "assistantMessage",
-							value: create(AssistantMessageSchema, { text: `${prefix}\n${text}` }),
-						},
-					});
-					stepBlobIds.push(storeCursorBlob(blobStore, toBinary(ConversationStepSchema, step)));
-				}
+				const step = create(ConversationStepSchema, {
+					message: {
+						case: "assistantMessage",
+						value: create(AssistantMessageSchema, { text: cursorOrphanToolResultText(stepMsg) }),
+					},
+				});
+				stepBlobIds.push(storeCursorBlob(blobStore, toBinary(ConversationStepSchema, step)));
 			}
 			i++;
 		}
@@ -5011,30 +5235,135 @@ function extractImages(content: (TextContent | ImageContent)[]) {
 		);
 }
 
-export async function buildGrpcRequest(
+/**
+ * Resolve `max_mode` for the wire id a request actually routes to.
+ *
+ * `GetUsableModels` marks max-mode models per raw row and discovery copies that
+ * onto `cursorMaxMode`, so on a row that puts its own id on the wire the marker
+ * is the authority — Cursor serves the whole Opus `-fast` lane in max mode
+ * (`claude-opus-4-8-high-fast` included) and leaves reasoning tiers such as
+ * `claude-4.6-opus-max` out of it, neither of which the wire slug can tell.
+ *
+ * Collapsing a family ORs the members' markers onto the logical row, so there
+ * `cursorMaxMode: true` only means *some* tier needs max mode; sending it for
+ * every tier is the refused `-low` request of issue #9478. The members' own
+ * markers survive per wire id in `cursorMaxModeRoutes`, so the routed id is
+ * looked up there first.
+ *
+ * A row's own wire id still owns its marker even when it has effort routing
+ * (for example a bare/thinking pair). Logical-only bundled rows and routes
+ * discovery never advertised have no per-id marker; only those use the suffix.
+ * A collapsed row whose `true` no route's suffix can explain keeps it for every
+ * route: the marker came from a member the suffix rule cannot see.
+ */
+function resolveCursorMaxMode(model: Model<"cursor-agent">, wireModelId: string): boolean {
+	const discovered = model.cursorMaxModeRoutes?.[wireModelId];
+	if (discovered !== undefined) return discovered;
+	const routing = model.thinking?.effortRouting;
+	if (routing === undefined || wireModelId === model.id) {
+		return model.cursorMaxMode ?? isCursorMaxModeWireId(wireModelId);
+	}
+	let routesOwnId = routing.off === model.id;
+	let hasInferredMaxRoute = typeof routing.off === "string" && isCursorMaxModeWireId(routing.off);
+	for (const effort of THINKING_EFFORTS) {
+		const target = routing[effort];
+		if (target === model.id) routesOwnId = true;
+		if (typeof target === "string" && isCursorMaxModeWireId(target)) hasInferredMaxRoute = true;
+	}
+	if (routesOwnId) return model.cursorMaxMode ?? isCursorMaxModeWireId(wireModelId);
+	if (model.cursorMaxMode === true && !hasInferredMaxRoute) return true;
+	return isCursorMaxModeWireId(wireModelId);
+}
+
+/**
+ * Resolve the Cursor Run wire model id and its parameter list.
+ *
+ * Cursor's `GetUsableModels` lists reasoning models as per-effort sibling
+ * slugs (`gpt-5.4-mini-low`, `gpt-5.6-sol-high`), and OMP copies those ids 1:1.
+ * The Run endpoint rejects a sibling slug as the wire `model_id` with
+ * `resource_exhausted` (errorId 528384); the official `cursor-agent` splits the
+ * slug into its base model id plus a `reasoning` effort parameter. Mirror that
+ * for OpenAI-family ids: split the tier with the compiled catalog policy
+ * (`collapseVariantId`, KDL suffix/lane rules) and emit
+ * `{ id: "reasoning", value: <effort> }`. The off tier (`-none`) is a sibling
+ * slug too, so it normalizes to the bare (lane-preserving) base with no
+ * reasoning parameter instead of going out raw.
+ *
+ * Non-OpenAI ids pass through unchanged — Cursor-native ids (`composer-*`,
+ * `cursor-grok-*`, `default`) carry no effort suffix, and Claude/other siblings
+ * need additional parameters (`thinking`, `context`) whose per-model values are
+ * not exposed by the decoded `GetUsableModels` schema, so guessing them would
+ * re-trigger 528384.
+ */
+function resolveCursorWireModel(
+	model: Model<"cursor-agent">,
+	requestModelId: string | undefined,
+	wireMode: CursorWireMode = "normalized",
+): {
+	modelId: string;
+	parameters: RequestedModel_ModelParameterbytes[];
+	maxMode: boolean;
+} {
+	const wireModelId = requestModelId ?? model.requestModelId ?? model.id;
+	const maxMode = resolveCursorMaxMode(model, wireModelId);
+	if (wireMode === "discovered") return { modelId: wireModelId, parameters: [], maxMode };
+	// `collapseVariantId` keeps the lane in the logical id (`-high-fast` →
+	// base `-fast`) and decodes the KDL effort (`-none` → `off`).
+	const collapsed = collapseVariantId("cursor", wireModelId);
+	const effort = collapsed.effort;
+	const base = effort !== undefined ? collapsed.logicalId : undefined;
+	if (effort !== undefined && base && classifyModel("cursor", base).class === "openai") {
+		if (effort === "off") {
+			return { modelId: base, parameters: [], maxMode };
+		}
+		if ((THINKING_EFFORTS as readonly string[]).includes(effort)) {
+			return {
+				modelId: base,
+				maxMode,
+				parameters: [
+					create(RequestedModel_ModelParameterbytesSchema, { id: "reasoning", value: collapsed.effort }),
+				],
+			};
+		}
+	}
+	// A bare `composer-2.5` id resolves to the Fast variant server-side
+	// (can1357/oh-my-pi#9012). Pin the Standard tier explicitly; `-fast`
+	// selections keep the Fast lane by omitting the parameter.
+	if (wireModelId === "composer-2.5") {
+		return {
+			modelId: wireModelId,
+			parameters: [create(RequestedModel_ModelParameterbytesSchema, { id: "fast", value: "false" })],
+			maxMode,
+		};
+	}
+	return { modelId: wireModelId, parameters: [], maxMode };
+}
+
+async function buildGrpcRequestForWireMode(
 	model: Model<"cursor-agent">,
 	context: Context,
 	options: CursorOptions | undefined,
-	state: {
-		conversationId: string;
-		blobStore: Map<string, Uint8Array>;
-		conversationState?: ConversationStateStructure;
-	},
-): Promise<{
-	requestBytes: Uint8Array;
-	blobStore: Map<string, Uint8Array>;
-	conversationState: ConversationStateStructure;
-}> {
+	state: CursorRequestState,
+	wireMode: CursorWireMode,
+): Promise<CursorTransportRequest> {
 	const blobStore = state.blobStore;
 
 	const systemPromptIds = buildCursorSystemPromptJsons(context.systemPrompt).map(json =>
 		storeCursorBlob(blobStore, new TextEncoder().encode(json)),
 	);
 
-	const activeUserMessageIndex = context.messages.length - 1;
+	const lastUserMessageIndex = findLastUserMessageIndex(context.messages);
+	let activeUserMessageIndex = context.messages.length - 1;
 	const activeMessage = context.messages[activeUserMessageIndex];
-	const activeUserMessage =
+	let activeUserMessage =
 		activeMessage?.role === "user" || activeMessage?.role === "developer" ? activeMessage : undefined;
+	if (state.rotatedFresh && !activeUserMessage && lastUserMessageIndex >= 0) {
+		activeUserMessageIndex = lastUserMessageIndex;
+		const lastUser = context.messages[lastUserMessageIndex];
+		if (lastUser.role === "user" || lastUser.role === "developer") {
+			activeUserMessage = lastUser;
+		}
+	}
 	let userContent: string | (TextContent | ImageContent)[] | undefined;
 	let userText = "";
 	let hasUserImages = false;
@@ -5117,8 +5446,11 @@ export async function buildGrpcRequest(
 		turns,
 	});
 
-	const wireModelId = model.requestModelId ?? model.id;
-	const cursorMaxMode = model.cursorMaxMode === true;
+	const {
+		modelId: wireModelId,
+		parameters: wireParameters,
+		maxMode: cursorMaxMode,
+	} = resolveCursorWireModel(model, options?.wireModelId, wireMode);
 	const modelDetails = create(ModelDetailsSchema, {
 		modelId: wireModelId,
 		displayModelId: model.id,
@@ -5128,6 +5460,7 @@ export async function buildGrpcRequest(
 	const requestedModel = create(RequestedModelSchema, {
 		modelId: wireModelId,
 		maxMode: cursorMaxMode,
+		parameters: wireParameters,
 	});
 
 	let runRequest = create(AgentRunRequestSchema, {
@@ -5150,6 +5483,21 @@ export async function buildGrpcRequest(
 	const replacementRequest = await options?.onPayload?.(runRequest, model);
 	if (replacementRequest !== undefined) runRequest = replacementRequest as typeof runRequest;
 
+	const discoveredWireModelId = options?.wireModelId ?? model.requestModelId ?? model.id;
+	const serializedParameters = runRequest.requestedModel?.parameters;
+	const normalizedEffortPayloadSerialized =
+		wireMode === "normalized" &&
+		wireParameters.length > 0 &&
+		wireModelId !== discoveredWireModelId &&
+		runRequest.requestedModel?.modelId === wireModelId &&
+		runRequest.modelDetails?.modelId === wireModelId &&
+		serializedParameters?.length === wireParameters.length &&
+		serializedParameters.every((parameter, index) => {
+			const expected = wireParameters[index];
+			return expected !== undefined && parameter.id === expected.id && parameter.value === expected.value;
+		});
+	const fallbackWireModelId = normalizedEffortPayloadSerialized ? discoveredWireModelId : undefined;
+
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "runRequest", value: runRequest },
 	});
@@ -5168,7 +5516,17 @@ export async function buildGrpcRequest(
 		detail: detail || undefined,
 	});
 
-	return { requestBytes, blobStore, conversationState };
+	return { requestBytes, blobStore, conversationState, fallbackWireModelId };
+}
+
+/** Builds the normalized Cursor Run request used by transport callers and request inspection hooks. */
+export async function buildGrpcRequest(
+	model: Model<"cursor-agent">,
+	context: Context,
+	options: CursorOptions | undefined,
+	state: CursorRequestState,
+): Promise<CursorGrpcRequest> {
+	return buildGrpcRequestForWireMode(model, context, options, state, "normalized");
 }
 
 function hasImages(content: (TextContent | ImageContent)[]): boolean {

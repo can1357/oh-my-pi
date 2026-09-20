@@ -1,0 +1,9 @@
+auth "baseten" {
+	name "Baseten"
+	login "api-key" {
+		auth-url "https://app.baseten.co/settings/api_keys"
+		instructions "Copy your API key from the Baseten dashboard"
+		prompt "Paste your Baseten API key" placeholder="bt_..."
+		validate "models-endpoint" label="Baseten" url="https://inference.baseten.co/v1/models"
+	}
+}

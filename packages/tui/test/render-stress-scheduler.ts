@@ -31,13 +31,10 @@ export class StressRenderScheduler implements RenderScheduler {
 		let rounds = 0;
 		while (this.#immediateCallbacks.length > 0 || this.#renderCallbacks.size > 0) {
 			rounds += 1;
-			if (rounds > 100) {
-				throw new Error("Render scheduler did not settle after 100 drain rounds");
-			}
+			if (rounds > 100) throw new Error("Render scheduler did not settle after 100 drain rounds");
 			const immediate = this.#immediateCallbacks;
 			this.#immediateCallbacks = [];
 			for (const callback of immediate) callback();
-
 			if (this.#renderCallbacks.size === 0) continue;
 			const render = [...this.#renderCallbacks.values()];
 			this.#renderCallbacks.clear();

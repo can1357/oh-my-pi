@@ -13,14 +13,15 @@ import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-cor
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
-const yieldToolSchema = type({ result: type("unknown") });
+const yieldToolSchema = type({ data: type("unknown") });
 const recordToolSchema = type({ value: type("string") });
 
 type Harness = { session: AgentSession; tempDir: TempDir };
@@ -39,10 +40,9 @@ const yieldTool: AgentTool<typeof yieldToolSchema, { value: unknown }> = {
 	description: "Finish the task with structured JSON output.",
 	parameters: yieldToolSchema,
 	async execute(_toolCallId, params) {
-		const result = (params.result ?? {}) as Record<string, unknown>;
 		return {
 			content: [{ type: "text", text: "Result submitted." }],
-			details: { value: result.data ?? null },
+			details: { value: params.data ?? null },
 		};
 	},
 };
@@ -62,7 +62,7 @@ const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
 
 function yieldCall(value: string, id: string): MockResponse {
 	return {
-		content: [{ type: "toolCall", id, name: "yield", arguments: { result: { data: { value } } } }],
+		content: [{ type: "toolCall", id, name: "yield", arguments: { data: { value } } }],
 		stopReason: "toolUse",
 	};
 }
@@ -82,14 +82,21 @@ function emptyStop(): MockResponse {
 	};
 }
 
-async function createHarness(responses: MockResponse[]): Promise<Harness & { mock: MockModel }> {
+async function createHarness(
+	responses: MockResponse[],
+	options?: { retryEnabled?: boolean },
+): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-yield-empty-stop-");
 
 	const mock = createMockModel({ responses });
 	const modelRegistry = sharedModelRegistry;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
-		"retry.enabled": false,
+		"retry.enabled": options?.retryEnabled ?? false,
+		"retry.baseDelayMs": 5,
+		"retry.maxDelayMs": 100,
+		"retry.maxRetries": 1,
+		"retry.modelFallback": false,
 		"todo.enabled": false,
 		"todo.eager": "default",
 		"todo.reminders": false,
@@ -150,6 +157,35 @@ afterEach(async () => {
 });
 
 describe("AgentSession yield empty-stop suppression", () => {
+	it("settles a successful retry that ends in a terminal yield", async () => {
+		mockSchedulerWaitWithClock();
+		const { session, mock } = await createHarness(
+			[{ throw: "503 service unavailable: overloaded_error" }, yieldCall("recovered", "call-yield-after-retry")],
+			{ retryEnabled: true },
+		);
+		const retryEvents: Array<"auto_retry_start" | "auto_retry_end"> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start" || event.type === "auto_retry_end") {
+				retryEvents.push(event.type);
+			}
+		});
+
+		const prompt = session.prompt("retry once then yield");
+		const outcome = await Promise.race([
+			prompt.then(() => "completed" as const),
+			Bun.sleep(1_000).then(() => "stuck" as const),
+		]);
+		if (outcome === "stuck") {
+			session.abortRetry();
+			await prompt;
+		}
+
+		expect(outcome).toBe("completed");
+		expect(mock.calls).toHaveLength(2);
+		expect(retryEvents).toEqual(["auto_retry_start", "auto_retry_end"]);
+		expect(session.isRetrying).toBe(false);
+	});
+
 	it("does not continue to a trailing empty assistant stop after a successful yield", async () => {
 		const { session, mock } = await createHarness([yieldCall("done", "call-yield-done")]);
 

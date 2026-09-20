@@ -3,8 +3,15 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import {
+	disposeAllVmContexts,
+	invokeJsTool,
+	runIfSnapshotMatches,
+	shadowPlanIfPresent,
+	snapshotVmContext,
+} from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { executeJs, type JsResult } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
+import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -93,27 +100,165 @@ describe("executeJs", () => {
 		expect(resetResult.output.trim()).toBe("undefined");
 	});
 
-	it("parallel() barriers until every thunk settles and throws the lowest-index error", async () => {
-		const result = await executeJs(
+	it("captures retained JSON-safe bindings without executing another cell", async () => {
+		await executeJs("globalThis.shadowSnapshotValue = { nested: ['safe'] };", {
+			sessionId,
+			session,
+			sessionFile,
+		});
+
+		const snapshot = await snapshotVmContext({ sessionKey: sessionId, cwd: session.cwd, sessionId });
+		expect(snapshot?.values.shadowSnapshotValue).toEqual({ nested: ["safe"] });
+		expect(snapshot?.revision).toBeGreaterThan(0);
+	});
+
+	it("plans only against an already-retained JavaScript runtime", async () => {
+		await expect(
+			shadowPlanIfPresent({ sessionKey: "missing", cwd: session.cwd, sessionId: "missing", code: "tool.read({})" }),
+		).resolves.toBeNull();
+		await executeJs("globalThis.shadowPlanValue = true;", { sessionId, session, sessionFile });
+		const planned = await shadowPlanIfPresent({
+			sessionKey: sessionId,
+			cwd: session.cwd,
+			sessionId,
+			code: 'tool.read({ path: "src/a.ts" });',
+		});
+		expect(planned?.snapshot.values.shadowPlanValue).toBe(true);
+		expect(planned?.plan.operations[0]?.call.name).toBe("read");
+	});
+
+	it("runs through the retained atomic admission path when the snapshot matches", async () => {
+		const planned = await shadowPlanIfPresent({
+			sessionKey: sessionId,
+			cwd: session.cwd,
+			sessionId,
+			code: 'tool.read({ path: "src/a.ts" });',
+		});
+		if (!planned) throw new Error("expected retained session");
+		await expect(
+			runIfSnapshotMatches({
+				sessionKey: sessionId,
+				sessionId,
+				cwd: session.cwd,
+				session,
+				code: "globalThis.atomicContextManagerValue = 42;",
+				filename: "atomic-context.ts",
+				runState: {},
+				expectedRevision: planned.snapshot.revision,
+				expectedDigest: planned.digest,
+			}),
+		).resolves.not.toBeNull();
+		const result = await executeJs("return atomicContextManagerValue;", { sessionId, session, sessionFile });
+		expect(result.output.trim()).toBe("42");
+	});
+
+	it("rejects stale retained snapshots before executing JavaScript", async () => {
+		await executeJs("globalThis.atomicStaleGuard = 1;", { sessionId, session, sessionFile });
+		const planned = await shadowPlanIfPresent({
+			sessionKey: sessionId,
+			cwd: session.cwd,
+			sessionId,
+			code: "globalThis.atomicStaleGuard = 3;",
+		});
+		if (!planned) throw new Error("expected retained session");
+		await executeJs("globalThis.atomicStaleGuard = 2;", { sessionId, session, sessionFile });
+		await expect(
+			runIfSnapshotMatches({
+				sessionKey: sessionId,
+				sessionId,
+				cwd: session.cwd,
+				session,
+				code: "globalThis.atomicStaleGuard = 3;",
+				filename: "atomic-stale-context.ts",
+				runState: {},
+				expectedRevision: planned.snapshot.revision,
+				expectedDigest: planned.digest,
+			}),
+		).resolves.toBeNull();
+		const result = await executeJs("return atomicStaleGuard;", { sessionId, session, sessionFile });
+		expect(result.output.trim()).toBe("2");
+	});
+
+	it("describes and invokes tools defined in the retained JavaScript kernel", async () => {
+		const evalSessionId = `${sessionId}:defined-tools`;
+		const evalSession: ToolSession = {
+			...session,
+			getEvalSessionId: () => evalSessionId,
+		};
+		const toolSessionId = `js:${evalSessionId}`;
+		const defined = await executeJs(
 			[
-				"const settled = [];",
-				"try {",
-				"	await parallel([",
-				"		async () => { await new Promise(r => setTimeout(r, 30)); settled.push('slow'); },",
-				"		async () => { settled.push('bad1'); throw new Error('bad1'); },",
-				"		async () => { settled.push('bad2'); throw new Error('bad2'); },",
-				"	]);",
-				"	return 'no-throw';",
-				"} catch (err) {",
-				"	return JSON.stringify([err.message, settled.sort()]);",
-				"}",
+				"tool(async ({ n }) => n * 2, {",
+				'  name: "dbl",',
+				'  description: "Double an integer",',
+				'  parameters: { type: "object", properties: { n: { type: "integer" } }, required: ["n"], additionalProperties: false },',
+				"});",
 			].join("\n"),
-			{ sessionId, session, sessionFile },
+			{ sessionId: toolSessionId, session: evalSession, sessionFile },
 		);
-		expect(result.exitCode).toBe(0);
-		// Every thunk ran to completion (the slow one was not orphaned by the
-		// early rejections), and the lowest-index error propagated.
-		expect(JSON.parse(result.output.trim())).toEqual(["bad1", ["bad1", "bad2", "slow"]]);
+		expect(defined.exitCode).toBe(0);
+		expect(getStatusEvents(defined)).toContainEqual({
+			type: "status",
+			event: { op: "tool_define", name: "dbl", params: ["n"] },
+		});
+
+		const described = await invokeJsTool(
+			{ op: "describe", names: ["dbl", "missing"] },
+			{ sessionKey: toolSessionId, session: evalSession },
+		);
+		expect(described.ok).toBe(true);
+		if (!described.ok || !("tools" in described)) throw new Error("Expected a JavaScript tool descriptor");
+		expect(described.tools).toEqual([
+			{
+				name: "dbl",
+				description: "Double an integer",
+				parameters: {
+					type: "object",
+					properties: { n: { type: "integer" } },
+					required: ["n"],
+					additionalProperties: false,
+				},
+				language: "js",
+			},
+		]);
+		expect(described.missing).toEqual(["missing"]);
+		expect(await describeEvalTools(evalSession, ["dbl"])).toEqual(described.tools);
+		await expect(describeEvalTools(evalSession, ["nope"])).rejects.toThrow("Unknown eval tool(s): nope");
+
+		const called = await invokeJsTool(
+			{ op: "call", name: "dbl", args: { n: 2 } },
+			{ sessionKey: toolSessionId, session: evalSession },
+		);
+		expect(called).toEqual({ ok: true, value: 4 });
+
+		// A throwing tool is forwarded to the caller; the worker stays alive.
+		await executeJs('tool(() => { throw new Error("kaboom"); }, { name: "boom" });', {
+			sessionId: toolSessionId,
+			session: evalSession,
+			sessionFile,
+		});
+		const failed = await invokeJsTool(
+			{ op: "call", name: "boom", args: {} },
+			{ sessionKey: toolSessionId, session: evalSession },
+		);
+		expect(failed).toEqual({ ok: false, error: "kaboom" });
+		const [boomTool] = createEvalCustomTools(evalSession, await describeEvalTools(evalSession, ["boom"]));
+		if (!boomTool) throw new Error("Expected the defined eval tool");
+		const bridgedFailure = await Reflect.apply(boomTool.execute, boomTool, ["call-boom", {}, undefined, undefined]);
+		expect(bridgedFailure).toMatchObject({
+			content: [{ type: "text", text: "kaboom" }],
+			details: { evalTool: "boom", language: "js", isError: true },
+			isError: true,
+		});
+		const alive = await executeJs("return 'still here';", {
+			sessionId: toolSessionId,
+			session: evalSession,
+			sessionFile,
+		});
+		expect(alive.output.trim()).toBe("still here");
+
+		evalSession.settings.set("eval.tools.enabled", false);
+		await expect(describeEvalTools(evalSession, ["dbl"])).rejects.toThrow("Eval-defined tools are disabled");
 	});
 
 	it("persists bindings from cells that contain nested returns", async () => {
@@ -368,12 +513,16 @@ describe("executeJs", () => {
 			expect.stringMatching(/^js-read-/),
 			{ path: "artifact://15:raw:1-1400", [INTENT_FIELD]: "js prelude" },
 			expect.any(AbortSignal),
+			undefined,
+			undefined,
 		);
 		expect(execute).toHaveBeenNthCalledWith(
 			2,
 			expect.stringMatching(/^js-read-/),
 			{ path: "artifact://15:raw:1-2", [INTENT_FIELD]: "js prelude" },
 			expect.any(AbortSignal),
+			undefined,
+			undefined,
 		);
 	});
 
@@ -427,13 +576,48 @@ describe("executeJs", () => {
 		expect(execute.mock.calls[1]?.[1]).toEqual({ path: "agent://agent-42", [INTENT_FIELD]: "js prelude" });
 	});
 
-	it("auto-displays the final awaited expression result", async () => {
-		const execute = vi.fn(
-			async (): Promise<AgentToolResult> => ({
-				content: [{ type: "text", text: "tool output" }],
-				details: { kind: "tool-result" },
-			}),
+	it("preserves nested await expressions in instrumented tool-call arguments", async () => {
+		const execute = vi.fn(async (_toolCallId: string, args: unknown): Promise<AgentToolResult> => ({
+			content: [{ type: "text", text: (args as { path: string }).path }],
+		}));
+		const toolSession: ToolSession = {
+			...session,
+			getToolByName: name => (name === "read" ? createTool("read", execute) : undefined),
+		};
+
+		const result = await executeJs(
+			'async function resolvePath() { return "package.json"; }\nreturn await tool.read({ path: await resolvePath() });',
+			{ sessionId, session: toolSession, sessionFile },
 		);
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("package.json");
+	});
+
+	it("preserves direct eval bindings around an instrumented tool read", async () => {
+		const execute = vi.fn(async (_toolCallId: string, args: unknown): Promise<AgentToolResult> => ({
+			content: [{ type: "text", text: (args as { path: string }).path }],
+		}));
+		const toolSession: ToolSession = {
+			...session,
+			getToolByName: name => (name === "read" ? createTool("read", execute) : undefined),
+		};
+
+		const result = await executeJs(`await tool.read({ path: eval('var p = "note.txt"; p') }); p;`, {
+			sessionId,
+			session: toolSession,
+			sessionFile,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.output.trim()).toBe("note.txt");
+	});
+
+	it("auto-displays the final awaited expression result", async () => {
+		const execute = vi.fn(async (): Promise<AgentToolResult> => ({
+			content: [{ type: "text", text: "tool output" }],
+			details: { kind: "tool-result" },
+		}));
 		const toolSession: ToolSession = {
 			...session,
 			getToolByName: name => (name === "read" ? createTool("read", execute) : undefined),

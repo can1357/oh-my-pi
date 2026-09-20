@@ -26,7 +26,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -97,6 +98,8 @@ interface PlanHarness {
 	mock: MockModel;
 	advisorMock?: MockModel;
 	sideMock?: MockModel;
+	isDeviceOnlyWrite: () => boolean;
+	isPendingFullWriteDescription: () => boolean;
 }
 
 describe("AgentSession plan-mode convergence", () => {
@@ -140,6 +143,7 @@ describe("AgentSession plan-mode convergence", () => {
 			initialPlanTools?: string[];
 			xdev?: boolean;
 			rebuildGate?: { fail: boolean };
+			deviceOnlyWrite?: boolean;
 		},
 	): Promise<PlanHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -158,7 +162,8 @@ describe("AgentSession plan-mode convergence", () => {
 				? [readTool, writeTool]
 				: [readTool]
 			: [askTool, writeTool, readTool];
-		let currentAgent: Agent | undefined;
+		let deviceOnlyWrite = options?.deviceOnlyWrite === true;
+		let pendingFullWriteDescription = false;
 		const xdev: XdevState | undefined = options?.xdev
 			? {
 					tools: toolRegistry,
@@ -179,7 +184,7 @@ describe("AgentSession plan-mode convergence", () => {
 			},
 			streamFn: mock.stream,
 		});
-		currentAgent = agent;
+		const currentAgent = agent;
 
 		let advisorMock: MockModel | undefined;
 		let advisorStreamFn: StreamFn | undefined;
@@ -205,6 +210,13 @@ describe("AgentSession plan-mode convergence", () => {
 			modelRegistry,
 			toolRegistry,
 			builtInToolNames: ["ask", "write", "read"],
+			isDeviceOnlyWrite: () => deviceOnlyWrite,
+			setDeviceOnlyWrite: enabled => {
+				deviceOnlyWrite = enabled;
+			},
+			setPendingFullWriteDescription: enabled => {
+				pendingFullWriteDescription = enabled;
+			},
 			advisorTools: [],
 			advisorStreamFn,
 			sideStreamFn,
@@ -219,7 +231,14 @@ describe("AgentSession plan-mode convergence", () => {
 		});
 		if (!options?.planYolo) created.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
 		session = created;
-		return { session: created, mock, advisorMock, sideMock };
+		return {
+			session: created,
+			mock,
+			advisorMock,
+			sideMock,
+			isDeviceOnlyWrite: () => deviceOnlyWrite,
+			isPendingFullWriteDescription: () => pendingFullWriteDescription,
+		};
 	}
 
 	it("T1: an advisor concern does not wake the primary in plan mode", async () => {
@@ -359,6 +378,46 @@ describe("AgentSession plan-mode convergence", () => {
 
 		expect(countReminders(harness.session.agent.state.messages)).toBe(2);
 		expect(harness.mock.calls.length).toBe(4);
+	});
+
+	it("keeps PlanYolo's internal write augmentation transport-only", async () => {
+		const harness = await createPlanSession(
+			[
+				{ content: ["planning A"] },
+				{ content: ["planning B"] },
+				{ content: ["planning C"] },
+				{ content: ["planning D"] },
+			],
+			{ planYolo: true, xdev: true, deviceOnlyWrite: true },
+		);
+
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+		expect(harness.session.getActiveToolNames()).toContain("write");
+		expect(harness.isDeviceOnlyWrite()).toBe(true);
+		expect(harness.isPendingFullWriteDescription()).toBe(false);
+	});
+	it("rolls PlanYolo state back when transport activation fails", async () => {
+		const rebuildGate = { fail: true };
+		const harness = await createPlanSession([{ content: ["planning"] }], {
+			planYolo: true,
+			xdev: true,
+			deviceOnlyWrite: true,
+			rebuildGate,
+		});
+
+		await expect(harness.session.prompt("make a plan")).rejects.toThrow("rebuild failed");
+		expect(harness.session.getPlanModeState()).toBeUndefined();
+		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+		expect(harness.isDeviceOnlyWrite()).toBe(true);
+
+		rebuildGate.fail = false;
+		await harness.session.prompt("retry the plan");
+		await harness.session.waitForIdle();
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+		expect(harness.isDeviceOnlyWrite()).toBe(true);
 	});
 
 	it("restores the pre-plan tool set after PlanYolo approval", async () => {
