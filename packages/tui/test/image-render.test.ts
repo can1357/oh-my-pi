@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as natives from "@oh-my-pi/pi-natives";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
 import {
@@ -47,6 +48,7 @@ describe("terminal image rendering", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		setCellDimensions(originalCellDims);
 		terminal.imageProtocol = originalProtocol;
 		setKittyGraphics(originalGraphics);
@@ -185,6 +187,33 @@ describe("terminal image rendering", () => {
 		// maxHeightCells=2, targetHeightPx=18 (not 20), rows=2 — within cap.
 		expect(result?.rows).toBe(2);
 		expect((result?.sequence ?? "").startsWith("\x1bP")).toBe(true);
+	});
+
+	it("reuses native SIXEL encoding across unchanged budgeted repaints", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = vi.spyOn(natives, "encodeSixel");
+		const budget = new ImageBudget(1, () => {});
+		const image = new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ budget, imageKey: "sixel-cache", maxWidthCells: 10, maxHeightCells: 2 },
+			SQUARE_DIMENSIONS,
+		);
+
+		budget.beginPass();
+		const first = image.render(20).join("");
+		budget.endPass();
+		expect(first).toMatch(/\x1bP[0-9;]*q[^\x1b]+\x1b\\/);
+		expect(first).not.toContain("[Image:");
+
+		for (let repaint = 0; repaint < 4; repaint++) {
+			budget.beginPass();
+			const rendered = image.render(20).join("");
+			budget.endPass();
+			expect(rendered).toBe(first);
+		}
+		expect(encodeSixel).toHaveBeenCalledTimes(1);
 	});
 
 	it("moves back up before multi-row direct Kitty output and restores the cursor below it", () => {
