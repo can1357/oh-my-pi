@@ -56,6 +56,7 @@ import {
 	AdvisorRuntime,
 	type AdvisorRuntimeStatus,
 	type AdvisorSeverity,
+	type AdvisorSteerSeverity,
 	AdvisorTranscriptRecorder,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
@@ -748,6 +749,11 @@ export class SessionAdvisors {
 		if (!Number.isFinite(immuneTurns) || immuneTurns <= 0) return 0;
 		return Math.trunc(immuneTurns);
 	}
+	#advisorSteerSeverity(): AdvisorSteerSeverity {
+		const steerSeverity = this.#host.settings.get("advisor.steerSeverity");
+		if (steerSeverity === "blocker" || steerSeverity === "concern" || steerSeverity === "both") return steerSeverity;
+		return "both";
+	}
 	#advisorMaxNotesPerUpdate(config?: AdvisorConfig): number {
 		const clamp = (value: unknown): number | undefined =>
 			typeof value === "number" && Number.isFinite(value) && value >= 1
@@ -1368,11 +1374,15 @@ export class SessionAdvisors {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
-		const interrupting = isInterruptingSeverity(severity);
+		const steerSeverity = this.#advisorSteerSeverity();
+		const interrupting = isInterruptingSeverity(severity, steerSeverity);
 		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
-		const terminalUnwindPreserve = this.#terminalUnwindActive && severity !== "blocker" && terminalAnswerNoQueuedWork;
+		const blockerSteers = isInterruptingSeverity("blocker", steerSeverity);
+		const terminalUnwindPreserve =
+			this.#terminalUnwindActive && !(severity === "blocker" && blockerSteers) && terminalAnswerNoQueuedWork;
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
+			steerSeverity,
 			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
 			preserveOnly: this.#preserveAdvisorAdvice || terminalUnwindPreserve,
 			// Key on the live agent-core loop, not session `isStreaming` (which also

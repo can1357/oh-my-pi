@@ -1331,6 +1331,17 @@ describe("advisor", () => {
 			expect(isInterruptingSeverity("nit")).toBe(false);
 			expect(isInterruptingSeverity(undefined)).toBe(false);
 		});
+		it("restricts interrupting severities to the configured steering threshold", () => {
+			// The default "both" is pinned by the test above; a plain nit never
+			// steers under any threshold.
+			expect(isInterruptingSeverity("nit", "blocker")).toBe(false);
+			expect(isInterruptingSeverity("concern", "blocker")).toBe(false);
+			expect(isInterruptingSeverity("blocker", "blocker")).toBe(true);
+			expect(isInterruptingSeverity("concern", "concern")).toBe(true);
+			expect(isInterruptingSeverity("blocker", "concern")).toBe(false);
+			expect(isInterruptingSeverity("concern", "both")).toBe(true);
+			expect(isInterruptingSeverity("blocker", "both")).toBe(true);
+		});
 
 		it("keeps the interrupt-immune turn fence half-open for the configured window", () => {
 			expect(
@@ -6526,6 +6537,51 @@ describe("advisor", () => {
 					}),
 				).toBe("steer");
 			}
+		});
+		it("asides a mid-work concern when the threshold is blocker-only", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+					steerSeverity: "blocker",
+				}),
+			).toBe("aside");
+		});
+		it("asides a blocker when the threshold is concern-only", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					steerSeverity: "concern",
+				}),
+			).toBe("aside");
+		});
+		it("still preserves an idle suppressed note inside the threshold instead of steering it", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: true,
+					streaming: false,
+					aborting: false,
+					steerSeverity: "blocker",
+				}),
+			).toBe("preserve");
+		});
+		it("preserves a late blocker that the threshold demotes, instead of asiding it below a nit", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					terminalAnswerNoQueuedWork: true,
+					steerSeverity: "concern",
+				}),
+			).toBe("preserve");
 		});
 	});
 	describe("advisor transcript filenames", () => {

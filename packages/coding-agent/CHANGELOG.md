@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `advisor.steerSeverity` setting (`blocker` / `concern` / `both`, default `both`) controlling which advisor severities may interrupt the primary through the steering channel; severities outside the threshold ride the non-interrupting aside queue, and a plain `nit` never steers ([#12510](https://github.com/can1357/oh-my-pi/pull/12510) by [@oldschoola](https://github.com/oldschoola)).
 ### Breaking Changes
 
 - Removed support for the env parameter in the bash tool
