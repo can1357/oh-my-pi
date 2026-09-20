@@ -23,7 +23,7 @@
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
-- Fixed JavaScript eval `wait()`/`handle.wait()` silently ignoring a positional argument (e.g. `h.wait(3600000)`): non-object arguments now raise a `TypeError` instead of waiting without a timeout while the eval watchdog is paused ([#12549](https://github.com/can1357/oh-my-pi/issues/12549)).
+- Fixed JavaScript eval `wait()`/`handle.wait()` silently ignoring a positional argument (e.g. `h.wait(3600000)`): non-object arguments now raise a `TypeError` instead of waiting without a timeout while the eval watchdog is paused ([#12617](https://github.com/can1357/oh-my-pi/pull/12617) by [@aminamos](https://github.com/aminamos)).
 
 ## [18.2.6] - 2026-09-18
 
