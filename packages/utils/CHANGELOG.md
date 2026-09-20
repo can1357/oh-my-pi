@@ -4,12 +4,12 @@
 
 ### Changed
 
-- Mermaid diagrams are now rendered by the native renderer in `@oh-my-pi/pi-natives` (`renderMermaidAscii`); the vendored TypeScript renderer was removed. Output is unchanged.
-- `PI_TIMING` span lines show their start offset (`@Nms`) so unspanned gaps can be located.
+- Mermaid diagrams are now rendered with the native renderer, with output remaining unchanged.
+- PI_TIMING span lines now include their start offset to make unspanned gaps easier to identify.
 
 ### Fixed
 
-- `PI_TIMING` module-load profiling no longer crashes startup on `require()`d modules or `.d.ts` text assets.
+- Fixed a startup crash when PI_TIMING profiled modules loaded via require() or TypeScript declaration assets.
 
 ## [18.2.5] - 2026-09-17
 

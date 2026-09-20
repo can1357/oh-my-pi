@@ -49,7 +49,21 @@ const IMAGE_PAYLOAD = {
 	],
 };
 
-describe("OpenRouter chat and image discovery", () => {
+const DECISIONS_PAYLOAD = {
+	data: [
+		{
+			id: "~typesafe/jev-latest",
+			name: "TypeSafe: Jev Latest",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+	],
+};
+
+describe("OpenRouter chat, image, and decisions discovery", () => {
 	it("keeps image-only rows and lets the image endpoint win id collisions", async () => {
 		const requested: string[] = [];
 		const options = openrouterModelManagerOptions({
@@ -57,6 +71,7 @@ describe("OpenRouter chat and image discovery", () => {
 				const url = String(input);
 				requested.push(url);
 				if (url.endsWith("/images/models")) return Response.json(IMAGE_PAYLOAD);
+				if (url.endsWith("/models?output_modalities=decisions")) return Response.json(DECISIONS_PAYLOAD);
 				if (url.endsWith("/models")) return Response.json(CHAT_PAYLOAD);
 				return new Response(null, { status: 404 });
 			},
@@ -66,7 +81,21 @@ describe("OpenRouter chat and image discovery", () => {
 		expect(requested.sort()).toEqual([
 			"https://openrouter.ai/api/v1/images/models",
 			"https://openrouter.ai/api/v1/models",
+			"https://openrouter.ai/api/v1/models?output_modalities=decisions",
 		]);
+		// Decision rows answer only through `/api/alpha/decisions`; they are judge-kind, tool-less, input-priced.
+		expect(models?.find(model => model.id === "~typesafe/jev-latest")).toEqual(
+			expect.objectContaining({
+				api: "openrouter-decisions",
+				kind: "judge",
+				baseUrl: "https://openrouter.ai/api/alpha",
+				supportsTools: false,
+				input: ["text"],
+				cost: expect.objectContaining({ input: expect.closeTo(0.042, 6), output: 0 }),
+				contextWindow: 32000,
+				maxTokens: 28800,
+			}),
+		);
 		expect(models?.find(model => model.id === "openrouter/auto")).toMatchObject({
 			api: "openrouter",
 			input: ["text"],

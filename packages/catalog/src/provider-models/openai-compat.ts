@@ -3188,6 +3188,14 @@ export interface OpenRouterModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+/**
+ * OpenRouter's Decisions API lives at `/api/alpha`, a sibling of the `/api/v1`
+ * chat root; derive it so a custom gateway base URL keeps both aligned.
+ */
+function openrouterDecisionsBaseUrl(chatBaseUrl: string): string {
+	return chatBaseUrl.endsWith("/v1") ? `${chatBaseUrl.slice(0, -"/v1".length)}/alpha` : `${chatBaseUrl}/alpha`;
+}
+
 function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | undefined {
 	const reasoning = entry.reasoning;
 	if (!isRecord(reasoning)) return undefined;
@@ -3210,6 +3218,7 @@ function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConf
 export function openrouterModelManagerOptions(config?: OpenRouterModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = (config?.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+	const decisionsBaseUrl = openrouterDecisionsBaseUrl(baseUrl);
 	const references = createBundledReferenceMap<"openrouter">("openrouter");
 	return {
 		providerId: "openrouter",
@@ -3218,7 +3227,7 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 		// override bundled `api: "openrouter"` models during online-if-uncached startup.
 		cacheProviderId: resolveModelCacheProviderId("openrouter"),
 		fetchDynamicModels: async () => {
-			const [chatModels, imageModels] = await Promise.all([
+			const [chatModels, imageModels, decisionModels] = await Promise.all([
 				fetchOpenAICompatibleModels({
 					api: "openrouter",
 					provider: "openrouter",
@@ -3298,6 +3307,46 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 					}),
 					fetch: config?.fetch,
 				}),
+				// Decision models (`text->decisions`) are absent from the default roster
+				// and answer only through the Decisions API, outside the `/v1` prefix.
+				fetchOpenAICompatibleModels({
+					api: "openrouter-decisions",
+					provider: "openrouter",
+					baseUrl,
+					apiKey,
+					query: { output_modalities: "decisions" },
+					filterModel: entry => {
+						const architecture = isRecord(entry.architecture) ? entry.architecture : undefined;
+						return (
+							Array.isArray(architecture?.output_modalities) &&
+							architecture.output_modalities.includes("decisions")
+						);
+					},
+					mapModel: (entry, defaults): ModelSpec<"openrouter-decisions"> => {
+						const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
+						const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
+						return {
+							...defaults,
+							baseUrl: decisionsBaseUrl,
+							kind: "judge",
+							reasoning: false,
+							input: ["text"],
+							supportsTools: false,
+							cost: {
+								input: parseFloat(String(pricing?.prompt ?? "0")) * 1_000_000,
+								output: parseFloat(String(pricing?.completion ?? "0")) * 1_000_000,
+								cacheRead: 0,
+								cacheWrite: 0,
+							},
+							contextWindow: typeof entry.context_length === "number" ? entry.context_length : null,
+							maxTokens:
+								typeof topProvider?.max_completion_tokens === "number"
+									? topProvider.max_completion_tokens
+									: null,
+						};
+					},
+					fetch: config?.fetch,
+				}),
 			]);
 
 			if (imageModels === null) {
@@ -3305,11 +3354,17 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 					endpoint: `${baseUrl}/images/models`,
 				});
 			}
-			if (chatModels === null && imageModels === null) return null;
+			if (decisionModels === null) {
+				logger.warn("OpenRouter decision model discovery unavailable; preserving chat model discovery", {
+					endpoint: `${baseUrl}/models?output_modalities=decisions`,
+				});
+			}
+			if (chatModels === null && imageModels === null && decisionModels === null) return null;
 
 			const models = new Map<string, ModelSpec<Api>>();
 			for (const model of chatModels ?? []) models.set(model.id, model);
 			for (const model of imageModels ?? []) models.set(model.id, model);
+			for (const model of decisionModels ?? []) models.set(model.id, model);
 			return Array.from(models.values()).sort((left, right) => left.id.localeCompare(right.id));
 		},
 	};

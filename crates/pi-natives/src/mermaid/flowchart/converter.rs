@@ -6,7 +6,14 @@ use super::{
 	AsciiConfig, AsciiEdge, AsciiGraph, AsciiNode, AsciiSubgraph, Dir, SubgraphId,
 	parser::{MermaidGraph, MermaidSubgraph},
 };
-use crate::mermaid::canvas::{Canvas, RoleCanvas};
+use crate::mermaid::{
+	canvas::{Canvas, RoleCanvas},
+	text::wrap_label,
+};
+
+/// Node labels wrap to this many display columns so one long sentence does
+/// not stretch its whole column; explicit line breaks are kept.
+const LABEL_WRAP_WIDTH: usize = 24;
 
 /// Convert a parsed Mermaid graph into graph state ready for layout.
 pub fn convert(parsed: &MermaidGraph, config: AsciiConfig) -> AsciiGraph {
@@ -16,7 +23,7 @@ pub fn convert(parsed: &MermaidGraph, config: AsciiConfig) -> AsciiGraph {
 		.enumerate()
 		.map(|(index, node)| AsciiNode {
 			name: node.id.clone(),
-			label: node.label.clone(),
+			label: wrap_label(&node.label, LABEL_WRAP_WIDTH),
 			shape: node.shape,
 			index,
 			grid_coord: None,

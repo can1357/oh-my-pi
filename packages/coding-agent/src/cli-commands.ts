@@ -245,7 +245,7 @@ export const commands: CommandEntry[] = [
 	{
 		name: "search",
 		load: () => import("./commands/web-search").then(m => m.default),
-		aliases: ["q"],
+		aliases: ["q", "web-search"],
 		help: commandHelp.searchHelp,
 	},
 ];

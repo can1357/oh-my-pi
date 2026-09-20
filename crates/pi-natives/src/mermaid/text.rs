@@ -67,6 +67,75 @@ pub fn line_count(label: &str) -> usize {
 	split_lines(label).count()
 }
 
+/// Identifier boundaries preferred when a single word must be split.
+const WORD_BREAK_CHARS: [char; 4] = ['_', '-', '.', '/'];
+
+/// Wrap flowchart labels without truncation, preserving explicit line breaks.
+///
+/// Long words prefer `_-./` boundaries, otherwise break between graphemes.
+/// A single wide grapheme remains intact even when `width` is one column.
+pub fn wrap_label(label: &str, width: usize) -> String {
+	let width = width.max(1);
+	let mut out = String::with_capacity(label.len());
+	for (i, line) in split_lines(label).enumerate() {
+		if i > 0 {
+			out.push('\n');
+		}
+		if display_width(line) <= width {
+			out.push_str(line);
+			continue;
+		}
+		let mut cur_w = 0usize;
+		let mut cur_empty = true;
+		for word in line.split(' ').filter(|w| !w.is_empty()) {
+			let ww = display_width(word);
+			let first = std::mem::take(&mut cur_empty);
+			if ww <= width {
+				if !first && cur_w + 1 + ww <= width {
+					out.push(' ');
+					cur_w += 1;
+				} else if !first {
+					out.push('\n');
+					cur_w = 0;
+				}
+				out.push_str(word);
+				cur_w += ww;
+				continue;
+			}
+			if !first {
+				out.push('\n');
+			}
+			let mut rest = word;
+			loop {
+				let mut end = 0;
+				let mut columns = 0;
+				let mut boundary = None;
+				for cluster in xutf::graphemes_str(rest) {
+					let cw = grapheme_width(cluster);
+					if columns + cw > width && end > 0 {
+						break;
+					}
+					end += cluster.len();
+					columns += cw;
+					if cluster.starts_with(WORD_BREAK_CHARS) {
+						boundary = Some((end, columns));
+					}
+				}
+				if end == rest.len() {
+					out.push_str(rest);
+					cur_w = columns;
+					break;
+				}
+				let (end, _) = boundary.unwrap_or((end, columns));
+				out.push_str(&rest[..end]);
+				out.push('\n');
+				rest = &rest[end..];
+			}
+		}
+	}
+	out
+}
+
 /// Normalize raw Mermaid label text for terminal output.
 ///
 /// Strips surrounding double quotes, turns `<br>` tags and literal `\n`
@@ -216,6 +285,22 @@ mod tests {
 		assert_eq!(display_width("a🚀b"), 4);
 		assert_eq!(display_width("─│┌"), 3);
 		assert_eq!(display_width("🇨🇳"), 2);
+	}
+
+	#[test]
+	fn wrap_label_breaks_on_words_boundaries_and_keeps_newlines() {
+		assert_eq!(
+			wrap_label("Check if the user has permission", 12),
+			"Check if the\nuser has\npermission"
+		);
+		assert_eq!(wrap_label("  a  b\n\nc ", 12), "  a  b\n\nc ");
+		assert_eq!(wrap_label("a_\u{301}bcdef", 3), "a_\u{301}\nbcd\nef");
+		assert_eq!(wrap_label("a\nb c", 1), "a\nb\nc");
+		// Over-wide identifiers split after the last `_-./` that fits, and a
+		// token with no boundary hard-breaks per grapheme; nothing is lost.
+		assert_eq!(wrap_label("mark_filter_restore_context", 12), "mark_filter_\nrestore_\ncontext");
+		assert_eq!(wrap_label("x aaaaaaaaaaaaaa", 6), "x\naaaaaa\naaaaaa\naa");
+		assert_eq!(wrap_label("日本語日本語 ab", 6), "日本語\n日本語\nab");
 	}
 
 	#[test]

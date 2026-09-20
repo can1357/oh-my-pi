@@ -5,6 +5,9 @@ use super::{
 };
 use crate::mermaid::text::display_width;
 
+/// Grid distance between adjacent ranks (a 3-cell node block plus one gap).
+const RANK_PITCH: i32 = 4;
+
 /// Determine the cardinal or diagonal direction from one coordinate to another.
 pub const fn determine_direction(from: GridCoord, to: GridCoord) -> Dir {
 	if from.x == to.x {
@@ -56,6 +59,19 @@ pub fn determine_start_and_end_dir(
 		LayoutDirection::LR => matches!(direction, Dir::Left | Dir::UpperLeft | Dir::LowerLeft),
 		LayoutDirection::TD => matches!(direction, Dir::Up | Dir::UpperLeft | Dir::UpperRight),
 	};
+	// A straight edge that skips over intermediate ranks would otherwise
+	// share the in-between nodes' connecting cells; leave and enter on the
+	// perpendicular side so it runs beside the chain with its own arrowhead.
+	let skips_ranks = match graph_direction {
+		LayoutDirection::LR => direction == Dir::Right && to.x - from.x > RANK_PITCH,
+		LayoutDirection::TD => direction == Dir::Down && to.y - from.y > RANK_PITCH,
+	};
+	if skips_ranks {
+		return match graph_direction {
+			LayoutDirection::LR => (Dir::Down, Dir::Down, Dir::Right, Dir::Left),
+			LayoutDirection::TD => (Dir::Right, Dir::Right, Dir::Down, Dir::Up),
+		};
+	}
 
 	match (direction, graph_direction) {
 		(Dir::LowerRight, LayoutDirection::LR) => (Dir::Down, Dir::Left, Dir::Right, Dir::Up),

@@ -2,9 +2,17 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed specialized keyword modules in favor of a centralized registration system
+
 ### Added
 
-- Added kind-filtered image, web, speech, dictation, and judge role selection with editable default fallback chains in the model hub.
+- Added `setMagicKeywords` for dynamic configuration of highlightable magic keywords
+
+### Fixed
+
+- Prevented magic keywords from triggering spelling autocorrect and underlining
 
 ## [18.2.5] - 2026-09-17
 

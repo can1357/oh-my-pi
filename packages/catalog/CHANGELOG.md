@@ -4,14 +4,14 @@
 
 ### Added
 
-- Added model kinds, grounded-search capabilities, local inference and search-engine catalogs, OpenRouter image discovery, and live TypeSafe judge-model discovery.
-
-- Added `buildDiscoveredModel` helper for custom providers
-- Added support for glob-based patterns in identity overrides
+- Added model-kind and grounded-search capability metadata, along with catalogs for local inference and search-engine models.
+- Added OpenRouter image-model discovery and live TypeSafe judge-model discovery.
+- Added the `buildDiscoveredModel` helper for defining custom providers.
+- Added glob-based patterns for identity overrides.
 
 ### Changed
 
-- Centralized llama.cpp Qwen routing and thinking policy in KDL, with reviewed Bonsai lineage aliases and shared backend policy for custom provider names.
+- Improved model routing and thinking-policy handling for llama.cpp Qwen models, Bonsai lineage aliases, and custom provider names.
 
 ## [18.2.5] - 2026-09-17
 

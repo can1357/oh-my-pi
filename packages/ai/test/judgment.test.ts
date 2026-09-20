@@ -227,6 +227,37 @@ describe("TypeSafeJudge", () => {
 		expect(result.usage.totalTokens).toBe(6);
 	});
 
+	it("posts OpenRouter decisions to the alpha route and carries the billed cost", async () => {
+		const urls: string[] = [];
+		const judge = new TypeSafeJudge({
+			apiKey: "or-key",
+			api: "openrouter-decisions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/alpha",
+			model: "~typesafe/jev-latest",
+			fetch: async url => {
+				urls.push(String(url));
+				return Response.json({
+					model: "typesafe/jev-1.13-20260917",
+					provider: "TypeSafe",
+					answers: { urgent: { type: "noul", noul: 0.9 } },
+					usage: { input_tokens: 336, output_tokens: 48, cost: 0.000014 },
+				});
+			},
+		});
+
+		const result = await judge.judge(request);
+
+		expect(urls).toEqual(["https://openrouter.ai/api/alpha/decisions"]);
+		expect(judge.label).toBe("openrouter/~typesafe/jev-latest");
+		expect(result).toMatchObject({
+			api: "openrouter-decisions",
+			provider: "openrouter",
+			model: "typesafe/jev-1.13-20260917",
+			usage: { input: 336, output: 48, cost: { input: 0.000014, total: 0.000014 } },
+		});
+	});
+
 	it("rotates the credential on 401 through the resolver and retries transient statuses", async () => {
 		const keys: string[] = [];
 		const statuses = [401, 529, 200];
