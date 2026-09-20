@@ -1,0 +1,20 @@
+// TypeSafe System One judgment models.
+
+provider "typesafe" {
+	default-model "jev-latest"
+	env "TYPESAFE_API_KEY"
+
+	seed api="typesafe" base-url="https://api.typesafe.ai" bundle="always" {
+		model "jev-latest" name="TypeSafe jev" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "*" {
+		kind "judge"
+	}
+}

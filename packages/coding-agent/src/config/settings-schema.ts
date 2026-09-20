@@ -16,7 +16,6 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import {
@@ -29,33 +28,9 @@ import {
 	TINY_MODEL_DTYPE_SETTING_OPTIONS,
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
-import {
-	AUTO_THINKING_MODEL_OPTIONS,
-	AUTO_THINKING_MODEL_VALUES,
-	ONLINE_AUTO_THINKING_MODEL_KEY,
-	ONLINE_MEMORY_MODEL_KEY,
-	ONLINE_TINY_TITLE_MODEL_KEY,
-	TINY_MEMORY_MODEL_OPTIONS,
-	TINY_MEMORY_MODEL_VALUES,
-	TINY_TITLE_MODEL_OPTIONS,
-	TINY_TITLE_MODEL_VALUES,
-} from "../tiny/models";
-import { IMAGE_PROVIDER_CHOICES, type ImageProvider } from "../tools/image-providers";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODEL_OPTIONS,
-	TTS_LOCAL_MODEL_VALUES,
-	TTS_LOCAL_VOICE_OPTIONS,
-	TTS_LOCAL_VOICE_VALUES,
-} from "../tts/models";
+import { DEFAULT_TTS_VOICE, TTS_LOCAL_VOICE_OPTIONS, TTS_LOCAL_VOICE_VALUES } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
-import {
-	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
-	SEARCH_PROVIDER_CHOICES,
-} from "../web/search/types";
-import { type SearchProviderId } from "@oh-my-pi/pi-tui/tools/web-search";
+import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -2216,7 +2191,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Magic Keywords",
 			label: "Magic Keywords",
-			description: "Enable hidden notices for standalone ultrathink, orchestrate, and workflowz keywords",
+			description: "Enable hidden notices for standalone ultrathink, orchestrate, workflowz, and jevify keywords",
 		},
 	},
 
@@ -2250,6 +2225,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Magic Keywords",
 			label: "Workflow Keyword",
 			description: "Let standalone workflowz append its hidden eval workflow notice",
+		},
+	},
+
+	"magicKeywords.jevify": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Magic Keywords",
+			label: "Jevify Keyword",
+			description: "Let standalone jevify append its hidden bulk-judge classification notice",
 		},
 	},
 
@@ -2487,19 +2473,6 @@ export const SETTINGS_SCHEMA = {
 		default: "en",
 	},
 
-	"stt.modelName": {
-		type: "enum",
-		values: STT_MODEL_VALUES,
-		default: DEFAULT_STT_MODEL_KEY,
-		ui: {
-			tab: "interaction",
-			group: "Speech",
-			label: "Speech Model",
-			description:
-				"Local on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
-			options: STT_MODEL_OPTIONS,
-		},
-	},
 	"stt.submitTrigger": {
 		type: "enum",
 		values: STT_SUBMIT_TRIGGER_VALUES,
@@ -5404,30 +5377,6 @@ export const SETTINGS_SCHEMA = {
 				"Maximum concurrent Ollama Cloud subagent runs per process; 0 disables the provider-specific limit",
 		},
 	},
-	"providers.webSearchOrder": {
-		type: "array",
-		default: [] as SearchProviderId[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Web Search Provider Order",
-			description:
-				"Prioritized providers for the web_search tool; unlisted providers retain their default order afterward",
-			options: SEARCH_PROVIDER_CHOICES,
-			ordered: true,
-		},
-	},
-	"providers.webSearchExclude": {
-		type: "array",
-		default: [] as SearchProviderId[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Excluded Web Search Providers",
-			description: "Providers that web_search should never use, even as fallbacks",
-			options: SEARCH_PROVIDER_CHOICES,
-		},
-	},
 	"providers.webSearchTimeoutSeconds": {
 		type: "number",
 		default: DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -5443,16 +5392,6 @@ export const SETTINGS_SCHEMA = {
 				{ value: "180", label: "3 minutes" },
 				{ value: "300", label: "5 minutes" },
 			],
-		},
-	},
-	"providers.webSearchGeminiModel": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Gemini web_search model",
-			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
 		},
 	},
 	"providers.antigravityEndpoint": {
@@ -5481,19 +5420,6 @@ export const SETTINGS_SCHEMA = {
 					description: "Force sandbox endpoint only",
 				},
 			],
-		},
-	},
-	"providers.imageOrder": {
-		type: "array",
-		default: [] as ImageProvider[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Image Provider Order",
-			description:
-				"Prioritized providers for image generation; unlisted providers follow the active session provider and the built-in order",
-			options: IMAGE_PROVIDER_CHOICES,
-			ordered: true,
 		},
 	},
 	"providers.fireworksTier": {
@@ -5526,48 +5452,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Live Voice",
 			description: "Voice used by Codex-backed realtime voice sessions",
 			options: LIVE_VOICE_OPTIONS,
-		},
-	},
-	"providers.tts": {
-		type: "enum",
-		values: ["auto", "local", "xai", "deepinfra"] as const,
-		default: "auto",
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Text-to-Speech Provider",
-			description:
-				"Backend for the tts tool: local on-device neural TTS (Kokoro-82M), xAI Grok Voice, or DeepInfra speech",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Prefer local on-device TTS; route .mp3 output to xAI when credentials exist",
-				},
-				{ value: "local", label: "Local", description: "On-device neural TTS (Kokoro-82M); output is WAV/PCM16" },
-				{
-					value: "xai",
-					label: "xAI Grok Voice",
-					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
-				},
-				{
-					value: "deepinfra",
-					label: "DeepInfra Speech",
-					description: "Requires DEEPINFRA_API_KEY; MP3 or WAV",
-				},
-			],
-		},
-	},
-	"tts.localModel": {
-		type: "enum",
-		values: TTS_LOCAL_MODEL_VALUES,
-		default: DEFAULT_TTS_LOCAL_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Local TTS Model",
-			description: "On-device neural TTS model (Kokoro-82M) used by the local TTS backend",
-			options: TTS_LOCAL_MODEL_OPTIONS,
 		},
 	},
 	"tts.localVoice": {
@@ -5632,44 +5516,6 @@ export const SETTINGS_SCHEMA = {
 			options: TTS_LOCAL_VOICE_OPTIONS,
 		},
 	},
-	"providers.judgmentProvider": {
-		type: "enum",
-		values: ["auto", "typesafe", "llm"] as const,
-		default: "auto",
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Judgment Provider",
-			description:
-				"Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging, eval judge()). Auto uses TypeSafe when authenticated; failed TypeSafe requests fall back through tiny, smol, default, then the active session model.",
-			options: [
-				{ value: "auto", label: "Auto", description: "TypeSafe when authenticated, else the LLM bridge (default)" },
-				{
-					value: "typesafe",
-					label: "TypeSafe",
-					description: "Prefer TypeSafe; fall back through the online model roles on failure",
-				},
-				{
-					value: "llm",
-					label: "LLM",
-					description: "Never TypeSafe; keyword prompts to the tiny/smol or local model",
-				},
-			],
-		},
-	},
-	"providers.tinyModel": {
-		type: "enum",
-		values: TINY_TITLE_MODEL_VALUES,
-		default: ONLINE_TINY_TITLE_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Tiny Model",
-			description:
-				"Session-title model: online (the TINY role from /models, else @smol) by default, or a local on-device model",
-			options: TINY_TITLE_MODEL_OPTIONS,
-		},
-	},
 	"providers.tinyModelDevice": {
 		type: "enum",
 		values: TINY_MODEL_DEVICE_SETTING_VALUES,
@@ -5694,35 +5540,6 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. Ignored by the MLX backend (its repos are pre-quantized 4-bit). The PI_TINY_DTYPE env var overrides this.",
 			options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
-		},
-	},
-	"providers.memoryModel": {
-		type: "enum",
-		values: TINY_MEMORY_MODEL_VALUES,
-		default: ONLINE_MEMORY_MODEL_KEY,
-		ui: {
-			tab: "memory",
-			group: "General",
-			label: "Memory Model",
-			description:
-				"Mnemopi LLM for fact extraction + consolidation: online (the TINY role from /models, else smol/remote) by default, or a local on-device model",
-			condition: "mnemopiActive",
-			options: TINY_MEMORY_MODEL_OPTIONS,
-		},
-	},
-
-	"providers.autoThinkingModel": {
-		type: "enum",
-		values: AUTO_THINKING_MODEL_VALUES,
-		default: ONLINE_AUTO_THINKING_MODEL_KEY,
-		ui: {
-			tab: "model",
-			group: "Thinking",
-			label: "Auto Thinking Model",
-			description:
-				"Difficulty classifier for the `auto` thinking level: online (the TINY role from /models, else smol) by default, or a local on-device model",
-			condition: "autoThinkingActive",
-			options: AUTO_THINKING_MODEL_OPTIONS,
 		},
 	},
 	"providers.autoThinkingMaxEffort": {
@@ -5765,20 +5582,6 @@ export const SETTINGS_SCHEMA = {
 					description: "Mechanical + small-model classification of text-only stops",
 				},
 			],
-		},
-	},
-	"providers.unexpectedStopModel": {
-		type: "enum",
-		values: TINY_MEMORY_MODEL_VALUES,
-		default: ONLINE_MEMORY_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Unexpected Stop Model",
-			description:
-				"Classifier for Smart unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.",
-			condition: "unexpectedStopSmart",
-			options: TINY_MEMORY_MODEL_OPTIONS,
 		},
 	},
 
@@ -6416,7 +6219,6 @@ export interface ThinkingBudgetsSettings {
 export interface SttSettings {
 	enabled: boolean;
 	language: string | undefined;
-	modelName: string;
 	streaming: boolean;
 }
 

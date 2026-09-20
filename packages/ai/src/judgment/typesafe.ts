@@ -10,6 +10,11 @@
  * the auth registry (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL`
  * overrides the API root, `TYPESAFE_DEFAULT_MODEL` the model.
  */
+import {
+	parseTypeSafeModelCards,
+	TYPESAFE_DEFAULT_BASE_URL,
+	type TypeSafeModelCard,
+} from "@oh-my-pi/pi-catalog/discovery";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
@@ -26,7 +31,6 @@ import {
 } from "./types";
 
 export const TYPESAFE_PROVIDER = "typesafe";
-export const TYPESAFE_DEFAULT_BASE_URL = "https://api.typesafe.ai";
 export const TYPESAFE_DEFAULT_MODEL = "jev-latest";
 
 /** `TYPESAFE_BASE_URL` when set, else the public API root; trailing slashes stripped. */
@@ -59,13 +63,6 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_ATTEMPTS = 3;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 5_000;
-
-/** Wire shape of `GET /v1/models`. */
-export interface TypeSafeModelCard {
-	name: string;
-	description: string;
-	release_date: string;
-}
 
 interface SystemOneResponse {
 	model: string;
@@ -120,14 +117,15 @@ export class TypeSafeJudge implements Judge {
 
 	/** Models available to the account (`GET /v1/models`); also the login validation probe. */
 	async listModels(signal?: AbortSignal): Promise<TypeSafeModelCard[]> {
-		const response = await this.#request<{ models: TypeSafeModelCard[] }>("GET", "/v1/models", undefined, signal);
-		if (!Array.isArray(response.models)) {
-			throw new AIError.ProviderResponseError("TypeSafe /v1/models response is missing `models`", {
+		const response = await this.#request<unknown>("GET", "/v1/models", undefined, signal);
+		const models = parseTypeSafeModelCards(response);
+		if (models === null) {
+			throw new AIError.ProviderResponseError("TypeSafe /v1/models response is missing or malformed `models`", {
 				provider: TYPESAFE_PROVIDER,
 				kind: "envelope",
 			});
 		}
-		return response.models;
+		return models;
 	}
 
 	async #request<T>(method: "GET" | "POST", path: string, body: string | undefined, signal?: AbortSignal): Promise<T> {

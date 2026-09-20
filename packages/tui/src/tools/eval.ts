@@ -139,15 +139,16 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 type AgentEventStatus = "pending" | "running" | "completed" | "failed" | "aborted";
 
 /**
- * Append or replace a status event. `agent` events are progress snapshots keyed
- * by `id`, so they coalesce in place (preserving first-seen order); every other
- * op is a discrete action and simply appends. Keeps the persisted event list
- * bounded even when a subagent emits hundreds of throttled progress ticks.
+ * Append or replace a status event. `agent` and `judge_batch` events are
+ * progress snapshots keyed by `id`, so they coalesce in place (preserving
+ * first-seen order); every other op is a discrete action and simply appends.
+ * Keeps the persisted event list bounded even when a subagent or batch emits
+ * hundreds of throttled progress ticks.
  */
 export function upsertStatusEvent(events: EvalStatusEvent[], event: EvalStatusEvent): void {
-	if (event.op === "agent" && typeof event.id === "string") {
-		const id = event.id;
-		const idx = events.findIndex(e => e.op === "agent" && e.id === id);
+	if ((event.op === "agent" || event.op === "judge_batch") && typeof event.id === "string") {
+		const { op, id } = event;
+		const idx = events.findIndex(e => e.op === op && e.id === id);
 		if (idx >= 0) {
 			events[idx] = event;
 			return;
@@ -350,6 +351,12 @@ function formatStatusEvent(event: EvalStatusEvent, theme: Theme): string {
 			if (data.count !== undefined) {
 				parts.push(data.action === "create" ? `${data.count} agent(s)` : `${data.count} item(s)`);
 			}
+			break;
+		case "judge_batch":
+			parts.push(`${data.action} ${data.id}`);
+			parts.push(`${data.done ?? 0}/${data.total ?? 0}`);
+			if (data.failed) parts.push(`${data.failed} failed`);
+			if (data.model) parts.push(String(data.model));
 			break;
 		case "wc":
 			parts.push(`${data.lines}L ${data.words}W ${data.chars}C`);

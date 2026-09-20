@@ -70,13 +70,7 @@ import {
 	concreteThinkingLevel,
 	parseConfiguredThinkingLevel,
 } from "@oh-my-pi/pi-tui/thinking";
-import {
-	isSearchProviderId,
-	setExcludedSearchProviders,
-	setImageProviderOrder,
-	setSearchProviderOrder,
-	type ToolSession,
-} from "../../tools";
+import type { ToolSession } from "../../tools";
 import { AskTool, type AskToolInput } from "../../tools/ask";
 import { type AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 import { sanitizeDisplayWarnings, shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -885,23 +879,6 @@ export class SelectorController {
 				this.ctx.ui.requestRender();
 				break;
 			}
-
-			// Provider settings - update runtime preferences
-			case "providers.webSearchOrder":
-				if (Array.isArray(value)) {
-					setSearchProviderOrder(value.filter(isSearchProviderId));
-				}
-				break;
-			case "providers.webSearchExclude":
-				if (Array.isArray(value)) {
-					setExcludedSearchProviders(value.filter(isSearchProviderId));
-				}
-				break;
-			case "providers.imageOrder":
-				if (Array.isArray(value)) {
-					setImageProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
-				}
-				break;
 
 			// MCP update injection - live subscribe/unsubscribe
 			case "mcp.notifications":

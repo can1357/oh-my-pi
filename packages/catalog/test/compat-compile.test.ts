@@ -327,6 +327,71 @@ describe("provider catalog grammar", () => {
 		);
 	});
 
+	test("runner seeds and per-kind APIs compile without entering the cascade", () => {
+		const model = (id: string, name: string, api?: string) =>
+			[
+				`\t\tmodel "${id}" name="${name}"${api === undefined ? "" : ` api="${api}"`} {`,
+				"\t\t\treasoning #false",
+				'\t\t\tinput "text"',
+				"\t\t\tcost input=0 output=0 cache-read=0 cache-write=0",
+				"\t\t\tlimits",
+				"\t\t}",
+			].join("\n");
+		const text = provider("p", [
+			'\tdefault-model "local"',
+			'\tkind-apis {\n\t\timage "openai-responses"\n\t\ttts "xai-tts"\n\t\tstt "openai-speech"\n\t}',
+			[
+				'\tseed api="local-inference" base-url="local://inference" {',
+				model("local", "Local"),
+				model("image", "Image", "openai-images"),
+				model("speech", "Speech", "xai-tts"),
+				"\t}",
+			].join("\n"),
+		]);
+		const { p } = compileProviders(src(text));
+		expect(p.kindApis).toEqual({
+			image: "openai-responses",
+			tts: "xai-tts",
+			stt: "openai-speech",
+		});
+		expect(p.seed?.models.map(entry => [entry.id, entry.api])).toEqual([
+			["local", "local-inference"],
+			["image", "openai-images"],
+			["speech", "xai-tts"],
+		]);
+		expect(compileCascade(src(text)).rules).toEqual([]);
+	});
+
+	test("kind-apis rejects duplicate, unsupported, malformed, and unknown API declarations", () => {
+		const compileKindApis = (body: string) =>
+			compileProviders(src(provider("p", ['\tdefault-model "m"', `\tkind-apis {\n${body}\n\t}`])));
+		expect(() => compileKindApis('\t\timage "openai-images"\n\t\timage "openai-responses"')).toThrow(
+			/directive `image` has a malformed value/,
+		);
+		expect(() => compileKindApis('\t\tvideo "openai-images"')).toThrow(/unexpected node `video` under `kind-apis`/);
+		expect(() => compileKindApis('\t\timage "openai-images" "openai-responses"')).toThrow(
+			/directive `image` has a malformed value/,
+		);
+		expect(() => compileKindApis('\t\timage "not-an-api"')).toThrow(/unknown api `not-an-api`/);
+		expect(() =>
+			compileProviders(
+				src(
+					provider("p", [
+						'\tdefault-model "m"',
+						'\tkind-apis {\n\t\timage "openai-images"\n\t}',
+						'\tkind-apis {\n\t\ttts "xai-tts"\n\t}',
+					]),
+				),
+			),
+		).toThrow(/directive `kind-apis` has a malformed value/);
+	});
+
+	test("seed APIs reject values outside the known and runner API sets", () => {
+		expect(() =>
+			compileProviders(src(provider("p", ['\tdefault-model "m"', seed('api="not-an-api" base-url="https://x"')]))),
+		).toThrow(/unknown api `not-an-api`/);
+	});
+
 	test("seed axis directives split into thinking/compat; catalog axes and foreign wire axes are rejected", () => {
 		const { p } = compileProviders(
 			src(
@@ -354,6 +419,12 @@ describe("provider catalog grammar", () => {
 		expect(() =>
 			compileProviders(seeded('api="openai-completions" base-url="https://x"', '\t\t\tedit-revision "x"')),
 		).toThrow(/providers\/p\.kdl:9.*catalog axis `edit-revision` is rule-owned/);
+		expect(() =>
+			compileProviders(seeded('api="local-inference" base-url="local://inference"', '\t\t\tkind "tiny"')),
+		).toThrow(/catalog axis `kind` is rule-owned/);
+		expect(() =>
+			compileProviders(seeded('api="openai-completions" base-url="https://x"', '\t\t\tweb-search "openrouter"')),
+		).toThrow(/catalog axis `web-search` is rule-owned/);
 		expect(() =>
 			compileProviders(seeded('api="anthropic-messages" base-url="https://x"', "\t\t\tsupports-store #true")),
 		).toThrow(/wire axis `supports-store` does not apply to api `anthropic-messages`/);

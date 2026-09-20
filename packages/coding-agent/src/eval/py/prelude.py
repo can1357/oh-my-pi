@@ -4,7 +4,7 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import asyncio, collections.abc, contextvars, inspect, os, json, math, re, types, typing
+    import asyncio, collections.abc, contextvars, inspect, os, json, math, re, time, types, typing
     from urllib.parse import unquote
 
 
@@ -773,14 +773,6 @@ if "__omp_prelude_loaded__" not in globals():
         def __repr__(self):
             return f"<completion {self.id}>"
 
-    class JudgmentHandle(CompletionHandle):
-        """Typed judgment handle returned by ``judge()``; ``wait()`` yields ``{id: answer}`` (choice/bool/score)."""
-
-        __slots__ = ()
-
-        def __repr__(self):
-            return f"<judgment {self.id}>"
-
     def _handle_value(handle, snapshot):
         status = snapshot.get("status") if isinstance(snapshot, dict) else "failed"
         if status == "running":
@@ -850,14 +842,130 @@ if "__omp_prelude_loaded__" not in globals():
             raise RuntimeError("completion() did not return a handle")
         return CompletionHandle(result["id"], schema)
 
-    def judge(state, questions):
-        """Start a typed judgment over ``state`` and return its handle."""
+    def _check_questions(questions):
         if not isinstance(questions, dict):
             raise TypeError("judge(state, questions) expects questions as a dict keyed by id")
-        result = _bridge_call("__judge__", {"state": state, "questions": questions})
+
+    async def judge(state, questions):
+        """Answer typed questions over one ``state``; returns ``{id: answer}`` (choice/bool/score)."""
+        _check_questions(questions)
+        result = await asyncio.to_thread(
+            _bridge_call, "__judge__", {"state": state, "questions": questions}
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("answers"), dict):
+            raise RuntimeError("judge() did not return answers")
+        return result["answers"]
+
+    class JudgmentItem:
+        """One settled ``judge_batch`` item: ``answers`` on success, else ``error``."""
+
+        __slots__ = ("key", "answers", "error", "model")
+
+        def __init__(self, item):
+            self.key = item.get("key")
+            self.answers = item.get("answers")
+            self.error = item.get("error")
+            self.model = item.get("model")
+
+        @property
+        def ok(self):
+            return self.error is None
+
+        def __repr__(self):
+            if self.error is not None:
+                return f"<judgment {self.key!r} error={self.error!r}>"
+            return f"<judgment {self.key!r} {self.answers!r}>"
+
+    class JudgmentBatch:
+        """Host-owned bulk judgment run. Pull settled items with ``await drain()`` across as many cells as needed."""
+
+        __slots__ = ("id", "total")
+
+        def __init__(self, id, total):
+            self.id = id
+            self.total = total
+
+        def _call(self, op, **args):
+            return _bridge_call("__judge_batch__", {"op": op, "id": self.id, **args})
+
+        def status(self):
+            """Snapshot: ``done``, ``total``, ``failed``, ``running``, ``model``, ``elapsedS``."""
+            return self._call("status")
+
+        async def drain(self, timeout=None):
+            """Items settled since the last drain as ``[(key, JudgmentItem)]``; waits up to ``timeout`` seconds for at least one, else ``[]``."""
+            args = {}
+            if timeout is not None:
+                args["timeoutMs"] = max(0, float(timeout) * 1000)
+            result = await asyncio.to_thread(self._call, "drain", **args)
+            items = result.get("items", []) if isinstance(result, dict) else []
+            return [(item.get("key"), JudgmentItem(item)) for item in items]
+
+        async def drain_iter(self, timeout=None):
+            """Yield ``(key, JudgmentItem)`` as items settle until ``timeout`` seconds elapse or the run completes."""
+            deadline = None if timeout is None else time.monotonic() + float(timeout)
+            while True:
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                items = await self.drain(remaining)
+                if not items:
+                    return
+                for entry in items:
+                    yield entry
+
+        def results(self):
+            """``{key: answers}`` for every item judged so far."""
+            result = self._call("results")
+            return result.get("results", {}) if isinstance(result, dict) else {}
+
+        def failed(self):
+            """``{key: error}`` for every item that failed so far."""
+            result = self._call("failed")
+            return result.get("failed", {}) if isinstance(result, dict) else {}
+
+        def cancel(self):
+            result = self._call("cancel")
+            return bool(result.get("cancelled")) if isinstance(result, dict) else False
+
+        def close(self):
+            """Cancel if running and release the host-side run."""
+            self._call("close")
+            return None
+
+        def __repr__(self):
+            return f"<judge_batch {self.id} total={self.total}>"
+
+    def _judge_batch_from(result):
         if not isinstance(result, dict) or not isinstance(result.get("id"), str):
-            raise RuntimeError("judge() did not return a handle")
-        return JudgmentHandle(result["id"])
+            raise RuntimeError("judge_batch() did not return a batch")
+        return JudgmentBatch(result["id"], int(result.get("total") or 0))
+
+    def judge_batch(states, questions, *, concurrency=None, retries=None, min_ok=None):
+        """Judge every state with the same ``questions`` on the host; returns a ``JudgmentBatch`` to drain across cells.
+
+        ``states`` is ``{key: state}`` or a list (keys are indices). Item failures land in
+        ``JudgmentItem.error``; only a run that dies wholesale raises from ``drain()``.
+        """
+        _check_questions(questions)
+        if isinstance(states, dict):
+            items = [{"key": key, "state": state} for key, state in states.items()]
+        elif isinstance(states, (list, tuple)):
+            items = [{"key": index, "state": state} for index, state in enumerate(states)]
+        else:
+            raise TypeError("judge_batch(states, questions) expects states as a dict or list")
+        args = {"op": "create", "items": items, "questions": questions}
+        if concurrency is not None:
+            args["concurrency"] = int(concurrency)
+        if retries is not None:
+            args["retries"] = int(retries)
+        if min_ok is not None:
+            args["minOk"] = int(min_ok)
+        return _judge_batch_from(_bridge_call("__judge_batch__", args))
+
+    def _attach_judge_batch(id):
+        """Re-create a ``JudgmentBatch`` ref by id (after a kernel reset or from another runtime)."""
+        return _judge_batch_from(_bridge_call("__judge_batch__", {"op": "attach", "id": str(id)}))
+
+    judge_batch.attach = _attach_judge_batch
 
     def agent(
         prompt,

@@ -11,7 +11,7 @@ import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
-import type { Api, Model, ModelSpec } from "./types";
+import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -74,6 +74,18 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
+	const kind = MODEL_KINDS.find(value => value === catalog.kind);
+	if (kind !== undefined) model.kind = kind;
+	const webSearch = catalog.webSearch;
+	if (
+		webSearch === "gemini" ||
+		webSearch === "anthropic" ||
+		webSearch === "codex" ||
+		webSearch === "xai" ||
+		webSearch === "openrouter"
+	) {
+		model.webSearch = webSearch;
+	}
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
