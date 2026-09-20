@@ -38,7 +38,7 @@
 - Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
 ### Fixed
 
-- Fixed `eval` `judge()` calls missing from session JSONL, usage totals, and model provenance ([#12621](https://github.com/can1357/oh-my-pi/issues/12621)).
+- Fixed `eval` `judge()` calls missing from session JSONL, usage totals, and model provenance ([#12621](https://github.com/can1357/oh-my-pi/issues/12621), [#12625](https://github.com/can1357/oh-my-pi/pull/12625) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [18.2.6] - 2026-09-18
 
