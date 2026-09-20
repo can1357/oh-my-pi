@@ -883,7 +883,7 @@ fn no_match_error(
 		)
 	};
 	let first = if operation.all {
-		format!("Operation {operation_number} <SM:EDIT all> found 0 matches in {path}. {reason}")
+		format!("Operation {operation_number} *** SM:EDIT all found 0 matches in {path}. {reason}")
 	} else {
 		format!("Operation {operation_number} did not match {path}. {reason}")
 	};
@@ -917,7 +917,7 @@ fn no_match_error(
 			)
 		} else if standalone {
 			"No copy-ready correction — the closest current text is only a fuzzy match. Re-read the \
-			 region above and rebuild <SM:FIND> from the exact current text."
+			 region above and rebuild *** SM:FIND from the exact current text."
 				.to_owned()
 		} else {
 			"No copy-ready correction — retrying this operation alone would drop sibling operations. \
@@ -1189,15 +1189,15 @@ pub(crate) fn locate(
 		.join("\n\n");
 	let all_retry = if same_rewrite_for_all(pattern, operation, &candidates) {
 		format!(
-			"All candidates receive the same rewrite; retry every match:\n{}\n\n",
+			"\n\nAll candidates receive the same rewrite; retry every match:\n{}",
 			operation_payload(operation, path, true, None)
 		)
 	} else {
 		String::new()
 	};
 	Err(EditError::matched(format!(
-		"Operation {operation_number} is ambiguous: {} ordered tuples match.\n\n{all_retry}Add \
-		 context that only the intended match has — one of these:\n\n{retries}",
+		"Operation {operation_number} is ambiguous: {} ordered tuples match.\n\nAdd context that \
+		 only the intended match has — one of these:\n\n{retries}{all_retry}",
 		candidates.len()
 	)))
 }
@@ -1363,7 +1363,7 @@ fn decode_literal_markers(text: String) -> String {
 		.replace("\0V8LITDIV\0", SELECT_DIVIDER)
 }
 
-/// Drop the `<SM:PUT>` ellipses that re-emit `<SM:FIND>`'s open edges. An
+/// Drop the `*** SM:PUT` ellipses that re-emit `*** SM:FIND`'s open edges. An
 /// edge gap captured nothing, so re-emitting it writes nothing; a whole-line
 /// edge `…` takes the newline joining it to the rest of the rewrite with it.
 /// The leading edge is positional; the trailing one is only claimed by an
@@ -1415,7 +1415,7 @@ fn strip_edge_gaps(rewrite: &str, edges: EdgeGaps, inner: usize) -> Cow<'_, str>
 	text
 }
 
-/// Edges of `<SM:FIND>` that an inline selection borders; its replacement may
+/// Edges of `*** SM:FIND` that an inline selection borders; its replacement may
 /// re-emit them.
 fn selection_edges(
 	pattern: &ParsedPattern,
@@ -1440,8 +1440,8 @@ fn render_rewrite(
 ) -> Result<String, EditError> {
 	if rewrite.contains(SELECT_OPEN) || rewrite.contains(SELECT_CLOSE) {
 		return Err(EditError::matched(format!(
-			"Operation {operation_number} has selection markers in <SM:PUT>; <SM:FIND> is current \
-			 text, <SM:PUT> is final text."
+			"Operation {operation_number} has selection markers in *** SM:PUT; *** SM:FIND is \
+			 current text, *** SM:PUT is final text."
 		)));
 	}
 	let stripped = strip_edge_gaps(rewrite, edges, indices.len());
@@ -1459,10 +1459,10 @@ fn render_rewrite(
 			if marker >= indices.len() {
 				if line.trim() == GAP {
 					return Err(EditError::matched(format!(
-						"Operation {operation_number} <SM:PUT> has a whole-line {GAP} with no <SM:FIND> \
-						 gap to re-emit. <SM:PUT> is final text written verbatim: type the elided lines \
-						 out, or add a matching {GAP} gap to <SM:FIND>. To write a literal {GAP} line, \
-						 use the write tool."
+						"Operation {operation_number} *** SM:PUT has a whole-line {GAP} with no *** \
+						 SM:FIND gap to re-emit. *** SM:PUT is final text written verbatim: type the \
+						 elided lines out, or add a matching {GAP} gap to *** SM:FIND. To write a \
+						 literal {GAP} line, use the write tool."
 					)));
 				}
 				rendered.push_str(GAP);
@@ -2085,7 +2085,11 @@ fn duplicate_collapse_span(
 	let match_start = normalized_index_at(&normalized, candidate.start);
 	let match_end = normalized_index_at(&normalized, candidate.end);
 	for overlap in (MIN_OVERLAP..=rewrite.len().min(match_start)).rev() {
-		if normalized.text[match_start - overlap..match_start] != rewrite[..overlap] {
+		if !normalized
+			.text
+			.get(match_start - overlap..match_start)
+			.is_some_and(|prefix| rewrite.starts_with(prefix))
+		{
 			continue;
 		}
 		let mut start = normalized
@@ -2108,7 +2112,11 @@ fn duplicate_collapse_span(
 			.min(normalized.text.len().saturating_sub(match_end)))
 		.rev()
 	{
-		if normalized.text[match_end..match_end + overlap] != rewrite[rewrite.len() - overlap..] {
+		if !normalized
+			.text
+			.get(match_end..match_end + overlap)
+			.is_some_and(|suffix| rewrite.ends_with(suffix))
+		{
 			continue;
 		}
 		let mut end = normalized
@@ -2178,7 +2186,7 @@ fn no_op_error(
 	} else if let Some(operation) = operation {
 		if let Some(matches) = match_count {
 			format!(
-				"Operation {operation} <SM:EDIT all> matched {matches} occurrences but all make no \
+				"Operation {operation} *** SM:EDIT all matched {matches} occurrences but all make no \
 				 change to {}.",
 				context.path
 			)
@@ -2191,7 +2199,7 @@ fn no_op_error(
 	let grounding = preview.map_or(String::new(), |(content, offset)| {
 		format!(
 			"\nYour rewrite normalized to text identical to these lines. Indentation-only changes \
-			 are applied verbatim; adjust the authored <SM:PUT> if another whitespace change was \
+			 are applied verbatim; adjust the authored *** SM:PUT if another whitespace change was \
 			 intended.\nCurrent file content near the closest match (no re-read needed):\n{}",
 			numbered_preview(content, offset)
 		)
@@ -2291,7 +2299,7 @@ fn apply_operations(
 		};
 		if operation.whitespace_matched {
 			recovery_notes.push(format!(
-				"Note: operation {number}'s <SM:FIND> differed from the file in whitespace only and \
+				"Note: operation {number}'s *** SM:FIND differed from the file in whitespace only and \
 				 was matched leniently. Inserted lines are written exactly as authored — verify their \
 				 indentation."
 			));
@@ -2453,19 +2461,19 @@ fn apply_operations(
 					return Err(EditError::matched(
 						[
 							format!(
-								"Operation {number} has {} selections, but <SM:PUT> proves neither \
+								"Operation {number} has {} selections, but *** SM:PUT proves neither \
 								 positional substitution nor whole-span replacement.",
 								pattern.selection_ranges.len()
 							),
 							"Copy-ready per-selection interpretation:".to_owned(),
 							format!(
-								"{header}\n<SM:FIND>\n{}\n</SM:FIND>\n<SM:PUT>\n{}\n</SM:PUT>\n</SM:EDIT>",
+								"{header}\n*** SM:FIND\n{}\n*** SM:PUT\n{}",
 								operation.pattern_text,
 								repeated.join("\n")
 							),
 							"Copy-ready whole-span interpretation:".to_owned(),
 							format!(
-								"{header}\n<SM:FIND>\n{}\n</SM:FIND>\n<SM:PUT>\n{}\n</SM:PUT>\n</SM:EDIT>",
+								"{header}\n*** SM:FIND\n{}\n*** SM:PUT\n{}",
 								operation.pattern_text,
 								rewrite_selection_spans(content, candidate, &repeated)
 							),
@@ -2526,12 +2534,12 @@ fn apply_operations(
 							number,
 							if operation.assumed_deletion {
 								format!(
-									"Note: operation {number} had no <SM:PUT> and was applied as a move \
+									"Note: operation {number} had no *** SM:PUT and was applied as a move \
 									 deletion (a later operation re-emits its block)."
 								)
 							} else {
 								format!(
-									"Note: operation {number} deleted {lines} line(s); an empty <SM:PUT> \
+									"Note: operation {number} deleted {lines} line(s); an empty *** SM:PUT \
 									 means deletion — resend with the final text if you meant to replace."
 								)
 							},
@@ -2656,11 +2664,11 @@ pub fn apply_sloppy(
 	mut context: ApplyContext<'_>,
 ) -> Result<String, EditError> {
 	apply_operations(content, input, &mut context).map_err(|error| {
-		let mut message = error.to_string();
-		if !message.contains(ATOMICITY_NOTICE) {
-			message.push('\n');
-			message.push_str(ATOMICITY_NOTICE);
-		}
-		EditError::matched(message)
+		let message = error.to_string();
+		EditError::matched(if message.contains(ATOMICITY_NOTICE) {
+			message
+		} else {
+			format!("{ATOMICITY_NOTICE}\n{message}")
+		})
 	})
 }

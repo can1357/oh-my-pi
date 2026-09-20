@@ -8,6 +8,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
+import { isAssistantMessageLine } from "./session-entries";
 import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 const utf8Decoder = new TextDecoder("utf-8");
@@ -140,6 +141,14 @@ export interface SessionStorage {
 	readText(path: string): Promise<string>;
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/**
+	 * True when any complete `message` record in the file carries an assistant
+	 * role. Scans line boundaries across the whole file (middle included) so a
+	 * >prefix assistant record before a fixed-size tail window still counts.
+	 * Optional: backends without cheap full scans omit it and callers fall back
+	 * to prefix/suffix marker evidence.
+	 */
+	hasAssistantTurn?(path: string): Promise<boolean>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
@@ -673,6 +682,18 @@ export class FileSessionStorage implements SessionStorage {
 		]);
 	}
 
+	async hasAssistantTurn(path: string): Promise<boolean> {
+		const fileHandle = await fsp.open(path, "r");
+		try {
+			for await (const line of fileHandle.readLines()) {
+				if (isAssistantMessageLine(line)) return true;
+			}
+			return false;
+		} finally {
+			await fileHandle.close();
+		}
+	}
+
 	async writeText(path: string, content: string): Promise<void> {
 		await Bun.write(path, content, { createPath: true });
 	}
@@ -1170,6 +1191,15 @@ export class MemorySessionStorage implements SessionStorage {
 		const entry = this.#files.get(path);
 		if (!entry) return Promise.reject(new Error(`File not found: ${path}`));
 		return Promise.resolve([sliceChunksHead(entry, prefixBytes), sliceChunksTail(entry, suffixBytes)]);
+	}
+
+	async hasAssistantTurn(path: string): Promise<boolean> {
+		const entry = this.#files.get(path);
+		if (!entry) throw new Error(`File not found: ${path}`);
+		for (const line of materializeMemoryEntry(entry).split("\n")) {
+			if (isAssistantMessageLine(line)) return true;
+		}
+		return false;
 	}
 
 	writeText(path: string, content: string): Promise<void> {

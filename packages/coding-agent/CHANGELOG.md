@@ -1,12 +1,30 @@
 # Changelog
 
 ## [Unreleased]
+
+### Breaking Changes
+
+- Removed support for the env parameter in the bash tool
+
 ### Added
 
+- Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
 - Added `/pets on` and `/pets off` to show or hide the Code Cat status-line companion, with persistent settings and session-aware faces and messages ([#12230](https://github.com/can1357/oh-my-pi/pull/12230) by [@Sandu1213](https://github.com/Sandu1213)).
 
 ### Fixed
 
+- Fixed resume clutter: elide 0-turn sessions from the /resume menu; -c similarly skips empty sessions.
+- Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
+- Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
+- Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
+- Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
+
+## [18.2.6] - 2026-09-18
+
+### Fixed
+
+- Fixed clipboard paste stalling on an empty clipboard; image and text clipboard reads now run concurrently so the empty-clipboard status surfaces after the slower read instead of the sum of both.
+- Fixed memory recall blocks carrying a minute-resolution `Current time` stamp that dirtied the cached system prompt on every refresh; recall rows already carry dates, so the stamp is removed.
 - Fixed `omp auth-broker token` and `omp auth-gateway token` exiting silently without creating a token on Windows when no token file exists yet; token and config reads now use `node:fs` instead of `Bun.file`.
 
 ## [18.2.5] - 2026-09-17

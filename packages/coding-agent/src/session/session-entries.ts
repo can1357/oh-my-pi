@@ -337,3 +337,20 @@ export interface UsageStatistics {
 	premiumRequests: number;
 	cost: number;
 }
+/**
+ * True when a raw JSONL line is a complete `message` record carrying an
+ * assistant role. Parses the line, so valid JSON whitespace (`"role" :
+ * "assistant"`, tabs, newlines-in-string excluded by line framing) classifies
+ * correctly — unlike substring checks for exact serializations. Malformed or
+ * partial lines (mid-write truncation) return false.
+ */
+export function isAssistantMessageLine(line: string): boolean {
+	if (line.length === 0 || line.charCodeAt(0) !== 123) return false;
+	let record: { type?: unknown; message?: { role?: unknown } };
+	try {
+		record = JSON.parse(line) as { type?: unknown; message?: { role?: unknown } };
+	} catch {
+		return false;
+	}
+	return record.type === "message" && record.message?.role === "assistant";
+}
