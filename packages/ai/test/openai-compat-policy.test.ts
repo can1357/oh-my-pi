@@ -7,7 +7,7 @@ import {
 	type OpenAICompletionsParams,
 	resolveOpenAICompatPolicy,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { Model, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-ai/types";
+import type { Api, Model, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -288,5 +288,22 @@ describe("OpenAI compat policy", () => {
 		expect(params.enable_thinking).toBe(true);
 		expect(params.reasoning_effort).toBeUndefined();
 		expect(params.chat_template_kwargs).toEqual({ preserve_thinking: true });
+	});
+
+	it("treats missing wire compat as empty instead of throwing (#12562)", () => {
+		// Custom-api models historically arrived with `compat: undefined`.
+		// The completions streamer must still resolve a policy object.
+		const model = {
+			...chatModel({}),
+			api: "my-completions",
+			compat: undefined,
+		} as Model<Api>;
+		const policy = resolveOpenAICompatPolicy(model, {
+			endpoint: "chat-completions",
+			toolChoice: { type: "function", name: "search" },
+		});
+		expect(policy.reasoning.enabled).toBe(false);
+		expect(policy.messages.systemRole).toBe("system");
+		expect(policy.messages.supportsDeveloperRole).toBeFalsy();
 	});
 });

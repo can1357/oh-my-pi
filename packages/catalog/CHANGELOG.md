@@ -11,6 +11,10 @@
 
 - Centralized llama.cpp Qwen routing and thinking policy in KDL, with reviewed Bonsai lineage aliases and shared backend policy for custom provider names.
 
+### Fixed
+
+- Fixed custom-api providers resolving no wire-compat record, so declared `compat` overlays never applied and OpenAI-compatible streamers crashed on `disableReasoningOnForcedToolChoice` ([#12562](https://github.com/can1357/oh-my-pi/issues/12562))
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
