@@ -123,6 +123,15 @@ export interface AcquireTabOptions {
 	waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
 	target?: string;
+	/**
+	 * Open a fresh, non-activating tab for this acquisition instead of adopting
+	 * one the picker chose. The picker cannot see tabs another omp process
+	 * drives, so concurrent processes otherwise converge on a single page and
+	 * navigate it out from under each other. Only meaningful for user-driven
+	 * browsers (relay/connected); the worker creates the page and reports its
+	 * target so a failed init still closes it.
+	 */
+	newTab?: boolean;
 	signal?: AbortSignal;
 	timeoutMs: number;
 	/**
@@ -1227,6 +1236,24 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 	// adopt the visible tab and avoid raising it before screenshots. An explicit
 	// target may be backgrounded, so retain activation for target-correct pixels.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
+	if (userDriven && opts.newTab) {
+		// Isolation opt-in: the worker creates the page (not this process) so its
+		// `page-created` report keeps the abandoned-worker cleanup working, and
+		// `background: true` makes every backend create it without activating it.
+		return {
+			mode: "attach",
+			browserWSEndpoint,
+			safeDir,
+			createPage: true,
+			dialogs: opts.dialogs,
+			url: opts.url,
+			waitUntil: opts.waitUntil,
+			timeoutMs: opts.timeoutMs,
+			// A tab we deliberately created in the background is never raised —
+			// not even for a screenshot.
+			activateForScreenshot: false,
+		};
+	}
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
 	const page = await pickElectronTarget(browser.browser, {
 		matcher: opts.target,

@@ -186,6 +186,7 @@ export class RelayBridge {
 	#rpcSeq = 0;
 	#ext: RelaySocket | null = null;
 	#extInfo: { userAgent: string; browserVersion: string } | null = null;
+	#extensionCaps: { createTabActive: boolean } = { createTabActive: false };
 	#extensionSeen = false;
 	#pendingRpc = new Map<
 		number,
@@ -270,6 +271,7 @@ export class RelayBridge {
 		if (this.#ext !== socket) return;
 		this.#ext = null;
 		this.#extInfo = null;
+		this.#extensionCaps = { createTabActive: false };
 		this.#rejectPendingExtensionRpcs(new Error("relay extension disconnected"));
 		for (const tab of this.#tabs.values()) {
 			tab.attached = false;
@@ -331,6 +333,7 @@ export class RelayBridge {
 
 	#onHello(msg: Extract<ExtToRelayMessage, { t: "hello" }>): void {
 		this.#extInfo = { userAgent: msg.userAgent, browserVersion: msg.browserVersion };
+		this.#extensionCaps = { createTabActive: msg.caps?.createTabActive === true };
 		this.#extensionSeen = true;
 		const seen = new Set<number>();
 		const attachedNow = new Set(msg.attachedTabIds);
@@ -705,7 +708,24 @@ export class RelayBridge {
 			case "Target.createTarget": {
 				const url =
 					typeof msg.params?.url === "string" && msg.params.url.length > 0 ? msg.params.url : "about:blank";
-				const result = (await this.#rpc({ op: "createTab", url })) as { tab: TabSnapshot };
+				// CDP's `background` is "create without activating". Forward it so the
+				// extension can create the tab with `active: false`; an unset flag keeps
+				// Chrome's default (foreground), so no existing caller changes behavior.
+				const active = msg.params?.background === true ? false : undefined;
+				// The extension sets `caps.createTabActive` once it can pass `active`
+				// through to `chrome.tabs.create`. It is a separately installed artifact
+				// (CLI updates cannot reload it), so an older build would silently open
+				// the tab in the foreground and move the user's focus: refuse instead,
+				// and say exactly how to fix it.
+				if (active === false && !this.#extensionCaps.createTabActive) {
+					this.#replyError(
+						conn,
+						msg,
+						"the loaded omp browser-relay extension is too old to open a background tab; run `omp browser-relay install` and reload the extension at chrome://extensions, then retry app.new_tab",
+					);
+					return;
+				}
+				const result = (await this.#rpc({ op: "createTab", url, active })) as { tab: TabSnapshot };
 				this.#onTabUpsert(result.tab);
 				// Creating a tab is an explicit act of driving it.
 				this.#claimTab(conn, result.tab.tabId);

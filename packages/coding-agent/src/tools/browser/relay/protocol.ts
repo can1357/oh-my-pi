@@ -24,7 +24,7 @@ export type RelayRpcRequest =
 	| { op: "attach"; tabId: number }
 	| { op: "detach"; tabId: number }
 	| { op: "send"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
-	| { op: "createTab"; url: string }
+	| { op: "createTab"; url: string; active?: boolean }
 	| { op: "removeTab"; tabId: number }
 	| { op: "activateTab"; tabId: number }
 	/** Add tabs to the per-window omp group (created/reused by title), remembering prior membership. */
@@ -41,6 +41,11 @@ export type ExtToRelayMessage =
 			t: "hello";
 			userAgent: string;
 			browserVersion: string;
+			/**
+			 * Capabilities of the extension build. Absent for builds that predate
+			 * the field, so the relay must treat missing flags as unsupported.
+			 */
+			caps?: { createTabActive?: boolean };
 			tabs: TabSnapshot[];
 			/** Tabs that already have a `chrome.debugger` attachment (relay reconciles after a service-worker restart). */
 			attachedTabIds: number[];
