@@ -2,8 +2,6 @@
 
 ## [Unreleased]
 
-## [16.4.22] - 2026-09-19
-
 ### Added
 
 - gpt-oss models (any provider building chat-completions compat) now resolve `compat.disableParallelToolCalls: true` so the host returns one tool call per assistant turn, matching Harmony's single-call `commentary` message contract. Non-gpt-oss models, and entries that set the compat field explicitly, keep the previous behavior.

@@ -1053,7 +1053,9 @@ describe("native durable task executor", () => {
 					store: observer,
 					ctx,
 					artifactsDir,
-					repoRoot: cwd.toUpperCase(),
+					// Same directory, different spelling: case variants only resolve on
+					// case-insensitive filesystems, so POSIX uses a "." suffix instead.
+					repoRoot: process.platform === "win32" ? cwd.toUpperCase() : path.join(cwd, "."),
 				});
 				try {
 					order.push("second");

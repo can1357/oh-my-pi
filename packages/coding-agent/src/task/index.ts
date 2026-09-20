@@ -2240,7 +2240,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const isolationDir = isolationHandle.mergedDir;
 					nativeRuntime?.executing(isolationDir);
 
-					const isolatedCwd = path.resolve(isolationDir, path.relative(repoRoot, spawnCwd));
+					// Mirror the spawn cwd inside the worktree only when it lives
+					// under the repo root; an outside cwd (or the root itself) maps to
+					// the worktree root — path.relative would otherwise escape the
+					// isolation dir and run the subagent in the parent's real tree.
+					const isolatedCwd = isPathWithinWorkspace(repoRoot, spawnCwd)
+						? path.resolve(isolationDir, path.relative(repoRoot, spawnCwd))
+						: isolationDir;
 					const code = prepared.codeWrite;
 					const delegatedIo: DelegatedIo | undefined = code
 						? {

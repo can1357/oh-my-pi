@@ -2,8 +2,6 @@
 
 ## [Unreleased]
 
-## [16.4.22] - 2026-09-19
-
 ### Added
 
 - Added the optional `9rdeepseek` 9router combo candidate to the default, balanced, task, and budget routing slots.
@@ -17,6 +15,8 @@
 ### Fixed
 
 - `/btw` replies no longer truncate at 4 KiB: the ephemeral turn now skips the IRC-oriented dedupe/byte cap (`dedupeReply: false`), so the panel shows the full answer, `c` copies the complete text instead of the `[…truncated]` marker, and `b` branches the full reply into the chat.
+- Fixed isolated task subagents escaping their worktree: when the spawn cwd was outside the repository root, `path.relative` produced a `..` path that resolved outside the isolation directory, so the subagent ran against the parent's real filesystem. Outside-root cwds now map to the worktree root.
+- Fixed the repository-lock serialization test on case-sensitive filesystems: the second lock contender now aliases `repoRoot` with a `.` suffix on POSIX instead of an uppercase spelling that only resolves on case-insensitive filesystems.
 
 ## [16.4.18] - 2026-09-09
 
