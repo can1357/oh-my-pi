@@ -20,6 +20,18 @@ import {
 } from "../../tools/approval";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
+import { withFollowUpVerification } from "../../tools/follow-up-context.js";
+import {
+	attachThenRun,
+	followUpBashArgs,
+	followUpBashContext,
+	prepareThenRunFusion,
+	skippedThenRunReport,
+	THEN_RUN_MISSING_BASH_MESSAGE,
+	thenRunReportFromError,
+	thenRunReportFromResult,
+	type PreparedThenRun,
+} from "../../tools/action-fusion";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
@@ -239,10 +251,20 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
+		// Action Fusion: preflight `then_run` after extension rewrites and before
+		// write/edit approval or mutation. Policy deny, missing bash, non-final LSP
+		// batch, grammar modes, and non-local/ACP targets fail closed here.
+		const fusion: PreparedThenRun | undefined = prepareThenRunFusion({
+			tool: this.tool,
+			params: effectiveParams,
+			runner: this.runner,
+			context,
+		});
+		if (fusion) {
+			effectiveParams = fusion.mutationParams as typeof params;
+		}
+
 		// 2. Full approval gate against the (possibly revised) input that will actually run — resolves
-		// policy and prompts on `effectiveParams`, so the user approves exactly what executes. A revised
-		// input that newly resolves to `deny` is caught here even though the original passed the
-		// short-circuit above.
 		const resolvedArgs = approvalArgs(effectiveParams, context);
 		const resolved = resolveApproval(this.tool, resolvedArgs, approvalMode, userPolicies);
 		context?.xdevTierResolved?.(resolved.tier);
@@ -366,6 +388,38 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				content: [{ type: "text", text: executionError.message }],
 				details: undefined as TDetails,
 			};
+		}
+
+		if (fusion) {
+			if (executionError || result.isError === true) {
+				result = attachThenRun(result, skippedThenRunReport());
+			} else {
+				const nativeBash = this.runner.getFollowUpBashTool();
+				const followUpCommand = fusion.command;
+				if (!nativeBash) {
+					result = attachThenRun(result, {
+						outcome: "fail",
+						content: "",
+						reason: THEN_RUN_MISSING_BASH_MESSAGE,
+					});
+				} else {
+					const bash = new ExtensionToolWrapper(nativeBash, this.runner);
+					try {
+						const bashResult = await withFollowUpVerification(toolCallId, () =>
+							bash.execute(
+								`${toolCallId}:then_run`,
+								followUpBashArgs(followUpCommand) as never,
+								signal,
+								undefined,
+								followUpBashContext(context),
+							),
+						);
+						result = attachThenRun(result, thenRunReportFromResult(bashResult));
+					} catch (err) {
+						result = attachThenRun(result, thenRunReportFromError(err, signal));
+					}
+				}
+			}
 		}
 
 		// Emit tool_result event - extensions can modify the result and error status

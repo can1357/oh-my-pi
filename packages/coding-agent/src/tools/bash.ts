@@ -41,6 +41,7 @@ import { checkBashInterception } from "./bash-interceptor";
 import { rewriteGitWorktreeAdd } from "./bash-worktree-rewrite";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
+import { getFollowUpVerification } from "./follow-up-context";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
@@ -302,6 +303,8 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 }
 
 const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
+/** Follow-up verification never runs unbounded; global tools.maxTimeout may lower this. */
+const FOLLOW_UP_VERIFICATION_MAX_TIMEOUT_SEC = 60;
 
 const bashSchemaBase = type({
 	command: type("string").describe("command to execute"),
@@ -839,6 +842,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,
 	): Promise<AgentToolResult<BashToolDetails>> {
+		const followUp = getFollowUpVerification();
+		if (followUp) {
+			// Extension-revised async/pty must not escape verification into a
+			// background job, PTY overlay, or client terminal.
+			asyncRequested = false;
+			pty = false;
+			const bridge = this.session.getClientBridge?.();
+			if (bridge?.capabilities.terminal && bridge.createTerminal) {
+				throw new ToolError("Follow-up verification cannot run on a remote ACP session.");
+			}
+		}
 		let command = rawCommand;
 
 		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
@@ -920,14 +934,27 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		// A timeout of 0 is an explicit long-running-command contract: the user
 		// must still cancel the call or job, but OMP does not impose a deadline.
+		// Follow-up verification always stays bounded: cap at 60s, or a lower
+		// tools.maxTimeout if the user configured one.
 		const requestedTimeoutSec = rawTimeout;
-		const timeoutDisabled = requestedTimeoutSec === 0;
+		const timeoutDisabled = requestedTimeoutSec === 0 && !followUp;
 		const maxTimeout = this.session.settings.get("tools.maxTimeout");
-		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec, maxTimeout);
+		const timeoutCeiling = followUp
+			? maxTimeout !== undefined && maxTimeout > 0
+				? Math.min(maxTimeout, FOLLOW_UP_VERIFICATION_MAX_TIMEOUT_SEC)
+				: FOLLOW_UP_VERIFICATION_MAX_TIMEOUT_SEC
+			: maxTimeout;
+		const timeoutSec = timeoutDisabled
+			? undefined
+			: clampTimeout(
+					"bash",
+					followUp && requestedTimeoutSec === 0 ? undefined : requestedTimeoutSec,
+					timeoutCeiling,
+				);
 		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
 		const pendingNotices: string[] = [];
 		if (timeoutSec !== undefined) {
-			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec, maxTimeout);
+			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec, timeoutCeiling ?? 0);
 			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
 		}
 
@@ -956,13 +983,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// auto-background would otherwise silently disable the terminal route).
 		const clientBridge = this.session.getClientBridge?.();
 		const bridgeTerminalAvailable = Boolean(
-			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty,
+			!followUp && clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty,
 		);
 
 		const autoBgManager = this.session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
 		// instead of failing every bash call until a slot frees up.
 		if (
+			!followUp &&
 			this.#autoBackgroundEnabled &&
 			!pty &&
 			!bridgeTerminalAvailable &&
@@ -1032,8 +1060,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// (the backend's own timeout is installed only after this await), matching
 		// the executeBash branch so a cold `.envrc` can't outlast a short call.
 		const backendPreflight =
-			(clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) ||
-			canUseInteractiveBashPty(pty, ctx)
+			bridgeTerminalAvailable || canUseInteractiveBashPty(pty, ctx)
 				? await applyDirenvPreflight(command, commandCwd, {
 						signal,
 						timeoutMs: this.session.settings.get("bash.direnvLoadTimeoutMs"),
@@ -1043,8 +1070,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				: undefined;
 
 		// Route through the client terminal when the client advertises the terminal capability.
-		// Skip when pty=true (PTY needs the local terminal UI).
-		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
+		// Skip when pty=true (PTY needs the local terminal UI) or during follow-up
+		// verification, which must stay on the local noninteractive executor.
+		if (bridgeTerminalAvailable && clientBridge?.createTerminal) {
 			// Invariant (ACP terminal bridge): createTerminal has no signal in its
 			// contract; allocation cannot be cancelled retroactively. Guard before
 			// allocation. Shared timeout helper / pure AbortSignal fusion rejected:
@@ -1333,7 +1361,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				// command here so the unset prefix is not applied twice.
 				await executeBash(command, {
 					cwd: commandCwd,
-					sessionKey: this.session.getSessionId?.() ?? undefined,
+					sessionKey: followUp
+						? `${this.session.getSessionId?.() ?? ""}:follow-up:${followUp.callId}`
+						: (this.session.getSessionId?.() ?? undefined),
 					timeout: timeoutMs ?? 0,
 					signal,
 					artifactPath,

@@ -16,7 +16,45 @@ const LABEL = "my-project";
 // window titles render in the OS UI font, so nerd-font glyphs are unusable here.
 const BRAND = "π";
 
+// isWsl() is true on linux when either of these is set. Title animation reads
+// `$env` (Bun.env), so both process.env and Bun.env are saved and restored.
+const WSL_ENV_KEYS = ["WSL_DISTRO_NAME", "WSL_INTEROP"] as const;
+type WslEnvSnapshot = Partial<Record<(typeof WSL_ENV_KEYS)[number], string | undefined>>;
+
+function saveAndClearWslEnv(): WslEnvSnapshot {
+	const saved: WslEnvSnapshot = {};
+	for (const key of WSL_ENV_KEYS) {
+		saved[key] = process.env[key] ?? Bun.env[key];
+		delete process.env[key];
+		delete Bun.env[key];
+	}
+	return saved;
+}
+
+function restoreWslEnv(saved: WslEnvSnapshot): void {
+	for (const key of WSL_ENV_KEYS) {
+		const prior = saved[key];
+		if (prior === undefined) {
+			delete process.env[key];
+			delete Bun.env[key];
+		} else {
+			process.env[key] = prior;
+			Bun.env[key] = prior;
+		}
+	}
+}
+
 describe("buildTerminalTitleWithState", () => {
+	let savedWslEnv: WslEnvSnapshot = {};
+
+	beforeEach(() => {
+		savedWslEnv = saveAndClearWslEnv();
+	});
+
+	afterEach(() => {
+		restoreWslEnv(savedWslEnv);
+	});
+
 	it("separates brand and label with '>' when idle/done (your turn)", () => {
 		expect(buildTerminalTitleWithState(LABEL, "idle", 0, true)).toBe(`${BRAND} > ${LABEL}`);
 	});
@@ -129,9 +167,11 @@ describe("disposeTerminalTitleState", () => {
 	let prevHeadless = false;
 	let ttyDescriptor: PropertyDescriptor | undefined;
 	let windowsTitleMock: WindowsConsoleTitleMock | undefined;
+	let savedWslEnv: WslEnvSnapshot = {};
 
 	beforeEach(() => {
 		vi.useFakeTimers();
+		savedWslEnv = saveAndClearWslEnv();
 
 		prevHeadless = setTerminalHeadless(false);
 		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
@@ -156,16 +196,20 @@ describe("disposeTerminalTitleState", () => {
 	});
 
 	afterEach(() => {
-		// A started interval must never leak between tests.
-		disposeTerminalTitleState();
-		stdoutSpy?.mockRestore();
-		windowsTitleMock?.restore();
-		windowsTitleMock = undefined;
-		stdoutSpy = undefined;
-		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
-		else Reflect.deleteProperty(process.stdout, "isTTY");
-		setTerminalHeadless(prevHeadless);
-		vi.useRealTimers();
+		try {
+			// A started interval must never leak between tests.
+			disposeTerminalTitleState();
+			stdoutSpy?.mockRestore();
+			windowsTitleMock?.restore();
+			windowsTitleMock = undefined;
+			stdoutSpy = undefined;
+			if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+			else Reflect.deleteProperty(process.stdout, "isTTY");
+			setTerminalHeadless(prevHeadless);
+			vi.useRealTimers();
+		} finally {
+			restoreWslEnv(savedWslEnv);
+		}
 	});
 
 	it("stops the spinner so no further OSC-title write fires on a tick after dispose", () => {

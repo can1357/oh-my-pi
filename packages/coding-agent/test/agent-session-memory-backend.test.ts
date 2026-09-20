@@ -6,12 +6,13 @@ import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/memory-backend/tool-names";
 import { computeMnemopiBankScope } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
-import { getMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import { getMnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -38,6 +39,20 @@ describe("AgentSession memory backend lifecycle", () => {
 	let settings: Settings;
 	let tempDir: TempDir;
 
+	function readSqliteAll<T extends Record<string, unknown>>(dbPath: string, sql: string): T[] {
+		const db = new Database(dbPath, { readonly: true });
+		try {
+			const stmt = db.prepare(sql);
+			try {
+				return stmt.all() as T[];
+			} finally {
+				stmt.finalize();
+			}
+		} finally {
+			db.close();
+		}
+	}
+
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@memory-backend-lifecycle-");
 		authStorage = createInMemoryAuthStorage();
@@ -51,10 +66,14 @@ describe("AgentSession memory backend lifecycle", () => {
 	});
 
 	afterEach(async () => {
+		const mnemopi = session ? setMnemopiSessionState(session, undefined) : undefined;
+		await mnemopi?.dispose({ consolidate: false });
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
 		authStorage.close();
+		AgentStorage.close();
+		resetSettingsForTest();
 		tempDir.removeSync();
 	});
 
@@ -243,26 +262,16 @@ describe("AgentSession memory backend lifecycle", () => {
 		);
 		expect(destinationDbPath).toBeDefined();
 		expect(destinationDbPath).not.toBe(sourceDbPath);
-		const transcriptRows = (dbPath: string) => {
-			const db = new Database(dbPath, { readonly: true });
-			try {
-				return db
-					.query(
-						"SELECT json_extract(metadata_json, '$.cwd') AS cwd FROM working_memory WHERE source = 'coding-agent-transcript'",
-					)
-					.all();
-			} finally {
-				db.close();
-			}
-		};
-		expect(transcriptRows(sourceDbPath)).toEqual([]);
-		expect(transcriptRows(destinationDbPath!)).toEqual([]);
+		const transcriptSql =
+			"SELECT json_extract(metadata_json, '$.cwd') AS cwd FROM working_memory WHERE source = 'coding-agent-transcript'";
+		expect(readSqliteAll(sourceDbPath, transcriptSql)).toEqual([]);
+		expect(readSqliteAll(destinationDbPath!, transcriptSql)).toEqual([]);
 
 		// Ordinary backend changes still retain once, in the committed project.
 		settings.override("memory.backend", "off");
 		await current.applyMemoryBackend();
-		expect(transcriptRows(sourceDbPath)).toEqual(rollback ? [{ cwd: sourceCwd }] : []);
-		expect(transcriptRows(destinationDbPath!)).toEqual(rollback ? [] : [{ cwd: destinationCwd }]);
+		expect(readSqliteAll(sourceDbPath, transcriptSql)).toEqual(rollback ? [{ cwd: sourceCwd }] : []);
+		expect(readSqliteAll(destinationDbPath!, transcriptSql)).toEqual(rollback ? [] : [{ cwd: destinationCwd }]);
 	});
 
 	it.each(["mnemopi", "hindsight"] as const)(
@@ -342,14 +351,12 @@ describe("AgentSession memory backend lifecycle", () => {
 				await current.getToolByName("retain")!.execute("after-move", {
 					items: [{ content: "The destination project deploys from its release branch." }],
 				});
-				const db = new Database(destinationDbPath, { readonly: true });
-				try {
-					expect(
-						db.query("SELECT content FROM working_memory WHERE source = 'coding-agent-retain'").all(),
-					).toEqual([{ content: "The destination project deploys from its release branch." }]);
-				} finally {
-					db.close();
-				}
+				expect(
+					readSqliteAll(
+						destinationDbPath,
+						"SELECT content FROM working_memory WHERE source = 'coding-agent-retain'",
+					),
+				).toEqual([{ content: "The destination project deploys from its release branch." }]);
 			} finally {
 				setProjectDir(originalProjectDir);
 			}
