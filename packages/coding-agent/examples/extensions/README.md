@@ -12,6 +12,12 @@ pi --extension examples/extensions/permission-gate.ts
 cp permission-gate.ts ~/.omp/agent/extensions/
 ```
 
+## Standalone Plugins
+
+| Plugin | Install | Description |
+| --- | --- | --- |
+| [OMP Jev Gate](https://github.com/cyriusweng/omp-jev-gate) | `omp plugin install github:cyriusweng/omp-jev-gate` | Adds TypeSafe Jev prompt preflight, typed judgment checkpoints, audit receipts, fallback policy and graphical configuration. |
+
 ## Examples
 
 ### Lifecycle & Safety
