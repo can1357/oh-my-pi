@@ -294,7 +294,7 @@ export class JudgmentBatch {
 		const signal = this.#controller.signal;
 		let judge: ChainJudge;
 		try {
-			judge = sessionJudge({ session: this.#session });
+			judge = sessionJudge({ session: this.#session }, "judge_batch");
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			for (const input of this.#inputs) this.#settle({ key: input.key, error: message });

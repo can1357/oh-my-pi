@@ -8,6 +8,11 @@
 
 ### Added
 
+- Added `find` tool renderer to display search results with hit ranking and score visualization
+- Supported collapsing/expanding search hit details and range snippets
+- Enabled file hyperlinking for navigation to absolute paths in search results
+- Added streaming progress display for incomplete find tool operations
+- Added Glyph Protocol support for rendering icons without requiring patched fonts
 - Added `setMagicKeywords` for dynamic configuration of highlightable magic keywords
 
 ### Fixed

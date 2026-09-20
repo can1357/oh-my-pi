@@ -267,6 +267,7 @@ import {
 	onTerminalAppearanceChange,
 	onThemeChange,
 	setMarkdownMermaidRendering,
+	setSymbolPreset,
 	startMacOSAppearanceReprobeFallback,
 	theme,
 } from "@oh-my-pi/pi-tui/theme";
@@ -1744,6 +1745,19 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.ui.requestRender(true, { clearScrollback: true });
 			}),
 		);
+		// A confirmed Glyph Protocol handshake means omp's own icons render in
+		// this terminal without a Nerd Font, so the default `unicode` preset is
+		// upgraded to `nerd` for this session. The persisted setting is left
+		// alone: it travels to terminals (ssh, tmux) where the upgrade would
+		// show tofu. Explicit `ascii`/`nerd` choices are never touched.
+		this.ui.terminal.onGlyphProtocolReport?.(supported => {
+			if (!supported || settings.get("symbolPreset") !== "unicode" || theme.getSymbolPreset() !== "unicode") return;
+			void setSymbolPreset("nerd").then(() => {
+				this.statusLine.invalidate();
+				this.ui.invalidate();
+				this.ui.requestRender();
+			});
+		});
 
 		// Subscribe to terminal dark/light appearance changes.
 		// The terminal queries background color via OSC 11 at startup and on

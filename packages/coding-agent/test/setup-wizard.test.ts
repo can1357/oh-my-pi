@@ -18,6 +18,7 @@ import { providersSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/providers";
 import { themeSetupScene } from "@oh-my-pi/pi-tui/setup/scenes/theme";
 import { WebSearchTab } from "@oh-my-pi/pi-tui/setup/scenes/web-search";
 import { SetupWizardComponent } from "@oh-my-pi/pi-tui/setup/wizard-overlay";
+import { setTerminalGlyphProtocol } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SEARCH_PROVIDER_OPTIONS } from "@oh-my-pi/pi-tui/tools/web-search";
@@ -108,6 +109,18 @@ describe("setup wizard scene selection", () => {
 		});
 		expect(selected.map(scene => scene.id)).toEqual(ALL_SCENES.map(scene => scene.id));
 		expect(await selectSetupScenes(0, ALL_SCENES, ctx, { isTTY: false, force: true })).toEqual([]);
+	});
+
+	it("drops the glyph scene once the terminal renders omp's bundled icons in-band", async () => {
+		setTerminalGlyphProtocol(true);
+		try {
+			const scenes = await selectSetupScenes(0, ALL_SCENES, fakeContextWithConfiguredModel(), { isTTY: true });
+			expect(scenes.map(scene => scene.id)).toEqual(
+				ALL_SCENES.map(scene => scene.id).filter(id => id !== "glyph-mode"),
+			);
+		} finally {
+			setTerminalGlyphProtocol(false);
+		}
 	});
 
 	it("applies scene shouldRun only as a hard environment gate", async () => {

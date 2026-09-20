@@ -1562,23 +1562,19 @@ export class ModelHubComponent implements Component {
 			}
 			return;
 		}
-		if (rolesView && matchesKey(data, "ctrl+left")) {
-			this.#moveRoleTab(-1);
-			return;
-		}
-		if (rolesView && matchesKey(data, "ctrl+right")) {
-			this.#moveRoleTab(1);
-			return;
-		}
-		// macOS terminals (ghostty, Terminal.app, iTerm) send ESC b / ESC f for
-		// Option+←/→, which parse as alt+b / alt+f — same aliases the editor's
-		// word-motion bindings accept.
+		// Alt+←/→ cycles whichever tab strip is on screen: role tabs in the
+		// Roles view, kind tabs in every browser view. Ctrl+←/→ is unusable on
+		// macOS (Spaces shortcut). macOS terminals (ghostty, Terminal.app,
+		// iTerm) send ESC b / ESC f for Option+←/→, which parse as alt+b /
+		// alt+f — the same aliases the editor's word-motion bindings accept.
 		if (matchesKey(data, "alt+left") || matchesKey(data, "alt+b")) {
-			this.#moveModelKind(-1);
+			if (rolesView) this.#moveRoleTab(-1);
+			else this.#moveModelKind(-1);
 			return;
 		}
 		if (matchesKey(data, "alt+right") || matchesKey(data, "alt+f")) {
-			this.#moveModelKind(1);
+			if (rolesView) this.#moveRoleTab(1);
+			else this.#moveModelKind(1);
 			return;
 		}
 
@@ -2018,7 +2014,7 @@ export class ModelHubComponent implements Component {
 			ROLE_TABS.map(tab => ({ label: tab === "kind" ? "kinds" : tab })),
 			Math.max(0, active),
 		);
-		return truncateToWidth(` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", "Ctrl+←/→")}`, width);
+		return truncateToWidth(` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", "Alt+←/→")}`, width);
 	}
 
 	#statusRow(width: number): string {
@@ -2289,7 +2285,7 @@ export class ModelHubComponent implements Component {
 		const entry = this.#activeEntry();
 		if (entry.kind === "roles") {
 			if (this.#focus !== "list") {
-				return "↑/↓ providers · → roles · Ctrl+←/→ tabs · Esc close";
+				return "↑/↓ providers · → roles · Alt+←/→ tabs · Esc close";
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			if (row?.kind === "fallback") {

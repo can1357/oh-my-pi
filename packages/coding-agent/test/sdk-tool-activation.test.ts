@@ -1779,7 +1779,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			toolNames: ["read", "search", "find"],
+			toolNames: ["read", "search", "glob"],
 		});
 
 		try {
@@ -1789,7 +1789,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(activeToolNames).toContain("grep");
 			expect(activeToolNames).toContain("glob");
 			expect(activeToolNames).not.toContain("search");
-			expect(activeToolNames).not.toContain("find");
 		} finally {
 			await session.dispose();
 		}

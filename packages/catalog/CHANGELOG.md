@@ -11,6 +11,7 @@
 
 ### Changed
 
+- Updated input cost for TypeSafe models to 0.042
 - Improved model routing and thinking-policy handling for llama.cpp Qwen models, Bonsai lineage aliases, and custom provider names.
 
 ## [18.2.5] - 2026-09-17
