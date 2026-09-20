@@ -2387,6 +2387,41 @@ providers:
 			.find(m => m.provider === "openai-test" && m.id === "openai-test/no-context-model");
 		expect(fallback?.contextWindow).toBe(128000);
 	});
+	test("openai-models-list discovery preserves explicitly unknown context instead of fabricating it (issue #12616)", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9998",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9998/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "openai-test/known-route", context_length: 262144 },
+							{ id: "openai-test/auto", context_length: null },
+							{ id: "openai-test/omitted-route" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const known = registry.getAll().find(m => m.provider === "openai-test" && m.id === "openai-test/known-route");
+		expect(known?.contextWindow).toBe(262144);
+		const auto = registry.getAll().find(m => m.provider === "openai-test" && m.id === "openai-test/auto");
+		expect(auto?.contextWindow).toBeNull();
+		expect(auto?.maxTokens).toBeGreaterThan(0);
+		const omitted = registry.getAll().find(m => m.provider === "openai-test" && m.id === "openai-test/omitted-route");
+		expect(omitted?.contextWindow).toBe(128000);
+	});
 
 	test("openai-models-list discovery enriches thin /v1/models payloads from the bundled reference catalog", async () => {
 		writeRawModelsJson({

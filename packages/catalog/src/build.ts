@@ -216,12 +216,14 @@ export function applyCatalogCorrections(
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {
 		const contextWindow = numberField(limitsPatch, "contextWindow");
-		if (contextWindow !== undefined) model.contextWindow = contextWindow;
+		// An explicitly unknown deployment limit (null) cannot be inferred
+		// from model lineage: a route advertising unknown context keeps it.
+		if (contextWindow !== undefined && model.contextWindow !== null) model.contextWindow = contextWindow;
 		const maxTokens = numberField(limitsPatch, "maxTokens");
 		if (maxTokens !== undefined) model.maxTokens = maxTokens;
 	}
 	const contextWindowFloor = catalog.contextWindowFloor;
-	if (typeof contextWindowFloor === "number") {
+	if (typeof contextWindowFloor === "number" && model.contextWindow !== null) {
 		model.contextWindow = Math.max(model.contextWindow ?? 0, contextWindowFloor);
 	}
 	const inputModalities = catalog.inputModalities;
