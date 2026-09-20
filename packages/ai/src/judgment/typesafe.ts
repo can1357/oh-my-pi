@@ -1,10 +1,13 @@
 /**
  * TypeSafe System One client: the native {@link Judge} backend.
  *
- * Forwards a {@link JudgmentRequest} verbatim to `POST /v1/systemone` and maps
- * the typed answers back. Credentials flow through {@link withAuth}, so a
- * stored key rotates on 401/403 exactly like chat providers; transient
- * 429/5xx responses retry with bounded, `retry-after`-aware backoff.
+ * Forwards a {@link JudgmentRequest} verbatim to the api's decisions endpoint
+ * (`POST /v1/systemone` on TypeSafe's own API; the same wire is re-exposed by
+ * OpenRouter's Decisions API as {@link OPENROUTER_DECISIONS_API}, so an
+ * OpenRouter key alone reaches Jev) and maps the typed answers back.
+ * Credentials flow through {@link withAuth}, so a stored key rotates on
+ * 401/403 exactly like chat providers; transient 429/5xx responses retry with
+ * bounded, `retry-after`-aware backoff.
  *
  * Environment (mirrors the official SDK): `TYPESAFE_API_KEY` is resolved by
  * the auth registry (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL`
@@ -32,6 +35,22 @@ import {
 
 export const TYPESAFE_PROVIDER = "typesafe";
 export const TYPESAFE_DEFAULT_MODEL = "jev-latest";
+/** Catalog api of System One served by OpenRouter's Decisions API. */
+export const OPENROUTER_DECISIONS_API = "openrouter-decisions";
+
+/** The catalog apis that speak the System One wire. */
+export type SystemOneApi = typeof TYPESAFE_PROVIDER | typeof OPENROUTER_DECISIONS_API;
+
+/** Per api: the decisions endpoint under its base URL and the provider that owns the key. */
+const SYSTEM_ONE_ROUTES: Record<SystemOneApi, { decisionsPath: string; provider: string }> = {
+	[TYPESAFE_PROVIDER]: { decisionsPath: "/v1/systemone", provider: TYPESAFE_PROVIDER },
+	[OPENROUTER_DECISIONS_API]: { decisionsPath: "/alpha/decisions", provider: "openrouter" },
+};
+
+/** Whether a catalog api id speaks the System One wire. */
+export function isSystemOneApi(api: string): api is SystemOneApi {
+	return Object.hasOwn(SYSTEM_ONE_ROUTES, api);
+}
 
 /** `TYPESAFE_BASE_URL` when set, else the public API root; trailing slashes stripped. */
 export function typesafeBaseUrl(): string {
@@ -45,6 +64,8 @@ export function typesafeModel(): string {
 
 export interface TypeSafeJudgeOptions {
 	apiKey: ApiKey;
+	/** Which System One api serves `baseUrl`; defaults to TypeSafe's own. */
+	api?: SystemOneApi;
 	/** Defaults to {@link typesafeBaseUrl}. */
 	baseUrl?: string;
 	/** Defaults to {@link typesafeModel}. */
@@ -67,7 +88,16 @@ const BACKOFF_MAX_MS = 5_000;
 interface SystemOneResponse {
 	model: string;
 	answers: Record<string, Answer>;
-	usage: { input_tokens: number; output_tokens: number };
+	/** OpenRouter's Decisions API also reports what it billed the key, in USD. */
+	usage: { input_tokens: number; output_tokens: number; cost?: number };
+}
+
+/** Token usage with the gateway's billed cost, when it reports one, on the total. */
+function billedUsage(usage: SystemOneResponse["usage"]) {
+	const result = tokenUsage(usage.input_tokens, usage.output_tokens);
+	if (typeof usage.cost === "number" && usage.cost > 0)
+		result.cost = { ...result.cost, output: usage.cost, total: usage.cost };
+	return result;
 }
 
 /** Server hint wins (capped); otherwise exponential backoff from {@link BACKOFF_BASE_MS}. */
@@ -79,6 +109,8 @@ function backoffMs(attempt: number, headers: Headers | undefined): number {
 
 export class TypeSafeJudge implements Judge {
 	readonly label: string;
+	readonly api: SystemOneApi;
+	readonly provider: string;
 	readonly model: string;
 	readonly baseUrl: string;
 	readonly #apiKey: ApiKey;
@@ -87,31 +119,38 @@ export class TypeSafeJudge implements Judge {
 
 	constructor(options: TypeSafeJudgeOptions) {
 		this.#apiKey = options.apiKey;
+		this.api = options.api ?? TYPESAFE_PROVIDER;
+		this.provider = SYSTEM_ONE_ROUTES[this.api].provider;
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
 		this.#fetch = options.fetch ?? fetch;
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-		this.label = `${TYPESAFE_PROVIDER}/${this.model}`;
+		this.label = `${this.provider}/${this.model}`;
 	}
 
 	async judge<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>> {
 		const body = JSON.stringify({ state: request.state, model: this.model, questions: request.questions });
-		const response = await this.#request<SystemOneResponse>("POST", "/v1/systemone", body, options?.signal);
+		const response = await this.#request<SystemOneResponse>(
+			"POST",
+			SYSTEM_ONE_ROUTES[this.api].decisionsPath,
+			body,
+			options?.signal,
+		);
 		for (const id in request.questions) {
 			const answer = response.answers[id];
 			if (answer === undefined || answer.type !== request.questions[id].type) {
 				throw new AIError.ProviderResponseError(
 					`TypeSafe response is missing a "${request.questions[id].type}" answer for question "${id}"`,
-					{ provider: TYPESAFE_PROVIDER, kind: "envelope" },
+					{ provider: this.provider, kind: "envelope" },
 				);
 			}
 		}
 		return {
-			api: TYPESAFE_PROVIDER,
-			provider: TYPESAFE_PROVIDER,
+			api: this.api,
+			provider: this.provider,
 			model: response.model,
 			answers: response.answers as JudgmentResult<Q>["answers"],
-			usage: tokenUsage(response.usage.input_tokens, response.usage.output_tokens),
+			usage: billedUsage(response.usage),
 		};
 	}
 

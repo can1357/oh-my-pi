@@ -8,6 +8,11 @@
 - Added OpenRouter image-model discovery and live TypeSafe judge-model discovery.
 - Added the `buildDiscoveredModel` helper for defining custom providers.
 - Added glob-based patterns for identity overrides.
+- Added model kinds, grounded-search capabilities, local inference and search-engine catalogs, OpenRouter image discovery, and live TypeSafe judge-model discovery.
+- Added the `openrouter-decisions` runner api and the seeded `openrouter/typesafe/jev-1.13` judge model.
+
+- Added `buildDiscoveredModel` helper for custom providers
+- Added support for glob-based patterns in identity overrides
 
 ### Changed
 

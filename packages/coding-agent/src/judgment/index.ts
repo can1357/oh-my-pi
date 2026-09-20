@@ -7,12 +7,14 @@
 import {
 	type AssistantMessage,
 	chatTextBackend,
+	isSystemOneApi,
 	type Judge,
 	type JudgeOptions,
 	type JudgmentRequest,
 	type JudgmentResult,
 	type Model,
 	type Questions,
+	type SystemOneApi,
 	type TextBackend,
 	type TextCompletion,
 	type TextPrompt,
@@ -79,7 +81,7 @@ export function kindOf(candidate: RoleChainCandidate): JudgeKind;
 export function kindOf(model: Model): JudgeKind;
 export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 	const model = "model" in value ? value.model : value;
-	if (model.api === TYPESAFE_PROVIDER) return "typesafe";
+	if (isSystemOneApi(model.api)) return "typesafe";
 	if (model.api === "local-inference") return "local";
 	return "online";
 }
@@ -169,8 +171,11 @@ export class ChainJudge implements Judge {
 		switch (kindOf(candidate)) {
 			case "typesafe": {
 				if (!(await this.#deps.registry.getApiKey(model, this.#deps.sessionId, { signal }))) return undefined;
+				// `kindOf` admitted only System One apis to this arm.
+				const api = model.api as SystemOneApi;
 				const judge = new TypeSafeJudge({
 					apiKey: this.#deps.registry.resolver(model, this.#deps.sessionId),
+					api,
 					model: model.id,
 					baseUrl: model.baseUrl,
 				});

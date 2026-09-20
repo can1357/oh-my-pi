@@ -9,6 +9,18 @@ provider "openrouter" {
 	}
 	web-search "openrouter"
 
+	// TypeSafe's System One wire re-exposed by OpenRouter's Decisions API, so an
+	// OpenRouter key alone reaches Jev for the judge role.
+	seed api="openrouter-decisions" base-url="https://openrouter.ai/api" bundle="always" {
+		model "typesafe/jev-1.13" name="TypeSafe jev via OpenRouter" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
 	// Replaces the OpenRouter provider wire-model-id dispatch branch.
 	wire-model-id-mode "openrouter"
 	// Replaces the strict-mode provider whitelist entry.
@@ -67,6 +79,9 @@ provider "openrouter" {
 	// as chat; OpenRouter's dedicated image roster confirms the image transport.
 	models "google/gemini-3-pro-image" {
 		kind "image"
+	}
+	models "typesafe/jev-1.13" {
+		kind "judge"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "qwen/qwen3-coder" {

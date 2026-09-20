@@ -7,6 +7,10 @@
 - Anthropic streaming and provider request helpers must now be imported from `@oh-my-pi/pi-ai/providers/anthropic` instead of the package root.
 - Moved the public `NO_AUTH_SENTINEL` export from `providers/openai-shared` to `auth-retry`.
 
+### Added
+
+- `TypeSafeJudge` posts to OpenRouter's Decisions API when constructed with `api: "openrouter-decisions"`, reporting that route and the billed cost on results.
+
 ### Fixed
 
 - Anthropic organization-level OAuth permission errors now rotate to an eligible sibling credential instead of failing permanently.

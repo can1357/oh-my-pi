@@ -112,6 +112,7 @@
 	],
 	"judge": [
 		"typesafe/jev-latest",
+		"openrouter/typesafe/jev-1.13",
 		"@tiny",
 		"@smol",
 		"@default"

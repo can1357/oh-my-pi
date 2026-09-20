@@ -34,6 +34,7 @@ export const RUNNER_APIS = [
 	"local-inference",
 	"web-search",
 	"typesafe",
+	"openrouter-decisions",
 	"openai-images",
 	"openrouter-images",
 	"xai-tts",
