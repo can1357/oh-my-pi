@@ -181,6 +181,9 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 	if (Object.hasOwn(params, "schema")) {
 		return "The task tool uses `outputSchema`; rename the stale `schema` field.";
 	}
+	if (batchEnabled && params.tasks !== undefined && Object.hasOwn(params, "agent")) {
+		return "Top-level `agent` is not part of the batch shape. Set `tasks[].agent` instead.";
+	}
 	if (!batchEnabled) {
 		const disallowed = (["tasks", "context"] as const).filter(field => params[field] !== undefined);
 		if (disallowed.length > 0) {
