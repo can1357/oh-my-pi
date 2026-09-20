@@ -111,6 +111,7 @@ describe("async speculative compaction", () => {
 			messages: () => agent.state.messages,
 			baseSystemPrompt: () => ["Test"],
 			goalModeState: () => undefined,
+			isStrandedVibeDirector: () => false,
 			planReferencePath: () => "",
 			nonMessageTokenSource: () => ({}),
 			memoryBackendSession: () => undefined,
