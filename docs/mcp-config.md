@@ -492,12 +492,13 @@ OMP loads providers in descending priority. The MCP-capable order is:
 
 The first definition wins. Duplicate names are not merged. A differently named definition is also shadowed when its transport, endpoint/command inputs, auth, and request-id mode are equivalent to a higher-priority definition.
 
-Within OMP native config, project `.omp/mcp.json` precedes `.omp/.mcp.json`, then the active profile's user `mcp.json` and `.mcp.json`. Root fallback `mcp.json` precedes root `.mcp.json`. In practice:
+### User-level third-party sources are opt-in
 
-- prefer `.omp/mcp.json` or the active profile's user `mcp.json` for an OMP-specific override
-- keep names and endpoint definitions unique across tools when possible
-- use the user `disabledServers` list when a third-party config keeps reintroducing an unwanted server
-- set `mcp.enableProjectConfig: false` to exclude every project-level source before deduplication, allowing a same-named user entry to survive
+User-level (`~/...`) configs from foreign tools (Claude Code, Codex, Gemini CLI, OpenCode, Cursor, Windsurf) load only when their provider is enabled via `enabledProviders` (or `*`/`all`). Project-level entries from those tools always load. OMP-native user config needs no opt-in.
+
+Two special cases: setting `CLAUDE_CONFIG_DIR` implicitly enables the `claude` user source (it also redirects the Claude paths to that directory), and `claude-plugins` user sources load when either `claude-plugins` or `claude` is enabled. To import only Claude Code's global MCP servers without its hooks, plugins, and skills, prefer an OMP-native copy in `~/.omp/agent/mcp.json`.
+
+Within OMP native config, project `.omp/mcp.json` precedes `.omp/.mcp.json`, then the active profile's user `mcp.json` and `.mcp.json`. Root fallback `mcp.json` precedes root `.mcp.json`. In practice:
 
 ## Troubleshooting
 
@@ -517,10 +518,9 @@ The JSON is valid, but the server may still be unreachable. Use `/mcp test <name
 - required environment variables are set
 - the remote URL is reachable
 - the OAuth or API token is valid
-
 ### The server exists in another tool's config but not in OMP
 
-Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, and a user-level `disabledServers` entry can suppress a server by name.
+Run `/mcp list`. OMP discovers many third-party MCP files, but project-level loading can also be disabled via the `mcp.enableProjectConfig` setting, a user-level `disabledServers` entry can suppress a server by name, and user-level third-party sources require their provider in `enabledProviders` (see [User-level third-party sources are opt-in](#user-level-third-party-sources-are-opt-in)).
 
 ### A namespaced server works but the editor rejects its name
 
