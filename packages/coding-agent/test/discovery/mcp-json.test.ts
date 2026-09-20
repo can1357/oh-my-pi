@@ -126,3 +126,49 @@ describe("standalone mcp.json oauth env expansion", () => {
 		expect(server?.auth).toBeUndefined();
 	});
 });
+
+describe("standalone mcp.json timeout units (#12485)", () => {
+	let tempDir = "";
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-json-timeout-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(tempDir);
+	});
+
+	test("treats a Claude-style timeout of 600 as 600 seconds", async () => {
+		// Failure mode: SAP-style project `.mcp.json` `"timeout": 600` was 600ms.
+		await fs.writeFile(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					"fiori-mcp": { type: "stdio", timeout: 600, command: "npx" },
+				},
+			}),
+		);
+
+		const [server] = await loadStandaloneMcpConfig(tempDir);
+		expect(server?.timeout).toBe(600_000);
+	});
+
+	test("keeps timeout 0 as disabled, millisecond values unchanged, and invalid ignored", async () => {
+		await fs.writeFile(
+			path.join(tempDir, "mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					off: { command: "timeout-off", timeout: 0 },
+					bad: { command: "timeout-bad", timeout: -1 },
+					nativeMs: { command: "timeout-ms", timeout: 30_000 },
+				},
+			}),
+		);
+
+		const servers = await loadStandaloneMcpConfig(tempDir);
+		const byName = Object.fromEntries(servers.map(s => [s.name, s]));
+		expect(byName.off?.timeout).toBe(0);
+		expect(byName.bad?.timeout).toBeUndefined();
+		expect(byName.nativeMs?.timeout).toBe(30_000);
+	});
+});
