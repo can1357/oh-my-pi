@@ -6,6 +6,7 @@ import * as path from "node:path";
 import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { resolveResumableSession } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { stripOuterDoubleQuotes } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 
@@ -432,8 +433,11 @@ describe("SessionManager.moveTo", () => {
 		if (!movedFile) throw new Error("Expected moved session file");
 		expect(fs.existsSync(movedFile)).toBe(true);
 
-		const targetSessions = await SessionManager.list(cwdB);
-		expect(targetSessions.some(item => item.path === movedFile)).toBe(true);
+		// An explicit ensureOnDisk() stub stays on disk even though the picker
+		// hides untitled empties; resolveResumableSession keeps it discoverable.
+		const sessionId = path.basename(movedFile, ".jsonl").split("_").at(-1) ?? "";
+		const resolved = await resolveResumableSession(sessionId, cwdB);
+		expect(resolved?.session.path).toBe(movedFile);
 	});
 
 	it("keeps post-rename fenced appends durable before trailing rewrite", async () => {
