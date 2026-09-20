@@ -21,6 +21,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
@@ -851,6 +852,28 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		expect(headers.Authorization).toBe("Bearer sk-ant-api-test");
 		expect(headers["X-Api-Key"]).toBeUndefined();
+	});
+
+	it("omits Authorization instead of leaking `Bearer N/A` for a keyless custom provider (#6188)", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: NO_AUTH_SENTINEL,
+			baseUrl: "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+			stream: true,
+		});
+
+		expect(headers.Authorization).toBeUndefined();
+		expect(headers["X-Api-Key"]).toBeUndefined();
+	});
+
+	it("still honors a caller-supplied Authorization for a keyless custom provider", () => {
+		const headers = buildAnthropicHeaders({
+			apiKey: NO_AUTH_SENTINEL,
+			baseUrl: "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+			stream: true,
+			modelHeaders: { Authorization: "real-gateway-credential" },
+		});
+
+		expect(headers.Authorization).toBe("real-gateway-credential");
 	});
 
 	it("honors caller-supplied Authorization on non-official Anthropic endpoints (#3391)", () => {
