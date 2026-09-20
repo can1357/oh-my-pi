@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Enabled macOS spelling assistance (typo undercurls, autocomplete, autocorrect) in the hook and ask answer editor ([#12517](https://github.com/can1357/oh-my-pi/pull/12517) by [@aleister1102](https://github.com/aleister1102)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
