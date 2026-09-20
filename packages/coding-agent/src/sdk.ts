@@ -10,6 +10,7 @@ import {
 	filterProviderReplayMessages,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
+import { resolveModelServiceTier } from "@oh-my-pi/pi-ai";
 import type {
 	Context,
 	CredentialDisabledEvent,
@@ -4172,9 +4173,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			};
 		}
 
-		if (model?.api === "openai-codex-responses") {
+		const prewarmModel = session.model;
+		if (prewarmModel?.api === "openai-codex-responses") {
 			// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
-			const codexModel = model as Model<"openai-codex-responses">;
+			const codexModel = prewarmModel as Model<"openai-codex-responses">;
 			const codexTransport = getOpenAICodexTransportDetails(codexModel, {
 				sessionId: providerSessionId,
 				baseUrl: codexModel.baseUrl,
@@ -4190,12 +4192,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								await resolveApiKeyOnce(await options.getApiKey(codexModel))
 							: await modelRegistry.getApiKey(codexModel, providerSessionId);
 						if (!codexPrewarmApiKey) return;
-						await logger.time("prewarmOpenAICodexResponses", prewarmOpenAICodexResponses, codexModel, {
+						const serviceTier = resolveModelServiceTier(session.serviceTierByFamily, codexModel);
+						const prewarmOptions = {
 							apiKey: codexPrewarmApiKey,
 							sessionId: providerSessionId,
 							preferWebsockets: preferOpenAICodexWebsockets,
 							providerSessionState: session.providerSessionState,
-						});
+							...(serviceTier === undefined ? {} : { serviceTier }),
+						};
+						await logger.time(
+							"prewarmOpenAICodexResponses",
+							prewarmOpenAICodexResponses,
+							codexModel,
+							prewarmOptions,
+						);
 					} catch (error) {
 						const errorMessage = error instanceof Error ? error.message : String(error);
 						logger.debug("Codex websocket prewarm failed", {

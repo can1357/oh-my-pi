@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, ServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import { resolveAgentServiceTierOverride } from "@oh-my-pi/pi-coding-agent/config/service-tier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -28,10 +29,85 @@ const runtimeProviderExtension: ExtensionFactory = pi => {
 	});
 };
 
-describe("createAgentSession resolveServiceTierByFamily", () => {
+const deferredCodexProviderExtension: ExtensionFactory = pi => {
+	pi.registerProvider("openai-codex", {
+		baseUrl: "https://chatgpt.com/backend-api",
+		apiKey: "RUNTIME_CODEX_KEY",
+		api: "openai-codex-responses",
+		models: [
+			{
+				id: "deferred-model",
+				name: "Deferred Codex Model",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			},
+		],
+	});
+};
+
+const originalWebSocket = globalThis.WebSocket;
+
+class CapturingWebSocket {
+	static readonly CONNECTING = 0;
+	static readonly OPEN = 1;
+	static readonly CLOSING = 2;
+	static readonly CLOSED = 3;
+	static instances: CapturingWebSocket[] = [];
+	static created?: PromiseWithResolvers<CapturingWebSocket>;
+
+	readonly headers: Record<string, string>;
+	readyState = CapturingWebSocket.CONNECTING;
+	binaryType = "arraybuffer";
+	onopen: ((event: Event) => void) | null = null;
+	onerror: ((event: Event) => void) | null = null;
+	onclose: ((event: CloseEvent) => void) | null = null;
+	onmessage: ((event: MessageEvent) => void) | null = null;
+
+	constructor(
+		readonly url: string,
+		options?: { headers?: Record<string, string>; proxy?: string },
+	) {
+		this.headers = options?.headers ?? {};
+		CapturingWebSocket.instances.push(this);
+		CapturingWebSocket.created?.resolve(this);
+		queueMicrotask(() => {
+			if (this.readyState !== CapturingWebSocket.CONNECTING) return;
+			this.readyState = CapturingWebSocket.OPEN;
+			this.onopen?.(new Event("open"));
+		});
+	}
+
+	send(_data: unknown): void {}
+
+	close(code = 1000, reason = "closed"): void {
+		if (this.readyState === CapturingWebSocket.CLOSED) return;
+		this.readyState = CapturingWebSocket.CLOSED;
+		this.onclose?.({ code, reason } as CloseEvent);
+	}
+}
+
+function installCapturingWebSocket(): void {
+	CapturingWebSocket.instances = [];
+	CapturingWebSocket.created = Promise.withResolvers<CapturingWebSocket>();
+	globalThis.WebSocket = CapturingWebSocket as unknown as typeof WebSocket;
+}
+
+async function waitForPrewarmSocket(): Promise<CapturingWebSocket> {
+	const socket = CapturingWebSocket.instances[0];
+	if (socket) return socket;
+	const created = CapturingWebSocket.created;
+	if (!created) throw new Error("Capturing WebSocket was not installed");
+	return await created.promise;
+}
+
+describe.serial("createAgentSession resolveServiceTierByFamily", () => {
 	const authStorages: AuthStorage[] = [];
 
 	afterEach(() => {
+		globalThis.WebSocket = originalWebSocket;
 		for (const authStorage of authStorages) authStorage.close();
 		authStorages.length = 0;
 	});
@@ -63,6 +139,83 @@ describe("createAgentSession resolveServiceTierByFamily", () => {
 			toolNames: ["read"],
 		};
 	}
+
+	it("prewarms the final deferred Codex model with the child resolver tier", async () => {
+		using tempDir = TempDir.createSync("@omp-service-tier-prewarm-");
+		const authStorage = openAuthStorage();
+		installCapturingWebSocket();
+		const { session } = await createAgentSession({
+			...sessionOptions(
+				tempDir.path(),
+				authStorage,
+				Settings.isolated({
+					"providers.openaiWebsockets": "on",
+					enabledModels: ["openai-codex/deferred-model"],
+					"tier.openai": "none",
+					"tier.anthropic": "none",
+					"tier.google": "none",
+				}),
+				SessionManager.inMemory(),
+			),
+			extensions: [deferredCodexProviderExtension],
+			// This is the same exact-agent resolver used by task dispatch; the global
+			// OpenAI tier above intentionally stays `none`.
+			resolveServiceTierByFamily: model => resolveAgentServiceTierOverride("priority", model, {}),
+		});
+		try {
+			const socket = await waitForPrewarmSocket();
+			expect(session.model?.id).toBe("deferred-model");
+			expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+			expect(socket.headers["x-codex-routing-hint"]).toBe("model=deferred-model;tier=priority");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps omitted and explicit default tiers distinct during Codex prewarm", async () => {
+		using tempDir = TempDir.createSync("@omp-service-tier-prewarm-default-");
+		const createDeferredSession = async (
+			resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily,
+		) =>
+			await createAgentSession({
+				...sessionOptions(
+					tempDir.path(),
+					openAuthStorage(),
+					Settings.isolated({
+						"providers.openaiWebsockets": "on",
+						enabledModels: ["openai-codex/deferred-model"],
+						"tier.openai": "none",
+						"tier.anthropic": "none",
+						"tier.google": "none",
+					}),
+					SessionManager.inMemory(),
+				),
+				extensions: [deferredCodexProviderExtension],
+				modelPattern: "openai-codex/deferred-model",
+				...(resolveServiceTierByFamily ? { resolveServiceTierByFamily } : {}),
+			});
+
+		installCapturingWebSocket();
+		const { session: omitted } = await createDeferredSession();
+		try {
+			const socket = await waitForPrewarmSocket();
+			expect(omitted.serviceTierByFamily).toEqual({});
+			expect(socket.headers["x-codex-routing-hint"]).toBe("model=deferred-model");
+		} finally {
+			await omitted.dispose();
+		}
+		installCapturingWebSocket();
+		const { session: explicitDefault } = await createDeferredSession(model =>
+			resolveAgentServiceTierOverride("default", model, {}),
+		);
+		try {
+			const socket = await waitForPrewarmSocket();
+			expect(explicitDefault.serviceTierByFamily).toEqual({ openai: "default" });
+			expect(socket.headers["x-codex-routing-hint"]).toBe("model=deferred-model;tier=default");
+		} finally {
+			await explicitDefault.dispose();
+		}
+	});
 
 	it("evaluates the resolver against the model resolved from a deferred pattern and replaces the configured tiers", async () => {
 		using tempDir = TempDir.createSync("@omp-service-tier-resolver-");
