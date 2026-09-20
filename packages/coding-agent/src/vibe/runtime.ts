@@ -55,6 +55,7 @@ import {
 	type VibeTombstoneReason,
 } from "./lifecycle";
 import { type VibeCli } from "@oh-my-pi/pi-tui/tools/vibe";
+import type { VibeRosterEntry } from "./state";
 /**
  * CLI flavor → bundled agent type. This IS the model-tier mapping: `sonic`
  * carries `model: "@smol"` (the configured fast/low-latency role) and `task`
@@ -562,6 +563,47 @@ export class VibeSessionRegistry {
 		}));
 	}
 
+	/**
+	 * Actionable workers in `scope`, spawn order: the single definition of
+	 * director liveness. Dead sessions are omitted — they cannot be driven.
+	 */
+	#liveRecords(scope: VibeOwnerScope): VibeRecord[] {
+		const records: VibeRecord[] = [];
+		for (const record of this.#records.values()) {
+			if (!matchesScope(record, scope) || record.state === "dead") continue;
+			records.push(record);
+		}
+		// Stable ordering: spawn order, not activity order.
+		records.sort((a, b) => a.createdAt - b.createdAt);
+		return records;
+	}
+
+	/**
+	 * Minimal live roster for the director's rebuilt context message: one
+	 * entry per actionable worker. All strings are one-line sanitized here so
+	 * the prompt template can print them verbatim.
+	 */
+	roster(session: ToolSession): VibeRosterEntry[] {
+		const scope = this.ownerScope(session);
+		return this.#liveRecords(scope).map(record => ({
+			id: record.id,
+			cli: record.cli,
+			state: record.state,
+			turns: record.turnCount,
+			lastActivity: record.lastActivity ? firstLine(record.lastActivity, 80) : undefined,
+		}));
+	}
+
+	/**
+	 * Count of actionable workers for resume decisions. Unlike {@link roster},
+	 * this carries no display strings and never returns a degraded empty on
+	 * error — failures propagate so a broken registry cannot read as "nobody
+	 * home". The prompt block is the only consumer allowed to degrade.
+	 */
+	liveWorkerCount(session: ToolSession): number {
+		return this.#liveRecords(this.ownerScope(session)).length;
+	}
+
 	#persistedIds(session: VibeParentSession, scope: VibeOwnerScope): Set<string> {
 		const ids = new Set<string>();
 		for (const entry of session.sessionManager?.getEntries() ?? []) {
@@ -918,7 +960,9 @@ export class VibeSessionRegistry {
 	 * Block until one watched session's in-flight turn settles, the timeout
 	 * elapses, or `signal` aborts — `hub` wait semantics. Settled turns are
 	 * acknowledged against the job manager so their results are not delivered
-	 * a second time as async follow-ups.
+	 * a second time as async follow-ups — unless the wait aborted, in which
+	 * case the inline result dies with the turn and the retained deliveries
+	 * are left to re-wake the director asynchronously.
 	 */
 	async wait(
 		session: ToolSession,
@@ -966,7 +1010,9 @@ export class VibeSessionRegistry {
 		}
 
 		let waitEndedByTimeout = false;
-		if (runningJobs.length > 0 && collectSettled().length === 0) {
+		let waitAborted = args.signal?.aborted === true;
+		let acknowledged = false;
+		if (runningJobs.length > 0 && collectSettled().length === 0 && !waitAborted) {
 			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
 			const watchedJobIds = runningJobs.map(job => job.id);
 			manager.watchJobs(watchedJobIds);
@@ -988,9 +1034,24 @@ export class VibeSessionRegistry {
 				}
 				racePromises.push(abortPromise);
 			}
+			let raceSettled = false;
 			try {
-				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
+				const outcome = await Promise.race(racePromises);
+				waitEndedByTimeout = outcome === "timeout";
+				waitAborted = outcome === "aborted";
+				raceSettled = true;
 			} finally {
+				// Claim the results this wait reports inline BEFORE releasing the
+				// watch: unwatch re-enqueues whatever settled while watched, and
+				// #enqueueDelivery skips an acknowledged job — so a settled turn can
+				// never arrive both inline and again as an async follow-up. An
+				// aborted wait claims nothing: its inline result dies with the turn,
+				// so the retained deliveries must survive to re-wake the director.
+				// A rejected race reports nothing either, hence `raceSettled`.
+				if (raceSettled && !waitAborted && args.signal?.aborted !== true) {
+					manager.acknowledgeDeliveries(collectSettled().map(entry => entry.jobId));
+					acknowledged = true;
+				}
 				manager.unwatchJobs(watchedJobIds);
 				clearTimeout(timeoutHandle);
 				abortCleanup?.();
@@ -998,7 +1059,14 @@ export class VibeSessionRegistry {
 		}
 
 		const settled = collectSettled();
-		manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
+		// An aborted wait discards its inline result with the aborted turn, so
+		// acknowledging would drop the async copy too — the unwatch above already
+		// re-enqueued the retained deliveries, so leave them to re-wake us. The
+		// watched path already acknowledged before unwatching; this covers the
+		// case where no watch was ever taken (jobs settled before the wait began).
+		if (!acknowledged && !waitAborted && args.signal?.aborted !== true) {
+			manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
+		}
 		// Current in-flight state, independent of the snapshot: a session whose
 		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);

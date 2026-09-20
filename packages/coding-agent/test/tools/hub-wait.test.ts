@@ -126,6 +126,60 @@ describe("hub unified wait", () => {
 		expect(text).toContain("## Completed (1)");
 	});
 
+	test("an aborted wait does not consume the settling job's async delivery", async () => {
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		manager.registerDeliverySink(SELF_ID, async (jobId, text) => {
+			deliveries.push({ jobId, text });
+		});
+		const job = registerHangingJob(manager, "aborted-watch job");
+		const tool = new HubTool(makeSession(manager));
+		const controller = new AbortController();
+
+		const pending = tool.execute("call_abort", { op: "wait", ids: [job.id] }, controller.signal);
+		// The job settles while watched: retained, not queued.
+		job.finish("late result");
+		await manager.getJob(job.id)?.promise;
+		// Only then abort: the inline snapshot dies with the caller, so the
+		// retained delivery must still arrive asynchronously.
+		controller.abort();
+
+		await pending;
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(deliveries).toEqual([{ jobId: job.id, text: "late result" }]);
+	});
+
+	test("a job settling under a completed wait delivers exactly once", async () => {
+		// Registering peers gives the wait a bus leg, so the tail awaits it before
+		// reporting. That await is the window in which a re-enqueued delivery can
+		// escape: the watch must therefore outlive it and be released only after
+		// `buildJobResult` has consumed what it reports inline.
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+		registry.register({ id: "Peer", displayName: "task", kind: "sub", parentId: SELF_ID, session: null });
+
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const manager = new AsyncJobManager({ onJobComplete: async () => {} });
+		manager.registerDeliverySink(SELF_ID, async (jobId, text) => {
+			deliveries.push({ jobId, text });
+		});
+		const job = registerHangingJob(manager, "watched-then-reported job");
+		const tool = new HubTool(makeSession(manager));
+
+		const pending = tool.execute("call_once", { op: "wait", ids: [job.id] });
+		// Settles while watched, so its delivery is retained and releasing the
+		// watch re-enqueues it. This wait reports that result inline, so the agent
+		// must not also receive it as an async follow-up.
+		job.finish("reported inline");
+
+		const result = await pending;
+		const details = result.details as CoordinationDetails;
+		expect(details.jobs?.[0]?.resultText).toBe("reported inline");
+
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(deliveries).toEqual([]);
+	});
+
 	test("bare wait with no jobs and no running peers returns immediately", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });

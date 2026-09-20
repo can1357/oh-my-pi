@@ -379,7 +379,11 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const runningJobs = jobsToWatch.filter(j => j.status === "running");
 		if (manager && jobsToWatch.length > 0 && runningJobs.length === 0) {
 			// Every explicitly watched job already settled — immediate snapshot.
-			return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
+			// When already aborted the inline result dies with the turn, so the
+			// async deliveries must survive: report without consuming them.
+			return buildJobResult(this.session, manager, "wait", jobsToWatch, [], [], {
+				consumeSettled: signal?.aborted !== true,
+			});
 		}
 
 		// Wait window: the adaptive ladder starts at the floor and climbs as the
@@ -465,39 +469,55 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const progressTimer = onUpdate ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
 		emitProgress();
 
+		// The watch deliberately outlives the race: releasing it re-enqueues every
+		// result that settled while watched, so it must happen only once this wait
+		// knows which of those it reports inline. `buildJobResult` consumes the
+		// ones it reports, and an already-consumed job is skipped on re-enqueue —
+		// so a settled job delivers exactly once instead of arriving both inline
+		// and as an async follow-up. The message path below reports no job
+		// results, so there the re-enqueue is what keeps them alive. This
+		// `finally` encloses the race too: a job left watched would have its
+		// delivery suppressed forever, so the release must be unconditional.
 		try {
-			if (signal) {
-				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
-				const onAbort = () => abortResolve();
-				signal.addEventListener("abort", onAbort, { once: true });
-				racePromises.push(abortPromise);
-				try {
+			try {
+				if (signal) {
+					const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
+					const onAbort = () => abortResolve();
+					signal.addEventListener("abort", onAbort, { once: true });
+					racePromises.push(abortPromise);
+					try {
+						await Promise.race(racePromises);
+					} finally {
+						signal.removeEventListener("abort", onAbort);
+					}
+				} else {
 					await Promise.race(racePromises);
-				} finally {
-					signal.removeEventListener("abort", onAbort);
 				}
-			} else {
-				await Promise.race(racePromises);
+			} finally {
+				clearTimeout(timeoutHandle);
+				clearInterval(progressTimer);
+				busAbort?.abort(busCancelled);
+				removeBusAbortListener?.();
+				// Reset the idle-gap clock: escalate if the agent waits again soon,
+				// drop back to the floor once it goes quiet for a while.
+				manager.recordPollWaitEnd(ownerId);
 			}
+
+			// A message consumed by the bus waiter must never be dropped — it wins
+			// even a photo-finish race (job results re-deliver themselves; a
+			// dequeued message would otherwise be lost).
+			if (busLeg && messaging) {
+				const settled = await busLeg;
+				if (settled.message) return messageResult(messaging.senderId, settled.message);
+			}
+
+			// An aborted wait discards its inline result with the turn — report
+			// without consuming so the retained async deliveries still re-wake us.
+			return buildJobResult(this.session, manager, "wait", jobsToWatch, [], [], {
+				consumeSettled: signal?.aborted !== true,
+			});
 		} finally {
 			manager.unwatchJobs(watchedJobIds);
-			clearTimeout(timeoutHandle);
-			clearInterval(progressTimer);
-			busAbort?.abort(busCancelled);
-			removeBusAbortListener?.();
-			// Reset the idle-gap clock: escalate if the agent waits again soon,
-			// drop back to the floor once it goes quiet for a while.
-			manager.recordPollWaitEnd(ownerId);
 		}
-
-		// A message consumed by the bus waiter must never be dropped — it wins
-		// even a photo-finish race (job results re-deliver themselves; a
-		// dequeued message would otherwise be lost).
-		if (busLeg && messaging) {
-			const settled = await busLeg;
-			if (settled.message) return messageResult(messaging.senderId, settled.message);
-		}
-
-		return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
 	}
 }

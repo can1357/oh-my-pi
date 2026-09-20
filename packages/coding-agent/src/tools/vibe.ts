@@ -25,6 +25,7 @@ import vibeWaitDescription from "../prompts/tools/vibe-wait.md" with { type: "te
 
 import { type VibeScreenSnapshot, type VibeWaitOutcome } from "@oh-my-pi/pi-tui/tools/vibe";
 import { VibeSessionRegistry } from "../vibe/runtime";
+import type { VibeRosterEntry } from "../vibe/state";
 import type { Tool, ToolSession } from "./index";
 
 export const VIBE_TOOL_NAMES = ["vibe_spawn", "vibe_send", "vibe_wait", "vibe_kill", "vibe_list"] as const;
@@ -55,6 +56,30 @@ const vibeListSchema = type({});
 
 function screensOf(session: ToolSession, ids?: string[]): VibeScreenSnapshot[] {
 	return VibeSessionRegistry.global().screens(session, ids);
+}
+
+/** Cap on roster lines injected into the director's context message. */
+const VIBE_ROSTER_MAX_LINES = 10;
+
+/**
+ * Pre-rendered live roster block for the director's rebuilt context message —
+ * one line per actionable worker. Undefined when the roster is empty. Never
+ * throws: without a stable parent session id there is no scope to list.
+ */
+export function vibeRosterText(session: ToolSession): string | undefined {
+	let entries: VibeRosterEntry[];
+	try {
+		entries = VibeSessionRegistry.global().roster(session);
+	} catch {
+		return undefined;
+	}
+	if (entries.length === 0) return undefined;
+	const lines = entries.slice(0, VIBE_ROSTER_MAX_LINES).map(entry => {
+		const head = `- \`${entry.id}\` [${entry.cli}] ${entry.state} · ${entry.turns} turn${entry.turns === 1 ? "" : "s"}`;
+		return entry.lastActivity ? `${head} · last: ${entry.lastActivity}` : head;
+	});
+	if (entries.length > VIBE_ROSTER_MAX_LINES) lines.push(`- … ${entries.length - VIBE_ROSTER_MAX_LINES} more`);
+	return lines.join("\n");
 }
 
 function textResult(text: string, details: VibeToolDetails): AgentToolResult<VibeToolDetails> {
