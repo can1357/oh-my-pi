@@ -248,6 +248,12 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		return this.#alive && !this.#disposed;
 	}
 
+	/** Subprocess pid, when the kernel is backed by a live child. */
+	get pid(): number | undefined {
+		const pid = this.#proc?.pid;
+		return typeof pid === "number" && Number.isInteger(pid) && pid > 1 ? pid : undefined;
+	}
+
 	async execute(code: string, options?: TExecuteOptions): Promise<KernelExecuteResult> {
 		const msgId = options?.id ?? Snowflake.next();
 		return await this.#submit(msgId, this.#options.buildPayload(code, msgId, options), options, true);

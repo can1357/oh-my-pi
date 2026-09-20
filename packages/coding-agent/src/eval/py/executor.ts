@@ -27,6 +27,12 @@ import {
 	normalizeKernelSessionCwd,
 	requireRemainingKernelTimeoutMs,
 } from "../kernel-session-registry";
+import {
+	formatKernelRssRecycleAnnotation,
+	kernelRssExceedsLimit,
+	normalizeMaxRssMb,
+	readProcessRssKb,
+} from "../process-rss";
 import type { PythonShadowPlan, PythonShadowSnapshot } from "./kernel";
 import {
 	checkPythonKernelAvailability,
@@ -82,6 +88,13 @@ export interface PythonExecutorOptions {
 	kernelOwnerId?: string;
 	/** Kernel mode (session reuse vs per-call) */
 	kernelMode?: PythonKernelMode;
+	/**
+	 * Recycle the retained kernel after a cell when its RSS exceeds this many
+	 * megabytes. `0` disables. Unset uses {@link normalizeMaxRssMb}'s default.
+	 */
+	maxRssMb?: number;
+	/** @internal Test seam for RSS sampling. */
+	readRssKb?: (pid: number) => Promise<number | undefined>;
 	/**
 	 * Explicit interpreter path (`python.interpreter` resolved from the
 	 * session's settings). Skips automatic runtime discovery when set.
@@ -382,6 +395,38 @@ async function ensureKernelAvailable(cwd: string, options: PythonExecutorOptions
 	}
 }
 
+function appendKernelAnnotation(result: PythonResult, note: string): PythonResult {
+	const prefix = result.output.length === 0 || result.output.endsWith("\n") ? result.output : `${result.output}\n`;
+	return { ...result, output: `${prefix}${note}\n` };
+}
+
+async function recycleRetainedPythonKernelIfOverRss(
+	cwd: string,
+	options: PythonExecutorOptions,
+): Promise<string | undefined> {
+	const maxRssMb = normalizeMaxRssMb(options.maxRssMb);
+	if (maxRssMb <= 0) return undefined;
+	const kernel = sessionRegistry.peekLiveKernel(cwd, options);
+	const pid = kernel?.pid;
+	if (pid === undefined) return undefined;
+	const rssKb = await (options.readRssKb ?? readProcessRssKb)(pid);
+	if (!kernelRssExceedsLimit(rssKb, maxRssMb)) return undefined;
+	const rssMb = Math.max(1, Math.round((rssKb ?? 0) / 1024));
+	try {
+		await sessionRegistry.recycleLiveKernel(cwd, options);
+	} catch (err) {
+		logger.warn("Failed to recycle Python kernel after RSS cap", {
+			error: err instanceof Error ? err.message : String(err),
+			pid,
+			rssMb,
+			maxRssMb,
+		});
+		return undefined;
+	}
+	logger.warn("Recycled Python kernel after RSS exceeded python.maxRssMb", { pid, rssMb, maxRssMb });
+	return formatKernelRssRecycleAnnotation(rssMb, maxRssMb);
+}
+
 async function ensureToolBridge(options: PythonExecutorOptions): Promise<void> {
 	if (!options.toolSession || options.bridge) return;
 	try {
@@ -598,7 +643,9 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		if (kernelMode === "per-call") {
 			return await executePerCall(code, cwd, executionOptions);
 		}
-		return await sessionRegistry.executeOnSession(code, cwd, executionOptions);
+		const result = await sessionRegistry.executeOnSession(code, cwd, executionOptions);
+		const recycleNote = await recycleRetainedPythonKernelIfOverRss(cwd, executionOptions);
+		return recycleNote ? appendKernelAnnotation(result, recycleNote) : result;
 	} catch (err) {
 		if (isCancellationError(err, PythonExecutionCancelledError) || executionOptions.signal?.aborted) {
 			return createCancelledPythonResult(

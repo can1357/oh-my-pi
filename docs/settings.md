@@ -626,6 +626,7 @@ lsp:
 | `eval.workpool.freshAgents`       | boolean | `false`   | Spawn a new workpool agent for every item instead of reusing idle workers or batching queued items.                                                        |
 | `python.kernelMode`               | enum    | `session` | `session` (persistent kernel) or `per-call`.                                                                                                                |
 | `python.interpreter`              | string  | `""`      | Path to a Python interpreter; empty = auto-detect.                                                                                                          |
+| `python.maxRssMb`                 | number  | `1024`    | Recycle the retained Python kernel after a cell when RSS exceeds this many MB. `0` disables.                                                                |
 | `lsp.enabled`                     | boolean | `true`    | Language-server integration. `--no-lsp` disables for the run.                                                                                               |
 | `lsp.lazy`                        | boolean | `true`    | Start servers on demand.                                                                                                                                    |
 | `lsp.shared`                      | boolean | `true`    | Share one language server per project across local `omp` processes through the daemon broker; falls back to private servers when the broker is unavailable. |

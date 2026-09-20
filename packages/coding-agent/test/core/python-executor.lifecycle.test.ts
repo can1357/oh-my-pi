@@ -19,14 +19,16 @@ class FakeKernel {
 	#alive: boolean;
 	readonly executeCalls: string[] = [];
 	shutdownCalls = 0;
+	readonly pid: number | undefined;
 
 	constructor(
 		result: KernelExecuteResult,
-		options: { alive?: boolean; onExecute?: (options?: KernelExecuteOptions) => void } = {},
+		options: { alive?: boolean; onExecute?: (options?: KernelExecuteOptions) => void; pid?: number } = {},
 	) {
 		this.#result = result;
 		this.#onExecute = options.onExecute;
 		this.#alive = options.alive ?? true;
+		this.pid = options.pid;
 	}
 
 	isAlive(): boolean {
@@ -406,5 +408,59 @@ describe("executePython session lifecycle", () => {
 
 		expect(startCount).toBe(2);
 		expect(shutdownCount).toBe(2);
+	});
+
+	it("recycles a retained kernel after a cell when RSS exceeds python.maxRssMb", async () => {
+		const firstKernel = new FakeKernel(okResult, { pid: 4242 });
+		const secondKernel = new FakeKernel(okResult, { pid: 4243 });
+		const kernels = [firstKernel, secondKernel];
+		let startCount = 0;
+
+		PythonKernel.start = async () => {
+			startCount += 1;
+			return kernels.shift() as unknown as PythonKernel;
+		};
+
+		const first = await executePython("print('one')", {
+			sessionId: "session-rss-recycle",
+			maxRssMb: 1,
+			readRssKb: async () => 1 * 1024 + 1,
+		});
+
+		expect(startCount).toBe(2);
+		expect(firstKernel.executeCalls).toEqual(["print('one')"]);
+		expect(firstKernel.shutdownCalls).toBe(1);
+		expect(first.output).toContain("python.maxRssMb=1");
+
+		await executePython("print('two')", {
+			sessionId: "session-rss-recycle",
+			maxRssMb: 1,
+			readRssKb: async () => 1,
+		});
+		expect(secondKernel.executeCalls).toEqual(["print('two')"]);
+	});
+
+	it("does not recycle when python.maxRssMb is 0", async () => {
+		const kernel = new FakeKernel(okResult, { pid: 4242 });
+		let startCount = 0;
+		PythonKernel.start = async () => {
+			startCount += 1;
+			return kernel as unknown as PythonKernel;
+		};
+
+		await executePython("print('one')", {
+			sessionId: "session-rss-disabled",
+			maxRssMb: 0,
+			readRssKb: async () => 50_000_000,
+		});
+		await executePython("print('two')", {
+			sessionId: "session-rss-disabled",
+			maxRssMb: 0,
+			readRssKb: async () => 50_000_000,
+		});
+
+		expect(startCount).toBe(1);
+		expect(kernel.shutdownCalls).toBe(0);
+		expect(kernel.executeCalls).toEqual(["print('one')", "print('two')"]);
 	});
 });

@@ -30,6 +30,7 @@ interface RegistryKernelShutdownResult {
 interface RegistryKernel {
 	isAlive(): boolean;
 	shutdown(options?: { timeoutMs: number }): Promise<RegistryKernelShutdownResult>;
+	readonly pid?: number;
 }
 
 export interface KernelSession<TKernel extends RegistryKernel> extends SessionOwners {
@@ -98,6 +99,7 @@ interface KernelSessionRegistry<
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<R>;
 	peekLiveKernel(cwd: string, options: TOptions): TKernel | undefined;
 	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
+	recycleLiveKernel(cwd: string, options: TOptions): Promise<boolean>;
 }
 
 export function normalizeKernelSessionCwd(cwd: string): string {
@@ -435,6 +437,14 @@ export function createKernelSessionRegistry<
 		return sessions.get(sessionKey);
 	}
 
+	async function recycleLiveKernel(cwd: string, options: TOptions): Promise<boolean> {
+		const session = getPresentSession(cwd, options);
+		if (!session?.kernel.isAlive()) return false;
+		throwIfCallerCancelled(options);
+		await replaceSessionKernel(session, cwd, options);
+		return true;
+	}
+
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<R> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = resolveOwnerScopedSessionKey({
@@ -491,5 +501,5 @@ export function createKernelSessionRegistry<
 		return result;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession };
+	return { disposeAll, disposeByOwner, executeOnSession, peekLiveKernel, getPresentSession, recycleLiveKernel };
 }

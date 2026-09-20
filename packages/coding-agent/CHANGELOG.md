@@ -200,6 +200,7 @@
 
 ### Fixed
 
+- Recycled the retained Python eval kernel after a cell when its RSS exceeds `python.maxRssMb` (default 1024; 0 disables), so a long-lived session cannot pin tens of GB ([#12631](https://github.com/can1357/oh-my-pi/issues/12631)).
 - Fixed system prompt configuration validation so systemPromptTemplate and customSystemPrompt cannot conflict with a full systemPrompt replacement, including when values are empty.
 - Added browser-relay support for listing eligible pages without attaching to or claiming them.
 - Fixed Codex compatibility with the sloppy edit tool.
