@@ -20,11 +20,24 @@ export const REJECT_DEVICE_NAME = "reject";
 /** Device name for submitting a plan. */
 export const PROPOSE_DEVICE_NAME = "propose";
 
+/** Device name for delivering a design without authorizing implementation. */
+export const DELIVER_PLAN_DEVICE_NAME = "deliver-plan";
+
 /** Plain-text staged-action device names. */
-export type ResolutionDeviceName = typeof RESOLVE_DEVICE_NAME | typeof REJECT_DEVICE_NAME | typeof PROPOSE_DEVICE_NAME;
+export type ResolutionDeviceName =
+	| typeof RESOLVE_DEVICE_NAME
+	| typeof REJECT_DEVICE_NAME
+	| typeof PROPOSE_DEVICE_NAME
+	| typeof DELIVER_PLAN_DEVICE_NAME;
 
 /** Resolution applied to a staged action. */
 export type ResolveAction = "apply" | "discard";
+
+/** Plain-text invocation payload for resolving or rejecting a staged action. */
+export interface ResolveInvocation {
+	action: ResolveAction;
+	reason: string;
+}
 
 /** Details payload carried on a resolve/reject dispatch result (`XdevDispatch.inner`). */
 export interface ResolveDetails {
@@ -35,15 +48,16 @@ export interface ResolveDetails {
 	sourceResultDetails?: unknown;
 }
 
-/** Invoker input for queued pending-preview handlers. */
-export interface ResolveInvocation {
-	action: ResolveAction;
-	reason: string;
-}
-
-/** Streaming-safe call preview for a resolution-device write: `Resolve/Reject/Propose: <text>`. */
+/** Streaming-safe call preview for a resolution-device write: `Resolve/Reject/Propose/Deliver plan: <text>`. */
 export function renderResolutionDeviceCall(device: ResolutionDeviceName, content: unknown, uiTheme: Theme): Component {
-	const title = device === PROPOSE_DEVICE_NAME ? "Propose" : device === REJECT_DEVICE_NAME ? "Reject" : "Resolve";
+	const title =
+		device === DELIVER_PLAN_DEVICE_NAME
+			? "Deliver plan"
+			: device === PROPOSE_DEVICE_NAME
+				? "Propose"
+				: device === REJECT_DEVICE_NAME
+					? "Reject"
+					: "Resolve";
 	return renderDeviceCallPreview(title, content, uiTheme, Ellipsis.Omit);
 }
 
@@ -135,5 +149,10 @@ export const resolveRenderer = {
 
 /** Whether an xd:// device name is one of the plain-text resolution devices. */
 export function isResolutionDeviceName(name: string): name is ResolutionDeviceName {
-	return name === RESOLVE_DEVICE_NAME || name === REJECT_DEVICE_NAME || name === PROPOSE_DEVICE_NAME;
+	return (
+		name === RESOLVE_DEVICE_NAME ||
+		name === REJECT_DEVICE_NAME ||
+		name === PROPOSE_DEVICE_NAME ||
+		name === DELIVER_PLAN_DEVICE_NAME
+	);
 }

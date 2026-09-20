@@ -170,7 +170,13 @@ import { containsUltrathink } from "@oh-my-pi/pi-tui/prompt/ultrathink";
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { renderWorkflowNotice } from "../modes/workflow";
 import { containsWorkflow } from "@oh-my-pi/pi-tui/prompt/workflow";
-import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
+import {
+	type PlanApprovalDetails,
+	type PlanDeliveryDetails,
+	normalizePlanTitle,
+	planFileUrlForSlug,
+	resolveApprovedPlan,
+} from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import type { PlanModeState } from "../plan-mode/state";
@@ -223,12 +229,13 @@ import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	buildResolveReminderMessage,
+	isDeliverPlanToolCall,
 	isPreviewResolutionToolCall,
 	isProposeToolCall,
 	type PlanProposalHandler,
 	writeDeviceDispatch,
 } from "../tools/resolve";
-import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
+import { DELIVER_PLAN_DEVICE_NAME, PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -1252,6 +1259,50 @@ export class AgentSession {
 		targetThinkingLevel: ConfiguredThinkingLevel | undefined,
 	): Promise<PrewalkRestartResult> {
 		return this.#prewalk.restart(source, sourceThinkingLevel, target, targetThinkingLevel);
+	}
+
+	/** Validate and deliver a design plan without changing mode or authorizing implementation. */
+	async deliverPlan(title: string): Promise<AgentToolResult<PlanDeliveryDetails>> {
+		const state = this.getPlanModeState();
+		if (!state?.enabled) {
+			throw new ToolError("Plan mode is not active.");
+		}
+
+		const { title: normalizedTitle } = normalizePlanTitle(title);
+		const planFilePath = planFileUrlForSlug(normalizedTitle);
+		const planContent = await this.#readPlanFile(planFilePath);
+		if (planContent === null) {
+			throw new ToolError(
+				`Plan file not found at ${planFilePath}. Write the finalized design to ${planFilePath} before delivering it.`,
+			);
+		}
+		if (!planContent.trim()) {
+			throw new ToolError(`Plan file at ${planFilePath} must be non-empty before it can be delivered.`);
+		}
+
+		// Reading the artifact is asynchronous. Only retarget the same active plan
+		// state that was validated before the read; a concurrent mode transition
+		// must not be overwritten by a stale delivery completion.
+		const currentState = this.getPlanModeState();
+		if (currentState === state && currentState.planFilePath !== planFilePath) {
+			this.setPlanModeState({ ...currentState, planFilePath });
+		}
+
+		const details: PlanDeliveryDetails = {
+			kind: "plan-delivery",
+			planFilePath,
+			title: normalizedTitle,
+			implementationAuthorized: false,
+		};
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Design delivered at ${planFilePath}. Plan mode remains active; implementation is not authorized.`,
+				},
+			],
+			details,
+		};
 	}
 
 	/** Validate the active plan artifact and shape an `xd://propose` result for review-mode hosts. */
@@ -3255,12 +3306,15 @@ export class AgentSession {
 				await this.#goalRuntime.onToolCompleted(event.toolName);
 			}
 			this.#planModeReminderAwaitingProgress = false;
-			if (
-				event.toolName === "ask" ||
-				writeDeviceDispatch(event.toolName, event.result)?.tool === PROPOSE_DEVICE_NAME
-			) {
+			const dispatch = writeDeviceDispatch(event.toolName, event.result);
+			const successfulPlanDelivery =
+				!event.isError && dispatch?.mode === "execute" && dispatch.tool === DELIVER_PLAN_DEVICE_NAME;
+			if (event.toolName === "ask" || dispatch?.tool === PROPOSE_DEVICE_NAME || successfulPlanDelivery) {
 				this.#planModeReminderCount = 0;
 				this.#planModeReminderAwaitingProgress = false;
+				if (successfulPlanDelivery) {
+					this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+				}
 			}
 		}
 
@@ -8859,6 +8913,37 @@ export class AgentSession {
 		this.#checkpointState = undefined;
 		this.#pendingRewindReport = undefined;
 	}
+	/**
+	 * Inspect only tool results after the most recent user message. A successful
+	 * delivery is a host-produced dispatch with the non-authorizing payload; a
+	 * model-written `xd://deliver-plan` call alone never qualifies.
+	 */
+	#planDeliveryOutcomeInCurrentTurn(): "succeeded" | "failed" | undefined {
+		let succeeded = false;
+		let failed = false;
+		const messages = this.agent.state.messages;
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index];
+			if (message.role === "user") break;
+			if (message.role !== "toolResult" || message.isError === undefined) continue;
+			const dispatch = writeDeviceDispatch(message.toolName, message);
+			if (dispatch?.mode !== "execute" || dispatch.tool !== DELIVER_PLAN_DEVICE_NAME) continue;
+			const details = dispatch.inner;
+			if (
+				!isRecord(details) ||
+				details.kind !== "plan-delivery" ||
+				typeof details.planFilePath !== "string" ||
+				typeof details.title !== "string" ||
+				details.implementationAuthorized !== false
+			) {
+				continue;
+			}
+			if (message.isError) failed = true;
+			else succeeded = true;
+		}
+		return succeeded ? "succeeded" : failed ? "failed" : undefined;
+	}
+
 	/** Plan-mode decision affordances: `ask`, or plan approval via `write xd://propose`. */
 	#isPlanDecisionTool(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
 		return toolCall.name === "ask" || isProposeToolCall(toolCall);
@@ -8875,6 +8960,13 @@ export class AgentSession {
 		if (assistantMessage.stopReason === "error" || assistantMessage.stopReason === "aborted") {
 			return false;
 		}
+		const planDeliveryOutcome = this.#planDeliveryOutcomeInCurrentTurn();
+		if (planDeliveryOutcome === "succeeded") {
+			this.#planModeReminderCount = 0;
+			this.#planModeReminderAwaitingProgress = false;
+			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			return false;
+		}
 
 		const calledDecisionTool = assistantMessage.content.some(
 			content => content.type === "toolCall" && this.#isPlanDecisionTool(content),
@@ -8886,7 +8978,10 @@ export class AgentSession {
 		}
 
 		const hasToolCall = assistantMessage.content.some(content => content.type === "toolCall");
-		if (hasToolCall) {
+		const attemptedFailedDelivery =
+			planDeliveryOutcome === "failed" ||
+			assistantMessage.content.some(content => content.type === "toolCall" && isDeliverPlanToolCall(content));
+		if (hasToolCall && !attemptedFailedDelivery) {
 			return false;
 		}
 		if (this.#planModeReminderAwaitingProgress) {

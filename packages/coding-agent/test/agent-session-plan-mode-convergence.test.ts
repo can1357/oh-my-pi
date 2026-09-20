@@ -60,6 +60,35 @@ function makeTool(name: string): AgentTool {
 	};
 }
 
+function makeDeliveredPlanWriteTool(): AgentTool {
+	const parameters = type({ path: type("string"), content: type("string") });
+	return {
+		name: "write",
+		label: "write",
+		description: "Fake write device transport",
+		parameters,
+		async execute(_toolCallId, rawParams) {
+			const params = rawParams as { path: string; content: string };
+			return {
+				content: [{ type: "text" as const, text: "Design delivered; still in plan mode." }],
+				details: {
+					xdev: {
+						tool: "deliver-plan",
+						mode: "execute",
+						args: { title: params.content },
+						inner: {
+							kind: "plan-delivery",
+							planFilePath: `local://${params.content}-plan.md`,
+							title: params.content,
+							implementationAuthorized: false,
+						},
+					},
+				},
+			};
+		},
+	};
+}
+
 function makeMcpTool(name: string, loadMode: ToolLoadMode, approval: ToolApproval = "read"): CustomTool {
 	return {
 		name,
@@ -88,6 +117,16 @@ function messageText(message: AgentMessage): string {
 	}
 	return text.join("\n");
 }
+function toolCallNames(messages: readonly AgentMessage[]): string[] {
+	const names: string[] = [];
+	for (const message of messages) {
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (block.type === "toolCall") names.push(block.name);
+		}
+	}
+	return names;
+}
 
 function countReminders(messages: readonly AgentMessage[]): number {
 	return messages.filter(m => m.role === "developer" && messageText(m).includes(REMINDER_FRAGMENT)).length;
@@ -108,7 +147,6 @@ describe("AgentSession plan-mode convergence", () => {
 	let authDir: TempDir;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
-
 	beforeAll(async () => {
 		authDir = TempDir.createSync("@pi-plan-converge-auth-");
 		authStorage = await AuthStorage.create(authDir.join("auth.db"));
@@ -144,13 +182,16 @@ describe("AgentSession plan-mode convergence", () => {
 			xdev?: boolean;
 			rebuildGate?: { fail: boolean };
 			deviceOnlyWrite?: boolean;
+			deliveryDispatch?: boolean;
+			persist?: boolean;
+			resumeSessionFile?: string;
 		},
 	): Promise<PlanHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic model to exist");
 
 		const askTool = makeTool("ask");
-		const writeTool = makeTool("write");
+		const writeTool = options?.deliveryDispatch ? makeDeliveredPlanWriteTool() : makeTool("write");
 		const readTool = makeTool("read");
 		const toolRegistry = new Map<string, AgentTool>([
 			["ask", askTool],
@@ -173,6 +214,11 @@ describe("AgentSession plan-mode convergence", () => {
 				}
 			: undefined;
 
+		const sessionManager = options?.resumeSessionFile
+			? await SessionManager.open(options.resumeSessionFile, tempDir.join("sessions"))
+			: options?.persist
+				? SessionManager.create(tempDir.path(), tempDir.join("sessions"))
+				: SessionManager.inMemory();
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -180,7 +226,7 @@ describe("AgentSession plan-mode convergence", () => {
 				model,
 				systemPrompt: ["Test"],
 				tools: initialTools,
-				messages: [],
+				messages: sessionManager.buildSessionContext().messages,
 			},
 			streamFn: mock.stream,
 		});
@@ -202,7 +248,7 @@ describe("AgentSession plan-mode convergence", () => {
 
 		const created = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager,
 			settings: Settings.isolated({
 				"compaction.enabled": false,
 				"retry.enabled": false,
@@ -378,6 +424,259 @@ describe("AgentSession plan-mode convergence", () => {
 
 		expect(countReminders(harness.session.agent.state.messages)).toBe(2);
 		expect(harness.mock.calls.length).toBe(4);
+	});
+	it("delivers a non-empty design plan without leaving plan mode", async () => {
+		const harness = await createPlanSession([]);
+		const localOptions = {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		};
+		const planPath = resolveLocalUrlToPath("local://design-only-plan.md", localOptions);
+		await Bun.write(planPath, "# Design only\n\nRecord the architecture decision.\n");
+
+		const deliverPlan = Reflect.get(harness.session, "deliverPlan");
+		expect(typeof deliverPlan).toBe("function");
+		if (typeof deliverPlan !== "function") return;
+		const result = await deliverPlan.call(harness.session, "design-only");
+
+		expect(result && typeof result === "object" && "details" in result ? result.details : undefined).toEqual({
+			kind: "plan-delivery",
+			planFilePath: "local://design-only-plan.md",
+			title: "design-only",
+			implementationAuthorized: false,
+		});
+		const content = result && typeof result === "object" && "content" in result ? result.content : undefined;
+		const text =
+			Array.isArray(content) && content[0] && typeof content[0] === "object" && "text" in content[0]
+				? content[0].text
+				: undefined;
+		expect(typeof text === "string" ? text : "").toMatch(/plan mode remains active/i);
+		expect(harness.session.getPlanModeState()).toEqual(
+			expect.objectContaining({ enabled: true, planFilePath: "local://design-only-plan.md" }),
+		);
+	});
+
+	it("does not overwrite a concurrent plan-mode transition while delivery reads", async () => {
+		const harness = await createPlanSession([]);
+		const localOptions = {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		};
+		const planPath = resolveLocalUrlToPath("local://concurrent-design-plan.md", localOptions);
+		await Bun.write(planPath, "# Concurrent design\n\nKeep the newer mode state.\n");
+
+		const deliverPlan = Reflect.get(harness.session, "deliverPlan");
+		expect(typeof deliverPlan).toBe("function");
+		if (typeof deliverPlan !== "function") return;
+		const delivery = deliverPlan.call(harness.session, "concurrent-design");
+		harness.session.setPlanModeState({
+			enabled: true,
+			planFilePath: "local://newer-plan.md",
+			workflow: "iterative",
+		});
+		await delivery;
+
+		expect(harness.session.getPlanModeState()).toEqual({
+			enabled: true,
+			planFilePath: "local://newer-plan.md",
+			workflow: "iterative",
+		});
+	});
+
+	it("rejects delivery when the exact slug file is missing or empty", async () => {
+		const harness = await createPlanSession([]);
+		const localOptions = {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		};
+		const emptyPath = resolveLocalUrlToPath("local://empty-design-plan.md", localOptions);
+		await Bun.write(emptyPath, " \n");
+
+		const deliverPlan = Reflect.get(harness.session, "deliverPlan");
+		expect(typeof deliverPlan).toBe("function");
+		if (typeof deliverPlan !== "function") return;
+		await expect(deliverPlan.call(harness.session, "missing-design")).rejects.toThrow(/Plan file not found/i);
+		await expect(deliverPlan.call(harness.session, "empty-design")).rejects.toThrow(/non-empty/i);
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+	});
+	it("ends only the successful delivery turn and requires a decision on the next user turn", async () => {
+		const harness = await createPlanSession(
+			[
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "write",
+							arguments: { path: "xd://deliver-plan", content: "design-only" },
+						},
+					],
+				},
+				{ content: ["Design delivered."] },
+				{ content: ["A new request still needs a plan decision."] },
+				{ content: [{ type: "toolCall", name: "read", arguments: { path: "notes.md" } }] },
+			],
+			{ deliveryDispatch: true },
+		);
+
+		await harness.session.prompt("deliver the design");
+		await harness.session.waitForIdle();
+		const afterDelivery = harness.session.agent.state.messages;
+		expect(countReminders(afterDelivery)).toBe(0);
+		expect(toolCallNames(afterDelivery)).toEqual(["write"]);
+		expect(harness.mock.calls.length).toBe(2);
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+
+		await harness.session.prompt("new request");
+		await harness.session.waitForIdle();
+		const afterNewTurn = harness.session.agent.state.messages;
+		expect(countReminders(afterNewTurn)).toBe(1);
+		expect(toolCallNames(afterNewTurn)).toEqual(["write", "read"]);
+		expect(harness.mock.calls.length).toBe(5);
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+	});
+
+	it("preserves delivered plan state across fork without carrying the delivery exemption", async () => {
+		const harness = await createPlanSession(
+			[
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "write",
+							arguments: { path: "xd://deliver-plan", content: "fork-design" },
+						},
+					],
+				},
+				{ content: ["Design delivered."] },
+				{ content: ["The forked follow-up still needs a decision."] },
+				{ content: [{ type: "toolCall", name: "read", arguments: { path: "notes.md" } }] },
+			],
+			{ deliveryDispatch: true, persist: true },
+		);
+		const localOptions = {
+			getArtifactsDir: () => harness.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => harness.session.sessionManager.getSessionId(),
+		};
+		await Bun.write(
+			resolveLocalUrlToPath("local://fork-design-plan.md", localOptions),
+			"# Fork design\n\nRetain planning state.\n",
+		);
+
+		const deliverPlan = Reflect.get(harness.session, "deliverPlan");
+		expect(typeof deliverPlan).toBe("function");
+		if (typeof deliverPlan !== "function") return;
+		await deliverPlan.call(harness.session, "fork-design");
+		expect(harness.session.getPlanModeState()).toEqual(
+			expect.objectContaining({ enabled: true, planFilePath: "local://fork-design-plan.md" }),
+		);
+
+		await harness.session.prompt("deliver the design");
+		await harness.session.waitForIdle();
+		expect(countReminders(harness.session.agent.state.messages)).toBe(0);
+		expect(await harness.session.fork()).toBe(true);
+		expect(harness.session.getPlanModeState()).toEqual(
+			expect.objectContaining({ enabled: true, planFilePath: "local://fork-design-plan.md" }),
+		);
+
+		await harness.session.prompt("follow up after fork");
+		await harness.session.waitForIdle();
+		expect(countReminders(harness.session.agent.state.messages)).toBe(1);
+		expect(toolCallNames(harness.session.agent.state.messages)).toEqual(["write", "read"]);
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+	});
+
+	it("keeps plan convergence after cancellation following delivery", async () => {
+		const harness = await createPlanSession(
+			[
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "write",
+							arguments: { path: "xd://deliver-plan", content: "cancel-design" },
+						},
+					],
+				},
+				{ content: ["Design delivered."] },
+				{ content: ["Cancellation must not authorize the next request."] },
+				{ content: [{ type: "toolCall", name: "read", arguments: { path: "notes.md" } }] },
+			],
+			{ deliveryDispatch: true },
+		);
+
+		await harness.session.prompt("deliver the design");
+		await harness.session.waitForIdle();
+		await harness.session.abort({ reason: "test cancellation" });
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+
+		await harness.session.prompt("follow up after cancellation");
+		await harness.session.waitForIdle();
+		expect(countReminders(harness.session.agent.state.messages)).toBe(1);
+		expect(toolCallNames(harness.session.agent.state.messages)).toEqual(["write", "read"]);
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+	});
+
+	it("resumes the saved delivery transcript without carrying its exemption", async () => {
+		const original = await createPlanSession(
+			[
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "write",
+							arguments: { path: "xd://deliver-plan", content: "resume-design" },
+						},
+					],
+				},
+				{ content: ["Design delivered."] },
+			],
+			{ deliveryDispatch: true, persist: true },
+		);
+		const localOptions = {
+			getArtifactsDir: () => original.session.sessionManager.getArtifactsDir(),
+			getSessionId: () => original.session.sessionManager.getSessionId(),
+		};
+		await Bun.write(
+			resolveLocalUrlToPath("local://resume-design-plan.md", localOptions),
+			"# Resume design\n\nKeep plan mode read-only.\n",
+		);
+		const deliverPlan = Reflect.get(original.session, "deliverPlan");
+		expect(typeof deliverPlan).toBe("function");
+		if (typeof deliverPlan !== "function") return;
+		await deliverPlan.call(original.session, "resume-design");
+
+		await original.session.prompt("deliver the design");
+		await original.session.waitForIdle();
+		const sessionFile = original.session.sessionFile;
+		expect(sessionFile).toBeDefined();
+		if (!sessionFile) return;
+		await original.session.sessionManager.flush();
+		await original.session.dispose();
+		session = undefined;
+
+		const resumed = await createPlanSession(
+			[
+				{ content: ["The resumed request still needs a plan decision."] },
+				{ content: [{ type: "toolCall", name: "read", arguments: { path: "notes.md" } }] },
+			],
+			{ resumeSessionFile: sessionFile, deliveryDispatch: true },
+		);
+		resumed.session.setPlanModeState({
+			enabled: true,
+			planFilePath: "local://resume-design-plan.md",
+			workflow: "parallel",
+		});
+		expect(resumed.session.getPlanModeState()).toEqual({
+			enabled: true,
+			planFilePath: "local://resume-design-plan.md",
+			workflow: "parallel",
+		});
+
+		await resumed.session.prompt("follow up after resume");
+		await resumed.session.waitForIdle();
+		expect(countReminders(resumed.session.agent.state.messages)).toBe(1);
+		expect(toolCallNames(resumed.session.agent.state.messages).at(-1)).toBe("read");
+		expect(resumed.session.getPlanModeState()?.enabled).toBe(true);
 	});
 
 	it("keeps PlanYolo's internal write augmentation transport-only", async () => {

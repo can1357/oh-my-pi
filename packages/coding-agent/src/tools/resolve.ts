@@ -2,6 +2,7 @@ import {
 	RESOLVE_DEVICE_NAME,
 	REJECT_DEVICE_NAME,
 	PROPOSE_DEVICE_NAME,
+	DELIVER_PLAN_DEVICE_NAME,
 	type ResolutionDeviceName,
 	type ResolveAction,
 	type ResolveDetails,
@@ -11,13 +12,14 @@ import {
  * Resolution devices: staged work is finalized through plain-text writes to
  * always-available `xd://` URLs — no tool schema, no JSON protocol.
  *
- *   write xd://resolve   reason text  → APPLY the pending staged preview
- *   write xd://reject    reason text  → DISCARD the pending staged preview
- *   write xd://propose   plan <slug>  → submit the plan for approval (plan mode)
+ *   write xd://resolve       reason text  → APPLY the pending staged preview
+ *   write xd://reject        reason text  → DISCARD the pending staged preview
+ *   write xd://propose       plan <slug>  → submit the plan for approval (plan mode)
+ *   write xd://deliver-plan  plan <slug>  → deliver a design without authorization (plan mode)
  *
  * Nothing rides the system prompt: the flows that stage work teach the call
  * shape at the moment it becomes relevant (the preview reminder for
- * resolve/reject, the plan-mode prompt for propose).
+ * resolve/reject, the plan-mode prompt for propose/deliver-plan).
  *
  * Rendering rides the write tool's xd:// delegation: renderers.ts keys the
  * resolve renderer under `resolve` and `reject` so device writes and legacy
@@ -40,6 +42,7 @@ import type { XdevDispatch } from "./xdev";
 export const RESOLVE_DEVICE_PATH = `${XD_URL_PREFIX}${RESOLVE_DEVICE_NAME}`;
 export const REJECT_DEVICE_PATH = `${XD_URL_PREFIX}${REJECT_DEVICE_NAME}`;
 export const PROPOSE_DEVICE_PATH = `${XD_URL_PREFIX}${PROPOSE_DEVICE_NAME}`;
+export const DELIVER_PLAN_DEVICE_PATH = `${XD_URL_PREFIX}${DELIVER_PLAN_DEVICE_NAME}`;
 
 /**
  * Model-visible banner prepended to a staged preview's tool result text. The
@@ -58,6 +61,8 @@ export function resolutionDeviceUsage(device: ResolutionDeviceName): string {
 			return `Write a one-sentence reason as plain text to ${REJECT_DEVICE_PATH} to DISCARD the pending staged action (e.g. a tool preview).`;
 		case PROPOSE_DEVICE_NAME:
 			return `Write your plan's <slug> (matching local://<slug>-plan.md) as plain text to ${PROPOSE_DEVICE_PATH} to submit the plan for approval. Valid only while plan mode is active.`;
+		case DELIVER_PLAN_DEVICE_NAME:
+			return `Write your design plan's <slug> (matching local://<slug>-plan.md) as plain text to ${DELIVER_PLAN_DEVICE_PATH} to deliver the design without authorizing implementation. Valid only while plan mode is active.`;
 	}
 }
 
@@ -84,6 +89,12 @@ export function isPreviewResolutionToolCall(toolCall: { name: string; arguments?
 export function isProposeToolCall(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
 	const path = toolCallWritePath(toolCall);
 	return path !== undefined && parseXdUrl(path)?.name === PROPOSE_DEVICE_NAME;
+}
+
+/** Whether an assistant tool call is a `write` targeting `xd://deliver-plan`. */
+export function isDeliverPlanToolCall(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
+	const path = toolCallWritePath(toolCall);
+	return path !== undefined && parseXdUrl(path)?.name === DELIVER_PLAN_DEVICE_NAME;
 }
 
 /**
@@ -274,6 +285,8 @@ async function runResolveInvocation(
  *   preview invoker (in-flight queue directive first).
  * - `xd://propose` → the plan title; dispatches to the plan-proposal handler
  *   installed by plan mode.
+ * - `xd://deliver-plan` → the plan title; validates and delivers a design
+ *   through the session host without leaving plan mode or authorizing work.
  */
 export async function dispatchResolutionDevice(
 	session: ToolSession,
@@ -281,6 +294,16 @@ export async function dispatchResolutionDevice(
 	text: string,
 ): Promise<{ result: AgentToolResult<unknown>; xdev: XdevDispatch }> {
 	const body = text.trim();
+	if (device === DELIVER_PLAN_DEVICE_NAME) {
+		if (!session.deliverPlan) {
+			throw new ToolError(
+				`No plan-delivery host is available — ${DELIVER_PLAN_DEVICE_PATH} requires an active plan session.`,
+			);
+		}
+		const result = await session.deliverPlan(body);
+		return { result, xdev: { tool: device, mode: "execute", args: { title: body }, inner: result.details } };
+	}
+
 	if (device === PROPOSE_DEVICE_NAME) {
 		const handler = session.peekPlanProposalHandler?.();
 		if (!handler) {

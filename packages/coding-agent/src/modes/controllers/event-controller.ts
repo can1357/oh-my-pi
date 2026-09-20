@@ -1944,6 +1944,8 @@ export class EventController {
 				{ hideWithToolActivity: true },
 			);
 		}
+		// Only `xd://propose` enters the approval flow. `xd://deliver-plan` is
+		// deliberately terminal and never opens an execution approval surface.
 		// Plan approval rides a `write` to xd://propose: the dispatch metadata on
 		// the write details carries the approval payload as `inner`.
 		if (!event.isError) {

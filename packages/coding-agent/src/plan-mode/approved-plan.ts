@@ -10,6 +10,16 @@ export interface PlanApprovalDetails {
 	planFilePath: string;
 	title: string;
 	planExists: boolean;
+	/** Why a proposal did not leave plan mode, when it was not an explicit approval. */
+	outcome?: "authorization-unavailable" | "refinement-requested";
+}
+
+/** Details returned when a design plan is delivered without authorizing implementation. */
+export interface PlanDeliveryDetails {
+	kind: "plan-delivery";
+	planFilePath: string;
+	title: string;
+	implementationAuthorized: false;
 }
 
 /** Validate and normalize the agent-supplied plan title into a safe filename stem.

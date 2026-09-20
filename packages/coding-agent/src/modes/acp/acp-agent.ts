@@ -1871,16 +1871,16 @@ export class AcpAgent implements Agent {
 
 	/**
 	 * Plan-proposal handler installed while ACP plan mode is active. The agent
-	 * submits the finalized plan by writing its `<slug>`/title to
-	 * `xd://propose`; this handler validates the plan file, normalizes the
-	 * title, asks the ACP client to confirm (via `unstable_createElicitation`
-	 * when supported), and on approval keeps the chosen plan path, exits plan
-	 * mode, and notifies the client so the agent regains full tools.
+	 * submits the finalized plan by writing its `<slug>`/title to `xd://propose`;
+	 * this handler validates the plan file, normalizes the title, asks the ACP
+	 * client to confirm via `unstable_createElicitation` when supported, and on
+	 * explicit approval exits plan mode and notifies the client so the agent
+	 * regains full tools.
 	 *
-	 * Mirrors `InteractiveMode.#handlePlanProposal` for the parts the agent sees
-	 * (same `PlanApprovalDetails` shape). Clients without form-mode elicitation
-	 * get an auto-approve so plan mode is never stranded — the agent always has
-	 * a way out.
+	 * Clients without form-mode elicitation cannot provide implementation
+	 * authorization. Their proposal remains pending with an explicit
+	 * authorization-unavailable outcome; the shared `xd://deliver-plan`
+	 * action remains available for design-only delivery.
 	 */
 	async #handleAcpPlanProposal(session: AgentSession, title: string): Promise<AgentToolResult<unknown>> {
 		const state = session.getPlanModeState();
@@ -1897,6 +1897,7 @@ export class AcpAgent implements Agent {
 			readPlan: url => this.#readAcpPlanFile(session, url),
 			listPlanFiles: () => this.#listAcpLocalPlanFiles(session),
 		});
+		const supportsExplicitApproval = this.#clientCapabilities?.elicitation?.form != null;
 		const approved = await this.#requestAcpPlanApprovalChoice(session.sessionId, resolvedTitle, planContent);
 		const details: PlanApprovalDetails = {
 			planFilePath,
@@ -1915,10 +1916,15 @@ export class AcpAgent implements Agent {
 				content: [
 					{
 						type: "text" as const,
-						text: `Plan refinement requested. Update the plan file, then write ${normalizedTitle} to xd://propose again when ready.`,
+						text: supportsExplicitApproval
+							? `Plan refinement requested. Update the plan file, then write ${normalizedTitle} to xd://propose again when ready.`
+							: "Implementation authorization is unavailable because this ACP client has no native approval UI. Use xd://deliver-plan to deliver the design without authorizing implementation, or continue later in a client with an explicit native implementation-approval action.",
 					},
 				],
-				details,
+				details: {
+					...details,
+					outcome: supportsExplicitApproval ? "refinement-requested" : "authorization-unavailable",
+				},
 			};
 		}
 		// Approved. Set the plan reference so the next turn injects the plan
@@ -2014,13 +2020,13 @@ export class AcpAgent implements Agent {
 	 * explicit `APPROVE_OPTION` selection. Refine, dismissal (`undefined`), or
 	 * any unrecognized value falls through to refine semantics — the caller
 	 * keeps plan mode active and surfaces guidance text to the agent. Clients
-	 * without `elicitation.form` support auto-approve because there is no
-	 * confirmation surface available; without that, plan mode would strand
-	 * the agent (the bug this method exists to fix).
+	 * without `elicitation.form` support cannot explicitly authorize
+	 * implementation, so they remain in plan mode and may use `xd://deliver-plan`
+	 * for design-only delivery.
 	 */
 	async #requestAcpPlanApprovalChoice(sessionId: string, title: string, planContent: string): Promise<boolean> {
 		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;
-		if (!supportsForm) return true;
+		if (!supportsForm) return false;
 		// Include a short preview of the plan so the user has context in the
 		// dialog. Keep the body bounded — Zed renders elicitation messages
 		// inline and a multi-thousand-line plan blows out the dialog.
