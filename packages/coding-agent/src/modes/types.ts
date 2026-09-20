@@ -17,6 +17,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
+import type { LiveProviderSetting } from "../live/provider";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
@@ -447,8 +448,8 @@ export interface InteractiveModeContext {
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;
 	handleSTTToggle(): Promise<void>;
-	/** Start or stop the Codex-backed realtime voice session. */
-	handleLiveCommand(): Promise<void>;
+	/** Start or stop the realtime voice session. */
+	handleLiveCommand(provider?: LiveProviderSetting): Promise<void>;
 	executeCompaction(
 		customInstructionsOrOptions?: string | CompactOptions,
 		isAuto?: boolean,

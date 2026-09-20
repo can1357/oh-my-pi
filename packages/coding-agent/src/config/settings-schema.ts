@@ -9,7 +9,7 @@ import {
 	BUILTIN_BLOB_DESTINATIONS,
 } from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
-import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
+import { DEFAULT_GROK_LIVE_VOICE, DEFAULT_LIVE_VOICE, GROK_LIVE_VOICE_OPTIONS, GROK_LIVE_VOICE_VALUES, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
 import type { AnyUiMetadata, SettingTab, SubmenuOption, UiBase } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import {
 	COMPACTION_METHOD_CHOICES,
@@ -5516,6 +5516,40 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"live.provider": {
+		type: "enum",
+		values: ["auto", "codex", "grok"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Live Provider",
+			description:
+				"Realtime `/live` backend. Auto skips a native duplex provider whose latest non-Spark usage window is exhausted (e.g. Codex weekly) and uses the next signed-in backend (xAI Grok OAuth or API key).",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Prefer Codex when it has quota; skip exhausted Codex and use Grok",
+				},
+				{ value: "codex", label: "Codex", description: "Always use Codex WebRTC; fail closed if unavailable" },
+				{ value: "grok", label: "Grok", description: "Always use xAI Grok Voice realtime; fail closed if unavailable" },
+			],
+		},
+	},
+	"live.grokVoice": {
+		type: "enum",
+		values: GROK_LIVE_VOICE_VALUES,
+		default: DEFAULT_GROK_LIVE_VOICE,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Grok Live Voice",
+			description: "Voice used by xAI Grok realtime voice sessions",
+			options: GROK_LIVE_VOICE_OPTIONS,
+		},
+	},
+
 	"live.voice": {
 		type: "enum",
 		values: LIVE_VOICE_VALUES,
