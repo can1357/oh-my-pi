@@ -484,7 +484,6 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				await Promise.race(racePromises);
 			}
 		} finally {
-			manager.unwatchJobs(watchedJobIds);
 			clearTimeout(timeoutHandle);
 			clearInterval(progressTimer);
 			busAbort?.abort(busCancelled);
@@ -494,18 +493,30 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			manager.recordPollWaitEnd(ownerId);
 		}
 
-		// A message consumed by the bus waiter must never be dropped — it wins
-		// even a photo-finish race (job results re-deliver themselves; a
-		// dequeued message would otherwise be lost).
-		if (busLeg && messaging) {
-			const settled = await busLeg;
-			if (settled.message) return messageResult(messaging.senderId, settled.message);
-		}
+		// The watch outlives the race on purpose: releasing it re-enqueues every
+		// result that settled while watched, so it must happen only once this
+		// wait knows which of those it is reporting inline. `buildJobResult`
+		// consumes the ones it reports, and an already-consumed job is skipped on
+		// re-enqueue — so a settled job delivers exactly once. The message path
+		// below reports none of them, so there the re-enqueue is what keeps them
+		// alive. Unwatching stays unconditional: a job left watched would have
+		// its delivery suppressed forever.
+		try {
+			// A message consumed by the bus waiter must never be dropped — it wins
+			// even a photo-finish race (job results re-deliver themselves; a
+			// dequeued message would otherwise be lost).
+			if (busLeg && messaging) {
+				const settled = await busLeg;
+				if (settled.message) return messageResult(messaging.senderId, settled.message);
+			}
 
-		// An aborted wait discards its inline result with the turn — report
-		// without consuming so the retained async deliveries still re-wake us.
-		return buildJobResult(this.session, manager, "wait", jobsToWatch, [], [], {
-			consumeSettled: signal?.aborted !== true,
-		});
+			// An aborted wait discards its inline result with the turn — report
+			// without consuming so the retained async deliveries still re-wake us.
+			return buildJobResult(this.session, manager, "wait", jobsToWatch, [], [], {
+				consumeSettled: signal?.aborted !== true,
+			});
+		} finally {
+			manager.unwatchJobs(watchedJobIds);
+		}
 	}
 }

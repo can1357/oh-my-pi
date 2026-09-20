@@ -1011,6 +1011,7 @@ export class VibeSessionRegistry {
 
 		let waitEndedByTimeout = false;
 		let waitAborted = args.signal?.aborted === true;
+		let acknowledged = false;
 		if (runningJobs.length > 0 && collectSettled().length === 0 && !waitAborted) {
 			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
 			const watchedJobIds = runningJobs.map(job => job.id);
@@ -1033,11 +1034,24 @@ export class VibeSessionRegistry {
 				}
 				racePromises.push(abortPromise);
 			}
+			let raceSettled = false;
 			try {
 				const outcome = await Promise.race(racePromises);
 				waitEndedByTimeout = outcome === "timeout";
 				waitAborted = outcome === "aborted";
+				raceSettled = true;
 			} finally {
+				// Claim the results this wait reports inline BEFORE releasing the
+				// watch: unwatch re-enqueues whatever settled while watched, and
+				// #enqueueDelivery skips an acknowledged job — so a settled turn can
+				// never arrive both inline and again as an async follow-up. An
+				// aborted wait claims nothing: its inline result dies with the turn,
+				// so the retained deliveries must survive to re-wake the director.
+				// A rejected race reports nothing either, hence `raceSettled`.
+				if (raceSettled && !waitAborted && args.signal?.aborted !== true) {
+					manager.acknowledgeDeliveries(collectSettled().map(entry => entry.jobId));
+					acknowledged = true;
+				}
 				manager.unwatchJobs(watchedJobIds);
 				clearTimeout(timeoutHandle);
 				abortCleanup?.();
@@ -1046,9 +1060,11 @@ export class VibeSessionRegistry {
 
 		const settled = collectSettled();
 		// An aborted wait discards its inline result with the aborted turn, so
-		// acknowledging would drop the async copy too. The unwatch above already
-		// re-enqueued the retained deliveries — leave them to re-wake us.
-		if (!waitAborted && args.signal?.aborted !== true) {
+		// acknowledging would drop the async copy too — the unwatch above already
+		// re-enqueued the retained deliveries, so leave them to re-wake us. The
+		// watched path already acknowledged before unwatching; this covers the
+		// case where no watch was ever taken (jobs settled before the wait began).
+		if (!acknowledged && !waitAborted && args.signal?.aborted !== true) {
 			manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
 		}
 		// Current in-flight state, independent of the snapshot: a session whose

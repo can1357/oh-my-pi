@@ -119,6 +119,24 @@ describe("vibe wait completion classification", () => {
 		expect(deliveries).toEqual([{ jobId: turn.jobId, text: "delivered later" }]);
 	});
 
+	it("delivers a settled worker turn exactly once when the wait is not aborted", async () => {
+		const deliveries: Array<{ jobId: string; text: string }> = [];
+		const turn = startTurn({ onDelivery: (jobId, text) => deliveries.push({ jobId, text }) });
+		const pending = VibeSessionRegistry.global().wait(session, { timeoutMs: 1_000 });
+		// Settles while watched, so the delivery is retained and releasing the
+		// watch re-enqueues it. This wait reports that result inline, so it must
+		// acknowledge before unwatching — otherwise the director is handed the
+		// same worker turn twice, once inline and once as an async follow-up.
+		turn.complete("reported inline");
+
+		const outcome = await pending;
+		expect(outcome.settled).toHaveLength(1);
+		expect(outcome.settled[0]?.resultText).toBe("reported inline");
+
+		await manager.drainDeliveries({ timeoutMs: 1_000 });
+		expect(deliveries).toEqual([]);
+	});
+
 	it("returns a cancelled worker settlement without classifying it as timeout", async () => {
 		const turn = startTurn();
 		const pending = VibeSessionRegistry.global().wait(session, { timeoutMs: 1_000 });
