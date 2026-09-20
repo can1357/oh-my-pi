@@ -296,6 +296,26 @@ describe("ImageBudget", () => {
 		expect(after.purge).toEqual([]);
 	});
 });
+describe("ImageBudget hidden-tmux-window recovery (issue #12595)", () => {
+	it("retransmits after forgetTransmitted so a dropped Kitty payload repairs on repaint", () => {
+		const budget = new ImageBudget(3, () => {});
+		budget.beginPass();
+		budget.enqueueTransmit(7, "TX7");
+		expect(budget.shouldTransmit(7)).toBe(false);
+		expect(budget.takeTransmits()).toEqual(["TX7"]);
+
+		// The hidden tmux window dropped the transmit: placeholders replay
+		// without image data, and the budget still believes it sent.
+		expect(budget.shouldTransmit(7)).toBe(false);
+
+		// Window visible again: forget + repaint re-queues the payload.
+		budget.forgetTransmitted();
+		expect(budget.shouldTransmit(7)).toBe(true);
+		budget.beginPass();
+		budget.enqueueTransmit(7, "TX7");
+		expect(budget.takeTransmits()).toEqual(["TX7"]);
+	});
+});
 
 describe("encodeKittyDeleteImage", () => {
 	it("emits an APC delete-by-id that frees the image and suppresses the reply", () => {

@@ -62,6 +62,7 @@ interface AppKeybindings {
 	"app.history.search": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
+	"app.images.retransmit": true;
 }
 
 /** Application action identifier registered alongside the base TUI keybindings. */

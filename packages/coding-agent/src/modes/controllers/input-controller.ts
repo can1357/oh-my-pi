@@ -390,6 +390,11 @@ export class InputController {
 					this.toggleToolActivityVisibility();
 					return { consume: true };
 				}
+				if (this.ctx.keybindings.matches(data, "app.images.retransmit")) {
+					if (this.ctx.ui.hasOverlay()) return undefined;
+					this.ctx.ui.retransmitInlineImages();
+					return { consume: true };
+				}
 				return undefined;
 			});
 		}
