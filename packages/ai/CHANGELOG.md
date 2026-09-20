@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.23] - 2026-09-20
+
 ### Added
 
 - Chat-completions requests for gpt-oss models now serialize `parallel_tool_calls: false` whenever tools are offered, so the turn carries a single tool call the way Harmony encodes it.
