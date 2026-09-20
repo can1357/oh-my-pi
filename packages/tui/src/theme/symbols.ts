@@ -817,11 +817,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.advisorClosed": "\ueae7",
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
-	// pick: 󰵗 (nf-md-pi) | alt:  π ∏ ∑
-	// INTENTIONAL: U+F0D57 is the chosen glyph here. It has been "fixed" to
-	// U+F03FF before (2ec52b8bdd) and reverted because it renders the wrong glyph;
-	// do not swap it again.
-	"icon.omp": "\u{f0d57}",
+	// pick: 󰏿 (nf-md-pi) | alt:  π ∏ ∑
+	// Nerd Fonts v3 maps md-pi to U+F03FF (unchanged across 3.0.0 → 3.5.1); U+F0D57
+	// is md-axis_z_rotate_clockwise, a rotating arrow. Do not revert to U+F0D57.
+	"icon.omp": "\u{f03ff}",
 	// pick: 󱊷 (nf-md-keyboard_esc) | alt: ⎋
 	"icon.esc": "\u{f12b7}",
 	// pick: 󰊠 (nf-md-ghost) | alt: 👻
