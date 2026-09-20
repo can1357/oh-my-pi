@@ -943,7 +943,7 @@ export function resolveOpenAICompatPolicy<TApi extends Api>(
 	model: Model<TApi>,
 	options: ResolveOpenAICompatPolicyOptions,
 ): OpenAICompatPolicy {
-	const baseCompat = (options.compat ?? model.compat) as OpenAICompatPolicyCompat;
+	const baseCompat = (options.compat ?? model.compat ?? {}) as OpenAICompatPolicyCompat;
 	const requestedEffort = options.reasoning;
 	const modelSupported = Boolean(model.reasoning);
 	const forcedToolChoiceSuppressesReasoning =

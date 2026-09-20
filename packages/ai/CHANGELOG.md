@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the OpenAI-compatible streamer crashing when a model has no resolved compat record ([#12562](https://github.com/can1357/oh-my-pi/issues/12562))
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

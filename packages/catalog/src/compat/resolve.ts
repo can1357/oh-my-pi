@@ -1271,6 +1271,16 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		specUsesApi(spec, "google-gemini-cli")
 	) {
 		compat = resolveGooglePolicy(spec, axes);
+	} else if (spec.api !== "ollama-chat" && spec.api !== "cursor-agent" && spec.api !== "gitlab-duo-agent") {
+		// Custom APIs cannot reuse a builtin id (`registerCustomApi` reserves
+		// them) but almost always wrap an openai-completions streamer. Resolve
+		// that dialect so `model.compat` is a complete record and spec.compat
+		// overlays apply (#12562).
+		compat = resolveOpenAICompletionsPolicy(
+			{ ...spec, api: "openai-completions" } as ModelSpec<"openai-completions">,
+			facts,
+			axes,
+		);
 	} else {
 		compat = undefined;
 	}
