@@ -3,7 +3,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { FileLock, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, postmortem, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import {
@@ -112,10 +112,6 @@ interface DaemonLogRead {
 	text: string;
 	terminalOutput: string;
 	cursor: number;
-}
-
-function quoteShellArg(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function terminalState(state: DaemonSnapshot["state"]): boolean {
@@ -800,23 +796,21 @@ class DaemonBroker {
 			}
 			started.resolve(Number.isSafeInteger(pid) && pid > 0 ? pid : undefined);
 		};
-		let run: Promise<PtyRunResult>;
-		if (process.platform === "win32") {
-			run = session.startArgv(
-				{
-					application: record.spec.application,
-					args: record.spec.args,
-					...options,
-				},
-				onChunk,
-				onStart,
-			);
-		} else {
-			const argv = [record.spec.application, ...record.spec.args];
-			const command = `exec ${argv.map(quoteShellArg).join(" ")}`;
-			const shell = procmgr.getShellConfig().shell;
-			run = session.start({ command, shell, ...options }, onChunk, onStart);
-		}
+		// PTY execution uses the direct-argv spawn path on every platform: the
+		// POSIX shell-command form ran the application through `shell -lc`, so
+		// login startup files overwrote explicit env overrides (notably PATH)
+		// before the application executed (issue #12613). Callers that want
+		// shell initialization can request it explicitly via the application
+		// (`/bin/bash` with `-lc` arguments).
+		const run: Promise<PtyRunResult> = session.startArgv(
+			{
+				application: record.spec.application,
+				args: record.spec.args,
+				...options,
+			},
+			onChunk,
+			onStart,
+		);
 		void run.then(
 			async result => {
 				await this.#onPtyExit(record, generation, result);
