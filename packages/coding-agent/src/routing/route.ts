@@ -15,10 +15,14 @@
 //
 // Corollary: fail-open here means fail EXPENSIVE. If the judge is unreachable,
 // slow, or unconfigured, route to the top tier. A missing router must never be
-// able to degrade output. The judge itself comes from `resolveJudge`, whose
-// chain (TypeSafe -> online chat fallback) already encodes "never throw away
-// the answer surface"; this layer adds the policy gates on top.
+// able to degrade output.
+//
+// The judge for routing is TypeSafe-only (`resolveRoutingJudge`): the
+// `resolveJudge` chain would answer routing questions via an LLM fallback on
+// Jev outage — extra tokens and latency on the turn critical path for a
+// decision that should not exist. Jev down -> no routing decision -> top tier.
 
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { ChoiceAnswer, ChoiceQuestion, Judge, Questions, ScoreAnswer } from "@oh-my-pi/pi-ai";
 import { DEFAULT_ROUTING_POLICY, type RouteDecision, type RoutingPolicy, type TierSpec } from "./types";
 
@@ -53,22 +57,46 @@ export function buildRoutingQuestions(tiers: TierSpec[]): Questions {
 	};
 }
 
+/** Hard cap on a routing judgment call (spec §1). Internal timeout aborts map to `engine-unavailable`, never to a swallowed user abort. */
+export const ROUTING_JUDGE_TIMEOUT_MS = 1500;
+
+/**
+ * True when `error` came from the CALLER's signal aborting — rethrow those so
+ * user escape propagates. Internal timeout aborts and all other failures
+ * return false -> `engine-unavailable` (fail expensive).
+ */
+function isCallerAbort(error: unknown, callerSignal: AbortSignal | undefined): boolean {
+	if (!callerSignal?.aborted) return false;
+	return AIError.is(AIError.classify(error), AIError.Flag.Abort) || error instanceof Error;
+}
+
+function routingSignal(callerSignal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+	const timeout = AbortSignal.timeout(timeoutMs);
+	return callerSignal ? AbortSignal.any([callerSignal, timeout]) : timeout;
+}
+
 export async function routeTurn(
 	judge: Judge,
 	state: string,
 	tiers: TierSpec[],
 	policy: RoutingPolicy = DEFAULT_ROUTING_POLICY,
 	signal?: AbortSignal,
+	timeoutMs: number = ROUTING_JUDGE_TIMEOUT_MS,
 ): Promise<RouteDecision> {
 	const top = tiers[tiers.length - 1];
 
 	let answers: RoutingAnswers;
 	try {
-		const result = await judge.judge({ state, questions: buildRoutingQuestions(tiers) }, { signal });
+		const result = await judge.judge(
+			{ state, questions: buildRoutingQuestions(tiers) },
+			{ signal: routingSignal(signal, timeoutMs) },
+		);
 		answers = result.answers;
-	} catch {
+	} catch (error) {
 		// The Judge contract throws instead of returning null; semantically a
-		// thrown judgment is "no opinion" -> fail expensive.
+		// thrown judgment is "no opinion" -> fail expensive. A caller abort is
+		// not a judgment failure — rethrow so user escape propagates.
+		if (isCallerAbort(error, signal)) throw error;
 		return { tier: top.id, reason: "engine-unavailable" };
 	}
 
@@ -139,6 +167,7 @@ export async function verifyAndEscalate(
 	decision: RouteDecision,
 	policy: RoutingPolicy = DEFAULT_ROUTING_POLICY,
 	signal?: AbortSignal,
+	timeoutMs: number = ROUTING_JUDGE_TIMEOUT_MS,
 ): Promise<RouteDecision> {
 	const top = tiers[tiers.length - 1];
 	if (!policy.allowVerify) return decision;
@@ -150,11 +179,16 @@ export async function verifyAndEscalate(
 	const state = `REQUEST:\n${originalRequest}\n\nRESPONSE:\n${producedOutput}`;
 	let adequate: ChoiceAnswer | undefined;
 	try {
-		const result = await judge.judge({ state, questions: ADEQUACY_QUESTION }, { signal });
+		const result = await judge.judge(
+			{ state, questions: ADEQUACY_QUESTION },
+			{ signal: routingSignal(signal, timeoutMs) },
+		);
 		adequate = result.answers.adequate;
-	} catch {
-		// If the router can't verify, ACCEPT the output. We never want a flaky
-		// verifier to trigger unbounded re-runs.
+	} catch (error) {
+		// If the router can't verify, ACCEPT the output — a flaky verifier must
+		// never trigger unbounded re-runs. A caller abort is not a verification
+		// failure — rethrow so user escape propagates.
+		if (isCallerAbort(error, signal)) throw error;
 		return decision;
 	}
 
