@@ -217,6 +217,24 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				runtime.ctx.handlePlanModeCommand(command.args || undefined, runtime.input),
 			);
 		},
+		handle: async (command, runtime) => {
+			if (!runtime.settings.get("plan.enabled" as SettingPath)) {
+				return usage("Plan mode is disabled. Enable it in settings (plan.enabled).", runtime);
+			}
+			if (runtime.session.isStreaming) {
+				return usage("Wait for the current response to finish or abort it before entering plan mode.", runtime);
+			}
+			if (!runtime.setMode) {
+				return usage("Plan mode is unavailable in this runtime.", runtime);
+			}
+
+			await runtime.setMode("plan");
+			if (!command.args) {
+				await runtime.output("Plan mode enabled. Send a request to create a plan.");
+				return commandConsumed();
+			}
+			return { prompt: command.args };
+		},
 	},
 	{
 		name: "plan-review",

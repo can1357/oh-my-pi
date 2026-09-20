@@ -1852,7 +1852,7 @@ describe("ACP agent", () => {
 		expect(names).toContain("skill:sample");
 		expect(names).not.toContain("settings");
 		expect(names).not.toContain("copy");
-		expect(names).not.toContain("plan");
+		expect(names).toContain("plan");
 		expect(names).not.toContain("loop");
 		expect(names).not.toContain("login");
 		expect(names).not.toContain("new");
@@ -2765,6 +2765,33 @@ describe("ACP agent", () => {
 
 		expect(session.forcedToolChoice).toBe("read");
 		expect(session.promptCalls).toEqual(["inspect package.json"]);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("enters plan mode from the ACP /plan command before forwarding its prompt", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/plan inspect the auth flow" }],
+		});
+
+		expect(session.planModeState).toEqual(expect.objectContaining({ enabled: true }));
+		expect(typeof session.planProposalHandler).toBe("function");
+		expect(session.promptCalls).toEqual(["inspect the auth flow"]);
+		expect(
+			harness.updates.some(
+				update =>
+					update.sessionId === created.sessionId &&
+					update.update.sessionUpdate === "current_mode_update" &&
+					update.update.currentModeId === "plan",
+			),
+		).toBe(true);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

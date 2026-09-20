@@ -232,10 +232,12 @@ function createRuntime() {
 			return true;
 		},
 	};
+	const modeChanges: string[] = [];
 	return {
 		output,
 		session,
 		fakeSessionManager,
+		modeChanges,
 		runtime: {
 			session: typedSession,
 			sessionManager: fakeSessionManager as unknown as SessionManager,
@@ -246,6 +248,9 @@ function createRuntime() {
 			},
 			refreshCommands: () => {},
 			reloadPlugins: async () => {},
+			setMode: async (modeId: string) => {
+				modeChanges.push(modeId);
+			},
 			notifyTitleChanged: undefined as (() => Promise<void> | void) | undefined,
 			notifyConfigChanged: undefined as (() => Promise<void> | void) | undefined,
 		},
@@ -260,6 +265,15 @@ describe("ACP builtin slash commands", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("enters native plan mode and forwards an inline planning request", async () => {
+		const { modeChanges, runtime } = createRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/plan inspect the auth flow", runtime);
+
+		expect(result).toEqual({ prompt: "inspect the auth flow" });
+		expect(modeChanges).toEqual(["plan"]);
 	});
 
 	it("toggles extended context with explicit controls and reports state", async () => {
@@ -606,7 +620,6 @@ describe("ACP builtin slash commands", () => {
 			"/resume",
 			"/tree",
 			"/branch",
-			"/plan",
 			"/loop",
 			"/hotkeys",
 			"/extensions",
