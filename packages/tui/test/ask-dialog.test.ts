@@ -1106,7 +1106,7 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
 	});
 
-	it("multi-select: Enter submits an empty selection instead of dead-ending", () => {
+	it("multi-select: Enter with nothing selected routes to review instead of submitting empty (issue #12521)", () => {
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
@@ -1123,10 +1123,14 @@ describe("AskDialogComponent", () => {
 			onPrompt: vi.fn(),
 		});
 
-		// Enter with nothing selected submits the empty selection rather than
-		// toggling or blocking on the Submit tab.
+		// First Enter must not submit: it routes to the Submit review tab
+		// where the empty selection is explicit and confirmed.
 		component.handleInput(ENTER);
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(render(component)).toContain("nothing selected");
 
+		// Second Enter on the review tab confirms the intentional empty submit.
+		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
 	});
