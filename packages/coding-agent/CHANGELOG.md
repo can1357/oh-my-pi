@@ -23,6 +23,8 @@
 - Updated sloppy edit tool syntax to use plain text headers instead of XML tags
 - Improved startup performance by validating provider-qualified model selectors against only the relevant provider catalog.
 - Reduced launch time for npm and compiled builds by embedding the model catalog more efficiently.
+- Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
+- Added OMP Jev Gate to the standalone extension list, with direct GitHub installation and graphical configuration ([#12586](https://github.com/can1357/oh-my-pi/pull/12586) by [@cyriusweng](https://github.com/cyriusweng)).
 
 ### Fixed
 
