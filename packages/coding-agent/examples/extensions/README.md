@@ -16,7 +16,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 | Plugin | Install | Description |
 | --- | --- | --- |
-| [OMP Jev Gate](https://github.com/cyriusweng/omp-jev-gate) | `omp plugin install github:cyriusweng/omp-jev-gate` | Adds TypeSafe Jev prompt preflight, typed judgment checkpoints, audit receipts, fallback policy and graphical configuration. |
+| [OMP Jev Gate](https://github.com/cyriusweng/omp-jev-gate) | `omp plugin install github:cyriusweng/omp-jev-gate` | Adds a global TypeSafe Jev judgment policy with prompt preflight, off/observe/guide/enforce modes, typed judgment checkpoints, audit receipts and graphical configuration. |
 
 ## Examples
 
