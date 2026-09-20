@@ -2259,7 +2259,13 @@ const streamAnthropicOnce = (
 				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 
 			if (zeroOutputCacheRefresh) {
-				const refreshParams: MessageCreateParams = { ...params, max_tokens: 0, stream: false };
+				// #12597: a pinned tool_choice must not leak into the zero-output refresh.
+				// Anthropic 400s on tool_choice tool|any with max_tokens 0, and a forced
+				// choice is meaningless on a request that generates nothing by design.
+				// Dropping it is cache-safe: tool_choice is a generation parameter and
+				// not part of the prompt-cache key (system/tools/messages are).
+				const { tool_choice: _droppedToolChoice, ...refreshBaseParams } = params;
+				const refreshParams: MessageCreateParams = { ...refreshBaseParams, max_tokens: 0, stream: false };
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
