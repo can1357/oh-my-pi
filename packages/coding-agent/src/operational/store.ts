@@ -812,7 +812,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			return this.#toJob(updated);
 		});
 
-		return claim();
+		return claim.immediate();
 	}
 
 	/**
@@ -842,7 +842,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			return this.#toJob(updated);
 		});
 
-		return claim();
+		return claim.immediate();
 	}
 
 	transitionJob(id: string, input: JobTransitionInput): DurableJob {
@@ -920,7 +920,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			return this.#toJob(updated);
 		});
 
-		return transition();
+		return transition.immediate();
 	}
 
 	setCheckpoint(jobId: string, data: JsonValue): JobCheckpoint {
@@ -937,7 +937,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			this.#writeJobRow(updated);
 			return { jobId, data: parseJsonValue(updated.checkpoint_json), updatedAt: now };
 		});
-		return set();
+		return set.immediate();
 	}
 
 	setCheckpointForLease(jobId: string, leaseOwner: string, data: JsonValue): JobCheckpoint {
@@ -959,7 +959,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			this.#writeJobRow(updated);
 			return { jobId, data: parseJsonValue(updated.checkpoint_json), updatedAt: now };
 		});
-		return set();
+		return set.immediate();
 	}
 
 	releasePausedLease(jobId: string, leaseOwner: string): DurableJob {
@@ -979,7 +979,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			this.#writeJobRow(updated);
 			return this.#toJob(updated);
 		});
-		return release();
+		return release.immediate();
 	}
 
 	getCheckpoint(jobId: string): JobCheckpoint | null {
@@ -1018,7 +1018,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			this.#writeJobRow(updated);
 			return this.#toJob(updated);
 		});
-		return renew();
+		return renew.immediate();
 	}
 
 	/** Re-queue running jobs whose leases have expired. */
@@ -1041,7 +1041,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			}
 			return recovered;
 		});
-		return recover();
+		return recover.immediate();
 	}
 
 	#writeJobRow(row: JobRow): void {
@@ -1155,7 +1155,7 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 			if (!job) throw new Error(`failed to read job ${jobId}`);
 			return job;
 		});
-		return materialize();
+		return materialize.immediate();
 	}
 
 	#toSchedule(row: ScheduleRow): RecurringSchedule {
