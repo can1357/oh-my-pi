@@ -556,6 +556,60 @@ describe("pi-natives", () => {
 
 			expect(result.matches.some(match => match.path === "history-search.ts")).toBe(true);
 		});
+
+		it("does not walk descendant directory symlinks into an outside tree (#12317)", async () => {
+			if (process.platform === "win32") return;
+
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "natives-fuzzy-symlink-"));
+			const outside = await fs.mkdtemp(path.join(os.tmpdir(), "natives-fuzzy-outside-"));
+			try {
+				await fs.mkdir(path.join(root, "src"));
+				await fs.writeFile(path.join(root, "src/inside-needle.txt"), "inside\n");
+				for (let index = 0; index < 40; index++) {
+					const bucket = path.join(outside, `bucket-${index}`);
+					await fs.mkdir(bucket);
+					await fs.writeFile(path.join(bucket, "outside-unique-needle.txt"), "outside\n");
+					await fs.writeFile(path.join(bucket, `noise-${index}.txt`), "noise\n");
+				}
+				await fs.symlink(outside, path.join(root, "biglink"));
+
+				const outsideHits = await fuzzyFind({
+					query: "outside-unique-needle",
+					path: root,
+					hidden: true,
+					gitignore: false,
+					maxResults: 100,
+					cache: false,
+				});
+				expect(outsideHits.matches.every(match => !match.path.includes("outside-unique-needle"))).toBe(true);
+				expect(outsideHits.matches.every(match => !match.path.startsWith("biglink/"))).toBe(true);
+
+				const insideHits = await fuzzyFind({
+					query: "inside-needle",
+					path: root,
+					hidden: true,
+					gitignore: false,
+					maxResults: 100,
+					cache: false,
+				});
+				expect(insideHits.matches.some(match => match.path === "src/inside-needle.txt")).toBe(true);
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+				await fs.rm(outside, { recursive: true, force: true });
+			}
+		});
+
+		it("still searches trees without directory symlinks", async () => {
+			const result = await fuzzyFind({
+				query: "file1",
+				path: testDir,
+				hidden: true,
+				gitignore: false,
+				maxResults: 20,
+				cache: false,
+			});
+			expect(result.matches.some(match => match.path === "file1.ts")).toBe(true);
+		});
 	});
 
 	describe("find", () => {

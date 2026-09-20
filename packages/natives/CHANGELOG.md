@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed composer `@` file-mention autocomplete freezing when a repo contains a directory symlink into a large tree ([#12317](https://github.com/can1357/oh-my-pi/issues/12317)).
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

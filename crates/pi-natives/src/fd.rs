@@ -315,7 +315,11 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 		.gitignore(respect_gitignore)
 		.skip_git(true)
 		.skip_node_modules(true)
-		.follow_links(pi_walker::FollowLinks::Always)
+		// Roots still walks a symlink search root (resolve_search_path
+		// canonicalizes first). Descendant directory symlinks are not
+		// followed, so @-mention discovery cannot explode into nix
+		// out-links, pnpm stores, or $HOME (issue #12317).
+		.follow_links(pi_walker::FollowLinks::Roots)
 		.detail(pi_walker::WalkDetail::Minimal)
 		.order(pi_walker::WalkOrder::Path)
 		.emit_root(false)
@@ -396,44 +400,87 @@ mod tests {
 	}
 
 	#[cfg(unix)]
-	#[test]
-	fn fuzzy_find_without_cache_follows_symlinked_directories() {
-		let root = TempDirGuard::new();
-		let real_dir = root.path().join("zz-real-dir");
-		let link_dir_name = "aa-linked-dir";
-		let link_dir = root.path().join(link_dir_name);
-		let file_name = "follow-links-fuzzy-needle.txt";
-
-		fs::create_dir_all(&real_dir).expect("create real directory");
-		fs::write(real_dir.join(file_name), "needle\n").expect("write symlink target file");
-		unix_fs::symlink(&real_dir, &link_dir).expect("create directory symlink");
-
+	fn fuzzy_paths(root: &Path, query: &str) -> Vec<String> {
 		let result = fuzzy_find_sync(
 			FuzzyFindConfig {
-				query:       file_name.to_string(),
-				path:        root.path().to_string_lossy().into_owned(),
+				query:       query.to_string(),
+				path:        root.to_string_lossy().into_owned(),
 				hidden:      Some(true),
 				gitignore:   Some(false),
-				max_results: Some(4),
+				max_results: Some(100),
 				cache:       Some(false),
 			},
 			task::CancelToken::default(),
 		)
 		.expect("fuzzy find succeeds");
+		result.matches.into_iter().map(|entry| entry.path).collect()
+	}
 
-		assert!(!result.matches.is_empty(), "expected at least one fuzzy find match");
-		let expected_path = format!("{link_dir_name}/{file_name}");
+	/// Composer `@` autocomplete must not descend through a directory symlink
+	/// into an outside tree (nix out-links, pnpm stores, `$HOME`). The walk
+	/// has no other traversal budget; following such a link is what froze
+	/// the popup (issue #12317).
+	#[cfg(unix)]
+	#[test]
+	fn fuzzy_find_does_not_walk_descendant_directory_symlinks_into_outside_trees() {
+		let root = TempDirGuard::new();
+		let outside = TempDirGuard::new();
+
+		fs::create_dir_all(root.path().join("src")).expect("create in-repo src");
+		fs::write(root.path().join("src/inside-needle.txt"), "inside\n")
+			.expect("write in-repo needle");
+
+		// Synthetic stand-in for a huge outside tree: many files plus a
+		// unique name that only exists behind the symlink.
+		for index in 0..40 {
+			let bucket = outside.path().join(format!("bucket-{index}"));
+			fs::create_dir_all(&bucket).expect("create outside bucket");
+			fs::write(bucket.join("outside-unique-needle.txt"), "outside\n")
+				.expect("write outside needle");
+			fs::write(bucket.join(format!("noise-{index}.txt")), "noise\n")
+				.expect("write outside noise file");
+		}
+		unix_fs::symlink(outside.path(), root.path().join("biglink"))
+			.expect("create directory symlink into outside tree");
+
+		let outside_hits = fuzzy_paths(root.path(), "outside-unique-needle");
 		assert!(
-			result
-				.matches
+			outside_hits
 				.iter()
-				.any(|entry| entry.path == expected_path),
-			"expected fuzzy find to include symlink traversal path {expected_path:?}, got {:?}",
-			result
-				.matches
+				.all(|path| !path.contains("outside-unique-needle")),
+			"fuzzy find must not follow descendant directory symlinks, got {outside_hits:?}"
+		);
+		assert!(
+			outside_hits
 				.iter()
-				.map(|entry| entry.path.as_str())
-				.collect::<Vec<_>>()
+				.all(|path| !path.starts_with("biglink/")),
+			"fuzzy find must not yield paths under the outside symlink, got {outside_hits:?}"
+		);
+
+		let inside_hits = fuzzy_paths(root.path(), "inside-needle");
+		assert!(
+			inside_hits
+				.iter()
+				.any(|path| path == "src/inside-needle.txt"),
+			"in-repo files must stay searchable when a directory symlink is present, got \
+			 {inside_hits:?}"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn fuzzy_find_still_searches_trees_without_directory_symlinks() {
+		let root = TempDirGuard::new();
+		fs::create_dir_all(root.path().join("src/nested")).expect("create nested dir");
+		fs::write(root.path().join("src/nested/plain-needle.txt"), "plain\n")
+			.expect("write nested needle");
+
+		let hits = fuzzy_paths(root.path(), "plain-needle");
+		assert!(
+			hits
+				.iter()
+				.any(|path| path == "src/nested/plain-needle.txt"),
+			"trees without directory symlinks must stay searchable, got {hits:?}"
 		);
 	}
 
