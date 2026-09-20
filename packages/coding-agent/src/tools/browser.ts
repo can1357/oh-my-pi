@@ -4,6 +4,7 @@ import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { probeCdpStatus } from "./browser/attach";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
 import { resolveSpawnArgs } from "./browser/attach";
 import {
@@ -59,6 +60,11 @@ export type { Observation, ObservationEntry } from "./browser/tab-protocol";
 
 const DEFAULT_TAB_NAME = "main";
 const BROWSER_RUN_SCOPE: readonly string[] = ["tab", "page", "browser", "wait", "assert"];
+/** Grace window for an abandoned acquisition to report its own failure before the timeout report is built. */
+const OPEN_TIMEOUT_REPORT_GRACE_MS = 500;
+
+/** Aborts produced by our own timeout/cancel path carry no diagnostic value. */
+const CANCELLATION_ERROR_NAMES = new Set(["ToolAbortError", "AbortError", "TimeoutError"]);
 
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
@@ -280,19 +286,47 @@ async function openBrowser(
 	const deadlineStart = performance.now();
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const openSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+	// The deadline races the acquisition but cannot cancel it: `untilAborted`
+	// rejects its wrapper only, so the real work stays pending. Track the stage
+	// and any late error, so a timeout can report what actually happened
+	// instead of a bare "timed out".
+	let pendingStage = "browser acquisition";
+	let pendingError: unknown;
+	let pendingSettled: Promise<void> = Promise.resolve();
+	const trackPending = <T>(stage: string, run: () => Promise<T>): Promise<T> => {
+		pendingStage = stage;
+		const outcome = Promise.withResolvers<void>();
+		pendingSettled = outcome.promise;
+		return run().then(
+			value => {
+				outcome.resolve();
+				return value;
+			},
+			(error: unknown) => {
+				pendingError = error;
+				outcome.resolve();
+				throw error;
+			},
+		);
+	};
 	try {
 		const browser = await untilAborted(openSignal, () =>
-			acquireBrowser(kind, {
-				cwd: session.cwd,
-				viewport: params.viewport
-					? {
-							width: params.viewport.width,
-							height: params.viewport.height,
-							deviceScaleFactor: params.viewport.scale,
-						}
-					: undefined,
-				signal: openSignal,
-			}),
+			trackPending("browser acquisition", () =>
+				acquireBrowser(kind, {
+					cwd: session.cwd,
+					viewport: params.viewport
+						? {
+								width: params.viewport.width,
+								height: params.viewport.height,
+								deviceScaleFactor: params.viewport.scale,
+							}
+						: undefined,
+					signal: openSignal,
+					// Bound the queued launch: a wedged sibling acquisition is
+					// evicted instead of stalling every later open behind it.
+					budgetMs: timeoutMs,
+				}),
+			),
 		);
 
 		// Hold one open-acquisition lease across the whole tab acquisition.
@@ -307,26 +341,28 @@ async function openBrowser(
 		let result: AcquireTabResult;
 		try {
 			result = await untilAborted(openSignal, () =>
-				acquireTab(name, browser, {
-					url: params.url,
-					waitUntil: params.wait_until,
-					viewport: params.viewport
+				trackPending("tab acquisition (worker init / navigation)", () =>
+					acquireTab(name, browser, {
+						url: params.url,
+						waitUntil: params.wait_until,
+						viewport: params.viewport
 						? {
 								width: params.viewport.width,
 								height: params.viewport.height,
 								deviceScaleFactor: params.viewport.scale,
 							}
 						: undefined,
-					target: params.app?.target,
-					timeoutMs,
-					deadlineStartMs: deadlineStart,
-					dialogs: params.dialogs,
-					signal: openSignal,
-					ownerSessionId: session.getSessionId?.() ?? undefined,
-					// Omitted stays undefined: creation defaults it to false
-					// while reuse by the owner leaves a set value alone.
-					persist: params.persist,
-				}),
+						target: params.app?.target,
+						timeoutMs,
+						deadlineStartMs: deadlineStart,
+						dialogs: params.dialogs,
+						signal: openSignal,
+						ownerSessionId: session.getSessionId?.() ?? undefined,
+						// Omitted stays undefined: creation defaults it to false
+						// while reuse by the owner leaves a set value alone.
+						persist: params.persist,
+					}),
+				),
 			);
 		} catch (error) {
 			await releaseBrowser(browser, {
@@ -357,9 +393,20 @@ async function openBrowser(
 		return toolResult(details).text(lines.join("\n")).done();
 	} catch (error) {
 		// Caller cancellation stays a ToolAbortError; the requested timeout
-		// becomes a timeout ToolError; anything else passes through unchanged.
+		// becomes a diagnosed timeout ToolError; anything else passes through
+		// unchanged.
 		if (signal?.aborted) throw error instanceof ToolAbortError ? error : new ToolAbortError();
-		if (timeoutSignal.aborted) throw new ToolError(`Browser open timed out after ${timeoutMs}ms`);
+		if (timeoutSignal.aborted) {
+			// The abandoned acquisition is still running. A stalled attach or a
+			// rejected navigation usually reports its own error moments after the
+			// budget expires, and that message is exactly what the caller needs —
+			// give it a short grace window before falling back to the endpoint
+			// diagnosis.
+			await Promise.race([pendingSettled, Bun.sleep(OPEN_TIMEOUT_REPORT_GRACE_MS)]);
+			throw new ToolError(
+				await describeOpenTimeout({ kind, name, timeoutMs, stage: pendingStage, pendingError }),
+			);
+		}
 		throw error;
 	}
 }
@@ -480,4 +527,108 @@ function describeKind(kind: BrowserKind): string {
 		case "cmux":
 			return `cmux:${kind.surface ?? "split"}`;
 	}
+}
+
+/** Port argument for the relay-management commands quoted in timeout reports. */
+function relayPortHint(cdpUrl: string): string {
+	try {
+		const port = new URL(cdpUrl).port;
+		return port.length > 0 ? ` --port ${port}` : "";
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * Explain a timed-out `open` instead of returning the bare "Browser open timed
+ * out" line: name the stage that never finished, surface whatever the
+ * abandoned acquisition reported, and — for a CDP endpoint this process can
+ * probe — identify the failure mode (nothing listening / serving without the
+ * extension / healthy relay stalling inside the tab worker) together with the
+ * commands that clear each one.
+ */
+export async function describeOpenTimeout(input: {
+	kind: BrowserKind;
+	name: string;
+	timeoutMs: number;
+	/** Stage the abandoned acquisition was in when the budget expired. */
+	stage: string;
+	pendingError?: unknown;
+}): Promise<string> {
+	const { kind, name, timeoutMs, stage, pendingError } = input;
+	const lines = [`Browser open timed out after ${timeoutMs}ms — stuck in ${stage} (${describeKind(kind)}).`];
+	// The tool's own timeout aborts the pending acquisition, so its rejection is
+	// usually the abort itself ("Operation aborted"), not a diagnosis. Only an
+	// error that says something about *why* the acquisition stalled is quoted.
+	if (
+		pendingError instanceof Error &&
+		pendingError.message.length > 0 &&
+		!CANCELLATION_ERROR_NAMES.has(pendingError.name)
+	) {
+		lines.push(`Reported error: ${pendingError.message}`);
+	} else {
+		lines.push("The acquisition never reported an error; it is still pending inside this omp process.");
+	}
+	if (kind.kind !== "relay" && kind.kind !== "connected") {
+		lines.push(
+			"Likely fixes:",
+			"1. Retry the open — a stalled acquisition is evicted, so the retry starts fresh.",
+			`2. Close the wedged tab: browser.close({ name: ${JSON.stringify(name)}, kill: true }).`,
+			"3. Still stuck: restart the session — browser state lives in the process.",
+		);
+		return lines.join("\n");
+	}
+	const endpoint = `${kind.cdpUrl}/json/version`;
+	const status = await probeCdpStatus(endpoint, { timeoutMs: 1_500 });
+	const probe = (detail: string) => `Endpoint check: GET ${endpoint} -> ${detail}`;
+	const retryFixes: string[] = ["Likely fixes:"];
+	if (kind.kind === "relay") {
+		if (status === null) {
+			lines.push(probe("no answer, nothing is listening."));
+			retryFixes.push(
+				"1. Start the relay: `omp browser-relay` — omp also auto-starts one on the next open.",
+				`2. If a stale process still holds the port: \`pkill -f "browser-relay${relayPortHint(kind.cdpUrl)}"\`; the next open respawns a fresh relay.`,
+				`3. Verify: \`curl -s -o /dev/null -w '%{http_code}\\n' ${endpoint}\` -> 200 with the extension connected, 503 without it.`,
+			);
+		} else if (status === 503) {
+			lines.push(probe("503, the relay is up but its Chrome extension has not dialed in."));
+			retryFixes.push(
+				'1. chrome://extensions: "OMP Browser Relay" must be enabled with its toolbar badge showing "on".',
+				"2. Reload the extension (reload on its card); a reaped service worker needs up to ~30s (its keepalive alarm) to redial, then retry the open.",
+				'3. Not installed? Run `omp browser-relay install`.',
+			);
+		} else if (status !== null && status >= 200 && status < 300) {
+			lines.push(probe(`${status}, relay and extension are both live — the stall is inside omp's tab worker.`));
+			retryFixes.push(
+				"1. Retry the open — a stalled acquisition is evicted, so the retry starts fresh.",
+				`2. Drop the wedged tab: browser.close({ name: ${JSON.stringify(name)}, kill: true }).`,
+				`3. Force a fresh relay: \`pkill -f "browser-relay${relayPortHint(kind.cdpUrl)}"\` (respawns on the next open).`,
+				"4. Still stuck: restart the session — browser state lives in the process.",
+			);
+		} else {
+			lines.push(probe(`unexpected HTTP ${status}.`));
+			retryFixes.push(
+				`1. Inspect what answers there: \`curl -sS ${endpoint}\`.`,
+				"2. Point omp at the intended relay with the `browser.relayUrl` setting.",
+			);
+		}
+	} else if (status === null) {
+		lines.push(probe("no answer, nothing is listening."));
+		retryFixes.push(
+			"1. Confirm the browser is running with a DevTools endpoint (`--remote-debugging-port`).",
+			`2. Verify: \`curl -s -o /dev/null -w '%{http_code}\\n' ${endpoint}\` should print 200.`,
+		);
+	} else if (status !== null && status >= 200 && status < 300) {
+		lines.push(probe(`${status}, the endpoint is live — the stall is inside omp's tab worker.`));
+		retryFixes.push(
+			"1. Retry the open — a stalled acquisition is evicted, so the retry starts fresh.",
+			`2. Drop the wedged tab: browser.close({ name: ${JSON.stringify(name)}, kill: true }).`,
+			"3. Still stuck: restart the session — browser state lives in the process.",
+		);
+	} else {
+		lines.push(probe(`HTTP ${status}.`));
+		retryFixes.push(`1. Inspect what answers there: \`curl -sS ${endpoint}\`.`);
+	}
+	lines.push(...retryFixes);
+	return lines.join("\n");
 }
