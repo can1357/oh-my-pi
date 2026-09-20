@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- Fixed long agent runs stopping on a second OpenAI Responses request-body timeout: the one-shot shake-and-retry recovery is re-armed by any turn that produced output, so a prompt that kept making progress can recover its newly grown history instead of terminating, while back-to-back timeouts still get exactly one changed request.
 - Fixed system prompt configuration validation so systemPromptTemplate and customSystemPrompt cannot conflict with a full systemPrompt replacement, including when values are empty.
 - Added browser-relay support for listing eligible pages without attaching to or claiming them.
 - Fixed Codex compatibility with the sloppy edit tool.
