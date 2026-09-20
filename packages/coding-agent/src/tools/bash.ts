@@ -4,6 +4,7 @@ import {
 	formatWallTimeNotice,
 	formatExitCodeNotice,
 } from "@oh-my-pi/pi-tui/tools/bash";
+import { formatToolWorkingDirectory, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import * as fs from "node:fs";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -686,7 +687,12 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		jobId: string,
 		previewText: string,
 		timeoutSec: number | undefined,
-		options: { requestedTimeoutSec?: number; notices?: readonly string[] } = {},
+		options: {
+			requestedTimeoutSec?: number;
+			notices?: readonly string[];
+			command?: string;
+			commandCwd?: string;
+		} = {},
 	): AgentToolResult<BashToolDetails> {
 		const details: BashToolDetails = {
 			async: { state: "running", jobId, type: "bash" },
@@ -708,6 +714,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			lines.push(...options.notices, "");
 		}
 		lines.push(formatBackgroundNotice(jobId));
+		const identityCommand = options.command?.trim();
+		if (identityCommand) {
+			lines.push(`Command: ${truncateForPrompt(identityCommand)}`);
+		}
+		const formattedCwd =
+			options.commandCwd !== undefined
+				? formatToolWorkingDirectory(options.commandCwd, this.session.cwd)
+				: undefined;
+		if (formattedCwd !== undefined) {
+			lines.push(`Working directory: ${replaceTabs(formattedCwd)}`);
+		}
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
 			details,
@@ -948,6 +965,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: pendingNotices,
+				command,
+				commandCwd,
 			});
 		}
 
@@ -985,6 +1004,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
+					command,
+					commandCwd,
 				});
 			}
 			// Suppress the completion delivery up front so a job finishing while we
@@ -1018,6 +1039,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
 				requestedTimeoutSec,
 				notices,
+				command,
+				commandCwd,
 			});
 		}
 

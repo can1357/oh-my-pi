@@ -134,7 +134,7 @@ describe("bashToolRenderer", () => {
 				content: [
 					{
 						type: "text",
-						text: "started\n\nBackgrounded as job bash-42; result will be delivered automatically.",
+						text: "started\n\nBackgrounded as job bash-42; result will be delivered automatically.\nCommand: printf REPRO_RIGHT\nWorking directory: workdir-child",
 					},
 				],
 				details: {
@@ -151,6 +151,8 @@ describe("bashToolRenderer", () => {
 		expect(rendered).toContain("started");
 		expect(rendered).toContain("Backgrounded: bash-42");
 		expect(rendered).not.toContain("result will be delivered automatically");
+		expect(rendered).not.toContain("printf REPRO_RIGHT");
+		expect(rendered).not.toContain("workdir-child");
 	});
 
 	it("folds raw output artifact notices into the status footer", async () => {

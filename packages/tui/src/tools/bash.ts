@@ -335,10 +335,19 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					) {
 						return cachedSnapshot;
 					}
-					const withoutBackground =
-						details?.async?.state === "running"
-							? stripTrailingNotice(rawOutput, formatBackgroundNotice(details.async.jobId))
-							: rawOutput;
+					const backgroundJobId = details?.async?.state === "running" ? details.async.jobId : undefined;
+					let withoutBackground = rawOutput;
+					if (backgroundJobId !== undefined) {
+						const backgroundNoticeStart = (line: string): boolean =>
+							line.startsWith(formatBackgroundNotice(backgroundJobId)) ||
+							line.startsWith("Command: ") ||
+							line.startsWith("Working directory: ");
+						let previous = "";
+						while (previous !== withoutBackground) {
+							previous = withoutBackground;
+							withoutBackground = stripTrailingNotice(withoutBackground, backgroundNoticeStart);
+						}
+					}
 					const strippedOutput = stripOutputNotice(withoutBackground, details?.meta);
 					const withoutExit =
 						details?.exitCode === undefined
