@@ -609,11 +609,12 @@ describe("AgentSession role model thinking behavior", () => {
 			initialThinkingLevel: Effort.High,
 			modelRoles: { default: `${model.provider}/${model.id}` },
 		});
+		sessionSettings.set("providers.autoThinkingMaxEffort", Effort.High);
 		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockRejectedValue(new Error("classifier down"));
 
 		session.setThinkingLevel(AUTO_THINKING);
-		const fallback = resolveProvisionalAutoLevel(model);
+		const fallback = Effort.High;
 		await session.prompt("Investigate a regression");
 
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);

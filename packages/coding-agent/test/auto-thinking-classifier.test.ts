@@ -66,6 +66,23 @@ describe("auto thinking classifier helpers", () => {
 		expect(maxTokens).toBe(1024);
 	});
 
+	it("honors a high ceiling for the local classifier", async () => {
+		const fixture = createLocalClassifierFixture("qwen3-1.7b");
+		const settings = Settings.isolated({
+			"providers.autoThinkingModel": "qwen3-1.7b",
+			"providers.autoThinkingMaxEffort": "high",
+		});
+		vi.spyOn(tinyModelClient, "complete").mockResolvedValue("hard");
+
+		expect(
+			await classifyDifficulty("cut over the storage layer", {
+				settings,
+				registry: fixture.registry,
+				model: fixture.model,
+			}),
+		).toBe(Effort.High);
+	});
+
 	it("keeps the local classifier capped at xhigh even when opted in to max", async () => {
 		// The local backend only ever emits trivial/moderate/hard, so a sparse
 		// ladder must not let the opt-in ceiling snap `hard` up to a tier the
@@ -167,7 +184,7 @@ describe("auto thinking classifier helpers", () => {
 		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 
-	function createOnlineFixture(targetModel: Model, answer: string, maxEffort: "xhigh" | "max" = "xhigh") {
+	function createOnlineFixture(targetModel: Model, answer: string, maxEffort: "high" | "xhigh" | "max" = "xhigh") {
 		const classifierModel = getBundledModel("anthropic", "claude-sonnet-4-6");
 		if (!classifierModel) throw new Error("Expected bundled Claude Sonnet 4.6 model");
 		const settings = {
@@ -232,6 +249,14 @@ describe("auto thinking classifier helpers", () => {
 	const MAX_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 	const XHIGH_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 
+	it("offers only labels through the configured high ceiling", async () => {
+		const fixture = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "xhigh", "high");
+		expect(await classifyDifficulty("untangle this cross-service race", fixture.deps)).toBe(Effort.High);
+		const request = fixture.completeSimpleMock.mock.calls[0]?.[1] as { systemPrompt: string[] };
+		expect(request.systemPrompt[0]).toContain("`high`");
+		expect(request.systemPrompt[0]).not.toMatch(/`xhigh`/);
+		expect(request.systemPrompt[0]).not.toMatch(/`max`/);
+	});
 	it("reports usage for each response when a transient classifier failure is retried", async () => {
 		const fixture = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "high");
 		fixture.completeSimpleMock.mockImplementationOnce(async (_model, _context, options) => {

@@ -49,6 +49,18 @@ const LEVEL_CRITERIA: Record<Exclude<Level, "max">, string> = {
 const MAX_CRITERION =
 	"Meets xhigh and at least one of: no reproduction to work from, irreversible or data-loss operation, or a live cutover that must stay correct while running. xhigh is required; difficulty alone is insufficient.";
 
+/** Three-level question used when the configured ceiling is `high`. */
+const HIGH_LEVEL_QUESTION: ChoiceQuestion<Exclude<Level, "xhigh" | "max">> = {
+	type: "choice",
+	instructions:
+		"The state is a user's request to a coding agent. Choose the reasoning effort this turn needs, judging inherent task difficulty rather than phrasing politeness or verbosity. If torn between levels, choose the lower one.",
+	criteria: {
+		low: LEVEL_CRITERIA.low,
+		medium: LEVEL_CRITERIA.medium,
+		high: LEVEL_CRITERIA.high,
+	},
+};
+
 /** Full-ladder question up to `xhigh`. */
 const LEVEL_QUESTION: ChoiceQuestion<Exclude<Level, "max">> = {
 	type: "choice",
@@ -87,14 +99,14 @@ export interface ClassifyDifficultyDeps {
 }
 
 /**
- * Highest effort this turn's classification may resolve to: the configured
- * ceiling, further limited by what the target model actually exposes. The
- * default keeps `auto` one tier below the top, so only an explicit
- * `ultrathink` reaches {@link Effort.Max}.
+ * Highest effort automatic classification or fallback may resolve to, further
+ * limited by what the target model actually exposes. The default keeps `auto`
+ * one tier below the top, so only explicit `ultrathink` reaches {@link Effort.Max}.
  */
-function autoEffortCeiling(deps: ClassifyDifficultyDeps): Effort {
-	if (deps.settings.get("providers.autoThinkingMaxEffort") !== Effort.Max) return Effort.XHigh;
-	return getSupportedEfforts(deps.model).includes(Effort.Max) ? Effort.Max : Effort.XHigh;
+export function autoThinkingEffortCeiling(model: Model, configured: string): Effort {
+	if (configured === Effort.High) return Effort.High;
+	if (configured !== Effort.Max) return Effort.XHigh;
+	return getSupportedEfforts(model).includes(Effort.Max) ? Effort.Max : Effort.XHigh;
 }
 
 /**
@@ -118,18 +130,22 @@ export async function classifyDifficulty(
 	});
 	const state = { request: preprocessTinyMessage(promptText) };
 	const options = { signal: deps.signal };
-	// The 3-bucket local question cannot select `max`, so its ceiling stays at
-	// XHigh whatever the setting says — otherwise a sparse ladder would snap its
-	// `hard` bucket up to a tier it never chose.
+	// The 3-bucket local question cannot select `max`; it remains capped at
+	// xhigh for the `max` opt-in, but honors the tighter `high` ceiling.
 	let ceiling: Effort;
 	let effort: Effort;
 	if (judge.kind === "local") {
-		ceiling = Effort.XHigh;
+		ceiling = deps.settings.get("providers.autoThinkingMaxEffort") === Effort.High ? Effort.High : Effort.XHigh;
 		const { answers } = await judge.judge({ state, questions: { bucket: BUCKET_QUESTION } }, options);
 		effort = BUCKET_EFFORT[answers.bucket.choice];
 	} else {
-		ceiling = autoEffortCeiling(deps);
-		const level = ceiling === Effort.Max ? LEVEL_QUESTION_WITH_MAX : LEVEL_QUESTION;
+		ceiling = autoThinkingEffortCeiling(deps.model, deps.settings.get("providers.autoThinkingMaxEffort"));
+		const level =
+			ceiling === Effort.Max
+				? LEVEL_QUESTION_WITH_MAX
+				: ceiling === Effort.High
+					? HIGH_LEVEL_QUESTION
+					: LEVEL_QUESTION;
 		const { answers } = await judge.judge({ state, questions: { level } }, options);
 		effort = LEVEL_EFFORT[answers.level.choice];
 	}
