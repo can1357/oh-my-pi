@@ -5,6 +5,8 @@
 //! Other platforms expose the same API as an unavailable, no-op backend.
 //! All `AppKit` work runs serially on one lazily spawned, dedicated spelling
 //! thread so the singleton keeps a stable thread identity.
+//! Word-level operations use the identified language, not the checker's current
+//! language.
 
 use napi_derive::napi;
 
@@ -24,7 +26,7 @@ mod platform {
 	use napi::{Error, Result, Status};
 	use objc2::rc::Retained;
 	use objc2_app_kit::NSSpellChecker;
-	use objc2_foundation::{NSArray, NSRange, NSString, NSTextCheckingType};
+	use objc2_foundation::{NSArray, NSOrthography, NSRange, NSString, NSTextCheckingType};
 
 	use super::SpellingRange;
 
@@ -137,17 +139,79 @@ mod platform {
 			.unwrap_or_default()
 	}
 
-	/// Language macOS identifies for a word range, honoring automatic language
-	/// identification. Falls back to the shared checker's current language when
-	/// detection is inconclusive (issue #9334).
+	/// Orthography checkString: identifies for text under automatic language
+	/// identification - the per-script language map the spelling pass in check
+	/// uses.
+	fn orthography(checker: &NSSpellChecker, text: &NSString) -> Option<Retained<NSOrthography>> {
+		let full = NSRange { location: 0, length: text.length() };
+		// SAFETY: the arguments match the documented nil options, tag, and word-count
+		// usage.
+		let results = unsafe {
+			checker.checkString_range_types_options_inSpellDocumentWithTag_orthography_wordCount(
+				text,
+				full,
+				NSTextCheckingType::Orthography.bits(),
+				None,
+				0,
+				None,
+				std::ptr::null_mut(),
+			)
+		};
+		results.iter().find_map(|result| {
+			(result.resultType() == NSTextCheckingType::Orthography)
+				.then(|| result.orthography())
+				.flatten()
+		})
+	}
+
+	/// Language identification assigns to the word at range through the whole
+	/// text script-to-language map.
+	fn detected_word_language(
+		checker: &NSSpellChecker,
+		text: &NSString,
+		range: NSRange,
+	) -> Option<Retained<NSString>> {
+		let end = range.location.checked_add(range.length)?;
+		if range.length == 0 || end > text.length() {
+			return None;
+		}
+		// SAFETY: bounds are checked above.
+		let word = text.substringWithRange(range);
+		let script = orthography(checker, &word)?.dominantScript();
+		let language = orthography(checker, text)?.dominantLanguageForScript(&script)?;
+		if language.to_string() == "und" {
+			return None;
+		}
+		Some(language)
+	}
+
+	/// Use the dictionary that will judge the word; fall back only when language
+	/// identification is inconclusive.
 	fn word_language(
 		checker: &NSSpellChecker,
 		text: &NSString,
 		range: NSRange,
 	) -> Retained<NSString> {
-		checker
-			.languageForWordRange_inString_orthography(range, text, None)
-			.unwrap_or_else(|| checker.language())
+		detected_word_language(checker, text, range).unwrap_or_else(|| checker.language())
+	}
+
+	/// Whether the spelling pass flags the word at `range`.
+	///
+	/// Autocorrection may only rewrite a word the typo pass would undercurl.
+	/// Language identification can disagree with the pass: for a text the pass
+	/// judges with the generic `en` run dictionary, the word-level lookup falls
+	/// back to the checker's preferred language (`en_GB`), which "corrects"
+	/// `artifacts` to `artefacts` while the pass accepts `artifacts` (issue
+	/// #9334 follow-up).
+	fn word_is_misspelled(text: &str, range: NSRange) -> bool {
+		let Ok(flagged) = check(text) else {
+			return false;
+		};
+		let start = u32::try_from(range.location).unwrap_or(u32::MAX);
+		let end = start.saturating_add(u32::try_from(range.length).unwrap_or(u32::MAX));
+		flagged
+			.iter()
+			.any(|flagged| flagged.start < end && flagged.start.saturating_add(flagged.length) > start)
 	}
 
 	pub fn completions(text: &str, start: u32, length: u32) -> Result<Vec<String>> {
@@ -180,11 +244,14 @@ mod platform {
 
 	pub fn correction(text: &str, start: u32, length: u32) -> Result<Option<String>> {
 		let checker = checker()?;
-		let text = NSString::from_str(text);
+		let source = NSString::from_str(text);
 		let range = ns_range(start, length)?;
-		let language = word_language(&checker, &text, range);
+		if !word_is_misspelled(text, range) {
+			return Ok(None);
+		}
+		let language = word_language(&checker, &source, range);
 		let value = checker.correctionForWordRange_inString_language_inSpellDocumentWithTag(
-			range, &text, &language, 0,
+			range, &source, &language, 0,
 		);
 		Ok(value.map(|value| value.to_string()))
 	}

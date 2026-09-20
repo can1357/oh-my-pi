@@ -191,6 +191,25 @@ describe("macOS spelling feature gates", () => {
 		expect(spellingGuesses).not.toHaveBeenCalled();
 	});
 
+	it("judges autocorrect over the whole draft, not just the cursor line", async () => {
+		// A one-word line used to make macOS fall back to the preferred dictionary
+		// (en_GB): `artifacts` was rewritten to `artefacts` even though the typo
+		// pass, which checks the whole draft, accepts `artifacts`.
+		const autocorrectWord = mock(async (text: string, start: number, length: number): Promise<string | null> =>
+			text === "alpha bravo\nartifacts " && start === 12 && length === 9 ? null : "artefacts",
+		);
+		const provider = new MacOSSpellingProvider(backend({ autocorrectWord }));
+		provider.setFeatures({ typoDetection: false, autocomplete: false, autocorrect: true });
+
+		expect(await provider.tryAutocorrect(["alpha bravo", "artifacts "], 1, 10)).toBeNull();
+		expect(autocorrectWord).toHaveBeenCalledWith("alpha bravo\nartifacts ", 12, 9);
+		// A single-line draft keeps the absolute offset in range too.
+		expect(await provider.tryAutocorrect(["artifacts "], 0, 10)).toEqual({
+			replaceLen: 10,
+			insert: "artefacts ",
+		});
+	});
+
 	it("skips paths, slash commands, and inline code", async () => {
 		const provider = new MacOSSpellingProvider(
 			backend({
