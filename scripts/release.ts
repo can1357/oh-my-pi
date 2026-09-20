@@ -11,6 +11,7 @@
 
 import { $, Glob } from "bun";
 import { runChangelogFixer } from "./fix-changelogs";
+import { queryReleaseRuns } from "./release-query";
 
 const changelogGlob = new Glob("packages/*/CHANGELOG.md");
 const packageJsonGlob = new Glob("packages/*/package.json");
@@ -40,7 +41,7 @@ async function watchCI(): Promise<boolean> {
 	console.log(`  Commit: ${commitSha.slice(0, 8)}`);
 
 	while (true) {
-		const runsOutput = await $`gh run list --commit ${commitSha} --json databaseId,status,conclusion,name`.text();
+		const runsOutput = await queryReleaseRuns(commitSha);
 		const runs: Array<{ databaseId: number; status: string; conclusion: string | null; name: string }> =
 			JSON.parse(runsOutput);
 
