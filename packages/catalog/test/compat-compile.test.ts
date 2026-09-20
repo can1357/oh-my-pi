@@ -285,12 +285,17 @@ describe("provider catalog grammar", () => {
 		'\t\t\tinput "text"',
 		"\t\t\tcost input=1 output=2 cache-read=0.1 cache-write=0",
 		"\t\t\tlimits context=1000",
+		"$SAND",
 		"$AXES",
 		"\t\t}",
 	];
 	const provider = (id: string, nodes: string[]) => `provider "${id}" {\n${nodes.join("\n")}\n}`;
-	const seed = (header: string, axes = "") =>
-		[`\tseed ${header} {`, ...row.map(line => (line === "$AXES" ? axes : line)), "\t}"].join("\n");
+	const seed = (header: string, axes = "", sand = "") =>
+		[
+			`\tseed ${header} {`,
+			...row.map(line => (line === "$AXES" ? axes : line === "$SAND" ? sand : line)).filter(Boolean),
+			"\t}",
+		].join("\n");
 	const src = (text: string) => [{ file: "providers/p.kdl", text }];
 
 	test("entry nodes compile alongside cascade rules; catalog membership requires default-model", () => {
@@ -363,6 +368,47 @@ describe("provider catalog grammar", () => {
 		expect(() =>
 			compileProviders(seeded('api="openai-completions" base-url="https://x" bundle="sometimes"', "")),
 		).toThrow(/seed bundle must be one of/);
+	});
+
+	test("Grok Bot seed parameters are typed model metadata", () => {
+		const { p } = compileProviders(
+			src(
+				provider("p", [
+					'\tdefault-model "m"',
+					seed(
+						'api="grokbot-sand" base-url="https://x"',
+						"",
+						'\t\t\tsand-parameter-ids "effort" "fast"\n\t\t\tsand-max-mode #true',
+					),
+				]),
+			),
+		);
+		expect(p.seed?.models[0]).toMatchObject({
+			sandParameterIds: ["effort", "fast"],
+			sandMaxMode: true,
+		});
+		expect(() =>
+			compileProviders(
+				src(
+					provider("p", [
+						'\tdefault-model "m"',
+						seed('api="grokbot-sand" base-url="https://x"', "", '\t\t\tsand-parameter-ids "effort" "effort"'),
+					]),
+				),
+			),
+		).toThrow(/sand-parameter-ids.*malformed value/);
+		for (const sandDirective of ['sand-parameter-ids "effort"', "sand-max-mode #true"]) {
+			expect(() =>
+				compileProviders(
+					src(
+						provider("p", [
+							'\tdefault-model "m"',
+							seed('api="openai-completions" base-url="https://x"', "", `\t\t\t${sandDirective}`),
+						]),
+					),
+				),
+			).toThrow(/only applies to api `grokbot-sand`/);
+		}
 	});
 
 	test("models-from copies rows under the inheriting provider; entries are keyed and sorted by id", () => {

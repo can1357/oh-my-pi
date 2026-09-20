@@ -8,8 +8,10 @@ import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { grokbotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { discoverOllamaModels, discoveryProbeTimeoutMs } from "@oh-my-pi/pi-coding-agent/config/model-discovery";
 import { RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
@@ -521,6 +523,187 @@ describe("ModelRegistry runtime discovery", () => {
 
 		expect(modelListCalls).toBe(0);
 		expect(getModelsForProvider(registry, "openai-codex").length).toBeGreaterThan(0);
+	});
+
+	test("Grok Bot discovery intersects every active structured and OAuth credential", async () => {
+		await authStorage.set("grokbot", [
+			{
+				type: "oauth",
+				access: "grok-renewal-a",
+				refresh: "grok-refresh-a",
+				expires: Date.now() + 3_600_000,
+				orgId: "grok-machine-a",
+			},
+			{
+				type: "api_key",
+				key: JSON.stringify({ machineId: "grok-machine-api-a", renewal: "grok-renewal-api-a" }),
+			},
+			{
+				type: "oauth",
+				access: "grok-renewal-b",
+				refresh: "grok-refresh-b",
+				expires: Date.now() + 3_600_000,
+				orgId: "grok-machine-b",
+			},
+			{
+				type: "api_key",
+				key: JSON.stringify({ machineId: "grok-machine-api-b", renewal: "grok-renewal-api-b" }),
+			},
+		]);
+		const rosterAuthorizations: string[] = [];
+		const mintedCredentials: string[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url.endsWith("/sand-box/inference-credential")) {
+				const { credential } = JSON.parse(String(init?.body)) as { credential: string };
+				mintedCredentials.push(credential);
+				return Response.json({
+					accessToken: `synthetic-access-${credential}`,
+					grokBotToken: `grok-bot-${credential}`,
+					expiresAtMs: Date.now() + 10 * 60_000,
+				});
+			}
+			if (url.endsWith("/aiserver.v1.AiService/AvailableModels")) {
+				const authorization = new Headers(init?.headers).get("authorization") ?? "";
+				rosterAuthorizations.push(authorization);
+				return authorization === "Bearer synthetic-access-grok-renewal-a"
+					? Response.json({
+							models: [
+								{
+									name: "shared-grok",
+									supportsImages: true,
+									supportsMaxMode: true,
+									supportsNonMaxMode: false,
+									contextTokenLimit: 100_000,
+									idAliases: ["shared-alias", "account-a-alias"],
+									parameterDefinitions: [{ id: "fast" }],
+								},
+								{ name: "account-a-only" },
+							],
+						})
+					: Response.json({
+							models: [
+								{
+									name: "shared-grok",
+									supportsImages: false,
+									supportsMaxMode: false,
+									supportsNonMaxMode: true,
+									contextTokenLimit: 50_000,
+									idAliases: ["shared-alias", "account-b-alias"],
+									parameterDefinitions: [{ id: "safe" }],
+								},
+								{ name: "account-b-only" },
+							],
+						});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("grokbot", "online");
+
+		const grokbotModels = getModelsForProvider(registry, "grokbot");
+		const shared = registry.find("grokbot", "shared-grok");
+		expect(grokbotModels.map(model => model.id).sort()).toEqual(["default", "sand-cua", "shared-grok"]);
+		expect(mintedCredentials.sort()).toEqual([
+			"grok-renewal-a",
+			"grok-renewal-api-a",
+			"grok-renewal-api-b",
+			"grok-renewal-b",
+		]);
+		expect(rosterAuthorizations.sort()).toEqual([
+			"Bearer synthetic-access-grok-renewal-a",
+			"Bearer synthetic-access-grok-renewal-api-a",
+			"Bearer synthetic-access-grok-renewal-api-b",
+			"Bearer synthetic-access-grok-renewal-b",
+		]);
+		expect(shared).toMatchObject({
+			input: ["text"],
+			contextWindow: 50_000,
+			sandParameterIds: [],
+			sandMaxMode: false,
+			aliases: ["shared-alias"],
+		});
+	});
+
+	test("Grok Bot discovery forwards resolved provider headers to token minting and roster lookup", async () => {
+		writeRawModelsJson({
+			grokbot: { headers: { "X-Grok-Tenant": "registry-tenant" } },
+		});
+		await authStorage.set("grokbot", {
+			type: "oauth",
+			access: "registry-header-renewal",
+			refresh: "registry-header-refresh",
+			expires: Date.now() + 3_600_000,
+			orgId: "registry-header-machine",
+		});
+		const headerValues: string[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			headerValues.push(new Headers(init?.headers).get("x-grok-tenant") ?? "");
+			if (String(input).endsWith("/sand-box/inference-credential")) {
+				return Response.json({
+					accessToken: "synthetic-registry-access-token",
+					grokBotToken: "registry-header-grok-bot",
+					expiresAtMs: Date.now() + 10 * 60_000,
+				});
+			}
+			if (String(input).endsWith("/aiserver.v1.AiService/AvailableModels")) {
+				return Response.json({ models: [] });
+			}
+			throw new Error(`Unexpected URL: ${String(input)}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("grokbot", "online");
+
+		expect(headerValues).toEqual(["registry-tenant", "registry-tenant"]);
+	});
+
+	test("Grok Bot offline hydration loads the exact renewal and machine credential cache after bearer expiry", async () => {
+		const apiKey = JSON.stringify({ renewal: "expired-cache-renewal", machineId: "expired-cache-machine" });
+		const managerOptions = grokbotModelManagerOptions({ apiKeys: [apiKey] });
+		const cacheProviderId = managerOptions.cacheProviderId;
+		if (!cacheProviderId) throw new Error("Missing Grok Bot cache provider id");
+		const staticModels = managerOptions.staticModels ?? [];
+		const cachedModel = buildModel({
+			id: "expired-cache-model",
+			name: "Expired cache model",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_000,
+		});
+		writeModelCache(
+			cacheProviderId,
+			Date.now(),
+			[cachedModel],
+			true,
+			fingerprintStaticModels(staticModels, true),
+			cacheDbPath,
+		);
+		await authStorage.set("grokbot", {
+			type: "oauth",
+			access: apiKey,
+			refresh: "expired-cache-refresh",
+			expires: Date.now() - 60_000,
+			orgId: "expired-cache-machine",
+		});
+		let fetchCalls = 0;
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				fetchCalls++;
+				throw new Error("offline Grok cache hydration must not fetch");
+			},
+		});
+
+		await registry.hydrateCredentialScopedModelCaches();
+
+		expect(fetchCalls).toBe(0);
+		expect(registry.find("grokbot", "expired-cache-model")).toBeDefined();
 	});
 
 	test("Gemini CLI discovery forwards a stored OAuth project id to the quota fallback", async () => {

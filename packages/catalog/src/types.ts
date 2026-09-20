@@ -20,7 +20,8 @@ export type KnownApi =
 	| "ollama-chat"
 	| "cursor-agent"
 	| "gitlab-duo-agent"
-	| "devin-agent";
+	| "devin-agent"
+	| "grokbot-sand";
 export type Api = KnownApi | (string & {});
 
 /** Canonical thinking transport used by a model. */
@@ -956,6 +957,17 @@ export interface DevinCompat {
 
 /** Fully-resolved devin-agent compat view. */
 export type ResolvedDevinCompat = Required<DevinCompat>;
+
+/**
+ * Compatibility settings for Grok Bot. AvailableModels is the authority for
+ * controllable effort; identity-derived ladders can name parameters this
+ * transport does not accept.
+ */
+export interface GrokbotCompat {
+	trustExplicitThinkingOnly?: boolean;
+}
+
+export type ResolvedGrokbotCompat = Required<GrokbotCompat>;
 /**
  * Compatibility settings for the Google API family (google-generative-ai,
  * google-vertex, google-gemini-cli). Class-driven defaults come from the
@@ -1019,9 +1031,11 @@ export type CompatConfigOf<TApi extends Api> = TApi extends
 			? BedrockCompat
 			: TApi extends "devin-agent"
 				? DevinCompat
-				: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
-					? GoogleCompat
-					: undefined;
+				: TApi extends "grokbot-sand"
+					? GrokbotCompat
+					: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
+						? GoogleCompat
+						: undefined;
 
 /** Resolved compat for a given API: complete record, materialized once by `buildModel`. */
 export type CompatOf<TApi extends Api> = TApi extends "openrouter"
@@ -1036,9 +1050,11 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 					? ResolvedBedrockCompat
 					: TApi extends "devin-agent"
 						? ResolvedDevinCompat
-						: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
-							? ResolvedGoogleCompat
-							: undefined;
+						: TApi extends "grokbot-sand"
+							? ResolvedGrokbotCompat
+							: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
+								? ResolvedGoogleCompat
+								: undefined;
 
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {
@@ -1164,6 +1180,23 @@ export interface Model<TApi extends Api = Api> {
 	 * serving path. Absent everywhere else; providers omit the wire field.
 	 */
 	reasoningMode?: "pro";
+	/**
+	 * Client-side id aliases from Grok Bot `AvailableModels.idAliases` (and similar).
+	 * Not separate catalog rows — lookup resolves an alias to this canonical model.
+	 */
+	aliases?: readonly string[];
+	/**
+	 * Allowed Grok Bot `requestedModel.parameters` ids from live `parameterDefinitions`
+	 * (e.g. `effort`, `fast`, `reasoning`, `context`). Empty/absent => bare modelId only.
+	 */
+	sandParameterIds?: readonly string[];
+	/**
+	 * Canonical user-facing effort to the exact Grok Bot parameter value advertised
+	 * by AvailableModels (for example `xhigh` → `extra-high` on some reasoning rows).
+	 */
+	sandEffortValues?: Readonly<Partial<Record<Effort, string>>>;
+	/** When true, Grok Bot stream sets `requestedModel.maxMode`. Default false. */
+	sandMaxMode?: boolean;
 	name: string;
 	api: TApi;
 	provider: Provider;

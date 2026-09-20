@@ -30,7 +30,11 @@ import {
 	RemoteAuthCredentialStore,
 	type SnapshotResponse,
 } from "@oh-my-pi/pi-ai/auth-broker";
-import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import {
+	DEFAULT_AUTH_GATEWAY_BIND,
+	RetryableModelResolutionError,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -161,22 +165,79 @@ const CATALOG_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 const CREDENTIAL_SYNC_INTERVAL_MS = 10 * 1000;
 
 /**
- * Index resolvable models by the request ids clients may send: the
- * provider-qualified `provider/id` (always) and the bare `id` (first-write-wins
- * fallback for legacy clients). Scoped to providers the gateway holds broker
- * credentials for, since only those are routable.
+ * Index resolvable models by request id. Provider-qualified canonical ids and
+ * native aliases use one case-insensitive, exact-first namespace; a canonical
+ * id always wins over an alias and collisions are omitted. Bare canonical ids
+ * use normalized lowercase keys only when exactly one eligible provider owns
+ * the id, while aliases remain qualified.
+ * Scoped to providers the gateway holds broker credentials for, since only
+ * those are routable.
  */
 export function indexModelsByRequestId(
 	models: readonly Model<Api>[],
 	providersWithCreds: ReadonlySet<string>,
 ): Map<string, Model<Api>> {
 	const modelById = new Map<string, Model<Api>>();
-	for (const model of models) {
-		if (!providersWithCreds.has(model.provider)) continue;
-		modelById.set(`${model.provider}/${model.id}`, model);
-		if (!modelById.has(model.id)) modelById.set(model.id, model);
+	const scopedModels = models.filter(model => providersWithCreds.has(model.provider));
+	const canonical = new Map<string, Model<Api> | null>();
+	const aliases = new Map<string, Model<Api> | null>();
+	const bareCanonical = new Map<string, Model<Api> | null>();
+	const addUnique = (index: Map<string, Model<Api> | null>, key: string, model: Model<Api>): void => {
+		const existing = index.get(key);
+		if (existing === undefined) {
+			index.set(key, model);
+		} else if (existing !== null && existing !== model) {
+			index.set(key, null);
+		}
+	};
+
+	for (const model of scopedModels) {
+		addUnique(canonical, `${model.provider}/${model.id}`.toLowerCase(), model);
+		addUnique(bareCanonical, model.id.toLowerCase(), model);
+	}
+	for (const model of scopedModels) {
+		for (const alias of model.aliases ?? []) {
+			const normalizedAlias = alias.trim().toLowerCase();
+			if (!normalizedAlias) continue;
+			const key = `${model.provider}/${normalizedAlias}`.toLowerCase();
+			// Canonical model ids win even when another model advertises the id
+			// as an alias, matching resolveProviderModelReference.
+			if (canonical.has(key)) continue;
+			addUnique(aliases, key, model);
+		}
+	}
+	for (const [key, model] of canonical) {
+		if (model) modelById.set(key, model);
+	}
+	for (const [key, model] of aliases) {
+		if (model) modelById.set(key, model);
+	}
+	for (const [key, model] of bareCanonical) {
+		if (model && !modelById.has(key)) modelById.set(key, model);
 	}
 	return modelById;
+}
+
+const MAX_GENERATION_SYNCHRONIZATION_REBUILD_ATTEMPTS = 3;
+
+export function createGenerationSynchronizedModelResolver(
+	getGeneration: () => number,
+	getCatalogGeneration: () => number | undefined,
+	rebuildCatalog: (force?: boolean) => Promise<void>,
+	lookup: (modelId: string) => Model<Api> | undefined,
+): (modelId: string) => Promise<Model<Api> | undefined> {
+	return async modelId => {
+		for (let attempt = 0; attempt < MAX_GENERATION_SYNCHRONIZATION_REBUILD_ATTEMPTS; attempt++) {
+			if (getCatalogGeneration() === getGeneration()) return lookup(modelId);
+			await rebuildCatalog(true);
+		}
+		if (getCatalogGeneration() !== getGeneration()) {
+			throw new RetryableModelResolutionError(
+				"Model catalog changed repeatedly while resolving the request; retry request",
+			);
+		}
+		return lookup(modelId);
+	};
 }
 
 /**
@@ -191,26 +252,106 @@ export function indexModelsByRequestId(
 export function createSerializedRebuilder(run: (force: boolean) => Promise<void>): (force?: boolean) => Promise<void> {
 	let inFlight: Promise<void> | null = null;
 	let forcedQueued = false;
-	const rebuild = (force = false): Promise<void> => {
-		if (inFlight) {
-			if (force) forcedQueued = true;
-			return inFlight;
-		}
-		inFlight = (async () => {
+	let forcedWaiters: PromiseWithResolvers<void> | null = null;
+
+	const start = (force: boolean): Promise<void> => {
+		const pass = (async () => {
+			let initialFailure: unknown;
+			let initialFailed = false;
 			try {
 				await run(force);
-				while (forcedQueued) {
-					forcedQueued = false;
-					await run(true);
-				}
-			} finally {
-				inFlight = null;
-				forcedQueued = false;
+			} catch (error) {
+				initialFailure = error;
+				initialFailed = true;
 			}
-		})();
-		return inFlight;
+			while (forcedQueued) {
+				forcedQueued = false;
+				const waiters = forcedWaiters;
+				forcedWaiters = null;
+				try {
+					await run(true);
+					waiters?.resolve();
+				} catch (error) {
+					waiters?.reject(error);
+				}
+			}
+			if (initialFailed) throw initialFailure;
+		})().finally(() => {
+			if (inFlight !== pass) return;
+			inFlight = null;
+			if (!forcedQueued) return;
+
+			// A forced caller can arrive after the loop observes no queued work
+			// but before this finalizer clears `inFlight`. Carry that caller into
+			// a fresh serialized pass rather than dropping its waiter.
+			forcedQueued = false;
+			const waiters = forcedWaiters;
+			forcedWaiters = null;
+			start(true).then(
+				() => waiters?.resolve(),
+				error => waiters?.reject(error),
+			);
+		});
+		inFlight = pass;
+		return pass;
 	};
-	return rebuild;
+
+	return (force = false): Promise<void> => {
+		if (!inFlight) return start(force);
+		if (!force) return inFlight;
+		forcedQueued = true;
+		forcedWaiters ??= Promise.withResolvers<void>();
+		return forcedWaiters.promise;
+	};
+}
+
+/**
+ * Hydrate and index the broker-scoped served catalog. The hydration pass must
+ * precede the initial cache-aware rebuild: exact credential-scoped rows are
+ * usable at startup even when the credential's access token has expired.
+ */
+export async function initializeGatewayModelCatalog(
+	storage: Pick<AuthStorage, "exportSnapshot" | "getGeneration">,
+	registry: Pick<ModelRegistry, "getAll" | "hydrateCredentialScopedModelCaches" | "refresh">,
+): Promise<{
+	rebuildCatalog: (force?: boolean) => Promise<void>;
+	resolveModel: (modelId: string) => Promise<Model<Api> | undefined>;
+	listModels: () => Iterable<Model<Api>>;
+}> {
+	await registry.hydrateCredentialScopedModelCaches();
+
+	// Providers the gateway can route right now, derived live from the store on
+	// every rebuild. Captured once at boot it would freeze the served catalog:
+	// a provider logged in later stays unroutable and one logged out keeps being
+	// advertised until restart.
+	const providersWithCreds = (): Set<string> => {
+		const providers = new Set<string>();
+		for (const entry of storage.exportSnapshot().credentials) providers.add(entry.provider);
+		return providers;
+	};
+	let modelById = new Map<string, Model<Api>>();
+	let catalogGeneration: number | undefined;
+	// Rebuild the served catalog (a `registry.refresh()` pass, then re-index
+	// against the current credential set). Credential-triggered rebuilds force
+	// `online` discovery: an account added to or removed from an
+	// already-authenticated provider (e.g. Codex, whose discovery unions
+	// per-account catalogs) leaves that provider's model cache fresh, so the
+	// default `online-if-uncached` pass would skip the fetch and miss the change
+	// for up to a cache TTL. Periodic rebuilds stay cached.
+	const rebuildCatalog = createSerializedRebuilder(async force => {
+		const generation = storage.getGeneration();
+		await registry.refresh(force ? "online" : "online-if-uncached");
+		modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds());
+		catalogGeneration = storage.getGeneration() === generation ? generation : undefined;
+	});
+	await rebuildCatalog();
+	const resolveModel = createGenerationSynchronizedModelResolver(
+		() => storage.getGeneration(),
+		() => catalogGeneration,
+		rebuildCatalog,
+		id => modelById.get(id) ?? modelById.get(id.toLowerCase()),
+	);
+	return { rebuildCatalog, resolveModel, listModels: () => modelById.values() };
 }
 
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
@@ -254,36 +395,15 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// a client-requested `model` field into a pi-ai `Model<Api>` before dispatch;
 	// `listModels` powers `/v1/models`.
 	const registry = new ModelRegistry(storage, undefined, { ignoreLocalModelConfig: true });
-	// Providers the gateway can route right now, derived live from the store on
-	// every rebuild. Captured once at boot it would freeze the served catalog:
-	// a provider logged in later stays unroutable and one logged out keeps being
-	// advertised until restart.
-	const providersWithCreds = (): Set<string> => {
-		const providers = new Set<string>();
-		for (const entry of storage.exportSnapshot().credentials) providers.add(entry.provider);
-		return providers;
-	};
-	let modelById = new Map<string, Model<Api>>();
-	// Rebuild the served catalog (a `registry.refresh()` pass, then re-index
-	// against the current credential set). Credential-triggered rebuilds force
-	// `online` discovery: an account added to or removed from an
-	// already-authenticated provider (e.g. Codex, whose discovery unions
-	// per-account catalogs) leaves that provider's model cache fresh, so the
-	// default `online-if-uncached` pass would skip the fetch and miss the change
-	// for up to a cache TTL. Periodic rebuilds stay cached.
-	const rebuildCatalog = createSerializedRebuilder(async force => {
-		await registry.refresh(force ? "online" : "online-if-uncached");
-		modelById = indexModelsByRequestId(registry.getAll(), providersWithCreds());
-	});
-	await rebuildCatalog();
+	const { listModels, rebuildCatalog, resolveModel } = await initializeGatewayModelCatalog(storage, registry);
 
 	const handle = startAuthGateway({
 		storage,
 		bind,
 		bearerTokens: gatewayToken ? [gatewayToken] : [],
 		version: VERSION,
-		resolveModel: (id: string) => modelById.get(id),
-		listModels: () => modelById.values(),
+		resolveModel,
+		listModels,
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {

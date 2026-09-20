@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Grok Bot as an inference provider with `/login grokbot` authentication, account-scoped model discovery, streaming responses, and tool calling.
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

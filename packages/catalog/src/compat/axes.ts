@@ -19,7 +19,7 @@ export type AxisShape = "scalar" | "array" | "object";
 export type AxisSet = "wire" | "thinking" | "catalog";
 
 /** Resolved compat record families a wire axis may be assigned onto. */
-export type CompatRecordName = "openai" | "openai-responses" | "anthropic" | "bedrock" | "devin" | "google";
+export type CompatRecordName = "openai" | "openai-responses" | "anthropic" | "bedrock" | "devin" | "grokbot" | "google";
 
 /** One axis definition: resolved key, namespace, shape, and applicability. */
 export interface AxisDef {
@@ -219,7 +219,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	// ── wire: devin-agent ──
 	"model-router": wire("modelRouter", ["devin"]),
 	"supports-parallel-tool-calls": wire("supportsParallelToolCalls", ["devin"]),
-	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", ["devin"]),
+	"trust-explicit-thinking-only": wire("trustExplicitThinkingOnly", ["devin", "grokbot"]),
 
 	// ── wire: google APIs ──
 	"antigravity-claude-tool-mode": wire("antigravityClaudeToolMode", ["google"]),
@@ -324,6 +324,7 @@ export const API_COMPAT_RECORDS: Readonly<Record<string, readonly CompatRecordNa
 	"anthropic-messages": ["anthropic"],
 	"bedrock-converse-stream": ["bedrock"],
 	"devin-agent": ["devin"],
+	"grokbot-sand": ["grokbot"],
 	"google-generative-ai": ["google"],
 	"google-vertex": ["google"],
 	"google-gemini-cli": ["google"],

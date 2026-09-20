@@ -5,6 +5,7 @@ import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/ove
 import {
 	extractExplicitThinkingSelector,
 	getModelMatchPreferences,
+	resolveProviderModelReference,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
@@ -40,13 +41,13 @@ export function resolveConfiguredModelTarget(
 	const parsed = parseModelString(trimmedTarget, {
 		allowMaxSuffix: true,
 		allowAutoAlias: true,
-		isLiteralModelId: (provider, id) => availableModels.some(model => model.provider === provider && model.id === id),
+		isLiteralModelId: (provider, id) => resolveProviderModelReference(provider, id, availableModels) !== undefined,
 	});
 	if (parsed) {
-		const explicitModel = availableModels.find(model => model.provider === parsed.provider && model.id === parsed.id);
+		const explicitModel = resolveProviderModelReference(parsed.provider, parsed.id, availableModels);
 		if (explicitModel) return explicitModel;
 	}
-	return availableModels.find(model => model.provider === currentModel.provider && model.id === trimmedTarget);
+	return resolveProviderModelReference(currentModel.provider, trimmedTarget, availableModels);
 }
 
 /** Resolves a model's configured context-promotion target. */

@@ -32,6 +32,7 @@ export type KnownProvider =
 	| "google-antigravity"
 	| "google-gemini-cli"
 	| "google-vertex"
+	| "grokbot"
 	| "groq"
 	| "huggingface"
 	| "kilo"

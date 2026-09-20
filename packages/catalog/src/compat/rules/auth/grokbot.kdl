@@ -1,0 +1,15 @@
+// Auth contract for "grokbot".
+//
+// Not Cursor OAuth and not xAI / Grok CLI. `/login grokbot` is fully
+// self-contained: browser sign-in (PKCE, redirectTarget=sand) → machine
+// registration → EnsureSandBox + box exec bootstrap (reads the pod-scoped
+// renewal credential from the box environment) → inference verification.
+// The stored OAuth row carries the renewal credential in `access` and the
+// machine id in `orgId`; `refresh` re-runs bootstrap when the box is
+// recreated. No env vars, no secrets file.
+auth "grokbot" {
+	name "Grok Bot (not Cursor, not xAI)"
+	login "custom" hook="grokbot"
+	refresh hook="grokbot"
+	api-key-format "structured"
+}

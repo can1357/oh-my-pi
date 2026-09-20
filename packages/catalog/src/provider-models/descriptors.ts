@@ -77,6 +77,7 @@ import {
 	cursorModelManagerOptions,
 	devinModelManagerOptions,
 	gitLabDuoWorkflowModelManagerOptions,
+	grokbotModelManagerOptions,
 	zaiModelManagerOptions,
 } from "./special";
 
@@ -101,6 +102,7 @@ const MODEL_MANAGER_FACTORIES: Readonly<Partial<Record<KnownProvider, ModelManag
 	deepinfra: config => deepinfraModelManagerOptions(config),
 	deepseek: config => deepseekModelManagerOptions(config),
 	devin: config => devinModelManagerOptions(config),
+	grokbot: config => grokbotModelManagerOptions(config),
 	"cline-pass": config => clinePassModelManagerOptions(config),
 	firepass: config => firepassModelManagerOptions(config),
 	fireworks: config => fireworksModelManagerOptions(config),

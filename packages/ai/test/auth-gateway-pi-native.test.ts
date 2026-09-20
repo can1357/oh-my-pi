@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { RetryableModelResolutionError, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { encodeStream, formatError, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
@@ -308,6 +308,273 @@ describe("pi-native gateway cache controls", () => {
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
 			clearCustomApis();
+		}
+	});
+});
+
+describe("pi-native gateway model-resolution errors", () => {
+	it("returns a retryable catalog-churn error in the native envelope", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-resolution-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const error = new RetryableModelResolutionError("catalog is changing; retry request");
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: async () => {
+				throw error;
+			},
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: "catalog-churn", context: baseContext, stream: false }),
+			});
+
+			expect(response.status).toBe(503);
+			expect(await response.json()).toEqual({
+				error: { type: "upstream_error", message: "catalog is changing; retry request" },
+			});
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("pi-native gateway model revalidation", () => {
+	it("does not dispatch a Grok model when broker selection adopts an account without it", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-generation-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const grok = createMockModel({ provider: "xai-oauth", id: "grok-4.6" });
+		const accountRosters = new Map([
+			["A", new Set([grok.id])],
+			["B", new Set<string>()],
+		]);
+		let selectedAccounts = ["A"];
+		const resolveModel = vi.fn(async (id: string) =>
+			selectedAccounts.every(account => accountRosters.get(account)?.has(id)) ? grok : undefined,
+		);
+		const apiKeySpy = vi.spyOn(storage, "getApiKey").mockImplementation(async () => {
+			selectedAccounts = ["A", "B"];
+			return "account-b-key";
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel,
+			version: "test",
+		});
+
+		try {
+			grok.push({ content: ["must not stream"] });
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: grok.id, context: baseContext, stream: false }),
+			});
+
+			expect(response.status).toBe(404);
+			expect(resolveModel).toHaveBeenCalledTimes(2);
+			expect(grok.calls).toHaveLength(0);
+		} finally {
+			apiKeySpy.mockRestore();
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+
+	it("rejects a provider change after selecting the original provider credential", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-provider-change-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const initial = createMockModel({ provider: "xai-oauth", id: "grok-4.6" });
+		const revalidated = createMockModel({ provider: "grok-build", id: "grok-4.6" });
+		let providerChanged = false;
+		const resolveModel = vi.fn(async () => (providerChanged ? revalidated : initial));
+		const selectedProviders: string[] = [];
+		const apiKeySpy = vi.spyOn(storage, "getApiKey").mockImplementation(async provider => {
+			selectedProviders.push(provider);
+			providerChanged = true;
+			return "xai-account-key";
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: initial.id, context: baseContext, stream: false }),
+			});
+
+			expect(response.status).toBe(409);
+			expect(selectedProviders).toEqual(["xai-oauth"]);
+			expect(resolveModel).toHaveBeenCalledTimes(2);
+			expect(initial.calls).toHaveLength(0);
+			expect(revalidated.calls).toHaveLength(0);
+		} finally {
+			apiKeySpy.mockRestore();
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+
+	it("reselects when a same-provider roster changes after selecting account A", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-same-provider-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const dispatchedKeys: unknown[] = [];
+		const grok = createMockModel({
+			provider: "xai-oauth",
+			id: "grok-4.6",
+			handler: (_context, options) => {
+				dispatchedKeys.push(options?.apiKey);
+				return { content: ["ok"] };
+			},
+		});
+		let generation = 1;
+		let selections = 0;
+		const generationSpy = vi.spyOn(storage, "getGeneration").mockImplementation(() => generation);
+		const apiKeySpy = vi.spyOn(storage, "getApiKey").mockImplementation(async () => {
+			selections++;
+			if (selections === 1) {
+				generation = 2;
+				return "account-a-key";
+			}
+			return "account-b-key";
+		});
+		const resolveModel = vi.fn(async () => grok);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: grok.id, context: baseContext, stream: false }),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(selections).toBe(2);
+			expect(resolveModel).toHaveBeenCalledTimes(3);
+			expect(dispatchedKeys).toEqual(["account-b-key"]);
+		} finally {
+			apiKeySpy.mockRestore();
+			generationSpy.mockRestore();
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+
+	it("returns unknown model when credential selection adopts an external logout", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-external-logout-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const grok = createMockModel({ provider: "xai-oauth", id: "grok-4.6" });
+		let storageGeneration = 1;
+		let catalogGeneration = storageGeneration;
+		const catalog = new Map([[grok.id, grok]]);
+		let synchronizedRebuilds = 0;
+		const generationSpy = vi.spyOn(storage, "getGeneration").mockImplementation(() => storageGeneration);
+		const resolveModel = vi.fn(async (id: string) => {
+			if (catalogGeneration !== storage.getGeneration()) {
+				synchronizedRebuilds++;
+				catalog.clear();
+				catalogGeneration = storage.getGeneration();
+			}
+			return catalog.get(id);
+		});
+		const apiKeySpy = vi.spyOn(storage, "getApiKey").mockImplementation(async () => {
+			storageGeneration++;
+			return undefined;
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: grok.id, context: baseContext, stream: false }),
+			});
+
+			expect(response.status).toBe(404);
+			expect(await response.json()).toEqual({
+				error: { type: "invalid_request_error", message: `Unknown model: ${grok.id}` },
+			});
+			expect(resolveModel).toHaveBeenCalledTimes(2);
+			expect(synchronizedRebuilds).toBe(1);
+			expect(grok.calls).toHaveLength(0);
+		} finally {
+			apiKeySpy.mockRestore();
+			generationSpy.mockRestore();
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("retains the authentication error when the model remains routable without a credential", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-no-credential-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const grok = createMockModel({ provider: "xai-oauth", id: "grok-4.6" });
+		const resolveModel = vi.fn(async () => grok);
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: grok.id, context: baseContext, stream: false }),
+			});
+
+			expect(response.status).toBe(401);
+			expect(await response.json()).toEqual({
+				error: {
+					type: "authentication_error",
+					message: `No credential available for provider ${grok.provider}`,
+				},
+			});
+			expect(resolveModel).toHaveBeenCalledTimes(2);
+			expect(grok.calls).toHaveLength(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 });

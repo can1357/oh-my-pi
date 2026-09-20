@@ -52,6 +52,7 @@ const KNOWN_APIS = [
 	"cursor-agent",
 	"gitlab-duo-agent",
 	"devin-agent",
+	"grokbot-sand",
 ] as const satisfies readonly KnownApi[];
 type _MissingKnownApis = Exclude<KnownApi, (typeof KNOWN_APIS)[number]>;
 true satisfies _MissingKnownApis extends never ? true : ["KNOWN_APIS is missing KnownApi values", _MissingKnownApis];
@@ -123,6 +124,19 @@ function stringList(node: KdlNodeView): string[] {
 	return values;
 }
 
+/** Exact Grok Bot requested-model parameter ids; a bare node means none. */
+function parseSandParameterIds(node: KdlNodeView): string[] {
+	validateProps(node, []);
+	if (node.children) malformed(node);
+	const ids = positionalStrings(node);
+	const seen = new Set<string>();
+	for (const id of ids) {
+		if (!id || seen.has(id)) malformed(node);
+		seen.add(id);
+	}
+	return ids;
+}
+
 function parseCost(node: KdlNodeView): TokenCost {
 	validateProps(node, COST_PROPS);
 	if (node.args.length > 0 || node.children) malformed(node);
@@ -162,6 +176,8 @@ function parseModel(node: KdlNodeView, provider: string, defaults: SeedDefaults)
 	let cost: TokenCost | undefined;
 	let limits: { contextWindow: number | null; maxTokens: number | null } | undefined;
 	let supportsTools: boolean | undefined;
+	let sandParameterIds: string[] | undefined;
+	let sandMaxMode: boolean | undefined;
 	const axes: RuleAxes = { wire: {}, thinking: {}, catalog: {} };
 	for (const child of node.children) {
 		switch (child.name) {
@@ -189,6 +205,23 @@ function parseModel(node: KdlNodeView, provider: string, defaults: SeedDefaults)
 			case "supports-tools":
 				if (supportsTools !== undefined) malformed(child);
 				supportsTools = singleBoolean(child);
+				break;
+			case "sand-parameter-ids":
+			case "sand-max-mode":
+				if (api !== "grokbot-sand") {
+					throw new CompatCompileError(
+						child.file,
+						child.line,
+						`directive \`${child.name}\` only applies to api \`grokbot-sand\``,
+					);
+				}
+				if (child.name === "sand-parameter-ids") {
+					if (sandParameterIds !== undefined) malformed(child);
+					sandParameterIds = parseSandParameterIds(child);
+				} else {
+					if (sandMaxMode !== undefined) malformed(child);
+					sandMaxMode = singleBoolean(child);
+				}
 				break;
 			default: {
 				const axis = axisFor(child);
@@ -234,6 +267,8 @@ function parseModel(node: KdlNodeView, provider: string, defaults: SeedDefaults)
 		reasoning,
 		input,
 		...(supportsTools !== undefined && { supportsTools }),
+		...(sandParameterIds !== undefined && { sandParameterIds }),
+		...(sandMaxMode !== undefined && { sandMaxMode }),
 		cost,
 		contextWindow: limits.contextWindow,
 		maxTokens: limits.maxTokens,

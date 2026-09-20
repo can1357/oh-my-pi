@@ -140,16 +140,19 @@ export async function getOAuthApiKey(
 	// credential metadata, so the API key is the JSON-encoded credential.
 	const apiKey =
 		policy?.apiKeyFormat === "structured"
-			? JSON.stringify({
-					apiEndpoint: creds.apiEndpoint,
-					token: creds.access,
-					enterpriseUrl: creds.enterpriseUrl,
-					projectId: creds.projectId,
-					refreshToken: creds.refresh,
-					expiresAt: creds.expires,
-					email: creds.email,
-					accountId: creds.accountId,
-				})
+			? provider === "grokbot"
+				? // Renewal credential + paired machine id (drives `x-cursor-checksum`).
+					JSON.stringify({ renewal: creds.access, machineId: creds.orgId })
+				: JSON.stringify({
+						apiEndpoint: creds.apiEndpoint,
+						token: creds.access,
+						enterpriseUrl: creds.enterpriseUrl,
+						projectId: creds.projectId,
+						refreshToken: creds.refresh,
+						expiresAt: creds.expires,
+						email: creds.email,
+						accountId: creds.accountId,
+					})
 			: creds.access;
 	return { newCredentials: creds, apiKey };
 }

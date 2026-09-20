@@ -607,6 +607,10 @@ export interface CompiledSeedModel {
 	reasoning: boolean;
 	input: ("text" | "image")[];
 	supportsTools?: boolean;
+	/** Allowed Grok Bot requested-model parameter ids. */
+	sandParameterIds?: string[];
+	/** Whether Grok Bot requests must set `requestedModel.maxMode`. */
+	sandMaxMode?: boolean;
 	cost: TokenCost;
 	contextWindow: number | null;
 	maxTokens: number | null;

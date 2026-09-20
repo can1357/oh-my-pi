@@ -95,6 +95,13 @@ function fingerprintOAuthBearer(bearer: string): string {
 	return createHash("sha256").update(bearer).digest("base64url");
 }
 const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
+/** Credential-independent home for the Grok Bot install id (survives logout). */
+const GROKBOT_MACHINE_ID_CACHE_KEY = "grokbot:machine-id";
+/**
+ * Local exec uses the renewer as a box identity; the machine id is client-owned
+ * metadata. No expiry — generated once per install and reused forever.
+ */
+const GROKBOT_MACHINE_ID_CACHE_TTL_SEC = 3_153_600_000;
 /**
  * Anthropic-only idle window after which a session's pinned credential no
  * longer suppresses usage-based re-ranking. Anthropic caps OAuth prompt-cache
@@ -3168,6 +3175,36 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Grok Bot install id: generated once per machine, reused across
+	 * logout/login and credential rotation. Persisted in the credential
+	 * store's cache table, deliberately separate from any OAuth row.
+	 */
+	readGrokbotMachineId(): string | undefined {
+		try {
+			const raw = this.#store.getCache(GROKBOT_MACHINE_ID_CACHE_KEY);
+			if (!raw) return undefined;
+			const parsed = JSON.parse(raw) as { machineId?: unknown };
+			return typeof parsed.machineId === "string" && parsed.machineId ? parsed.machineId : undefined;
+		} catch (error) {
+			logger.debug("Failed to read Grok Bot machine id", { error: String(error) });
+			return undefined;
+		}
+	}
+
+	/** Persist the Grok Bot install id; see {@link readGrokbotMachineId}. */
+	writeGrokbotMachineId(machineId: string): void {
+		try {
+			this.#store.setCache(
+				GROKBOT_MACHINE_ID_CACHE_KEY,
+				JSON.stringify({ machineId }),
+				Math.floor(Date.now() / 1000) + GROKBOT_MACHINE_ID_CACHE_TTL_SEC,
+			);
+		} catch (err) {
+			logger.debug("Failed to persist Grok Bot machine id", { err });
+		}
+	}
+
+	/**
 	 * Login to an OAuth provider. Resolves with the stored credential's
 	 * identity slice (or `undefined` when nothing was stored) so callers can
 	 * surface which account — and for Anthropic, which organization — the
@@ -3210,6 +3247,12 @@ export class AuthStorage {
 			onBrowserSession: ctrl.onBrowserSession,
 			signal: ctrl.signal,
 			fetch: ctrl.fetch,
+			// Grok Bot: flows read/persist the install id through this accessor
+			// so it is a property of the machine, not of any single credential.
+			grokbotMachineId: {
+				read: () => this.readGrokbotMachineId(),
+				write: id => this.writeGrokbotMachineId(id),
+			},
 		});
 		if (typeof result === "string") {
 			// Some flows (e.g. ollama) return "" to signal that no key was entered.
@@ -5989,10 +6032,17 @@ export class AuthStorage {
 						apiEndpoint: oauthSelection.credential.apiEndpoint,
 					});
 				}
+				if (provider === "grokbot") {
+					// Structured envelope: renewal credential + paired machine id
+					// (needed for `x-cursor-checksum`), mirroring getOAuthApiKey.
+					return JSON.stringify({
+						renewal: oauthSelection.credential.access,
+						machineId: oauthSelection.credential.orgId,
+					});
+				}
 				return oauthSelection.credential.access;
 			}
 		}
-
 		const loginApiKeySelection = this.#selectCredentialByType(
 			provider,
 			"api_key",

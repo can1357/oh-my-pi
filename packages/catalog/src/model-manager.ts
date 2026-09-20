@@ -49,6 +49,12 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/**
+	 * Determines whether a successful dynamic response has no live server rows
+	 * for cache-authoritative admission. Defaults to `models.length === 0`;
+	 * current-cycle authoritative resolution remains unchanged.
+	 */
+	isDynamicModelRosterEmpty?: (models: readonly Model<Api>[]) => boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/**
@@ -320,6 +326,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
 		: preparedCacheModels;
 	const dynamicModels = fetchedDynamicModels ?? [];
+	const dynamicModelRosterEmpty = options.isDynamicModelRosterEmpty?.(dynamicModels) ?? dynamicModels.length === 0;
 	// A successful empty endpoint result stays authoritative for THIS cycle (so an
 	// intentional catalog emptying still prunes removed models downstream), but
 	// is NOT pinned into the cache as authoritative — that would suppress the
@@ -327,7 +334,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// models.dev snapshots may be empty for one provider and remain authoritative.
 	const cacheAuthoritative = hasDynamicFetcher
 		? dynamicFetchSucceeded &&
-			dynamicModels.length > 0 &&
+			!dynamicModelRosterEmpty &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
 	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels);

@@ -1,9 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { RetryableModelResolutionError, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
@@ -1428,6 +1428,193 @@ describe("auth-gateway OpenAI Responses multimodal tool outputs", () => {
 		}
 	});
 });
+
+describe("auth-gateway OpenAI Responses model-resolution errors", () => {
+	it("returns a retryable catalog-churn error in the OpenAI envelope", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-resolution-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const error = new RetryableModelResolutionError("catalog is changing; retry request");
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: async () => {
+				throw error;
+			},
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({ model: "catalog-churn", input: "hi", stream: false }),
+			});
+
+			expect(response.status).toBe(503);
+			expect(await response.json()).toEqual({
+				error: { message: "catalog is changing; retry request", type: "upstream_error" },
+			});
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("auth-gateway OpenAI Responses model revalidation", () => {
+	it("reselects when a same-provider roster changes after selecting account A", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-same-provider-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const dispatchedKeys: unknown[] = [];
+		const grok = createMockModel({
+			provider: "xai-oauth",
+			id: "grok-4.6",
+			handler: (_context, options) => {
+				dispatchedKeys.push(options?.apiKey);
+				return { content: ["ok"] };
+			},
+		});
+		let generation = 1;
+		let selections = 0;
+		const generationSpy = vi.spyOn(storage, "getGeneration").mockImplementation(() => generation);
+		const apiKeySpy = vi.spyOn(storage, "getApiKey").mockImplementation(async () => {
+			selections++;
+			if (selections === 1) {
+				generation = 2;
+				return "account-a-key";
+			}
+			return "account-b-key";
+		});
+		const resolveModel = vi.fn(async () => grok);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({ model: grok.id, input: "hi", stream: false }),
+			});
+
+			expect(response.status).toBe(200);
+			await response.json();
+			expect(selections).toBe(2);
+			expect(resolveModel).toHaveBeenCalledTimes(3);
+			expect(dispatchedKeys).toEqual(["account-b-key"]);
+		} finally {
+			apiKeySpy.mockRestore();
+			generationSpy.mockRestore();
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+
+	it("converges the served catalog when credential selection adopts an external logout", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-external-logout-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const grok = createMockModel({ provider: "xai-oauth", id: "grok-4.6" });
+		let storageGeneration = 1;
+		let catalogGeneration = storageGeneration;
+		const catalog = new Map([[grok.id, grok]]);
+		let synchronizedRebuilds = 0;
+		const generationSpy = vi.spyOn(storage, "getGeneration").mockImplementation(() => storageGeneration);
+		const resolveModel = vi.fn(async (id: string) => {
+			if (catalogGeneration !== storage.getGeneration()) {
+				synchronizedRebuilds++;
+				catalog.clear();
+				catalogGeneration = storage.getGeneration();
+			}
+			return catalog.get(id);
+		});
+		const apiKeySpy = vi.spyOn(storage, "getApiKey").mockImplementation(async () => {
+			storageGeneration++;
+			return undefined;
+		});
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel,
+			listModels: () => catalog.values(),
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({ model: grok.id, input: "hi", stream: false }),
+			});
+
+			expect(response.status).toBe(404);
+			expect(await response.json()).toEqual({
+				error: { message: `Unknown model: ${grok.id}`, type: "invalid_request_error" },
+			});
+			expect(resolveModel).toHaveBeenCalledTimes(2);
+			expect(synchronizedRebuilds).toBe(1);
+			expect(grok.calls).toHaveLength(0);
+
+			const models = await fetch(`${gateway.url}/v1/models`, {
+				headers: { Authorization: "Bearer test-token" },
+			});
+			expect(models.status).toBe(200);
+			expect(await models.json()).toEqual({ object: "list", data: [] });
+		} finally {
+			apiKeySpy.mockRestore();
+			generationSpy.mockRestore();
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("retains the authentication error when the model remains routable without a credential", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-responses-no-credential-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const grok = createMockModel({ provider: "xai-oauth", id: "grok-4.6" });
+		const resolveModel = vi.fn(async () => grok);
+		const gateway = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel,
+			version: "test",
+		});
+
+		try {
+			const response = await fetch(`${gateway.url}/v1/responses`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer test-token" },
+				body: JSON.stringify({ model: grok.id, input: "hi", stream: false }),
+			});
+
+			expect(response.status).toBe(401);
+			expect(await response.json()).toEqual({
+				error: {
+					message: `No credential available for provider ${grok.provider}`,
+					type: "authentication_error",
+				},
+			});
+			expect(resolveModel).toHaveBeenCalledTimes(2);
+			expect(grok.calls).toHaveLength(0);
+		} finally {
+			await gateway.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("auth-gateway OpenAI Responses computer option bridge", () => {
 	it("preserves the native tool, forced choice, and include in stream options", async () => {
 		registerMockApi();

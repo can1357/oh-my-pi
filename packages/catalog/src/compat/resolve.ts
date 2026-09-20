@@ -25,6 +25,7 @@ import type {
 	ResolvedAnthropicCompat,
 	ResolvedBedrockCompat,
 	ResolvedDevinCompat,
+	ResolvedGrokbotCompat,
 	ResolvedGoogleCompat,
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
@@ -914,6 +915,15 @@ function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes):
 	return compat;
 }
 
+function resolveGrokbotPolicy(spec: ModelSpec<"grokbot-sand">, axes: ResolvedAxes): ResolvedGrokbotCompat {
+	const compat: ResolvedGrokbotCompat = {
+		trustExplicitThinkingOnly: false,
+	};
+	applyWireAxes(compat, axes.wire, "grokbot-sand");
+	applyCompatOverrides(compat, spec.compat);
+	return compat;
+}
+
 function resolveGooglePolicy(
 	spec: ModelSpec<"google-generative-ai" | "google-vertex" | "google-gemini-cli">,
 	axes: ResolvedAxes,
@@ -1265,6 +1275,8 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		compat = resolveBedrockPolicy(spec, axes);
 	} else if (specUsesApi(spec, "devin-agent")) {
 		compat = resolveDevinPolicy(spec, axes);
+	} else if (specUsesApi(spec, "grokbot-sand")) {
+		compat = resolveGrokbotPolicy(spec, axes);
 	} else if (
 		specUsesApi(spec, "google-generative-ai") ||
 		specUsesApi(spec, "google-vertex") ||
