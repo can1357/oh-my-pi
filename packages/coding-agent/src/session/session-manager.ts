@@ -2780,7 +2780,16 @@ export class SessionManager {
 	appendModelUsage(
 		usage: Pick<
 			ModelUsageEntry,
-			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+			| "purpose"
+			| "handleId"
+			| "questionIds"
+			| "role"
+			| "api"
+			| "provider"
+			| "model"
+			| "usage"
+			| "stopReason"
+			| "errorMessage"
 		>,
 		owner: { sessionId: string; parentId: string | null },
 	): string | undefined {

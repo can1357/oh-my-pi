@@ -79,6 +79,10 @@ export interface SessionMessageEntry extends SessionEntryBase {
 export interface ModelUsageEntry extends SessionEntryBase {
 	type: "model_usage";
 	purpose: string;
+	/** Process-local operation handle that produced this attempt, when available. */
+	handleId?: string;
+	/** Judgment question ids shared by every attempt under the same handle. */
+	questionIds?: string[];
 	/** Resolved model role used for the call, such as `tiny` or `smol`. */
 	role?: string;
 	api: string;

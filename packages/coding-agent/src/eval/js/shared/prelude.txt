@@ -124,12 +124,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			this.id = id;
 			this._schema = schema;
 			this._result = HANDLE_UNSET;
+			this.details = undefined;
 		}
 
 		async status() {
 			const snapshot = await globalThis.__omp_call_tool__("__status__", {
 				item: { kind: this.kind, id: this.id },
 			});
+			if (hasOwn(snapshot ?? {}, "details")) this.details = snapshot.details;
 			return snapshot?.status ?? "failed";
 		}
 
@@ -202,7 +204,11 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	// contract that Python satisfies natively via its synchronous bridge.
 	class PendingHandle {
 		constructor(promise) {
-			this._promise = promise;
+			this._handle = undefined;
+			this._promise = promise.then(handle => {
+				this._handle = handle;
+				return handle;
+			});
 		}
 
 		then(onFulfilled, onRejected) {
@@ -215,6 +221,9 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 		finally(onFinally) {
 			return this._promise.finally(onFinally);
+		}
+		get details() {
+			return this._handle?.details;
 		}
 
 		async status() {
@@ -248,6 +257,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		if (status === "failed" || status === "cancelled") {
 			throw new Error(snapshot?.error || `${handle.kind} handle ${handle.id} failed`);
 		}
+		if (hasOwn(snapshot ?? {}, "details")) handle.details = snapshot.details;
 		const value = hasOwn(snapshot ?? {}, "data")
 			? snapshot.data
 			: handle._schema !== undefined

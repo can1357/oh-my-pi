@@ -2,12 +2,14 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as vm from "node:vm";
 import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { releaseCompletionHandles } from "../../src/eval/completion-bridge";
-import { type EvalHandleSnapshot, runEvalWait } from "../../src/eval/handle-bridge";
+import { type EvalHandleSnapshot, runEvalCancel, runEvalWait } from "../../src/eval/handle-bridge";
 import { runEvalJudgment } from "../../src/eval/judgment-bridge";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
+import { SessionManager } from "../../src/session/session-manager";
 import type { ToolSession } from "../../src/tools";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { asGlobalFetch } from "../helpers/fetch-mock";
@@ -35,7 +37,7 @@ const JEV_PREVIEW: Model<Api> = {
 	kind: "judge",
 } as Model<Api>;
 
-function makeSession(opts: { typesafe?: boolean } = {}): ToolSession {
+function makeSession(opts: { typesafe?: boolean; sessionManager?: SessionManager } = {}): ToolSession {
 	const settings = Settings.isolated({
 		"async.enabled": false,
 		"task.isolation.enabled": false,
@@ -47,10 +49,15 @@ function makeSession(opts: { typesafe?: boolean } = {}): ToolSession {
 	if (opts.typesafe) authStorage.setRuntimeApiKey("typesafe", "ts-key");
 	const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-bridge-models.yml");
 	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue(opts.typesafe ? [JEV_PREVIEW, SMOL] : [SMOL]);
-	return { settings, modelRegistry, getSessionId: () => "sess-1" } as unknown as ToolSession;
+	return {
+		settings,
+		modelRegistry,
+		sessionManager: opts.sessionManager,
+		getSessionId: () => opts.sessionManager?.getSessionId() ?? "sess-1",
+	} as unknown as ToolSession;
 }
 
-function reply(text: string): AssistantMessage {
+function reply(text: string, input = 0, output = 0): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
@@ -58,11 +65,11 @@ function reply(text: string): AssistantMessage {
 		provider: "p",
 		model: "smol",
 		usage: {
-			input: 0,
-			output: 0,
+			input,
+			output,
 			cacheRead: 0,
 			cacheWrite: 0,
-			totalTokens: 0,
+			totalTokens: input + output,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "stop",
@@ -167,6 +174,107 @@ describe("eval judge() bridge", () => {
 		expect(chat).not.toHaveBeenCalled();
 	});
 
+	it("persists failed and successful judgment attempts for session accounting", async () => {
+		using tempDir = TempDir.createSync("@omp-eval-judge-usage-");
+		const manager = SessionManager.create(tempDir.path(), tempDir.path());
+		try {
+			manager.appendMessage({ role: "user", content: "classify this", timestamp: 1 });
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch(async () => new Response("unauthorized", { status: 401 })),
+			);
+			const response = reply("tests: yes", 11, 2);
+			vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, options) => {
+				options?.onAttempt?.(response);
+				return response;
+			});
+
+			const snapshot = await judgeAndWait(
+				{ state: "add tests", questions: { tests: QUESTIONS.tests } },
+				makeSession({ typesafe: true, sessionManager: manager }),
+			);
+			await manager.ensureOnDisk();
+			await manager.flush();
+
+			const usageEntries = manager.getEntries().filter(entry => entry.type === "model_usage");
+			expect(snapshot.details).toEqual({ model: "p/smol", structured: true });
+			expect(usageEntries).toHaveLength(2);
+			expect(usageEntries[0]).toMatchObject({
+				purpose: "eval-judge",
+				handleId: snapshot.id,
+				questionIds: ["tests"],
+				role: "typesafe",
+				api: "typesafe",
+				provider: "typesafe",
+				model: JEV_PREVIEW.id,
+				stopReason: "error",
+				usage: { totalTokens: 0 },
+			});
+			expect(usageEntries[0]?.errorMessage).toContain("unauthorized");
+			expect(usageEntries[1]).toMatchObject({
+				parentId: usageEntries[0]?.id,
+				purpose: "eval-judge",
+				handleId: snapshot.id,
+				questionIds: ["tests"],
+				role: "judge",
+				api: SMOL.api,
+				provider: SMOL.provider,
+				model: SMOL.id,
+				stopReason: "stop",
+				usage: { input: 11, output: 2, totalTokens: 13 },
+			});
+			expect(manager.getUsageStatistics()).toMatchObject({ input: 11, output: 2, totalTokens: 13 });
+
+			const sessionFile = manager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted session file");
+			const persisted = (await Bun.file(sessionFile).text())
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line) as { type?: string })
+				.filter(entry => entry.type === "model_usage");
+			expect(persisted).toHaveLength(2);
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it("records a cancelled TypeSafe attempt without falling back", async () => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "classify this", timestamp: 1 });
+		const session = makeSession({ typesafe: true, sessionManager: manager });
+		const started = Promise.withResolvers<void>();
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				const signal = init?.signal;
+				if (!signal) throw new Error("Expected TypeSafe request signal");
+				started.resolve();
+				const pending = Promise.withResolvers<Response>();
+				signal.addEventListener("abort", () => pending.reject(signal.reason), { once: true });
+				return await pending.promise;
+			}),
+		);
+		const chat = vi.spyOn(ai, "completeSimple");
+		const handle = runEvalJudgment({ state: "x", questions: { tests: QUESTIONS.tests } }, { session });
+		await started.promise;
+
+		expect(runEvalCancel({ item: { kind: "completion", id: handle.id } }, { session })).toEqual({
+			cancelled: true,
+		});
+		const waited = await runEvalWait({ items: [{ kind: "completion", id: handle.id }] }, { session });
+
+		expect(waited.items[0]?.status).toBe("cancelled");
+		expect(manager.getEntries().filter(entry => entry.type === "model_usage")).toEqual([
+			expect.objectContaining({
+				purpose: "eval-judge",
+				handleId: handle.id,
+				questionIds: ["tests"],
+				role: "typesafe",
+				stopReason: "aborted",
+				usage: expect.objectContaining({ totalTokens: 0 }),
+			}),
+		]);
+		expect(chat).not.toHaveBeenCalled();
+	});
+
 	it("fails the handle when the chat model answers off-format", async () => {
 		vi.spyOn(ai, "completeSimple").mockResolvedValue(reply("I cannot decide."));
 		const snapshot = await judgeAndWait({ state: "x", questions: { tests: QUESTIONS.tests } }, makeSession());
@@ -189,6 +297,7 @@ describe("eval js judge() prelude", () => {
 								status: "completed",
 								text: '{"ok":{"type":"noul","noul":1}}',
 								data: { ok: { type: "noul", noul: 1 } },
+								details: { model: "typesafe/jev-latest", structured: true },
 							},
 						],
 					};
@@ -199,12 +308,19 @@ describe("eval js judge() prelude", () => {
 		vm.createContext(sandbox);
 		vm.runInContext(JAVASCRIPT_PRELUDE_SOURCE, sandbox);
 
-		const answers = await vm.runInContext(
-			`judge("ship it", { ok: { type: "noul", instructions: "Is it ready?" } }).wait()`,
+		const result = await vm.runInContext(
+			`(async () => {
+				const handle = judge("ship it", { ok: { type: "noul", instructions: "Is it ready?" } });
+				const answers = await handle.wait();
+				return { answers, model: handle.details?.model };
+			})()`,
 			sandbox,
 		);
 
-		expect(answers).toEqual({ ok: { type: "noul", noul: 1 } });
+		expect(result).toEqual({
+			answers: { ok: { type: "noul", noul: 1 } },
+			model: "typesafe/jev-latest",
+		});
 		expect(calls[0]).toEqual({
 			name: "__judge__",
 			args: { state: "ship it", questions: { ok: { type: "noul", instructions: "Is it ready?" } } },

@@ -417,7 +417,7 @@ export async function runEvalCompletion(
 export function retainCompletionHandle(
 	prefix: string,
 	options: EvalCompletionBridgeOptions,
-	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
+	execute: (signal: AbortSignal, id: string) => Promise<EvalCompletionResult>,
 ): EvalCompletionHandleResult {
 	const id = `${prefix}-${Snowflake.next()}`;
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
@@ -430,7 +430,7 @@ export function retainCompletionHandle(
 		settled: false,
 	};
 	completionHandles.set(id, entry);
-	entry.promise = execute(signal)
+	entry.promise = execute(signal, id)
 		.then(
 			result => {
 				entry.result = result;

@@ -293,10 +293,10 @@ export interface ToolSession {
 	/** Get session file */
 	getSessionFile: () => string | null;
 	/** Owning journal; full SDK managers also supply registered identity without changing advisor-local IDs. */
-	sessionManager?: Pick<
-		SessionManager,
-		"appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"
-	> & { getSessionId?: SessionManager["getSessionId"] };
+	sessionManager?: Pick<SessionManager, "appendCustomEntry" | "ensureOnDisk" | "flush" | "getBranch" | "getEntries"> &
+		Partial<Pick<SessionManager, "appendModelUsage" | "getLeafId">> & {
+			getSessionId?: SessionManager["getSessionId"];
+		};
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
 	getEvalKernelOwnerId?: () => string | null;
 	/** Current enabled eval prelude definitions. */

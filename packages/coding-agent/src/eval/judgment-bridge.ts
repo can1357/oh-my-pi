@@ -149,12 +149,28 @@ export function runEvalJudgment(args: unknown, options: EvalCompletionBridgeOpti
 	const { session } = options;
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("judge() has no model registry.");
-	const judge = resolveJudge({
-		settings: session.settings,
-		registry,
-		sessionId: session.getSessionId?.() ?? undefined,
-	});
-	return retainCompletionHandle("jdg", options, async (signal): Promise<EvalCompletionResult> => {
+	const usageManager = session.sessionManager;
+	const usageSessionId = usageManager?.getSessionId?.();
+	const usageOwner =
+		usageSessionId && usageManager?.getLeafId && usageManager.appendModelUsage
+			? { sessionId: usageSessionId, parentId: usageManager.getLeafId() }
+			: undefined;
+	const questionIds = Object.keys(questions);
+	return retainCompletionHandle("jdg", options, async (signal, handleId): Promise<EvalCompletionResult> => {
+		const judge = resolveJudge({
+			settings: session.settings,
+			registry,
+			sessionModel: session.getActiveModel?.(),
+			sessionId: session.getSessionId?.() ?? usageSessionId ?? undefined,
+			onUsage: usage => {
+				if (!usageOwner) return;
+				const entryId = usageManager?.appendModelUsage?.(
+					{ purpose: "eval-judge", handleId, questionIds, ...usage },
+					usageOwner,
+				);
+				if (entryId) usageOwner.parentId = entryId;
+			},
+		});
 		const result = await judge.judge({ state, questions }, { signal });
 		const answers: Record<string, Answer | { type: "bool"; bool: number }> = {};
 		for (const id in result.answers) {

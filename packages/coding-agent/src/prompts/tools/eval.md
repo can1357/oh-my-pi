@@ -22,7 +22,7 @@ output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | di
 completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) → CompletionHandle
     Oneshot, stateless (no history/tools); returns immediately. `.wait()` → str (parsed object with `schema`). `model`: "smol" fast | "default" session | "slow" most capable.
 judge(state, questions) → JudgmentHandle
-    Typed judgment over one `state` (str | JSON object | JSON array); returns immediately, `.wait()` → `{id: answer}`. Every question sees the same state and is answered independently: batch independent questions into one call. Cheap and fast (TypeSafe when credentialed, else the tiny/smol chat model); prefer over `completion()` for classification, yes/no, ranking.
+    Typed judgment over one `state` (str | JSON object | JSON array); returns immediately, `.wait()` → `{id: answer}`, then `.details.model` names the resolved backend. Every question sees the same state and is answered independently: batch independent questions into one call. Cheap and fast (TypeSafe when credentialed, else the tiny/smol chat model); prefer over `completion()` for classification, yes/no, ranking.
     `questions`: `{id: q}` where q is one of
       `{type: "choice", instructions, criteria: {label: rubric | None, …}}` → `{choice, probabilities: {label: p}, confidence}` (≥2 labels)
       `{type: "bool", instructions, criteria?: {true?: str, false?: str}}` → `{bool: P(yes)}`

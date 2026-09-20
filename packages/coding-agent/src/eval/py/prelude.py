@@ -698,7 +698,7 @@ if "__omp_prelude_loaded__" not in globals():
     class _Handle:
         """Shared process-local agent/completion handle behavior."""
 
-        __slots__ = ("id", "_schema", "_result")
+        __slots__ = ("id", "_schema", "_result", "details")
 
         kind = ""
 
@@ -706,6 +706,7 @@ if "__omp_prelude_loaded__" not in globals():
             self.id = id
             self._schema = schema
             self._result = _HANDLE_UNSET
+            self.details = None
 
         @property
         def status(self):
@@ -713,6 +714,8 @@ if "__omp_prelude_loaded__" not in globals():
                 "__status__",
                 {"item": {"kind": self.kind, "id": self.id}},
             )
+            if isinstance(snapshot, dict) and "details" in snapshot:
+                self.details = snapshot["details"]
             return snapshot.get("status") if isinstance(snapshot, dict) else "failed"
 
         def done(self):
@@ -792,6 +795,8 @@ if "__omp_prelude_loaded__" not in globals():
                 else f"{handle.kind} handle {handle.id} failed"
             )
             raise RuntimeError(message or f"{handle.kind} handle {handle.id} failed")
+        if isinstance(snapshot, dict) and "details" in snapshot:
+            handle.details = snapshot["details"]
         if isinstance(snapshot, dict) and "data" in snapshot:
             value = snapshot["data"]
         else:

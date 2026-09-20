@@ -17,6 +17,7 @@ import {
 	type TextCompletion,
 	type TextPrompt,
 	TextJudge,
+	tokenUsage,
 	TYPESAFE_PROVIDER,
 	TypeSafeJudge,
 	type Usage,
@@ -210,16 +211,30 @@ function usageReportingTypeSafeJudge(judge: TypeSafeJudge, onUsage: JudgeDeps["o
 			request: JudgmentRequest<Q>,
 			options?: JudgeOptions,
 		): Promise<JudgmentResult<Q>> {
-			const result = await judge.judge(request, options);
-			onUsage?.({
-				role: TYPESAFE_PROVIDER,
-				api: result.api,
-				provider: result.provider,
-				model: judge.model,
-				usage: result.usage,
-				stopReason: "stop",
-			});
-			return result;
+			try {
+				const result = await judge.judge(request, options);
+				onUsage?.({
+					role: TYPESAFE_PROVIDER,
+					api: result.api,
+					provider: result.provider,
+					model: judge.model,
+					usage: result.usage,
+					stopReason: "stop",
+				});
+				return result;
+			} catch (error) {
+				const aborted = options?.signal?.aborted || AIError.is(AIError.classify(error), AIError.Flag.Abort);
+				onUsage?.({
+					role: TYPESAFE_PROVIDER,
+					api: TYPESAFE_PROVIDER,
+					provider: TYPESAFE_PROVIDER,
+					model: judge.model,
+					usage: tokenUsage(0, 0),
+					stopReason: aborted ? "aborted" : "error",
+					errorMessage: error instanceof Error ? error.message : String(error),
+				});
+				throw error;
+			}
 		},
 	};
 }

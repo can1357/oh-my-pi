@@ -101,6 +101,8 @@ export interface SessionModelUsageEntry {
 	parentId: string | null;
 	timestamp: string;
 	purpose: string;
+	handleId?: string;
+	questionIds?: string[];
 	role?: string;
 	api: string;
 	provider: string;

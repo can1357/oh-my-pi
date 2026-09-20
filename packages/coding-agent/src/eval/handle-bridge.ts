@@ -28,6 +28,7 @@ export interface EvalHandleSnapshot extends EvalHandleRef {
 	status: EvalHandleState;
 	text?: string;
 	data?: unknown;
+	details?: unknown;
 	error?: string;
 }
 
@@ -102,6 +103,7 @@ function agentSnapshot(ref: EvalHandleRef, job: AsyncJob): EvalHandleSnapshot {
 	if (isUnknownRecord(evalResult)) {
 		if (typeof evalResult.text === "string") snapshot.text = evalResult.text;
 		if (Object.hasOwn(evalResult, "data")) snapshot.data = evalResult.data;
+		if (Object.hasOwn(evalResult, "details")) snapshot.details = evalResult.details;
 	}
 	return snapshot;
 }
@@ -117,6 +119,7 @@ function completionSnapshot(ref: EvalHandleRef, entry: CompletionHandleEntry): E
 	}
 	const snapshot: EvalHandleSnapshot = { ...ref, status: "completed", text: entry.result?.text ?? "" };
 	if (entry.result && Object.hasOwn(entry.result, "data")) snapshot.data = entry.result.data;
+	if (entry.result) snapshot.details = entry.result.details;
 	return snapshot;
 }
 
