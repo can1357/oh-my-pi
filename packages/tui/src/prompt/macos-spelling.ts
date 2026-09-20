@@ -2,6 +2,7 @@ import * as native from "@oh-my-pi/pi-natives";
 import { TERMINAL } from "../index";
 import type { EditorInlineReplacement, EditorTextAssistProvider, EditorWordReplacements } from "../components/editor";
 import { logger } from "@oh-my-pi/pi-utils";
+import { isLocalExecutionDraft } from "./skill-tokens";
 import { maskNonProse } from "./markdown-prose";
 
 /** Styled underline: red curly undercurl via colon-subparameter SGR (4:3 + SGR 58 color). */
@@ -98,6 +99,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#sourceText = "";
 	#sourceMask = "";
 	#sourceLineOffsets: number[] = [];
+	#sourceIsLocalExecution = false;
 	/** Underline open/close pair, chosen once from the terminal's styled-underline capability. */
 	readonly #marks: { start: string; end: string };
 
@@ -420,6 +422,8 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		const line = context.lines[context.line];
 		if (line === undefined || line.length > MAX_SPELLING_LINE_LENGTH || endCol > line.length) return false;
 		this.#prepareSource(context);
+		// Local-execution drafts are executable text, same reason isProseWord skips command lines.
+		if (this.#sourceIsLocalExecution) return false;
 		const lineOffset = this.#sourceLineOffsets[context.line];
 		if (lineOffset === undefined) return false;
 		return this.#sourceMask.slice(lineOffset + startCol, lineOffset + endCol).trim().length > 0;
@@ -428,6 +432,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 	#prepareSource(context: SpellingDecorationContext): void {
 		if (this.#sourceText === context.editorText) return;
 		this.#sourceText = context.editorText;
+		this.#sourceIsLocalExecution = isLocalExecutionDraft(context.editorText);
 		this.#sourceMask = maskNonProse(context.editorText);
 		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		this.#sourceLineOffsets = new Array<number>(context.lines.length);
