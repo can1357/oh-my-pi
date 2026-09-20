@@ -79,6 +79,73 @@ describe("eval js agent() handle", () => {
 		);
 	});
 
+	it("rejects a positional argument on handle.wait() before any bridge call", async () => {
+		// Regression for #12549: `h.wait(3600000)` destructured `{ timeout }` off a
+		// boxed number, produced `undefined`, and waited unbounded while the eval
+		// watchdog was paused for the `__wait__` bridge call.
+		const calls: string[] = [];
+		const sandbox = loadPrelude(async name => {
+			calls.push(name);
+			if (name === "__agent__") return { id: "a-1", agent: "task" };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const handle = (await (sandbox.agent as AgentHelper)("go")) as { wait(options?: unknown): Promise<unknown> };
+
+		await expect(handle.wait(3600000)).rejects.toThrow(
+			"AgentHandle.wait() expects an options object like { timeout }",
+		);
+		await expect(handle.wait("5")).rejects.toThrow("expects an options object");
+		expect(calls).toEqual(["__agent__"]);
+	});
+
+	it("rejects a positional argument on the un-awaited factory handle", async () => {
+		const calls: string[] = [];
+		const sandbox = loadPrelude(async name => {
+			calls.push(name);
+			if (name === "__completion__") return { id: "c-1" };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const completion = sandbox.completion as (
+			prompt: string,
+			opts?: unknown,
+		) => { wait(options?: unknown): Promise<unknown> };
+
+		await expect(completion("x").wait(5000)).rejects.toThrow(
+			"CompletionHandle.wait() expects an options object like { timeout }",
+		);
+		expect(calls).toEqual(["__completion__"]);
+	});
+
+	it("rejects a non-object options argument on wait()", async () => {
+		const calls: string[] = [];
+		const sandbox = loadPrelude(async name => {
+			calls.push(name);
+			if (name === "__agent__") return { id: "a-1", agent: "task" };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const handle = (await (sandbox.agent as AgentHelper)("go")) as { wait(options?: unknown): Promise<unknown> };
+		const waitAll = sandbox.wait as (handles: unknown, options?: unknown) => Promise<unknown[]>;
+
+		await expect(waitAll([handle], 5000)).rejects.toThrow(
+			"wait() expects an options object like { timeout, raiseErrors }",
+		);
+		expect(calls).toEqual(["__agent__"]);
+	});
+
+	it("forwards { timeout } as timeoutMs to the __wait__ bridge", async () => {
+		const calls: Array<{ name: string; args: unknown }> = [];
+		const sandbox = loadPrelude(async (name, args) => {
+			calls.push({ name, args });
+			if (name === "__agent__") return { id: "a-1", agent: "task" };
+			if (name === "__wait__") return { items: [{ status: "completed", text: "done" }] };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const handle = (await (sandbox.agent as AgentHelper)("go")) as { wait(options?: unknown): Promise<unknown> };
+
+		expect(await handle.wait({ timeout: 0 })).toBe("done");
+		expect(calls[1]?.args).toEqual({ items: [{ kind: "agent", id: "a-1" }], timeoutMs: 0 });
+	});
+
 	it("parses wait() text as JSON only when a schema was given", async () => {
 		const sandbox = loadPrelude(async name => {
 			if (name === "__agent__") return { id: "id-9", agent: "task" };
