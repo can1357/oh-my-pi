@@ -107,10 +107,14 @@ fn build_darwin_oauth_callback_helper() {
 	};
 	println!("cargo:rerun-if-changed={}", source.display());
 	println!("cargo:rerun-if-env-changed=CC");
+	println!("cargo:rerun-if-env-changed=SDKROOT");
 
 	let mut command = darwin_compiler::darwin_compiler_command(env::var_os("CC").as_deref());
+	command.current_dir(&manifest_dir);
+	if let Some(sdk_root) = darwin_compiler::darwin_sdk_root(env::var_os("SDKROOT").as_deref()) {
+		command.arg("-isysroot").arg(sdk_root);
+	}
 	let result = command
-		.current_dir(&manifest_dir)
 		.args([
 			"-x",
 			"objective-c",

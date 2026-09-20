@@ -9,6 +9,8 @@ import {
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
 import { isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatModelRoleAlias, roleCandidatePool } from "../../config/model-roles";
+import { resolveModelRoleValue } from "../../config/model-resolver";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
@@ -42,7 +44,7 @@ import {
 	lookupBuiltinSlashCommand,
 } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
-import { getTinyTitleModelSpec, isTinyTitleLocalModelKey } from "../../tiny/models";
+import { getTinyLocalModelSpec, isTinyLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { resolveReadPath } from "../../tools/path-utils";
@@ -199,9 +201,26 @@ export class InputController {
 		},
 	) {}
 
+	/** Resolve the current tiny role at use time so project/session reloads cannot leave a stale model. */
+	#resolveTinyTitleLocalModelKey(): string | undefined {
+		const model = resolveModelRoleValue(
+			formatModelRoleAlias("tiny"),
+			roleCandidatePool("tiny", this.ctx.settings, this.ctx.session.modelRegistry),
+			{ settings: this.ctx.settings },
+		).model;
+		return model?.api === "local-inference" && isTinyLocalModelKey(model.id) ? model.id : undefined;
+	}
+
+	/** Prewarm only the local worker selected by the current tiny role. */
+	prewarmTinyTitleModel(): void {
+		const modelKey = this.#resolveTinyTitleLocalModelKey();
+		if (modelKey) tinyTitleClient.prewarm(modelKey);
+	}
+
 	/** Session-level title starts (user `/skill:` via promptCustomMessage) reuse this UI. */
 	notifyTitleGenerationStart(): (() => void) | undefined {
-		return this.#showTinyTitleDownloadProgress(this.ctx.settings.get("providers.tinyModel"));
+		const modelKey = this.#resolveTinyTitleLocalModelKey();
+		return modelKey ? this.#showTinyTitleDownloadProgress(modelKey) : undefined;
 	}
 
 	#enhancedPaste?: EnhancedPasteController;
@@ -233,9 +252,11 @@ export class InputController {
 	// scoped-input render fast path so the attachment chips band repaints.
 	#lastChipsSignature = "";
 
-	#showTinyTitleDownloadProgress(modelKey: string): (() => void) | undefined {
-		if (!isTinyTitleLocalModelKey(modelKey)) return;
-		const component = new TinyTitleDownloadProgressComponent(getTinyTitleModelSpec(modelKey).label);
+	#showTinyTitleDownloadProgress(modelKey: string | undefined): (() => void) | undefined {
+		if (!modelKey || !isTinyLocalModelKey(modelKey)) return;
+		const spec = getTinyLocalModelSpec(modelKey);
+		if (!spec) return;
+		const component = new TinyTitleDownloadProgressComponent(spec.label);
 		let added = false;
 		let disposed = false;
 		let removeTimer: NodeJS.Timeout | undefined;
@@ -1257,9 +1278,10 @@ export class InputController {
 		if (this.#isLocalExtensionCommand(text)) {
 			return;
 		}
-		this.ctx.session.maybeStartTitleGeneration(text, () =>
-			this.#showTinyTitleDownloadProgress(this.ctx.settings.get("providers.tinyModel")),
-		);
+		this.ctx.session.maybeStartTitleGeneration(text, () => {
+			const modelKey = this.#resolveTinyTitleLocalModelKey();
+			return modelKey ? this.#showTinyTitleDownloadProgress(modelKey) : undefined;
+		});
 	}
 
 	/** Submit editor text to the focused subagent session (chat-only focus policy). */

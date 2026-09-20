@@ -7,6 +7,23 @@
 - `Editor.setHistoryStorage()` accepts an optional `sourceKey` callback: when the key changes, the editor re-seeds its list from `storage` at the start of the next navigation, carrying its own canceled drafts over. Omitted, the list stays fixed for the editor's lifetime and locally remembered drafts are never reloaded ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - `Editor.addToHistory()` records under the context active at the call, so a command that switches sessions or moves the working directory belongs to the host recording it before dispatch ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+### Breaking Changes
+
+- Removed specialized keyword modules in favor of a centralized registration system
+
+### Added
+
+- Added `find` tool renderer to display search results with hit ranking and score visualization
+- Supported collapsing/expanding search hit details and range snippets
+- Enabled file hyperlinking for navigation to absolute paths in search results
+- Added streaming progress display for incomplete find tool operations
+- Added Glyph Protocol support for rendering icons without requiring patched fonts
+- Added `setMagicKeywords` for dynamic configuration of highlightable magic keywords
+
+### Fixed
+
+- Prevented magic keywords from triggering spelling autocorrect and underlining
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

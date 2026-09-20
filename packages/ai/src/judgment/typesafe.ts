@@ -1,16 +1,20 @@
 /**
  * TypeSafe System One client: the native {@link Judge} backend.
  *
- * Forwards a {@link JudgmentRequest} verbatim to `POST /v1/systemone` and maps
- * the typed answers back. Credentials flow through {@link withAuth}, so a
- * stored key rotates on 401/403 exactly like chat providers; transient
- * 429/5xx responses retry with bounded, `retry-after`-aware backoff.
+ * Forwards a {@link JudgmentRequest} verbatim to the judgment route of its
+ * API ({@link JUDGMENT_ROUTES}) and maps the typed answers back. TypeSafe's
+ * own `POST /v1/systemone` and OpenRouter's `POST /api/alpha/decisions` share
+ * the request and answer wire shape, so one client serves both. Credentials
+ * flow through {@link withAuth}, so a stored key rotates on 401/403 exactly
+ * like chat providers; transient 429/5xx responses retry with bounded,
+ * `retry-after`-aware backoff.
  *
  * Environment (mirrors the official SDK): `TYPESAFE_API_KEY` is resolved by
  * the auth registry (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL`
  * overrides the API root, `TYPESAFE_DEFAULT_MODEL` the model.
  */
-import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
+import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env } from "@oh-my-pi/pi-utils";
 import { type ApiKey, withAuth } from "../auth-retry";
 import * as AIError from "../error";
@@ -26,8 +30,21 @@ import {
 } from "./types";
 
 export const TYPESAFE_PROVIDER = "typesafe";
-export const TYPESAFE_DEFAULT_BASE_URL = "https://api.typesafe.ai";
 export const TYPESAFE_DEFAULT_MODEL = "jev-latest";
+
+/** Judgment `POST` path under a model's base URL, per System One–compatible API. */
+export const JUDGMENT_ROUTES = {
+	typesafe: "/v1/systemone",
+	"openrouter-decisions": "/decisions",
+} as const satisfies Partial<Record<Api, string>>;
+
+/** APIs {@link TypeSafeJudge} can serve. */
+export type JudgmentApi = keyof typeof JUDGMENT_ROUTES;
+
+/** Whether a catalog API answers System One judgments natively. */
+export function isJudgmentApi(api: Api): api is JudgmentApi {
+	return Object.hasOwn(JUDGMENT_ROUTES, api);
+}
 
 /** `TYPESAFE_BASE_URL` when set, else the public API root; trailing slashes stripped. */
 export function typesafeBaseUrl(): string {
@@ -41,6 +58,10 @@ export function typesafeModel(): string {
 
 export interface TypeSafeJudgeOptions {
 	apiKey: ApiKey;
+	/** Wire route; defaults to TypeSafe's own API. */
+	api?: JudgmentApi;
+	/** Catalog provider reported on results; defaults to {@link TYPESAFE_PROVIDER}. */
+	provider?: string;
 	/** Defaults to {@link typesafeBaseUrl}. */
 	baseUrl?: string;
 	/** Defaults to {@link typesafeModel}. */
@@ -60,17 +81,11 @@ const MAX_ATTEMPTS = 3;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_MAX_MS = 5_000;
 
-/** Wire shape of `GET /v1/models`. */
-export interface TypeSafeModelCard {
-	name: string;
-	description: string;
-	release_date: string;
-}
-
 interface SystemOneResponse {
 	model: string;
 	answers: Record<string, Answer>;
-	usage: { input_tokens: number; output_tokens: number };
+	/** OpenRouter adds the billed `cost` in USD; TypeSafe reports tokens only. */
+	usage: { input_tokens: number; output_tokens: number; cost?: number };
 }
 
 /** Server hint wins (capped); otherwise exponential backoff from {@link BACKOFF_BASE_MS}. */
@@ -82,6 +97,8 @@ function backoffMs(attempt: number, headers: Headers | undefined): number {
 
 export class TypeSafeJudge implements Judge {
 	readonly label: string;
+	readonly api: JudgmentApi;
+	readonly provider: string;
 	readonly model: string;
 	readonly baseUrl: string;
 	readonly #apiKey: ApiKey;
@@ -90,67 +107,55 @@ export class TypeSafeJudge implements Judge {
 
 	constructor(options: TypeSafeJudgeOptions) {
 		this.#apiKey = options.apiKey;
+		this.api = options.api ?? TYPESAFE_PROVIDER;
+		this.provider = options.provider ?? TYPESAFE_PROVIDER;
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
 		this.#fetch = options.fetch ?? fetch;
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-		this.label = `${TYPESAFE_PROVIDER}/${this.model}`;
+		this.label = `${this.provider}/${this.model}`;
 	}
 
 	async judge<Q extends Questions>(request: JudgmentRequest<Q>, options?: JudgeOptions): Promise<JudgmentResult<Q>> {
 		const body = JSON.stringify({ state: request.state, model: this.model, questions: request.questions });
-		const response = await this.#request<SystemOneResponse>("POST", "/v1/systemone", body, options?.signal);
+		const signal = options?.signal;
+		const response = await withAuth(
+			this.#apiKey,
+			key => this.#attempt<SystemOneResponse>(JUDGMENT_ROUTES[this.api], body, key, signal),
+			{ signal },
+		);
 		for (const id in request.questions) {
 			const answer = response.answers[id];
 			if (answer === undefined || answer.type !== request.questions[id].type) {
 				throw new AIError.ProviderResponseError(
-					`TypeSafe response is missing a "${request.questions[id].type}" answer for question "${id}"`,
-					{ provider: TYPESAFE_PROVIDER, kind: "envelope" },
+					`${this.label} response is missing a "${request.questions[id].type}" answer for question "${id}"`,
+					{ provider: this.provider, kind: "envelope" },
 				);
 			}
 		}
 		return {
-			api: TYPESAFE_PROVIDER,
-			provider: TYPESAFE_PROVIDER,
+			api: this.api,
+			provider: this.provider,
 			model: response.model,
 			answers: response.answers as JudgmentResult<Q>["answers"],
-			usage: tokenUsage(response.usage.input_tokens, response.usage.output_tokens),
+			usage: tokenUsage(response.usage.input_tokens, response.usage.output_tokens, response.usage.cost),
 		};
 	}
 
-	/** Models available to the account (`GET /v1/models`); also the login validation probe. */
-	async listModels(signal?: AbortSignal): Promise<TypeSafeModelCard[]> {
-		const response = await this.#request<{ models: TypeSafeModelCard[] }>("GET", "/v1/models", undefined, signal);
-		if (!Array.isArray(response.models)) {
-			throw new AIError.ProviderResponseError("TypeSafe /v1/models response is missing `models`", {
-				provider: TYPESAFE_PROVIDER,
-				kind: "envelope",
-			});
-		}
-		return response.models;
-	}
-
-	async #request<T>(method: "GET" | "POST", path: string, body: string | undefined, signal?: AbortSignal): Promise<T> {
-		return withAuth(this.#apiKey, key => this.#attempt<T>(method, path, body, key, signal), { signal });
-	}
-
-	async #attempt<T>(
-		method: "GET" | "POST",
-		path: string,
-		body: string | undefined,
-		key: string,
-		signal: AbortSignal | undefined,
-	): Promise<T> {
+	async #attempt<T>(path: string, body: string, key: string, signal: AbortSignal | undefined): Promise<T> {
 		const url = `${this.baseUrl}${path}`;
-		const headers: Record<string, string> = { Authorization: `Bearer ${key}`, Accept: "application/json" };
-		if (body !== undefined) headers["Content-Type"] = "application/json";
+		const headers: Record<string, string> = {
+			Authorization: `Bearer ${key}`,
+			Accept: "application/json",
+			"Content-Type": "application/json",
+		};
 		for (let attempt = 0; ; attempt++) {
 			signal?.throwIfAborted();
 			const timeout = AbortSignal.timeout(this.#timeoutMs);
 			let response: Response;
 			try {
 				response = await this.#fetch(url, {
-					method,
+					method: "POST",
 					headers,
 					body,
 					signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
@@ -162,7 +167,7 @@ export class TypeSafeJudge implements Judge {
 			}
 			if (response.ok) return (await response.json()) as T;
 			const text = await response.text();
-			const error = new TypeSafeApiError(`TypeSafe API error (${response.status}): ${text}`, response.status, {
+			const error = new TypeSafeApiError(`${this.label} API error (${response.status}): ${text}`, response.status, {
 				headers: response.headers,
 			});
 			const transient = response.status === 408 || response.status === 429 || response.status >= 500;

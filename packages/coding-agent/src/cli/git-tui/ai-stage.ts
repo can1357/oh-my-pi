@@ -19,7 +19,6 @@ import { Settings } from "../../config/settings";
 import { resolveJudge } from "../../judgment";
 import fileQuestionTemplate from "../../prompts/system/git-ai-stage-file.md" with { type: "text" };
 import { discoverAuthStorage, loadCliExtensionProviders } from "../../sdk";
-import { ONLINE_MEMORY_MODEL_KEY } from "../../tiny/models";
 import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
 import type { AiStageOutcome } from "@oh-my-pi/pi-tui/apps/git/git-tui";
 
@@ -69,7 +68,6 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 		const judge = resolveJudge({
 			settings,
 			registry,
-			backend: ONLINE_MEMORY_MODEL_KEY,
 			sessionId: Bun.randomUUIDv7(),
 		});
 

@@ -38,7 +38,7 @@
  *   very turn that rotated; it stays on its existing session-close path.
  */
 
-import { clearAnthropicFastModeFallback } from "./providers/anthropic";
+import { clearAnthropicFastModeFallback } from "./providers/anthropic-state";
 import { resetOpenAIResponsesAccountScopedState } from "./providers/openai-responses";
 import type { ProviderSessionState } from "./types";
 

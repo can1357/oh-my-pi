@@ -1,12 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Model, ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
+	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 function createContext(
 	chains: RetryFallbackResolutionContext["chains"],
@@ -127,15 +130,17 @@ describe("retry fallback selector resolution", () => {
 		expect(candidates[1]?.thinkingLevel).toBeUndefined();
 	});
 
-	it("inherits the default chain only for roles without an explicit chain", () => {
+	it("inherits the default chain only for chat roles and preserves explicit empty kind chains", () => {
 		const defaultChain = ["openai/gpt-4o-mini"];
-		const expanded = expandDefaultRetryFallbackChains({ default: defaultChain, slow: ["google/gemini-2.5-flash"] }, [
-			"default",
-			"task",
-			"slow",
-		]);
+		const expanded = expandDefaultRetryFallbackChains(
+			{ default: defaultChain, slow: ["google/gemini-2.5-flash"], judge: [] },
+			["default", "task", "slow", "judge", "image", "web"],
+		);
 		expect(expanded.task).toBe(defaultChain);
 		expect(expanded.slow).toEqual(["google/gemini-2.5-flash"]);
+		expect(expanded.judge).toEqual([]);
+		expect(expanded.image).toBeUndefined();
+		expect(expanded.web).toBeUndefined();
 	});
 
 	it("prefers an exact model+effort key over a different-effort key regardless of object order", () => {
@@ -211,5 +216,104 @@ describe("retry fallback selector resolution", () => {
 			[high]: ["openai/gpt-4o-mini:high"],
 		});
 		expect(resolveRetryFallbackChainKey(exactHigh, high, model)).toBe(high);
+	});
+});
+
+describe("retry fallback kind-role validation", () => {
+	const chatModel = getBundledModel("openai", "gpt-4o-mini");
+	if (!chatModel) throw new Error("Expected bundled OpenAI test model");
+	const judgeModel: Model = { ...chatModel, id: "test-judge", name: "Test Judge", kind: "judge" };
+	const imageModel: Model = { ...chatModel, id: "test-image", name: "Test Image", kind: "image" };
+	const models = [chatModel, judgeModel, imageModel];
+	const registry = {
+		getAll: (kind: ModelKind | "all" = "chat") =>
+			kind === "all" ? models : models.filter(model => (model.kind ?? "chat") === kind),
+		getAvailable: (kind: ModelKind | "all" = "chat") =>
+			kind === "all" ? models : models.filter(model => (model.kind ?? "chat") === kind),
+		find: (provider: string, id: string) => models.find(model => model.provider === provider && model.id === id),
+		hasProvider: (provider: string) => models.some(model => model.provider === provider),
+		getProviderModels: (provider: string) => models.filter(model => model.provider === provider),
+	};
+
+	it("accepts aliases and fuzzy patterns that resolve to the role's model kind", () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: `${judgeModel.provider}/${judgeModel.id}` },
+			"retry.fallbackChains": { judge: ["@judge", "test-judge"] },
+		});
+		const warnings: string[] = [];
+
+		validateRetryFallbackChains(settings, registry, warning => warnings.push(warning));
+
+		expect(warnings).toEqual([]);
+	});
+
+	it("validates compatibility without requiring provider credentials or availability", () => {
+		const settings = Settings.isolated({
+			modelRoles: { image: `${imageModel.provider}/${imageModel.id}` },
+			"retry.fallbackChains": { image: ["@image", "test-image"] },
+		});
+		const warnings: string[] = [];
+
+		const unavailableRegistry = { ...registry, getAvailable: () => [] };
+		validateRetryFallbackChains(settings, unavailableRegistry, warning => warnings.push(warning));
+
+		expect(warnings).toEqual([]);
+	});
+
+	it("warns when kind-role entries resolve to the wrong kind or no model", () => {
+		const wrongKindSelector = `${imageModel.provider}/${imageModel.id}`;
+		const missingSelector = `${chatModel.provider}/missing-judge`;
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { judge: [wrongKindSelector, missingSelector] },
+		});
+		const warnings: string[] = [];
+
+		validateRetryFallbackChains(settings, registry, warning => warnings.push(warning));
+
+		expect(warnings).toHaveLength(2);
+		expect(warnings[0]).toContain(wrongKindSelector);
+		expect(warnings[1]).toContain(missingSelector);
+	});
+
+	it("validates provider-qualified kind-role entries without composing the full catalog", () => {
+		let fullCatalogReads = 0;
+		const countingRegistry = {
+			...registry,
+			getAll: (kind: ModelKind | "all" = "chat") => {
+				fullCatalogReads++;
+				return registry.getAll(kind);
+			},
+		};
+		const warnings: string[] = [];
+
+		validateRetryFallbackChains(
+			Settings.isolated({ "retry.fallbackChains": { judge: [`${judgeModel.provider}/${judgeModel.id}`] } }),
+			countingRegistry,
+			warning => warnings.push(warning),
+		);
+		expect(warnings).toEqual([]);
+		expect(fullCatalogReads).toBe(0);
+
+		// A provider-less pattern has no provider slice to check; it must still resolve.
+		validateRetryFallbackChains(
+			Settings.isolated({ "retry.fallbackChains": { judge: ["test-judge"] } }),
+			countingRegistry,
+			warning => warnings.push(warning),
+		);
+		expect(warnings).toEqual([]);
+		expect(fullCatalogReads).toBe(1);
+	});
+
+	it("keeps pending-discovery suppression for unresolved kind-role entries", () => {
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { judge: ["litellm/pending-judge"] },
+		});
+		const warnings: string[] = [];
+
+		validateRetryFallbackChains(settings, registry, warning => warnings.push(warning), {
+			isDiscoveryPending: provider => provider === "litellm",
+		});
+
+		expect(warnings).toEqual([]);
 	});
 });

@@ -10,7 +10,7 @@
  * one of the axis's declared records.
  */
 import type { Effort } from "../effort";
-import type { ThinkingControlMode } from "../types";
+import { MODEL_KINDS, type ThinkingControlMode } from "../types";
 
 /** Value shape a directive accepts (see `rules/README.md`). */
 export type AxisShape = "scalar" | "array" | "object";
@@ -294,6 +294,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"edit-prompt-variant": { key: "editPromptVariant", set: "catalog", shape: "scalar", values: ["full", "compact"] },
 	"edit-revision": { key: "editRevision", set: "catalog", shape: "scalar" },
 	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
+	kind: { key: "kind", set: "catalog", shape: "scalar", values: MODEL_KINDS },
+	"web-search": {
+		key: "webSearch",
+		set: "catalog",
+		shape: "scalar",
+		values: ["gemini", "anthropic", "codex", "xai", "openrouter"],
+	},
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },

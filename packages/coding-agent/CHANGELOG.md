@@ -8,7 +8,29 @@
 
 ### Breaking Changes
 
-- Removed support for the env parameter in the bash tool
+- Image-generation overrides now use model selectors, and web-search CLI overrides use --model instead of --provider.
+- Removed the bash tool's env parameter.
+- Eval judge(state, questions) is now awaited and returns answers directly; JudgmentHandle and judgment support in wait() have been removed.
+
+### Added
+
+- Added `find` tool for semantic workspace searching, allowing agents to locate behaviors and symbols using natural language
+- Added `find` CLI command for performing semantic workspace searches
+- Added batch evaluation with judge_batch(states, questions) / judgeBatch(...), including bounded background execution, incremental result and status access, per-item failure reporting, and the ability to wait for or reattach to jobs across turns or after a reset.
+- Added the jevify magic keyword to have the agent establish an evaluation rubric before classifying bulk items and inspect only items flagged by the judge.
+- Added omp web-search as an alias for omp search.
+- Added tui.titleSpinner configuration to select the terminal-title working-state spinner (braille, dots, or line).
+- Added Handlebars-based system prompt templates through SYSTEM_TEMPLATE.md, --system-prompt-template, and the SDK, with access to live settings and tool data.
+- Added configurable image, web, speech, dictation, judge, and memory model roles with ordered fallbacks, legacy backend-setting migration, and omp models --kind filtering.
+- Added native OpenRouter image generation, model-selected web-plugin search, and live discovery of TypeSafe judge models.
+
+### Changed
+
+- Updated agent system prompts to prioritize the `find` tool over `grep` and `glob` for behavioral lookups
+- Refined system prompt instructions for XML tag handling and agent persona
+- Updated sloppy edit tool syntax to use plain text headers instead of XML tags
+- Improved startup performance by validating provider-qualified model selectors against only the relevant provider catalog.
+- Reduced launch time for npm and compiled builds by embedding the model catalog more efficiently.
 
 ### Fixed
 
@@ -21,6 +43,16 @@
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery of PrismML Bonsai 2 27B GGUFs: built-in and custom-named providers now share catalog rules for chat-completions routing and the Qwen 3.8 thinking ladder (`low`/`medium`/`xhigh`), including cached models.
+- Fixed system prompt configuration validation so systemPromptTemplate and customSystemPrompt cannot conflict with a full systemPrompt replacement, including when values are empty.
+- Added browser-relay support for listing eligible pages without attaching to or claiming them.
+- Fixed Codex compatibility with the sloppy edit tool.
+- Capped concurrent eval judge and completion requests to prevent large fan-outs from overwhelming judge and fallback models.
+- Temporarily avoids retrying judgment requests with credentials that recently failed due to authorization or billing errors.
+- Fixed image and speech fallback models disappearing after discovery and eliminated incorrect incompatibility warnings for providers without credentials.
+- Fixed resume and continue flows to hide empty sessions.
+- Fixed edit operations that could loop after empty insertions or fail on Unicode no-op and overlapping duplicate matches.
+- Fixed live subagent messages being delayed by agent discovery and roster discovery looping on dot-named transcripts.
+- Fixed llama.cpp discovery and routing for PrismML Bonsai 2 27B GGUF models, including support for cached models and the Qwen 3.8 thinking-level ladder.
 
 ## [18.2.6] - 2026-09-18
 

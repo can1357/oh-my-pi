@@ -1,13 +1,32 @@
-import { describe, expect, it, vi } from "bun:test";
-import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { afterAll, describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
 import { searchXAI } from "@oh-my-pi/pi-coding-agent/web/search/providers/xai";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
-const fakeAuthStorage = {
-	resolver: vi.fn(() => async () => "test-key"),
-	getCredentialOrigin: vi.fn(() => undefined),
-	hasAuth: vi.fn(() => true),
-} as unknown as AuthStorage;
+const SELECTED_MODEL_ID = "grok-selected-grounding";
+const SELECTED_BASE_URL = "https://xai-grounding.example.test/v1";
+const authStorage = createInMemoryAuthStorage();
+authStorage.setRuntimeApiKey("xai", "selected-xai-key");
+const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+const model = buildModel({
+	id: SELECTED_MODEL_ID,
+	name: "Selected xAI Grounding",
+	api: "openai-responses",
+	provider: "xai",
+	baseUrl: SELECTED_BASE_URL,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 16_384,
+});
+
+afterAll(() => {
+	authStorage.close();
+});
 
 function makeFetchMock(response: Record<string, unknown>): FetchImpl {
 	return async () =>
@@ -17,17 +36,43 @@ function makeFetchMock(response: Record<string, unknown>): FetchImpl {
 		});
 }
 
-function makeParams(fetch: FetchImpl, extras: Record<string, unknown> = {}) {
+function makeParams(fetch: FetchImpl, extras: Partial<SearchParams> = {}): SearchParams {
 	return {
 		query: "Bun latest release",
 		systemPrompt: "xAI integration test prompt",
-		authStorage: fakeAuthStorage,
+		authStorage,
+		modelRegistry,
+		model,
 		fetch,
 		...extras,
 	};
 }
 
 describe("xAI Responses answer extraction from relay output items", () => {
+	it("uses the selected catalog model, endpoint, and credential provider", async () => {
+		let requestUrl: string | undefined;
+		let requestHeaders: Headers | undefined;
+		let requestBody: Record<string, unknown> | undefined;
+		const fetch: FetchImpl = async (input, init) => {
+			requestUrl = String(input);
+			requestHeaders = new Headers(init?.headers);
+			requestBody = JSON.parse(String(init?.body));
+			return new Response(
+				JSON.stringify({
+					id: "resp-selected-model",
+					model: SELECTED_MODEL_ID,
+					output_text: "Selected transport answer.",
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+
+		await searchXAI(makeParams(fetch));
+
+		expect(requestUrl).toBe(`${SELECTED_BASE_URL}/responses`);
+		expect(requestHeaders?.get("authorization")).toBe("Bearer selected-xai-key");
+		expect(requestBody?.model).toBe(SELECTED_MODEL_ID);
+	});
 	it("drops between-call narration and keeps the final substantive message", async () => {
 		const relayResponse = {
 			id: "resp-relay",
