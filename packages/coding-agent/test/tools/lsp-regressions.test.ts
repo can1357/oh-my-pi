@@ -5560,3 +5560,36 @@ describe("ty python lsp", () => {
 		}
 	});
 });
+
+describe("lsp cross-worktree location output (issue #12569)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("marks definition targets outside the session checkout with their checkout path", async () => {
+		const { formatLocationWithContext, formatCheckoutSuffix } =
+			await import("@oh-my-pi/pi-coding-agent/lsp/diagnostics");
+		const tempDir = TempDir.createSync("@omp-lsp-worktree-");
+		try {
+			const callerDir = path.join(tempDir.path(), "harmonic-analyzer");
+			const siblingDir = path.join(tempDir.path(), "harmonic-e2e-failure-20260919");
+			await Bun.write(path.join(callerDir, "cad", "scripts", "_common.py"), "x = 1\n");
+			await Bun.write(
+				path.join(siblingDir, "cad", "scripts", "_common.py"),
+				"line1\nline2\ndef _preference_id():\n    pass\n",
+			);
+			const target = path.join(siblingDir, "cad", "scripts", "_common.py");
+			const location = {
+				uri: fileToUri(target),
+				range: { start: { line: 2, character: 4 }, end: { line: 2, character: 18 } },
+			};
+			expect(formatCheckoutSuffix(target, callerDir)).toBe(` (in ${target})`);
+			expect(formatCheckoutSuffix(path.join(callerDir, "cad", "scripts", "_common.py"), callerDir)).toBe("");
+			const rendered = await formatLocationWithContext(location, callerDir);
+			expect(rendered).toContain(`(in ${target})`);
+			expect(rendered).toContain("def _preference_id");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+});

@@ -36,6 +36,7 @@ import { getLinterClient } from "./clients";
 import { configCache, getConfig, getServersForFile } from "./config";
 import {
 	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+	formatCheckoutSuffix,
 	formatLocationWithContext,
 	hasRustWorkspaceAncestor,
 	isOnlyQueriedDeclaration,
@@ -1315,7 +1316,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const contextualLines = await Promise.all(
 							contextualReferences.map(location => formatLocationWithContext(location, this.session.cwd)),
 						);
-						const plainLines = plainReferences.map(location => `  ${formatLocation(location, this.session.cwd)}`);
+						const plainLines = plainReferences.map(
+							location =>
+								`  ${formatLocation(location, this.session.cwd)}${formatCheckoutSuffix(uriToFile(location.uri), this.session.cwd)}`,
+						);
 						const lines = plainLines.length
 							? [
 									...contextualLines,

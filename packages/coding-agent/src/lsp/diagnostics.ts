@@ -143,6 +143,18 @@ function filterOrphanProjectDiagnostics(
 
 const LOCATION_CONTEXT_LINES = 1;
 export const REFERENCE_CONTEXT_LIMIT = 50;
+/**
+ * Suffix identifying the checkout a location belongs to when it is outside
+ * the session cwd. `formatLocation` already keeps the absolute path there,
+ * but sibling checkouts share identical relative tails (`cad/scripts/...`),
+ * so the eye still reads the wrong tree. The explicit root makes the target
+ * checkout unmistakable (issue #12569).
+ */
+export function formatCheckoutSuffix(targetFile: string, cwd: string): string {
+	const relative = path.relative(path.resolve(cwd), path.resolve(targetFile));
+	if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return "";
+	return ` (in ${targetFile})`;
+}
 
 export const REFERENCES_RETRY_COUNT = 2;
 export const REFERENCES_RETRY_DELAY_MS = 250;
@@ -177,12 +189,9 @@ export function normalizeLocationResult(
 }
 
 export async function formatLocationWithContext(location: Location, cwd: string): Promise<string> {
-	const header = `  ${formatLocation(location, cwd)}`;
-	const context = await readLocationContext(
-		uriToFile(location.uri),
-		location.range.start.line + 1,
-		LOCATION_CONTEXT_LINES,
-	);
+	const targetFile = uriToFile(location.uri);
+	const header = `  ${formatLocation(location, cwd)}${formatCheckoutSuffix(targetFile, cwd)}`;
+	const context = await readLocationContext(targetFile, location.range.start.line + 1, LOCATION_CONTEXT_LINES);
 	if (context.length === 0) {
 		return header;
 	}
