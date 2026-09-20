@@ -1,18 +1,18 @@
 // Ported from NousResearch/hermes-agent (MIT) — tools/tts_tool.py L167-171, L896-959.
-// The xAI Grok Voice path below is preserved intact; a local on-device neural TTS
-// backend (Kokoro-82M via kokoro-js on the shared ONNX worker) is layered on behind
-// the `providers.tts` switch.
+// Speech backends are catalog models selected through the speech role chain.
 
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, type FetchImpl, withAuth } from "@oh-my-pi/pi-ai";
-import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { type ApiKey, type FetchImpl, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { prompt, USER_AGENT } from "@oh-my-pi/pi-utils";
-import { settings } from "../config/settings";
+import type { ModelRegistry } from "../config/model-registry";
+import { resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
+import { roleCandidatePool } from "../config/model-roles";
+import { settings, type Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
-import { resolveXAIHttpCredentials } from "../lib/xai-http";
 import ttsDescription from "../prompts/tools/tts.md" with { type: "text" };
-import { DEFAULT_TTS_LOCAL_MODEL_KEY, DEFAULT_TTS_VOICE, isTtsLocalModelKey, KOKORO_VOICES } from "../tts/models";
+import { DEFAULT_TTS_VOICE, KOKORO_VOICES } from "../tts/models";
 import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
@@ -31,10 +31,7 @@ const formatVoiceList = (): string =>
 	XAI_BUILTIN_VOICES.map(v => (v === DEFAULT_XAI_VOICE_ID ? `${v} (default)` : v)).join(", ");
 
 type TtsCodec = "mp3" | "wav";
-type TtsBackend = "local" | "xai" | "deepinfra";
-
-const DEEPINFRA_TTS_URL = "https://api.deepinfra.com/v1/openai/audio/speech";
-const DEFAULT_DEEPINFRA_TTS_MODEL = "hexgrad/Kokoro-82M";
+type TtsBackend = "local-inference" | "xai-tts" | "openai-speech";
 
 const ttsSchema = type({
 	text: "1 <= string <= 15000",
@@ -57,21 +54,23 @@ interface TtsToolDetails {
 	backend: TtsBackend;
 }
 
-/**
- * Pick the synthesis backend. Pure for testability.
- *
- * - `xai` / `local` are honored verbatim (the xAI path still surfaces its own
- *   "no credentials" error when creds are missing).
- * - `auto` prefers the local on-device backend, except when the caller asked for
- *   an `.mp3` and xAI credentials exist — only the cloud path can emit MP3, so we
- *   route there to satisfy the requested container rather than substituting WAV.
- */
-export function resolveTtsBackend(opts: { preference: string; wantsMp3: boolean; hasXaiCreds: boolean }): TtsBackend {
-	if (opts.preference === "xai") return "xai";
-	if (opts.preference === "deepinfra") return "deepinfra";
-	if (opts.preference === "local") return "local";
-	if (opts.wantsMp3 && opts.hasXaiCreds) return "xai";
-	return "local";
+/** Resolve speech candidates while preserving every explicitly configured slot. */
+export function resolveSpeechCandidates(
+	settingsInstance: Settings,
+	modelRegistry: ModelRegistry,
+	wantsMp3: boolean,
+): RoleChainCandidate[] {
+	const pool = roleCandidatePool("speech", settingsInstance, modelRegistry);
+	const candidates = resolveRoleChain("speech", settingsInstance, pool);
+	if (!wantsMp3) return candidates;
+
+	const nonExplicit = candidates.filter(candidate => !candidate.explicit);
+	const cloudFirst = [
+		...nonExplicit.filter(candidate => candidate.model.api !== "local-inference"),
+		...nonExplicit.filter(candidate => candidate.model.api === "local-inference"),
+	];
+	let next = 0;
+	return candidates.map(candidate => (candidate.explicit ? candidate : cloudFirst[next++]!));
 }
 
 /**
@@ -88,19 +87,16 @@ export function resolveLocalWavPath(outputPath: string): { wavPath: string; subs
 	return { wavPath: `${base}.wav`, substituted: true };
 }
 
-function readStringSetting(key: "providers.tts" | "tts.localModel" | "tts.localVoice"): string | undefined {
+function readLocalVoice(settingsInstance: Settings): string {
 	try {
-		const value = settings.get(key);
-		return typeof value === "string" ? value : undefined;
+		const value = settingsInstance.get("tts.localVoice");
+		return typeof value === "string" && value ? value : DEFAULT_TTS_VOICE;
 	} catch {
-		return undefined;
+		return DEFAULT_TTS_VOICE;
 	}
 }
 
-/**
- * Shared cloud-speech POST: bearer auth, JSON payload, 60 s timeout fence,
- * ProviderHttpError mapped to an error string. Returns the raw audio bytes.
- */
+/** Shared cloud-speech POST with a 60 s timeout fence. */
 async function postSpeechRequest(options: {
 	label: string;
 	url: string;
@@ -109,50 +105,41 @@ async function postSpeechRequest(options: {
 	resolveHeaders?: () => Promise<Record<string, string> | undefined>;
 	fetchImpl: FetchImpl;
 	signal: AbortSignal | undefined;
-}): Promise<Uint8Array | { errorText: string }> {
+}): Promise<Uint8Array> {
 	const timeoutSignal = AbortSignal.timeout(60_000);
 	const combinedSignal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
-
-	let response: Response;
-	try {
-		response = await withAuth(
-			options.apiKey,
-			async key => {
-				const configuredHeaders = await options.resolveHeaders?.();
-				const resp = await options.fetchImpl(options.url, {
-					method: "POST",
-					headers: {
-						...configuredHeaders,
-						Authorization: `Bearer ${key}`,
-						"Content-Type": "application/json",
-						"User-Agent": USER_AGENT,
-					},
-					body: JSON.stringify(options.payload),
-					signal: combinedSignal,
-				});
-				if (!resp.ok) {
-					const detail = await resp.text();
-					throw new ProviderHttpError(
-						`${options.label} failed (${resp.status}): ${detail.slice(0, 300)}`,
-						resp.status,
-						{ headers: resp.headers },
-					);
-				}
-				return resp;
-			},
-			{ signal: combinedSignal },
-		);
-	} catch (error) {
-		const status = (error as { status?: unknown }).status;
-		if (error instanceof Error && typeof status === "number") {
-			return { errorText: error.message };
-		}
-		throw error;
-	}
+	const response = await withAuth(
+		options.apiKey,
+		async key => {
+			const configuredHeaders = await options.resolveHeaders?.();
+			const resp = await options.fetchImpl(options.url, {
+				method: "POST",
+				headers: {
+					...configuredHeaders,
+					Authorization: `Bearer ${key}`,
+					"Content-Type": "application/json",
+					"User-Agent": USER_AGENT,
+				},
+				body: JSON.stringify(options.payload),
+				signal: combinedSignal,
+			});
+			if (!resp.ok) {
+				const detail = await resp.text();
+				throw new ProviderHttpError(
+					`${options.label} failed (${resp.status}): ${detail.slice(0, 300)}`,
+					resp.status,
+					{ headers: resp.headers },
+				);
+			}
+			return resp;
+		},
+		{ signal: combinedSignal },
+	);
 	return new Uint8Array(await response.arrayBuffer());
 }
 
 async function synthesizeXai(
+	model: Model,
 	params: TtsSchemaType,
 	ctx: CustomToolContext,
 	outputPath: string,
@@ -160,28 +147,13 @@ async function synthesizeXai(
 	codec: TtsCodec,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
-	const creds = await resolveXAIHttpCredentials(ctx.modelRegistry);
-	if (!creds) {
-		return {
-			isError: true,
-			content: [
-				{
-					type: "text",
-					text: "No xAI credentials. Run /login → xAI Grok OAuth (SuperGrok or X Premium+) or set XAI_API_KEY.",
-				},
-			],
-		};
-	}
-
 	const voiceId = params.voice_id ?? DEFAULT_XAI_VOICE_ID;
-	const language = params.language;
 	const sampleRate = params.sample_rate ?? DEFAULT_XAI_SAMPLE_RATE;
 	const bitRate = params.bit_rate ?? DEFAULT_XAI_BIT_RATE;
-
 	const payload: Record<string, unknown> = {
 		text: params.text,
 		voice_id: voiceId,
-		language,
+		language: params.language,
 	};
 	// Hermes tts_tool.py L926-940 — only send output_format when caller overrides a default.
 	const codecOverridden = codec !== "mp3";
@@ -195,36 +167,30 @@ async function synthesizeXai(
 	}
 
 	const sessionId = ctx.sessionManager.getSessionId();
-	const apiKey: ApiKey = ctx.modelRegistry.resolver(creds.provider, {
-		sessionId,
-		baseUrl: creds.baseURL,
-	});
-
+	const apiKey: ApiKey = ctx.modelRegistry.resolver(model, sessionId);
 	const bytes = await postSpeechRequest({
-		label: "xAI TTS",
-		url: `${creds.baseURL}/tts`,
+		label: `${model.provider}/${model.id}`,
+		url: `${model.baseUrl.replace(/\/+$/, "")}/tts`,
 		payload,
 		apiKey,
-		resolveHeaders: () => ctx.modelRegistry.getProviderHeaders(creds.provider),
+		resolveHeaders: () => ctx.modelRegistry.resolveModelHeaders(model, signal),
 		fetchImpl: ctx.fetch ?? fetch,
 		signal,
 	});
-	if (!(bytes instanceof Uint8Array)) {
-		return { isError: true, content: [{ type: "text", text: bytes.errorText }] };
-	}
 	await Bun.write(outputPath, bytes);
 	return {
 		content: [
 			{
 				type: "text",
-				text: `Saved ${bytes.length} bytes to ${displayPath} (voice=${voiceId}, codec=${codec}, backend=xai).`,
+				text: `Saved ${bytes.length} bytes to ${displayPath} (model=${model.provider}/${model.id}, voice=${voiceId}, codec=${codec}).`,
 			},
 		],
-		details: { bytes: bytes.length, voiceId, codec, backend: "xai" },
+		details: { bytes: bytes.length, voiceId, codec, backend: "xai-tts" },
 	};
 }
 
-async function synthesizeDeepInfra(
+async function synthesizeOpenAiSpeech(
+	model: Model,
 	params: TtsSchemaType,
 	ctx: CustomToolContext,
 	outputPath: string,
@@ -232,74 +198,53 @@ async function synthesizeDeepInfra(
 	codec: TtsCodec,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
-	const sessionId = ctx.sessionManager.getSessionId();
-	const storedKey = await ctx.modelRegistry.getApiKeyForProvider("deepinfra", sessionId);
-	if (!storedKey) {
-		return {
-			isError: true,
-			content: [
-				{
-					type: "text",
-					text: "No DeepInfra credentials. Run /login → DeepInfra or set DEEPINFRA_API_KEY.",
-				},
-			],
-		};
-	}
-
-	// Forward the voice only when the caller set one so DeepInfra's server
-	// default applies otherwise (voice ids are model-specific).
 	const payload: Record<string, unknown> = {
-		model: DEFAULT_DEEPINFRA_TTS_MODEL,
+		model: model.id,
 		input: params.text,
 		response_format: codec,
 		...(params.voice_id ? { voice: params.voice_id } : {}),
 	};
-
-	const apiKey: ApiKey = ctx.modelRegistry.resolver("deepinfra", { sessionId });
-
+	const sessionId = ctx.sessionManager.getSessionId();
+	const apiKey: ApiKey = ctx.modelRegistry.resolver(model, sessionId);
 	const bytes = await postSpeechRequest({
-		label: "DeepInfra TTS",
-		url: DEEPINFRA_TTS_URL,
+		label: `${model.provider}/${model.id}`,
+		url: `${model.baseUrl.replace(/\/+$/, "")}/audio/speech`,
 		payload,
 		apiKey,
-		resolveHeaders: () => ctx.modelRegistry.getProviderHeaders("deepinfra"),
+		resolveHeaders: () => ctx.modelRegistry.resolveModelHeaders(model, signal),
 		fetchImpl: ctx.fetch ?? fetch,
 		signal,
 	});
-	if (!(bytes instanceof Uint8Array)) {
-		return { isError: true, content: [{ type: "text", text: bytes.errorText }] };
-	}
 	await Bun.write(outputPath, bytes);
 	const voiceLabel = params.voice_id ?? "default";
 	return {
 		content: [
 			{
 				type: "text",
-				text: `Saved ${bytes.length} bytes to ${displayPath} (model=${DEFAULT_DEEPINFRA_TTS_MODEL}, voice=${voiceLabel}, codec=${codec}, backend=deepinfra).`,
+				text: `Saved ${bytes.length} bytes to ${displayPath} (model=${model.provider}/${model.id}, voice=${voiceLabel}, codec=${codec}).`,
 			},
 		],
-		details: { bytes: bytes.length, voiceId: voiceLabel, codec, backend: "deepinfra" },
+		details: { bytes: bytes.length, voiceId: voiceLabel, codec, backend: "openai-speech" },
 	};
 }
 
 async function synthesizeLocal(
+	model: Model,
 	params: TtsSchemaType,
+	settingsInstance: Settings,
 	cwd: string,
 	outputPath: string,
 	signal: AbortSignal | undefined,
 ): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
-	const modelSetting = readStringSetting("tts.localModel");
-	const modelKey = modelSetting && isTtsLocalModelKey(modelSetting) ? modelSetting : DEFAULT_TTS_LOCAL_MODEL_KEY;
-	const voice = readStringSetting("tts.localVoice") || DEFAULT_TTS_VOICE;
-
-	const audio = await ttsClient.synthesize(modelKey, params.text, { voice, signal });
+	const voice = readLocalVoice(settingsInstance);
+	const audio = await ttsClient.synthesize(model.id, params.text, { voice, signal });
 	if (!audio) {
 		return {
 			isError: true,
 			content: [
 				{
 					type: "text",
-					text: `Local TTS synthesis failed (model=${modelKey}). The on-device worker may be unavailable or the model download was interrupted.`,
+					text: `Local TTS synthesis failed (model=${model.id}). The on-device worker may be unavailable or the model download was interrupted.`,
 				},
 			],
 		};
@@ -316,10 +261,10 @@ async function synthesizeLocal(
 		content: [
 			{
 				type: "text",
-				text: `Saved ${wav.length} bytes to ${displayPath} (voice=${modelKey}/${voice}, codec=wav, backend=local, ${audio.sampleRate} Hz).${note}`,
+				text: `Saved ${wav.length} bytes to ${displayPath} (voice=${model.id}/${voice}, codec=wav, backend=local, ${audio.sampleRate} Hz).${note}`,
 			},
 		],
-		details: { bytes: wav.length, voiceId: `${modelKey}/${voice}`, codec: "wav", backend: "local" },
+		details: { bytes: wav.length, voiceId: `${model.id}/${voice}`, codec: "wav", backend: "local-inference" },
 	};
 }
 
@@ -346,16 +291,41 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 		const displayPath = formatPathRelativeToCwd(outputPath, cwd);
 		const codec: TtsCodec = outputPath.toLowerCase().endsWith(".wav") ? "wav" : "mp3";
 
-		const preference = readStringSetting("providers.tts") ?? "auto";
-		// Only resolve xAI creds when they can affect routing (skip for explicit local/deepinfra preferences).
-		const hasXaiCreds =
-			preference === "local" || preference === "deepinfra"
-				? false
-				: (await resolveXAIHttpCredentials(ctx.modelRegistry)) !== null;
-		const backend = resolveTtsBackend({ preference, wantsMp3: codec === "mp3", hasXaiCreds });
+		const settingsInstance = ctx.settings ?? settings;
+		const candidates = resolveSpeechCandidates(settingsInstance, ctx.modelRegistry, codec === "mp3");
+		if (candidates.length === 0) {
+			return {
+				isError: true,
+				content: [{ type: "text", text: "No available speech model matches the speech role." }],
+			};
+		}
 
-		if (backend === "local") return synthesizeLocal(params, cwd, outputPath, signal);
-		if (backend === "deepinfra") return synthesizeDeepInfra(params, ctx, outputPath, displayPath, codec, signal);
-		return synthesizeXai(params, ctx, outputPath, displayPath, codec, signal);
+		const failures: string[] = [];
+		for (const { model } of candidates) {
+			try {
+				if (model.api === "local-inference") {
+					return await synthesizeLocal(model, params, settingsInstance, cwd, outputPath, signal);
+				}
+				if (model.api === "xai-tts") {
+					return await synthesizeXai(model, params, ctx, outputPath, displayPath, codec, signal);
+				}
+				if (model.api === "openai-speech") {
+					return await synthesizeOpenAiSpeech(model, params, ctx, outputPath, displayPath, codec, signal);
+				}
+				throw new Error(`Unsupported speech model API: ${model.api}`);
+			} catch (error) {
+				if (signal?.aborted) throw error;
+				if (error instanceof MissingApiKeyError || error instanceof ProviderHttpError) {
+					failures.push(`${model.provider}/${model.id}: ${error.message}`);
+					continue;
+				}
+				throw error;
+			}
+		}
+
+		return {
+			isError: true,
+			content: [{ type: "text", text: `Speech synthesis failed for every candidate: ${failures.join("; ")}` }],
+		};
 	},
 };

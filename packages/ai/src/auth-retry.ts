@@ -43,6 +43,9 @@ export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<string | und
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;
 
+/** Keyless-provider credential marker; transports must not send it in authentication headers. */
+export const NO_AUTH_SENTINEL = "N/A";
+
 /** Narrows {@link ApiKey} to its resolver form. */
 export function isApiKeyResolver(key: ApiKey | undefined): key is ApiKeyResolver {
 	return typeof key === "function";

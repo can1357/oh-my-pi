@@ -63,7 +63,6 @@ import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
-import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
 	onModelRolesChanged,
@@ -135,7 +134,6 @@ import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-pro
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { tinyTitleClient } from "../tiny/title-client";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -1633,7 +1631,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// spawn syscall never lands in the same loop turn ahead of the first paint.
 		setImmediate(() => {
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
-				tinyTitleClient.prewarm(this.settings.get("providers.tinyModel"));
+				this.#inputController.prewarmTinyTitleModel();
 			}
 		});
 
@@ -1945,11 +1943,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				// before the move commits so the next prompt cannot recall or
 				// retain against the source project's memory.
 				await rebindMemoryBackendForCwd(this.session);
-				// Reapply provider preferences from the newly-loaded settings so the
-				// module-level search/image provider state reflects the destination
-				// project's configuration. Without this, the previous project's
-				// exclusions leak and newly-excluded providers are still used.
-				applyProviderGlobalsFromSettings(settings);
 			}
 			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
 			// the next prompt sees everything scoped to the new project directory.
@@ -1969,7 +1962,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (isSettingsInitialized()) {
 					await settings.reloadForCwd(previousCwd);
 					await rebindMemoryBackendForCwd(this.session);
-					applyProviderGlobalsFromSettings(settings);
 				}
 				clearClaudePluginRootsCache();
 				await this.refreshTitleSystemPrompt(previousCwd);
@@ -1983,7 +1975,6 @@ export class InteractiveMode implements InteractiveModeContext {
 					if (isSettingsInitialized()) {
 						await settings.reloadForCwd(actual);
 						await rebindMemoryBackendForCwd(this.session);
-						applyProviderGlobalsFromSettings(settings);
 					}
 					clearClaudePluginRootsCache();
 					await this.refreshTitleSystemPrompt(actual);
@@ -6368,7 +6359,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#sttController.toggle(this.editor, {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
-			requestRender: () => this.ui.requestRender(),
 			onStateChange: (state: SttState) => {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();

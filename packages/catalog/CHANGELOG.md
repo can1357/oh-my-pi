@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added model kinds, grounded-search capabilities, local inference and search-engine catalogs, OpenRouter image discovery, and live TypeSafe judge-model discovery.
+
 - Added `buildDiscoveredModel` helper for custom providers
 - Added support for glob-based patterns in identity overrides
 

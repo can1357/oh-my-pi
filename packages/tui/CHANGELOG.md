@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added kind-filtered image, web, speech, dictation, and judge role selection with editable default fallback chains in the model hub.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added

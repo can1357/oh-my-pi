@@ -10,7 +10,6 @@ import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
-	getInstallId,
 	isEnoent,
 	logger,
 	parseJsonWithRepair,
@@ -129,6 +128,43 @@ import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import {
+	injectedClientBaseUrl,
+	resolvesToOfficialAnthropicEndpoint,
+	supportsAnthropicCompaction,
+	supportsAnthropicCompactionOnClient,
+} from "./anthropic-compaction";
+import {
+	applyClaudeToolPrefix,
+	deriveClaudeDeviceId,
+	extractClaudeMetadataSessionId,
+	generateClaudeCloakingUserId,
+	isClaudeCloakingUserId,
+	readAnthropicMetadataAccountId,
+	readAnthropicMetadataString,
+	resolveAnthropicMetadataUserId,
+	stripClaudeToolPrefix,
+} from "./anthropic-identity";
+import {
+	anthropicProviderSessionStateKey,
+	clearAnthropicFastModeFallback,
+	isAnthropicFastModeFallbackDisabled,
+	normalizeAnthropicBaseUrl,
+	resolveDirectAnthropicBaseUrl,
+} from "./anthropic-state";
+
+export {
+	applyClaudeToolPrefix,
+	clearAnthropicFastModeFallback,
+	deriveClaudeDeviceId,
+	generateClaudeCloakingUserId,
+	isAnthropicFastModeFallbackDisabled,
+	isClaudeCloakingUserId,
+	normalizeAnthropicBaseUrl,
+	resolveAnthropicMetadataUserId,
+	stripClaudeToolPrefix,
+};
+export { resolvesToOfficialAnthropicEndpoint, supportsAnthropicCompaction, supportsAnthropicCompactionOnClient };
 
 export type AnthropicHeaderOptions = {
 	apiKey: string;
@@ -143,15 +179,6 @@ export type AnthropicHeaderOptions = {
 	/** Allow explicit fingerprint headers to replace OAuth defaults on non-official endpoints. */
 	allowAnthropicHeaderOverrides?: boolean;
 };
-
-export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
-	const trimmed = baseUrl?.trim();
-	if (!trimmed) {
-		return undefined;
-	}
-	const withoutTrailingSlashes = trimmed.replace(/\/+$/, "");
-	return withoutTrailingSlashes.endsWith("/v1") ? withoutTrailingSlashes.slice(0, -3) : withoutTrailingSlashes;
-}
 
 // Build deduplicated beta header string
 export function buildBetaHeader(baseBetas: readonly string[], extraBetas: readonly string[]): string {
@@ -416,8 +443,6 @@ type AnthropicOutputConfig = NonNullable<MessageCreateParamsStreaming["output_co
 const ANTHROPIC_STOP_SEQUENCES_MAX = 4;
 let warnedStopSequencesTrim = false;
 
-const ANTHROPIC_PROVIDER_SESSION_STATE_KEY = "anthropic-messages";
-
 /**
  * A mid-conversation `role: "system"` message omp inserts at a fixed slot in
  * the wire history so top-level `tools` and `output_config.effort` can stay
@@ -504,18 +529,6 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 	return state;
 }
 
-/**
- * Key the sticky strict-tools / fast-mode learning per endpoint+model. A
- * grammar-too-large 400 or a fast-mode rejection is specific to the model (its
- * tool grammar / entitlement) and the endpoint (direct Anthropic vs a gateway /
- * Foundry / Bedrock proxy), so it MUST NOT bleed onto unrelated anthropic-messages
- * requests in the same session. NUL separates the two components so neither can
- * forge the boundary.
- */
-function anthropicProviderSessionStateKey(baseUrl: string, modelId: string): string {
-	return `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:${baseUrl}\u0000${modelId}`;
-}
-
 function getAnthropicProviderSessionState(
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
 	baseUrl: string,
@@ -532,41 +545,6 @@ function getAnthropicProviderSessionState(
 	const created = createAnthropicProviderSessionState();
 	providerSessionState.set(key, created);
 	return created;
-}
-
-/**
- * Clears the in-session "server rejected fast mode" sticky flag. Call when the
- * caller is explicitly re-arming `serviceTier: "priority"` (e.g. user toggled
- * `/fast on` after a previous turn auto-disabled it) so the next request
- * actually carries `speed: "fast"` again. No-op when the map or state entry
- * hasn't been materialized yet.
- */
-export function clearAnthropicFastModeFallback(
-	providerSessionState: Map<string, ProviderSessionState> | undefined,
-): void {
-	if (!providerSessionState) return;
-	// Fast mode is re-armed session-wide (user toggled `/fast on`), so clear the
-	// sticky flag on every per-endpoint/model Anthropic entry — plus the legacy
-	// unscoped key — rather than a single shared object.
-	const prefix = `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:`;
-	for (const [key, value] of providerSessionState) {
-		if (key !== ANTHROPIC_PROVIDER_SESSION_STATE_KEY && !key.startsWith(prefix)) continue;
-		(value as AnthropicProviderSessionState).fastModeDisabled = false;
-	}
-}
-/**
- * Whether the direct Anthropic model's endpoint-scoped fast-mode fallback is
- * currently active. Reading the map directly is intentional: inspection must
- * not materialize a state entry for a model that has never streamed.
- */
-export function isAnthropicFastModeFallbackDisabled(
-	providerSessionState: Map<string, ProviderSessionState> | undefined,
-	model: Model<Api>,
-): boolean {
-	if (!providerSessionState || model.provider !== "anthropic" || model.api !== "anthropic-messages") return false;
-	const baseUrl = resolveAnthropicBaseUrl(model as Model<"anthropic-messages">) ?? "https://api.anthropic.com";
-	const key = anthropicProviderSessionStateKey(baseUrl, model.id);
-	return (providerSessionState.get(key) as AnthropicProviderSessionState | undefined)?.fastModeDisabled ?? false;
 }
 
 function hasStrictAnthropicTools(params: MessageCreateParamsStreaming): boolean {
@@ -760,145 +738,8 @@ export function wrapFetchForCch(base: FetchImpl): FetchImpl {
 	};
 }
 
-const CLAUDE_CLOAKING_USER_ID_REGEX =
-	/^user_[0-9a-fA-F]{64}_account_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-export function isClaudeCloakingUserId(userId: string): boolean {
-	return CLAUDE_CLOAKING_USER_ID_REGEX.test(userId);
-}
-
-/**
- * Real Claude Code sends `metadata.user_id` as a JSON-stringified object of the
- * shape `{ device_id, account_uuid, session_id, ...extra }` (see
- * services/api/claude.ts → getAPIMetadata). Accept that shape so callers that
- * supply a stable `session_id` aren't silently overwritten with fresh entropy
- * on every request, which would inflate the backend session count.
- */
-function isClaudeJsonUserId(userId: string): boolean {
-	if (userId.length === 0 || userId[0] !== "{") return false;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(userId);
-	} catch {
-		return false;
-	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-	const obj = parsed as Record<string, unknown>;
-	return typeof obj.session_id === "string" && obj.session_id.length > 0;
-}
-
-function extractClaudeMetadataSessionId(userId: unknown): string | undefined {
-	if (typeof userId !== "string") return undefined;
-	if (isClaudeCloakingUserId(userId)) {
-		return userId.slice(userId.lastIndexOf("_session_") + "_session_".length);
-	}
-	if (userId.length === 0 || userId[0] !== "{") return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(userId);
-	} catch {
-		return undefined;
-	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-	const sessionId = (parsed as Record<string, unknown>).session_id;
-	return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
-}
-
-export function generateClaudeCloakingUserId(): string {
-	const userHash = nodeCrypto.randomBytes(32).toString("hex");
-	const accountId = nodeCrypto.randomUUID().toLowerCase();
-	const sessionId = nodeCrypto.randomUUID().toLowerCase();
-	return `user_${userHash}_account_${accountId}_session_${sessionId}`;
-}
-
-const CLAUDE_DEVICE_ID_INSTALL_HASH_DOMAIN = "omp-claude-device-id-v1:";
-const CLAUDE_DEVICE_ID_ACCOUNT_HASH_DOMAIN = "omp-claude-device-id-v2";
-
-export function deriveClaudeDeviceId(installId: string, accountId?: string): string {
-	const hash = nodeCrypto.createHash("sha256");
-	if (accountId && accountId.length > 0) {
-		return hash
-			.update(CLAUDE_DEVICE_ID_ACCOUNT_HASH_DOMAIN)
-			.update("\0")
-			.update(installId)
-			.update("\0")
-			.update(accountId)
-			.digest("hex");
-	}
-	return hash.update(CLAUDE_DEVICE_ID_INSTALL_HASH_DOMAIN).update(installId).digest("hex");
-}
-
-function readMetadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
-	const value = metadata?.[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function readAnthropicMetadataAccountId(metadata: Record<string, unknown> | undefined): string | undefined {
-	return (
-		readMetadataString(metadata, "account_uuid") ??
-		readMetadataString(metadata, "accountId") ??
-		readMetadataString(metadata, "account_id")
-	);
-}
-
-function deriveClaudeDeviceIdFromInstallId(accountId?: string): string {
-	return deriveClaudeDeviceId(getInstallId(), accountId);
-}
-
-function generateClaudeJsonUserId(sessionId?: string, accountId?: string): string {
-	const userId: Record<string, string> = {
-		device_id: deriveClaudeDeviceIdFromInstallId(accountId),
-		session_id: sessionId ?? nodeCrypto.randomUUID().toLowerCase(),
-	};
-	if (accountId && accountId.length > 0) userId.account_uuid = accountId;
-	return JSON.stringify(userId);
-}
-
-/**
- * Resolve the `metadata.user_id` field for an Anthropic Messages request.
- *
- * For API-key tokens, an explicit caller-supplied `userId` is forwarded
- * verbatim and `undefined` yields no metadata. For OAuth tokens the value
- * must match the Claude Code attribution shape (`isClaudeCloakingUserId` or
- * the `{session_id, account_uuid?, device_id?}` JSON envelope) — anything
- * else is dropped and a fresh Claude-Code-style JSON id is generated from
- * `sessionId`/`accountId` so attribution stays consistent across the main
- * streaming path and provider-specific request builders (e.g. web search).
- */
-export function resolveAnthropicMetadataUserId(
-	userId: unknown,
-	isOAuthToken: boolean,
-	sessionId?: string,
-	accountId?: string,
-): string | undefined {
-	if (typeof userId === "string") {
-		if (!isOAuthToken || isClaudeCloakingUserId(userId) || isClaudeJsonUserId(userId)) {
-			return userId;
-		}
-	}
-
-	if (!isOAuthToken) return undefined;
-	return generateClaudeJsonUserId(sessionId, accountId);
-}
-const ANTHROPIC_BUILTIN_TOOL_NAMES = new Set(["web_search", "code_execution", "text_editor", "computer"]);
 const UMANS_WEBSEARCH_PROVIDER_HEADER = "X-Umans-Websearch-Provider";
 const UMANS_WEBSEARCH_TOOL_NAME = "web_search";
-export const applyClaudeToolPrefix = (name: string): string => {
-	if (!claudeToolPrefix) return name;
-	if (ANTHROPIC_BUILTIN_TOOL_NAMES.has(name.toLowerCase())) return name;
-	// Always prepend (no "already prefixed" short-circuit): the prefix is a wire
-	// transport detail applied once to internal tool names, and `stripClaudeToolPrefix`
-	// removes exactly one prefix on receive. Skipping names that already start with the
-	// prefix would make a tool literally named `_foo` lose its leading underscore on the
-	// return trip (`_foo` → wire `_foo` → strip → `foo`), so the agent loop can't find it.
-	return `${claudeToolPrefix}${name}`;
-};
-
-export const stripClaudeToolPrefix = (name: string): string => {
-	if (!claudeToolPrefix) return name;
-	if (!name.toLowerCase().startsWith(claudeToolPrefix.toLowerCase())) return name;
-	return name.slice(claudeToolPrefix.length);
-};
 
 function normalizeUmansWebSearchProvider(value: string | undefined): "native" | "exa" | undefined {
 	const normalized = value?.trim().toLowerCase();
@@ -1327,22 +1168,7 @@ function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: st
 	if (model.provider === "github-copilot") {
 		return normalizeAnthropicBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl);
 	}
-	if (model.provider === "anthropic" && isFoundryEnabled()) {
-		const foundryBaseUrl = normalizeAnthropicBaseUrl($env.FOUNDRY_BASE_URL);
-		if (foundryBaseUrl) {
-			return foundryBaseUrl;
-		}
-	}
-	if (model.provider === "anthropic") {
-		const configured = normalizeAnthropicBaseUrl(model.baseUrl);
-		// An explicitly configured non-official baseUrl (e.g. a models.yml provider
-		// override) is more specific than the generic env fallback and wins.
-		if (configured && !isOfficialAnthropicApiUrl(configured)) return configured;
-		// Otherwise ANTHROPIC_BASE_URL routes chat through an enterprise gateway
-		// (docs/environment-variables.md), ahead of the official default. The
-		// Foundry redirect is already handled above.
-		return normalizeAnthropicBaseUrl($env.ANTHROPIC_BASE_URL) ?? configured ?? "https://api.anthropic.com";
-	}
+	if (model.provider === "anthropic") return resolveDirectAnthropicBaseUrl(model);
 	return normalizeAnthropicBaseUrl(model.baseUrl);
 }
 
@@ -1790,89 +1616,6 @@ function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackConte
 }
 
 const ANTHROPIC_COMPACTION_MIN_TRIGGER_TOKENS = 50_000;
-
-/**
- * Whether this model's requests reach the official Anthropic API, resolved the
- * way the transport resolves it — including the Foundry and
- * `ANTHROPIC_BASE_URL` reroutes that leave `compat.officialEndpoint` stale.
- */
-export function resolvesToOfficialAnthropicEndpoint(model: Model<"anthropic-messages">): boolean {
-	return isOfficialAnthropicApiUrl(resolveAnthropicBaseUrl(model));
-}
-
-/**
- * Whether server-side compaction (`compact-2026-01-12`) may be spoken for
- * this model to the endpoint a request actually reaches: a model line the
- * beta supports (`compat.supportsServerCompaction`, rule-owned in the
- * catalog), on the official API for the first-party provider or on any
- * endpoint that opted in through `remoteCompaction.enabled`, and never on one
- * whose deployment contract excludes context management. The same predicate
- * gates emitting the edit, attaching the beta, and replaying a persisted
- * block, so a route or model change can never leave a session sending a block
- * its endpoint rejects.
- */
-export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, effectiveBaseUrl?: string): boolean {
-	if (!isCompactionCapableModel(model)) return false;
-	if (model.remoteCompaction?.enabled === true) return true;
-	// First-party provider is catalog policy (`first-party-provider` on the
-	// provider rules), never a provider-id literal. It reads its own axis
-	// rather than `officialEndpoint`, which stays URL-derived.
-	// A `transport: "pi-native"` baseUrl names the auth gateway, not the
-	// upstream model server: the gateway resolves the model's own provider
-	// server-side, so the upstream URL check cannot apply to the model's own
-	// transport URL — but only for the KDL-owned first-party deployment. A
-	// custom provider travels the same gateway to its own upstream, whose
-	// server-side gate stays off (unless `remoteCompaction.enabled` opts the
-	// route in above). An explicitly supplied foreign endpoint (e.g. a
-	// caller-owned client's URL) is still judged on its own merits below.
-	if (
-		model.transport === "pi-native" &&
-		model.compat.firstPartyProvider === true &&
-		(effectiveBaseUrl === undefined || effectiveBaseUrl === normalizeAnthropicBaseUrl(model.baseUrl))
-	) {
-		return true;
-	}
-	return (
-		model.compat.firstPartyProvider === true &&
-		(effectiveBaseUrl === undefined
-			? resolvesToOfficialAnthropicEndpoint(model)
-			: isOfficialAnthropicApiUrl(effectiveBaseUrl))
-	);
-}
-
-/**
- * {@link supportsAnthropicCompaction} for a request on a caller-owned client:
- * the endpoint is whatever the client targets (an `AnthropicVertex` client
- * carries an Anthropic model to Vertex), never the model's own routing. SDK
- * clients expose it as `baseURL`; a client that exposes no endpoint only
- * compacts through an explicit `remoteCompaction.enabled` opt-in.
- */
-export function supportsAnthropicCompactionOnClient(
-	model: Model<"anthropic-messages">,
-	client: AnthropicMessagesClientLike,
-): boolean {
-	const baseURL = injectedClientBaseUrl(client);
-	if (baseURL !== undefined) return supportsAnthropicCompaction(model, baseURL);
-	return isCompactionCapableModel(model) && model.remoteCompaction?.enabled === true;
-}
-
-/**
- * Effective endpoint of a caller-owned client. SDK clients expose it as
- * `baseURL`; a client that exposes none leaves routing to the model.
- */
-function injectedClientBaseUrl(client: AnthropicMessagesClientLike): string | undefined {
-	const baseURL = (client as { baseURL?: unknown }).baseURL;
-	return typeof baseURL === "string" && baseURL.length > 0 ? baseURL : undefined;
-}
-
-/** The model-side half of the gate: lineage support and a deployment contract that allows it. */
-function isCompactionCapableModel(model: Model<"anthropic-messages">): boolean {
-	return (
-		model.compat.supportsServerCompaction === true &&
-		model.compat.supportsContextManagement !== false &&
-		model.remoteCompaction?.enabled !== false
-	);
-}
 
 /**
  * Whether a persisted compaction summary replays as a native `compaction`
@@ -4567,7 +4310,7 @@ function buildParams(
 	// Pre-compute metadata.
 	const metadataAccountId = readAnthropicMetadataAccountId(options?.metadata);
 	const metadataUserId = resolveAnthropicMetadataUserId(
-		readMetadataString(options?.metadata, "user_id") ??
+		readAnthropicMetadataString(options?.metadata, "user_id") ??
 			// Deliberately share the normalized affinity identity across Kimi's two transports.
 			(model.provider === "kimi-code" ? getOpenAIPromptCacheKey(options) : undefined),
 		isOAuthToken,

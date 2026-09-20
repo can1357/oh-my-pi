@@ -10,7 +10,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
-import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { modelKind, type ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { resolveProviderModelReference } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 describe("Codex model discovery", () => {
@@ -433,7 +433,12 @@ describe("Codex model discovery", () => {
 				"online",
 			);
 
-			expect(result.models.map(model => model.id).sort()).toEqual(["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
+			expect(
+				result.models
+					.filter(model => modelKind(model) === "chat")
+					.map(model => model.id)
+					.sort(),
+			).toEqual(["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra"]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

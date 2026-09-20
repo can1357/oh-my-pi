@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { renderProviderModels } from "@oh-my-pi/pi-coding-agent/cli/models-cli";
+import Models from "@oh-my-pi/pi-coding-agent/commands/models";
+import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
+
+const TEST_CONFIG: CliConfig = { bin: "omp", version: "test", commands: new Map() };
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -17,6 +22,7 @@ function makeModel(spec: {
 	compat?: ModelSpec["compat"];
 	input?: readonly ("text" | "image")[];
 	transport?: ModelSpec["transport"];
+	kind?: ModelKind;
 }) {
 	return buildModel({
 		id: spec.id,
@@ -31,6 +37,7 @@ function makeModel(spec: {
 		maxTokens: 8_192,
 		compat: spec.compat,
 		transport: spec.transport,
+		kind: spec.kind,
 	} as ModelSpec);
 }
 
@@ -54,6 +61,63 @@ function imagesCell(model: Model<Api>): string {
 		.filter(cell => cell.length > 0);
 	return cells.at(-1) ?? "";
 }
+
+describe("omp models kind filtering", () => {
+	it("accepts every advertised kind and rejects invalid values", async () => {
+		for (const kind of [...MODEL_KINDS, "all"]) {
+			const command = new Models(["--kind", kind], TEST_CONFIG);
+			const parsed = await command.parse(Models);
+			expect(parsed.flags.kind).toBe(kind);
+		}
+
+		const defaults = await new Models([], TEST_CONFIG).parse(Models);
+		expect(defaults.flags.kind).toBe("chat");
+
+		const invalid = new Models(["--kind", "video"], TEST_CONFIG);
+		await expect(invalid.parse(Models)).rejects.toThrow(
+			`Expected --kind to be one of: ${[...MODEL_KINDS, "all"].join(", ")}; got "video"`,
+		);
+	});
+
+	it("keeps the default listing chat-only and selects runner or all pools", () => {
+		const chat = makeModel({ id: "chat-model", api: "openai-completions" });
+		const image = makeModel({ id: "image-runner", api: "openai-images", kind: "image" });
+		const models = [chat, image];
+		const requested: (ModelKind | "all")[] = [];
+		const source = {
+			getAvailable(kind: ModelKind | "all" = "chat") {
+				requested.push(kind);
+				return kind === "all" ? models : models.filter(model => modelKind(model) === kind);
+			},
+			getError: () => undefined,
+		};
+		const render = (kind?: ModelKind | "all", json = false): string => {
+			const output: string[] = [];
+			spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+				output.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+				return true;
+			});
+			renderProviderModels(source, "ls", undefined, json, kind);
+			vi.restoreAllMocks();
+			return stripAnsi(output.join(""));
+		};
+
+		const defaultOutput = render();
+		expect(defaultOutput).toContain("chat-model");
+		expect(defaultOutput).not.toContain("image-runner");
+
+		const imageOutput = render("image");
+		expect(imageOutput).toContain("image-runner");
+		expect(imageOutput).not.toContain("chat-model");
+
+		const allOutput = render("all", true);
+		expect(allOutput).toContain('"id":"chat-model"');
+		expect(allOutput).toContain('"kind":"chat"');
+		expect(allOutput).toContain('"id":"image-runner"');
+		expect(allOutput).toContain('"kind":"image"');
+		expect(requested).toEqual(["chat", "image", "all"]);
+	});
+});
 
 describe("omp models image support column", () => {
 	it("reports wire truth for a DeepSeek-class id served by a proxy that accepts images", () => {

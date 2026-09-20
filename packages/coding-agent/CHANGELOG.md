@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Image generation overrides now use `model` selectors, and web search CLI overrides use `--model` instead of `--provider`.
 - Removed support for the env parameter in the bash tool
 
 ### Added
@@ -15,10 +16,21 @@
 
 - Fixed contradictory `systemPromptTemplate` and `customSystemPrompt` options being accepted with a fixed full `systemPrompt` replacement, including empty values ([#12194](https://github.com/can1357/oh-my-pi/pull/12194) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Added `Target.getTargets` to the browser relay's CDP surface so clients can enumerate eligible pages without attaching to or claiming them.
+- Added image, web, speech, dictation, judge, and memory model roles with ordered fallbacks, automatic migration of legacy backend settings, and `omp models --kind` filtering.
+- Added native OpenRouter image generation and model-selected web-plugin search, plus live TypeSafe judge-model discovery.
+
+### Changed
+
+- Startup no longer composes the entire bundled model catalog to validate kind-role fallback chains; provider-qualified selectors are checked against their providers' slices.
+### Changed
+
+- npm and compiled builds embed `models.json` as JSON text instead of an object literal, cutting ~100 ms from bundle launch.
 
 ### Fixed
 
 - Fixed resume clutter: elide 0-turn sessions from the /resume menu; -c similarly skips empty sessions.
+- Fixed image and speech fallback models disappearing after discovery and false incompatibility warnings for providers without credentials.
+
 - Fixed Edit calls getting stuck generating repeated closing tags after an empty `SM:AFTER` insertion.
 - Fixed Edit previews and application panicking on Unicode no-op edits and overlapping duplicate matches.
 - Fixed live subagent messages getting stuck behind persisted-agent discovery, and roster discovery looping on dot-named transcripts.

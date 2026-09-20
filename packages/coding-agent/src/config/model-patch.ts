@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createConfigHeaderResolver } from "./resolve-config-value";
 import type { ModelOverride } from "./models-config-schema";
@@ -155,8 +156,15 @@ export function providersWithAuthoritativeProjectCatalog(models: readonly Model<
 	return providers;
 }
 
-export function dropProviderModels(models: readonly Model<Api>[], providers: ReadonlySet<string>): Model<Api>[] {
-	return models.filter(model => !providers.has(model.provider));
+/** Removes a registry layer's provider models, optionally limited to one catalog kind. */
+export function dropProviderModels(
+	models: readonly Model<Api>[],
+	providers: ReadonlySet<string>,
+	options?: { kind?: ModelKind },
+): Model<Api>[] {
+	return models.filter(
+		model => !providers.has(model.provider) || (options?.kind !== undefined && modelKind(model) !== options.kind),
+	);
 }
 
 /**

@@ -2,15 +2,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as asrClient from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
 import { STTController } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
+import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { getTinyModelsCacheDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 const WHISPER_BASE_REPO = "onnx-community/whisper-base";
 const PARAKEET_REPO = "csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
+const DICTATION_MODELS = [
+	getBundledModel("local", "whisper-base"),
+	getBundledModel("local", "whisper-small"),
+	getBundledModel("local", "whisper-large-v3-turbo"),
+	getBundledModel("local", "parakeet-tdt-0.6b-v3"),
+];
+const registry: ModelBrowserRegistry = {
+	getError: () => undefined,
+	getAvailable: () => DICTATION_MODELS,
+	getAll: () => DICTATION_MODELS,
+};
 
 async function touch(file: string): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true });
@@ -39,15 +52,15 @@ describe("isSttModelCached completeness", () => {
 		await touch(path.join(repoDir, "config.json"));
 		await touch(path.join(repoDir, "onnx", "encoder_model.onnx"));
 		// Only the encoder shard landed — an interrupted Whisper download.
-		expect(await downloader.isSttModelCached("fast")).toBe(false);
+		expect(await downloader.isSttModelCached("whisper-base")).toBe(false);
 
 		await touch(path.join(repoDir, "onnx", "decoder_model_merged.onnx"));
-		expect(await downloader.isSttModelCached("fast")).toBe(true);
+		expect(await downloader.isSttModelCached("whisper-base")).toBe(true);
 	});
 
 	it("treats a transformers model with config.json but no onnx weights as not cached", async () => {
 		await touch(path.join(cacheDir, WHISPER_BASE_REPO, "config.json"));
-		expect(await downloader.isSttModelCached("fast")).toBe(false);
+		expect(await downloader.isSttModelCached("whisper-base")).toBe(false);
 	});
 
 	it("requires every sherpa model file to be present", async () => {
@@ -56,10 +69,10 @@ describe("isSttModelCached completeness", () => {
 		await touch(path.join(repoDir, "decoder.int8.onnx"));
 		await touch(path.join(repoDir, "joiner.int8.onnx"));
 		// tokens.txt still missing.
-		expect(await downloader.isSttModelCached("parakeet")).toBe(false);
+		expect(await downloader.isSttModelCached("parakeet-tdt-0.6b-v3")).toBe(false);
 
 		await touch(path.join(repoDir, "tokens.txt"));
-		expect(await downloader.isSttModelCached("parakeet")).toBe(true);
+		expect(await downloader.isSttModelCached("parakeet-tdt-0.6b-v3")).toBe(true);
 	});
 });
 
@@ -85,14 +98,13 @@ describe("STTController preflight", () => {
 			showWarning: vi.fn(),
 			showStatus: vi.fn(),
 			onStateChange: vi.fn(),
-			requestRender: vi.fn(),
 		};
 	}
 
 	beforeEach(async () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
-		settings.set("stt.modelName", "fast");
+		settings.setModelRole("dictation", "local/whisper-base");
 		vi.spyOn(asrClient.sttClient, "startStream").mockReturnValue({
 			pushAudio: vi.fn(),
 			stop: vi.fn().mockResolvedValue(""),
@@ -114,12 +126,13 @@ describe("STTController preflight", () => {
 		const download = vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
 
 		const editor = makeEditor();
-		controller = new STTController(() => ({ stop: vi.fn() }));
+		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
 		const options = makeOptions();
 		await controller.toggle(editor, options);
 
 		expect(controller.state).toBe("recording");
-		expect(isCached).toHaveBeenCalledWith("fast");
+		expect(isCached).toHaveBeenCalledWith("whisper-base");
+		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("whisper-base", expect.anything());
 		// Background warm calls downloadSttModel with no progress callback.
 		expect(download).toHaveBeenCalledTimes(1);
 		expect(download.mock.calls[0]).toHaveLength(1);
@@ -142,7 +155,7 @@ describe("STTController preflight", () => {
 		});
 
 		const editor = makeEditor();
-		controller = new STTController(() => ({ stop: vi.fn() }));
+		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
 		const options = makeOptions();
 		await controller.toggle(editor, options);
 
@@ -159,21 +172,46 @@ describe("STTController preflight", () => {
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
 
 		const editor = makeEditor();
-		controller = new STTController(() => ({ stop: vi.fn() }));
+		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
 		await controller.toggle(editor, makeOptions());
 		expect(controller.state).toBe("recording");
-		expect(isCached).toHaveBeenLastCalledWith("fast");
+		expect(isCached).toHaveBeenCalledTimes(1);
+		expect(isCached).toHaveBeenLastCalledWith("whisper-base");
 
-		// Switch the model, then stop and re-start the gesture.
-		settings.set("stt.modelName", "turbo");
+		// Switch the role model, then stop and re-start the gesture.
+		settings.setModelRole("dictation", "local/whisper-large-v3-turbo");
 		await controller.toggle(editor, makeOptions()); // recording -> idle
 		expect(controller.state).toBe("idle");
 		await controller.toggle(editor, makeOptions()); // idle -> recording
 
 		expect(controller.state).toBe("recording");
-		// Preflight ran again for the new tier rather than short-circuiting.
-		expect(isCached).toHaveBeenLastCalledWith("turbo");
+		// Preflight ran exactly once for the new model rather than short-circuiting.
+		expect(isCached).toHaveBeenCalledTimes(2);
+		expect(isCached).toHaveBeenLastCalledWith("whisper-large-v3-turbo");
+		expect(asrClient.sttClient.startStream).toHaveBeenLastCalledWith("whisper-large-v3-turbo", expect.anything());
+
+		await controller.toggle(editor, makeOptions()); // recording -> idle
+		await controller.toggle(editor, makeOptions()); // same model -> recording
+		expect(isCached).toHaveBeenCalledTimes(2);
 	});
+
+	it("falls back to the full parakeet id when the dictation chain is empty", async () => {
+		settings.setModelRole("dictation", "missing/model");
+		const emptyRegistry: ModelBrowserRegistry = {
+			getError: () => undefined,
+			getAvailable: () => [],
+			getAll: () => [],
+		};
+		const isCached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
+		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
+		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry: emptyRegistry });
+
+		await controller.toggle(makeEditor(), makeOptions());
+
+		expect(isCached).toHaveBeenCalledWith("parakeet-tdt-0.6b-v3");
+		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("parakeet-tdt-0.6b-v3", expect.anything());
+	});
+
 	it("stops recording and surfaces asynchronous microphone failures", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
@@ -181,10 +219,13 @@ describe("STTController preflight", () => {
 		const stopCapture = vi.fn();
 		const editor = makeEditor();
 		const options = makeOptions();
-		controller = new STTController(callback => {
-			onAudio = callback;
-			return { stop: stopCapture };
-		});
+		controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop: stopCapture };
+			},
+			{ settings, registry },
+		);
 		await controller.toggle(editor, options);
 
 		onAudio?.(new Error("Microphone permission denied"), new Float32Array());
