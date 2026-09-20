@@ -4,6 +4,8 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
@@ -29,24 +31,13 @@ function getModelFor(provider: GeneratedProvider, id: string): Model<Api> {
 	return model;
 }
 
-function createSettings(model: Model<Api>, tinyModel = "online") {
-	return {
-		get(path: string) {
-			if (path === "providers.tinyModel") return tinyModel;
-			return undefined;
-		},
-		getModelRole(role: string) {
-			return role === "smol" ? `${model.provider}/${model.id}` : undefined;
-		},
-		getStorage() {
-			return undefined;
-		},
-	} as never;
+function createSettings(model: Model<Api>): Settings {
+	return Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
 }
 
-function createRegistry(model: Model<Api>) {
+function createRegistry(model: Model<Api>, availableModels: Model<Api>[] = [model]) {
 	return {
-		getAvailable: () => [model],
+		getAvailable: () => availableModels,
 		getApiKey: async () => "test-key",
 		getApiKeyForProvider: async () => "test-key",
 		authStorage: { rotateSessionCredential: async () => false },
@@ -82,6 +73,45 @@ describe("title generator", () => {
 		expect(options?.disableReasoning).toBe(true);
 		const messages = completeSimpleMock.mock.calls[0]?.[1].messages;
 		expect(messages?.map(message => message.role)).toEqual(["user"]);
+	});
+
+	it("selects an available local-inference model from the tiny role", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const paidModel = getModelOrThrow("claude-haiku-4-5");
+		const settings = createSettings(localModel);
+		const registry = createRegistry(localModel, [localModel, paidModel]);
+		const generateMock = vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("Local Title");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
+
+		const title = await generateSessionTitle("Investigate the resolver", registry, settings);
+
+		expect(title).toBe("Local Title");
+		expect(generateMock).toHaveBeenCalledWith(localModel.id, "Investigate the resolver");
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+	});
+
+	it("never falls back to a paid title model when local inference fails", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const paidModel = getModelOrThrow("claude-haiku-4-5");
+		const settings = createSettings(localModel);
+		const registry = createRegistry(localModel, [localModel, paidModel]);
+		vi.spyOn(tinyTitleClient, "generate").mockResolvedValue(null);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
+
+		const title = await generateSessionTitle("Investigate the resolver", registry, settings);
+
+		expect(title).toBeNull();
+		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
 
 	it("prefills the title marker as a trailing assistant turn for Ollama-hosted models", async () => {
@@ -259,7 +289,11 @@ describe("title generator", () => {
 
 	it("defers titling for a greeting without invoking the model", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
 
 		const title = await generateSessionTitle("hi", createRegistry(model), createSettings(model));
 
@@ -320,7 +354,11 @@ describe("title generator", () => {
 
 	it("logs and returns null when title credentials are missing", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 		const title = await generateSessionTitle(
@@ -348,7 +386,11 @@ describe("title generator", () => {
 
 	it("logs and returns null when title credential lookup throws", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 		const title = await generateSessionTitle(
@@ -403,23 +445,16 @@ describe("title generator", () => {
 				authStorage: { rotateSessionCredential: async () => false },
 				resolver: () => async () => "test-key",
 			} as never,
-			{
-				get(path: string) {
-					if (path === "providers.tinyModel") return "online";
-					if (path === "retry.modelFallback") return true;
-					if (path === "retry.fallbackChains")
-						return { [`${primary.provider}/${primary.id}`]: [`${fallback.provider}/${fallback.id}`] };
-					return undefined;
+			Settings.isolated({
+				modelRoles: {
+					tiny: `${primary.provider}/${primary.id}`,
+					smol: `${fallback.provider}/${fallback.id}`,
 				},
-				getModelRole(role: string) {
-					if (role === "tiny") return `${primary.provider}/${primary.id}`;
-					if (role === "smol") return `${fallback.provider}/${fallback.id}`;
-					return undefined;
+				"retry.modelFallback": true,
+				"retry.fallbackChains": {
+					[`${primary.provider}/${primary.id}`]: [`${fallback.provider}/${fallback.id}`],
 				},
-				getStorage() {
-					return undefined;
-				},
-			} as never,
+			}),
 			"session-abort",
 			undefined,
 			undefined,
@@ -588,21 +623,13 @@ describe("title generator", () => {
 		} as never);
 
 		// Case 1: All three roles configured. 'tiny' should be used.
-		let currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
+		let currentSettings = Settings.isolated({
+			modelRoles: {
+				tiny: `${tinyModel.provider}/${tinyModel.id}`,
+				commit: `${commitModel.provider}/${commitModel.id}`,
+				smol: `${smolModel.provider}/${smolModel.id}`,
 			},
-			getModelRole(role: string) {
-				if (role === "tiny") return `${tinyModel.provider}/${tinyModel.id}`;
-				if (role === "commit") return `${commitModel.provider}/${commitModel.id}`;
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		});
 
 		const registry = {
 			getAvailable: () => [tinyModel, commitModel, smolModel],
@@ -619,20 +646,12 @@ describe("title generator", () => {
 		mockComplete.mockClear();
 
 		// Case 2: 'tiny' role not configured, 'commit' and 'smol' configured. 'commit' should be used.
-		currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
+		currentSettings = Settings.isolated({
+			modelRoles: {
+				commit: `${commitModel.provider}/${commitModel.id}`,
+				smol: `${smolModel.provider}/${smolModel.id}`,
 			},
-			getModelRole(role: string) {
-				if (role === "commit") return `${commitModel.provider}/${commitModel.id}`;
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		});
 
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
@@ -641,19 +660,9 @@ describe("title generator", () => {
 		mockComplete.mockClear();
 
 		// Case 3: Only 'smol' role configured. 'smol' should be used.
-		currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
-			},
-			getModelRole(role: string) {
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		currentSettings = Settings.isolated({
+			modelRoles: { smol: `${smolModel.provider}/${smolModel.id}` },
+		});
 
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
@@ -705,20 +714,10 @@ describe("title generator", () => {
 				content: [{ type: "text", text: "<title>Routed Recovery</title>" }],
 			} as never;
 		});
-		const settings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				if (path === "retry.modelFallback") return true;
-				return undefined;
-			},
-			getModelRole(role: string) {
-				if (role === "tiny") return "openrouter/google/gemini-2.5-flash@cerebras";
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		const settings = Settings.isolated({
+			modelRoles: { tiny: "openrouter/google/gemini-2.5-flash@cerebras" },
+			"retry.modelFallback": true,
+		});
 		const registry = {
 			getAvailable: () => [base],
 			getApiKey: async () => "test-key",
@@ -754,27 +753,15 @@ describe("title generator", () => {
 				content: [{ type: "text", text: `<title>From ${model.id}</title>` }],
 			} as never;
 		});
-		const settings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				if (path === "retry.modelFallback") return true;
-				if (path === "retry.fallbackChains") {
-					return {
-						[`${current.provider}/${current.id}`]: [`${currentFallback.provider}/${currentFallback.id}`],
-						// Role/default chains must not be merged onto the appended current model.
-						tiny: [`${roleOnly.provider}/${roleOnly.id}`],
-						default: [`${roleOnly.provider}/${roleOnly.id}`],
-					};
-				}
-				return undefined;
+		const settings = Settings.isolated({
+			"retry.modelFallback": true,
+			"retry.fallbackChains": {
+				[`${current.provider}/${current.id}`]: [`${currentFallback.provider}/${currentFallback.id}`],
+				// Role/default chains must not be merged onto the appended current model.
+				tiny: [`${roleOnly.provider}/${roleOnly.id}`],
+				default: [`${roleOnly.provider}/${roleOnly.id}`],
 			},
-			getModelRole() {
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		});
 		const registry = {
 			getAvailable: () => [current, currentFallback, roleOnly],
 			getApiKey: async () => "test-key",
@@ -807,23 +794,13 @@ describe("title generator", () => {
 				content: [{ type: "text", text: "<title>Recovered Title</title>" }],
 			} as never;
 		});
-		const settings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				if (path === "retry.fallbackChains") {
-					return { [`${smolModel.provider}/${smolModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`] };
-				}
-				if (path === "retry.modelFallback") return enabled;
-				return undefined;
+		const settings = Settings.isolated({
+			modelRoles: { smol: `${smolModel.provider}/${smolModel.id}` },
+			"retry.fallbackChains": {
+				[`${smolModel.provider}/${smolModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
-			getModelRole(role: string) {
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+			"retry.modelFallback": enabled,
+		});
 		const registry = {
 			getAvailable: () => [smolModel, fallbackModel],
 			getApiKey: async () => "test-key",

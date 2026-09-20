@@ -29,11 +29,18 @@ function footerLine(lines: readonly string[]): string {
 	return stripVTControlCharacters(lines[lines.length - 2] ?? "");
 }
 
-function makeModel(provider: string, id: string, contextWindow = 128_000, cost?: Model["cost"]): Model {
+function makeModel(
+	provider: string,
+	id: string,
+	contextWindow = 128_000,
+	cost?: Model["cost"],
+	kind?: Model["kind"],
+): Model {
 	return buildModel({
 		id,
 		name: id,
-		api: "ollama-chat",
+		api: kind === "image" ? "openai-images" : "ollama-chat",
+		...(kind ? { kind } : {}),
 		provider,
 		baseUrl: "https://example.com",
 		reasoning: false,
@@ -148,6 +155,8 @@ function createHub(options: {
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
 const LEFT = "\x1b[D";
+const CTRL_RIGHT = "\x1b[1;5C";
+const ALT_RIGHT = "\x1b[1;3C";
 const ESC = "\x1b";
 
 describe("ModelHub", () => {
@@ -166,6 +175,53 @@ describe("ModelHub", () => {
 	});
 
 	describe("role chips and roles view", () => {
+		test("separates chat and kind roles and filters role tabs", () => {
+			const chat = makeModel("test", "chat-model");
+			const image = makeModel("test", "image-model", 128_000, undefined, "image");
+			const settings = Settings.isolated({
+				modelRoles: {
+					default: "test/chat-model",
+					image: "test/image-model",
+				},
+			});
+			const { hub } = createHub({ models: [chat, image], scoped: true, settings });
+
+			hub.handleInput(UP);
+			let lines = hub.render(220).map(line => stripVTControlCharacters(line));
+			const chatIndex = lines.findIndex(line => line.includes("DEFAULT"));
+			const kindIndex = lines.findIndex(line => line.includes("IMAGE"));
+			expect(chatIndex).toBeGreaterThan(-1);
+			expect(kindIndex).toBeGreaterThan(chatIndex);
+			expect(lines.slice(chatIndex + 1, kindIndex).some(line => line.includes("─"))).toBe(true);
+
+			hub.handleInput(CTRL_RIGHT);
+			lines = hub.render(220).map(line => stripVTControlCharacters(line));
+			expect(lines.some(line => line.includes("DEFAULT"))).toBe(true);
+			expect(lines.some(line => line.includes("IMAGE"))).toBe(false);
+
+			hub.handleInput(CTRL_RIGHT);
+			lines = hub.render(220).map(line => stripVTControlCharacters(line));
+			expect(lines.some(line => line.includes("DEFAULT"))).toBe(false);
+			expect(lines.some(line => line.includes("IMAGE"))).toBe(true);
+		});
+
+		test("role assignment candidates honor the role's accepted model kinds", () => {
+			const chat = makeModel("test", "chat-model");
+			const image = makeModel("test", "image-model", 128_000, undefined, "image");
+			const { hub } = createHub({ models: [chat, image], scoped: true });
+
+			hub.handleInput(UP);
+			hub.handleInput(CTRL_RIGHT);
+			hub.handleInput(CTRL_RIGHT);
+			hub.handleInput("\n");
+			hub.handleInput("\n");
+
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("Assigning IMAGE");
+			expect(rendered).toContain("image-model");
+			expect(rendered).not.toContain("chat-model");
+		});
+
 		test("tags the selected model's roles in the detail line, including custom roles", () => {
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Expected bundled model anthropic/claude-sonnet-4-5");
@@ -272,6 +328,27 @@ describe("ModelHub", () => {
 			// reads as unassigned instead of keeping the cleared value.
 			expect(smolRow).not.toContain("worker-model");
 			expect(smolRow).toContain("—");
+		});
+	});
+
+	describe("model kind tabs", () => {
+		test("filters the browser to the selected catalog kind", () => {
+			const chat = makeModel("test", "chat-model");
+			const image = makeModel("test", "image-model", 128_000, undefined, "image");
+			const { hub } = createHub({ models: [chat, image], scoped: true });
+
+			const initial = normalize(hub.render(220));
+			expect(initial).toContain("Kind:");
+			expect(initial).toContain("all");
+			expect(initial).toContain("chat");
+			expect(initial).toContain("image");
+			hub.handleInput(ALT_RIGHT);
+			hub.handleInput(ALT_RIGHT);
+			hub.handleInput(ALT_RIGHT);
+
+			const rendered = normalize(hub.render(220));
+			expect(rendered).toContain("image-model");
+			expect(rendered).not.toContain("chat-model");
 		});
 	});
 

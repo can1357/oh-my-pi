@@ -92,10 +92,9 @@ const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
  * - `fallback`: only when the provider's authoritative discovery did not succeed.
  * - `empty`: only when no other source produced a row for the provider.
  *
- * xai-oauth is the one projected seed: its rows are curated facts that
- * `buildXaiOAuthStaticSeed` bakes into full Responses specs, and the bundle
- * carries the baked form so `ModelRegistry.#loadModels()` honours a persisted
- * `modelRoles.default = "xai-oauth/<id>"` synchronously at boot.
+ * xai-oauth projects curated chat rows into Responses specs while preserving
+ * runner seed transports. The bundle carries both so configured roles resolve
+ * synchronously before live discovery completes.
  */
 function bundledSeedRows(
 	entry: CompiledProvider,
@@ -250,7 +249,7 @@ async function loadModelsDevData(): Promise<ModelSpec[]> {
 		const data = await fetchWellKnownModels();
 		const models = mapModelsDevToModels(data as Record<string, unknown>, MODELS_DEV_PROVIDER_DESCRIPTORS);
 		models.sort((a, b) => a.id.localeCompare(b.id));
-		console.log(`Loaded ${models.length} tool-capable models from stencil.so`);
+		console.log(`Loaded ${models.length} models from stencil.so`);
 		return models;
 	} catch (error) {
 		console.error("Failed to load stencil.so data:", error);
@@ -748,7 +747,7 @@ async function generateModels() {
 
 	console.log(`
 Model Statistics:`);
-	console.log(`  Total tool-capable models: ${totalModels}`);
+	console.log(`  Total models: ${totalModels}`);
 	console.log(`  Reasoning-capable models: ${reasoningModels}`);
 
 	for (const [provider, models] of Object.entries(MODELS)) {

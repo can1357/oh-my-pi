@@ -7049,6 +7049,13 @@ export class AuthStorage {
 				options?.modelId,
 				modelPolicyScope,
 			);
+			const sticky = this.#getSessionCredential(provider, sessionId);
+			if (
+				!sessionCredential.explicit ||
+				(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index)
+			) {
+				this.#clearSessionCredential(provider, sessionId);
+			}
 			return this.#blockCredentialForRotation(
 				provider,
 				sessionCredential.type,

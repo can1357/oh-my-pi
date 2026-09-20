@@ -2,13 +2,14 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as vm from "node:vm";
 import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
-import type { ModelRegistry } from "../../src/config/model-registry";
+import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { releaseCompletionHandles } from "../../src/eval/completion-bridge";
 import { type EvalHandleSnapshot, runEvalWait } from "../../src/eval/handle-bridge";
 import { runEvalJudgment } from "../../src/eval/judgment-bridge";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
 import type { ToolSession } from "../../src/tools";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { asGlobalFetch } from "../helpers/fetch-mock";
 
 const SMOL: Model<Api> = {
@@ -24,18 +25,28 @@ const SMOL: Model<Api> = {
 	maxTokens: 4096,
 } as Model<Api>;
 
+const JEV_PREVIEW: Model<Api> = {
+	...SMOL,
+	id: "jev-preview",
+	name: "JEV Preview",
+	api: "typesafe",
+	provider: "typesafe",
+	baseUrl: "https://judge.example.test/",
+	kind: "judge",
+} as Model<Api>;
+
 function makeSession(opts: { typesafe?: boolean } = {}): ToolSession {
-	const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
-	settings.setModelRole("smol", "p/smol");
-	const modelRegistry = {
-		authStorage: {
-			hasAuth: (provider: string) => Boolean(opts.typesafe) && provider === "typesafe",
-			resolver: () => async () => "ts-key",
-		},
-		getAvailable: () => [SMOL],
-		getApiKey: async () => "test-key",
-		resolver: () => async () => "test-key",
-	} as unknown as ModelRegistry;
+	const settings = Settings.isolated({
+		"async.enabled": false,
+		"task.isolation.enabled": false,
+		modelRoles: { judge: opts.typesafe ? "typesafe/jev-preview" : "p/smol" },
+		"retry.fallbackChains": { judge: ["p/smol"] },
+	});
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.setRuntimeApiKey("p", "test-key");
+	if (opts.typesafe) authStorage.setRuntimeApiKey("typesafe", "ts-key");
+	const modelRegistry = new ModelRegistry(authStorage, "/nonexistent/judgment-bridge-models.yml");
+	vi.spyOn(modelRegistry, "getAvailable").mockReturnValue(opts.typesafe ? [JEV_PREVIEW, SMOL] : [SMOL]);
 	return { settings, modelRegistry, getSessionId: () => "sess-1" } as unknown as ToolSession;
 }
 
@@ -129,14 +140,16 @@ describe("eval judge() bridge", () => {
 		expect(options.temperature).toBe(0);
 	});
 
-	it("routes to TypeSafe when credentialed and forwards questions verbatim", async () => {
+	it("routes to the selected TypeSafe judge and forwards questions verbatim", async () => {
 		const chat = vi.spyOn(ai, "completeSimple");
-		let body: { state: unknown; questions: unknown } | undefined;
+		let body: { model: string; state: unknown; questions: unknown } | undefined;
 		vi.spyOn(globalThis, "fetch").mockImplementation(
-			asGlobalFetch(async (_url, init) => {
+			asGlobalFetch(async (url, init) => {
+				expect(String(url)).toBe("https://judge.example.test/v1/systemone");
 				body = JSON.parse(String(init?.body));
+				expect(body).toEqual(expect.objectContaining({ model: "jev-preview" }));
 				return Response.json({
-					model: "jev-latest",
+					model: "jev-preview",
 					answers: { tests: { type: "noul", noul: 0.83 } },
 					usage: { input_tokens: 10, output_tokens: 1 },
 				});

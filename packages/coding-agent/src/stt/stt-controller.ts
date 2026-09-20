@@ -1,9 +1,12 @@
 import { AudioCapture } from "@oh-my-pi/pi-natives";
+import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
-import { settings } from "../config/settings";
+import { resolveRoleChain } from "../config/model-resolver";
+import { roleCandidatePool } from "../config/model-roles";
+import { type Settings, settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
-import { resolveSttModelSpec } from "./models";
+import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
 
 export type SttState = "idle" | "recording" | "transcribing";
@@ -12,8 +15,6 @@ interface ToggleOptions {
 	showWarning(msg: string): void;
 	showStatus(msg: string): void;
 	onStateChange(state: SttState): void;
-	/** Force a redraw after async edits to the composer (live segment/preview inserts). */
-	requestRender?(): void;
 }
 
 /** The slice of the composer editor the controller drives. */
@@ -32,14 +33,21 @@ interface CaptureHandle {
 
 type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
 
+export interface STTControllerDependencies {
+	settings: Settings;
+	registry: ModelBrowserRegistry;
+}
+
 /** Coordinates native microphone capture with incremental local transcription. */
 export class STTController {
 	#state: SttState = "idle";
-	#resolvedModelKey: string | null = null;
+	#resolvedModelKey: SttModelKey | null = null;
 	#toggling = false;
 	#stopAfterStart = false;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
+	readonly #settings: Settings;
+	readonly #registry: ModelBrowserRegistry | undefined;
 
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
@@ -50,8 +58,23 @@ export class STTController {
 	#streamUtterance = "";
 
 	/** Creates a controller; tests may replace the hardware capture boundary. */
-	constructor(createCapture: CaptureFactory = onAudio => new AudioCapture(16_000, onAudio)) {
-		this.#createCapture = createCapture;
+	constructor();
+	constructor(createCapture: CaptureFactory);
+	constructor(dependencies: STTControllerDependencies);
+	constructor(createCapture: CaptureFactory, dependencies: STTControllerDependencies);
+	constructor(
+		createCaptureOrDependencies?: CaptureFactory | STTControllerDependencies,
+		dependencies?: STTControllerDependencies,
+	) {
+		if (typeof createCaptureOrDependencies === "function") {
+			this.#createCapture = createCaptureOrDependencies;
+			this.#settings = dependencies?.settings ?? settings;
+			this.#registry = dependencies?.registry;
+		} else {
+			this.#createCapture = onAudio => new AudioCapture(16_000, onAudio);
+			this.#settings = createCaptureOrDependencies?.settings ?? settings;
+			this.#registry = createCaptureOrDependencies?.registry;
+		}
 	}
 
 	get state(): SttState {
@@ -92,12 +115,17 @@ export class STTController {
 		}
 	}
 
-	async #ensureDeps(options: ToggleOptions): Promise<boolean> {
-		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
-		// Keyed on the model rather than a one-shot flag: switching stt.modelName
-		// mid-session must re-run preflight so an uncached new tier downloads here
-		// (with progress) instead of blocking silently at stop.
-		if (this.#resolvedModelKey === modelKey) return true;
+	#resolveModelKey(): SttModelKey {
+		if (!this.#registry) return resolveSttModelSpec(undefined).key;
+		const pool = roleCandidatePool("dictation", this.#settings, this.#registry);
+		const selectedId = resolveRoleChain("dictation", this.#settings, pool)[0]?.model.id;
+		return resolveSttModelSpec(selectedId).key;
+	}
+
+	async #ensureDeps(options: ToggleOptions, modelKey = this.#resolveModelKey()): Promise<SttModelKey | null> {
+		// Keyed on the resolved role model rather than a one-shot flag: changing
+		// modelRoles.dictation mid-session re-runs preflight for the new model.
+		if (this.#resolvedModelKey === modelKey) return modelKey;
 		try {
 			// Only clear the status line when preflight emitted progress; the
 			// cached-model fast path emits nothing.
@@ -120,12 +148,12 @@ export class STTController {
 			}
 			if (wroteStatus) options.showStatus("");
 			this.#resolvedModelKey = modelKey;
-			return true;
+			return modelKey;
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : "Failed to setup STT dependencies";
 			options.showWarning(msg);
 			logger.error("STT dependency setup failed", { error: msg });
-			return false;
+			return null;
 		}
 	}
 
@@ -135,7 +163,7 @@ export class STTController {
 	 *  cached, so no network fetch happens. On load failure (corrupt cache, OOM,
 	 *  runtime install) invalidate the resolved key so the next toggle re-runs
 	 *  preflight and retries instead of skipping it forever. */
-	#warmModel(modelKey: string): void {
+	#warmModel(modelKey: SttModelKey): void {
 		void downloadSttModel(modelKey).catch(err => {
 			// Guard against a concurrent model switch clobbering a newer resolution.
 			if (!this.#disposed && this.#resolvedModelKey === modelKey) this.#resolvedModelKey = null;
@@ -146,8 +174,14 @@ export class STTController {
 	}
 
 	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
-		if (!(await this.#ensureDeps(options))) return;
-		await this.#startStreaming(editor, options);
+		let modelKey = await this.#ensureDeps(options);
+		if (!modelKey) return;
+		const startModelKey = this.#resolveModelKey();
+		if (startModelKey !== modelKey) {
+			modelKey = await this.#ensureDeps(options, startModelKey);
+			if (!modelKey) return;
+		}
+		await this.#startStreaming(editor, options, modelKey);
 	}
 
 	async #stop(options: ToggleOptions): Promise<void> {
@@ -164,9 +198,8 @@ export class STTController {
 		return this.#streamCommitted ? ` ${normalized}` : normalized;
 	}
 
-	async #startStreaming(editor: Editor, options: ToggleOptions): Promise<void> {
-		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
-		const language = settings.get("stt.language") as string | undefined;
+	async #startStreaming(editor: Editor, options: ToggleOptions, modelKey: SttModelKey): Promise<void> {
+		const language = this.#settings.get("stt.language");
 		this.#streamEditor = editor;
 		this.#streamCommitted = false;
 		this.#streamUtterance = "";
@@ -177,7 +210,6 @@ export class STTController {
 			onPartial: text => {
 				if (this.#disposed || this.#state !== "recording") return;
 				this.#streamEditor?.setVolatileText(this.#prefixed(text));
-				options.requestRender?.();
 			},
 			onSegment: text => {
 				if (this.#disposed) return;
@@ -189,7 +221,6 @@ export class STTController {
 				} else {
 					this.#streamEditor?.clearVolatileText();
 				}
-				options.requestRender?.();
 			},
 		});
 		this.#stream = stream;
@@ -211,7 +242,6 @@ export class STTController {
 					this.#streamAbort?.abort(error);
 					stream.cancel();
 					this.#streamEditor?.clearVolatileText();
-					options.requestRender?.();
 					this.#cleanupStream();
 					this.#setState("idle", options);
 					options.showWarning(error.message);
@@ -274,11 +304,10 @@ export class STTController {
 		} else {
 			this.#streamEditor?.clearVolatileText();
 		}
-		options.requestRender?.();
 		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
 
 		if (this.#streamCommitted && !failed && this.#streamEditor) {
-			const trigger = settings.get("stt.submitTrigger");
+			const trigger = this.#settings.get("stt.submitTrigger");
 			const { submit, trimTrailing } = evaluateSubmitTrigger(this.#streamUtterance, trigger);
 			if (trimTrailing > 0) {
 				this.#streamEditor.deleteBeforeCursor(trimTrailing);

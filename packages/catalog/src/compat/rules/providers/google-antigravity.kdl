@@ -2,6 +2,20 @@
 
 provider "google-antigravity" {
 	default-model "gemini-3.1-pro"
+	kind-apis {
+		image "google-gemini-cli"
+	}
+	web-search "gemini"
+
+	seed api="google-gemini-cli" base-url="https://daily-cloudcode-pa.googleapis.com" bundle="always" {
+		model "gemini-3-pro-image" name="Gemini 3 Pro Image" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
 
 	class "anthropic" {
 		family "opus" {
@@ -44,6 +58,9 @@ provider "google-antigravity" {
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "gemini-3-pro" {
 		thinking-mode "google-level"
+	}
+	models "gemini-3-pro-image" {
+		kind "image"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "gemini-3.1-flash-lite" {

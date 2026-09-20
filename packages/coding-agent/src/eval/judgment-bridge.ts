@@ -3,9 +3,8 @@
  *
  * Cell code calls `judge(state, questions)`; the prelude forwards
  * `{ state, questions }` through {@link EVAL_JUDGMENT_BRIDGE_NAME} and this
- * module answers every question with the session's resolved {@link Judge}:
- * TypeSafe System One when a credential exists, else keyword prompts to the
- * `tiny`/`smol` chat chain (see `../judgment`). The handle settles with the
+ * module answers every question with the session's resolved {@link Judge}
+ * role chain (see `../judgment`). The handle settles with the
  * typed answers as structured `data`, so `.wait()` yields `{ id: Answer }`
  * directly in both runtimes.
  *
@@ -23,7 +22,6 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { resolveJudge } from "../judgment";
-import { ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	type EvalCompletionBridgeOptions,
@@ -154,7 +152,6 @@ export function runEvalJudgment(args: unknown, options: EvalCompletionBridgeOpti
 	const judge = resolveJudge({
 		settings: session.settings,
 		registry,
-		backend: ONLINE_MEMORY_MODEL_KEY,
 		sessionId: session.getSessionId?.() ?? undefined,
 	});
 	return retainCompletionHandle("jdg", options, async (signal): Promise<EvalCompletionResult> => {
