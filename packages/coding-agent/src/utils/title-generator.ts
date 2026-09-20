@@ -580,9 +580,10 @@ function getProjectTerminalTitleSuffix(cwd: string | undefined): string | undefi
 
 export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?: string): string {
 	const label = sanitizeTerminalTitlePart(sessionName) ?? getFallbackTerminalTitle(cwd);
-	const project = label !== undefined && sanitizeTerminalTitlePart(sessionName) !== undefined
-		? getProjectTerminalTitleSuffix(cwd)
-		: undefined;
+	const project =
+		label !== undefined && sanitizeTerminalTitlePart(sessionName) !== undefined
+			? getProjectTerminalTitleSuffix(cwd)
+			: undefined;
 	const fullLabel = project !== undefined && project !== label ? `${label} - ${project}` : label;
 	return fullLabel ? `${DEFAULT_TERMINAL_TITLE}: ${fullLabel}` : DEFAULT_TERMINAL_TITLE;
 }
@@ -666,9 +667,10 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	terminalTitleRuntime.extensionOverride = undefined;
 	const sessionLabel = sanitizeTerminalTitlePart(sessionName);
 	const project = sessionLabel !== undefined ? getProjectTerminalTitleSuffix(cwd) : undefined;
-	terminalTitleRuntime.label = sessionLabel !== undefined && project !== undefined && project !== sessionLabel
-		? `${sessionLabel} - ${project}`
-		: (sessionLabel ?? getFallbackTerminalTitle(cwd));
+	terminalTitleRuntime.label =
+		sessionLabel !== undefined && project !== undefined && project !== sessionLabel
+			? `${sessionLabel} - ${project}`
+			: (sessionLabel ?? getFallbackTerminalTitle(cwd));
 	emitTerminalTitle();
 }
 
