@@ -525,6 +525,8 @@ function detectOpenAICompat(
 		// Template effort support is a reviewed backend × model contract in KDL.
 		qwenTemplateReasoningEffort: false,
 		requiresAssistantContentForToolCalls: facts.is("kimi") || d.isDirectDeepseekReasoning,
+		// Rule-owned: only an explicit axis or compat override sets it.
+		requiresStringMessageContent: false,
 		cacheControlFormat:
 			(d.isClinePass && (isQwen || isAnthropicModel)) || (d.isOpenRouter && isAnthropicModel)
 				? "anthropic"

@@ -728,8 +728,32 @@ Cloudflare AI Gateway proxies requests through Cloudflare's edge infrastructure 
 
 ### Catalog model handling
 - **Descriptor & Default Model**: Wired via `anthropicMessagesDescriptor` with default model `anthropic/claude-opus-4-8` (`packages/catalog/src/provider-models/descriptors.ts`).
-- **Static Fallback Model**: Injects `CLOUDFLARE_FALLBACK_MODEL` (`claude-sonnet-4-5`, reasoning enabled, 200k context) during catalog generation when no models are returned by discovery (`packages/catalog/scripts/generated-policies.ts`, `packages/catalog/scripts/generate-models.ts:536-538`).
-- **Priority Wiring**: Assigned catalog priority level 39 in `providerPriority` (`packages/catalog/src/identity/priority.ts`).
+- **Static Fallback Model**: the `seed … bundle="empty"` row in `packages/catalog/src/compat/rules/providers/cloudflare-ai-gateway.kdl`, bundled only when no other source produced a row.
+- **Priority Wiring**: `DEFAULT_MODEL_PROVIDER_ORDER` (`packages/catalog/src/identity/priority.ts`).
+
+## Cloudflare Workers AI (`cloudflare-workers-ai`)
+Called directly (not via AI Gateway) at `https://api.cloudflare.com/client/v4/accounts/<account>/ai/v1` over OpenAI Chat Completions. Wire policy: `packages/catalog/src/compat/rules/providers/cloudflare-workers-ai.kdl`.
+
+### Special casings
+- **Prompt cache**: `x-session-affinity` carries the session's prompt-cache key; without it cache hits are luck.
+- **Output cap**: always sent, because the endpoint defaults to 256 tokens. Discovery seeds `min(32768, contextWindow / 4)`; the API publishes no real cap.
+- **Message content**: text-only `content` arrays are sent as one string (`requires-string-message-content`); some models 400 (code 5006) on two or more parts.
+- **Reasoning effort**: `reasoning_effort: "none"` is sent only to models that advertise it. Models that publish no ladder get `low`/`medium`/`high`; `minimal`/`xhigh` 400 (code 8001).
+- **Tool choice**: named `tool_choice` is disabled (returns 200 without calling the tool); `"required"` works.
+- **Developer role, `store`**: off.
+- **Reasoning field**: pinned to `reasoning_content`; deltas are duplicated on `reasoning`.
+- **Images**: base64 `data:` URIs only.
+- **Errors**: Cloudflare's `{"success":false,"errors":[…]}` envelope is parsed by `OpenAIHttpError.parseEnvelope` (`packages/ai/src/error/classes.ts`).
+- **Usage**: every chunk carries `usage`; the last chunk holds the totals and wins.
+
+### Auth & usage
+- `/login` prompts for an API token (Workers AI: Read + Edit) and the account ID, stored as one JSON credential (`packages/catalog/src/wire/cloudflare-workers-ai.ts`).
+- Env: `CLOUDFLARE_WORKERS_AI_API_KEY`, then `CLOUDFLARE_API_TOKEN`; account from `CLOUDFLARE_ACCOUNT_ID`.
+
+### Catalog model handling
+- No bundled rows. Models come from `GET {account}/ai/models/search?task=Text Generation&format=openrouter` (`fetchCloudflareWorkersAiModels` in `packages/catalog/src/provider-models/openai-compat.ts`); tool-calling models only.
+- Paid-only models are not filtered: free-plan accounts get HTTP 403 (code 5035), including on the default model.
+- `@cf/meta/llama-3.3-70b-instruct-fp8-fast` (24k context) cannot hold omp's default prompt and tools.
 
 ## CoreWeave Serverless Inference (`coreweave`)
 CoreWeave Serverless Inference provides hosted AI model inference powered by Weights & Biases (W&B) infrastructure at `https://api.inference.wandb.ai/v1`. It operates using the "OpenAI Chat Completions" transport.
