@@ -236,10 +236,13 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
-			if (runtime.ctx.vibeModeEnabled) return "Vibe: on";
-			if (runtime.ctx.planModeEnabled) return "Vibe: blocked by plan mode";
-			if (runtime.ctx.goalModeEnabled) return "Vibe: blocked by goal mode";
-			return "Vibe: off";
+			if (runtime.ctx.vibeModeEnabled)
+				return "Director mode: delegates work to persistent workers; parent reads and steers. Toggle. (on)";
+			if (runtime.ctx.planModeEnabled)
+				return "Director mode: delegates work to persistent workers; parent reads and steers. Toggle. (blocked by plan mode)";
+			if (runtime.ctx.goalModeEnabled)
+				return "Director mode: delegates work to persistent workers; parent reads and steers. Toggle. (blocked by goal mode)";
+			return "Director mode: delegates work to persistent workers; parent reads and steers. Toggle. (off)";
 		},
 		handleTui: async (command, runtime) => {
 			await runWithDetachedModeDraft(command, runtime, () =>

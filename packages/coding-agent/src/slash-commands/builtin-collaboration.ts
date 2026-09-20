@@ -70,10 +70,13 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const stats = runtime.ctx.session.getAdvisorStats();
-			if (stats.active && stats.advisors.length > 1) return `Advisor: on (${stats.advisors.length} advisors)`;
-			if (stats.active && stats.model) return `Advisor: on (${stats.model.provider}/${stats.model.id})`;
-			if (stats.configured) return "Advisor: configured, no model";
-			return "Advisor: off";
+			if (stats.active && stats.advisors.length > 1)
+				return `Second model reviews this session and injects concise technical advice. Toggle. (on: ${stats.advisors.length} advisors)`;
+			if (stats.active && stats.model)
+				return `Second model reviews this session and injects concise technical advice. Toggle. (on: ${stats.model.provider}/${stats.model.id})`;
+			if (stats.configured)
+				return "Second model reviews this session and injects concise technical advice. Toggle. (configured, no model)";
+			return "Second model reviews this session and injects concise technical advice. Toggle. (off)";
 		},
 		handle: async (command, runtime) => {
 			const { verb, rest } = parseSubcommand(command.args);
