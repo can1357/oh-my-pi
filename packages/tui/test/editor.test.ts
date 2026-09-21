@@ -2644,6 +2644,16 @@ describe("Editor component", () => {
 		// landed on the legacy `Input` component; OMP's interactive prompt
 		// uses `Editor`, so the fix has to live here too.
 
+		it("separates pasted path prefixes from the preceding word without doubling whitespace", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.handleInput("inspect");
+			editor.handleInput("\x1b[200~/tmp/file\x1b[201~");
+			editor.handleInput("\x1b[200~~/project\x1b[201~");
+			editor.handleInput("\x1b[200~.env\x1b[201~");
+			editor.handleInput("\x1b[200~ /already-spaced\x1b[201~");
+			expect(editor.getText()).toBe("inspect /tmp/file ~/project .env /already-spaced");
+		});
+
 		it("normalizes NFD Korean bracketed-paste to NFC", () => {
 			const editor = new Editor(defaultEditorTheme);
 			const nfcPath = "/Users/leo/Documents/260411_아빠-창고-미팅-1회차";

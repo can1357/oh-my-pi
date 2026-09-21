@@ -1,13 +1,12 @@
 /**
- * Compact session-model picker (alt+p / `/switch`): a bottom-anchored
- * floating overlay hosting just a {@link ModelBrowser} — no provider sidebar.
- * Model entries switch the current session only; a search beginning with `@`
- * exposes the configured ctrl+p quick roles.
+ * Session-only model picker. Hosts may opt into a passive editor-area popup;
+ * the default remains the compact bottom-anchored overlay.
  */
 import type { Model } from "@oh-my-pi/pi-ai";
 import { addKeyAliases, canonicalKeyId } from "../keybindings";
 import { type KeyId, parseKey } from "../keys";
-import type { Component, TUI } from "../tui";
+import { CURSOR_MARKER, type Focusable, type TUI } from "../tui";
+import { applyBackgroundToLine, truncateToWidth } from "../utils";
 import { type ThemeColor, theme } from "../theme/theme";
 import { buildSessionModelScope, ModelBrowser, type ModelBrowserItem } from "./model-browser";
 import type { ModelBrowserRegistry, ModelBrowserSource } from "./model-browser";
@@ -48,6 +47,10 @@ export interface ModelPickerCallbacks {
 }
 
 export interface ModelPickerOptions {
+	/** Replace only the existing editor rows; paint the list through the slash-popup path. */
+	editorRows?: number;
+	/** Preserve editor chrome; mark the input row with CURSOR_MARKER even while unfocused. */
+	renderEditorRows?: (width: number) => readonly string[];
 	/** Session token count; models with smaller context windows are grayed and compact-first on pick. */
 	currentContextTokens?: number;
 	/** `provider/id` of the session's active model; highlighted and preselected. */
@@ -64,9 +67,11 @@ export interface ModelPickerOptions {
 	taskModeKeyLabel?: string;
 	/** `provider/id` highlighted and preselected in task mode (current Task subagent model). */
 	taskSelector?: string;
+	/** Fill the inline popup with the host's message background. */
+	popupFill?: boolean;
 }
 
-/** Fixed chrome rows: top border, status row, footer, bottom border. */
+/** Fixed chrome rows in the default picker. */
 const CHROME_ROWS = 4;
 /** Rows the browser renders around its list window (search + blank, blank + two detail rows). */
 export const BROWSER_FRAME_ROWS = 5;
@@ -82,12 +87,8 @@ const FOOTER_HINT = "↑/↓ models · Enter use for this session · type to sea
 const QUICK_ROLE_FOOTER_HINT = "↑/↓ roles · Enter apply role model · type to search · Esc close";
 const TASK_FOOTER_HINT = "↑/↓ models · Enter use for Task subagents · type to search · Esc close";
 
-/**
- * The alt+p picker component. Hosted as a non-fullscreen bottom-anchored
- * overlay (`ui.showOverlay(..., { anchor: "bottom-center" })`); keyboard-only,
- * since mouse tracking is reserved for fullscreen overlays.
- */
-export class ModelPickerComponent implements Component {
+/** Search occupies the editor slot; results use the passive slash-popup renderer. */
+export class ModelPickerComponent implements Focusable {
 	#tui: TUI;
 	#settings: ModelBrowserSource;
 	#registry: ModelPickerRegistry;
@@ -104,6 +105,24 @@ export class ModelPickerComponent implements Component {
 	#taskMatchKeys = new Set<string>();
 	#taskModeKeyLabel: string;
 	#taskSelector: string | undefined;
+	#editorRows: number | undefined;
+	#renderEditorRows: ((width: number) => readonly string[]) | undefined;
+	#popupFill: boolean;
+	#focused = false;
+
+	get focused(): boolean {
+		return this.#focused;
+	}
+
+	set focused(focused: boolean) {
+		this.#focused = focused;
+		this.#browser.setFocused(focused);
+		this.#browser.setSearchFocused(focused);
+	}
+
+	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#browser.setUseTerminalCursor(useTerminalCursor);
+	}
 
 	constructor(
 		tui: TUI,
@@ -114,6 +133,9 @@ export class ModelPickerComponent implements Component {
 		options: ModelPickerOptions = {},
 	) {
 		this.#tui = tui;
+		this.#editorRows = options.editorRows;
+		this.#renderEditorRows = options.renderEditorRows;
+		this.#popupFill = options.popupFill ?? false;
 		this.#settings = settings;
 		this.#registry = registry;
 		this.#scopedModels = scopedModels;
@@ -130,6 +152,8 @@ export class ModelPickerComponent implements Component {
 		);
 
 		this.#browser = new ModelBrowser(settings, {
+			searchPrompt: options.editorRows === undefined ? undefined : "",
+			searchFocused: options.editorRows !== undefined,
 			currentContextTokens: options.currentContextTokens,
 			markOverContext: true,
 			emptyText: () => (this.#roleMode ? "  No quick roles in the Ctrl+P cycle" : undefined),
@@ -245,6 +269,11 @@ export class ModelPickerComponent implements Component {
 		}
 		this.#browser.handleInput(data);
 	}
+
+	/** Clipboard payloads edit search rather than the hidden conversation draft. */
+	pasteText(text: string): void {
+		this.#browser.pasteText(text);
+	}
 	/** Flip between session-model and Task-subagent targets, repointing the highlight. */
 	#toggleTaskMode(): void {
 		this.#taskMode = !this.#taskMode;
@@ -255,16 +284,57 @@ export class ModelPickerComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		const termRows = Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
-		const listBudget = Math.floor(termRows * HEIGHT_FRACTION) - CHROME_ROWS - BROWSER_FRAME_ROWS;
-		this.#browser.setMaxVisible(Math.max(MIN_VISIBLE, listBudget));
+		if (this.#editorRows !== undefined) {
+			const editorRows = this.#renderEditorRows?.(width);
+			const count = Math.max(1, editorRows?.length ?? this.#editorRows);
+			const markedRow = editorRows?.findIndex(line => line.includes(CURSOR_MARKER)) ?? -1;
+			const inputRow = markedRow >= 0 ? markedRow : count - 1;
+			const rendered = this.#renderPicker(width, this.#tui.terminal.rows);
+			const search = rendered.pop() ?? "";
+			this.#tui.setCursorOverlay(
+				(popupWidth, available) => {
+					const rows = this.#renderPicker(popupWidth, available + 1);
+					rows.pop();
+					return this.#popupFill
+						? rows
+								.slice(0, available)
+								.map(line =>
+									applyBackgroundToLine(line, popupWidth, text => theme.bgFill("userMessageBg", text)),
+								)
+						: rows.slice(0, available);
+				},
+				inputRow,
+				count,
+				"above",
+			);
+			const rows = editorRows ? Array.from(editorRows) : Array<string>(count).fill("");
+			rows[inputRow] = search;
+			// Preserve the draft's existing footprint without counting its blank
+			// replacement rows as editor chrome: they remain available to results.
+			const padding = Math.max(0, Math.min(this.#editorRows, this.#tui.terminal.rows) - rows.length);
+			return [...Array<string>(padding).fill(""), ...rows];
+		}
+		return this.#renderPicker(width, this.#tui.terminal.rows);
+	}
+
+	#renderPicker(width: number, availableRows: number): string[] {
+		const inline = this.#editorRows !== undefined;
+		const termRows = inline
+			? Math.max(1, availableRows)
+			: Math.max(16, this.#tui.terminal?.rows || process.stdout.rows || 40);
+		const listBudget = inline
+			? Math.min(Math.max(MIN_VISIBLE, Math.floor(this.#tui.terminal.rows * HEIGHT_FRACTION) - 7), termRows - 7)
+			: Math.floor(termRows * HEIGHT_FRACTION) - CHROME_ROWS - BROWSER_FRAME_ROWS;
+		this.#browser.setMaxVisible(Math.max(inline ? 1 : MIN_VISIBLE, listBudget));
 
 		const inner = Math.max(1, width - 4);
 		const status = this.#configError
-			? theme.fg("error", ` ${this.#configError}`)
+			? this.#configError
 			: this.#taskMode
-				? theme.fg("error", ` ${TASK_STATUS_HINT}`)
-				: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
+				? TASK_STATUS_HINT
+				: this.#roleMode
+					? QUICK_ROLE_STATUS_HINT
+					: STATUS_HINT;
 
 		const borderColor: ThemeColor | undefined = this.#taskMode ? "error" : undefined;
 		let footer = this.#taskMode ? TASK_FOOTER_HINT : this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT;
@@ -273,13 +343,32 @@ export class ModelPickerComponent implements Component {
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, this.#taskMode ? "Switch Task Model" : "Switch Model", borderColor));
-		out.push(row(status, width, borderColor));
-		for (const line of this.#browser.render(inner)) {
+		if (!inline) {
+			out.push(topBorder(width, this.#taskMode ? "Switch Task Model" : "Switch Model", borderColor));
+			out.push(
+				row(theme.fg(this.#configError || this.#taskMode ? "error" : "muted", ` ${status}`), width, borderColor),
+			);
+			for (const line of this.#browser.render(inner)) out.push(row(line, width, borderColor));
+			out.push(row(theme.fg("dim", footer), width, borderColor));
+			out.push(bottomBorder(width, borderColor));
+			return out;
+		}
+		const title = this.#taskMode ? "Switch Task Model" : "Switch Model";
+		const scope =
+			this.#roleMode || this.#taskMode || this.#configError ? status : "Session-only — role models stay unchanged";
+		const [searchRow = "", , ...browserRows] = this.#browser.render(inner);
+		if (termRows >= 5) out.push(topBorder(width, `${title} · ${scope}`, borderColor));
+		for (const line of browserRows.slice(0, Math.max(0, termRows - 1 - out.length))) {
 			out.push(row(line, width, borderColor));
 		}
-		out.push(row(theme.fg("dim", footer), width, borderColor));
-		out.push(bottomBorder(width, borderColor));
+		out.push(
+			topBorder(width, footer, borderColor)
+				.replace(theme.boxRound.topLeft, theme.boxRound.bottomLeft)
+				.replace(theme.boxRound.topRight, theme.boxRound.bottomRight),
+		);
+		const placeholder = this.#browser.query ? "" : theme.fg("dim", "Search model…");
+		const prefix = `${theme.boxRound.bottomLeft}${theme.boxRound.horizontal}`;
+		out.push(truncateToWidth(`${theme.fg(borderColor ?? "border", prefix)}${searchRow.trim()}${placeholder}`, width));
 		return out;
 	}
 }

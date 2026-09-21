@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added passive cursor-adjacent popups and completion dismissal that preserves the editor draft and cursor ([#11958](https://github.com/can1357/oh-my-pi/pull/11958) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes

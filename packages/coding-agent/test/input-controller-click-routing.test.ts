@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { PINNED_HUD_TOGGLE_ID } from "@oh-my-pi/pi-tui/prompt/composer";
+import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -12,7 +13,7 @@ const ESC = String.fromCharCode(27);
 // candidates below resolve it to the toggle sentinel.
 const EXPANDER_CLICK = `${ESC}[<0;5;3M`;
 
-function makeHarness() {
+function makeHarness(pickerFocused = false) {
 	const listeners: Array<(data: string) => { consume?: boolean; data?: string } | undefined> = [];
 	const focused: string[] = [];
 	let toggled = 0;
@@ -25,7 +26,8 @@ function makeHarness() {
 			hasOverlay: () => false,
 			requestRender: () => {},
 			addStartListener: () => {},
-			getFocused: () => undefined,
+			getFocused: () =>
+				pickerFocused ? (Object.create(ModelPickerComponent.prototype) as ModelPickerComponent) : undefined,
 		},
 		handlesBtwBranchKey: () => false,
 		editor: {
@@ -70,6 +72,20 @@ describe("InputController click routing", () => {
 	afterEach(() => {
 		AgentRegistry.resetGlobalForTests();
 		resetSettingsForTest();
+	});
+
+	it("does not route background clicks while the inline picker owns focus", () => {
+		AgentRegistry.global().register({
+			id: PINNED_HUD_TOGGLE_ID,
+			displayName: "worker",
+			kind: "sub",
+			session: {} as unknown as AgentSession,
+			sessionFile: null,
+		});
+		const h = makeHarness(true);
+		h.click();
+		expect(h.focused).toEqual([]);
+		expect(h.toggled()).toBe(0);
 	});
 
 	it("focuses a live agent whose id equals the toggle sentinel", () => {
