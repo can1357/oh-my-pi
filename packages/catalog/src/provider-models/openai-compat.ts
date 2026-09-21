@@ -7412,16 +7412,69 @@ export interface SingularityApiModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+interface SingularityApiCapability extends Record<string, unknown> {
+	endpoint?: unknown;
+	context_window_tokens?: unknown;
+	maximum_output_tokens?: unknown;
+	default_output_tokens?: unknown;
+	pricing?: unknown;
+}
+
 /**
- * SingularityAPI reserved-inference gateway: OpenAI-compatible chat
- * completions fronted by LiteLLM. The roster is lane-scoped, so the
- * authoritative cache namespace is hashed from the resolved credential **and**
- * the endpoint: switching keys — or pointing at a self-hosted proxy that
- * publishes its own roster — misses the prior namespace and re-discovers,
- * instead of serving lanes the current key cannot call until the TTL expires.
- * Lane ids that no KDL rule describes keep neutral discovery metadata rather
- * than borrowed foreign pricing, with the gateway-wide wire shape applied by
- * the provider rule in `rules/providers/singularityapi.kdl`.
+ * One row of the gateway's per-endpoint `capabilities` array: limits and
+ * 12-decimal per-million pricing strings for a single serving surface.
+ * Chat rows (`/v1/chat/completions`) own the catalog row; responses/image
+ * rows only mark the kind the gateway routes them to.
+ */
+function singularityApiChatCapability(entry: OpenAICompatibleModelRecord): SingularityApiCapability | undefined {
+	const capabilities = entry.capabilities;
+	if (!Array.isArray(capabilities)) return undefined;
+	for (const capability of capabilities) {
+		if (isRecord(capability) && capability.endpoint === "/v1/chat/completions") {
+			return capability;
+		}
+	}
+	return undefined;
+}
+
+function toSingularityApiRate(value: unknown): number {
+	const parsed = toNumber(value);
+	return parsed !== undefined && parsed >= 0 ? parsed : 0;
+}
+
+function resolveSingularityApiCost(capability: SingularityApiCapability | undefined): ModelSpec<"openai-completions">["cost"] {
+	const pricing = capability !== undefined && isRecord(capability.pricing) ? capability.pricing : undefined;
+	if (!pricing) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+	return {
+		input: toSingularityApiRate(pricing.input_per_million_usd),
+		output: toSingularityApiRate(pricing.output_per_million_usd),
+		cacheRead: 0,
+		cacheWrite: 0,
+	};
+}
+
+function mapSingularityApiModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+): ModelSpec<"openai-completions"> {
+	const capability = singularityApiChatCapability(entry);
+	return {
+		...defaults,
+		name: toModelName(entry.name, defaults.name),
+		contextWindow: toPositiveNumber(capability?.context_window_tokens, defaults.contextWindow),
+		maxTokens: toPositiveNumber(capability?.maximum_output_tokens, defaults.maxTokens),
+		cost: resolveSingularityApiCost(capability),
+	};
+}
+/**
+ * SingularityAPI universal inference gateway: OpenAI-compatible chat
+ * completions over a 300+ model catalog. `GET /v1/models` publishes each
+ * row's per-endpoint capabilities — context window, max output tokens, and
+ * per-million pricing as 12-decimal strings — with `cache-control:
+ * no-store`, so discovery reads limits, tariffs, vision flags, and the
+ * reasoning vocabulary straight off the wire. Rows without a reasoning
+ * vocabulary stay non-reasoning; reviewed KDL rules own the ladders the
+ * gateway leaves implicit (DeepSeek Flash/Pro, GPT-5.6 flagships).
  */
 export function singularityApiModelManagerOptions(
 	config?: SingularityApiModelManagerConfig,
@@ -7439,6 +7492,7 @@ export function singularityApiModelManagerOptions(
 					provider: "singularityapi",
 					baseUrl,
 					apiKey,
+					mapModel: (entry, defaults) => mapSingularityApiModel(entry, defaults),
 					fetch: config?.fetch,
 				}),
 		}),
