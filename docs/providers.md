@@ -163,7 +163,7 @@ Each provider has one or more environment variables that supply a key when no st
 
 `charm-hyper` is Charm's OpenAI-compatible inference gateway for coding agents. Issue or manage a key at `https://hyper.charm.land/`; the model list is discovered live from the provider's public `/v1/models` endpoint, and `HYPER_API_KEY` is accepted as a fallback alias for `CHARM_HYPER_API_KEY`.
 
-`singularityapi` is SingularityAPI's reserved-inference gateway for DeepSeek lanes. Create a key from the billing dashboard at `https://app.singularityapi.tech/compute/billing` (or run `/login singularityapi`) and set `SINGULARITYAPI_API_KEY`; the roster is discovered live from `https://api.singularityapi.tech/v1/models`.
+`singularityapi` is SingularityAPI's universal inference gateway (300+ models: DeepSeek, Kimi, GLM, frontier flagships). Create a `sapi_...` key at `https://app.singularityapi.dev` (or run `/login singularityapi`) and set `SINGULARITYAPI_API_KEY`; the roster, limits, and tariffs are discovered live from `https://api.singularityapi.dev/v1/models`.
 
 OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, `/login sakana`, and `/login singularityapi` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 

@@ -1,15 +1,17 @@
-// Key validation probes the non-billable `GET /v1/models`: it answers 401
-// for a missing, malformed, or unknown key (verified 2026-09-21), so a bad
-// key is rejected without spending. Keys start with `sk-...`; `sapi_...`
-// dashboard keys belong to the separate app.singularityapi.dev API.
+// SingularityAPI universal inference gateway (api.singularityapi.dev): 300+
+// models behind one OpenAI-compatible endpoint, `sapi_...` bearer keys,
+// per-million-token tariffs published per model. Auth is declared in the KDL
+// stratum. Key validation probes the non-billable `GET /v1/models`: it
+// answers 401 `invalid_api_key` for a missing, malformed, or unknown key
+// (verified 2026-09-22), so a bad key is rejected without spending.
 auth "singularityapi" {
 	name "SingularityAPI"
 	env "SINGULARITYAPI_API_KEY"
 	login "api-key" {
-		auth-url "https://app.singularityapi.tech/compute/billing"
+		auth-url "https://app.singularityapi.dev"
 		instructions "Create an API key from the SingularityAPI dashboard, then paste it here"
-		prompt "Paste your SingularityAPI API key" placeholder="sk-..."
+		prompt "Paste your SingularityAPI API key" placeholder="sapi_..."
 		normalize "strip-bearer"
-		validate "models-endpoint" label="SingularityAPI" url="https://api.singularityapi.tech/v1/models"
+		validate "models-endpoint" label="SingularityAPI" url="https://api.singularityapi.dev/v1/models"
 	}
 }
