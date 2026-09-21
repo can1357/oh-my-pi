@@ -155,8 +155,14 @@ export interface MemoryBackend {
 	 * fresh session. Context is appended to the winning base prompt at delivery;
 	 * commit publishes the cached snippet and first-turn consumption together.
 	 * Return undefined for an ineligible or failed recall, not an empty success.
+	 * `signal` aborts the in-flight recall when the submission is cancelled
+	 * (Esc); treat it as a failed recall, not an error.
 	 */
-	beforeAgentStartPrompt?(session: AgentSession, promptText: string): Promise<MemoryPromptPreparation | undefined>;
+	beforeAgentStartPrompt?(
+		session: AgentSession,
+		promptText: string,
+		signal?: AbortSignal,
+	): Promise<MemoryPromptPreparation | undefined>;
 
 	/**
 	 * Optional hook to splice extra context into a compaction summarization.
