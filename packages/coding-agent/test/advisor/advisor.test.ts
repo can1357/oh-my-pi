@@ -1587,6 +1587,46 @@ describe("advisor", () => {
 			releasePrompt.resolve();
 			await settleUntil(() => runtime.backlog === 0);
 		});
+		it("waits without a wall-clock deadline until abort releases strict catch-up", async () => {
+			const promptStarted = Promise.withResolvers<void>();
+			const releasePrompt = Promise.withResolvers<void>();
+			const messages: AgentMessage[] = [{ role: "user", content: "first", timestamp: 1 } as AgentMessage];
+			const agent: AdvisorAgent = {
+				prompt: async () => {
+					promptStarted.resolve();
+					await releasePrompt.promise;
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+			});
+
+			runtime.onTurnEnd();
+			await promptStarted.promise;
+			const controller = new AbortController();
+			let settled = false;
+			vi.useFakeTimers();
+			try {
+				const catchup = runtime.waitForCatchup(undefined, 1, controller.signal).then(caughtUp => {
+					settled = true;
+					return caughtUp;
+				});
+				vi.advanceTimersByTime(60_000);
+				await Promise.resolve();
+				expect(settled).toBe(false);
+
+				controller.abort();
+				expect(await catchup).toBe(false);
+			} finally {
+				releasePrompt.resolve();
+				vi.useRealTimers();
+			}
+			await settleUntil(() => runtime.backlog === 0);
+		});
+
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);
