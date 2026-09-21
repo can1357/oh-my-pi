@@ -144,6 +144,8 @@ import type {
 	SessionStopEventResult,
 	SessionSwitchEvent,
 	SessionTreeEvent,
+	SubagentStopEvent,
+	SubagentStopEventResult,
 	TodoReminderEvent,
 	ToolCallEventResult,
 	ToolResultEventResult,
@@ -1239,6 +1241,8 @@ export type {
 	AgentStartEvent,
 	SessionStopEvent,
 	SessionStopEventResult,
+	SubagentStopEvent,
+	SubagentStopEventResult,
 	TurnEndEvent,
 	TurnStartEvent,
 } from "../shared-events";
@@ -1699,6 +1703,7 @@ export type ExtensionEvent =
 	| AgentStartEvent
 	| AgentEndEvent
 	| SessionStopEvent
+	| SubagentStopEvent
 	| TurnStartEvent
 	| TurnEndEvent
 	| MessageStartEvent
@@ -1927,6 +1932,7 @@ export interface ExtensionAPI {
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "session_stop", handler: ExtensionHandler<SessionStopEvent, SessionStopEventResult>): void;
+	on(event: "subagent_stop", handler: ExtensionHandler<SubagentStopEvent, SubagentStopEventResult>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;
 	on(event: "turn_end", handler: ExtensionHandler<TurnEndEvent>): void;
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
