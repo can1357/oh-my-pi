@@ -52,6 +52,7 @@ import {
 	isPuppeteerHandle,
 	loadPuppeteerInWorker,
 } from "./launch";
+import { splitPressArgs } from "./press-args";
 import { extractReadableFromHtml, type ReadableFormat } from "./readable";
 
 import { cloneSafe, RunOutput } from "./run-output";
@@ -1776,7 +1777,7 @@ export class WorkerCore {
 				),
 			press: (key, opts) =>
 				op(`tab.press(${JSON.stringify(key)})`, actionOpMs, async sig => {
-					const selector = opts?.selector;
+					const { key: keyName, selector } = splitPressArgs(key, opts);
 					if (selector) {
 						if (parseAriaRefSelector(selector) !== null) {
 							const handle = await this.#resolveAriaRef(selector);
@@ -1787,7 +1788,7 @@ export class WorkerCore {
 							}
 						} else await untilAborted(sig, () => page.focus(normalizeSelector(selector)));
 					}
-					await untilAborted(sig, () => page.keyboard.press(key));
+					await untilAborted(sig, () => page.keyboard.press(keyName as KeyInput));
 				}),
 			scroll: (deltaX, deltaY) =>
 				op("tab.scroll()", actionOpMs, sig =>

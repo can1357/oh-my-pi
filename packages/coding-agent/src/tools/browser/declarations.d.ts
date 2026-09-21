@@ -248,6 +248,8 @@ interface BrowserTabHelpers {
 	fill(selector: string, value: string): Promise<void>;
 	/** Press a keyboard key, optionally on a matching element. */
 	press(key: string, options?: BrowserPressOptions): Promise<void>;
+	/** Playwright-style: focus the element matching `selector`, then press `key`. */
+	press(selector: string, key: string): Promise<void>;
 	/** Scroll by page-relative deltas. */
 	scroll(deltaX: number, deltaY: number): Promise<void>;
 	/** Drag from one selector or point to another. */

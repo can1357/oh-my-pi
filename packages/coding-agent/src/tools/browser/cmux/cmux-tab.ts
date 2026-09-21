@@ -22,6 +22,7 @@ import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { type AriaSnapshotOptions, assertSelectorString, buildAriaSnapshotScript } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
 import { extractReadableFromHtml, type ReadableFormat } from "../readable";
+import { splitPressArgs } from "../press-args";
 import { cloneSafe, RunOutput } from "../run-output";
 import type { Observation, ReadyInfo, RunResultOk, ScreenshotResult, SessionSnapshot } from "../tab-protocol";
 import {
@@ -486,11 +487,12 @@ export class CmuxTab {
 		await this.#selectorAction(selector, "fill", { value });
 	}
 
-	async press(key: string, opts?: { selector?: string }): Promise<void> {
-		if (opts?.selector) {
-			await this.focus(opts.selector);
+	async press(key: string, opts?: { selector?: string } | string): Promise<void> {
+		const { key: keyName, selector } = splitPressArgs(key, opts);
+		if (selector) {
+			await this.focus(selector);
 		}
-		await this.#request("browser.press", { key });
+		await this.#request("browser.press", { key: keyName });
 	}
 
 	async scroll(dx: number, dy: number): Promise<void> {
