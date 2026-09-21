@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.7] - 2026-09-21
+
 ### Changed
 
 - Mermaid diagrams are now rendered with the native renderer, with output remaining unchanged.

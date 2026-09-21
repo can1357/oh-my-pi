@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.7] - 2026-09-21
+
 ### Breaking Changes
 
 - Anthropic streaming and provider request helpers must now be imported from `@oh-my-pi/pi-ai/providers/anthropic` instead of the package root.
