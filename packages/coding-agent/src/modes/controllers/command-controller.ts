@@ -387,7 +387,7 @@ export class CommandController {
 			const settingLabel = setting === "auto" ? `${setting} (${model?.provider ?? "?"})` : setting;
 			info += `${theme.fg("dim", "Append-Only:")} ${activeLabel} (setting: ${settingLabel})\n`;
 		}
-		info += `${theme.bold("Tokens")}\n`;
+		info += `${theme.bold("Tokens (local session accounting, not provider billing)")}\n`;
 		info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
 		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
 		if (stats.tokens.cacheRead > 0) {
@@ -399,7 +399,7 @@ export class CommandController {
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
 		if (stats.cost > 0 || normalizedPremiumRequests > 0 || stats.credits !== undefined) {
-			info += `\n${theme.bold("Cost")}\n`;
+			info += `\n${theme.bold("Cost (OMP estimate, not an invoice)")}\n`;
 			if (stats.cost > 0) {
 				info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}\n`;
 			}
