@@ -157,6 +157,16 @@ export const EMPTY_STRING_PARTS: string[] = [];
 const EMPTY_TOOLS: readonly ContextTool[] = [];
 const EMPTY_SKILLS: readonly ContextSkill[] = [];
 
+export interface ContextTokenDetail {
+	readonly name: string;
+	readonly tokens: number;
+}
+
+export interface ContextUsageDetails {
+	readonly tools: readonly ContextTokenDetail[];
+	readonly skills: readonly ContextTokenDetail[];
+}
+
 /**
  * Skills actually rendered into the system prompt, mirroring the filter in
  * `buildSystemPrompt` (`system-prompt.ts`): the `read` tool must be present so
@@ -173,18 +183,32 @@ function renderedSkills(skills: readonly ContextSkill[], tools: readonly Context
 export function estimateSkillsTokens(skills: readonly ContextSkill[], tokenizer: Tokenizer): number {
 	const fragments: string[] = [];
 	for (const skill of skills) {
-		// "- name: description\n" wire framing tokenizes ~identically to the
-		// concatenated form, so encode each piece separately and sum.
 		fragments.push(skill.name, skill.description ?? "");
 	}
 	return tokenizer.countTokens(fragments);
 }
 
+function estimateSkillsTokenDetails(skills: readonly ContextSkill[], tokenizer: Tokenizer): ContextTokenDetail[] {
+	return skills.map(skill => ({
+		name: skill.name,
+		// "- name: description\n" wire framing tokenizes ~identically to the
+		// concatenated form, so encode each piece separately and sum.
+		tokens: tokenizer.countTokens([skill.name, skill.description ?? ""]),
+	}));
+}
+
 type ToolSchemaSource = readonly ContextTool[];
+
+interface ToolSchemaTokenEstimate {
+	revision: number;
+	sourceRevision: number;
+	tokens: number;
+	details?: ContextTokenDetail[];
+}
 
 interface ToolSchemaTokenCache {
 	revision: number;
-	byTokenizer: WeakMap<Tokenizer, { revision: number; sourceRevision: number; tokens: number }>;
+	byTokenizer: WeakMap<Tokenizer, ToolSchemaTokenEstimate>;
 }
 
 /**
@@ -224,6 +248,34 @@ export function invalidateToolSchemaMetadata(tools: ToolSchemaSource): void {
 	toolSchemaTokenCache(tools).revision++;
 }
 
+function appendToolSchemaFragments(tool: ContextTool, fragments: string[]): string | undefined {
+	// Extension-supplied tools may carry a non-string name/description or a
+	// parameters value whose wire schema stringifies to `undefined` (e.g. a
+	// callable schema that escaped normalization). A non-string fragment is
+	// fatal inside the native tokenizer, so only real strings are counted.
+	const name = tool.name;
+	const description = tool.description;
+	const parameters = tool.parameters;
+	if (typeof name === "string") fragments.push(name);
+	if (typeof description === "string") fragments.push(description);
+	try {
+		const wireTool: AiTool = {
+			name,
+			description,
+			parameters: parameters as AiTool["parameters"],
+			examples: tool.examples,
+		};
+		const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {});
+		if (typeof wireJson === "string") fragments.push(wireJson);
+		// The agent loop appends rendered examples to the wire description.
+		const examplesBlock = renderToolExamples(wireTool);
+		if (examplesBlock) fragments.push(examplesBlock);
+	} catch {
+		// Schema may contain functions or cycles; ignore.
+	}
+	return typeof name === "string" ? name : undefined;
+}
+
 /**
  * Estimate provider-visible tool-schema tokens.
  *
@@ -233,41 +285,43 @@ export function invalidateToolSchemaMetadata(tools: ToolSchemaSource): void {
  * must either advance `sourceRevision` or call
  * {@link invalidateToolSchemaMetadata} when those inputs change.
  */
-export function estimateToolSchemaTokens(tools: ToolSchemaSource, tokenizer: Tokenizer, sourceRevision = 0): number {
+function estimateToolSchemas(
+	tools: ToolSchemaSource,
+	tokenizer: Tokenizer,
+	sourceRevision: number,
+): ToolSchemaTokenEstimate {
 	const cache = toolSchemaTokenCache(tools);
 	const cached = cache.byTokenizer.get(tokenizer);
-	if (cached?.revision === cache.revision && cached.sourceRevision === sourceRevision) return cached.tokens;
+	if (cached?.revision === cache.revision && cached.sourceRevision === sourceRevision) return cached;
 
 	const fragments: string[] = [];
-	for (const tool of tools) {
-		// Extension-supplied tools may carry a non-string name/description or a
-		// parameters value whose wire schema stringifies to `undefined` (e.g. a
-		// callable schema that escaped normalization). A non-string fragment is
-		// fatal inside the native tokenizer, so only real strings are counted.
-		const name = tool.name;
-		const description = tool.description;
-		const parameters = tool.parameters;
-		if (typeof name === "string") fragments.push(name);
-		if (typeof description === "string") fragments.push(description);
-		try {
-			const wireTool: AiTool = {
-				name,
-				description,
-				parameters: parameters as AiTool["parameters"],
-				examples: tool.examples,
-			};
-			const wireJson = JSON.stringify(toolWireSchema(wireTool) ?? {});
-			if (typeof wireJson === "string") fragments.push(wireJson);
-			// The agent loop appends rendered examples to the wire description.
-			const examplesBlock = renderToolExamples(wireTool);
-			if (examplesBlock) fragments.push(examplesBlock);
-		} catch {
-			// Schema may contain functions or cycles; ignore.
-		}
-	}
+	for (const tool of tools) appendToolSchemaFragments(tool, fragments);
 	const tokens = tokenizer.countTokens(fragments);
-	cache.byTokenizer.set(tokenizer, { revision: cache.revision, sourceRevision, tokens });
-	return tokens;
+	const estimate = { revision: cache.revision, sourceRevision, tokens };
+	cache.byTokenizer.set(tokenizer, estimate);
+	return estimate;
+}
+
+function estimateToolSchemaTokenDetails(
+	tools: ToolSchemaSource,
+	tokenizer: Tokenizer,
+	sourceRevision = 0,
+): readonly ContextTokenDetail[] {
+	const estimate = estimateToolSchemas(tools, tokenizer, sourceRevision);
+	if (estimate.details) return estimate.details;
+
+	const details: ContextTokenDetail[] = [];
+	for (const tool of tools) {
+		const fragments: string[] = [];
+		const name = appendToolSchemaFragments(tool, fragments);
+		details.push({ name: name ?? "(unnamed)", tokens: tokenizer.countTokens(fragments) });
+	}
+	estimate.details = details;
+	return details;
+}
+
+export function estimateToolSchemaTokens(tools: ToolSchemaSource, tokenizer: Tokenizer, sourceRevision = 0): number {
+	return estimateToolSchemas(tools, tokenizer, sourceRevision).tokens;
 }
 
 /**
@@ -406,6 +460,27 @@ export function computeNonMessageBreakdown(
 	entry.skillful = skillful;
 	entry.breakdown = breakdown;
 	return breakdown;
+}
+
+/** Per-tool and per-skill estimates shown by `/context all`. */
+export function computeContextUsageDetails(
+	session: ContextUsageSession,
+	options: Pick<ContextUsageOptions, "sourceRevision" | "skillful"> = {},
+): ContextUsageDetails {
+	const tokenizer = session.agent.tokenizer;
+	const tools = session.agent.state?.tools ?? EMPTY_TOOLS;
+	const skills =
+		options.skillful === false
+			? EMPTY_SKILLS
+			: renderedSkills(session.renderedSkills ?? session.skills ?? EMPTY_SKILLS, tools);
+	const byLargest = (left: ContextTokenDetail, right: ContextTokenDetail): number =>
+		right.tokens - left.tokens || left.name.localeCompare(right.name);
+	return {
+		tools: estimateToolSchemaTokenDetails(tools, tokenizer, options.sourceRevision)
+			.map(detail => ({ ...detail }))
+			.sort(byLargest),
+		skills: estimateSkillsTokenDetails(skills, tokenizer).sort(byLargest),
+	};
 }
 
 /**
@@ -711,6 +786,47 @@ function buildLegendLines(breakdown: ContextBreakdown, theme: Theme): string[] {
 	});
 }
 
+function buildContextDetailParts(details: ContextUsageDetails): LegendPart[][] {
+	const lines: LegendPart[][] = [];
+	const append = (label: string, entries: readonly ContextTokenDetail[]): void => {
+		lines.push([], [{ t: label, s: "muted" }]);
+		if (entries.length === 0) {
+			lines.push([{ t: "└ None", s: "dim" }]);
+			return;
+		}
+		for (let index = 0; index < entries.length; index++) {
+			const detail = entries[index];
+			lines.push([
+				{ t: `${index === entries.length - 1 ? "└" : "├"} ${detail.name}: ` },
+				{ t: String(detail.tokens), s: "strong" },
+				{ t: " tokens", s: "dim" },
+			]);
+		}
+	};
+	append("System tools", details.tools);
+	append("Skills", details.skills);
+	return lines;
+}
+
+function renderContextDetails(details: ContextUsageDetails, theme: Theme): string[] {
+	return buildContextDetailParts(details).map(line =>
+		line
+			.map(part => (part.s === "strong" ? theme.bold(part.t) : part.s ? theme.fg(part.s, part.t) : part.t))
+			.join(""),
+	);
+}
+
+function describeContextDetails(details: ContextUsageDetails): NativeNode {
+	return node(
+		"section",
+		{ role: "omp.context.details" },
+		buildContextDetailParts(details).map((line, index) =>
+			node("text", { spans: line.length > 0 ? line : [{ t: " " }], wrap: "word" }, undefined, `detail-${index}`),
+		),
+		"details",
+	);
+}
+
 /** Stacked meter parts in grid order: the categories, free space as the empty track, then the hatched buffer. */
 function contextMeterParts(
 	breakdown: ContextBreakdown,
@@ -745,7 +861,7 @@ function contextMeterParts(
  * of the same parts marked where auto-compaction fires, then the snapcompact
  * estimate when one is on. {@link contextUsageHead} names the model and window.
  */
-function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
+function describeContextFrame(breakdown: ContextBreakdown, details?: ContextUsageDetails): NativeNode {
 	const { contextWindow: window, usedTokens, freeTokens, autoCompactBufferTokens, thresholdTokens } = breakdown;
 	const parts = contextMeterParts(breakdown);
 	const used = Math.min(1, usedTokens / window);
@@ -808,6 +924,7 @@ function describeContextFrame(breakdown: ContextBreakdown): NativeNode {
 			),
 		);
 	}
+	if (details) children.push(describeContextDetails(details));
 	return col(children, { gap: "md", role: "omp.context" });
 }
 
@@ -859,20 +976,30 @@ export function describeContextUsage(breakdown: ContextBreakdown): NativeNode {
  */
 export class ContextUsageView extends Container {
 	readonly #breakdown: ContextBreakdown;
+	readonly #details?: ContextUsageDetails;
 	#native: { meter: boolean; node: NativeNode } | undefined;
 
-	constructor(breakdown: ContextBreakdown, theme: Theme) {
+	constructor(breakdown: ContextBreakdown, theme: Theme, details?: ContextUsageDetails) {
 		super();
 		this.#breakdown = breakdown;
-		this.addChild(new Text(renderContextUsage(breakdown, theme), 0, 0));
+		this.#details = details;
+		this.addChild(new Text(renderContextUsage(breakdown, theme, details), 0, 0));
 	}
 
 	override describe(cx: DescribeContext): NativeNode {
 		const meter = cx.supports("meter");
 		if (this.#native?.meter === meter) return this.#native.node;
 		const breakdown = this.#breakdown;
+		const details = this.#details;
 		const described =
-			meter && breakdown.contextWindow > 0 ? describeContextFrame(breakdown) : describeContextUsage(breakdown);
+			meter && breakdown.contextWindow > 0
+				? describeContextFrame(breakdown, details)
+				: details && breakdown.contextWindow > 0
+					? col([describeContextUsage(breakdown), describeContextDetails(details)], {
+							gap: "md",
+							role: "omp.context",
+						})
+					: describeContextUsage(breakdown);
 		this.#native = { meter, node: described };
 		return described;
 	}
@@ -882,7 +1009,7 @@ export class ContextUsageView extends Container {
  * Render a colorful context-usage panel as ANSI text. Output is a series of
  * lines pairing the grid (left) with the legend (right).
  */
-export function renderContextUsage(breakdown: ContextBreakdown, theme: Theme): string {
+export function renderContextUsage(breakdown: ContextBreakdown, theme: Theme, details?: ContextUsageDetails): string {
 	if (breakdown.contextWindow <= 0) {
 		return theme.fg("muted", "Context usage is unavailable: no model is selected for this session.");
 	}
@@ -914,5 +1041,6 @@ export function renderContextUsage(breakdown: ContextBreakdown, theme: Theme): s
 		lines.push(line);
 	}
 
+	if (details) lines.push(...renderContextDetails(details, theme));
 	return lines.join("\n");
 }

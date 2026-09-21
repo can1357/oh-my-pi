@@ -52,7 +52,7 @@ import { ContextUsageView, contextUsageHead } from "@oh-my-pi/pi-tui/status-line
 import type { OverlayHandle } from "@oh-my-pi/pi-tui";
 import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
 import type { TspText } from "@oh-my-pi/pi-wire";
-import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { computeSessionContextBreakdown, computeSessionContextUsageDetails } from "../../session/context-usage-runtime";
 import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
@@ -939,17 +939,18 @@ export class CommandController {
 		this.#showMarkdownPanel("Available Tools", tools);
 	}
 
-	handleContextCommand(): void {
+	handleContextCommand(showAll = false): void {
 		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
+		const details = showAll ? computeSessionContextUsageDetails(this.ctx.session) : undefined;
 		// Natively the body is `/context`'s own card (meters, legend, compaction mark).
 		this.showCommandReport({
 			title: "Context Usage",
 			head: contextUsageHead(breakdown),
-			body: new ContextUsageView(breakdown, theme),
+			body: new ContextUsageView(breakdown, theme, details),
 		});
 	}
 
