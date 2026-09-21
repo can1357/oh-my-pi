@@ -7552,7 +7552,8 @@ export class AgentSession {
 	 * Handles three cases:
 	 * - Streaming: queue as steer/follow-up, aside (next step boundary), or store for next turn
 	 * - Not streaming + triggerTurn: appends to state/session, starts new turn unless the client cannot own it
-	 * - Not streaming + no trigger: appends to state/session, no turn
+	 * - Not streaming + no trigger: appends to state/session, no turn; a display:true message
+	 *   paints to the interactive transcript immediately (message_start/message_end, no turn)
 	 *
 	 * @returns true iff this call synchronously started a new turn (awaited
 	 * `agent.prompt`); false when the message was queued/appended without a turn
@@ -7721,6 +7722,20 @@ export class AgentSession {
 			return outcome.sessionClaimed;
 		}
 
+		if (normalizedAppMessage.display === true && this.#unsubscribeAgent !== undefined) {
+			// Displayable idle append with no turn: paint to the interactive transcript
+			// immediately instead of leaving it invisible until the next rebuild. The
+			// event-emitting fold path fires message_start + message_end so subscribers
+			// (the interactive renderer) append exactly one block; message_end appends the
+			// message to agent state and #persistMessageEnd writes the CustomMessageEntry
+			// (onEntryAppended intact), so no direct appendMessage/appendCustomMessageEntry
+			// here — those would double-append. No turn starts and isStreaming stays false,
+			// so the return value is still false.
+			this.#foldStrandedIrcAsidesIntoContext([normalizedAppMessage]);
+			// Preserve the no-turn contract that the entry is persisted before this resolves.
+			await this.settleInFlightMessagePersistence();
+			return false;
+		}
 		this.agent.appendMessage(normalizedAppMessage);
 		this.sessionManager.appendCustomMessageEntry(
 			normalizedAppMessage.customType,
