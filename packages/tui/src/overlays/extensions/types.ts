@@ -128,7 +128,7 @@ export type FocusRegion = "tabs" | "list";
  * Provider tab representation.
  */
 export interface ProviderTab {
-	/** Provider ID (or "all" for the ALL tab) */
+	/** Provider ID, "all", or a reserved aggregate-tab ID. */
 	id: string;
 	/** Display label */
 	label: string;
