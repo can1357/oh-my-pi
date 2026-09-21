@@ -171,6 +171,7 @@ import { applyHyperlinkSetting, fileHyperlink } from "@oh-my-pi/pi-tui/render/hy
 import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
+import { copyUrlTarget, ensureCopyUrlHandler } from "../utils/copy-store";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { resumeCommand } from "../utils/resume-command";
@@ -266,6 +267,7 @@ import {
 	getMarkdownTheme,
 	onTerminalAppearanceChange,
 	onThemeChange,
+	setCopyUrlHandlerReady,
 	setMarkdownMermaidRendering,
 	setSymbolPreset,
 	startMacOSAppearanceReprobeFallback,
@@ -1509,6 +1511,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		});
 		this.composer.setStatusComponent(this.statusLine);
+		void ensureCopyUrlHandler().then(ready => {
+			if (ready) setCopyUrlHandlerReady(true, code => copyUrlTarget(code, true));
+			else setCopyUrlHandlerReady(false);
+			this.ui.invalidate();
+			this.ui.requestRender();
+		});
 
 		this.composer.setRuntimeChildren([
 			this.chatContainer,

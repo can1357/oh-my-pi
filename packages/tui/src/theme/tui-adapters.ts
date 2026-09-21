@@ -172,6 +172,14 @@ let cachedMarkdownTheme: MarkdownTheme | undefined;
 let cachedMarkdownThemeRef: Theme | undefined;
 let markdownMermaidRendering = true;
 
+let copyChipTarget: ((code: string) => string | undefined) | undefined;
+
+/** Configure the optional application-owned target resolver for Markdown copy chips. */
+export function setCopyUrlHandlerReady(ready: false): void;
+export function setCopyUrlHandlerReady(ready: true, resolver: (code: string) => string | undefined): void;
+export function setCopyUrlHandlerReady(ready: boolean, resolver?: (code: string) => string | undefined): void {
+	copyChipTarget = ready ? resolver : undefined;
+}
 export function setMarkdownMermaidRendering(enabled: boolean): void {
 	if (markdownMermaidRendering === enabled) return;
 	markdownMermaidRendering = enabled;
@@ -207,6 +215,14 @@ export function getMarkdownTheme(): MarkdownTheme {
 		code: (text: string) => theme.fg("mdCode", text),
 		codeBlock: (text: string) => theme.fg("mdCodeBlock", text),
 		codeBlockBorder: (text: string) => theme.fg("mdCodeBlockBorder", text),
+		codeBlockLanguage: (lang: string) => {
+			const icon = theme.getLangIconStyled(lang);
+			return icon ? `${icon} ${lang}` : lang;
+		},
+		copyChip: "copy",
+		get copyChipTarget() {
+			return copyChipTarget;
+		},
 		quote: (text: string) => theme.fg("mdQuote", text),
 		quoteBorder: (text: string) => theme.fg("mdQuoteBorder", text),
 		hr: (text: string) => theme.fg("mdHr", text),

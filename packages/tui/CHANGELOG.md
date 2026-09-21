@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added compact framed rendering for completed fenced Markdown code blocks, with width-aware wrapping and language labels while preserving raw delimiters for still-streaming fences ([#9527](https://github.com/can1357/oh-my-pi/pull/9527) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+
+### Changed
+
+- Improved incremental Markdown lexing to reuse append-only guard scans and stable block boundaries during streaming ([#9527](https://github.com/can1357/oh-my-pi/pull/9527) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+
+### Fixed
+
+- Fixed narrow and nested framed Markdown code blocks so wide graphemes stay within the requested width and copy targets preserve raw source boundaries without cache collisions ([#9527](https://github.com/can1357/oh-my-pi/pull/9527) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes

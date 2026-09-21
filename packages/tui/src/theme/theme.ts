@@ -29,6 +29,7 @@ export {
 	getSettingsListTheme,
 	getSymbolTheme,
 	highlightCode,
+	setCopyUrlHandlerReady,
 	setMarkdownMermaidRendering,
 	warmHighlighter,
 } from "./tui-adapters";
