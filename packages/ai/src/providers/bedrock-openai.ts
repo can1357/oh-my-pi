@@ -201,7 +201,7 @@ function createChatCompletionsUrlFetch(fetchUrlPrefix: string, baseFetch?: OpenA
 	const urlFetch: typeof inner = (input, init) => {
 		const url = new URL(String(input instanceof Request ? input.url : input));
 		url.search = new URL(fetchUrlPrefix).search;
-		return inner(input instanceof Request ? new Request(url, input) : url, init);
+		return inner(input instanceof Request ? new Request(url.href, input) : url.href, init);
 	};
 	return Object.assign(urlFetch, inner.preconnect ? { preconnect: inner.preconnect } : {});
 }

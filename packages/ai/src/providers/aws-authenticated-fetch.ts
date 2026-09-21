@@ -122,10 +122,7 @@ export function resolveAwsAuthenticatedBearerToken(options: AwsAuthenticatedFetc
  * Region defaults to {@link resolveAwsRegion} precedence; callers that need
  * model-aware inference-profile geo routing pass `providerOptions.region`.
  */
-export function createAwsAuthenticatedFetch(
-	service: string,
-	options: AwsAuthenticatedFetchOptions = {},
-): FetchImpl {
+export function createAwsAuthenticatedFetch(service: string, options: AwsAuthenticatedFetchOptions = {}): FetchImpl {
 	const region = resolveAwsRegion(options.providerOptions?.region, options.providerOptions?.profile);
 	const bearerToken = resolveAwsAuthenticatedBearerToken(options);
 	if (!bearerToken) return createAwsSignedFetch(options, region, service);

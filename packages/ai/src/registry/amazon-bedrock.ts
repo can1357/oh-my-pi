@@ -14,7 +14,10 @@ export const amazonBedrockTransport: ProviderTransport = {
 		// Only the OpenAI-compatible Chat Completions route needs preparation;
 		// Converse authenticates inside its own provider stream function.
 		if (model.api !== "openai-completions") return { model, options };
-		return prepareBedrockOpenAIRequest(model as Model<"openai-completions">, options as BedrockOpenAIOptions & AwsFetchCarrierOptions);
+		return prepareBedrockOpenAIRequest(
+			model as Model<"openai-completions">,
+			options as BedrockOpenAIOptions & AwsFetchCarrierOptions,
+		);
 	},
 	mapSimpleOptions: options => {
 		// Converse reads region/guardrails off the top-level BedrockOptions and
