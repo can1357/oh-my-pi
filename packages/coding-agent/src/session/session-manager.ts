@@ -250,6 +250,10 @@ async function mergeDirectoryInto(
 	return stranded;
 }
 
+function isCrossDeviceError(err: unknown): boolean {
+	return isFsError(err) && err.code === "EXDEV";
+}
+
 /**
  * Relocate a session's artifacts directory for {@link SessionManager.moveTo}.
  *
@@ -270,7 +274,10 @@ async function mergeDirectoryInto(
  * but not reachable through `artifact://` — two writers that shared one id
  * space cannot both be.
  */
-async function relocateArtifactsDirectory(source: string, destination: string): Promise<"renamed" | "merged"> {
+async function relocateArtifactsDirectory(
+	source: string,
+	destination: string,
+): Promise<"renamed" | "copied" | "merged"> {
 	try {
 		await fs.promises.rename(source, destination);
 		return "renamed";
@@ -286,6 +293,13 @@ async function relocateArtifactsDirectory(source: string, destination: string): 
 			}),
 			fs.promises.lstat(source),
 		]);
+		if (isCrossDeviceError(err) && occupant === null && origin?.isDirectory()) {
+			// Fresh destination on another filesystem: copy the tree and remove
+			// the source (#12360). A pre-existing destination still merges.
+			await fs.promises.cp(source, destination, { recursive: true });
+			await fs.promises.rm(source, { recursive: true, force: true });
+			return "copied";
+		}
 		if (occupant === null || !occupant.isDirectory() || !origin.isDirectory()) throw err;
 	}
 	const stranded = await mergeDirectoryInto(source, destination);
@@ -1987,11 +2001,22 @@ export class SessionManager {
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
 
 				let sessionMoved = false;
+				let sessionCopied = false;
 				let artifactsRenamed = false;
+				let artifactsCopied = false;
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
-						await fs.promises.rename(oldSessionFile, newSessionFile);
+						try {
+							await fs.promises.rename(oldSessionFile, newSessionFile);
+						} catch (err) {
+							// Cross-device move (custom session dirs on another
+							// filesystem): copy + unlink instead (#12360).
+							if (!isCrossDeviceError(err)) throw err;
+							await fs.promises.copyFile(oldSessionFile, newSessionFile);
+							await fs.promises.unlink(oldSessionFile);
+							sessionCopied = true;
+						}
 						sessionMoved = true;
 					}
 
@@ -2005,14 +2030,20 @@ export class SessionManager {
 						if (artifactStat?.isDirectory()) {
 							// Only a whole-directory rename can be undone by renaming back;
 							// a merge leaves the rollback below to the session file alone.
-							artifactsRenamed =
-								(await relocateArtifactsDirectory(oldArtifactsDir, newArtifactsDir)) === "renamed";
+							// A cross-device copy is undone by removing the copy.
+							const relocation = await relocateArtifactsDirectory(oldArtifactsDir, newArtifactsDir);
+							artifactsRenamed = relocation === "renamed";
+							artifactsCopied = relocation === "copied";
 						}
 					}
 				} catch (err) {
-					if (artifactsRenamed && oldArtifactsDir && newArtifactsDir) {
+					if ((artifactsRenamed || artifactsCopied) && oldArtifactsDir && newArtifactsDir) {
 						try {
-							await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
+							if (artifactsCopied) {
+								await fs.promises.rm(newArtifactsDir, { recursive: true, force: true });
+							} else {
+								await fs.promises.rename(newArtifactsDir, oldArtifactsDir);
+							}
 						} catch (rollbackErr) {
 							throw new Error(
 								`Failed to move artifacts and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
@@ -2022,7 +2053,11 @@ export class SessionManager {
 
 					if (sessionMoved) {
 						try {
-							await fs.promises.rename(newSessionFile, oldSessionFile);
+							if (sessionCopied) {
+								await fs.promises.unlink(newSessionFile);
+							} else {
+								await fs.promises.rename(newSessionFile, oldSessionFile);
+							}
 						} catch (rollbackErr) {
 							throw new Error(
 								`Failed to move session file and rollback: ${rollbackErr instanceof Error ? rollbackErr.message : String(rollbackErr)}`,
