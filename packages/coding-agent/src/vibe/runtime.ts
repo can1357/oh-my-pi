@@ -1292,6 +1292,7 @@ export class VibeSessionRegistry {
 			description: `vibe ${record.cli} session`,
 			index: 0,
 			id: record.id,
+			parentSessionId: session.getSessionId?.() ?? undefined,
 			taskDepth: session.taskDepth ?? 0,
 			detached: true,
 			modelOverride: record.modelOverride,
@@ -1400,6 +1401,8 @@ export class VibeSessionRegistry {
 								onProgress,
 								eventBus: session.eventBus,
 								subagentEventBus: session.subagentEventBus,
+								parentSessionId: session.getSessionId?.() ?? undefined,
+								parentSessionFile: session.getSessionFile() ?? undefined,
 								artifactsDir: session.getSessionFile()?.slice(0, -6),
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);

@@ -119,6 +119,40 @@ export interface SessionStopEvent {
 	signal: AbortSignal;
 }
 
+/**
+ * Fired when a task/subagent reaches a candidate terminal `yield`, once its
+ * owner background work has quiesced and before the run's result is accepted
+ * or published. Handlers may refuse the candidate and request one continuation
+ * turn on the same child session.
+ *
+ * Distinct from {@link SessionStopEvent}: this event is per child run, carries
+ * child/parent identities instead of a main-session turn, and never fires for
+ * the main session. It is deliberately absent from {@link SessionEvent} so the
+ * legacy hooks API does not inherit it.
+ */
+export interface SubagentStopEvent {
+	type: "subagent_stop";
+	/** Registry/task id of the child run (its `agent://<id>` handle). */
+	agent_id: string;
+	/** Agent definition the child was spawned from. */
+	agent_type: string;
+	/** Child session id (the run's own transcript identity). */
+	session_id: string;
+	/** Child session transcript file. */
+	session_file?: string;
+	/** Session id of the parent that spawned this child. */
+	parent_session_id?: string;
+	/** Transcript file of the parent that spawned this child. */
+	parent_session_file?: string;
+	/** Child transcript at the moment of the candidate yield. */
+	messages: AgentMessage[];
+	last_assistant_message?: AgentMessage;
+	/** True once this run already had a `subagent_stop` continuation. */
+	stop_hook_active: boolean;
+	/** Cancels handler waiting when the run is aborted mid-pass. */
+	signal: AbortSignal;
+}
+
 /** Preparation data for tree navigation (used by session_before_tree event) */
 export interface TreePreparation {
 	/** Node being switched to */
@@ -499,6 +533,16 @@ export interface SessionStopEventResult {
 	/** Claude/Codex-compatible model-visible continuation reason */
 	reason?: string;
 }
+
+/**
+ * Return type for `subagent_stop` handlers.
+ *
+ * Intentionally the same shape as {@link SessionStopEventResult}: the runner's
+ * aggregation and the continuation-text precedence are shared between the two
+ * stop hooks, so a handler written for one produces the same decision for the
+ * other.
+ */
+export type SubagentStopEventResult = SessionStopEventResult;
 
 /** Return type for `session_before_tree` handlers */
 export interface SessionBeforeTreeResult {
