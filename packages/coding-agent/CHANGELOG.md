@@ -5,6 +5,7 @@
 ### Added
 
 - Added `<name>.local.md` sibling context files: `AGENTS.local.md` next to `AGENTS.md` (`.omp/`, standalone) and `CLAUDE.local.md` next to `CLAUDE.md` (`.claude/`, standalone), plus user-level variants. Each gitignored sibling loads as an additional file directly after its base, only when the base itself loads ([#7039](https://github.com/can1357/oh-my-pi/issues/7039), [#12496](https://github.com/can1357/oh-my-pi/pull/12496) by [@cdcxd](https://github.com/cdcxd)).
+
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes
