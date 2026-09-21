@@ -49,17 +49,22 @@ provider "singularityapi" {
 		reasoning-content-field "reasoning_content"
 	}
 	// Responses-capable flagships (gpt-5.6-sol/terra/luna): five-tier
-	// low..max ladder with the wire-exact off switch, per the published
-	// pricing table. Reasoning effort is mandatory alongside tools on chat
-	// completions (omitting it with tools 400s upstream), matching the
-	// first-party GPT-5.6 contract.
+	// low..max ladder with the wire-exact off switch, matching the
+	// first-party GPT-5.6 rows. `thinking-upgrade-neutral` is what makes the
+	// ladder real: the wire publishes no reasoning metadata, so without it the
+	// rows stay non-reasoning and omp sends no `reasoning_effort` at all —
+	// which the gateway rejects (400 from upstream) on chat completions
+	// whenever `tools` are present, exactly the case a coding agent hits.
 	models "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna" {
+		thinking-upgrade-neutral #true
 		thinking-efforts "low" "medium" "high" "xhigh" "max"
 		reasoning-disable-mode "none-effort"
 	}
 	// Gateway image models serve POST /v1/images/generations, never billed
-	// by tokens: FLUX per megapixel, GPT Image per image. Catalog rows for
-	// them carry the image transport so chat routing never selects them.
+	// by tokens: FLUX per megapixel, GPT Image per image. The `kind` rules
+	// keep them out of chat; `mapSingularityApiModel` reads the same rows'
+	// `capabilities` and assigns the `openai-images` transport, so a new
+	// image id the roster adds works without a rule edit here.
 	models "flux-1-schnell" "flux-pro-1.1" {
 		kind "image"
 	}
