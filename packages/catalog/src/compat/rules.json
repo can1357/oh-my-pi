@@ -7294,7 +7294,7 @@
 				"thinking": { "upgradeNeutral": true, "efforts": ["low", "high", "max"] }
 			},
 			{
-				"source": "providers/singularityapi.kdl:56",
+				"source": "providers/singularityapi.kdl:58",
 				"providers": ["singularityapi"],
 				"models": [
 					{ "kind": "exact", "value": "gpt-5.6-sol" },
@@ -7302,10 +7302,10 @@
 					{ "kind": "exact", "value": "gpt-5.6-luna" }
 				],
 				"wire": { "reasoningDisableMode": "none-effort" },
-				"thinking": { "efforts": ["low", "medium", "high", "xhigh", "max"] }
+				"thinking": { "upgradeNeutral": true, "efforts": ["low", "medium", "high", "xhigh", "max"] }
 			},
 			{
-				"source": "providers/singularityapi.kdl:63",
+				"source": "providers/singularityapi.kdl:68",
 				"providers": ["singularityapi"],
 				"models": [
 					{ "kind": "exact", "value": "flux-1-schnell" },
@@ -7314,7 +7314,7 @@
 				"catalog": { "kind": "image" }
 			},
 			{
-				"source": "providers/singularityapi.kdl:66",
+				"source": "providers/singularityapi.kdl:71",
 				"providers": ["singularityapi"],
 				"models": [
 					{ "kind": "exact", "value": "gpt-image-2" },
@@ -7323,7 +7323,7 @@
 				"catalog": { "kind": "image" }
 			},
 			{
-				"source": "providers/singularityapi.kdl:71",
+				"source": "providers/singularityapi.kdl:76",
 				"providers": ["singularityapi"],
 				"models": [{ "kind": "glob", "value": "*deepseek*" }],
 				"wire": { "supportsToolChoice": false }
