@@ -158,7 +158,7 @@ export interface RpcHandoffResult {
 	savedPath?: string;
 }
 
-export type RpcSubagentSubscriptionLevel = "off" | "progress" | "events";
+export type RpcSubagentSubscriptionLevel = "off" | "progress" | "messages" | "events";
 
 export interface RpcSubagentSnapshot {
 	id: string;

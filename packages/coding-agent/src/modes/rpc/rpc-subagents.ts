@@ -241,7 +241,9 @@ export class RpcSubagentRegistry {
 
 	handleEvent(payload: SubagentEventPayload): void {
 		if (this.#staleSubagentIds.has(payload.id)) return;
-		if (this.#subscriptionLevel !== "events") return;
+		if (this.#subscriptionLevel !== "events") {
+			if (this.#subscriptionLevel !== "messages" || payload.event.type !== "message_end") return;
+		}
 		this.#output({ type: "subagent_event", payload } satisfies RpcSubagentEventFrame);
 	}
 
