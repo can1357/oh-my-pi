@@ -4532,6 +4532,17 @@ function buildParams(
 		if ((choiceType === "any" || choiceType === "tool") && !model.compat.supportsForcedToolChoice) {
 			params.tool_choice = { type: "auto" };
 		}
+		// Anthropic rejects a forced tool_choice paired with max_tokens 0
+		// ("tool_choice ... cannot be used when max_tokens is 0"), so a
+		// zero-token forced call (e.g. a subagent final yield) 400s instead of
+		// yielding. Floor to the minimum: forcing is the caller's intent and a
+		// forced call with no output budget can never be delivered (#12597).
+		if (
+			(params.tool_choice?.type === "any" || params.tool_choice?.type === "tool") &&
+			(params.max_tokens ?? 0) < 1
+		) {
+			params.max_tokens = 1;
+		}
 	}
 
 	disableThinkingIfToolChoiceForced(params, model);
