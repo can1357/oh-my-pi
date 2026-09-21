@@ -91,6 +91,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly label = "Glob";
 	get description(): string {
 		return prompt.render(globDescription, {
+			hasFind: this.session.isToolActive?.("find") ?? this.session.settings.get("find.enabled"),
 			eagerDelegation: sessionDelegationBias(this.session) === "eager",
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,

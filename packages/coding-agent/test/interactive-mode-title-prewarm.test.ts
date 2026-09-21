@@ -86,8 +86,8 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		tempDir.removeSync();
 	});
 
-	it("prewarms the configured local worker on startup for an unnamed session", async () => {
-		session.settings.set("providers.tinyModel", "lfm2.5-230m");
+	it("prewarms the configured local tiny role on startup for an unnamed session", async () => {
+		session.settings.setModelRole("tiny", "local/lfm2.5-230m");
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
@@ -104,11 +104,34 @@ describe("InteractiveMode tiny-title prewarm", () => {
 	});
 
 	it("does not prewarm when the session is already named", async () => {
-		session.settings.set("providers.tinyModel", "lfm2.5-230m");
+		session.settings.setModelRole("tiny", "local/lfm2.5-230m");
 		vi.spyOn(mode.sessionManager, "getSessionName").mockReturnValue("resumed-session");
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
+
+		expect(prewarm).not.toHaveBeenCalled();
+	});
+
+	it("does not prewarm an unconfigured default row", async () => {
+		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
+
+		await mode.init();
+		const immediateFlushed = Promise.withResolvers<void>();
+		setImmediate(immediateFlushed.resolve);
+		await immediateFlushed.promise;
+
+		expect(prewarm).not.toHaveBeenCalled();
+	});
+
+	it("does not prewarm a paid tiny role", async () => {
+		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
+		session.settings.setModelRole("tiny", "anthropic/claude-haiku-4-5");
+
+		await mode.init();
+		const immediateFlushed = Promise.withResolvers<void>();
+		setImmediate(immediateFlushed.resolve);
+		await immediateFlushed.promise;
 
 		expect(prewarm).not.toHaveBeenCalled();
 	});

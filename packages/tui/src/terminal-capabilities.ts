@@ -732,6 +732,12 @@ export interface RuntimeTerminal extends TerminalInfo {
 	textSizing: boolean;
 	/** Whether the terminal implements colon-subparameter styled underlines (curly + colored). */
 	styledUnderlines: boolean;
+	/**
+	 * Whether the terminal answered the Glyph Protocol support query with a
+	 * `glyf`-capable reply and the bundled icons have been registered. Probe-
+	 * driven: false until {@link ProcessTerminal} resolves it.
+	 */
+	glyphProtocol: boolean;
 }
 
 export const TERMINAL: RuntimeTerminal = (() => {
@@ -763,6 +769,7 @@ export const TERMINAL: RuntimeTerminal = (() => {
 	// depth), so Apple Terminal and other unproven hosts fall back to the flat
 	// CSI 4 m / CSI 24 m underline the typo renderer needs to avoid black bars.
 	resolved.styledUnderlines = detectStyledUnderlineSupport(resolved.id, Bun.env);
+	resolved.glyphProtocol = false;
 	return resolved;
 })();
 
@@ -786,6 +793,11 @@ export function setTerminalImageProtocol(imageProtocol: ImageProtocol | null): v
  */
 export function setTerminalDeccara(enabled: boolean): void {
 	TERMINAL.deccara = enabled;
+}
+
+/** Record the Glyph Protocol probe result (called by ProcessTerminal). */
+export function setTerminalGlyphProtocol(supported: boolean): void {
+	TERMINAL.glyphProtocol = supported;
 }
 
 /** Override screen-to-scrollback clear support for targeted renderer tests. */

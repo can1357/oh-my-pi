@@ -3,10 +3,9 @@
  *
  * Asks one {@link ChoiceQuestion} about the user's request and maps the
  * chosen level to a concrete {@link Effort}, clamped into the active model's
- * supported range (never below {@link Effort.Low}). The judge comes from
- * {@link resolveJudge} — TypeSafe, the tiny/smol chat chain, or the local
- * model named by `providers.autoThinkingModel`. A local on-device judge gets
- * the coarser `trivial|moderate|hard` question (3-class is more reliable
+ * supported range (never below {@link Effort.Low}). The judge comes from the
+ * live `judge` role chain. A local on-device candidate gets the coarser
+ * `trivial|moderate|hard` question (3-class is more reliable
  * than 4-way ordinal on sub-2B models), mapped to `low|high|xhigh`.
  *
  * Throws on any failure (no judge, no key, unparseable output, abort/timeout);
@@ -110,7 +109,6 @@ export async function classifyDifficulty(
 	const judge = resolveJudge({
 		settings: deps.settings,
 		registry: deps.registry,
-		backend: deps.settings.get("providers.autoThinkingModel"),
 		sessionModel: deps.model,
 		sessionId: deps.sessionId,
 		metadataResolver: deps.metadataResolver,
@@ -118,22 +116,21 @@ export async function classifyDifficulty(
 	});
 	const state = { request: preprocessTinyMessage(promptText) };
 	const options = { signal: deps.signal };
-	// The 3-bucket local question cannot select `max`, so its ceiling stays at
-	// XHigh whatever the setting says — otherwise a sparse ladder would snap its
-	// `hard` bucket up to a tier it never chose.
-	let ceiling: Effort;
-	let effort: Effort;
-	if (judge.kind === "local") {
-		ceiling = Effort.XHigh;
-		const { answers } = await judge.judge({ state, questions: { bucket: BUCKET_QUESTION } }, options);
-		effort = BUCKET_EFFORT[answers.bucket.choice];
-	} else {
-		ceiling = autoEffortCeiling(deps);
+	const classified = await judge.withCandidate(async (candidate, kind) => {
+		// The 3-bucket local question cannot select `max`, so its ceiling stays at
+		// XHigh whatever the setting says — otherwise a sparse ladder would snap its
+		// `hard` bucket up to a tier it never chose.
+		if (kind === "local") {
+			const { answers } = await candidate.judge({ state, questions: { bucket: BUCKET_QUESTION } }, options);
+			return { effort: BUCKET_EFFORT[answers.bucket.choice], ceiling: Effort.XHigh };
+		}
+		const ceiling = autoEffortCeiling(deps);
 		const level = ceiling === Effort.Max ? LEVEL_QUESTION_WITH_MAX : LEVEL_QUESTION;
-		const { answers } = await judge.judge({ state, questions: { level } }, options);
-		effort = LEVEL_EFFORT[answers.level.choice];
-	}
-	// The ceiling goes into the clamp itself: capping the request alone is not
-	// enough, because a sparse ladder snaps an excluded request back up.
-	return clampAutoThinkingEffort(deps.model, effort, ceiling);
+		const { answers } = await candidate.judge({ state, questions: { level } }, options);
+		return { effort: LEVEL_EFFORT[answers.level.choice], ceiling };
+	}, options);
+	// The successful branch's ceiling goes into the clamp itself: capping the
+	// request alone is not enough, because a sparse ladder snaps an excluded
+	// request back up.
+	return clampAutoThinkingEffort(deps.model, classified.effort, classified.ceiling);
 }

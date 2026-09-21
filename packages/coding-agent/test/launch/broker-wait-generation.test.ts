@@ -30,7 +30,7 @@ function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 	return broker;
 }
 
-function restartingSpec(name: string, cwd: string): DaemonSpec {
+function exitingSpec(name: string, cwd: string, restart: DaemonSpec["restart"]): DaemonSpec {
 	return {
 		name,
 		application: process.execPath,
@@ -38,14 +38,14 @@ function restartingSpec(name: string, cwd: string): DaemonSpec {
 		env: {},
 		cwd,
 		pty: false,
-		restart: "always",
+		restart,
 		persist: false,
 		detached: false,
 	};
 }
 
-async function shutdown(client: DaemonBrokerClient, broker: Promise<void>): Promise<void> {
-	await client.request({ op: "stop", name: "restarting", timeoutMs: 2_000 }).catch(() => undefined);
+async function shutdown(client: DaemonBrokerClient, broker: Promise<void>, name: string): Promise<void> {
+	await client.request({ op: "stop", name, timeoutMs: 2_000 }).catch(() => undefined);
 	await client.request({ op: "shutdown" }).catch(() => undefined);
 	client.close();
 	await broker;
@@ -62,7 +62,10 @@ describe("daemon wait generation binding", () => {
 		const previousTitle = process.title;
 		const broker = startBroker(projectDir, runtimeDir);
 		try {
-			const started = await client.request({ op: "start", spec: restartingSpec("restarting", projectDir) });
+			const started = await client.request({
+				op: "start",
+				spec: exitingSpec("restarting", projectDir, "always"),
+			});
 			if (started.op !== "start") throw new Error("unexpected start result");
 
 			const waitStartedAt = Date.now();
@@ -94,7 +97,42 @@ describe("daemon wait generation binding", () => {
 			expect((error as Error).message).toContain("generation");
 			expect(elapsed).toBeLessThan(1_000);
 		} finally {
-			await shutdown(client, broker);
+			await shutdown(client, broker, "restarting");
+			process.title = previousTitle;
+		}
+	}, 25_000);
+
+	it("wakes a pattern wait when the process exits without printing the pattern", async () => {
+		using tempDir = TempDir.createSync("@omp-wait-exit-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		try {
+			const started = await client.request({ op: "start", spec: exitingSpec("crashing", projectDir, "no") });
+			if (started.op !== "start") throw new Error("unexpected start result");
+
+			const waitStartedAt = Date.now();
+			const result = await client.request({
+				op: "wait",
+				name: "crashing",
+				for: "exit",
+				pattern: "NEVER",
+				timeoutMs: 15_000,
+			});
+			const elapsed = Date.now() - waitStartedAt;
+
+			if (result.op !== "wait") throw new Error("unexpected wait result");
+			expect(result.daemon.state).toBe("failed");
+			expect(result.daemon.exitCode).toBe(1);
+			expect(result.matched).toBeUndefined();
+			expect(result.timedOut).toBe(false);
+			expect(elapsed).toBeLessThan(5_000);
+		} finally {
+			await shutdown(client, broker, "crashing");
 			process.title = previousTitle;
 		}
 	}, 25_000);

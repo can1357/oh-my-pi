@@ -3,6 +3,9 @@
 provider "openai" {
 	default-model "gpt-5.5"
 	env "OPENAI_API_KEY"
+	kind-apis {
+		image "openai-responses"
+	}
 
 	// Daybreak models are approval-gated first-party Responses models that are
 	// not yet present in stencil.so. Seed the documented aliases and current

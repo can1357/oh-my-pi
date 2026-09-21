@@ -5,7 +5,7 @@
  * `behavior.ts`, `resolve.ts`) exposes to consumers.
  */
 import type { Effort } from "../effort";
-import type { KnownApi, ThinkingControlMode, TokenCost } from "../types";
+import type { Api, ThinkingControlMode, TokenCost } from "../types";
 import type { RevisionOp } from "./revision";
 
 /** Class-membership matcher kinds, most to least specific. */
@@ -32,11 +32,9 @@ export interface CompiledRevisionPrefix {
 	anywhere?: boolean;
 }
 
-/** One compiled reviewed identity correction. */
-export interface CompiledIdentityOverride {
+interface CompiledIdentityOverrideFields {
 	id: string;
 	provider?: string;
-	model: string;
 	logical?: string;
 	class?: string;
 	family?: string;
@@ -48,6 +46,21 @@ export interface CompiledIdentityOverride {
 	provenance: string;
 	expiresAtMs?: number;
 }
+
+/** One compiled reviewed identity correction with exactly one bare-model selector. */
+export type CompiledIdentityOverride = CompiledIdentityOverrideFields &
+	(
+		| {
+				/** Exact bare-model selector. */
+				model: string;
+				glob?: never;
+		  }
+		| {
+				model?: never;
+				/** Anchored, case-insensitive bare-model glob. */
+				glob: string;
+		  }
+	);
 
 /** One compiled model class: matchers, families, revision rules, overrides. */
 export interface CompiledClass {
@@ -588,7 +601,7 @@ export interface CompiledProviderDiscovery {
 export interface CompiledSeedModel {
 	id: string;
 	name: string;
-	api: KnownApi;
+	api: Api;
 	provider: string;
 	baseUrl: string;
 	reasoning: boolean;
@@ -615,8 +628,8 @@ export interface CompiledSeed {
 }
 
 /**
- * One chat-model provider's catalog entry: the non-code half of what the
- * runtime and generator know about a provider. A `providers/<id>.kdl` file
+ * One model provider's catalog entry: the non-code half of what the runtime
+ * and generator know about a provider. A `providers/<id>.kdl` file
  * declares one by carrying `default-model`; files without it are wire-compat
  * only (custom provider ids such as `llama.cpp`).
  */
@@ -634,6 +647,8 @@ export interface CompiledProvider {
 	skipCrossProviderReferenceFills?: boolean;
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
+	/** Non-chat model kinds mapped to their runtime transport APIs. */
+	kindApis?: Partial<Record<"image" | "tts" | "stt", Api>>;
 	/** Authored bundled rows, when the provider cannot be discovered at generation time. */
 	seed?: CompiledSeed;
 }
