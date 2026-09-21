@@ -921,6 +921,17 @@ export class EventController {
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
 		this.#ensureWorkingLoaderWhileStreaming();
 		if (event.message.role === "hookMessage" || event.message.role === "custom") {
+			if (event.message.role === "custom" && !this.ctx.initialChatRendered && !this.ctx.viewSession.isStreaming) {
+				// Idle custom append delivered after subscribeToAgent() but before the initial
+				// transcript render (e.g. a startup display:true sendMessage): its entry is
+				// already persisted, and renderInitialMessages({ preserveExistingChat: true })
+				// replays it from session entries while re-appending existing chat children —
+				// painting it live here too would duplicate it. Let the initial replay own the
+				// paint; a later idle rebuild re-replays from entries when they change. Mirrors
+				// ExtensionUiController.#applyCustomMessageDisplay's initialChatRendered gate.
+				// Streaming is excluded so live-turn rendering is unchanged.
+				return;
+			}
 			const signature = `${event.message.role}:${event.message.customType}:${event.message.timestamp}`;
 			if (this.#renderedCustomMessages.has(signature)) {
 				return;
