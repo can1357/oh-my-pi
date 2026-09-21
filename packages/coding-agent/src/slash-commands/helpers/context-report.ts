@@ -1,4 +1,4 @@
-import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { computeSessionContextBreakdown, computeSessionContextUsageDetails } from "../../session/context-usage-runtime";
 import type { SlashCommandRuntime } from "../types";
 import { renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
 
@@ -7,7 +7,7 @@ import { renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
  * (categories + auto-compact buffer + free slack) and falls back to the
  * minimal "window/used" lines when the breakdown helper throws.
  */
-export function buildContextReportText(runtime: SlashCommandRuntime): string {
+export function buildContextReportText(runtime: SlashCommandRuntime, showAll = false): string {
 	try {
 		const breakdown = computeSessionContextBreakdown(runtime.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
@@ -56,6 +56,22 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 					lines.push(`  Estimated next request: ~${breakdown.usedTokens - snap.savedTokens} tokens on the wire`);
 				}
 			}
+		}
+		if (showAll) {
+			const details = computeSessionContextUsageDetails(runtime.session);
+			const appendDetails = (label: string, entries: readonly { name: string; tokens: number }[]): void => {
+				lines.push("", label);
+				if (entries.length === 0) {
+					lines.push("└ None");
+					return;
+				}
+				for (let index = 0; index < entries.length; index++) {
+					const detail = entries[index];
+					lines.push(`${index === entries.length - 1 ? "└" : "├"} ${detail.name}: ${detail.tokens} tokens`);
+				}
+			};
+			appendDetails("System tools", details.tools);
+			appendDetails("Skills", details.skills);
 		}
 		return lines.join("\n");
 	} catch {

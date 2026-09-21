@@ -39,7 +39,7 @@ import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import { renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { computeSessionContextBreakdown, computeSessionContextUsageDetails } from "../../session/context-usage-runtime";
 import { buildHotkeysMarkdown } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
@@ -702,13 +702,14 @@ export class CommandController {
 		showMarkdownPanel(this.ctx, "Available Tools", tools);
 	}
 
-	handleContextCommand(): void {
+	handleContextCommand(showAll = false): void {
 		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
 		}
-		const output = renderContextUsage(breakdown, theme);
+		const details = showAll ? computeSessionContextUsageDetails(this.ctx.session) : undefined;
+		const output = renderContextUsage(breakdown, theme, details);
 		const block = new TranscriptBlock();
 		block.addChild(new DynamicBorder());
 		block.addChild(new Text(theme.bold(theme.fg("accent", "Context Usage")), 1, 0));

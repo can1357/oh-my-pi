@@ -115,10 +115,10 @@ describe("estimateToolSchemaTokens", () => {
 });
 
 /**
- * Contract: the /context panel surfaces estimated snapcompact wire savings —
- * applied swaps show "saves" figures, inactive states say why.
+ * Contract: the /context panel surfaces estimated snapcompact wire savings and
+ * keeps `/context all` item counts precise enough to compare.
  */
-describe("renderContextUsage snapcompact section", () => {
+describe("renderContextUsage", () => {
 	const themeStub = {
 		fg: (_color: string, text: string) => text,
 		bold: (text: string) => text,
@@ -168,6 +168,20 @@ describe("renderContextUsage snapcompact section", () => {
 	it("omits the section entirely when no snapcompact setting is on", () => {
 		const output = renderContextUsage(breakdownWith(undefined), themeStub);
 		expect(output).not.toContain("Snapcompact");
+	});
+
+	it("shows exact per-item token estimates instead of rounded buckets", () => {
+		const output = renderContextUsage(breakdownWith(undefined), themeStub, {
+			tools: [
+				{ name: "larger", tokens: 1449 },
+				{ name: "smaller", tokens: 1351 },
+			],
+			skills: [],
+		});
+
+		expect(output).toContain("├ larger: 1449 tokens");
+		expect(output).toContain("└ smaller: 1351 tokens");
+		expect(output).not.toContain("1.4K");
 	});
 });
 
