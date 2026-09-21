@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { WatchdogConfigDoc } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	discoverAdvisorConfigs,
 	loadWatchdogConfigFile,
 	saveWatchdogConfigFile,
 	serializeWatchdogConfig,
-	type WatchdogConfigDoc,
 } from "../../src/advisor/config";
 
 describe("WATCHDOG.yml subagent eligibility", () => {
@@ -72,7 +72,15 @@ describe("WATCHDOG.yml subagent eligibility", () => {
 
 	it("rejects a non-boolean subagents value", async () => {
 		await Bun.write(configPath, 'advisors:\n  - name: reviewer\n    subagents: "true"\n');
-		expect(await loadWatchdogConfigFile(configPath)).toEqual({ advisors: [] });
-		expect((await discoverAdvisorConfigs(projectDir, agentDir)).advisors).toEqual([]);
+		const loaded = await loadWatchdogConfigFile(configPath);
+		expect(loaded.advisors).toEqual([]);
+		expect(loaded.warnings).toHaveLength(1);
+		expect(loaded.warnings?.[0]).toContain('advisor "reviewer" dropped');
+		expect(loaded.warnings?.[0]).toContain("subagents must be boolean");
+
+		const discovered = await discoverAdvisorConfigs(projectDir, agentDir);
+		expect(discovered.advisors).toEqual([]);
+		expect(discovered.warnings).toHaveLength(1);
+		expect(discovered.warnings[0]).toContain("subagents must be boolean");
 	});
 });

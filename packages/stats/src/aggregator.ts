@@ -3,6 +3,8 @@ import * as path from "node:path";
 import { getStatsDbPath, workerHostEntry } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
 import {
+	applySessionParseResult,
+	completeSessionSync,
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
 	getBehaviorByModel,
@@ -26,15 +28,17 @@ import {
 	getToolStatsByModel,
 	getToolTimeSeries,
 	initDb,
-	insertMessageStats,
-	insertToolCalls,
-	insertUserMessageStats,
 	markSessionBackfillsComplete,
-	setFileOffset,
-	updateToolResults,
-	updateUserMessageLinks,
+	prepareSessionSync,
 } from "./db";
-import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
+import {
+	getSessionEntry,
+	listAllSessionFiles,
+	matchesSessionFile,
+	type ParseSessionResult,
+	parseSessionFile,
+	type SessionParserState,
+} from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
@@ -67,20 +71,6 @@ export async function withStatsSyncLock<T>(dbPath: string, fn: () => Promise<T>)
 		retryDelayMs: STATS_SYNC_LOCK_RETRY_MS,
 		retries: Math.ceil(STATS_SYNC_LOCK_WAIT_MS / STATS_SYNC_LOCK_RETRY_MS),
 	});
-}
-
-/**
- * Apply a freshly parsed result to the database. Runs entirely on the
- * main thread so the single SQLite handle owns every write.
- */
-function applyParseResult(sessionFile: string, lastModified: number, result: ParseSessionResult): number {
-	if (result.stats.length > 0) insertMessageStats(result.stats);
-	if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
-	if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
-	if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
-	if (result.toolResults.length > 0) updateToolResults(result.toolResults);
-	setFileOffset(sessionFile, result.newOffset, lastModified);
-	return result.stats.length + result.userStats.length;
 }
 
 /**
@@ -239,20 +229,34 @@ export async function smokeTestSyncWorker({ timeoutMs = 5_000 }: { timeoutMs?: n
  * bar walks at a steady rate).
  */
 export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
-	return withStatsSyncLock(getStatsDbPath(), () => syncAllSessionsLocked(opts));
+	return withStatsSyncLock(getStatsDbPath(), async () => {
+		let processed = 0;
+		let files = 0;
+		while (true) {
+			const result = await syncAllSessionsLocked(opts);
+			processed += result.processed;
+			files += result.files;
+			if (!result.reconcile) return { processed, files };
+		}
+	});
 }
 
-async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
+async function syncAllSessionsLocked(
+	opts?: SyncOptions,
+): Promise<{ processed: number; files: number; reconcile: boolean }> {
 	await initDb();
+	const replay = prepareSessionSync();
 
 	const files = await listAllSessionFiles();
 	let totalProcessed = 0;
 	let filesProcessed = 0;
 	let completed = 0;
 	let cursor = 0;
+	let reconcile = false;
 	const finish = () => {
+		completeSessionSync(reconcile);
 		markSessionBackfillsComplete();
-		return { processed: totalProcessed, files: filesProcessed };
+		return { processed: totalProcessed, files: filesProcessed, reconcile };
 	};
 	if (files.length === 0) return finish();
 
@@ -268,7 +272,12 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 
 	const processFile = async (
 		sessionFile: string,
-		parse: (sessionFile: string, fromOffset: number) => Promise<ParseSessionResult>,
+		parse: (
+			sessionFile: string,
+			fromOffset: number,
+			state?: SessionParserState,
+			replay?: boolean,
+		) => Promise<ParseSessionResult>,
 	): Promise<void> => {
 		let fileStats: fs.Stats;
 		try {
@@ -279,14 +288,24 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 		}
 		const lastModified = fileStats.mtimeMs;
 		const stored = getFileOffset(sessionFile);
-		if (stored && stored.lastModified >= lastModified) {
+		if (
+			!replay &&
+			stored?.parserState &&
+			stored.lastModified === lastModified &&
+			stored.parserState.size === fileStats.size &&
+			matchesSessionFile(stored.parserState, fileStats)
+		) {
 			report(sessionFile);
 			return;
 		}
 
-		const fromOffset = stored?.offset ?? 0;
-		const result = await parse(sessionFile, fromOffset);
-		const inserted = applyParseResult(sessionFile, lastModified, result);
+		const unknownIdentity = stored !== null && !stored.parserState;
+		const fromOffset = unknownIdentity ? 0 : (stored?.offset ?? 0);
+		const result = await parse(sessionFile, fromOffset, stored?.parserState, replay);
+		if (unknownIdentity && result.parserState) result.reset = true;
+		const applied = applySessionParseResult(sessionFile, result, replay || !stored?.parserState);
+		const inserted = applied.processed;
+		if (applied.reconcile) reconcile = true;
 		if (inserted > 0) {
 			totalProcessed += inserted;
 			filesProcessed++;
@@ -312,7 +331,9 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 			const idx = cursor++;
 			if (idx >= files.length) return;
 			const sessionFile = files[idx];
-			await processFile(sessionFile, (file, fromOffset) => dispatch(handle, { sessionFile: file, fromOffset }));
+			await processFile(sessionFile, (file, fromOffset, parserState, replay) =>
+				dispatch(handle, { sessionFile: file, fromOffset, parserState, replay }),
+			);
 		}
 	}
 

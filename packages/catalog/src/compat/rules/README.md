@@ -6,7 +6,7 @@ There are three ownership strata:
 
 - `taxonomy/*.kdl` defines identity: class membership, product families, revision extraction, reviewed exact corrections, and suffix collapse.
 - `classes/*.kdl` defines model-lineage truths: behavior inherent to a model line, optionally scoped to the providers or request adapters where the census established it.
-- `providers/*.kdl` defines deployment contracts: behavior imposed by a host, plus documented per-model residue that taxonomy cannot express exactly.
+- `providers/<id>.kdl` is a provider's entry: its catalog identity (default model, env keys, discovery wiring, optional authored seed rows — see [Provider catalog grammar](#provider-catalog-grammar)) plus its deployment contract: behavior imposed by the host and documented per-model residue that taxonomy cannot express exactly.
 - `runtime/behavior.kdl` defines heuristics used before or outside exact model lookup: responses routing, API routes, quota tiers, plan requirements, model limits, roster exclusions, hosted defaults, pricing peers.
 - `auth/<provider>.kdl` defines the provider's auth contract: display name, env-var fallback, credential storage/format, and the declarative login / refresh flow that `@oh-my-pi/pi-ai`'s registry engines interpret (see [Auth grammar](#auth-grammar)).
 
@@ -89,7 +89,7 @@ revision skip-bare "o1" "o3" "o4"
 
 ### Reviewed identity overrides
 
-`override` has properties only and no child block. Required string properties are `id` (stable, globally unique review ID), `model` (exact bare model identifier, compared case-insensitively), `rationale`, and `provenance`.
+`override` has properties only and no child block. Required string properties are `id` (stable, globally unique review ID), `rationale`, and `provenance`, plus exactly one selector: `model` (exact bare identifier) or `glob` (anchored `*` wildcard over the bare identifier). Both selectors compare case-insensitively; namespace prefixes before the final `/` are ignored.
 
 Optional properties are:
 
@@ -104,7 +104,7 @@ Optional properties are:
 | `thinking-variant` | Boolean marker for a separately exposed thinking sibling. |
 | `expires-at-ms` | Non-negative Unix time in milliseconds. The override is inactive when the observation time is at or after this value. |
 
-The pair `(provider, model)` must also be unique, including provider-agnostic pairs. When no observation time is supplied, an expiring override remains active.
+The tuple `(provider, selector-kind, selector)` must also be unique, including provider-agnostic selectors. Active exact overrides take precedence over every glob. Within each selector kind, provider-scoped overrides precede provider-agnostic ones; matching globs rank by non-wildcard byte count. Equal-ranked globs are an ambiguity error, never resolved by declaration order. When no observation time is supplied, an expiring override remains active.
 
 ### Suffix collapse
 
@@ -194,6 +194,8 @@ A `models` string without `*` is an exact, case-sensitive match against the prov
 
 `priority=N` is an optional signed integer property on the block that owns axis assignments. Its default is zero. Use it only to resolve an intentional equal-specificity overlap; do not use it to encode declaration order.
 
+`buildDiscoveredModel(spec, providerType)` resolves the catalog `discovery-api` axis before materializing compatibility. It preserves the credential-bearing provider ID and records `providerType` as the backend used for provider selectors on subsequent rebuilds. Ordinary `buildModel` preserves its input API. This lets custom-named llama.cpp deployments reuse the same rules without model-specific discovery code.
+
 ### Axis vocabulary and value shapes
 
 The directive vocabulary is closed and lives in **`src/compat/axes.ts`** — one table mapping each kebab-case directive to its resolved camelCase field, namespace (`wire` / `thinking` / `catalog`), value shape, applicable compat records, and (for enums) accepted values. The compiler rejects unknown directives and out-of-vocabulary values against that table; consult it rather than a duplicated table here.
@@ -262,7 +264,7 @@ The highest-ranked matching assignment wins for that axis. Two distinct rules th
 
 ### Capability gating
 
-Wire axes are considered for every matching target. Thinking axes are considered only when the structured resolve target sets `reasoning` — except that an exact model selector declaring `thinking-efforts` upgrades the target (a reviewed correction to stale source capability metadata). Family and revision selectors never match targets missing that rank. An unmatched target resolves to empty maps; the cascade does not infer negative capabilities from absence.
+Wire axes are considered for every matching target. Thinking axes require `reasoning`, except that an exact model selector declaring `thinking-efforts` opens the gate for reviewed corrections. A winning `thinking-upgrade-neutral #true` scoped to a recognized class, family, revision, or model selector also opens it when a matching effort ladder exists; provider-wide opt-in alone does not. Materializing a neutral spec as reasoning-capable requires that opt-in and no explicit thinking vocabulary. Family and revision selectors never match targets missing that rank. An unmatched target resolves to empty maps; the cascade does not infer negative capabilities from absence.
 
 ## Runtime behavior grammar
 
@@ -288,15 +290,17 @@ behavior {
         route "openai-completions" prefix="openai/" strip-prefix=#true
     }
     model-limits provider="github-copilot" { limits "gpt-5.6" context=272000 max-tokens=128000 }
+    exclude-discovery-modes "embedding" "moderation" provider="litellm"
     exclude-models provider="nanogpt" substring="embed" substring="tts"
     plan-requirement provider="openai-codex" { tier "pro" substring="-spark" }
+    retry-reset-timezone provider="zai" offset="+08:00"
     pricing-peer provider="google-antigravity" peers="google" "google-vertex" {
         alias "gemini-3-pro" peer-id="gemini-3-pro-preview"
     }
 }
 ```
 
-Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
+`exclude-discovery-modes` takes one or more exact, case-sensitive upstream mode strings plus `provider=`; discovery mappers preserve missing, malformed, and unknown modes unless the provider policy explicitly lists them. Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
 
 ## Auth grammar
 
@@ -308,6 +312,8 @@ auth "anthropic" {
     env hook="anthropic-foundry"                 // or: env "ANTHROPIC_OAUTH_TOKEN" "ANTHROPIC_API_KEY"
     login "oauth-code" {
         client-id "OWQxYzI1…" encoding="base64"  // env="VAR" adds an override; child `env "A" "B"` an ordered list
+        base-url "https://api.example" { env "X_BASE_URL" }      // optional; `{base}` placeholder (API origin)
+        auth-url "https://auth.example" { env "X_AUTH_URL" }     // optional; `{auth}` placeholder for authorize/token/userinfo
         authorize-url "https://claude.ai/oauth/authorize"
         scopes "org:create_api_key" "user:profile"      // separator=" " default
         pkce #true
@@ -339,6 +345,7 @@ auth "anthropic" {
     expiry "jwt-or-never"                        // session-JWT expiry policy
     result "api-key"                             // OAuth login persists only credentials.access as a plain API key
     allows-missing-api-key #true
+    native-auth-api "bedrock-converse-stream"     // provider transport resolves auth; scan plans pin this API without secrets
     available #false
     show-in-login-list #false
 }
@@ -352,6 +359,61 @@ Login kinds:
 - `login "custom" hook="name"` — the whole flow is a named `@oh-my-pi/pi-ai` hook (`src/registry/hooks/custom.ts`).
 
 Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registry/hooks` by that package's `auth-hooks-registry` test. Values marked `encoding="base64"` are public OAuth client ids stored obfuscated to keep secret scanners quiet; they are decoded at runtime.
+
+## Provider catalog grammar
+
+The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entry next to the cascade rules. A file that declares `default-model` is a catalog provider (a member of the generated `KnownProvider` union in `src/compat/provider-ids.ts`); a file without it is wire-compat only (custom provider ids such as `llama.cpp`) and may not carry any other entry node. The compiled entries live in `rules.json` under `providers`, keyed by id; runtime accessors are in `src/compat/providers.ts`, and `provider-models/descriptors.ts` pairs each entry with its model-manager factory — the only provider fact that stays in code.
+
+```kdl
+provider "sakana" {
+    default-model "fugu"                          // required for a catalog entry
+    env "SAKANA_API_KEY" "FUGU_API_KEY"           // runtime API-key env fallback, in order
+    dynamic-models-authoritative #true            // discovery replaces bundled rows
+    allow-unauthenticated #true                   // runtime manager without a key
+    skip-cross-provider-reference-fills #true     // generator never backfills from same-id rows elsewhere
+    discovery label="Sakana AI" oauth-provider="sakana" allow-unauthenticated=#true {
+        env "SAKANA_GEN_KEY"                      // generation-time keys; defaults to the provider env
+    }
+    seed api="openai-responses" base-url="https://api.sakana.ai/v1" bundle="fallback" {
+        model "fugu-ultra" name="Fugu Ultra" {
+            reasoning #true
+            input "text"
+            cost input=5 output=30 cache-read=0.5 cache-write=0
+            limits context=1000000                // max-tokens omitted → null
+            thinking-mode "effort"                // thinking-* axes → row.thinking
+            thinking-efforts "high" "max"
+            include-encrypted-reasoning #false    // wire axes → row.compat
+        }
+    }
+
+    // cascade rules follow, as before
+    include-encrypted-reasoning #false
+}
+provider "muse-code" {
+    default-model "muse-spark-1.3"
+    seed api="openai-responses" base-url="https://api.meta.ai/v1" {
+        models-from "meta"                        // copies meta's seed rows under this provider
+    }
+}
+```
+
+Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
+
+### Seed rows
+
+A `seed` *defines* bundled rows for providers whose catalog cannot be discovered at generation time — credential-scoped rosters, unauthenticated regens, or models ahead of upstream catalogs. Every other stratum patches rows; this one authors them. Runtime model managers hand the rows to `staticModels` through `seedModels(provider)`; the generator bundles them per the seed's `bundle` policy. Values are literal — a seed never derives from another provider's row, and pricing is never borrowed.
+
+`seed` properties: `api` and `base-url` are per-row defaults (a `model` may override either with the same property names); `bundle` defaults to `always`; `precedence="seed"` is optional. `model` takes the wire id positionally, requires `name=`, and its body MUST declare `reasoning`, `input` (`"text"` and/or `"image"`), `cost` (all four per-million rates), and `limits` (`context=` / `max-tokens=`, an omitted limit is `null`); `supports-tools #true` is optional. Any other directive is an axis from the cascade vocabulary: thinking axes become the row's explicit `thinking` (then `thinking-mode` and `thinking-efforts` are both required), wire axes become its explicit `compat` and must apply to the row's API, and catalog axes are rejected because they stay rule-owned in the cascade block. Explicit `thinking`/`compat` on a seed row win over the cascade exactly as they do for any authored spec.
+
+`bundle` decides when the generator includes the rows:
+
+| Policy | Rows enter the bundle |
+| --- | --- |
+| `always` | Every regeneration. Same-id upstream/discovery rows win dedup. |
+| `fallback` | Only when the provider's authoritative catalog discovery did not succeed. |
+| `empty` | Only when no other source produced a row for the provider. |
+
+`precedence="seed"` prepends the rows after the previous-snapshot merge and cross-provider reference fills, so the authored row wins dedup and same-id rows on other hosts never overwrite its name or capabilities (QwenCloud Token Plan, Meta). The default `upstream` precedence appends before the snapshot merge, so the current seed — not a stale snapshot copy — is the fallback row.
 
 ## Vendoring provenance
 

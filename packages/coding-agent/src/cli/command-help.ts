@@ -27,6 +27,11 @@ export const cleanseHelp = {
 	description: "Detect and fix project diagnostics with weighted parallel subagents",
 } satisfies CommandMetadata;
 
+export const collabHelp = {
+	description:
+		"List active local Collab host metadata without URLs; use collab link <instanceId|pid> to retrieve a control link (--view for view-only)",
+} satisfies CommandMetadata;
+
 export const commitHelp = { description: "Generate a commit message and update changelogs" } satisfies CommandMetadata;
 
 export const completionsHelp = {
@@ -56,6 +61,10 @@ export const ifBenchHelp = {
 } satisfies CommandMetadata;
 export const gitHelp = {
 	description: "Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer",
+} satisfies CommandMetadata;
+
+export const findHelp = {
+	description: "Semantic search: describe a behavior, get the files and line ranges that implement it",
 } satisfies CommandMetadata;
 
 export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
@@ -108,6 +117,10 @@ export const shellHelp = { description: "Interactive shell console" } satisfies 
 export const sshHelp = { description: "Manage SSH host configurations" } satisfies CommandMetadata;
 
 export const statsHelp = { description: "View usage statistics" } satisfies CommandMetadata;
+
+export const streamHelp = {
+	description: "Broadcast local omp session screens and chat to your public live channel",
+} satisfies CommandMetadata;
 
 export const tinyModelsHelp = {
 	description: "Download tiny local models (session titles + memory)",

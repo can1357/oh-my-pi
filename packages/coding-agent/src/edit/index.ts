@@ -24,13 +24,8 @@ import {
 import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveLocalRoot } from "../internal-urls";
 import { cachedVaultRoots, isVaultEnabled } from "../internal-urls/vault-protocol";
-import {
-	createLspWritethrough,
-	type FileDiagnosticsResult,
-	flushLspWritethroughBatch,
-	type WritethroughCallback,
-	writethroughNoop,
-} from "../lsp";
+import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
+import { type FileDiagnosticsResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
@@ -51,12 +46,14 @@ import {
 import { outputMeta } from "../tools/output-meta";
 import { resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { planLocalProtocolOptions } from "../tools/plan-mode-guard";
-import { ToolError } from "../tools/tool-errors";
-import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import { normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
-import { type EditToolDetails, type EditToolPerFileResult, getLspBatchRequest, type Operation } from "./renderer";
+import { getLspBatchRequest } from "../lsp/batch";
+import { type EditToolDetails, type EditToolPerFileResult, type Operation } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	type ApplyPatchParams,
 	applyPatchSchema,
@@ -72,10 +69,17 @@ import {
 } from "./schemas";
 import { getEditStore } from "./store";
 
-export * from "./renderer";
+export type {
+	EditRenderContext,
+	EditToolDetails,
+	EditToolPerFileResult,
+	Operation,
+	PerFileDiffPreview,
+} from "@oh-my-pi/pi-tui/tools/edit";
 export * from "./schemas";
 export * from "./store";
-export { DEFAULT_EDIT_MODE, type EditMode, normalizeEditMode } from "../utils/edit-mode";
+export { DEFAULT_EDIT_MODE, normalizeEditMode } from "../utils/edit-mode";
+export { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 
 type TInput =
 	| typeof replaceEditSchema
@@ -319,6 +323,13 @@ async function mkdirAllowingFallback(directory: string): Promise<void> {
 	}
 }
 
+/** Memoized native inspection, tagged onto the streamed args object it describes. */
+const kInspection = Symbol("edit.inspection");
+
+interface InspectedArgs {
+	[kInspection]?: { mode: EditMode; inspection: EditInspection };
+}
+
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 	if (left.byteLength !== right.byteLength) return false;
 	for (let index = 0; index < left.byteLength; index++) {
@@ -340,6 +351,7 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #editMode?: EditMode;
 	readonly #deferredDiagnostics: DeferredDiagnostics;
 	readonly #sessions = new Map<string, EditSession>();
+	readonly #streamedArgs = new Map<string, string>();
 
 	constructor(
 		private readonly session: ToolSession,
@@ -433,6 +445,7 @@ export class EditTool implements AgentTool<TInput> {
 	openArgStream(init: AgentToolArgStreamInit): AgentToolArgStream {
 		const existing = this.#sessions.get(init.toolCallId);
 		if (existing) existing.close();
+		this.#streamedArgs.delete(init.toolCallId);
 		// A call that arrived through the custom-tool wire streams the payload
 		// verbatim; JSON function calls stream JSON text.
 		const rawInput = init.customWireName !== undefined;
@@ -450,13 +463,18 @@ export class EditTool implements AgentTool<TInput> {
 			if (oldestId === undefined) break;
 			this.#sessions.get(oldestId)?.close();
 			this.#sessions.delete(oldestId);
+			this.#streamedArgs.delete(oldestId);
 		}
 		return {
 			push: delta => editSession.push(delta),
-			end: () => editSession.finish(),
+			end: args => {
+				editSession.finish();
+				this.#streamedArgs.set(init.toolCallId, JSON.stringify(args));
+			},
 			cancel: () => {
 				editSession.close();
 				if (this.#sessions.get(init.toolCallId) === editSession) this.#sessions.delete(init.toolCallId);
+				this.#streamedArgs.delete(init.toolCallId);
 			},
 		};
 	}
@@ -469,11 +487,19 @@ export class EditTool implements AgentTool<TInput> {
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		let editSession = this.#sessions.get(toolCallId);
+		const argsJson = JSON.stringify(params);
+		if (editSession && this.#streamedArgs.get(toolCallId) !== argsJson) {
+			editSession.close();
+			this.#sessions.delete(toolCallId);
+			editSession = undefined;
+		}
+		this.#streamedArgs.delete(toolCallId);
 		if (!editSession) {
 			// No deltas were streamed (non-streaming provider, inline recovery,
-			// Cursor batch frames): the parsed args are the whole payload.
+			// Cursor batch frames), or a pre-execution hook revised the arguments:
+			// the parsed args are the whole effective payload.
 			editSession = new EditSession(getEditStore(this.session), this.#policy(false));
-			editSession.setArgsJson(JSON.stringify(params));
+			editSession.setArgsJson(argsJson);
 			editSession.finish();
 		}
 		const batch = getLspBatchRequest(context?.toolCall);
@@ -492,6 +518,7 @@ export class EditTool implements AgentTool<TInput> {
 		} finally {
 			editSession.close();
 			if (this.#sessions.get(toolCallId) === editSession) this.#sessions.delete(toolCallId);
+			this.#streamedArgs.delete(toolCallId);
 		}
 
 		if (outcome.isError) {
@@ -543,12 +570,24 @@ export class EditTool implements AgentTool<TInput> {
 		return result;
 	}
 
+	/**
+	 * TTSR asks `matcherPaths` and `matcherEntries` (and approval asks again)
+	 * for the same streamed args object on every delta, and the native inspect
+	 * re-parses the whole payload each time; the result is tagged onto the args
+	 * so repeat lookups for one object pay once.
+	 */
 	#inspect(args: unknown): EditInspection {
+		const tagged = typeof args === "object" && args !== null ? (args as InspectedArgs) : undefined;
+		const cached = tagged?.[kInspection];
+		if (cached?.mode === this.mode) return cached.inspection;
+		let inspection: EditInspection;
 		try {
-			return editInspect(this.mode, JSON.stringify(args ?? {}));
+			inspection = editInspect(this.mode, JSON.stringify(args ?? {}));
 		} catch {
-			return { paths: [], entries: [], fileOps: [] };
+			inspection = { paths: [], entries: [], fileOps: [] };
 		}
+		if (tagged) tagged[kInspection] = { mode: this.mode, inspection };
+		return inspection;
 	}
 
 	#policy(rawInput: boolean): EditPolicy {

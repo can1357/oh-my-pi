@@ -36,6 +36,26 @@ describe("$which", () => {
 		expect($which(command)).toBe(secondExecutable);
 	});
 
+	it("returns null when requireAbsolutePaths is true and PATH contains only relative entries", () => {
+		process.env.PATH = [".", "./bin", ""].join(path.delimiter);
+		expect($which("some-command", { requireAbsolutePaths: true })).toBeNull();
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"resolves absolute PATH entries while ignoring relative ones when requireAbsolutePaths is true",
+		() => {
+			const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-which-abs-"));
+			tempDirs.push(testDir);
+
+			const command = `omp-test-cmd-${process.pid}`;
+			const executable = path.join(testDir, command);
+			fs.writeFileSync(executable, "#!/bin/sh\n");
+			fs.chmodSync(executable, 0o755);
+
+			process.env.PATH = [".", "./bin", "", testDir].join(path.delimiter);
+			expect($which(command, { requireAbsolutePaths: true })).toBe(executable);
+		},
+	);
 	// Tests stub `Bun.which` per test to keep PATH lookups hermetic. If `$which`
 	// captured the original function at import, such a stub would be bypassed and
 	// host binaries would leak into the result.
@@ -46,5 +66,19 @@ describe("$which", () => {
 
 		expect($which(command, { cache: WhichCachePolicy.Bypass })).toBe(stubbedPath);
 		expect(whichSpy).toHaveBeenCalledWith(command, expect.objectContaining({ PATH: process.env.PATH }));
+	});
+
+	it("keeps cache entries distinct when cwd/PATH share a concatenation", () => {
+		const first = `/tmp/which-first-${process.pid}`;
+		const second = `/tmp/which-second-${process.pid}`;
+		const whichSpy = vi
+			.spyOn(Bun, "which")
+			.mockImplementation((_command: string, options?: Bun.WhichOptions) =>
+				options?.cwd === "ab" && options?.PATH === "c" ? first : second,
+			);
+
+		expect($which("cmd", { cwd: "ab", PATH: "c" })).toBe(first);
+		expect($which("cmd", { cwd: "a", PATH: "bc" })).toBe(second);
+		expect(whichSpy).toHaveBeenCalledTimes(2);
 	});
 });

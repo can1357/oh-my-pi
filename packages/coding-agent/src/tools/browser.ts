@@ -1,27 +1,25 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
-import browserDescription from "../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import { enforceInlineByteCap } from "../session/streaming-output";
-// @ts-expect-error Bun imports this declaration source as text instead of a TypeScript module.
-import browserDeclarations from "./browser/declarations.d.ts" with { type: "text" };
-// @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
-import browserJavascript from "./browser/prelude.js" with { type: "text" };
-import browserPython from "./browser/prelude.py" with { type: "text" };
+import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
+import { resolveSpawnArgs } from "./browser/attach";
 import {
 	acquireBrowser,
+	browserKey,
 	type BrowserHandle,
 	type BrowserKind,
 	type BrowserKindTag,
 	holdBrowser,
 	releaseBrowser,
 } from "./browser/registry";
+import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveRelayKind } from "./browser/relay/kind";
+import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
-import type { OutputMeta } from "./output-meta";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import {
 	type AcquireTabResult,
 	acquireTab,
@@ -35,12 +33,24 @@ import {
 } from "./browser/tab-supervisor";
 import { renderTabCall } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
-import { renderFunctionRun } from "./run-code";
-import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
+import { renderCallChain, renderFunctionRun } from "./run-code";
+import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
-export { type AriaSnapshotOptions, buildAriaSnapshotScript, parseAriaRefSelector } from "./browser/aria/aria-snapshot";
+export type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
+
+/** First-use boundary for the generated Playwright ARIA evaluator bundle. */
+export function buildAriaSnapshotScript(selector: string | undefined, options: AriaSnapshotOptions = {}): string {
+	return require("./browser/aria/aria-snapshot").buildAriaSnapshotScript(selector, options);
+}
+
+/** First-use boundary for ARIA-ref parsing; keeps evaluator construction out of tool registration. */
+export function parseAriaRefSelector(selector: string): string | null {
+	return require("./browser/aria/aria-snapshot").parseAriaRefSelector(selector);
+}
+
 export { cmuxSnapshotToObservation, mapWaitUntil, resolveCmuxKind, serializeEval } from "./browser/cmux/rpc";
 export { CmuxSocketClient } from "./browser/cmux/socket-client";
 export { extractReadableFromHtml, type ReadableFormat, type ReadableResult } from "./browser/readable";
@@ -107,7 +117,7 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	}
 	if (app?.path) {
 		const exe = resolveToCwd(app.path, session.cwd);
-		return { kind: "spawned", path: exe };
+		return { kind: "spawned", path: exe, args: resolveSpawnArgs(exe, app.args, session.cwd) };
 	}
 	const relayUrl = session.settings.get("browser.relayUrl");
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
@@ -143,17 +153,32 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 
 /** Create the enabled-only browser host prelude for one tool session. */
 export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinition {
-	return {
-		name: "browser",
-		documentation: browserDescription,
-		javascript: browserJavascript,
-		python: browserPython,
-		exports: ["browser"],
-		codeModeDeclarations: browserDeclarations,
-		approval: "exec",
-		enabled: () => session.settings.get("browser.enabled"),
-		invoke: (parameters, context) => invokeBrowser(session, parameters, context),
-	};
+	// Eval-first-use boundary: source/declaration assets stay unloaded until a
+	// JavaScript or Python kernel actually asks for its enabled preludes.
+	const { createBrowserPreludeDefinition } = require("./browser/prelude-definition");
+	return createBrowserPreludeDefinition(session, {
+		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
+		status: describeBrowserCall,
+	});
+}
+
+/** Status-tree line for a completed browser call: `open main https://…`, `main.id(5).click()`, `close all`. */
+function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknown>): string | undefined {
+	const parsed = browserSchema(parameters);
+	if (parsed instanceof type.errors) return undefined;
+	const name = parsed.name ?? DEFAULT_TAB_NAME;
+	switch (parsed.action) {
+		case "open": {
+			const url = isRecord(result.details) ? result.details.url : undefined;
+			return typeof url === "string" && url.length > 0 ? `open ${name} ${url}` : `open ${name}`;
+		}
+		case "close":
+			return parsed.all ? "close all" : `close ${name}`;
+		case "run":
+			return `${name}.run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
+		case "call":
+			return `${name}.${renderCallChain(parsed.chain ?? [])}`;
+	}
 }
 
 /** Drop headless tabs so a browser mode change applies to the next open. */
@@ -230,11 +255,19 @@ async function openBrowser(
 
 	// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
 	const existing = getTab(name);
-	if (existing && !sameBrowserKind(existing.browser.kind, kind)) {
+	if (existing && browserKey(existing.browser.kind) !== browserKey(kind)) {
 		throw new ToolError(
 			`Tab ${JSON.stringify(name)} is bound to a different browser (${describeKind(existing.browser.kind)}). Close it first.`,
 		);
 	}
+
+	// First browser use may have to download Chrome for Testing (~180 MB).
+	// That is a one-time install, not part of the open, so it runs before the
+	// deadline below starts: charged against the 30s default it timed out on
+	// connections where installation alone exceeds that budget.
+	// The download promise is module-cached, so a caller abort here leaves it
+	// finishing in the background and the next open picks up the result.
+	if (kind.kind === "headless") await untilAborted(signal, () => ensureChromiumExecutable());
 
 	// The requested timeout must cover the *entire* open — browser
 	// acquisition (CDP discovery/connect), queued tab acquisition, worker
@@ -258,7 +291,6 @@ async function openBrowser(
 							deviceScaleFactor: params.viewport.scale,
 						}
 					: undefined,
-				appArgs: params.app?.args,
 				signal: openSignal,
 			}),
 		);
@@ -448,14 +480,4 @@ function describeKind(kind: BrowserKind): string {
 		case "cmux":
 			return `cmux:${kind.surface ?? "split"}`;
 	}
-}
-
-function sameBrowserKind(a: BrowserKind, b: BrowserKind): boolean {
-	if (a.kind !== b.kind) return false;
-	if (a.kind === "headless" && b.kind === "headless") return a.headless === b.headless;
-	if (a.kind === "spawned" && b.kind === "spawned") return a.path === b.path;
-	if (a.kind === "connected" && b.kind === "connected") return a.cdpUrl === b.cdpUrl;
-	if (a.kind === "relay" && b.kind === "relay") return a.cdpUrl === b.cdpUrl;
-	if (a.kind === "cmux" && b.kind === "cmux") return a.socketPath === b.socketPath;
-	return false;
 }

@@ -276,7 +276,7 @@ describe("InputController orphaned submit", () => {
 			const sessionManager = SessionManager.inMemory(tempDir.path());
 			const settings = Settings.isolated({
 				"compaction.enabled": false,
-				"providers.tinyModel": "online",
+				modelRoles: { tiny: `${model.provider}/${model.id}` },
 			});
 			const localHandler = vi.fn(async () => {});
 			const runtime = new ExtensionRuntime();

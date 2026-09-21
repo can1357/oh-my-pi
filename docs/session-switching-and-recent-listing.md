@@ -11,7 +11,7 @@ It focuses on current implementation behavior, including fallback paths and cave
 - [`../src/session/session-paths.ts`](../packages/coding-agent/src/session/session-paths.ts)
 - [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
 - [`../src/cli/session-picker.ts`](../packages/coding-agent/src/cli/session-picker.ts)
-- [`../src/modes/components/session-selector.ts`](../packages/coding-agent/src/modes/components/session-selector.ts)
+- [`packages/tui/src/overlays/session-selector.ts`](../packages/tui/src/overlays/session-selector.ts)
 - [`../src/modes/controllers/selector-controller.ts`](../packages/coding-agent/src/modes/controllers/selector-controller.ts)
 - [`../src/main.ts`](../packages/coding-agent/src/main.ts)
 - [`../src/sdk.ts`](../packages/coding-agent/src/sdk.ts)

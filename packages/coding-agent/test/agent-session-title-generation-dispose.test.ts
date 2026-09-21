@@ -59,9 +59,8 @@ describe("AgentSession title generation disposal", () => {
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"providers.tinyModel": "online",
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});
-		settings.overrideModelRoles({ smol: `${model.provider}/${model.id}` });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -122,9 +121,8 @@ describe("AgentSession title generation disposal", () => {
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"providers.tinyModel": "online",
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});
-		settings.overrideModelRoles({ smol: `${model.provider}/${model.id}` });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -160,9 +158,8 @@ describe("AgentSession title generation disposal", () => {
 
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"providers.tinyModel": "online",
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
 		});
-		settings.overrideModelRoles({ smol: `${model.provider}/${model.id}` });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },

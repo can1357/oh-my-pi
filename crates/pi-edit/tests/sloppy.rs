@@ -2,11 +2,12 @@ mod common;
 
 use common::{DiskWriter, Workspace, run_fixture};
 use pi_edit::{
-	EditMode, EditStore, ModeEngine,
+	EditError, EditMode, EditStore, ModeEngine,
 	files::FileCache,
 	modes::sloppy::{
 		SloppyEngine,
 		apply::{ApplyContext, apply_sloppy, normalize_text},
+		parse::extract_inline_sloppy_regions,
 	},
 	path_policy::canonical_key,
 	stream_json::ArgSnapshot,
@@ -16,6 +17,234 @@ use serde_json::json;
 #[tokio::test]
 async fn apply_fixtures() {
 	run_fixture("sloppy/apply.json", EditMode::Sloppy).await;
+}
+
+fn after_payload(anchor: &str, insertion: &str) -> String {
+	format!("*** SM:EDIT a.txt\n*** SM:FIND\n{anchor}\n*** SM:AFTER\n{insertion}")
+}
+
+#[tokio::test]
+async fn after_preserves_source_bytes_across_lenient_and_gap_matches() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	let before = "function run() {\n\tfirst(😀);  \n\tsecond();\t\n}\nnext();\n";
+	workspace.write("a.txt", before);
+	let input = after_payload("function run() {\n…\n    second();", "\tthird();\n");
+	workspace
+		.apply_json(&json!({ "input": input }), &DiskWriter::default())
+		.await
+		.expect("insert after the last matched line");
+	assert_eq!(
+		workspace.read("a.txt").unwrap(),
+		"function run() {\n\tfirst(😀);  \n\tsecond();\t\n\tthird();\n}\nnext();\n"
+	);
+}
+
+#[tokio::test]
+async fn after_preserves_line_endings_and_eof_conventions() {
+	for (before, expected) in [
+		("anchor\nnext\n", "anchor\nadded\nnext\n"),
+		("anchor\r\nnext\r\n", "anchor\r\nadded\r\nnext\r\n"),
+		("anchor\n", "anchor\nadded\n"),
+		("anchor", "anchor\nadded"),
+	] {
+		let workspace = Workspace::new(EditMode::Sloppy);
+		workspace.write("a.txt", before);
+		workspace
+			.apply_json(
+				&json!({ "input": after_payload("anchor", "added\n") }),
+				&DiskWriter::default(),
+			)
+			.await
+			.expect("line insertion");
+		assert_eq!(workspace.read("a.txt").unwrap(), expected);
+	}
+}
+
+#[tokio::test]
+async fn after_inserts_literal_blank_lines_and_control_like_text() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "anchor\n\nnext\n");
+	let insertion = "\n\t+literal <a> & \"b\"\n…\n»1\n＋kept\n*** End Patch\n\n";
+	workspace
+		.apply_json(&json!({ "input": after_payload("anchor", insertion) }), &DiskWriter::default())
+		.await
+		.expect("literal insertion");
+	assert_eq!(workspace.read("a.txt").unwrap(), format!("anchor\n{insertion}\nnext\n"));
+
+	workspace.write("a.txt", "anchor\nnext\n");
+	workspace
+		.apply_json(&json!({ "input": after_payload("anchor", "\n") }), &DiskWriter::default())
+		.await
+		.expect("one blank line is an insertion");
+	assert_eq!(workspace.read("a.txt").unwrap(), "anchor\n\nnext\n");
+}
+
+#[tokio::test]
+async fn after_requires_all_even_when_ambiguous_insertions_have_identical_outcomes() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "item\nitem\n");
+	let writer = DiskWriter::default();
+	let input = after_payload("item", "item\n");
+	let error = workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect_err("an insertion needs a unique anchor");
+	assert!(error.to_string().contains("ambiguous"));
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.txt").unwrap(), "item\nitem\n");
+
+	let input = copy_ready_payload(&error.to_string(), "*** SM:EDIT a.txt all");
+	workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect("explicitly insert after every match");
+	assert_eq!(workspace.read("a.txt").unwrap(), "item\nitem\nitem\nitem\n");
+}
+
+/// The payload is the final labeled region of this diagnostic and is safe to
+/// resend verbatim through the end of the message.
+fn copy_ready_payload(message: &str, opener: &str) -> String {
+	let start = message.find(opener).expect("pathful copy-ready opener");
+	message[start..].to_owned()
+}
+
+#[tokio::test]
+async fn no_match_correction_resends_verbatim() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "const RUNNER = compute(1);\nkeep();\n");
+	let writer = DiskWriter::default();
+	let input = "*** SM:EDIT a.txt\n*** SM:FIND\nconst RUNNER = computeValue(1);\n*** \
+	             SM:PUT\nconst RUNNER = compute(2);\n";
+	let error = workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect_err("anchor drifted past the fuzzy edit limit");
+	let message = error.to_string();
+	let input = copy_ready_payload(&message, "*** SM:EDIT a.txt");
+	workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect("the correction applies as handed back");
+	assert_eq!(workspace.read("a.txt").unwrap(), "const RUNNER = compute(2);\nkeep();\n");
+}
+
+#[tokio::test]
+async fn after_preview_matches_application_and_supports_inline_payloads() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "anchor\nnext\n");
+	let input = after_payload("anchor", "first\nsecond\n");
+	let regions =
+		extract_inline_sloppy_regions(&format!("Editing now:\n{input}*** End Patch\nFinished."));
+	assert_eq!(regions.len(), 1);
+	let engine = SloppyEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	let mut files = FileCache::new(workspace.config.policy.clone());
+	let partial = input.split("second\n").next().unwrap();
+	let args = ArgSnapshot { input: Some(partial.to_owned()), ..ArgSnapshot::default() };
+	let preview = engine.preview(&args, true, &mut files, &workspace.store);
+	assert_eq!(preview.len(), 1);
+	assert!(preview[0].diff.as_deref().unwrap().contains("+2|first"));
+	assert_eq!(workspace.read("a.txt").unwrap(), "anchor\nnext\n");
+
+	let args = ArgSnapshot {
+		input: Some(regions[0].payload.clone()),
+		complete: true,
+		..ArgSnapshot::default()
+	};
+	let preview = engine.preview(&args, false, &mut files, &workspace.store);
+	let staged = engine
+		.stage(&args, &mut files, &workspace.store)
+		.expect("stage insertion");
+	assert_eq!(staged[0].after, "anchor\nfirst\nsecond\nnext\n");
+	assert_eq!(preview[0].diff.as_deref(), Some(staged[0].diff.as_str()));
+	workspace
+		.apply_json(&json!({ "input": args.input }), &DiskWriter::default())
+		.await
+		.expect("apply insertion");
+	assert_eq!(workspace.read("a.txt").unwrap(), staged[0].after);
+}
+
+#[tokio::test]
+async fn after_and_put_use_original_anchors_and_fail_atomically_across_files() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "anchor\nnext\n");
+	workspace.write("b.txt", "original\n");
+	let input = format!(
+		"{}*** SM:EDIT a.txt\n*** SM:FIND\nnext\n*** SM:PUT\nchanged\n",
+		after_payload("anchor", "added\n"),
+	);
+	let invalid = format!("{input}*** SM:EDIT b.txt\n*** SM:FIND\nmissing\n*** SM:AFTER\nadded\n");
+	let writer = DiskWriter::default();
+	workspace
+		.apply_json(&json!({ "input": invalid }), &writer)
+		.await
+		.expect_err("a failing sibling prevents every write");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.txt").unwrap(), "anchor\nnext\n");
+	assert_eq!(workspace.read("b.txt").unwrap(), "original\n");
+
+	workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect("mixed actions apply to the original source");
+	assert_eq!(workspace.read("a.txt").unwrap(), "anchor\nadded\nchanged\n");
+}
+
+#[tokio::test]
+async fn after_rejects_empty_actions_and_missing_anchors_without_writing() {
+	for input in [
+		after_payload("anchor", ""),
+		after_payload("", "added\n"),
+		"*** SM:EDIT a.txt\n*** SM:AFTER\nadded\n".to_owned(),
+	] {
+		let workspace = Workspace::new(EditMode::Sloppy);
+		workspace.write("a.txt", "anchor\n");
+		let writer = DiskWriter::default();
+		let error = workspace
+			.apply_json(&json!({ "input": input }), &writer)
+			.await
+			.expect_err("incomplete insertion must not become replacement or deletion");
+		assert!(error.to_string().contains("*** SM:AFTER"));
+		assert!(writer.requests.lock().is_empty());
+		assert_eq!(workspace.read("a.txt").unwrap(), "anchor\n");
+	}
+}
+
+#[tokio::test]
+async fn no_op_recovery_respects_utf8_boundaries_in_source_and_replacement() {
+	for (before, anchor) in [
+		("abcdefgh\n══════\n", "abcdefgh"),
+		("══════\nabcdefgh\n", "abcdefgh"),
+		("0123456789\nabcdefgh😀\n", "abcdefgh😀"),
+		("😀abcdefgh\n0123456789\n", "😀abcdefgh"),
+	] {
+		let workspace = Workspace::new(EditMode::Sloppy);
+		workspace.write("a.txt", before);
+		let writer = DiskWriter::default();
+		let input = format!("*** SM:EDIT a.txt\n*** SM:FIND\n{anchor}\n*** SM:PUT\n{anchor}\n");
+		let error = workspace
+			.apply_raw(&input, &writer)
+			.await
+			.expect_err("an unchanged edit reports a no-op instead of panicking");
+		assert!(matches!(error, EditError::Match(_)));
+		assert!(writer.requests.lock().is_empty());
+		assert_eq!(workspace.read("a.txt").unwrap(), before);
+	}
+}
+
+#[tokio::test]
+async fn overlapping_desired_matches_are_rejected_without_collapsing_source() {
+	let workspace = Workspace::new(EditMode::Sloppy);
+	let before = "abcabcabc\n";
+	workspace.write("a.txt", before);
+	let writer = DiskWriter::default();
+	let error = workspace
+		.apply_raw("*** SM:EDIT a.txt\nabcabc", &writer)
+		.await
+		.expect_err("overlapping matches are not adjacent duplicate blocks");
+	assert!(matches!(error, EditError::Match(_)));
+	assert!(error.to_string().contains("ambiguous"));
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("a.txt").unwrap(), before);
 }
 
 #[test]
@@ -70,12 +299,9 @@ async fn returns_a_diff_for_an_applicable_section_and_an_error_for_a_miss() {
 	let engine = SloppyEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
 	let complete = ArgSnapshot {
 		input: Some(
-			concat!(
-				"<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nconst value = oldValue;\n",
-				"</SM:FIND>\n<SM:PUT>\nconst value = newValue;\n",
-				"</SM:PUT>\n</SM:EDIT>",
-			)
-			.to_owned(),
+			"*** SM:EDIT a.ts\n*** SM:FIND\nconst value = oldValue;\n*** SM:PUT\nconst value = \
+			 newValue;\n"
+				.to_owned(),
 		),
 		complete: true,
 		..ArgSnapshot::default()
@@ -90,14 +316,7 @@ async fn returns_a_diff_for_an_applicable_section_and_an_error_for_a_miss() {
 	);
 
 	let miss = ArgSnapshot {
-		input: Some(
-			concat!(
-				"<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nmissing();\n",
-				"</SM:FIND>\n<SM:PUT>\nnew();\n</SM:PUT>\n",
-				"</SM:EDIT>",
-			)
-			.to_owned(),
-		),
+		input: Some("*** SM:EDIT a.ts\n*** SM:FIND\nmissing();\n*** SM:PUT\nnew();\n".to_owned()),
 		complete: true,
 		..ArgSnapshot::default()
 	};
@@ -111,7 +330,7 @@ async fn returns_a_diff_for_an_applicable_section_and_an_error_for_a_miss() {
 	);
 
 	let partial = ArgSnapshot {
-		input: Some("<SM:EDIT path=\"a.ts\">\n<SM:FIND>\nmissing".to_owned()),
+		input: Some("*** SM:EDIT a.ts\n*** SM:FIND\nmissing".to_owned()),
 		..ArgSnapshot::default()
 	};
 	let preview = engine.preview(&partial, true, &mut files, &workspace.store);
@@ -124,10 +343,8 @@ fn inspect_exposes_matcher_paths_and_entries() {
 	let args = ArgSnapshot {
 		input: Some(
 			concat!(
-				"<SM:EDIT path=\"a.ts\">\n<SM:FIND>\na\n</SM:FIND>\n",
-				"<SM:PUT>\nb\n</SM:PUT>\n</SM:EDIT>\n<SM:EDIT path=\"b.ts\">\n",
-				"<SM:FIND>\nx\n</SM:FIND>\n<SM:PUT>\ny\n</SM:PUT>\n",
-				"</SM:EDIT>",
+				"*** SM:EDIT a.ts\n*** SM:FIND\na\n*** SM:PUT\nb\n",
+				"*** SM:EDIT b.ts\n*** SM:FIND\nx\n*** SM:PUT\ny\n",
 			)
 			.to_owned(),
 		),
@@ -141,14 +358,21 @@ fn inspect_exposes_matcher_paths_and_entries() {
 }
 
 #[tokio::test]
-async fn missing_file_target_uses_the_taught_opener() {
+async fn miss_with_cjk_content_returns_match_error_without_panicking() {
+	// `closest_fragment` slides a byte-width window over the normalized line and
+	// appends a `len - width` tail fallback. With normalized `ab戸cd` (7 bytes)
+	// and a 4-byte needle the tail is byte 3, inside `戸` (bytes 2..5): slicing
+	// there panicked instead of reporting the miss.
 	let workspace = Workspace::new(EditMode::Sloppy);
+	workspace.write("a.txt", "ab戸cd\n");
 	let error = workspace
-		.apply_json(&json!({ "input": "plain text" }), &DiskWriter::default())
+		.apply_json(
+			&json!({
+				"input": "*** SM:EDIT a.txt\n*** SM:FIND\nwxyz\n*** SM:PUT\nnew();\n",
+			}),
+			&DiskWriter::default(),
+		)
 		.await
-		.expect_err("missing target");
-	assert_eq!(
-		error.to_string(),
-		"Missing file target: start the payload with <SM:EDIT path=\"relative/path.ts\">."
-	);
+		.expect_err("CJK miss must surface a match error, not panic");
+	assert!(error.to_string().contains("did not match"));
 }

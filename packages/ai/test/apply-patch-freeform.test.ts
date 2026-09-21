@@ -212,7 +212,20 @@ describe("convertTools: freeform emission", () => {
 		// distinguish it from an omitted flag when generating optional-arg values.
 		expect(out.strict).toBe(false);
 		expect(items.oneOf).toBeUndefined();
-		expect(items.anyOf).toEqual(unionBranches);
+		// Normalization adds the `enum`-implied `type`; the input fixture is no longer
+		// mutated in place, so the wire shape is asserted explicitly.
+		expect(items.anyOf).toEqual([
+			{
+				type: "object",
+				properties: { type: { enum: ["insert"], type: "string" }, text: { type: "string" } },
+				required: ["type", "text"],
+			},
+			{
+				type: "object",
+				properties: { type: { enum: ["delete"], type: "string" }, start: { type: "integer" } },
+				required: ["type", "start"],
+			},
+		]);
 	});
 
 	test("rewrites oneOf to anyOf before strict schema enforcement", () => {

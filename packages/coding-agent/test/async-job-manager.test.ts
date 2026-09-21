@@ -411,6 +411,40 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.resultText).toBe("late result");
 	});
 
+	test.each(["single", "bulk"] as const)("keeps %s cancelled work reapable past retention", async kind => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ retentionMs: 25 });
+		const release = Promise.withResolvers<void>();
+		const jobId = manager.register(
+			"bash",
+			"pending cleanup",
+			async () => {
+				await release.promise;
+				return "cleanup finished";
+			},
+			{ ownerId: "owner" },
+		);
+		try {
+			if (kind === "single") manager.cancel(jobId);
+			else manager.cancelAll({ ownerId: "owner" });
+			vi.advanceTimersByTime(50);
+			const reap = await manager.cancelAndReapOwnerJobs("owner", Date.now());
+			expect(reap.settled).toBe(false);
+			expect(reap.pendingJobIds).toEqual([jobId]);
+			release.resolve();
+			await reap.completion;
+			expect(manager.getJob(jobId)?.resultText).toBe("cleanup finished");
+			expect(await manager.waitForOwnerJobs("owner")).toBe(true);
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+		} finally {
+			release.resolve();
+			await manager.waitForAll();
+			await manager.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	test("enforces maxRunningJobs cap", () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,
@@ -487,6 +521,97 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.status).toBe("completed");
 		await waitForJobEviction(manager, jobId);
 		expect(manager.getJob(jobId)).toBeUndefined();
+	});
+
+	test("evicts a consumed settled row on the short grace instead of full retention", async () => {
+		// A settled job whose result reached its consumer (sink delivery or a
+		// foreground snapshot) must not linger in `hub jobs` reads for the full
+		// 5-minute retention window — that lingering is the "background jobs
+		// hang around after they complete" complaint. Delivery success marks
+		// the result consumed, which re-arms eviction on the short grace.
+		const manager = new AsyncJobManager({
+			consumedResultEvictionMs: 25,
+			onJobComplete: async () => {},
+		});
+
+		const jobId = manager.register("task", "delivered", async () => "done");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		expect(manager.isJobResultConsumed(jobId)).toBe(true);
+		await waitForJobEviction(manager, jobId);
+		expect(manager.getJob(jobId)).toBeUndefined();
+	});
+
+	test("keeps an unconsumed dead-lettered row inspectable until a snapshot consumes it", async () => {
+		// No default sink and no owner sink: the delivery dead-letters, so the
+		// result is never consumed. The row must outlive the consumed grace
+		// (its result text is the only inspectable copy) and only evict once a
+		// foreground snapshot consumes it. Fake timers drive the eviction
+		// clocks deterministically — the survival half asserts an absence, which
+		// polling cannot express.
+		vi.useFakeTimers();
+		try {
+			const manager = new AsyncJobManager({
+				retentionMs: 60_000,
+				consumedResultEvictionMs: 25,
+			});
+
+			const jobId = manager.register("bash", "orphan", async () => "orphan result");
+			await manager.waitForAll();
+			await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+			vi.advanceTimersByTime(1_000);
+			expect(manager.getJob(jobId)?.resultText).toBe("orphan result");
+
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("keeps the consumed row while its async-result delivery is still parked", async () => {
+		// Regression (autoreview): a foreground snapshot consuming a result
+		// whose delivery is parked on the owner's yield queue must NOT arm the
+		// short consumed grace. Evicting would clear the suppression marker
+		// (#evictJob) before the queue's isStale check drains the parked entry,
+		// letting the already-consumed result inject a duplicate async-result
+		// follow-up once the tool batch settles. Fake timers prove the absence
+		// of eviction past the consumed grace deterministically.
+		vi.useFakeTimers();
+		try {
+			const gate = Promise.withResolvers<void>();
+			const manager = new AsyncJobManager({ consumedResultEvictionMs: 25 });
+			manager.registerDeliverySink("Main", async () => {
+				await gate.promise; // parked async-result entry (receipt pending)
+			});
+
+			const jobId = manager.register("task", "parked", async () => "done", { ownerId: "Main" });
+			await manager.waitForAll();
+			await waitForCondition(() => manager.getDeliveryState({ ownerId: "Main" }).delivering);
+
+			// Foreground `hub jobs` read consumes the result mid-park.
+			expect(manager.consumeJobResults([jobId])).toBe(1);
+			vi.advanceTimersByTime(1_000);
+
+			// Row and suppression marker both survive the consumed grace: the
+			// parked entry's isStale check still resolves through the marker.
+			expect(manager.getJob(jobId)?.status).toBe("completed");
+			expect(manager.isDeliverySuppressed(jobId)).toBe(true);
+
+			gate.resolve();
+			await scheduler.yield();
+			expect(await manager.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+			// Once the parked delivery settles, its suppression marker has served
+			// its purpose and the already-consumed row starts the short grace.
+			vi.advanceTimersByTime(25);
+			expect(manager.getJob(jobId)).toBeUndefined();
+			await manager.dispose();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	test("cancelAll does not clear retention timers for already completed jobs", async () => {
@@ -825,17 +950,10 @@ describe("AsyncJobManager", () => {
 	});
 });
 
-describe("AsyncJobManager smart poll-wait escalation", () => {
+describe("AsyncJobManager adaptive wait ladder", () => {
 	const newManager = () => new AsyncJobManager({ onJobComplete: async () => {} });
 
-	test("first poll waits the ladder floor", () => {
-		const m = newManager();
-		expect(m.nextPollWaitMs("Main", 1_000)).toBe(5_000);
-		// A fresh owner also starts at the floor.
-		expect(m.nextPollWaitMs("Other", 1_000)).toBe(5_000);
-	});
-
-	test("back-to-back polls climb the ladder to the top rung", () => {
+	test("back-to-back waits climb the ladder and saturate at the top rung", () => {
 		const m = newManager();
 		const owner = "Main";
 		const t = 1_000;
@@ -845,7 +963,6 @@ describe("AsyncJobManager smart poll-wait escalation", () => {
 			waits.push(m.nextPollWaitMs(owner, t));
 			m.recordPollWaitEnd(owner, t);
 		}
-		// Climbs the rungs, then saturates at the top.
 		expect(waits).toEqual([5_000, 10_000, 30_000, 60_000, 300_000, 300_000]);
 	});
 
@@ -856,11 +973,11 @@ describe("AsyncJobManager smart poll-wait escalation", () => {
 		expect(m.nextPollWaitMs(owner, 0)).toBe(5_000);
 		m.recordPollWaitEnd(owner, 0);
 
-		// Still within the reset window (just under a minute) → keeps climbing.
+		// Just under the reset window → keeps climbing.
 		expect(m.nextPollWaitMs(owner, 59_999)).toBe(10_000);
 		m.recordPollWaitEnd(owner, 60_000);
 
-		// A full minute without polling resets the climb to the floor.
+		// A full minute without waiting resets the climb to the floor.
 		expect(m.nextPollWaitMs(owner, 120_000)).toBe(5_000);
 	});
 

@@ -6,8 +6,7 @@
  * - Trigger subprocess termination on completion
  * - Provide custom rendering for realtime/final display
  */
-import type { Component } from "@oh-my-pi/pi-tui";
-import type { Theme } from "../modes/theme/theme";
+import { registerSubprocessToolRenderer, type SubprocessToolRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
 
 /** Event from subprocess tool execution (parsed from JSONL) */
 export interface SubprocessToolEvent {
@@ -22,7 +21,7 @@ export interface SubprocessToolEvent {
 }
 
 /** Handler for subprocess tool events */
-export interface SubprocessToolHandler<TData = unknown> {
+export interface SubprocessToolHandler<TData = unknown> extends SubprocessToolRenderer<TData> {
 	/**
 	 * Extract structured data from tool result.
 	 * Extracted data is accumulated in progress.extractedToolData[toolName][].
@@ -34,18 +33,6 @@ export interface SubprocessToolHandler<TData = unknown> {
 	 * Return true to send SIGTERM after the tool completes.
 	 */
 	shouldTerminate?: (event: SubprocessToolEvent) => boolean;
-
-	/**
-	 * Render a single data item inline during streaming progress.
-	 * Called for each tool execution end event.
-	 */
-	renderInline?: (data: TData, theme: Theme) => Component;
-
-	/**
-	 * Render accumulated data in the final result view.
-	 * Called once with all accumulated data for this tool.
-	 */
-	renderFinal?: (allData: TData[], theme: Theme, expanded: boolean) => Component;
 }
 
 /** Registry for subprocess tool handlers */
@@ -57,6 +44,10 @@ class SubprocessToolRegistryImpl {
 	 */
 	register<T>(toolName: string, handler: SubprocessToolHandler<T>): void {
 		this.#handlers.set(toolName, handler as SubprocessToolHandler);
+		registerSubprocessToolRenderer(toolName, {
+			renderInline: handler.renderInline,
+			renderFinal: handler.renderFinal,
+		});
 	}
 
 	/**

@@ -31,20 +31,32 @@ import {
 	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
+import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
+import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
+import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
+import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
+import { setMcpRenderMarkdownResults } from "@oh-my-pi/pi-tui/tools/mcp";
+import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
 import { loadCapability } from "../discovery";
-import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
-import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
-import { applyHyperlinkSetting } from "../tui/hyperlink";
+import MODEL_PRIO from "../priority.json" with { type: "json" };
+import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
+import {
+	setFeedModelBadgeEnabled,
+	setInlineImageMaxColumns,
+	setInlineImageMaxRows,
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import { replaceFileAtomically } from "../utils/atomic-file";
-import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
-import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
-import { stringifyYamlConfig } from "./config-file";
+import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
+import { normalizeEditMode } from "../utils/edit-mode";
+import { stringifyYamlConfig } from "@oh-my-pi/pi-utils/yaml-config";
+import { validateAgentServiceTierOverrides } from "./service-tier";
+import { STATUS_LINE_SEGMENT_IDS } from "@oh-my-pi/pi-tui/status-line/schema";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -58,6 +70,30 @@ import {
 // Re-export types that callers need
 export type * from "./settings-schema";
 export * from "./settings-schema";
+
+const STATUS_LINE_SEGMENT_PATHS = ["statusLine.leftSegments", "statusLine.rightSegments"] as const;
+const warnedUnknownStatusLineSegments = new Set<string>();
+
+function getUnknownStatusLineSegments(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	const unknown = new Set<string>();
+	for (const segment of value) {
+		if (!STATUS_LINE_SEGMENT_IDS.some(id => id === segment)) {
+			unknown.add(typeof segment === "string" ? JSON.stringify(segment) : String(segment));
+		}
+	}
+	return [...unknown];
+}
+
+function assertKnownStatusLineSegments(path: SettingPath, value: unknown): void {
+	if (path !== "statusLine.leftSegments" && path !== "statusLine.rightSegments") return;
+	const unknown = getUnknownStatusLineSegments(value);
+	if (unknown.length === 0) return;
+	const noun = unknown.length === 1 ? "segment" : "segments";
+	throw new Error(
+		`Unknown status line ${noun}: ${unknown.join(", ")}. Valid segments: ${STATUS_LINE_SEGMENT_IDS.join(", ")}`,
+	);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -177,6 +213,24 @@ function getByPath(obj: RawSettings, segments: readonly string[]): unknown {
 const SETTING_PATH_SEGMENTS: Record<SettingPath, readonly string[]> = Object.fromEntries(
 	(Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(settingPath => [settingPath, settingPath.split(".")]),
 ) as unknown as Record<SettingPath, readonly string[]>;
+
+/**
+ * Schema members for each typed group, computed once. `getGroup` is hot during
+ * startup and status rendering; it must not walk the full schema on every
+ * settings instance or effective-layer revision.
+ */
+const SETTING_GROUP_MEMBERS: Record<GroupPrefix, readonly [suffix: string, path: SettingPath][]> = (() => {
+	const members: Partial<Record<GroupPrefix, [suffix: string, path: SettingPath][]>> = {};
+	for (const rawPath in SETTINGS_SCHEMA) {
+		const path = rawPath as SettingPath;
+		const dot = path.indexOf(".");
+		if (dot === -1) continue;
+		const prefix = path.slice(0, dot) as GroupPrefix;
+		const group = members[prefix] ?? (members[prefix] = []);
+		group.push([path.slice(dot + 1), path]);
+	}
+	return members as Record<GroupPrefix, readonly [suffix: string, path: SettingPath][]>;
+})();
 
 /**
  * Set a nested value in an object by path segments.
@@ -498,8 +552,12 @@ export class Settings {
 	#overrides: RawSettings = {};
 	/** Merged view (global + project + overrides) */
 	#merged: RawSettings = {};
+	/** Monotonic revision of merged layers and cwd-scoped resolution. */
+	#revision = 0;
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
+	/** Typed group snapshots for the current merged layers and cwd scope. */
+	#groupCache = new Map<GroupPrefix, unknown>();
 	#effectiveChangeListeners = new Set<(path: SettingPath, value: unknown, previous: unknown) => void>();
 	#editVariantCache: readonly EditVariantEntry[] | undefined;
 
@@ -663,6 +721,7 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		assertKnownStatusLineSegments(path, value);
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
@@ -692,7 +751,9 @@ export class Settings {
 		const segments = path.split(".");
 		setByPath(this.#overrides, segments, value);
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		const next = this.get(path);
+		SETTING_HOOKS[path]?.(next, prev);
+		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
 
 	/**
@@ -712,7 +773,9 @@ export class Settings {
 		}
 		delete current[segments[segments.length - 1]];
 		this.#rebuildMerged();
-		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
+		const next = this.get(path);
+		SETTING_HOOKS[path]?.(next, prev);
+		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
 
 	/** Effective values of every setting that repartitions the Code Mode surface. */
@@ -943,6 +1006,15 @@ export class Settings {
 	}
 
 	/**
+	 * Monotonic revision for consumers caching derived effective settings.
+	 * Changes after every merged-layer or cwd-scope rebuild, including overlays
+	 * and path-scoped array re-resolution.
+	 */
+	get revision(): number {
+		return this.#revision;
+	}
+
+	/**
 	 * Raw global settings layer (`config.yml`/`config.yaml`), deep-cloned.
 	 *
 	 * Exposes arbitrary namespaced keys (e.g. an extension's own `piVim` block)
@@ -1003,16 +1075,22 @@ export class Settings {
 
 	/**
 	 * Get all settings in a group with full type safety.
+	 *
+	 * The returned snapshot is stable until any effective settings layer or cwd
+	 * scope is rebuilt. Defaults remain instance-local because each member still
+	 * resolves through {@link get}, which clones array/record defaults.
 	 */
 	getGroup<G extends GroupPrefix>(prefix: G): GroupTypeMap[G] {
+		const cached = this.#groupCache.get(prefix);
+		if (cached !== undefined) return cached as GroupTypeMap[G];
+
 		const result: Record<string, unknown> = {};
-		for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
-			if (key.startsWith(`${prefix}.`)) {
-				const suffix = key.slice(prefix.length + 1);
-				result[suffix] = this.get(key);
-			}
+		for (const [suffix, path] of SETTING_GROUP_MEMBERS[prefix] ?? []) {
+			result[suffix] = this.get(path);
 		}
-		return result as unknown as GroupTypeMap[G];
+		const snapshot = Object.freeze(result);
+		this.#groupCache.set(prefix, snapshot);
+		return snapshot as unknown as GroupTypeMap[G];
 	}
 
 	/**
@@ -1926,35 +2004,65 @@ export class Settings {
 
 		let settings: RawSettings = {};
 		let migrated = false;
+		let migratedSettingsJson = false;
 
-		// 1. Migrate from settings.json
 		const settingsJsonPath = path.join(this.#agentDir, "settings.json");
 		try {
 			const parsed: unknown = JSONC.parse(await Bun.file(settingsJsonPath).text());
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(parsed as RawSettings));
 				migrated = true;
-				try {
-					fs.renameSync(settingsJsonPath, `${settingsJsonPath}.bak`);
-				} catch {}
+				migratedSettingsJson = true;
+			} else {
+				logger.warn("Settings: ignoring non-object legacy settings.json", { path: settingsJsonPath });
 			}
-		} catch {}
+		} catch (error) {
+			if (!isEnoent(error)) {
+				logger.warn("Settings: failed to read legacy settings.json", {
+					path: settingsJsonPath,
+					error: String(error),
+				});
+			}
+		}
 
-		// 2. Migrate from agent.db
 		try {
 			const dbSettings = this.#storage?.getSettings();
 			if (dbSettings) {
 				settings = this.#deepMerge(settings, this.#migrateRawSettings(dbSettings as RawSettings));
 				migrated = true;
 			}
-		} catch {}
+		} catch (error) {
+			logger.warn("Settings: failed to read legacy agent.db settings", { error: String(error) });
+		}
 
-		// 3. Write merged settings
 		if (migrated && Object.keys(settings).length > 0) {
 			try {
 				await this.#writeYamlAtomically(this.#configPath, settings);
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
-			} catch {}
+			} catch (error) {
+				logger.warn("Settings: failed to write migrated config.yml", {
+					path: this.#configPath,
+					error: String(error),
+				});
+				return;
+			}
+
+			if (migratedSettingsJson) {
+				try {
+					await fs.promises.rename(settingsJsonPath, `${settingsJsonPath}.bak`);
+				} catch (error) {
+					logger.warn("Settings: failed to archive settings.json after migration", {
+						path: settingsJsonPath,
+						error: String(error),
+					});
+				}
+			}
+
+			try {
+				this.#storage?.clearMigratedSettings();
+			} catch (error) {
+				logger.warn("Settings: failed to clear migrated agent.db settings", { error: String(error) });
+			}
 		}
 	}
 
@@ -2006,14 +2114,6 @@ export class Settings {
 		}
 		delete raw.collapseChangelog;
 		delete raw["startup.changelogMode"];
-
-		// ask.timeout: ms -> seconds (if value > 1000, it's old ms format)
-		if (raw.ask && typeof (raw.ask as Record<string, unknown>).timeout === "number") {
-			const oldValue = (raw.ask as Record<string, unknown>).timeout as number;
-			if (oldValue > 1000) {
-				(raw.ask as Record<string, unknown>).timeout = Math.round(oldValue / 1000);
-			}
-		}
 
 		// Migrate old flat "theme" string to nested theme.dark/theme.light
 		if (typeof raw.theme === "string") {
@@ -2256,6 +2356,33 @@ export class Settings {
 		}
 		delete raw["providers.parallelFetch"];
 
+		// Retired local title models (replaced by the LFM2.5/Falcon refresh) map to
+		// their closest current equivalents. Without this a pinned retired key
+		// passes through as a stale string and title generation silently skips
+		// every turn instead of falling back (no online fallback by design).
+		const RETIRED_TINY_TITLE_MODELS: Record<string, string> = {
+			"lfm2-350m": "lfm2.5-350m",
+			"lfm2-700m": "lfm2.5-350m",
+			"qwen3-0.6b": "lfm2.5-350m",
+			"qwen2.5-0.5b": "lfm2.5-230m",
+			"gemma-270m": "falcon-h1-90m",
+		};
+		const migrateTinyModelValue = (value: unknown): string | undefined =>
+			typeof value === "string" ? RETIRED_TINY_TITLE_MODELS[value] : undefined;
+		// Quoted-dotted flat keys (`"providers.tinyModel"` in YAML/legacy JSON)
+		// promote into the nested setting; nested wins when both are present.
+		const flatTinyModel = migrateTinyModelValue(raw["providers.tinyModel"]);
+		if (flatTinyModel !== undefined) {
+			const providersRoot = isRecord(raw.providers) ? raw.providers : {};
+			if (typeof providersRoot.tinyModel !== "string") providersRoot.tinyModel = flatTinyModel;
+			raw.providers = providersRoot;
+			delete raw["providers.tinyModel"];
+		}
+		if (providersObj) {
+			const migrated = migrateTinyModelValue(providersObj.tinyModel);
+			if (migrated !== undefined) providersObj.tinyModel = migrated;
+		}
+
 		// codexResets.autoRedeem: boolean -> tri-state enum.
 		// Existing explicit false keeps the old "do not run" behavior; missing
 		// config now falls through to the new "unset" default, which asks before
@@ -2320,6 +2447,10 @@ export class Settings {
 				}
 				delete hindsightObj.agentName;
 			}
+			// mentalModelRefreshIntervalMs removed: the mental-model block is now
+			// frozen for the session lifetime rather than re-listed on a timer that
+			// rewrote the cached prompt prefix mid-session (#11961).
+			delete hindsightObj.mentalModelRefreshIntervalMs;
 		}
 
 		// power.preventIdleSleep / power.preventSystemSleep / power.declareUserActive
@@ -2362,9 +2493,10 @@ export class Settings {
 			delete raw["power.preventDisplaySleep"];
 		}
 
-		// Migration for renamed settings grep.* and glob.* from search.* and find.*:
-		// 1. Nested settings: find -> glob, search -> grep (per-property merge to avoid clobbering)
-		const ensureRawObject = (key: "glob" | "grep"): Record<string, unknown> => {
+		// Migration for renamed settings grep.* from search.*. (`find.*` is no
+		// longer migrated to `glob.*`: `find` is the semantic search tool now.)
+		// 1. Nested settings: search -> grep (per-property merge to avoid clobbering)
+		const ensureRawObject = (key: "grep"): Record<string, unknown> => {
 			const current = raw[key];
 			if (isRecord(current)) {
 				return current;
@@ -2373,20 +2505,6 @@ export class Settings {
 			raw[key] = created;
 			return created;
 		};
-
-		if ("find" in raw) {
-			const findObj = raw.find;
-			if (isRecord(findObj)) {
-				const globObj = ensureRawObject("glob");
-				const findKeys: Array<"enabled"> = ["enabled"];
-				for (const key of findKeys) {
-					if (key in findObj && !(key in globObj)) {
-						globObj[key] = findObj[key];
-					}
-				}
-			}
-			delete raw.find;
-		}
 
 		if ("search" in raw) {
 			const searchObj = raw.search;
@@ -2407,13 +2525,6 @@ export class Settings {
 		}
 
 		// 2. Flat settings keys: map them to the proper nested target so get/set resolves them correctly
-		if ("find.enabled" in raw) {
-			const globObj = ensureRawObject("glob");
-			if (!("enabled" in globObj)) {
-				globObj.enabled = raw["find.enabled"];
-			}
-			delete raw["find.enabled"];
-		}
 		if ("search.enabled" in raw) {
 			const grepObj = ensureRawObject("grep");
 			if (!("enabled" in grepObj)) {
@@ -2571,44 +2682,237 @@ export class Settings {
 		delete raw["mcp.discoveryMode"];
 		delete raw["mcp.discoveryDefaultServers"];
 
-		// providers.webSearch / providers.image (single preferred provider) →
-		// providers.webSearchOrder / providers.imageOrder (priority lists). A
-		// concrete legacy choice becomes the head of the new list with every
-		// remaining provider appended in its built-in order, so the old
-		// preference stays #1 and the fallback chain is written out explicitly.
-		// "auto" (or an unknown id) just drops the key — the default chain.
-		const providerPrefsObj = raw.providers as Record<string, unknown> | undefined;
-		const migrateProviderPreference = (
-			legacyKey: string,
-			orderKey: string,
-			expand: (value: string) => string[] | undefined,
-		): void => {
-			const flatLegacyKey = `providers.${legacyKey}`;
-			const legacy = providerPrefsObj?.[legacyKey] ?? raw[flatLegacyKey];
-			if (legacy === undefined) return;
-			const existingOrder = providerPrefsObj?.[orderKey] ?? raw[`providers.${orderKey}`];
-			const orderAlreadySet = Array.isArray(existingOrder) && existingOrder.length > 0;
-			if (!orderAlreadySet && typeof legacy === "string") {
-				const expanded = expand(legacy);
-				if (expanded) {
-					const root = providerPrefsObj ?? {};
-					root[orderKey] = expanded;
-					raw.providers = root;
+		// Retired provider/model selectors now live in modelRoles plus explicit
+		// retry chains. Read nested and quoted-dotted forms from the same layer;
+		// an owned nested key wins even when its value is undefined. Every legacy
+		// key is removed after inspection so it cannot leak back into config.yml.
+		function migrateKindRoleSettings(): void {
+			const providerSettings = isRecord(raw.providers) ? raw.providers : undefined;
+			const ttsSettings = isRecord(raw.tts) ? raw.tts : undefined;
+			const sttSettings = isRecord(raw.stt) ? raw.stt : undefined;
+			const legacy = (root: Record<string, unknown> | undefined, key: string, flatKey: string): unknown =>
+				root && Object.hasOwn(root, key) ? root[key] : raw[flatKey];
+			const removeLegacy = (root: Record<string, unknown> | undefined, key: string, flatKey: string): void => {
+				if (root) delete root[key];
+				delete raw[flatKey];
+			};
+			const dedupe = (values: readonly string[]): string[] => [...new Set(values)];
+
+			const roles = isRecord(raw.modelRoles) ? raw.modelRoles : {};
+			const retrySettings = isRecord(raw.retry) ? raw.retry : {};
+			const fallbackChains = isRecord(retrySettings.fallbackChains) ? retrySettings.fallbackChains : {};
+			let rolesChanged = false;
+			let fallbackChainsChanged = false;
+			const setRoleChain = (role: string, candidates: readonly string[]): void => {
+				if (candidates.length === 0) return;
+				if (!Object.hasOwn(roles, role)) {
+					roles[role] = candidates[0];
+					rolesChanged = true;
 				}
+				if (!Object.hasOwn(fallbackChains, role)) {
+					fallbackChains[role] = candidates.slice(1);
+					fallbackChainsChanged = true;
+				}
+			};
+
+			const legacyWebSearch = legacy(providerSettings, "webSearch", "providers.webSearch");
+			const legacyWebOrder = legacy(providerSettings, "webSearchOrder", "providers.webSearchOrder");
+			const legacyWebExclude = legacy(providerSettings, "webSearchExclude", "providers.webSearchExclude");
+			const legacyGeminiModel = legacy(providerSettings, "webSearchGeminiModel", "providers.webSearchGeminiModel");
+			const webSelector = (provider: string, geminiModel: string): string | undefined => {
+				switch (provider) {
+					case "gemini":
+						return `google/${geminiModel}`;
+					case "anthropic":
+						return "anthropic/claude-haiku-4-5";
+					case "codex":
+						return "openai-codex/gpt-5.6-luna";
+					case "xai":
+						return "xai/grok-4.5";
+					case "auto":
+						return undefined;
+					default:
+						return MODEL_PRIO.web.includes(`web/${provider}`) ? `web/${provider}` : undefined;
+				}
+			};
+			const geminiModel =
+				typeof legacyGeminiModel === "string" && legacyGeminiModel.trim()
+					? legacyGeminiModel.trim()
+					: "gemini-2.5-flash";
+			const webDefaults = MODEL_PRIO.web.map(selector => {
+				if (selector === "google/gemini-2.5-flash") return `google/${geminiModel}`;
+				if (selector === "google-antigravity/gemini-2.5-flash") {
+					return `google-antigravity/${geminiModel}`;
+				}
+				return selector;
+			});
+			const excludedWebProviders = new Set(
+				Array.isArray(legacyWebExclude)
+					? legacyWebExclude.filter(
+							(value): value is string =>
+								typeof value === "string" && webSelector(value, geminiModel) !== undefined,
+						)
+					: [],
+			);
+			const isWebSelectorExcluded = (selector: string): boolean => {
+				if (excludedWebProviders.has("gemini") && /^(?:google|google-antigravity)\//.test(selector)) return true;
+				if (excludedWebProviders.has("anthropic") && selector.startsWith("anthropic/")) return true;
+				if (excludedWebProviders.has("codex") && selector.startsWith("openai-codex/")) return true;
+				if (excludedWebProviders.has("xai") && (selector.startsWith("xai/") || selector.startsWith("xai-oauth/"))) {
+					return true;
+				}
+				for (const provider of excludedWebProviders) {
+					if (selector === `web/${provider}`) return true;
+				}
+				return false;
+			};
+			const orderedWebProviders = Array.isArray(legacyWebOrder)
+				? legacyWebOrder
+				: typeof legacyWebSearch === "string" && legacyWebSearch !== "auto"
+					? [legacyWebSearch]
+					: [];
+			const orderedWebSelectors = orderedWebProviders.flatMap(value =>
+				typeof value === "string" ? (webSelector(value, geminiModel) ?? []) : [],
+			);
+			const shouldMigrateWeb =
+				orderedWebSelectors.length > 0 ||
+				excludedWebProviders.size > 0 ||
+				(typeof legacyGeminiModel === "string" && legacyGeminiModel.trim().length > 0);
+			if (shouldMigrateWeb) {
+				setRoleChain(
+					"web",
+					dedupe([...orderedWebSelectors, ...webDefaults]).filter(selector => !isWebSelectorExcluded(selector)),
+				);
 			}
-			if (providerPrefsObj) delete providerPrefsObj[legacyKey];
-			delete raw[flatLegacyKey];
-		};
-		migrateProviderPreference("webSearch", "webSearchOrder", value =>
-			value !== "auto" && isSearchProviderId(value)
-				? [value, ...SEARCH_PROVIDER_ORDER.filter(id => id !== value)]
-				: undefined,
-		);
-		migrateProviderPreference("image", "imageOrder", value =>
-			value !== "auto" && isImageProviderId(value)
-				? [value, ...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== value)]
-				: undefined,
-		);
+
+			const legacyImage = legacy(providerSettings, "image", "providers.image");
+			const legacyImageOrder = legacy(providerSettings, "imageOrder", "providers.imageOrder");
+			const imageSelector = (provider: string): string | undefined => {
+				switch (provider) {
+					case "openai":
+						return "openai/gpt-image-1";
+					case "openai-codex":
+						return "openai-codex/gpt-image-1";
+					case "antigravity":
+						return "google-antigravity/gemini-3-pro-image";
+					case "xai":
+						return "xai/grok-imagine-image";
+					case "openrouter":
+						return "openrouter/google/gemini-3-pro-image-preview";
+					case "gemini":
+						return "google/gemini-3-pro-image-preview";
+					case "deepinfra":
+						return "deepinfra/black-forest-labs/FLUX-2-pro";
+					default:
+						return undefined;
+				}
+			};
+			const orderedImageProviders = Array.isArray(legacyImageOrder)
+				? legacyImageOrder
+				: typeof legacyImage === "string" && legacyImage !== "auto"
+					? [legacyImage]
+					: [];
+			const orderedImageSelectors = orderedImageProviders.flatMap(value =>
+				typeof value === "string" ? (imageSelector(value) ?? []) : [],
+			);
+			if (orderedImageSelectors.length > 0) {
+				setRoleChain("image", dedupe([...orderedImageSelectors, ...MODEL_PRIO.image]));
+			}
+
+			const legacyTtsProvider = legacy(providerSettings, "tts", "providers.tts");
+			const speechSelector =
+				legacyTtsProvider === "local"
+					? "local/kokoro"
+					: legacyTtsProvider === "xai"
+						? "xai/grok-tts"
+						: legacyTtsProvider === "deepinfra"
+							? "deepinfra/hexgrad/Kokoro-82M"
+							: undefined;
+			if (speechSelector) setRoleChain("speech", [speechSelector]);
+
+			const legacySttModel = legacy(sttSettings, "modelName", "stt.modelName");
+			const dictationSelector =
+				legacySttModel === "fast" || legacySttModel === "whisper-base"
+					? "local/whisper-base"
+					: legacySttModel === "balanced" || legacySttModel === "whisper-small"
+						? "local/whisper-small"
+						: legacySttModel === "turbo" || legacySttModel === "whisper-large-v3-turbo"
+							? "local/whisper-large-v3-turbo"
+							: undefined;
+			if (dictationSelector && !Object.hasOwn(roles, "dictation")) {
+				roles.dictation = dictationSelector;
+				rolesChanged = true;
+			}
+
+			const legacyJudgmentProvider = legacy(providerSettings, "judgmentProvider", "providers.judgmentProvider");
+			const legacyAutoThinkingModel = legacy(providerSettings, "autoThinkingModel", "providers.autoThinkingModel");
+			const legacyUnexpectedStopModel = legacy(
+				providerSettings,
+				"unexpectedStopModel",
+				"providers.unexpectedStopModel",
+			);
+			const nonDefaultJudge =
+				(typeof legacyJudgmentProvider === "string" && legacyJudgmentProvider !== "auto") ||
+				(typeof legacyAutoThinkingModel === "string" && legacyAutoThinkingModel !== "online") ||
+				(typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online");
+			if (nonDefaultJudge) {
+				const judgeCandidates: string[] = [];
+				if (legacyJudgmentProvider !== "llm") judgeCandidates.push("typesafe/jev-latest");
+				if (typeof legacyAutoThinkingModel === "string" && legacyAutoThinkingModel !== "online") {
+					judgeCandidates.push(`local/${legacyAutoThinkingModel}`);
+				}
+				if (typeof legacyUnexpectedStopModel === "string" && legacyUnexpectedStopModel !== "online") {
+					judgeCandidates.push(`local/${legacyUnexpectedStopModel}`);
+				}
+				judgeCandidates.push("@tiny", "@smol", "@default");
+				setRoleChain("judge", dedupe(judgeCandidates));
+			}
+
+			const prependLocalRole = (role: "tiny" | "memory", model: unknown): void => {
+				if (typeof model !== "string" || model === "online" || model.length === 0) return;
+				const selector = `local/${model}`;
+				const configured = typeof roles[role] === "string" ? roles[role] : undefined;
+				const patterns = configured
+					? configured
+							.split(",")
+							.map(pattern => pattern.trim())
+							.filter(Boolean)
+					: [];
+				roles[role] = dedupe([selector, ...patterns]).join(",");
+				rolesChanged = true;
+			};
+			prependLocalRole("tiny", legacy(providerSettings, "tinyModel", "providers.tinyModel"));
+			prependLocalRole("memory", legacy(providerSettings, "memoryModel", "providers.memoryModel"));
+
+			for (const key of [
+				"webSearch",
+				"webSearchOrder",
+				"webSearchExclude",
+				"webSearchGeminiModel",
+				"image",
+				"imageOrder",
+				"tts",
+				"judgmentProvider",
+				"autoThinkingModel",
+				"unexpectedStopModel",
+				"tinyModel",
+				"memoryModel",
+			]) {
+				removeLegacy(providerSettings, key, `providers.${key}`);
+			}
+			removeLegacy(ttsSettings, "localModel", "tts.localModel");
+			removeLegacy(sttSettings, "modelName", "stt.modelName");
+
+			if (rolesChanged) raw.modelRoles = roles;
+			if (fallbackChainsChanged) {
+				retrySettings.fallbackChains = fallbackChains;
+				raw.retry = retrySettings;
+			}
+			if (providerSettings && Object.keys(providerSettings).length === 0) delete raw.providers;
+			if (ttsSettings && Object.keys(ttsSettings).length === 0) delete raw.tts;
+			if (sttSettings && Object.keys(sttSettings).length === 0) delete raw.stt;
+		}
+		migrateKindRoleSettings();
 
 		// Consolidate the retired Exa suite toggles onto the sole remaining
 		// provider switch. The old runtime required both `enabled` and
@@ -2655,6 +2959,8 @@ export class Settings {
 			}
 		}
 		delete raw["computer.backend"];
+
+		delete raw["hindsight.mentalModelRefreshIntervalMs"];
 
 		return raw;
 	}
@@ -2983,12 +3289,26 @@ export class Settings {
 		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
 	}
 
+	#warnUnknownStatusLineSegments(): void {
+		for (const path of STATUS_LINE_SEGMENT_PATHS) {
+			const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
+			for (const segment of getUnknownStatusLineSegments(value)) {
+				if (warnedUnknownStatusLineSegments.has(segment)) continue;
+				warnedUnknownStatusLineSegments.add(segment);
+				logger.warn(`Settings: unknown status line segment ${segment}`, { setting: path });
+			}
+		}
+	}
+
 	#rebuildMerged(): void {
+		this.#revision++;
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
 		this.#resolvedCache.clear();
+		this.#groupCache.clear();
 		this.#editVariantCache = undefined;
+		this.#warnUnknownStatusLineSegments();
 	}
 
 	#fireAllHooks(): void {
@@ -3101,6 +3421,45 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	// track it the same instant path/resource links do. Runtime `/settings` edits
 	// also go through the selector controller to invalidate and repaint live views.
 	"tui.hyperlinks": value => applyHyperlinkSetting(value),
+	"display.hideToolActivity": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ hideToolActivity: value });
+	},
+	"read.toolResultPreview": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ readToolResultPreview: value });
+	},
+	"terminal.showImages": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showImages: value });
+	},
+	"display.cacheMissMarker": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ cacheMissMarker: value });
+	},
+	"display.showTokenUsage": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTokenUsage: value });
+	},
+	"display.showTurnTime": value => {
+		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTurnTime: value });
+	},
+	"tui.maxInlineImageColumns": value => {
+		if (typeof value === "number") setInlineImageMaxColumns(value);
+	},
+	"tui.maxInlineImageRows": value => {
+		if (typeof value === "number") setInlineImageMaxRows(value);
+	},
+	"task.showResolvedModelBadge": value => {
+		if (typeof value === "boolean") setFeedModelBadgeEnabled(value);
+	},
+	"mcp.renderMarkdownResults": value => {
+		if (typeof value === "boolean") setMcpRenderMarkdownResults(value);
+	},
+	"display.shimmer": value => {
+		if (value === "classic" || value === "kitt" || value === "disabled") setShimmerMode(value);
+	},
+	"composer.shape": value => {
+		if (typeof value === "string") setEditorGapComposerShape(value);
+	},
+	emojiAutocomplete: value => {
+		if (typeof value === "boolean") setEmojiAutocompleteEnabled(value);
+	},
 	"provider.appendOnlyContext": value => {
 		if (typeof value === "string") {
 			appendOnlyModeSignal.fire(value);
@@ -3108,6 +3467,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	},
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
+	},
+	"task.agentServiceTierOverrides": value => {
+		validateAgentServiceTierOverrides(value);
 	},
 	"secrets.enabled": value => {
 		configureCredentialRedaction(value === true);
@@ -3280,6 +3642,7 @@ export function resetSettingsForTest(): void {
 		ref.deref()?.cancelPendingSaves();
 	}
 	liveSettingsInstances.clear();
+	warnedUnknownStatusLineSegments.clear();
 	globalInstance = null;
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
