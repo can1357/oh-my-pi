@@ -593,6 +593,25 @@ describe("shareSession", () => {
 			server.stop(true);
 		}
 	});
+
+	test("gist store fails loud when gh is missing instead of falling back (issue #11494)", async () => {
+		const entries = [messageEntry("e1", null, "share me")];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "e1",
+		} as unknown as SessionManager;
+
+		const savedPath = process.env.PATH;
+		using emptyBin = TempDir.createSync("@omp-share-no-gh-");
+		process.env.PATH = emptyBin.path();
+		try {
+			await expect(shareSession(sm, { store: "gist" })).rejects.toThrow(/gh.*CLI.*not found on PATH/);
+		} finally {
+			if (savedPath === undefined) delete process.env.PATH;
+			else process.env.PATH = savedPath;
+		}
+	});
 });
 
 describe("share command", () => {

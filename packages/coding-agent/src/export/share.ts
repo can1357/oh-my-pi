@@ -21,7 +21,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { $which, logger } from "@oh-my-pi/pi-utils";
+import { $which } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
 import { obfuscateToolArguments } from "../secrets/message-transform";
@@ -493,18 +493,17 @@ export async function shareSession(sm: SessionManager, options?: ShareSessionOpt
 
 	if (options?.store === "gist") {
 		const forGist = await sealToFit(key, data, GIST_MAX_SEALED_BYTES);
+		// An explicit `--gist` is a transport choice, not a preference: never
+		// silently fall back to the share server (#11494). tryCreateGist throws
+		// with the reason when `gh` is missing, unauthenticated, or fails.
 		const gist = await tryCreateGist(forGist.sealed);
-		if (gist) {
-			return {
-				url: `${base}/${gist.id}#${keyText}`,
-				method: "gist",
-				gistUrl: gist.url,
-				truncated: forGist.truncated,
-				sealedBytes: forGist.sealed.byteLength,
-			};
-		}
-		// gh unusable or gist creation failed — fall back to the share server.
-		return shareViaServer(key, data, base, keyText, forGist);
+		return {
+			url: `${base}/${gist.id}#${keyText}`,
+			method: "gist",
+			gistUrl: gist.url,
+			truncated: forGist.truncated,
+			sealedBytes: forGist.sealed.byteLength,
+		};
 	}
 
 	return shareViaServer(key, data, base, keyText);
@@ -609,13 +608,16 @@ function capLongStrings(value: unknown, cap: number): void {
 	}
 }
 
-/** Create a secret gist holding base64 of the sealed blob; null when `gh` is unusable. */
-async function tryCreateGist(sealed: Uint8Array): Promise<{ id: string; url: string } | null> {
-	if (!$which("gh")) return null;
+/** Create a secret gist holding base64 of the sealed blob. Throws with the
+ *  reason when `gh` is missing, unauthenticated, or creation fails — the
+ *  caller asked for gist explicitly, so there is no silent fallback (#11494). */
+async function tryCreateGist(sealed: Uint8Array): Promise<{ id: string; url: string }> {
+	if (!$which("gh")) {
+		throw new Error("share --gist needs the `gh` CLI, which was not found on PATH");
+	}
 	const auth = await $`gh auth status`.quiet().nothrow();
 	if (auth.exitCode !== 0) {
-		logger.debug("share: gh present but not authenticated; falling back to share server");
-		return null;
+		throw new Error("share --gist needs `gh` authentication (`gh auth login`)");
 	}
 
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-share-"));
@@ -624,16 +626,14 @@ async function tryCreateGist(sealed: Uint8Array): Promise<{ id: string; url: str
 		await Bun.write(file, Buffer.from(sealed).toString("base64"));
 		const result = await $`gh gist create --public=false ${file}`.quiet().nothrow();
 		if (result.exitCode !== 0) {
-			logger.warn("share: gist creation failed; falling back to share server", {
-				stderr: result.stderr.toString("utf-8").trim().slice(0, 500),
-			});
-			return null;
+			throw new Error(
+				`share --gist failed: gh gist create exited ${result.exitCode}: ${result.stderr.toString("utf-8").trim().slice(0, 500)}`,
+			);
 		}
 		const url = result.text().trim().split("\n").pop()?.trim() ?? "";
 		const id = url.split("/").pop() ?? "";
 		if (!GIST_ID_RE.test(id)) {
-			logger.warn("share: could not parse gist id from gh output", { url });
-			return null;
+			throw new Error(`share --gist failed: could not parse a gist id from gh output: ${url.slice(0, 200)}`);
 		}
 		return { id, url };
 	} finally {
