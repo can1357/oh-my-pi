@@ -83,8 +83,8 @@ describe("AgentSession queue-mode controls are session-scoped by default", () =>
 		const laterSession = new AgentSession({
 			agent: new Agent({
 				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-				steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
-				followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
+				steeringMode: settings.get("steeringMode") === "all" ? "all" : "one-at-a-time",
+				followUpMode: settings.get("followUpMode") === "all" ? "all" : "one-at-a-time",
 				interruptMode: settings.get("interruptMode") ?? "immediate",
 			}),
 			sessionManager: SessionManager.create(agentDir, agentDir),

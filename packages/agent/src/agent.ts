@@ -1179,6 +1179,17 @@ export class Agent {
 		return claim ? [...claim.messages, ...this.#followUpQueue] : this.#followUpQueue;
 	}
 
+	/** Queue entries not yet claimed by asynchronous preparation. Mutation layers
+	 *  must use these views so they never coalesce a fresh send into a batch that
+	 *  may already have committed to the active model call. */
+	peekUnclaimedSteeringQueue(): readonly AgentMessage[] {
+		return this.#steeringQueue;
+	}
+
+	peekUnclaimedFollowUpQueue(): readonly AgentMessage[] {
+		return this.#followUpQueue;
+	}
+
 	/** Nonblocking snapshot of the latest results, including provisional payloads while transforms are pending. */
 	getPendingToolResults(): readonly ToolResultMessage[] {
 		const results = this.#cursorToolResultDrain?.map(({ toolResult }) => toolResult) ?? [];

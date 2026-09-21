@@ -293,19 +293,21 @@ describe("ChainJudge", () => {
 		});
 		const registry = makeRegistry([nativeModel], { "custom-judge": "test-key" });
 
-		vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
-			const h = new Headers(init?.headers);
-			recordedHeaders.push({
-				auth: h.get("authorization") ?? "",
-				customRouting: h.get("x-custom-routing") ?? "",
-				customTenant: h.get("x-custom-tenant") ?? "",
-			});
-			return Response.json({
-				model: "typesafe/jev-1.13",
-				answers: { level: { type: "choice", choice: "low" } },
-				usage: { input_tokens: 10, output_tokens: 2 },
-			});
-		});
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				const h = new Headers(init?.headers);
+				recordedHeaders.push({
+					auth: h.get("authorization") ?? "",
+					customRouting: h.get("x-custom-routing") ?? "",
+					customTenant: h.get("x-custom-tenant") ?? "",
+				});
+				return Response.json({
+					model: "typesafe/jev-1.13",
+					answers: { level: { type: "choice", choice: "low" } },
+					usage: { input_tokens: 10, output_tokens: 2 },
+				});
+			}),
+		);
 
 		const result = await new ChainJudge({ settings, registry }).judge({
 			state: "mechanical task",

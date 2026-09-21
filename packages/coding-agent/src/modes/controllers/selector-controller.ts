@@ -621,10 +621,10 @@ export class SelectorController {
 				}
 				break;
 			case "steeringMode":
-				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time", true);
+				this.ctx.session.setSteeringMode(value as "all" | "one-at-a-time" | "coalescing", true);
 				break;
 			case "followUpMode":
-				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time", true);
+				this.ctx.session.setFollowUpMode(value as "all" | "one-at-a-time" | "coalescing", true);
 				break;
 			case "interruptMode":
 				this.ctx.session.setInterruptMode(value as "immediate" | "wait", true);

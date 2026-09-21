@@ -621,6 +621,15 @@ export class InputController {
 		this.ctx.editor.onCopyPrompt = () => this.handleCopyPrompt();
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
+		this.ctx.editor.setActionKeys("app.message.expandQueue", this.ctx.keybindings.getKeys("app.message.expandQueue"));
+		this.ctx.editor.onExpandQueue = () => this.togglePendingQueueExpansion();
+		this.ctx.editor.onUpWhenEmpty = () => {
+			const queued = this.ctx.viewSession.getQueuedMessages();
+			const hasQueued =
+				queued.steering.length > 0 || queued.followUp.length > 0 || this.ctx.compactionQueuedMessages.length > 0;
+			if (!hasQueued) return false;
+			return this.restoreQueuedMessagesToEditor() > 0;
+		};
 		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
 		this.ctx.editor.onRetry = () => void this.handleRetry();
 		this.ctx.editor.clearCustomKeyHandlers();
@@ -1747,10 +1756,10 @@ export class InputController {
 	}
 
 	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
-		this.ctx.locallySubmittedUserSignatures.clear();
+		const targetSession = this.ctx.viewSession;
 		// On Esc (abort) drop non-user internal steers so the post-abort drain can't
 		// auto-resume; plain Alt+Up dequeue preserves them for the continuing stream.
-		const { steering, followUp } = this.ctx.session.clearQueue({ forInterrupt: options?.abort });
+		const { steering, followUp } = targetSession.clearQueue({ forInterrupt: options?.abort });
 		// Messages typed while compacting live in `compactionQueuedMessages`, not the
 		// agent queue `clearQueue()` drains — but the pending bar shows the same
 		// "Alt+Up to edit" hint for them (ui-helpers `updatePendingMessagesDisplay`).
@@ -1766,7 +1775,7 @@ export class InputController {
 		];
 		const restored = this.#restoreEntriesToEditor(allQueued, options?.currentText);
 		if (options?.abort) {
-			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			void targetSession.abort({ reason: USER_INTERRUPT_LABEL });
 		}
 		return restored;
 	}
@@ -1781,6 +1790,9 @@ export class InputController {
 		if (entries.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			return 0;
+		}
+		for (const entry of entries) {
+			this.ctx.locallySubmittedUserSignatures.delete(`${entry.text}\u0000${entry.images?.length ?? 0}`);
 		}
 		// Image markers are positional: `[Image #N]` ↔ `pendingImages[N-1]`
 		// (legacy drafts may still carry a trailing `attachment://N`). Each queued
@@ -2498,5 +2510,11 @@ export class InputController {
 				}
 			});
 		}
+	}
+	/** Toggle expanded/collapsed queued-message preview. */
+	togglePendingQueueExpansion(): void {
+		this.ctx.pendingQueueExpanded = !this.ctx.pendingQueueExpanded;
+		this.ctx.updatePendingMessagesDisplay();
+		this.ctx.ui.requestRender();
 	}
 }
