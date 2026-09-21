@@ -6,7 +6,10 @@ import {
 	inheritReferenceThinking,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
+import type { ComfyUIConfig, ComfyUIWorkflowConfig } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
+import * as os from "node:os";
+import * as path from "node:path";
 import { type ConfigHeaderResolver, type ConfigHeaderSource, createConfigHeaderResolver } from "./resolve-config-value";
 import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig } from "./model-patch";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
@@ -62,6 +65,34 @@ function resolveCustomModelIsOAuth(api: Api, providerAuth: ProviderAuthMode | un
 	return undefined;
 }
 
+/**
+ * Resolve one declared workflow path against the directory holding the
+ * models.yml that declared it, so a config-relative workflow loads the same
+ * way regardless of the session cwd. A leading `~` expands to the home
+ * directory, mirroring the config layer's own expansion in
+ * `config/settings.ts` rather than reaching into the tools layer.
+ */
+function resolveWorkflowPath(workflow: ComfyUIWorkflowConfig, baseDir: string): ComfyUIWorkflowConfig {
+	const declared = workflow.path;
+	const expanded =
+		declared === "~"
+			? os.homedir()
+			: declared.startsWith("~/") || declared.startsWith("~\\")
+				? path.join(os.homedir(), declared.slice(2))
+				: declared;
+	return { ...workflow, path: path.isAbsolute(expanded) ? expanded : path.resolve(baseDir, expanded) };
+}
+
+/** Resolve every workflow path of a model's ComfyUI config against `baseDir`. */
+function resolveComfyUIConfigPaths(config: ComfyUIConfig | undefined, baseDir: string): ComfyUIConfig | undefined {
+	if (!config) return undefined;
+	return {
+		...config,
+		generation: resolveWorkflowPath(config.generation, baseDir),
+		...(config.edit ? { edit: resolveWorkflowPath(config.edit, baseDir) } : {}),
+	};
+}
+
 export function buildCustomModelOverlay(
 	providerName: string,
 	providerBaseUrl: string,
@@ -73,6 +104,8 @@ export function buildCustomModelOverlay(
 	providerAuth: ProviderAuthMode | undefined,
 	providerRemoteCompaction: RemoteCompactionConfig<Api> | undefined,
 	modelDef: CustomModelDefinitionLike,
+	/** Directory of the config declaring this model; anchors relative workflow paths. */
+	workflowBaseDir: string,
 ): CustomModelOverlay | undefined {
 	const api = modelDef.api ?? providerApi;
 	if (!api) return undefined;
@@ -82,6 +115,7 @@ export function buildCustomModelOverlay(
 		api,
 		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
 		name: modelDef.name,
+		kind: modelDef.kind,
 		reasoning: modelDef.reasoning,
 		thinking: modelDef.thinking,
 		input: modelDef.input,
@@ -98,6 +132,7 @@ export function buildCustomModelOverlay(
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		compactionModel: modelDef.compactionModel,
 		remoteCompaction: mergeRemoteCompactionConfig(providerRemoteCompaction, modelDef.remoteCompaction),
+		comfyui: resolveComfyUIConfigPaths(modelDef.comfyui, workflowBaseDir),
 		premiumMultiplier: modelDef.premiumMultiplier,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
 	};
@@ -124,6 +159,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 	const built = buildModel({
 		id: resolvedModel.id,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
+		kind: resolvedModel.kind,
 		api: resolvedModel.api,
 		provider: resolvedModel.provider,
 		baseUrl: resolvedModel.baseUrl,
@@ -139,6 +175,7 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		resolveHeaders: resolvedModel.resolveHeaders,
 		omitMaxOutputTokens: resolvedModel.omitMaxOutputTokens ?? reference?.omitMaxOutputTokens,
 		preferWebsockets: resolvedModel.preferWebsockets,
+		comfyui: resolvedModel.comfyui,
 		compat: mergeCompat(reference?.compatConfig, resolvedModel.compat),
 		tokenizer: resolvedModel.tokenizer,
 		contextPromotionTarget: resolvedModel.contextPromotionTarget,

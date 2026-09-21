@@ -263,6 +263,8 @@ export class ModelRegistry {
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
 	#configError: ConfigError | undefined = undefined;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
+	/** Directory declaring models.yml; anchors relative ComfyUI workflow paths. */
+	#modelsConfigDir: string;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
@@ -427,6 +429,7 @@ export class ModelRegistry {
 				? () => Promise.reject(new Error("network disabled in model-registry runtime test"))
 				: wrapFetchForExtraCa(fetch));
 		this.#modelsConfigFile = ModelsConfigFile.relocate(modelsPath ?? path.join(getAgentDir(), "models.yml"));
+		this.#modelsConfigDir = path.dirname(this.#modelsConfigFile.path());
 		this.#cacheDbPath =
 			options?.cacheDbPath ?? (modelsPath ? path.join(path.dirname(modelsPath), "models.db") : undefined);
 		this.authStorage.setConfigValueResolver(resolveConfigValue);
@@ -2452,6 +2455,7 @@ export class ModelRegistry {
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
 					providerConfig.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
+					this.#modelsConfigDir,
 				);
 				if (!model) continue;
 				models.push(model);
@@ -2968,6 +2972,7 @@ export class ModelRegistry {
 					undefined,
 					config.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
+					this.#modelsConfigDir,
 				);
 				if (!overlay) {
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
@@ -3059,6 +3064,7 @@ export class ModelRegistry {
 							undefined,
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
+							this.#modelsConfigDir,
 						);
 						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
 					}
@@ -3184,6 +3190,8 @@ export interface ProviderConfigInput {
 	models?: Array<{
 		id: string;
 		name: string;
+		/** Catalog kind of the registered model; absent means chat. `"image"` requires an image api. */
+		kind?: ModelKind;
 		api?: Api;
 		baseUrl?: string;
 		reasoning: boolean;
@@ -3200,6 +3208,12 @@ export interface ProviderConfigInput {
 		contextPromotionTarget?: string;
 		compactionModel?: string;
 		remoteCompaction?: RemoteCompactionConfig<Api>;
+		/**
+		 * ComfyUI workflows, required only for `api: "comfyui"`.
+		 * Extensions should supply absolute workflow paths. Relative paths use the
+		 * agent's models.yml directory, not the extension or session directory.
+		 */
+		comfyui?: Model<Api>["comfyui"];
 		premiumMultiplier?: number;
 	}>;
 }

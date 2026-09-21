@@ -39,7 +39,13 @@ export const RUNNER_APIS = [
 	"openrouter-images",
 	"xai-tts",
 	"openai-speech",
+	"comfyui",
 ] as const;
+/**
+ * Runner APIs that render images. A model on one of these transports is an
+ * image runner, so it MUST carry `kind: "image"` and never enters a chat pool.
+ */
+export const IMAGE_RUNNER_APIS = ["openai-images", "openrouter-images", "comfyui"] as const;
 
 /** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
 export function modelKind(model: Pick<Model, "kind">): ModelKind {
@@ -1081,6 +1087,46 @@ export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	model?: string;
 }
 
+/**
+ * One input on a ComfyUI API-format graph node that a render supplies: the
+ * prompt text, an uploaded reference image, or a pixel dimension.
+ */
+export interface ComfyUIInputBinding {
+	/** Node id as it appears in the API-format workflow JSON. */
+	nodeId: string;
+	/** Input name on that node (e.g. `text`, `image`, `width`). */
+	input: string;
+}
+
+/**
+ * A ComfyUI API-format graph (the file ComfyUI's "Save (API format)" emits,
+ * not a frontend export) plus the node inputs a render fills.
+ */
+export interface ComfyUIWorkflowConfig {
+	/** Workflow JSON path; a relative path resolves against the models.yml directory, never the process cwd. */
+	path: string;
+	/** Node input receiving the assembled prompt. */
+	prompt: ComfyUIInputBinding[];
+	/** Node inputs receiving uploaded reference images, in upload order. */
+	images?: ComfyUIInputBinding[];
+	/** Node input receiving the requested width. Supplied only together with `height`. */
+	width?: ComfyUIInputBinding[];
+	/** Node input receiving the requested height. Supplied only together with `width`. */
+	height?: ComfyUIInputBinding[];
+	/** Node whose rendered images are fetched back from `/view`. */
+	outputNode: string;
+}
+
+/** ComfyUI runner configuration for one model (`api: "comfyui"`). */
+export interface ComfyUIConfig {
+	/** Workflow used when the render has no reference image. */
+	generation: ComfyUIWorkflowConfig;
+	/** Workflow used when the render has reference images; absent means the model supports no edit. */
+	edit?: ComfyUIWorkflowConfig;
+	/** Per-render timeout in milliseconds. Falls back to the tool's default when absent. */
+	timeoutMs?: number;
+}
+
 /** Per-million-token rates for one model pricing tier. */
 export interface TokenCost {
 	input: number;
@@ -1282,6 +1328,13 @@ export interface Model<TApi extends Api = Api> {
 	transport?: "pi-native";
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
+	/**
+	 * ComfyUI runner configuration (`api: "comfyui"`), declared per model in
+	 * models.yml or by a runtime registration. Workflow paths are absolute by
+	 * the time a model is built; the registry resolves relative paths against
+	 * the declaring models.yml directory.
+	 */
+	comfyui?: ComfyUIConfig;
 	/** Codex Responses Lite transport: send the lite marker and carry instructions/tools as input items (mirrors codex-rs `use_responses_lite`). */
 	useResponsesLite?: boolean;
 	/** Codex Code Mode restriction: model expects tools routed through a programmatic exec surface (mirrors codex-rs `tool_mode`). */

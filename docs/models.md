@@ -101,6 +101,11 @@ providers:
 - `google-generative-ai`
 - `google-gemini-cli`
 - `google-vertex`
+- `openai-images` (requires model `kind: image`)
+- `openrouter-images` (requires model `kind: image`)
+- `comfyui` (requires model `kind: image` and `comfyui` workflow configuration)
+
+Image runners use the `image` role and stay out of chat-model selection. See [self-hosted image models](tools/generate_image.md#self-hosted-image-models) for endpoint, workflow, authentication, and local-only fallback examples. These image-only APIs are not valid `remoteCompaction.api` values.
 
 ### Allowed auth/discovery values
 
@@ -150,6 +155,8 @@ It supports `enabled`, `api`, `endpoint`, `model`, `v2StreamingEnabled`,
 
 - `id` required
 - `contextWindow` and `maxTokens` must be positive if provided
+- `kind` accepts `chat` or `image`; omission preserves chat behavior. Image-runner APIs require `kind: image`, and `kind: image` requires an image-runner API.
+- `comfyui` is required only for `api: comfyui` and rejected for other APIs. It declares a generation workflow, optional edit workflow, and optional request timeout. Workflow paths resolve relative to the declaring models configuration file.
 
 ### Command-resolved secrets
 

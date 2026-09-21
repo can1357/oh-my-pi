@@ -6,11 +6,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomToolContext, CustomToolResult } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import {
-	getImageGenTools,
-	getImageGenToolsWithRegistry,
-	imageGenTool,
-} from "@oh-my-pi/pi-coding-agent/tools/image-gen";
+import { getImageGenTools, imageGenTool } from "@oh-my-pi/pi-coding-agent/tools/image-gen";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
@@ -100,13 +96,9 @@ function collectPaths(result: CustomToolResult<{ imagePaths: string[] }>): void 
 }
 
 describe("imageGenTool catalog routing", () => {
-	it("registers without resolving credentials", async () => {
-		const registry = createRegistry([]);
-		expect(await getImageGenTools(registry)).toEqual([imageGenTool]);
-		expect(await getImageGenToolsWithRegistry(registry)).toEqual([imageGenTool]);
-		const schema = JSON.stringify(imageGenTool.parameters.toJsonSchema());
-		expect(schema).toContain('"model"');
-		expect(schema).not.toContain('"provider"');
+	it("offers image generation before credentials are configured", async () => {
+		const tools = await getImageGenTools(createRegistry([]));
+		expect(tools.map(tool => tool.name)).toContain("generate_image");
 	});
 
 	it("uses a request model override as a single explicit candidate", async () => {

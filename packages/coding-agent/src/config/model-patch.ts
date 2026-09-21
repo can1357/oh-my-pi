@@ -233,6 +233,7 @@ export function mergeProviderRemoteCompactionConfig(
  */
 export interface ModelPatch {
 	name?: string;
+	kind?: ModelKind;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
@@ -251,6 +252,8 @@ export interface ModelPatch {
 	contextPromotionTarget?: string;
 	compactionModel?: string;
 	remoteCompaction?: RemoteCompactionConfig<Api>;
+	/** ComfyUI runner workflow config; see {@link Model.comfyui}. */
+	comfyui?: Model<Api>["comfyui"];
 	premiumMultiplier?: number;
 }
 
@@ -265,6 +268,7 @@ type ModelTransportPolicy = "merge" | "replace";
 export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
 	if (patch.name !== undefined) result.name = patch.name;
+	if (patch.kind !== undefined) result.kind = patch.kind;
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;
@@ -280,6 +284,7 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 	if (patch.remoteCompaction !== undefined) {
 		result.remoteCompaction = mergeRemoteCompactionConfig(base.remoteCompaction, patch.remoteCompaction);
 	}
+	if (patch.comfyui !== undefined) result.comfyui = patch.comfyui;
 	if (patch.premiumMultiplier !== undefined) result.premiumMultiplier = patch.premiumMultiplier;
 	if (patch.cost) {
 		const longContext = patch.cost.longContext ?? base.cost.longContext;

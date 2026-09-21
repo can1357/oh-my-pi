@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { OmpErrors } from "@oh-my-pi/omptype";
 import { getModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema-bundle";
-import { validateProviderConfiguration } from "@oh-my-pi/pi-coding-agent/config/models-config";
+import {
+	type ProviderValidationModel,
+	validateProviderConfiguration,
+} from "@oh-my-pi/pi-coding-agent/config/models-config";
 import { type ModelsConfig, ModelsConfigSchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 
 const models = [{ id: "grok-4", api: "openai-completions" as const }];
@@ -100,5 +103,104 @@ describe("models.yml compat.stripImageInput (#11697)", () => {
 		if (parsed instanceof OmpErrors) {
 			expect(parsed.summary).toContain("stripImageInput");
 		}
+	});
+});
+
+describe("models.yml image runner models", () => {
+	const workflow = {
+		path: "./workflows/flux.json",
+		prompt: [{ nodeId: "6", input: "text" }],
+		outputNode: "9",
+	};
+	/** Validate one custom model against a keyless provider, as a models.yml entry declares it. */
+	const validate = (model: Omit<ProviderValidationModel, "id">, providerApi?: ProviderValidationModel["api"]) =>
+		validateProviderConfiguration(
+			"comfy-local",
+			{
+				baseUrl,
+				auth: "none",
+				...(providerApi ? { api: providerApi } : {}),
+				models: [{ id: "flux-dev", ...model }],
+			},
+			"models-config",
+		);
+
+	test("accepts the keyless image runner pairings the image role admits", () => {
+		expect(() => validate({ kind: "image", api: "comfyui", comfyui: { generation: workflow } })).not.toThrow();
+		expect(() => validate({ kind: "image", api: "openai-images" })).not.toThrow();
+	});
+
+	test("rejects an image runner api without kind image, which would hide the model from the image role", () => {
+		expect(() => validate({ api: "comfyui", comfyui: { generation: workflow } })).toThrow(
+			'api "comfyui" requires kind: "image"',
+		);
+	});
+
+	test("rejects kind image on a chat api, including a provider-level api the model-level schema cannot see", () => {
+		expect(() => validate({ kind: "image" }, "openai-completions")).toThrow(
+			'kind "image" requires an image api (openai-images, openrouter-images, comfyui)',
+		);
+	});
+
+	test("requires a comfyui workflow config for api comfyui and rejects one anywhere else", () => {
+		expect(() => validate({ kind: "image", api: "comfyui" })).toThrow(
+			'api "comfyui" requires a "comfyui" workflow config',
+		);
+		expect(() => validate({ kind: "image", api: "openai-images", comfyui: { generation: workflow } })).toThrow(
+			'"comfyui" config requires api "comfyui"',
+		);
+	});
+});
+
+describe("models.yml comfyui workflow schema", () => {
+	const schema = getModelsConfigSchema();
+	const generation = {
+		path: "./workflows/flux.json",
+		prompt: [{ nodeId: "6", input: "text" }],
+		outputNode: "9",
+	};
+	const parseComfyui = (comfyui: Record<string, unknown>) =>
+		schema({
+			providers: {
+				"comfy-local": {
+					baseUrl: "http://127.0.0.1:8188",
+					auth: "none" as const,
+					models: [{ id: "flux-dev", kind: "image" as const, api: "comfyui" as const, comfyui }],
+				},
+			},
+		});
+
+	test("accepts a provider-level comfyui api inherited by its models", () => {
+		// `api` may live at the provider or the model level, so the schema must not
+		// reject the documented inherited form before the per-model pairing check.
+		const provider = {
+			baseUrl: "http://127.0.0.1:8188",
+			api: "comfyui" as const,
+			auth: "none" as const,
+			models: [{ id: "flux-dev", kind: "image" as const, comfyui: { generation } }],
+		};
+		expect(schema({ providers: { "local-comfy": provider } }) instanceof OmpErrors).toBe(false);
+		expect(() => validateProviderConfiguration("local-comfy", provider, "models-config")).not.toThrow();
+	});
+
+	test("rejects a workflow that accepts only one render dimension", () => {
+		// A render supplies both dimensions together, so `width` without `height`
+		// would silently keep the graph's preconfigured height.
+		const parsed = parseComfyui({ generation: { ...generation, width: [{ nodeId: "5", input: "width" }] } });
+		expect(parsed instanceof OmpErrors).toBe(true);
+		if (parsed instanceof OmpErrors) expect(parsed.summary).toContain("width and height bindings together");
+	});
+
+	test("rejects a workflow that binds no prompt", () => {
+		// The requested prompt reaches the graph only through a declared binding.
+		const parsed = parseComfyui({ generation: { ...generation, prompt: [] } });
+		expect(parsed instanceof OmpErrors).toBe(true);
+		if (parsed instanceof OmpErrors) expect(parsed.summary).toContain("prompt with at least one binding");
+	});
+
+	test("rejects a timeout no 32-bit timer can honor", () => {
+		const parsed = parseComfyui({ generation, timeoutMs: Number.MAX_SAFE_INTEGER });
+		expect(parsed instanceof OmpErrors).toBe(true);
+		if (parsed instanceof OmpErrors) expect(parsed.summary).toContain("comfyui.timeoutMs at most 2147483647");
 	});
 });
