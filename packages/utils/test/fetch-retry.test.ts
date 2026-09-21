@@ -121,6 +121,45 @@ describe("fetchWithRetry", () => {
 			message: "Request was aborted",
 		});
 	});
+
+	it("fails fast on DNS and certificate errors instead of burning attempts (issue #12546)", async () => {
+		for (const message of [
+			"Network error: getaddrinfo ENOTFOUND api.example.com",
+			"Network error: certificate verify failed",
+			"Network error: self signed certificate",
+		]) {
+			let attempt = 0;
+			const request = fetchWithRetry("https://example.invalid/fatal", {
+				fetch: async () => {
+					attempt += 1;
+					throw new TypeError(message);
+				},
+				defaultDelayMs: 1,
+				maxAttempts: 5,
+			});
+
+			await expect(request).rejects.toThrow(message);
+			expect(attempt).toBe(1);
+		}
+	});
+
+	it("still retries transient DNS timeouts and refused connections", async () => {
+		for (const message of ["getaddrinfo EAI_AGAIN api.example.com", "Network error: connect ECONNREFUSED"]) {
+			let attempt = 0;
+			const response = await fetchWithRetry("https://example.invalid/transient", {
+				fetch: async () => {
+					attempt += 1;
+					if (attempt === 1) throw new TypeError(message);
+					return new Response("recovered", { status: 200 });
+				},
+				defaultDelayMs: 1,
+				maxAttempts: 3,
+			});
+
+			expect(response.status).toBe(200);
+			expect(attempt).toBe(2);
+		}
+	});
 });
 
 describe("extractRetryHint", () => {
