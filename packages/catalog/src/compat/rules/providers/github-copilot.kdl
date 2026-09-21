@@ -3,6 +3,10 @@
 provider "github-copilot" {
 	default-model "gpt-5.5"
 	env "COPILOT_GITHUB_TOKEN"
+	// Copilot's authenticated `/models` response is the account's complete,
+	// policy-filtered roster. Bundled rows for models the account cannot call
+	// (plan-gated or org-policy-disabled) must not survive a successful fetch.
+	dynamic-models-authoritative #true
 
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true

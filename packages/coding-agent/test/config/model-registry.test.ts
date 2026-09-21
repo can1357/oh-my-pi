@@ -146,6 +146,38 @@ describe("ModelRegistry", () => {
 		secondResolve();
 		await registry.awaitBackgroundRefresh();
 	});
+	test("does not merge shared catalog rows into authoritative account catalogs", async () => {
+		authStorage.setRuntimeApiKey("github-copilot", "copilot-test-key");
+		const seen: string[] = [];
+		const authoritativeRegistry = new ModelRegistry(authStorage, path.join(tmpDir, "models.yaml"), {
+			cacheDbPath: path.join(tmpDir, "models.db"),
+			fetch: async input => {
+				const url = input instanceof Request ? input.url : input.toString();
+				seen.push(url);
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.enterprise.githubcopilot.com" } });
+				}
+				if (url === "https://api.enterprise.githubcopilot.com/models") {
+					return Response.json({
+						data: [{ id: "claude-opus-5", name: "Claude Opus 5", capabilities: { type: "chat" } }],
+					});
+				}
+				throw new Error(`Unexpected discovery request: ${url}`);
+			},
+		});
+
+		await authoritativeRegistry.refreshProvider("github-copilot", "online");
+		const copilotIds = authoritativeRegistry
+			.getAvailable()
+			.filter(model => model.provider === "github-copilot")
+			.map(model => model.id);
+		expect(copilotIds).toContain("claude-opus-5");
+		expect(copilotIds).not.toContain("claude-fable-5");
+		expect(seen).toEqual([
+			"https://api.github.com/copilot_internal/user",
+			"https://api.enterprise.githubcopilot.com/models",
+		]);
+	});
 	test("resolves API keys and provider headers for legacy extensions", async () => {
 		const model = testModel;
 		vi.spyOn(registry, "getApiKey").mockResolvedValue("test-key");

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -80,6 +81,10 @@ function cachedCopilotCompletionModel(id: string, name: string): ModelSpec<"open
 }
 
 describe("github copilot model limits mapping", () => {
+	it("registers the account-scoped catalog as authoritative", () => {
+		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "github-copilot");
+		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
+	});
 	it("discovers the plan endpoint for a raw environment token before model discovery", async () => {
 		const token = "ghu_valid_business_token";
 		const { fetchMock } = await discoverCopilotModels(
@@ -104,6 +109,35 @@ describe("github copilot model limits mapping", () => {
 		const models = await githubCopilotModelManagerOptions({ apiKey: token, fetch: fetchMock }).fetchDynamicModels?.();
 		expect(models).toEqual([]);
 		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+	it("prunes bundled models absent from the account-scoped catalog", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-copilot-authoritative-"));
+		try {
+			const apiKey = JSON.stringify({
+				token: "copilot-test-key",
+				apiEndpoint: "https://api.enterprise.githubcopilot.com",
+			});
+			const fetchMock = vi.fn(async () =>
+				Response.json({
+					data: [{ id: "claude-opus-5", name: "Claude Opus 5", capabilities: { type: "chat" } }],
+				}),
+			);
+			const options = githubCopilotModelManagerOptions({ apiKey, fetch: fetchMock });
+			const manager = createModelManager({
+				...options,
+				staticModels: getBundledModels("github-copilot").filter(model =>
+					["claude-fable-5", "claude-opus-5"].includes(model.id),
+				),
+				cacheDbPath: path.join(tempDir, "models.db"),
+			});
+
+			expect(options.dynamicModelsAuthoritative).toBe(true);
+			const { models } = await manager.refresh("online");
+			expect(models.find(model => model.id === "claude-opus-5")).toBeDefined();
+			expect(models.find(model => model.id === "claude-fable-5")).toBeUndefined();
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 	it("drops cross-provider wire routing from enterprise-only sibling ids", async () => {
 		const { models } = await discoverCopilotModels({

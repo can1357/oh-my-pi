@@ -803,6 +803,19 @@ describe("parseModelPattern", () => {
 			expect(result.error).toBeTruthy();
 		});
 
+		test("resolveCliModel rejects a bundled model absent from an authoritative account catalog", () => {
+			const unavailableFable = createOpusModel("github-copilot", "claude-fable-5", "Claude Fable 5");
+			const result = resolveCliModel({
+				cliModel: "github-copilot/claude-fable-5",
+				modelRegistry: {
+					getAll: () => [unavailableFable],
+					getAvailable: () => [],
+				},
+			});
+			expect(result.model).toBeUndefined();
+			expect(result.error).toContain("not found");
+		});
+
 		test("openai/gpt-4o:extended still resolves to the OpenRouter raw id (openai carries no such id)", () => {
 			const result = parseModelPattern("openai/gpt-4o:extended", allModels);
 			expect(result.model?.provider).toBe("openrouter");

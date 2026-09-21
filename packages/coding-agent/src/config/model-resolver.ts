@@ -43,6 +43,7 @@ import {
 	concreteThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
+import { AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS } from "./model-patch";
 import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
@@ -1880,8 +1881,15 @@ function findExactCliModel(
 	availableModels: Model<Api>[],
 	options?: { catalogFallback?: boolean },
 ): Model<Api> | undefined {
-	// Explicit provider/id references stay authoritative against the full catalog.
-	const referenced = findExactModelReferenceMatch(selector, allModels);
+	// Explicit provider/id references stay authoritative against the full catalog,
+	// except when that provider's account-scoped catalog is authoritative. In that
+	// case a bundled-only row is not runnable and must not bypass availability.
+	const parsedReference = parseModelString(selector);
+	const referenceCatalog =
+		parsedReference && AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(parsedReference.provider.toLowerCase())
+			? availableModels
+			: allModels;
+	const referenced = findExactModelReferenceMatch(selector, referenceCatalog);
 	if (referenced) return referenced;
 
 	// Flat-id (or full-selector-string) matches prefer authenticated providers,
@@ -2077,8 +2085,12 @@ export function resolveCliModel(options: {
 		}
 	}
 
+	const providerCandidates =
+		provider && AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(provider.toLowerCase())
+			? availableModels.filter(model => model.provider === provider)
+			: allModels;
 	if (provider) {
-		const exactProviderMatch = resolveProviderModelReference(provider, pattern, allModels);
+		const exactProviderMatch = resolveProviderModelReference(provider, pattern, providerCandidates);
 		if (exactProviderMatch) {
 			return {
 				model: exactProviderMatch,
@@ -2090,7 +2102,7 @@ export function resolveCliModel(options: {
 		}
 	}
 
-	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
+	const candidates = provider ? providerCandidates.filter(model => model.provider === provider) : availableModels;
 	// Keep the explicit provider on the pattern: the raw-id phase provider-locks
 	// `google/gemini-x` to the bundled `google` provider unless the selector
 	// names the aggregator carrying it (`openrouter/google/gemini-x@upstream`).

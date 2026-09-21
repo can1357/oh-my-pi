@@ -5986,6 +5986,10 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	const resolveReference = createReferenceResolver(getProviderReferences);
 	return {
 		providerId: "github-copilot",
+		// A successful `/models` fetch is the account's whole catalog: prune
+		// bundled ids Copilot did not serve instead of offering models that can
+		// only fail with `model_not_supported`.
+		dynamicModelsAuthoritative: true,
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
 		// COPILOT_API_HEADERS are compile-time wire identity constants, not
