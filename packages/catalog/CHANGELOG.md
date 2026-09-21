@@ -2,15 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OpenZoo live model discovery from its keyless local proxy, including pricing and a single `auto` router entry.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
 
-- Added OpenZoo live model discovery from its keyless local proxy, including pricing and a single `auto` router entry.
-- Added support for embedding, rerank, and video generation capabilities in OpenRouter provider
-- Added support for speech-to-text (STT) capabilities in OpenAI provider
-- Added five STT models to OpenRouter provider
-- Added support for TTS and STT API capabilities in OpenRouter provider
 - Expanded OpenRouter provider support with embedding, reranking, video generation, text-to-speech, and speech-to-text capabilities, including five new speech-to-text models.
 - Added speech-to-text support to the OpenAI provider.
 
