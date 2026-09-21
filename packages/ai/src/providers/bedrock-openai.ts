@@ -11,6 +11,7 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { ConfigurationError } from "../error";
 import type { AwsBedrockProviderOptions } from "../registry/aws";
 import type { Model } from "../types";
+import { getHeaderCaseInsensitive } from "../utils";
 import { AWS_REGIONAL_BEDROCK_HOST, resolveBedrockRegion } from "../utils/aws-bedrock-region";
 import { createAwsAuthenticatedFetch, resolveAwsAuthenticatedBearerToken } from "./aws-authenticated-fetch";
 import type { OpenAICompletionsOptions } from "./openai-completions";
@@ -67,7 +68,8 @@ function resolveBedrockGuardrailConfig(
 ): EffectiveGuardrail {
 	const modelHeaders = model.headers;
 	const optionHeaders = options.headers;
-	const advisory = (key: string): string | undefined => modelHeaders?.[key] ?? optionHeaders?.[key];
+	const advisory = (key: string): string | undefined =>
+		getHeaderCaseInsensitive(modelHeaders, key) ?? getHeaderCaseInsensitive(optionHeaders, key);
 	return {
 		guardrailIdentifier:
 			model.guardrailIdentifier ?? options.guardrailIdentifier ?? advisory(GUARDRAIL_IDENTIFIER_HEADER),
@@ -117,26 +119,26 @@ function resolveBedrockOpenAIUrls(
 	baseUrl: string | undefined,
 	region: string,
 ): { builderBaseUrl: string; fetchUrlPrefix: string } {
-	if (baseUrl) {
-		let url: URL | undefined;
-		try {
-			url = new URL(baseUrl.replaceAll("{region}", "us-east-1"));
-		} catch {
-			url = undefined;
-		}
-		if (url && !AWS_REGIONAL_BEDROCK_HOST.test(url.host)) {
-			// `new URL` normalizes a trailing slash into pathname; strip it so the
-			// OpenAI builder's trim/suffix lands exactly once after any prefix.
-			const prefix = `${url.origin}${url.pathname}`.replace(/\/+$/, "");
-			if (url.search || url.hash) {
-				const completions = `${prefix}/chat/completions${url.search}${url.hash}`;
-				return { builderBaseUrl: completions, fetchUrlPrefix: completions };
-			}
-			return { builderBaseUrl: prefix, fetchUrlPrefix: prefix };
-		}
+	let url: URL;
+	try {
+		url = new URL(
+			(baseUrl || "https://bedrock-runtime.{region}.amazonaws.com/openai/v1").replaceAll(
+				"{region}",
+				encodeURIComponent(region),
+			),
+		);
+	} catch (cause) {
+		throw new ConfigurationError("Invalid Bedrock Chat Completions base URL", { cause });
 	}
-	const template = `https://bedrock-runtime.${encodeURIComponent(region)}.amazonaws.com/openai/v1`;
-	return { builderBaseUrl: template, fetchUrlPrefix: template };
+	if (AWS_REGIONAL_BEDROCK_HOST.test(url.host)) {
+		url.host = `bedrock-runtime.${region}.amazonaws.com`;
+		if (url.pathname === "/") url.pathname = "/openai/v1";
+	}
+	const builderBaseUrl = `${url.origin}${url.pathname}`.replace(/\/+$/, "");
+	return {
+		builderBaseUrl,
+		fetchUrlPrefix: url.search ? `${builderBaseUrl}/chat/completions${url.search}` : builderBaseUrl,
+	};
 }
 
 export interface PreparedBedrockOpenAIRequest {
@@ -176,28 +178,20 @@ export function prepareBedrockOpenAIRequest(
 	};
 	const resolvedModel: Model<"openai-completions"> = { ...model, baseUrl: builderBaseUrl, headers };
 	const effectiveProviderOptions: AwsBedrockProviderOptions = { ...providerOptions, region };
-	const requestSignal = (options as { signal?: AbortSignal }).signal;
-	const fetchOptions: BedrockOpenAIOptions & { signal?: AbortSignal } = {
+	const fetchOptions: BedrockOpenAIOptions = {
 		...options,
 		providerOptions: effectiveProviderOptions,
 		headers,
-		signal: requestSignal,
 	};
 	const bearerToken = resolveAwsAuthenticatedBearerToken(fetchOptions);
+	const authenticatedFetch = bearerToken ? options.fetch : createAwsAuthenticatedFetch(BEDROCK_SERVICE, fetchOptions);
 	const fetch =
 		fetchUrlPrefix === builderBaseUrl
-			? options.fetch
-			: createChatCompletionsUrlFetch(fetchUrlPrefix, options.fetch);
-	if (bearerToken) {
-		return { model: resolvedModel, options: { ...fetchOptions, apiKey: bearerToken, fetch } };
-	}
+			? authenticatedFetch
+			: createChatCompletionsUrlFetch(fetchUrlPrefix, authenticatedFetch);
 	return {
 		model: resolvedModel,
-		options: {
-			...fetchOptions,
-			apiKey: NO_AUTH_SENTINEL,
-			fetch: createAwsAuthenticatedFetch(BEDROCK_SERVICE, { ...fetchOptions, fetch }),
-		},
+		options: { ...fetchOptions, apiKey: bearerToken ?? NO_AUTH_SENTINEL, fetch },
 	};
 }
 
