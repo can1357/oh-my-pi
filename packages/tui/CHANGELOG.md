@@ -557,6 +557,9 @@
 ### Fixed
 
 - Prevented magic keywords from triggering spelling autocorrect and underlining
+### Added
+
+* Added the MCP server action panel for the Extension Control Center, including live status, capability counts, disabled-action reasons, destructive-action confirmation, cancellable operations, and manual OAuth callback input.
 
 ## [18.2.5] - 2026-09-17
 
