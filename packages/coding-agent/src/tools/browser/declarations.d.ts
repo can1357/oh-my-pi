@@ -1551,6 +1551,8 @@ interface BrowserTabRealm extends BrowserTabHelpers {
 	url(): string;
 	/** Wait for and return an actionable element handle. */
 	waitFor(selector: string, options?: BrowserWaitOptions): Promise<BrowserElement>;
+	/** Sleep for `ms` milliseconds (bounded by the run budget) — a documented plain wait. */
+	waitFor(ms: number, options?: BrowserWaitOptions): Promise<void>;
 	/** Wait for and return an element handle, or `null` when it remains absent. */
 	waitForSelector(selector: string, options?: BrowserWaitForSelectorOptions): Promise<BrowserElement | null>;
 	/** Wait for a matching network response and return the raw response object. */
@@ -1590,6 +1592,8 @@ interface BrowserTab extends BrowserTabHelpers {
 	url(): Promise<string>;
 	/** Wait for an actionable selector and report whether it appeared. */
 	waitFor(selector: string, options?: BrowserWaitOptions): Promise<boolean>;
+	/** Sleep for `ms` milliseconds (bounded by the run budget). */
+	waitFor(ms: number, options?: BrowserWaitOptions): Promise<void>;
 	/** Wait for a selector and report whether it appeared. */
 	waitForSelector(selector: string, options?: BrowserWaitForSelectorOptions): Promise<boolean>;
 	/** Return a numeric observation-id element proxy. */

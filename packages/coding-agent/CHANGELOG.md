@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `tab.waitFor(ms)` on the browser tool now accepts a number of milliseconds as a documented bounded sleep on the tab surface, in addition to the selector form; the `call` action returns it directly instead of coercing through the handle-or-null check ([#12137](https://github.com/can1357/oh-my-pi/issues/12137)) ([#12264](https://github.com/can1357/oh-my-pi/pull/12264) by [@danilouchoa](https://github.com/danilouchoa)).
+
 ## [18.2.8] - 2026-09-21
 
 ### Added

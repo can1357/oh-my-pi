@@ -29,6 +29,7 @@ import {
 	markHandled,
 	observeBrowserRunPromise,
 	resolvePredicateTimeout,
+	resolveDurationTimeout,
 	type WaitPredicateOptions,
 	waitForRun,
 	withBrowserPromiseCombinatorTracking,
@@ -230,7 +231,7 @@ declare module "puppeteer-core" {
 }
 
 declare global {
-	interface Element extends HTMLElement {}
+	interface Element extends HTMLElement { }
 	function getComputedStyle(element: Element): Record<string, unknown>;
 	var innerWidth: number;
 	var innerHeight: number;
@@ -379,6 +380,15 @@ export function resolveWaitTimeout(cellTimeoutMs: number, explicit?: number): nu
 	return actionOpMs;
 }
 
+/**
+ * Validate + clamp a `tab.waitFor(ms)` duration. Unlike `resolveWaitTimeout` this is a
+ * duration, not a selector timeout: 0 means "complete immediately" (NOT Puppeteer's
+ * "disable timeout" sentinel, which would turn a 0 ms sleep into a full-budget stall),
+ * positive values clamp to the cell budget, and garbage rejects instead of guessing.
+ */
+export function resolveWaitDuration(cellTimeoutMs: number, requested: number): number {
+	return resolveDurationTimeout(cellTimeoutMs, requested);
+}
 interface TabApi {
 	readonly name: string;
 	readonly page: Page;
@@ -406,7 +416,7 @@ interface TabApi {
 	press(key: KeyInput, opts?: { selector?: string }): Promise<void>;
 	scroll(deltaX: number, deltaY: number, opts?: ScrollOptions): Promise<void>;
 	drag(from: DragTarget, to: DragTarget): Promise<void>;
-	waitFor(selector: string, opts?: { timeout?: number }): Promise<ActionableHandle>;
+	waitFor(selector: string | number, opts?: { timeout?: number }): Promise<ActionableHandle | undefined>;
 	evaluate<R, TArgs extends unknown[]>(fn: string | ((...args: TArgs) => R | Promise<R>), ...args: TArgs): Promise<R>;
 	scrollIntoView(selector: string): Promise<void>;
 	select(selector: string, ...values: string[]): Promise<string[]>;
@@ -527,7 +537,7 @@ export function normalizeSelector(selector: string): string {
 	) {
 		throw new ToolError(
 			`Playwright-only selector ${JSON.stringify(selector)} is not supported by the browser tool. ` +
-				`Use a puppeteer text selector ("text/Allow all"), an aria selector ("aria/Name"), CSS, or "xpath/...".`,
+			`Use a puppeteer text selector ("text/Allow all"), an aria selector ("aria/Name"), CSS, or "xpath/...".`,
 		);
 	}
 	if (selector.startsWith("p-") && !LEGACY_SELECTOR_PREFIXES.some(prefix => selector.startsWith(prefix))) {
@@ -628,7 +638,7 @@ async function runGuardedHandleAction<T>(
 	if (state.invalidatedBy) {
 		throw new ToolError(
 			`${label} cannot run: this handle was invalidated after ${state.invalidatedBy} timed out; ` +
-				"run tab.observe() or tab.ariaSnapshot() to resolve a fresh handle",
+			"run tab.observe() or tab.ariaSnapshot() to resolve a fresh handle",
 		);
 	}
 	throwIfAborted(signal);
@@ -904,7 +914,7 @@ function redactUrlCredentials(url: string): string {
 	}
 }
 
-class RequestInterceptionCleanupError extends ToolError {}
+class RequestInterceptionCleanupError extends ToolError { }
 
 interface RunPageScope {
 	page: Page;
@@ -1833,7 +1843,7 @@ export class WorkerCore {
 				break;
 			}
 		}
-		return await new Promise<never>(() => {});
+		return await new Promise<never>(() => { });
 	}
 
 	/**
@@ -2059,6 +2069,18 @@ export class WorkerCore {
 				}),
 			drag: (from, to) => op("tab.drag()", actionOpMs, sig => this.#drag(from, to, sig)),
 			waitFor: (selector, opts) => {
+				// Duration form: `tab.waitFor(ms)` is a plain bounded sleep. Agents had
+				// no documented sleep on the tab surface — the run-scope `wait` only
+				// polls conditions — so they (ab)used selector waits as timers (#12137).
+				// Duration-specific clamping: 0 completes immediately (a plain sleep —
+				// NOT Puppeteer's "disable timeout" sentinel), positive durations clamp
+				// to the cell budget, and garbage rejects instead of guessing.
+				if (typeof selector === "number") {
+					const ms = resolveWaitDuration(timeoutMs, selector);
+					return op(`tab.waitFor(${ms}ms)`, ms + OP_DEADLINE_SLACK_MS, sig =>
+						untilAborted(sig, () => Bun.sleep(ms)).then(() => undefined),
+					);
+				}
 				const w = waitMs(opts?.timeout);
 				return op(
 					`tab.waitFor(${JSON.stringify(selector)})`,
@@ -2545,8 +2567,8 @@ export class WorkerCore {
 				parseAriaRefSelector(options.selector) !== null
 					? await this.#resolveAriaRef(options.selector)
 					: ((await untilAborted(options.signal, () =>
-							page.$(normalizeSelector(options.selector!)),
-						)) as ElementHandle | null);
+						page.$(normalizeSelector(options.selector!)),
+					)) as ElementHandle | null);
 			if (!root) {
 				throw new ToolError(`tab.observe: selector ${JSON.stringify(options.selector)} matched no element`);
 			}
@@ -2632,7 +2654,7 @@ export class WorkerCore {
 		}
 		const cleanupAnnotations = opts.annotate
 			? await installScreenshotAnnotations(page, annotationTargets, signal)
-			: async (): Promise<void> => {};
+			: async (): Promise<void> => { };
 		const resolveSelector = async (selector: string): Promise<ElementHandle | null> =>
 			parseAriaRefSelector(selector) !== null
 				? await this.#resolveAriaRef(selector)
@@ -2670,9 +2692,9 @@ export class WorkerCore {
 		const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
 		const dest = session.browserScreenshotDir
 			? path.join(
-					session.browserScreenshotDir,
-					`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
-				)
+				session.browserScreenshotDir,
+				`screenshot-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1)}.${ext}`,
+			)
 			: path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.${ext}`);
 		await fs.promises.mkdir(path.dirname(dest), { recursive: true });
 		await Bun.write(dest, savedBuffer);

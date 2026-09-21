@@ -324,6 +324,17 @@ export function resolvePredicateTimeout(cellTimeoutMs: number, explicit?: number
 }
 
 /**
+ * Validate and bound a fixed-duration wait below its owning run budget.
+ * Unlike selector timeouts, zero means complete immediately.
+ */
+export function resolveDurationTimeout(cellTimeoutMs: number, requested: number): number {
+	if (!Number.isFinite(requested) || requested < 0) {
+		throw new ToolError(`tab.waitFor(ms) takes a non-negative duration in ms, got ${JSON.stringify(requested)}`);
+	}
+	return Math.min(requested, Math.max(1, cellTimeoutMs - CELL_BUDGET_SLACK_MS));
+}
+
+/**
  * Run-scoped `wait()` helper for evaluated code (browser and computer workers), honoring
  * the owning run's cancellation signal.
  *
