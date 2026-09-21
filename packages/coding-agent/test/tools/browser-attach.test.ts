@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -262,12 +262,16 @@ describe("pickElectronTarget", () => {
 	test("does not reuse a live CDP endpoint belonging to a different profile", async () => {
 		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
 		const profile = path.join(os.tmpdir(), `omp-cdp-profile-${crypto.randomUUID()}`);
+		const otherProfile = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cdp-other-"));
 		const existing = await spawnDisposableExecutable([
 			`--user-data-dir=${profile}`,
 			`--remote-debugging-port=${cdp.port}`,
 		]);
 		try {
-			expect(await findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${profile}-other`] })).toBeNull();
+			if (process.platform === "linux") {
+				await fs.symlink(`${os.hostname()}-${existing.pid}`, path.join(otherProfile, "SingletonLock"));
+			}
+			expect(await findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${otherProfile}`] })).toBeNull();
 			expect(await findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
 				cdpUrl: `http://127.0.0.1:${cdp.port}`,
 				pid: existing.pid,
@@ -275,44 +279,51 @@ describe("pickElectronTarget", () => {
 		} finally {
 			await existing.close();
 			cdp.stop(true);
+			await fs.rm(otherProfile, { recursive: true, force: true });
 		}
 	});
 
-	test.skipIf(process.platform !== "linux")("reuses Chromium launched through a distro wrapper", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-wrapper-"));
-		const wrapper = path.join(root, "google-chrome");
-		const target = path.join(root, "chrome");
-		const profile = path.join(root, "profile");
-		const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
-		await Bun.write(target, Bun.file(process.execPath));
-		await fs.chmod(target, 0o755);
-		await Bun.write(wrapper, '#!/bin/bash\nHERE="$(dirname "$0")"\nexec -a "$0" "$HERE/chrome" "$@"\n');
-		await fs.chmod(wrapper, 0o755);
-		const child = Bun.spawn(
-			[
-				wrapper,
-				"--eval",
-				'process.stdout.write("ready\\n"); await Bun.stdin.text()',
-				`--user-data-dir=${profile}`,
-				`--remote-debugging-port=${cdp.port}`,
-			],
-			{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
-		);
-		const readiness = child.stdout.getReader();
-		await readiness.read();
-		readiness.releaseLock();
-		try {
-			expect(await findReusableCdp(wrapper, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
-				cdpUrl: `http://127.0.0.1:${cdp.port}`,
-				pid: child.pid,
+	test.skipIf(process.platform !== "linux")(
+		"reuses separate switch values without splitting flag-like profile segments",
+		async () => {
+			const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+			const profileRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp spaced "));
+			const requestedPrefix = path.join(profileRoot, "profile");
+			const profile = `${requestedPrefix} --archive/${crypto.randomUUID()}`;
+			await fs.mkdir(profile, { recursive: true });
+			const existing = await spawnDisposableExecutable([]);
+			await fs.symlink(`${os.hostname()}-${existing.pid}`, path.join(profile, "SingletonLock"));
+			const originalArgs = Process.prototype.args;
+			const spy = vi.spyOn(Process.prototype, "args").mockImplementation(function (this: Process) {
+				return this.pid === existing.pid
+					? [`${existing.path} --user-data-dir ${profile} --remote-debugging-port ${cdp.port}`]
+					: originalArgs.call(this);
 			});
-		} finally {
-			child.kill();
-			await child.exited;
-			cdp.stop(true);
-			await fs.rm(root, { recursive: true, force: true });
-		}
-	});
+			try {
+				expect(await findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
+					cdpUrl: `http://127.0.0.1:${cdp.port}`,
+					pid: existing.pid,
+				});
+				expect(await findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${profile}-other`] })).toBeNull();
+				await expect(
+					findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${requestedPrefix}`] }),
+				).rejects.toThrow("already running");
+				await fs.unlink(path.join(profile, "SingletonLock"));
+				await expect(findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${profile}`] })).rejects.toThrow(
+					"already running",
+				);
+				spy.mockReturnValue([]);
+				await expect(findReusableCdp(existing.path, { appArgs: [`--user-data-dir=${profile}`] })).rejects.toThrow(
+					"already running",
+				);
+			} finally {
+				spy.mockRestore();
+				await existing.close();
+				cdp.stop(true);
+				await fs.rm(profileRoot, { recursive: true, force: true });
+			}
+		},
+	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps profile tabs isolated and never kills a borrowed Chrome on close",
@@ -320,18 +331,19 @@ describe("pickElectronTarget", () => {
 			const exe = await ensureChromiumExecutable();
 			if (!exe) throw new Error("Expected a Chromium executable");
 			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-profile-isolation-"));
-			const borrowedProfile = path.join(root, "borrowed");
+			const borrowedProfile = path.join(root, "borrowed profile");
+			const launchPath = process.platform === "linux" ? path.join(root, "chrome") : exe;
+			if (launchPath !== exe) {
+				const wrapperPath = path.join(root, "chrome-launcher");
+				await Bun.write(
+					wrapperPath,
+					`#!${process.execPath}\nprocess.execve(${JSON.stringify(exe)}, [${JSON.stringify(exe)}, ...process.argv.slice(2)], process.env);\n`,
+				);
+				await fs.chmod(wrapperPath, 0o700);
+				await fs.symlink(wrapperPath, launchPath);
+			}
 			const port = await findFreeCdpPort();
-			// Explicit profiles keep the real OS keystore, so bypass it here or macOS
-			// blocks each spawn on a keychain-access dialog.
-			const flags = [
-				"--headless=new",
-				"--no-sandbox",
-				"--no-first-run",
-				"--no-default-browser-check",
-				"--use-mock-keychain",
-				"--password-store=basic",
-			];
+			const flags = ["--headless=new", "--no-sandbox", "--no-first-run", "--no-default-browser-check"];
 			const child = Bun.spawn(
 				[exe, ...flags, `--user-data-dir=${borrowedProfile}`, `--remote-debugging-port=${port}`],
 				{ stdin: "ignore", stdout: "ignore", stderr: "ignore" },
@@ -344,17 +356,30 @@ describe("pickElectronTarget", () => {
 			const ownedName = `owned-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
+				const runningExecutable = process.platform === "linux" ? await fs.realpath(`/proc/${child.pid}/exe`) : exe;
+				if (launchPath !== exe) {
+					await expect(
+						findReusableCdp(launchPath, {
+							appArgs: resolveSpawnArgs(launchPath, [...flags, "--user-data-dir", borrowedProfile]),
+						}),
+					).rejects.toThrow("occupied by an unverified application");
+				}
+				expect(
+					await findReusableCdp(runningExecutable, {
+						appArgs: resolveSpawnArgs(runningExecutable, [...flags, "--user-data-dir", borrowedProfile]),
+					}),
+				).toEqual({ cdpUrl: `http://127.0.0.1:${port}`, pid: child.pid });
 				await invoke({
 					action: "open",
 					name: borrowedName,
 					url: "data:text/html,<title>Borrowed</title>",
-					app: { path: exe, args: [...flags, "--user-data-dir", borrowedProfile] },
+					app: { path: runningExecutable, args: [...flags, "--user-data-dir", borrowedProfile] },
 				});
 				await invoke({
 					action: "open",
 					name: ownedName,
 					url: "data:text/html,<title>Owned</title>",
-					app: { path: exe, args: [...flags, "--user-data-dir", path.join(root, "owned")] },
+					app: { path: launchPath, args: [...flags, "--user-data-dir", path.join(root, "owned")] },
 				});
 				const title = await invoke({ action: "run", name: borrowedName, code: "return await tab.title();" });
 				expect(title.details).toMatchObject({ value: "Borrowed" });
@@ -477,16 +502,6 @@ describe("resolveSpawnArgs", () => {
 		const args = resolveSpawnArgs("/var/lib/flatpak/exports/bin/com.google.Chrome", []);
 		expect(args.some(arg => arg.startsWith("--user-data-dir="))).toBe(true);
 		expect(resolveSpawnArgs("/Applications/Slack.app/Contents/MacOS/Slack", ["--foo"])).toEqual(["--foo"]);
-	});
-
-	test("bypasses the OS keystore only for omp-owned Chromium profiles", () => {
-		const owned = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--password-store=gnome"]);
-		expect(owned).toContain("--use-mock-keychain");
-		expect(owned).toContain("--password-store=gnome");
-		expect(owned).not.toContain("--password-store=basic");
-
-		const borrowed = resolveSpawnArgs("/usr/bin/google-chrome-stable", ["--user-data-dir=/home/me/.config/chrome"]);
-		expect(borrowed).toEqual(["--user-data-dir=/home/me/.config/chrome"]);
 	});
 });
 

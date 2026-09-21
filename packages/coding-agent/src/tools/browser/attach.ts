@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { getBrowserProfilesDir } from "@oh-my-pi/pi-utils";
@@ -185,7 +186,7 @@ export async function waitForCdp(cdpUrl: string, timeoutMs: number, signal?: Abo
  */
 function findCdpPortInArgs(args: string[]): number | null {
 	for (const arg of args) {
-		const m = /^--remote-debugging-port=(\d+)$/.exec(arg);
+		const m = /^--remote-debugging-port(?:=| +)(\d+)$/.exec(arg);
 		if (m) {
 			const port = Number.parseInt(m[1]!, 10);
 			if (Number.isFinite(port) && port > 0) return port;
@@ -208,6 +209,10 @@ function findUserDataDirInArgs(args: string[] | undefined): string | null {
 		const arg = args[index]!;
 		if (arg.startsWith(inlinePrefix)) {
 			result = arg.length > inlinePrefix.length ? arg.slice(inlinePrefix.length) : null;
+			continue;
+		}
+		if (arg.startsWith("--user-data-dir ")) {
+			result = arg.slice("--user-data-dir ".length).trimStart() || null;
 			continue;
 		}
 		if (arg !== "--user-data-dir") continue;
@@ -321,47 +326,6 @@ async function resolveWrapperTarget(wrapperPath: string): Promise<string | null>
 }
 
 /**
- * Normalize candidate argv for kernels that serve /proc/<pid>/cmdline
- * space-joined instead of NUL-separated. A glued first word (the whole
- * command line in argv[0]) would otherwise hide --user-data-dir and
- * --remote-debugging-port from the matchers below.
- */
-function normalizeCandidateArgs(args: string[]): string[] {
-	if (args.length !== 1 || !args[0]!.includes(" --")) return args;
-	const word = args[0]!;
-	const split = word.trim().split(/\s+/);
-	if (split.length <= 1) return args;
-
-	// Invariant: ungluing is only safe when splitting preserves exact argument
-	// boundaries without corrupting switch values (e.g. splitting a profile path
-	// containing spaces into multiple argv elements, which risks cross-profile reuse).
-	// Every --user-data-dir flag must re-parse to the identical value.
-	const flagRegex = /(?:^|\s)--user-data-dir(?:=(.*?)|(?:\s+(.*?))?)(?=\s--|$)/g;
-	const rawMatches = [...word.trim().replace(/\s+/g, " ").matchAll(flagRegex)];
-	if (rawMatches.length > 0) {
-		let matchIndex = 0;
-		for (let i = 0; i < split.length; i++) {
-			const arg = split[i]!;
-			if (arg.startsWith("--user-data-dir=")) {
-				const expected = rawMatches[matchIndex]?.[1] ?? rawMatches[matchIndex]?.[2] ?? "";
-				const actual = findUserDataDirInArgs(split.slice(i, i + 1));
-				if (actual !== expected) return args;
-				matchIndex++;
-			} else if (arg === "--user-data-dir") {
-				const expected = rawMatches[matchIndex]?.[1] ?? rawMatches[matchIndex]?.[2] ?? "";
-				const actual = findUserDataDirInArgs(split.slice(i, i + 2));
-				if (actual !== expected) return args;
-				matchIndex++;
-				i++;
-			}
-		}
-		if (matchIndex !== rawMatches.length) return args;
-	}
-
-	return split;
-}
-
-/**
  * Return a reusable CDP endpoint for `exe`, or null when no instance is
  * running. Refuse to replace an occupied instance unless the caller can
  * launch an isolated profile.
@@ -385,13 +349,84 @@ export async function findReusableCdp(
 	const candidates = Process.fromPath(wrapperTarget ?? executablePath).filter(
 		candidate => candidate.status() === ProcessStatus.Running,
 	);
+	if (process.platform === "linux" && normalizedRequestedUserDataDir !== null) {
+		// Profile ownership does not imply application identity. A wrapper can
+		// launch a fresh profile, but an occupied profile needs a verified binary
+		// match (or an explicitly selected CDP endpoint).
+		const lock = await fs.readlink(path.join(normalizedRequestedUserDataDir, "SingletonLock")).catch(() => undefined);
+		const localPrefix = `${os.hostname()}-`;
+		if (lock?.startsWith(localPrefix)) {
+			const pidText = lock.slice(localPrefix.length);
+			const owner = /^\d+$/.test(pidText) ? Process.fromPid(Number(pidText)) : null;
+			if (owner?.status() === ProcessStatus.Running && !candidates.some(candidate => candidate.pid === owner.pid)) {
+				const ownerExecutable = await fs.realpath(`/proc/${owner.pid}/exe`).catch(() => undefined);
+				if (ownerExecutable !== executablePath && ownerExecutable !== wrapperTarget) {
+					throw new ToolError(
+						"The requested profile is occupied by an unverified application. Use its executable path or explicitly select app.cdp_url.",
+					);
+				}
+				candidates.push(owner);
+			}
+		}
+	}
 	const candidateArgs: string[][] = [];
 	let hasUnreadableCandidate = false;
-	for (const process of candidates) {
+	for (const candidate of candidates) {
 		let args: string[];
+		let ambiguousProfile = false;
 		try {
-			args = normalizeCandidateArgs(process.args());
+			const processArgs = candidate.args();
+			if (processArgs.length === 0) {
+				hasUnreadableCandidate = true;
+				continue;
+			}
+			if (process.platform === "linux" && processArgs.length === 1) {
+				// A flattened title cannot be split unambiguously when a switch
+				// value contains spaces (and may itself contain ` --`). Anchor on
+				// the requested profile: lift that exact value out of the title
+				// before splitting the rest. A longer value continuing past the
+				// requested one is only the same profile when the profile's
+				// SingletonLock is owned by this very process; otherwise treat the
+				// candidate as ambiguous instead of relaunching over a live profile.
+				let title = processArgs[0]!;
+				let matchedProfile = false;
+				if (requestedUserDataDir !== null) {
+					for (const separator of ["=", " "]) {
+						const token = ` --user-data-dir${separator}${requestedUserDataDir}`;
+						const offset = title.indexOf(token);
+						if (offset < 0) continue;
+						const end = offset + token.length;
+						if (end !== title.length && !title.startsWith(" --", end)) continue;
+						if (end !== title.length) {
+							const lock = await fs
+								.readlink(path.join(normalizedRequestedUserDataDir ?? "", "SingletonLock"))
+								.catch(() => undefined);
+							const ownerPid = lock?.startsWith(`${os.hostname()}-`)
+								? Number(lock.slice(os.hostname().length + 1))
+								: Number.NaN;
+							if (ownerPid !== candidate.pid) {
+								ambiguousProfile = true;
+								continue;
+							}
+						}
+						title = title.slice(0, offset) + title.slice(end);
+						matchedProfile = true;
+						break;
+					}
+				}
+				// A flattened title cannot be split on whitespace: switch values
+				// containing spaces would become separate argv items. Split on ` --`
+				// boundaries instead.
+				args = title.split(/ (?=--)/);
+				if (matchedProfile) args.push(`--user-data-dir=${requestedUserDataDir}`);
+			} else {
+				args = processArgs;
+			}
 		} catch {
+			hasUnreadableCandidate = true;
+			continue;
+		}
+		if (ambiguousProfile) {
 			hasUnreadableCandidate = true;
 			continue;
 		}
@@ -409,7 +444,7 @@ export async function findReusableCdp(
 		const port = findCdpPortInArgs(args);
 		if (port === null) continue;
 		if (await probeCdpAt(port, options.signal)) {
-			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
+			return { cdpUrl: `http://127.0.0.1:${port}`, pid: candidate.pid };
 		}
 	}
 	const canLaunchIsolatedProfile =

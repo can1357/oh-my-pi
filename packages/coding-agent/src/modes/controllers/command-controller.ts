@@ -10,7 +10,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Loader, Markdown, padding, Spacer, Text, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
@@ -34,12 +34,11 @@ import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
-import { moveDirectorySource } from "../move-directory-source";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
+import { fitAccountLabel } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+import { getMarkdownTheme, getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { computeContextBreakdown, renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { buildHotkeysMarkdown } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
@@ -54,9 +53,12 @@ import {
 	type SessionWorktree,
 } from "../../session/session-worktree";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
-import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
+import {
+	getActiveAccountLabelParts,
+	limitMatchesActiveAccount,
+	reportMatchesActiveAccount,
+} from "../../slash-commands/helpers/active-oauth-account";
 import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
-import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -69,7 +71,14 @@ import {
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
-import { collapseSharedUsageReports, formatLimitTitle } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	type AccountLabel,
+	type AccountMasker,
+	createAccountMasker,
+	MASK_STARS,
+	usageIdentityKey,
+} from "@oh-my-pi/pi-tui/overlays/usage-mask";
+import { renderFractionBar } from "@oh-my-pi/pi-tui/overlays/usage-bar";
 import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
 
 function formatCreditValue(value: number): string {
@@ -507,12 +516,11 @@ export class CommandController {
 					info += `${theme.fg("dim", "Model:")} ${a.model.provider}/${a.model.id}\n`;
 				}
 				if (a.model && usageReports) {
-					const identity = resolveActiveAdvisorAccount(a.model.provider, a.sessionId);
 					const quota = formatCompactQuota(
 						a.model.provider,
-						collapseSharedUsageReports(usageReports),
+						usageReports,
 						nowMs,
-						(report, limit) => !identity || limitMatchesActiveAccount(report, limit, identity),
+						resolveActiveAdvisorAccount(a.model.provider, a.sessionId),
 					);
 					if (quota) info += `${theme.fg("dim", quota)}\n`;
 				}
@@ -550,12 +558,11 @@ export class CommandController {
 			info += `${theme.fg("dim", "Model:")} ${model.provider}/${model.id}\n`;
 		}
 		if (model && usageReports) {
-			const identity = resolveActiveAdvisorAccount(model.provider, stats.advisors[0]?.sessionId);
 			const quota = formatCompactQuota(
 				model.provider,
-				collapseSharedUsageReports(usageReports),
+				usageReports,
 				nowMs,
-				(report, limit) => !identity || limitMatchesActiveAccount(report, limit, identity),
+				resolveActiveAdvisorAccount(model.provider, stats.advisors[0]?.sessionId),
 			);
 			if (quota) {
 				info += `\n${theme.bold("Quota")}\n`;
@@ -678,7 +685,7 @@ export class CommandController {
 	}
 
 	handleContextCommand(): void {
-		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
+		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
@@ -1108,12 +1115,12 @@ export class CommandController {
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 
-	async handleDeleteCommand(): Promise<void> {
+	async handleDropCommand(): Promise<void> {
 		if (!this.ctx.sessionManager.getSessionFile()) {
-			this.ctx.showError("Nothing to delete (in-memory session)");
+			this.ctx.showError("Nothing to drop (in-memory session)");
 			return;
 		}
-		await this.#runNewSessionFlow({ drop: true }, "Session deleted");
+		await this.#runNewSessionFlow({ drop: true }, "Session dropped");
 	}
 
 	async handleForkCommand(): Promise<void> {
@@ -1164,8 +1171,7 @@ export class CommandController {
 		// No argument in TUI mode: open the path autocomplete overlay.
 		if (!input) {
 			const result = await this.ctx.showHookCustom<MoveOverlayResult | undefined>(
-				(_tui, _theme, _keybindings, done) =>
-					new MoveOverlay(this.ctx.sessionManager.getCwd(), done, moveDirectorySource),
+				(_tui, _theme, _keybindings, done) => new MoveOverlay(this.ctx.sessionManager.getCwd(), done),
 				{ overlay: true },
 			);
 			if (!result) return; // cancelled
@@ -1408,7 +1414,6 @@ export class CommandController {
 				this.ctx.bashComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
-					artifactError: meta?.artifactError,
 					images: result.images,
 					showImages: this.ctx.settings.get("terminal.showImages"),
 				});
@@ -1480,7 +1485,6 @@ export class CommandController {
 				this.ctx.pythonComponent.setComplete(result.exitCode, result.cancelled, {
 					output: result.output,
 					truncation: meta?.truncation,
-					artifactError: meta?.artifactError,
 				});
 			}
 		} catch (error) {
@@ -1513,16 +1517,9 @@ export class CommandController {
 		// `customInstructions` channel of the `session_before_compact` extension
 		// hook — extensions treat that field as user focus and would otherwise
 		// bias the summary toward the plan boilerplate (issue #4359). Ride it
-		// through as a CompactOptions field instead. That caller also dispatches
-		// the execution turn itself, so the compaction must not resume the
-		// plan-approval turn it aborted.
+		// through as a CompactOptions field instead.
 		if (internalGuidance) {
-			return this.executeCompaction(
-				{ internalGuidance, suppressContinuation: true, ...(mode ? { mode } : {}) },
-				false,
-				beforeFlush,
-				mode,
-			);
+			return this.executeCompaction({ internalGuidance, ...(mode ? { mode } : {}) }, false, beforeFlush, mode);
 		}
 		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
 	}
@@ -1787,7 +1784,7 @@ function resolveProviderAuthMode(authStorage: AuthStorage, provider: string): st
 	return "unknown";
 }
 
-export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<Theme, "fg">): string {
+export function renderProviderSection(details: ProviderDetails, uiTheme: Pick<typeof theme, "fg">): string {
 	const lines: string[] = [];
 	lines.push(`${uiTheme.fg("dim", "Name:")} ${details.provider}`);
 	for (const field of details.fields) {
@@ -1803,7 +1800,15 @@ function resolveProviderUsageTotal(reports: UsageReport[]): number {
 		.reduce((sum, value) => sum + value, 0);
 }
 
-function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme): string {
+function formatLimitTitle(limit: UsageLimit): string {
+	const tier = limit.scope.tier;
+	if (tier && !limit.label.toLowerCase().includes(tier.toLowerCase())) {
+		return `${limit.label} (${tier})`;
+	}
+	return limit.label;
+}
+
+function formatWindowSuffix(label: string, windowLabel: string, uiTheme: typeof theme): string {
 	const normalizedLabel = label.toLowerCase();
 	const normalizedWindow = windowLabel.toLowerCase();
 	if (normalizedWindow === "quota window") return "";
@@ -1819,30 +1824,68 @@ function orgSuffix(report: UsageReport): string {
 	return org ? ` (${org})` : "";
 }
 
-function formatAccountLabel(limit: UsageLimit, report: UsageReport, index: number): string {
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return `${email}${orgSuffix(report)}`;
-	const accountId =
-		typeof report.metadata?.accountId === "string" && report.metadata.accountId
-			? report.metadata.accountId
-			: limit.scope.accountId || undefined;
-	if (accountId) return `${accountId}${orgSuffix(report)}`;
-	const projectId =
-		typeof report.metadata?.projectId === "string" && report.metadata.projectId
-			? report.metadata.projectId
-			: limit.scope.projectId || undefined;
-	if (projectId) return projectId;
-	return `account ${index + 1}`;
+function styleAccountMask(label: string, uiTheme: typeof theme): string {
+	return label.replace(MASK_STARS, uiTheme.fg("warning", MASK_STARS));
 }
 
-function formatUnlimitedReportLabel(report: UsageReport, index: number): string {
+function formatAccountLabel(limit: UsageLimit, report: UsageReport, index: number): AccountLabel {
+	const accountKey = usageIdentityKey(
+		limit.scope.accountId || report.metadata?.accountId,
+		limit.scope.projectId || report.metadata?.projectId,
+		limit.scope,
+		report.metadata?.orgId,
+	);
 	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return `${email}${orgSuffix(report)}`;
+	if (typeof email === "string" && email)
+		return { identity: email, qualifier: orgSuffix(report), accountKey, provider: report.provider };
+	const accountId =
+		limit.scope.accountId ||
+		(typeof report.metadata?.accountId === "string" && report.metadata.accountId
+			? report.metadata.accountId
+			: undefined);
+	if (accountId) return { identity: accountId, qualifier: orgSuffix(report), accountKey, provider: report.provider };
+	const projectId =
+		limit.scope.projectId ||
+		(typeof report.metadata?.projectId === "string" && report.metadata.projectId
+			? report.metadata.projectId
+			: undefined);
+	if (projectId) return { identity: projectId, accountKey, provider: report.provider };
+	return { identity: `account ${index + 1}`, placeholder: true, provider: report.provider };
+}
+
+function formatUnlimitedReportLabel(report: UsageReport, index: number): AccountLabel {
+	const accountKey = usageIdentityKey(
+		report.metadata?.accountId,
+		report.metadata?.projectId,
+		report.limits[0]?.scope,
+		report.metadata?.orgId,
+	);
+	const email = report.metadata?.email;
+	if (typeof email === "string" && email)
+		return { identity: email, qualifier: orgSuffix(report), accountKey, provider: report.provider };
 	const accountId = report.metadata?.accountId;
-	if (typeof accountId === "string" && accountId) return `${accountId}${orgSuffix(report)}`;
+	if (typeof accountId === "string" && accountId)
+		return { identity: accountId, qualifier: orgSuffix(report), accountKey, provider: report.provider };
 	const projectId = report.metadata?.projectId;
-	if (typeof projectId === "string" && projectId) return projectId;
-	return `account ${index + 1}`;
+	if (typeof projectId === "string" && projectId)
+		return { identity: projectId, accountKey, provider: report.provider };
+	return { identity: `account ${index + 1}`, placeholder: true, provider: report.provider };
+}
+
+function formatResetAccountLabel(report: UsageReport): AccountLabel {
+	const accountKey = usageIdentityKey(
+		report.metadata?.accountId,
+		report.metadata?.projectId,
+		report.limits[0]?.scope,
+		report.metadata?.orgId,
+	);
+	const email = report.metadata?.email;
+	const accountId = report.metadata?.accountId;
+	const identity =
+		typeof email === "string" && email ? email : typeof accountId === "string" && accountId ? accountId : undefined;
+	return identity
+		? { identity, qualifier: orgSuffix(report), accountKey, provider: report.provider }
+		: { identity: "account", placeholder: true, provider: report.provider };
 }
 
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
@@ -1859,16 +1902,20 @@ function formatAccountHeaderRow(
 	reports: UsageReport[],
 	nowMs: number,
 	columnWidth: number,
-	uiTheme: Theme,
-	activeAccount?: OAuthAccountIdentity,
+	uiTheme: typeof theme,
+	activeAccount: OAuthAccountIdentity | undefined,
+	mask: AccountMasker,
+	startIndex = 0,
 ): string[] {
 	const parts = limits.map((limit, index) => {
 		const reset = formatResetShort(limit, nowMs);
 		const report = reports[index];
 		const active = report !== undefined && limitMatchesActiveAccount(report, limit, activeAccount);
-		const label = formatAccountLabel(limit, report, index);
+		const accountLabel = formatAccountLabel(limit, report, index + startIndex);
+		const label = mask(accountLabel);
 		return {
 			label: active ? `● ${label}` : label,
+			qualifier: accountLabel.qualifier || label.match(/ \(\d+\)$/)?.[0] || "",
 			suffix: reset ? `(${reset})` : "",
 			active,
 		};
@@ -1877,23 +1924,45 @@ function formatAccountHeaderRow(
 	const gap = maxSuffixWidth > 0 ? 1 : 0;
 	const prefixBudget = columnWidth - maxSuffixWidth - gap;
 
-	// If suffix can't share the cell with at least `x…`, fall back to whole-label truncation.
+	// When reset text cannot share the cell, preserve the account qualifier or
+	// collision ordinal instead; identical truncated prefixes are not identities.
 	if (prefixBudget < 2) {
 		return parts.map(p => {
-			const full = p.suffix ? `${p.label} ${p.suffix}` : p.label;
-			const cell = padColumn(truncateJobLabel(full, columnWidth), columnWidth);
-			return p.active ? uiTheme.fg("accent", cell) : cell;
+			if (/^ \(\d+\)$/.test(p.qualifier) && visibleWidth(p.qualifier) >= columnWidth) {
+				const cell = padColumn(p.qualifier.trim(), columnWidth);
+				return styleAccountMask(p.active ? uiTheme.fg("accent", cell) : cell, uiTheme);
+			}
+			const cell = padColumn(fitAccountLabel(p.label, columnWidth, p.qualifier), columnWidth);
+			return styleAccountMask(p.active ? uiTheme.fg("accent", cell) : cell, uiTheme);
 		});
 	}
 
 	return parts.map(p => {
-		const prefix = truncateJobLabel(p.label, prefixBudget);
+		const prefix = fitAccountLabel(p.label, prefixBudget, p.qualifier);
 		const prefixCell = prefix + " ".repeat(prefixBudget - visibleWidth(prefix));
-		const styledPrefix = p.active ? uiTheme.fg("accent", prefixCell) : prefixCell;
+		const styledPrefix = styleAccountMask(p.active ? uiTheme.fg("accent", prefixCell) : prefixCell, uiTheme);
 		if (!p.suffix) return styledPrefix + " ".repeat(maxSuffixWidth + gap);
 		const suffixPad = " ".repeat(maxSuffixWidth - visibleWidth(p.suffix));
 		return `${styledPrefix} ${suffixPad}${uiTheme.fg("dim", p.suffix)}`;
 	});
+}
+
+function resolveAccountHeaderWidth(
+	limits: UsageLimit[],
+	reports: UsageReport[],
+	nowMs: number,
+	activeAccount: OAuthAccountIdentity | undefined,
+	mask: AccountMasker,
+	startIndex = 0,
+): number {
+	return limits.reduce((max, limit, index) => {
+		const report = reports[index];
+		const active = report !== undefined && limitMatchesActiveAccount(report, limit, activeAccount);
+		const label = `${active ? "● " : ""}${mask(formatAccountLabel(limit, report, index + startIndex))}`;
+		const reset = formatResetShort(limit, nowMs);
+		const width = visibleWidth(reset ? `${label} (${reset})` : label);
+		return Math.max(max, width);
+	}, BAR_WIDTH_MAX);
 }
 
 function padColumn(text: string, width: number): string {
@@ -1976,8 +2045,59 @@ function resolveResetRange(limits: UsageLimit[], nowMs: number): string | null {
 	}
 	return `${verb} in ${formatDuration(minReset)}`;
 }
+/**
+ * Compact one-line quota summary for a single advisor's provider.
+ * Returns `null` when the provider has no usage data.
+ * When `activeAccount` is provided, only limits matching that credential
+ * are shown (mirrors `renderUsageReports`'s account-stickiness filtering).
+ * Example output: `Quota: 7d window · 67% used · resets in 3.2d`
+ */
+export function formatCompactQuota(
+	provider: string,
+	reports: UsageReport[],
+	nowMs: number,
+	activeAccount?: OAuthAccountIdentity,
+): string | null {
+	const providerReports = reports.filter(r => r.provider === provider);
+	if (providerReports.length === 0) return null;
+	// Group limits by window id so we show BOTH the 5-hour and 7-day windows
+	// (or any other distinct windows the provider exposes). Within each window,
+	// pick the highest used fraction across accounts — that's the most pressing.
+	const byWindow = new Map<string, { limit: UsageLimit; fraction: number }>();
+	for (const report of providerReports) {
+		for (const limit of report.limits) {
+			// Skip limits that belong to a different credential than the one
+			// the advisor is actually using, so we don't alarm the user with
+			// an exhausted account that isn't theirs.
+			if (activeAccount && !limitMatchesActiveAccount(report, limit, activeAccount)) continue;
+			const fraction = resolveUsedFraction(limit);
+			if (fraction === undefined) continue;
+			const key = limit.window?.id ?? limit.scope.windowId ?? "—";
+			const existing = byWindow.get(key);
+			if (!existing || fraction > existing.fraction) byWindow.set(key, { limit, fraction });
+		}
+	}
+	if (byWindow.size === 0) return null;
+	// Sort windows by urgency (highest fraction first) so the most pressing
+	// quota is always the first thing the user sees.
+	const entries = [...byWindow.values()].sort((a, b) => b.fraction - a.fraction);
+	const lines: string[] = [];
+	for (const { limit, fraction } of entries) {
+		const pct = Math.round(fraction * 100);
+		const windowLabel = limit.window?.label ?? limit.scope.windowId ?? "—";
+		// Include the limit label (account/tier) when it carries identity beyond
+		// the window name, so the user can tell which credential's quota is shown.
+		const identity = limit.label.trim();
+		const header = identity && identity !== windowLabel ? `${windowLabel} (${identity})` : windowLabel;
+		const parts = [`${header}: ${pct}% used`];
+		const reset = resolveResetRange([limit], nowMs);
+		if (reset) parts.push(reset);
+		lines.push(parts.join(" · "));
+	}
+	return `Quota: ${lines.join(" │ ")}`;
+}
 
-function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): string {
+function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: typeof theme): string {
 	if (status === "neutral") return uiTheme.fg("dim", uiTheme.status.info);
 	if (status === "exhausted") return uiTheme.fg("error", uiTheme.status.error);
 	if (status === "warning") return uiTheme.fg("warning", uiTheme.status.warning);
@@ -1985,14 +2105,12 @@ function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): stri
 	return uiTheme.fg("dim", uiTheme.status.pending);
 }
 
-function resolveStatusColor(status: UsageLimit["status"]): "success" | "warning" | "error" | "dim" {
-	if (status === "exhausted") return "error";
-	if (status === "warning") return "warning";
-	if (status === "ok") return "success";
-	return "dim";
-}
-
-function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): string {
+function renderUsageBar(
+	limit: UsageLimit,
+	uiTheme: typeof theme,
+	barWidth: number,
+	labelPlacement: "moving" | "right",
+): string {
 	const usedAmount = limit.amount.used;
 	if (usedAmount !== undefined && isUsedOnlyAbsoluteAmount(limit)) {
 		const used =
@@ -2001,52 +2119,53 @@ function renderUsageBar(limit: UsageLimit, uiTheme: Theme, barWidth: number): st
 				: `${formatNumber(usedAmount, 2)} ${limit.amount.unit}`;
 		return uiTheme.fg("dim", truncateJobLabel(`${used} used`, barWidth));
 	}
-	const fraction = resolveUsedFraction(limit);
-	if (fraction === undefined) {
+	const usedFraction = resolveUsedFraction(limit);
+	if (usedFraction === undefined) {
 		return uiTheme.fg("dim", "·".repeat(barWidth));
 	}
-	const clamped = Math.min(Math.max(fraction, 0), 1);
-	const exact = clamped * barWidth;
-	const fullCells = Math.floor(exact);
-	const remainder = exact - fullCells;
-	let partial = "";
-	if (remainder >= 2 / 3) partial = "▓";
-	else if (remainder >= 1 / 3) partial = "▒";
-	const leading = "█".repeat(fullCells) + partial;
-	const empty = "░".repeat(Math.max(0, barWidth - fullCells - (partial ? 1 : 0)));
-	const color = resolveStatusColor(limit.status);
-	return `${uiTheme.fg(color, leading)}${uiTheme.fg("dim", empty)}`;
+
+	return renderFractionBar(1 - Math.min(Math.max(usedFraction, 0), 1), barWidth, uiTheme, labelPlacement);
 }
 
-/**
- * Pick a per-account column width so the columns and trailing amount fit in `available`.
- * Falls back to the minimum when the terminal is too narrow rather than wrapping.
- */
-function resolveColumnWidth(count: number, available: number, trailing: number): number {
+/** Pick the widest per-account column that fits alongside gaps and trailing text. */
+function resolveColumnWidth(count: number, available: number, trailing: number, preferred: number): number {
 	if (count <= 0) return BAR_WIDTH_MAX;
 	const indent = 2;
 	const gaps = count - 1;
 	const spaceForBars = available - indent - gaps - (trailing > 0 ? trailing + 1 : 0);
 	const ideal = Math.floor(spaceForBars / count);
 	if (ideal < COLUMN_WIDTH_MIN) return COLUMN_WIDTH_MIN;
-	return ideal;
+	return Math.min(ideal, Math.max(COLUMN_WIDTH_MIN, preferred));
+}
+
+/** Limit each row to the number of minimum-width account columns that physically fit. */
+function resolveColumnsPerRow(count: number, available: number, trailing: number): number {
+	if (count <= 0) return 0;
+	const indent = 2;
+	const trailingWidth = trailing > 0 ? trailing + 1 : 0;
+	const capacity = Math.floor((available - indent - trailingWidth + 1) / (COLUMN_WIDTH_MIN + 1));
+	return Math.max(1, Math.min(count, capacity));
 }
 
 export function renderUsageReports(
 	reports: UsageReport[],
-	uiTheme: Theme,
+	uiTheme: typeof theme,
 	nowMs: number,
 	availableWidth: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
-	usageModelSelectors: readonly string[] = [],
+	options: {
+		maskAccountLabels?: boolean;
+		usageModelSelectors?: readonly string[];
+		labelPlacement?: "moving" | "right";
+	} = {},
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const { maskAccountLabels = false, usageModelSelectors = [], labelPlacement = "moving" } = options;
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
 	lines.push(uiTheme.bold(uiTheme.fg("accent", `Usage${headerSuffix}`)));
 	const grouped = new Map<string, UsageReport[]>();
-	for (const report of displayReports) {
+	for (const report of reports) {
 		const list = grouped.get(report.provider) ?? [];
 		list.push(report);
 		grouped.set(report.provider, list);
@@ -2089,9 +2208,32 @@ export function renderUsageReports(
 		}
 
 		lines.push(uiTheme.bold(uiTheme.fg("accent", providerName)));
-		const activeAccountLabel = formatActiveAccountLabel(activeAccount);
+		// One masker per provider so colliding masks (`mai1@` vs `mai2@`) get
+		// ordinals consistently across the header, reset lines and unlimited rows.
+		const maskInputs = providerReports.flatMap((report, index) => [
+			...report.limits.map(limit => formatAccountLabel(limit, report, index)),
+			formatUnlimitedReportLabel(report, index),
+			formatResetAccountLabel(report),
+		]);
+		const activeLabelParts = getActiveAccountLabelParts(activeAccount);
+		const activeReportIndex = activeLabelParts
+			? providerReports.findIndex(report => reportMatchesActiveAccount(report, activeAccount))
+			: -1;
+		let activeLabel: AccountLabel | undefined = activeLabelParts ? { ...activeLabelParts, provider } : undefined;
+		if (activeReportIndex >= 0) {
+			const report = providerReports[activeReportIndex]!;
+			const limit = report.limits.find(candidate => limitMatchesActiveAccount(report, candidate, activeAccount));
+			activeLabel = limit
+				? formatAccountLabel(limit, report, activeReportIndex)
+				: formatUnlimitedReportLabel(report, activeReportIndex);
+		}
+		if (activeLabel) maskInputs.push(activeLabel);
+		const mask = createAccountMasker(maskInputs, maskAccountLabels);
+		const activeAccountLabel = activeLabel ? mask(activeLabel) : "";
 		if (activeAccountLabel) {
-			lines.push(`  ${uiTheme.fg("accent", "in use by this session:")} ${activeAccountLabel}`);
+			lines.push(
+				`  ${uiTheme.fg("accent", "in use by this session:")} ${styleAccountMask(activeAccountLabel, uiTheme)}`,
+			);
 		}
 		const reportingModels = usageModelSelectors.filter(selector => selector.startsWith(`${provider}/`));
 		if (reportingModels.length > 0) {
@@ -2114,35 +2256,34 @@ export function renderUsageReports(
 		for (const report of providerReports) {
 			const count = report.resetCredits?.availableCount ?? 0;
 			if (count <= 0) continue;
-			const label =
-				typeof report.metadata?.email === "string" && report.metadata.email
-					? report.metadata.email
-					: typeof report.metadata?.accountId === "string" && report.metadata.accountId
-						? report.metadata.accountId
-						: "account";
-			const isActive =
-				!!activeAccount &&
-				((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
-					(!!activeAccount.email && activeAccount.email === report.metadata?.email));
-			resetAccountLines.push(
-				`    • ${label}: ${count} saved reset${count === 1 ? "" : "s"}${isActive ? " (active)" : ""}`,
-			);
-			const credits = report.resetCredits?.credits;
-			if (credits) {
-				for (const credit of credits) {
-					if (credit.expiresAt) {
-						const expiryMs = Date.parse(credit.expiresAt);
-						if (!Number.isNaN(expiryMs)) {
-							const remaining = expiryMs - nowMs;
-							const expiryDate = credit.expiresAt.slice(0, 10);
-							if (remaining > 0) {
-								resetAccountLines.push(`        expires in ${formatDuration(remaining)} (${expiryDate})`);
-							} else {
-								resetAccountLines.push(`        expired (${expiryDate})`);
-							}
-						}
-					}
+			const labelParts = formatResetAccountLabel(report);
+			const isActive = reportMatchesActiveAccount(report, activeAccount);
+			const suffix = `: ${count} saved reset${count === 1 ? "" : "s"}${isActive ? " (active)" : ""}`;
+			const maskedLabel = mask(labelParts);
+			const fixedWidth = visibleWidth(`    • ${suffix}`);
+			if (fixedWidth < availableWidth) {
+				const labelBudget = availableWidth - fixedWidth;
+				const label = styleAccountMask(truncateToWidth(maskedLabel, labelBudget), uiTheme);
+				resetAccountLines.push(`    • ${label}${suffix}`);
+			} else {
+				const label = styleAccountMask(truncateToWidth(maskedLabel, Math.max(1, availableWidth - 6)), uiTheme);
+				resetAccountLines.push(`    • ${label}`);
+				const compact = `${count} reset${count === 1 ? "" : "s"}${isActive ? " (active)" : ""}`;
+				for (const detail of wrapTextWithAnsi(compact, Math.max(1, availableWidth - 4))) {
+					resetAccountLines.push(`    ${detail}`);
 				}
+			}
+			for (const credit of report.resetCredits?.credits ?? []) {
+				if (!credit.expiresAt) continue;
+				const expiryMs = Date.parse(credit.expiresAt);
+				if (Number.isNaN(expiryMs)) continue;
+				const remaining = expiryMs - nowMs;
+				const expiryDate = credit.expiresAt.slice(0, 10);
+				resetAccountLines.push(
+					remaining > 0
+						? `        expires in ${formatDuration(remaining)} (${expiryDate})`
+						: `        expired (${expiryDate})`,
+				);
 			}
 		}
 		if (resetAccountLines.length > 0) {
@@ -2184,12 +2325,36 @@ export function renderUsageReports(
 			});
 			const sortedLimits = entries.map(entry => entry.limit);
 			const sortedReports = entries.map(entry => entry.report);
-			return { group, sortedLimits, sortedReports, amountText: formatAggregateAmount(sortedLimits) };
+			const aggregateAmount = formatAggregateAmount(sortedLimits);
+			// Only prefix "combined" when the aggregate is a real combined percentage
+			// (every limit has a fraction). Used-only absolute amounts yield an empty
+			// aggregate; prefixing them produced a bogus 9-char "combined " cell.
+			const allHaveFraction = sortedLimits.every(limit => resolveUsedFraction(limit) !== undefined);
+			const amountText =
+				sortedLimits.length > 1 && aggregateAmount.length > 0
+					? allHaveFraction
+						? `combined ${aggregateAmount}`
+						: aggregateAmount
+					: resolveUsedFraction(sortedLimits[0]) === undefined
+						? aggregateAmount
+						: "";
+			return { group, sortedLimits, sortedReports, amountText };
 		});
 
 		const sectionCount = renderableGroups.reduce((max, g) => Math.max(max, g.sortedLimits.length), 0);
 		const sectionTrailing = renderableGroups.reduce((max, g) => Math.max(max, visibleWidth(g.amountText)), 0);
-		const sectionColumnWidth = resolveColumnWidth(sectionCount, availableWidth, sectionTrailing);
+		const sectionColumnsPerRow = resolveColumnsPerRow(sectionCount, availableWidth, sectionTrailing);
+		const preferredColumnWidth = renderableGroups.reduce(
+			(max, g) =>
+				Math.max(max, resolveAccountHeaderWidth(g.sortedLimits, g.sortedReports, nowMs, activeAccount, mask)),
+			BAR_WIDTH_MAX,
+		);
+		const sectionColumnWidth = resolveColumnWidth(
+			sectionColumnsPerRow,
+			availableWidth,
+			sectionTrailing,
+			preferredColumnWidth,
+		);
 		const sectionBarWidth = Math.min(sectionColumnWidth, BAR_WIDTH_MAX);
 
 		for (const { group, sortedLimits, sortedReports, amountText } of renderableGroups) {
@@ -2198,19 +2363,29 @@ export function renderUsageReports(
 
 			const windowSuffix = formatWindowSuffix(group.label, group.windowLabel, uiTheme);
 			lines.push(`${statusIcon} ${uiTheme.bold(group.label)} ${windowSuffix}`.trim());
-			const accountLabels = formatAccountHeaderRow(
-				sortedLimits,
-				sortedReports,
-				nowMs,
-				sectionColumnWidth,
-				uiTheme,
-				activeAccount,
-			);
-			lines.push(`  ${accountLabels.join(" ")}`.trimEnd());
-			const bars = sortedLimits.map(limit =>
-				padColumn(renderUsageBar(limit, uiTheme, sectionBarWidth), sectionColumnWidth),
-			);
-			lines.push(`  ${bars.join(" ")} ${amountText}`.trimEnd());
+			for (let offset = 0; offset < sortedLimits.length; offset += sectionColumnsPerRow) {
+				const chunkLimits = sortedLimits.slice(offset, offset + sectionColumnsPerRow);
+				const chunkReports = sortedReports.slice(offset, offset + sectionColumnsPerRow);
+				const accountLabels = formatAccountHeaderRow(
+					chunkLimits,
+					chunkReports,
+					nowMs,
+					sectionColumnWidth,
+					uiTheme,
+					activeAccount,
+					mask,
+					offset,
+				);
+				lines.push(`  ${accountLabels.join(" ")}`.trimEnd());
+				const bars = chunkLimits.map(limit =>
+					padColumn(renderUsageBar(limit, uiTheme, sectionBarWidth, labelPlacement), sectionColumnWidth),
+				);
+				const trailingAmount =
+					offset + sectionColumnsPerRow >= sortedLimits.length
+						? ` ${truncateToWidth(amountText, Math.max(0, availableWidth - 2 - sectionColumnWidth * chunkLimits.length - chunkLimits.length))}`
+						: "";
+				lines.push(`  ${bars.join(" ")}${trailingAmount}`.trimEnd());
+			}
 			const resetText = sortedLimits.length <= 1 ? resolveResetRange(sortedLimits, nowMs) : null;
 			if (resetText) {
 				lines.push(`  ${uiTheme.fg("dim", resetText)}`.trimEnd());
@@ -2218,7 +2393,7 @@ export function renderUsageReports(
 			const notes = [...new Set(sortedLimits.flatMap(limit => limit.notes ?? []))];
 			if (notes.length > 0) {
 				lines.push(
-					`  ${uiTheme.fg("dim", replaceTabs(truncateToWidth(sanitizeText(notes.map(n => n.replace(/[\r\n]+/g, " ")).join(" • ")), 110)))}`.trimEnd(),
+					`  ${uiTheme.fg("dim", replaceTabs(truncateToWidth(sanitizeText(notes.map(n => n.replace(/[\r\n]+/g, " ")).join(" • ")), availableWidth - 2)))}`.trimEnd(),
 				);
 			}
 		}
@@ -2226,7 +2401,7 @@ export function renderUsageReports(
 		// Render accounts with no rate limits (e.g. business/enterprise plans).
 		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
 		for (const report of unlimitedReports) {
-			const label = formatUnlimitedReportLabel(report, 0);
+			const label = styleAccountMask(mask(formatUnlimitedReportLabel(report, 0)), uiTheme);
 			const tier = report.metadata?.planType;
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
 			lines.push(

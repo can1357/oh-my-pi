@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Improved `/usage` with provider/account cards, temporary privacy and account-grouping controls, and configurable quota-bar labels.
+
+### Fixed
+
+- Applied account masking consistently to text-mode and ACP `/usage` output, including reset-credit labels.
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes
@@ -609,6 +617,7 @@
 - First-use Chromium installation and browser operations no longer consume Eval's runtime timeout or reset its kernel while waiting.
 - Browser startup reuses a successful system-Chrome fallback instead of retrying an unavailable download during the same open.
 - Browser clicks and other interactions no longer stall when OMP-owned tabs are in the background, including after worker timeout recovery.
+
 
 ## [18.1.20] - 2026-09-13
 

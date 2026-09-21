@@ -1065,6 +1065,9 @@ describe("commitToBranch preserves agent commits", () => {
 		await runGit(fixtureRepo, ["init", "-q", "-b", "main"]);
 		await runGit(fixtureRepo, ["config", "user.email", "test@example.com"]);
 		await runGit(fixtureRepo, ["config", "user.name", "Test User"]);
+		// These repositories are copied immediately after commits; detached Git
+		// maintenance must not create/remove lockfiles during the filesystem copy.
+		await runGit(fixtureRepo, ["config", "maintenance.auto", "false"]);
 		await fs.writeFile(
 			path.join(fixtureRepo, "EXP_CLEAN_COMMIT.txt"),
 			"line1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\n",

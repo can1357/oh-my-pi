@@ -120,6 +120,7 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+import { createAccountMasker } from "@oh-my-pi/pi-tui/overlays/usage-mask";
 import { renderUsageReports } from "./command-controller";
 import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 
@@ -344,9 +345,9 @@ export class SelectorController {
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(
-					currentProvider,
-					this.ctx.session.sessionId,
-				)
+				currentProvider,
+				this.ctx.session.sessionId,
+			)
 			: undefined;
 		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(reports);
 		const done = () => {
@@ -356,16 +357,25 @@ export class SelectorController {
 		};
 		const dashboard = new UsageDashboardComponent({
 			reports,
-			renderDetail: width =>
+			renderDetail: (width, view) =>
 				renderUsageReports(
 					reports,
 					theme,
 					Date.now(),
 					width,
 					provider => (provider === currentProvider ? activeAccount : undefined),
-					usageModelSelectors,
+					{
+						usageModelSelectors,
+						maskAccountLabels: view.maskAccountLabels,
+						labelPlacement: this.ctx.settings.get("usage.labelPlacement"),
+					},
 				),
-			loadActivity: loadDailyActivity,
+			createMasker: createAccountMasker,
+			// Read on every open; the overlay's p/m toggles never write back.
+			maskAccountLabels: this.ctx.settings.get("usage.maskAccountLabels"),
+			mergeAccounts: this.ctx.settings.get("usage.mergeAccounts"),
+			labelPlacement: this.ctx.settings.get("usage.labelPlacement"),
+			loadActivity: (push, signal) => loadDailyActivity(push, signal),
 			requestRender: () => this.ctx.ui.requestRender(),
 			onClose: done,
 		});

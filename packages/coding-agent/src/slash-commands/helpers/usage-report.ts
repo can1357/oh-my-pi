@@ -1,11 +1,10 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
-import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
+import { type AccountLabel, createAccountMasker, usageIdentityKey } from "@oh-my-pi/pi-tui/overlays/usage-mask";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
-
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
 	if (!windowLabel) return "";
 	const normalizedLabel = label.toLowerCase();
@@ -26,7 +25,13 @@ function formatUsageAmount(limit: UsageLimit): string {
 	return `${usedText}${remainingText}`;
 }
 
-function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index: number): string {
+function formatUsageReportAccount(report: UsageReport, limit: UsageLimit | undefined, index: number): AccountLabel {
+	const accountKey = usageIdentityKey(
+		(limit?.scope ?? report.limits[0]?.scope)?.accountId || report.metadata?.accountId,
+		(limit?.scope ?? report.limits[0]?.scope)?.projectId || report.metadata?.projectId,
+		limit?.scope ?? report.limits[0]?.scope,
+		report.metadata?.orgId,
+	);
 	const metaOrgName = report.metadata?.orgName;
 	const metaOrgId = report.metadata?.orgId;
 	const org =
@@ -38,19 +43,26 @@ function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index:
 	// Two subscriptions (orgs) can share one email — suffix the org so the rows
 	// are tellable apart.
 	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return org ? `${email} (${org})` : email;
+	if (typeof email === "string" && email)
+		return { identity: email, qualifier: org ? ` (${org})` : undefined, accountKey, provider: report.provider };
 	// Guard metadata values for truthiness before using, then fall back to scope.
 	// ?? won't help here: empty string is not null/undefined, so it would suppress
 	// a valid scoped fallback (e.g. metadata.accountId="" hides limit.scope.accountId).
 	const metaAccountId = report.metadata?.accountId;
-	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit.scope.accountId;
+	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit?.scope.accountId;
 	if (typeof accountId === "string" && accountId) {
-		return org && org !== accountId ? `${accountId} (${org})` : accountId;
+		return {
+			identity: accountId,
+			qualifier: org && org !== accountId ? ` (${org})` : undefined,
+			accountKey,
+			provider: report.provider,
+		};
 	}
 	const metaProjectId = report.metadata?.projectId;
-	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
-	if (typeof projectId === "string" && projectId) return projectId;
-	return `account ${index + 1}`;
+	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit?.scope.projectId;
+	if (typeof projectId === "string" && projectId)
+		return { identity: projectId, accountKey, provider: report.provider };
+	return { identity: limit ? `account ${index + 1}` : "account", placeholder: true, provider: report.provider };
 }
 
 function renderUsageReports(
@@ -58,12 +70,20 @@ function renderUsageReports(
 	nowMs: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
+	maskAccountLabels = false,
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
-	const latestFetchedAt = Math.max(...displayReports.map(report => report.fetchedAt ?? 0));
-	const lines = [`Usage${latestFetchedAt ? ` (${formatCoarseDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
+	const accountMasker = createAccountMasker(
+		reports.flatMap(report => [
+			formatUsageReportAccount(report, undefined, 0),
+			...report.limits.map((limit, index) => formatUsageReportAccount(report, limit, index)),
+		]),
+		maskAccountLabels,
+	);
+	const displayAccount = accountMasker;
+	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
+	const lines = [`Usage${latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
 	const grouped = new Map<string, UsageReport[]>();
-	for (const report of displayReports) {
+	for (const report of reports) {
 		const providerReports = grouped.get(report.provider) ?? [];
 		providerReports.push(report);
 		grouped.set(report.provider, providerReports);
@@ -87,14 +107,9 @@ function renderUsageReports(
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
 			const savedResets = report.resetCredits?.availableCount ?? 0;
 			if (savedResets > 0) {
-				const resetLabel =
-					typeof report.metadata?.email === "string"
-						? report.metadata.email
-						: typeof report.metadata?.accountId === "string"
-							? report.metadata.accountId
-							: "account";
+				const resetLabel = formatUsageReportAccount(report, undefined, 0);
 				lines.push(
-					`- ${resetLabel}: ${savedResets} saved rate-limit reset${savedResets === 1 ? "" : "s"} available — /usage reset to spend`,
+					`- ${displayAccount(resetLabel)}: ${savedResets} saved rate-limit reset${savedResets === 1 ? "" : "s"} available — /usage reset to spend`,
 				);
 				const credits = report.resetCredits?.credits;
 				if (credits) {
@@ -104,9 +119,7 @@ function renderUsageReports(
 							if (!Number.isNaN(expiryMs)) {
 								const remaining = expiryMs - nowMs;
 								if (remaining > 0) {
-									lines.push(
-										`  expires in ${formatCoarseDuration(remaining)} (${credit.expiresAt.slice(0, 10)})`,
-									);
+									lines.push(`  expires in ${formatDuration(remaining)} (${credit.expiresAt.slice(0, 10)})`);
 								} else {
 									lines.push(`  expired (${credit.expiresAt.slice(0, 10)})`);
 								}
@@ -116,29 +129,26 @@ function renderUsageReports(
 				}
 			}
 			if (report.limits.length === 0) {
-				const email = typeof report.metadata?.email === "string" ? report.metadata.email : "account";
-				lines.push(`- ${email}: no limits reported`);
+				const account = formatUsageReportAccount(report, undefined, 0);
+				lines.push(`- ${displayAccount(account)}: no limits reported`);
 				continue;
 			}
 			for (let index = 0; index < report.limits.length; index++) {
 				const limit = report.limits[index]!;
 				const window = limit.window?.label ?? limit.scope.windowId;
-				// Skip the tier suffix when the label already names it (e.g. Anthropic's
-				// "Claude 7 Day (Fable)" with scope.tier "fable") — mirrors limitTitle in usage-cli.
 				const tier =
 					limit.scope.tier && !limit.label.toLowerCase().includes(limit.scope.tier.toLowerCase())
 						? ` (${limit.scope.tier})`
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
 				lines.push(
-					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
+					`  ${displayAccount(formatUsageReportAccount(report, limit, index))}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
 				);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
-				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
+				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs)
 					lines.push(
-						`  ${limit.window.resetLabel ?? "resets"} in ${formatCoarseDuration(limit.window.resetsAt - nowMs)}`,
+						`  ${limit.window.resetLabel ?? "resets"} in ${formatDuration(limit.window.resetsAt - nowMs)}`,
 					);
-				}
 				if (limit.notes && limit.notes.length > 0)
 					lines.push(
 						`  ${limit.notes.map(n => sanitizeText(n.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))).join(" • ")}`,
@@ -175,6 +185,7 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 				Date.now(),
 				providerId => (providerId === currentProvider ? activeAccount : undefined),
 				usageModelSelectors,
+				runtime.settings.get("usage.maskAccountLabels") === true,
 			);
 		}
 	}
