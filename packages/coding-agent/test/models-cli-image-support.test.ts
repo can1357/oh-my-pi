@@ -73,9 +73,9 @@ describe("omp models kind filtering", () => {
 		const defaults = await new Models([], TEST_CONFIG).parse(Models);
 		expect(defaults.flags.kind).toBe("chat");
 
-		const invalid = new Models(["--kind", "video"], TEST_CONFIG);
+		const invalid = new Models(["--kind", "hologram"], TEST_CONFIG);
 		await expect(invalid.parse(Models)).rejects.toThrow(
-			`Expected --kind to be one of: ${[...MODEL_KINDS, "all"].join(", ")}; got "video"`,
+			`Expected --kind to be one of: ${[...MODEL_KINDS, "all"].join(", ")}; got "hologram"`,
 		);
 	});
 

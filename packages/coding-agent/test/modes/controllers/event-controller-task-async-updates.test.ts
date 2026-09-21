@@ -22,7 +22,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
+import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -226,7 +226,7 @@ describe("EventController async update finalization", () => {
 			type: "tool_execution_end",
 			toolCallId: "tc-bash",
 			toolName: "bash",
-			result: bashResult("Backgrounded as job bash-1; result will be delivered automatically."),
+			result: bashResult(formatBackgroundNotice("bash-1")),
 			isError: false,
 		});
 

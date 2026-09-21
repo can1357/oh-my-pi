@@ -70,7 +70,7 @@ describe("hub jobs structured output rendering", () => {
 
 		expect(text).toContain("Structured output: schema valid");
 		expect(text).toContain("full payload at agent://ValidJob");
-		expect(text).toContain("fields via agent://ValidJob?q=.<field>");
+		expect(text).toContain("fields via agent://ValidJob/<field>");
 		// The truncated inline JSON block must not appear for a valid result.
 		expect(text).not.toContain("```json");
 	});
