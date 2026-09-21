@@ -415,6 +415,8 @@ export class WorkPool {
 							onProgress,
 							eventBus: this.session.eventBus,
 							subagentEventBus: this.session.subagentEventBus,
+							parentSessionId: this.session.getSessionId?.() ?? undefined,
+							parentSessionFile: this.session.getSessionFile() ?? undefined,
 							artifactsDir: this.session.getSessionFile()?.slice(0, -6),
 							maxRuntimeMs: cfgTaskMaxRuntimeMs.get(this.session.settings),
 							completionProbe: isCompletionProbeEnabled(this.session.settings, this.session.taskDepth ?? 0),
