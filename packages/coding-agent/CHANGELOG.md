@@ -6,6 +6,7 @@
 
 - Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 
+- Fixed multi-second UI freezes after every turn in long sessions caused by rescanning the whole provider context with every credential regex on each request; built-in patterns now skip text that contains none of their literal prefixes (1018 ms → 19 ms on a 716 KB context) ([#12666](https://github.com/can1357/oh-my-pi/pull/12666) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 ### Added
 
 - Added comprehensive browser tools for accessibility audits, React internals inspection, console/network monitoring, and performance tracing
