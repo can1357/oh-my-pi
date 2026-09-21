@@ -887,7 +887,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					if (output.type === "json") {
 						const formatted = formatDisplayJson(output.data, artifactPath !== undefined);
 						const label = `display[${cellDisplayTexts.length + 1}]:\n`;
-						jsonOutputs.push(formatted.detailsValue);
+						// Fully-inline values render once, in the cell box: pushing
+						// them as well makes the TUI tree repeat them (#10778).
+						// Oversized values keep the details entry (bounded preview
+						// or restored full value) for tree navigation and SDK use.
+						if (formatted.spillFullValue || formatted.previewText !== formatted.fullText) {
+							jsonOutputs.push(formatted.detailsValue);
+						}
 						cellDisplayTexts.push(`${label}${formatted.previewText}`);
 						if (formatted.spillFullValue) {
 							spilledDisplays.push({ index: jsonOutputs.length - 1, fullValue: output.data });
