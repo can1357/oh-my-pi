@@ -175,7 +175,7 @@ import {
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
-import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
+import { createSettingsAwareStreamFn, type ProviderRetryWaitInfo } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
 import { createSpeculativeToolExecutionConfig } from "./speculation/host";
@@ -3636,8 +3636,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the session drives. Wrapped in a per-provider concurrency limiter so
 		// each LLM HTTP request — not the whole subagent lifecycle — holds the
 		// slot, preventing the nested-spawn deadlock from issue #3749.
+		// Provider-internal retry backoffs (pi-ai sleeps between its own stream
+		// retries) are otherwise invisible — the UI shows a stalled turn. Relay
+		// them to the session so the TUI can show a countdown. `session` is
+		// late-bound below, so events raised before construction are dropped.
+		const providerRetryWaitObserver = {
+			onStart: (info: ProviderRetryWaitInfo) => {
+				if (hasSession) session.emitProviderRetryWait({ type: "provider_retry_wait_start", ...info });
+			},
+			onEnd: (result: { aborted: boolean }) => {
+				if (hasSession) session.emitProviderRetryWait({ type: "provider_retry_wait_end", aborted: result.aborted });
+			},
+		};
 		const settingsAwareStreamFn = wrapStreamFnWithBlobUrlFallback(
-			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
+			wrapStreamFnWithProviderConcurrency(
+				settings,
+				createSettingsAwareStreamFn(settings, undefined, providerRetryWaitObserver),
+			),
 			blobBroker,
 		);
 		const codeModeState: { namespacesInfo?: unknown } = {};

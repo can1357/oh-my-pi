@@ -2044,6 +2044,10 @@ function mapOptionsForApi<TApi extends Api>(
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
+		// Without this the hook is silently dropped here: every provider reads it
+		// off its own `OptionsForApi`, so a caller-supplied retry-wait observer
+		// never reached the retry loops that honour it.
+		providerRetryWait: options?.providerRetryWait,
 		metadata: options?.metadata,
 		taskBudget: options?.taskBudget,
 		sessionId: options?.sessionId,

@@ -46,6 +46,13 @@ export type AgentSessionEvent =
 			finalError?: string;
 			retryErrors?: RetryErrorUpdate[];
 	  }
+	/**
+	 * A provider-internal retry backoff (pi-ai's own stream retry) is sleeping.
+	 * Distinct from `auto_retry_start`: no turn has been superseded and no
+	 * assistant context is pruned — the same turn is still in flight.
+	 */
+	| { type: "provider_retry_wait_start"; delayMs: number; model: string; provider: string; api: string }
+	| { type: "provider_retry_wait_end"; aborted: boolean }
 	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
 	| { type: "retry_fallback_succeeded"; model: string; role: string }
 	| { type: "model_changed" }

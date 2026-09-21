@@ -20,6 +20,7 @@
 - Added support for buffered cloud transcription using OpenAI-compatible models
 - Added visual change detection capabilities for video processing using FFMPEG and SVG overlaying
 - Prevented LSP client from hanging when a request is aborted while waiting for a previous write
+- Fixed provider-internal retry backoffs looking like a frozen turn: pi-ai's own stream retry waits now surface as `provider_retry_wait_start`/`provider_retry_wait_end` session events, a "Provider retrying in …" status countdown, and a structured log line. Retry delays, attempt counts, and abort behaviour are unchanged.
 
 ## [18.2.7] - 2026-09-21
 

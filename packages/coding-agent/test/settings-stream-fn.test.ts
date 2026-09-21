@@ -7,12 +7,16 @@
  * OpenRouter sticky-routing / response caching behaves the same on advisor turns
  * (can1357/oh-my-pi#3639).
  */
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createSettingsAwareStreamFn } from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import {
+	createSettingsAwareStreamFn,
+	type ProviderRetryWaitInfo,
+} from "@oh-my-pi/pi-coding-agent/session/settings-stream-fn";
+import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOptions }> } {
 	const calls: Array<{ options?: SimpleStreamOptions }> = [];
@@ -244,6 +248,92 @@ describe("createSettingsAwareStreamFn", () => {
 			});
 
 			expect(calls[0]?.options?.fallbacks).toEqual([{ model: "claude-sonnet-5" }]);
+		});
+	});
+
+	describe("provider retry wait observer", () => {
+		const stubAnthropicModel = {
+			api: "anthropic-messages",
+			provider: "anthropic",
+			id: "claude-sonnet-4-5",
+		} as unknown as Model;
+
+		// The first case mocks `scheduler.wait`; the abort case needs the real one.
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		function captureObserver() {
+			const starts: ProviderRetryWaitInfo[] = [];
+			const ends: Array<{ aborted: boolean }> = [];
+			return {
+				starts,
+				ends,
+				observer: {
+					onStart: (info: ProviderRetryWaitInfo) => starts.push(info),
+					onEnd: (result: { aborted: boolean }) => ends.push(result),
+				},
+			};
+		}
+
+		it("installs a providerRetryWait that reports the wait around the real sleep", async () => {
+			const settings = Settings.isolated({});
+			const { fn: base, calls } = captureBase();
+			const { starts, ends, observer } = captureObserver();
+			const wrapped = createSettingsAwareStreamFn(settings, base, observer);
+
+			wrapped(stubAnthropicModel, stubContext, { apiKey: "k" });
+			const installed = calls[0]?.options?.providerRetryWait;
+			expect(installed).toBeDefined();
+
+			const waitSpy = mockSchedulerWaitWithClock();
+			await installed!(1234);
+
+			expect(waitSpy).toHaveBeenCalledTimes(1);
+			expect(waitSpy.mock.calls[0]?.[0]).toBe(1234);
+			expect(starts).toEqual([
+				{ delayMs: 1234, model: "claude-sonnet-4-5", provider: "anthropic", api: "anthropic-messages" },
+			]);
+			expect(ends).toEqual([{ aborted: false }]);
+		});
+
+		it("leaves a caller-supplied providerRetryWait untouched", async () => {
+			const settings = Settings.isolated({});
+			const { fn: base, calls } = captureBase();
+			const { starts, ends, observer } = captureObserver();
+			const wrapped = createSettingsAwareStreamFn(settings, base, observer);
+			const callerWaits: number[] = [];
+			const callerWait = async (delayMs: number) => {
+				callerWaits.push(delayMs);
+			};
+
+			wrapped(stubAnthropicModel, stubContext, { apiKey: "k", providerRetryWait: callerWait });
+
+			expect(calls[0]?.options?.providerRetryWait).toBe(callerWait);
+			await calls[0]?.options?.providerRetryWait?.(42);
+			expect(callerWaits).toEqual([42]);
+			// The caller owns the wait: our observer must not be told about it.
+			expect(starts).toEqual([]);
+			expect(ends).toEqual([]);
+		});
+
+		it("reports aborted:true and rethrows when the signal aborts during the wait", async () => {
+			const settings = Settings.isolated({});
+			const { fn: base, calls } = captureBase();
+			const { starts, ends, observer } = captureObserver();
+			const wrapped = createSettingsAwareStreamFn(settings, base, observer);
+
+			wrapped(stubAnthropicModel, stubContext, { apiKey: "k" });
+			const installed = calls[0]?.options?.providerRetryWait;
+			const abort = new AbortController();
+			// `scheduler.wait` has already registered its abort listener by the time
+			// the call returns, so aborting here lands mid-wait without a real timer.
+			const pending = installed!(60_000, abort.signal);
+			abort.abort();
+
+			await expect(pending).rejects.toThrow();
+			expect(starts).toHaveLength(1);
+			expect(ends).toEqual([{ aborted: true }]);
 		});
 	});
 });

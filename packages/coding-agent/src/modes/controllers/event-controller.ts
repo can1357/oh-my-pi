@@ -173,6 +173,10 @@ export class EventController {
 	// mid-retry blip or the final settle — only the retry lifecycle events
 	// (never deferred) can tell them apart.
 	#retryPending = false;
+	// Countdown for a provider-internal retry backoff. Kept out of
+	// `ctx.retryLoader` so a session-level retry overlay and this one can never
+	// clobber each other's slot.
+	#providerRetryLoader: Loader | undefined;
 	#idleCompactionTimer?: NodeJS.Timeout;
 	#idleRecapTimer?: NodeJS.Timeout;
 	// In-flight ephemeral recap turn; aborted by #cancelIdleRecap when any
@@ -272,6 +276,8 @@ export class EventController {
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
+			provider_retry_wait_start: e => this.#handleProviderRetryWaitStart(e),
+			provider_retry_wait_end: e => this.#handleProviderRetryWaitEnd(e),
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
 			retry_fallback_succeeded: e => this.#handleRetryFallbackSucceeded(e),
 			ttsr_triggered: e => this.#handleTtsrTriggered(e),
@@ -2266,6 +2272,50 @@ export class EventController {
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.statusContainer.addChild(this.ctx.retryLoader);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * A provider-internal retry backoff started. This is a pause inside the SAME
+	 * turn — pi-ai will re-issue the request itself — so unlike
+	 * `#handleAutoRetryStart` it must not set `#retryPending`, retract synthetic
+	 * failure cards, or touch the pinned error: nothing has been superseded.
+	 * Only the status line changes, so the wait stops looking like a freeze.
+	 */
+	async #handleProviderRetryWaitStart(
+		event: Extract<AgentSessionEvent, { type: "provider_retry_wait_start" }>,
+	): Promise<void> {
+		// A session-level retry/compaction overlay owns the status container and
+		// carries the more important message; leave it alone.
+		if (this.ctx.retryLoader || this.ctx.autoCompactionLoader) return;
+		this.#providerRetryLoader?.stop();
+		this.#stopWorkingLoader();
+		this.ctx.statusContainer.disposeChildren();
+		const waitStartMs = Date.now();
+		this.#providerRetryLoader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("warning", spinner),
+			text => theme.fg("muted", text),
+			() => {
+				const remaining = Math.max(0, event.delayMs - (Date.now() - waitStartMs));
+				return `Provider retrying in ${formatDuration(remaining)}…`;
+			},
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(this.#providerRetryLoader);
+		this.ctx.ui.requestRender();
+	}
+
+	async #handleProviderRetryWaitEnd(
+		_event: Extract<AgentSessionEvent, { type: "provider_retry_wait_end" }>,
+	): Promise<void> {
+		if (!this.#providerRetryLoader) return;
+		this.#providerRetryLoader.stop();
+		this.#providerRetryLoader = undefined;
+		this.ctx.statusContainer.disposeChildren();
+		// The turn never ended: put "Working…" back so the stream keeps its
+		// indicator whether the retry succeeds or the wait was aborted.
+		this.#ensureWorkingLoaderWhileStreaming();
 		this.ctx.ui.requestRender();
 	}
 
