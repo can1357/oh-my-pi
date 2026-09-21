@@ -207,6 +207,24 @@ async function loadImpl<T>(
 	const equivalent = capability.equivalent;
 
 	for (const item of allItems) {
+		// Attachments are additive satellites of a survivor: they never claim a
+		// dedup key or consume a scope slot, and they survive only when the item
+		// they attach to survived (suppressed attachments never survive).
+		// Providers emit an attachment after its base in the same item list, so
+		// the base is already resolved here.
+		const attachTo = capability.attachTo?.(item);
+		if (attachTo !== undefined && !suppressedItems.has(item)) {
+			const attached =
+				capability.attachmentId !== undefined &&
+				deduped.some(survivor => !disabledItems.has(survivor) && capability.attachmentId?.(survivor) === attachTo);
+			if (attached) {
+				deduped.push(item);
+			} else {
+				item._shadowed = true;
+			}
+			continue;
+		}
+
 		const key = capability.key(item);
 
 		if (disabledItems.has(item)) {
@@ -253,6 +271,7 @@ async function loadImpl<T>(
 
 	// Validate items (only non-shadowed items)
 	if (capability.validate && !options.includeInvalid) {
+		const splicedIdentities = new Set<string>();
 		for (let i = deduped.length - 1; i >= 0; i--) {
 			const error = capability.validate(deduped[i]);
 			if (error) {
@@ -260,7 +279,20 @@ async function loadImpl<T>(
 				allWarnings.push(
 					`[${source?.providerName ?? "unknown"}] Invalid item at ${source?.path ?? "unknown"}: ${error}`,
 				);
+				const identity = capability.attachmentId?.(deduped[i]);
+				if (identity !== undefined) splicedIdentities.add(identity);
 				deduped.splice(i, 1);
+			}
+		}
+		// A spliced item is no longer a survivor: drop its attachments too so
+		// the "attachment survives only with its base" invariant stays total.
+		if (splicedIdentities.size > 0) {
+			for (let i = deduped.length - 1; i >= 0; i--) {
+				const attachTo = capability.attachTo?.(deduped[i]);
+				if (attachTo !== undefined && splicedIdentities.has(attachTo)) {
+					(deduped[i] as T & { _source: SourceMeta; _shadowed?: boolean })._shadowed = true;
+					deduped.splice(i, 1);
+				}
 			}
 		}
 	}

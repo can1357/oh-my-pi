@@ -681,6 +681,14 @@ function isWithin(parent: string, child: string): boolean {
 }
 
 /**
+ * Name of the gitignored local overlay for a context file:
+ * `AGENTS.md` → `AGENTS.local.md`, `CLAUDE.md` → `CLAUDE.local.md`.
+ */
+export function toLocalSiblingName(fileName: string): string {
+	return fileName.replace(/\.md$/, ".local.md");
+}
+
+/**
  * Load standalone context files (e.g. AGENTS.md, CLAUDE.md) by walking up from
  * cwd. Shared across providers whose files live in project root rather than
  * config directories (which their own providers handle).
@@ -736,6 +744,22 @@ export async function loadStandaloneContextFiles(
 						depth: calculatedDepth,
 						_source: createSourceMeta(providerId, candidate, "project"),
 					});
+
+					// Gitignored local overlay (e.g. AGENTS.local.md next to
+					// AGENTS.md): attached to the base item, so it loads only when
+					// the base survived shadowing. Empty files contribute nothing.
+					const localCandidate = path.join(current, toLocalSiblingName(fileName));
+					const localContent = await readFile(localCandidate);
+					if (localContent !== null && localContent !== "") {
+						items.push({
+							path: localCandidate,
+							content: localContent,
+							level: "project",
+							depth: calculatedDepth,
+							localSiblingOf: candidate,
+							_source: createSourceMeta(providerId, localCandidate, "project"),
+						});
+					}
 				}
 			}
 		}
