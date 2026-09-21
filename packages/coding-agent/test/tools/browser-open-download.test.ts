@@ -16,7 +16,8 @@ import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supe
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import * as launch from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import { ToolAbortError, ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();

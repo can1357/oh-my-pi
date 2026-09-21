@@ -87,10 +87,6 @@ export function clearGitLabDuoDirectAccessCache(): void {
 	directAccessCache.clear();
 }
 
-export function isGitLabDuoModel(model: Model<Api>): boolean {
-	return model.provider === "gitlab-duo";
-}
-
 export function streamGitLabDuo(
 	model: Model<Api>,
 	context: Context,

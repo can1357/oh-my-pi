@@ -3,6 +3,28 @@
 provider "xai" {
 	default-model "grok-4.6"
 	env "XAI_API_KEY"
+	kind-apis {
+		image "openai-images"
+		tts "xai-tts"
+	}
+	web-search "xai"
+
+	seed api="xai-tts" base-url="https://api.x.ai/v1" bundle="always" {
+		model "grok-tts" name="Grok TTS" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "grok-imagine-image" {
+		kind "image"
+	}
+	models "grok-tts" {
+		kind "tts"
+	}
 
 	// Replaces the provider-keyed prompt-cache session-header baseline.
 	prompt-cache-session-header "x-grok-conv-id"

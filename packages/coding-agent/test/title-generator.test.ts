@@ -4,6 +4,8 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
@@ -11,10 +13,10 @@ import {
 	setExtensionTerminalTitle,
 	setSessionTerminalTitle,
 	setTerminalTitle,
+	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
-import { isConPTYHosted } from "@oh-my-pi/pi-tui";
-import { logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
 function getModelOrThrow(id: string): Model<Api> {
@@ -29,24 +31,13 @@ function getModelFor(provider: GeneratedProvider, id: string): Model<Api> {
 	return model;
 }
 
-function createSettings(model: Model<Api>, tinyModel = "online") {
-	return {
-		get(path: string) {
-			if (path === "providers.tinyModel") return tinyModel;
-			return undefined;
-		},
-		getModelRole(role: string) {
-			return role === "smol" ? `${model.provider}/${model.id}` : undefined;
-		},
-		getStorage() {
-			return undefined;
-		},
-	} as never;
+function createSettings(model: Model<Api>): Settings {
+	return Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
 }
 
-function createRegistry(model: Model<Api>) {
+function createRegistry(model: Model<Api>, availableModels: Model<Api>[] = [model]) {
 	return {
-		getAvailable: () => [model],
+		getAvailable: () => availableModels,
 		getApiKey: async () => "test-key",
 		getApiKeyForProvider: async () => "test-key",
 		authStorage: { rotateSessionCredential: async () => false },
@@ -82,6 +73,45 @@ describe("title generator", () => {
 		expect(options?.disableReasoning).toBe(true);
 		const messages = completeSimpleMock.mock.calls[0]?.[1].messages;
 		expect(messages?.map(message => message.role)).toEqual(["user"]);
+	});
+
+	it("selects an available local-inference model from the tiny role", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const paidModel = getModelOrThrow("claude-haiku-4-5");
+		const settings = createSettings(localModel);
+		const registry = createRegistry(localModel, [localModel, paidModel]);
+		const generateMock = vi.spyOn(tinyTitleClient, "generate").mockResolvedValue("Local Title");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
+
+		const title = await generateSessionTitle("Investigate the resolver", registry, settings);
+
+		expect(title).toBe("Local Title");
+		expect(generateMock).toHaveBeenCalledWith(localModel.id, "Investigate the resolver");
+		expect(completeSimpleMock).not.toHaveBeenCalled();
+	});
+
+	it("never falls back to a paid title model when local inference fails", async () => {
+		const localModel = getBundledModel("local", "lfm2.5-230m");
+		if (!localModel) throw new Error("Expected bundled local tiny model");
+		const paidModel = getModelOrThrow("claude-haiku-4-5");
+		const settings = createSettings(localModel);
+		const registry = createRegistry(localModel, [localModel, paidModel]);
+		vi.spyOn(tinyTitleClient, "generate").mockResolvedValue(null);
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
+
+		const title = await generateSessionTitle("Investigate the resolver", registry, settings);
+
+		expect(title).toBeNull();
+		expect(completeSimpleMock).not.toHaveBeenCalled();
 	});
 
 	it("prefills the title marker as a trailing assistant turn for Ollama-hosted models", async () => {
@@ -259,7 +289,11 @@ describe("title generator", () => {
 
 	it("defers titling for a greeting without invoking the model", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
 
 		const title = await generateSessionTitle("hi", createRegistry(model), createSettings(model));
 
@@ -320,7 +354,11 @@ describe("title generator", () => {
 
 	it("logs and returns null when title credentials are missing", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 		const title = await generateSessionTitle(
@@ -348,7 +386,11 @@ describe("title generator", () => {
 
 	it("logs and returns null when title credential lookup throws", async () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "error",
+			errorMessage: "unexpected remote fallback",
+			content: [],
+		} as never);
 		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
 
 		const title = await generateSessionTitle(
@@ -403,23 +445,16 @@ describe("title generator", () => {
 				authStorage: { rotateSessionCredential: async () => false },
 				resolver: () => async () => "test-key",
 			} as never,
-			{
-				get(path: string) {
-					if (path === "providers.tinyModel") return "online";
-					if (path === "retry.modelFallback") return true;
-					if (path === "retry.fallbackChains")
-						return { [`${primary.provider}/${primary.id}`]: [`${fallback.provider}/${fallback.id}`] };
-					return undefined;
+			Settings.isolated({
+				modelRoles: {
+					tiny: `${primary.provider}/${primary.id}`,
+					smol: `${fallback.provider}/${fallback.id}`,
 				},
-				getModelRole(role: string) {
-					if (role === "tiny") return `${primary.provider}/${primary.id}`;
-					if (role === "smol") return `${fallback.provider}/${fallback.id}`;
-					return undefined;
+				"retry.modelFallback": true,
+				"retry.fallbackChains": {
+					[`${primary.provider}/${primary.id}`]: [`${fallback.provider}/${fallback.id}`],
 				},
-				getStorage() {
-					return undefined;
-				},
-			} as never,
+			}),
 			"session-abort",
 			undefined,
 			undefined,
@@ -588,21 +623,13 @@ describe("title generator", () => {
 		} as never);
 
 		// Case 1: All three roles configured. 'tiny' should be used.
-		let currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
+		let currentSettings = Settings.isolated({
+			modelRoles: {
+				tiny: `${tinyModel.provider}/${tinyModel.id}`,
+				commit: `${commitModel.provider}/${commitModel.id}`,
+				smol: `${smolModel.provider}/${smolModel.id}`,
 			},
-			getModelRole(role: string) {
-				if (role === "tiny") return `${tinyModel.provider}/${tinyModel.id}`;
-				if (role === "commit") return `${commitModel.provider}/${commitModel.id}`;
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		});
 
 		const registry = {
 			getAvailable: () => [tinyModel, commitModel, smolModel],
@@ -619,20 +646,12 @@ describe("title generator", () => {
 		mockComplete.mockClear();
 
 		// Case 2: 'tiny' role not configured, 'commit' and 'smol' configured. 'commit' should be used.
-		currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
+		currentSettings = Settings.isolated({
+			modelRoles: {
+				commit: `${commitModel.provider}/${commitModel.id}`,
+				smol: `${smolModel.provider}/${smolModel.id}`,
 			},
-			getModelRole(role: string) {
-				if (role === "commit") return `${commitModel.provider}/${commitModel.id}`;
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		});
 
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
@@ -641,19 +660,9 @@ describe("title generator", () => {
 		mockComplete.mockClear();
 
 		// Case 3: Only 'smol' role configured. 'smol' should be used.
-		currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
-			},
-			getModelRole(role: string) {
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		currentSettings = Settings.isolated({
+			modelRoles: { smol: `${smolModel.provider}/${smolModel.id}` },
+		});
 
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
@@ -705,20 +714,10 @@ describe("title generator", () => {
 				content: [{ type: "text", text: "<title>Routed Recovery</title>" }],
 			} as never;
 		});
-		const settings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				if (path === "retry.modelFallback") return true;
-				return undefined;
-			},
-			getModelRole(role: string) {
-				if (role === "tiny") return "openrouter/google/gemini-2.5-flash@cerebras";
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		const settings = Settings.isolated({
+			modelRoles: { tiny: "openrouter/google/gemini-2.5-flash@cerebras" },
+			"retry.modelFallback": true,
+		});
 		const registry = {
 			getAvailable: () => [base],
 			getApiKey: async () => "test-key",
@@ -754,27 +753,15 @@ describe("title generator", () => {
 				content: [{ type: "text", text: `<title>From ${model.id}</title>` }],
 			} as never;
 		});
-		const settings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				if (path === "retry.modelFallback") return true;
-				if (path === "retry.fallbackChains") {
-					return {
-						[`${current.provider}/${current.id}`]: [`${currentFallback.provider}/${currentFallback.id}`],
-						// Role/default chains must not be merged onto the appended current model.
-						tiny: [`${roleOnly.provider}/${roleOnly.id}`],
-						default: [`${roleOnly.provider}/${roleOnly.id}`],
-					};
-				}
-				return undefined;
+		const settings = Settings.isolated({
+			"retry.modelFallback": true,
+			"retry.fallbackChains": {
+				[`${current.provider}/${current.id}`]: [`${currentFallback.provider}/${currentFallback.id}`],
+				// Role/default chains must not be merged onto the appended current model.
+				tiny: [`${roleOnly.provider}/${roleOnly.id}`],
+				default: [`${roleOnly.provider}/${roleOnly.id}`],
 			},
-			getModelRole() {
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		});
 		const registry = {
 			getAvailable: () => [current, currentFallback, roleOnly],
 			getApiKey: async () => "test-key",
@@ -807,23 +794,13 @@ describe("title generator", () => {
 				content: [{ type: "text", text: "<title>Recovered Title</title>" }],
 			} as never;
 		});
-		const settings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				if (path === "retry.fallbackChains") {
-					return { [`${smolModel.provider}/${smolModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`] };
-				}
-				if (path === "retry.modelFallback") return enabled;
-				return undefined;
+		const settings = Settings.isolated({
+			modelRoles: { smol: `${smolModel.provider}/${smolModel.id}` },
+			"retry.fallbackChains": {
+				[`${smolModel.provider}/${smolModel.id}`]: [`${fallbackModel.provider}/${fallbackModel.id}`],
 			},
-			getModelRole(role: string) {
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+			"retry.modelFallback": enabled,
+		});
 		const registry = {
 			getAvailable: () => [smolModel, fallbackModel],
 			getApiKey: async () => "test-key",
@@ -854,7 +831,7 @@ describe("title generator", () => {
 
 // The terminal title runtime is a module-global. `emitTerminalTitle()` composes
 // the emitted OSC title from three inputs — an extension override, a run-state
-// separator (spinner frame, static Windows `:`, `>`, or `!` between the `π`
+// separator (spinner frame, static WSL `:`, `>`, or `!` between the `π`
 // brand and the session label), and the session label — and writes it to
 // `process.stdout` as `ESC]0;<title>BEL`. These tests pin the observable
 // contract at that sink: what string actually reaches the terminal after a
@@ -872,13 +849,12 @@ const OSC_TITLE_RE = /\x1b\]0;([\s\S]*?)\x07/;
 // private TITLE_SPINNER_FRAMES); a clobbered override would surface one of these.
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-// The `working` separator is a spinner frame everywhere except ConPTY hosts
-// (native Windows and WSL), where the title is static `:` because no interval is
-// ever scheduled. Assert the separator the host actually renders instead of
-// skipping the platform: the contract under test — the override was released, so
-// the run state drives the title again — holds identically on both.
+// The `working` separator is a spinner frame everywhere except WSL, where the title is
+// static `:` because no interval is ever scheduled. Assert the separator the host actually
+// renders instead of skipping the platform: the contract under test — the override was
+// released, so the run state drives the title again — holds identically on both.
 function expectWorkingSeparator(title: string | undefined, label: string): void {
-	if (isConPTYHosted()) expect(title).toBe(`π : ${label}`);
+	if (isWsl()) expect(title).toBe(`π : ${label}`);
 	else expect(SPINNER_FRAMES.some(frame => title?.includes(frame))).toBe(true);
 }
 
@@ -889,10 +865,17 @@ describe("terminal title runtime", () => {
 	let ttyDescriptor: PropertyDescriptor | undefined;
 	let windowsTitleMock: WindowsConsoleTitleMock | undefined;
 
-	// Titles emitted (newest last) since the last reset of `writes`; used across
-	// every assertion, so the OSC extraction lives here rather than at each site.
+	// Titles emitted (newest last) since the last reset of `writes` and the native
+	// mock; this win32 host drives the native `SetConsoleTitleW` sink, so OSC-only
+	// extraction would observe nothing — include both sinks.
 	function emittedTitles(): string[] {
-		return writes.map(payload => OSC_TITLE_RE.exec(payload)?.[1]).filter((t): t is string => t !== undefined);
+		const osc = writes.map(payload => OSC_TITLE_RE.exec(payload)?.[1]);
+		return [...osc, ...(windowsTitleMock?.titles ?? [])].filter((t): t is string => t !== undefined);
+	}
+
+	function resetEmitted(): void {
+		writes.length = 0;
+		if (windowsTitleMock) windowsTitleMock.titles.length = 0;
 	}
 
 	beforeEach(() => {
@@ -906,6 +889,7 @@ describe("terminal title runtime", () => {
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
 
 		windowsTitleMock = mockWindowsConsoleTitle();
+		windowsTitleMock.succeeds = true;
 		writes = [];
 		stdoutSpy = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
 			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
@@ -922,6 +906,7 @@ describe("terminal title runtime", () => {
 
 		// Discard the reset's own emissions; each test asserts only its own writes.
 		writes.length = 0;
+		windowsTitleMock.titles.length = 0;
 	});
 
 	afterEach(() => {
@@ -943,8 +928,8 @@ describe("terminal title runtime", () => {
 		// spinner prefix. The override wins verbatim.
 		setExtensionTerminalTitle("Deploying prod");
 		expect(emittedTitles().at(-1)).toBe("Deploying prod");
-
-		writes.length = 0;
+		// The `beforeEach` reset already cleared the sync-setup emissions observed
+		// above; no re-reset — the state flips below must not move off the override.
 		setTerminalTitleState("working");
 		setTerminalTitleState("attention");
 		setTerminalTitleState("idle");
@@ -962,7 +947,7 @@ describe("terminal title runtime", () => {
 		// the override. This exercises the timer-driven emission path, not just
 		// the synchronous state setter.
 		setExtensionTerminalTitle("Long extension task");
-		writes.length = 0;
+		resetEmitted();
 
 		// Enter `working` to start the spinner interval, then advance the fake
 		// clock across several tick intervals (interval is 80ms).
@@ -979,7 +964,7 @@ describe("terminal title runtime", () => {
 		// CONTRACT: `setSessionTerminalTitle` supersedes any extension override —
 		// the emitted title tracks the real session, not the stale override.
 		setExtensionTerminalTitle("Stale extension title");
-		writes.length = 0;
+		resetEmitted();
 
 		setSessionTerminalTitle("my-session");
 
@@ -994,22 +979,36 @@ describe("terminal title runtime", () => {
 		setTerminalTitle("direct title");
 
 		expect(emittedTitles()).toEqual(["direct title"]);
-		expect(writes).toHaveLength(1);
+		// Sink-specific: the native mock only fires on win32
+		// (`getWindowsConsoleTitleApi` returns null elsewhere), so OSC is the
+		// sink on Linux/macOS. Exactly one sink fires once either way.
+		if (process.platform === "win32") {
+			expect(writes).toHaveLength(0);
+			expect(windowsTitleMock?.titles).toEqual(["direct title"]);
+		} else {
+			expect(writes).toHaveLength(1);
+			expect(windowsTitleMock?.titles ?? []).toEqual([]);
+		}
 	});
 
-	it("keeps the working title static with ':' on Windows", () => {
+	it("animates the working title on Windows", () => {
 		const originalPlatform = process.platform;
 		try {
 			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			setTerminalTitleSpinnerStyle("line");
+			setTerminalTitleSpinnerStyle("braille");
 			setSessionTerminalTitle("windows-project");
-			writes.length = 0;
+			resetEmitted();
 
 			setTerminalTitleState("working");
-			expect(emittedTitles()).toEqual(["π : windows-project"]);
+			expect(emittedTitles()).toEqual(["π ⠋ windows-project"]);
 
-			writes.length = 0;
-			vi.advanceTimersByTime(400);
-			expect(writes).toEqual([]);
+			resetEmitted();
+			vi.advanceTimersByTime(160);
+			const titles = emittedTitles();
+			expect(titles.length).toBeGreaterThan(0);
+			expect(titles.every(title => SPINNER_FRAMES.some(frame => title.includes(frame)))).toBe(true);
+			expect(titles.some(title => title !== "π ⠋ windows-project")).toBe(true);
 		} finally {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}
@@ -1022,14 +1021,14 @@ describe("terminal title runtime", () => {
 			Object.defineProperty(process, "platform", { value: "linux", configurable: true });
 			process.env.WSL_DISTRO_NAME = "Ubuntu";
 			setSessionTerminalTitle("wsl-project");
-			writes.length = 0;
+			resetEmitted();
 
 			setTerminalTitleState("working");
 			expect(emittedTitles()).toEqual(["π : wsl-project"]);
 
-			writes.length = 0;
+			resetEmitted();
 			vi.advanceTimersByTime(400);
-			expect(writes).toEqual([]);
+			expect(emittedTitles()).toEqual([]);
 		} finally {
 			if (originalWslDistro === undefined) delete process.env.WSL_DISTRO_NAME;
 			else process.env.WSL_DISTRO_NAME = originalWslDistro;
@@ -1054,6 +1053,58 @@ describe("terminal title runtime", () => {
 		}
 	});
 
+	it("falls back to OSC verbatim when a direct title fails the native path on Windows", () => {
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			native.succeeds = false;
+			resetEmitted();
+
+			setTerminalTitle("custom direct");
+
+			// The caller's own title is the OSC fallback — not the composed session
+			// state — and the interval is pinned off for later working frames.
+			expect(emittedTitles()).toEqual(["custom direct"]);
+			expect(windowsTitleMock?.titles).toEqual([]);
+			setTerminalTitleState("working");
+			resetEmitted();
+			vi.advanceTimersByTime(400);
+			expect(emittedTitles()).toEqual([]);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
+	it("pins the working title static when the native path fails mid-spinner on Windows", () => {
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			native.succeeds = true;
+			resetEmitted();
+			setSessionTerminalTitle("windows-project");
+			setTerminalTitleState("working");
+			resetEmitted();
+			// Fail the NEXT native write mid-spinner: the failing animated frame
+			// must collapse to the static `:` separator over OSC, not emit OSC
+			// animation, and the interval must stop so no later frame ticks.
+			native.succeeds = false;
+			setSessionTerminalTitle("windows-project-2");
+
+			expect(emittedTitles().at(-1)).toBe("π : windows-project-2");
+			expect(vi.getTimerCount()).toBe(0);
+			resetEmitted();
+			vi.advanceTimersByTime(400);
+			expect(emittedTitles()).toEqual([]);
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
 	it("releases the override when an extension sets an empty title", () => {
 		// CONTRACT: `setTitle("")` is the obvious way an extension author clears a
 		// title, so an empty override must RELEASE ownership back to the run-state
@@ -1061,7 +1112,7 @@ describe("terminal title runtime", () => {
 		// title is stranded at the bare brand and the run state can never show again.
 		setSessionTerminalTitle("my-session");
 		setExtensionTerminalTitle("Deploying prod");
-		writes.length = 0;
+		resetEmitted();
 
 		setExtensionTerminalTitle("");
 
@@ -1079,7 +1130,7 @@ describe("terminal title runtime", () => {
 		// `setSessionTerminalTitle` again.
 		setSessionTerminalTitle("my-session");
 		setExtensionTerminalTitle("");
-		writes.length = 0;
+		resetEmitted();
 
 		setTerminalTitleState("working");
 
@@ -1097,7 +1148,7 @@ describe("terminal title runtime", () => {
 		// the run state exactly as `""` did.
 		setSessionTerminalTitle("my-session");
 		setExtensionTerminalTitle("   ");
-		writes.length = 0;
+		resetEmitted();
 
 		setTerminalTitleState("working");
 

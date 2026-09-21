@@ -23,6 +23,29 @@ export type KnownApi =
 	| "devin-agent";
 export type Api = KnownApi | (string & {});
 
+/** Catalog kinds used to isolate role-specific runners from session chat models. */
+export const MODEL_KINDS = ["chat", "tiny", "image", "tts", "stt", "search", "judge"] as const;
+/** Technical capability of a catalog model; absent model kinds mean chat. */
+export type ModelKind = (typeof MODEL_KINDS)[number];
+/** Grounding transport available to chat models selected by the web role. */
+export type WebSearchGrounding = "gemini" | "anthropic" | "codex" | "xai" | "openrouter";
+/** Non-chat runner protocols accepted by catalog seeds, outside the chat dispatch union. */
+export const RUNNER_APIS = [
+	"local-inference",
+	"web-search",
+	"typesafe",
+	"openrouter-decisions",
+	"openai-images",
+	"openrouter-images",
+	"xai-tts",
+	"openai-speech",
+] as const;
+
+/** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
+export function modelKind(model: Pick<Model, "kind">): ModelKind {
+	return model.kind ?? "chat";
+}
+
 /** Canonical thinking transport used by a model. */
 export type ThinkingControlMode =
 	| "effort"
@@ -1125,6 +1148,10 @@ export type ModelTokenizer =
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
+	/** Role-specific runner capability; omitted for ordinary chat models. */
+	kind?: ModelKind;
+	/** Grounding transport supported by this chat model. */
+	webSearch?: WebSearchGrounding;
 	/**
 	 * Structured model identity resolved by the compat engine: vendor lineage
 	 * class, product family, and revision. Baked into models.json rows and
@@ -1167,6 +1194,12 @@ export interface Model<TApi extends Api = Api> {
 	name: string;
 	api: TApi;
 	provider: Provider;
+	/**
+	 * Discovery backend whose catalog policy applies when it differs from the
+	 * credential-bearing provider id. Persisted so cached and rebuilt custom
+	 * providers retain their transport backend's policy.
+	 */
+	providerType?: string;
 	baseUrl: string;
 	reasoning: boolean;
 	/**
@@ -1196,6 +1229,16 @@ export interface Model<TApi extends Api = Api> {
 	gitlabDuoWorkflowRootNamespaceId?: string;
 	/** Cursor `max_mode` request flag returned by `GetUsableModels` for premium models that require max mode. */
 	cursorMaxMode?: boolean;
+	/**
+	 * Per-wire-id `max_mode` markers for the members a collapsed Cursor row
+	 * routes to, recorded by `collapseVariants` from live `GetUsableModels`
+	 * rows. {@link cursorMaxMode} on a collapsed row is an OR across members,
+	 * so it cannot tell a `-low` route that needs no max mode from an Opus
+	 * `-fast` route that does; transports look the routed wire id up here
+	 * first. Absent on raw rows (their own `cursorMaxMode` already describes
+	 * their single wire id) and on bundled snapshots that predate discovery.
+	 */
+	cursorMaxModeRoutes?: Readonly<Record<string, boolean>>;
 	cost: ModelCost;
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
@@ -1216,6 +1259,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	omitMaxOutputTokens?: boolean;
 	headers?: Record<string, string>;
+	/**
+	 * Materialize config-backed headers immediately before a request. Catalog
+	 * inspection never invokes this hook; transports receive a cloned model
+	 * whose `headers` is a plain resolved record and whose hook is removed.
+	 */
+	resolveHeaders?: (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
 	/**
 	 * Streaming transport override. When `"pi-native"`, `streamSimple` routes
 	 * the request to the model's `baseUrl` via the auth-gateway's

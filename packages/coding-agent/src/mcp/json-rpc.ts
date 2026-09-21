@@ -4,6 +4,7 @@
  * Lightweight utilities for calling MCP servers directly via HTTP
  * without maintaining persistent connections.
  */
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, readSseEvents } from "@oh-my-pi/pi-utils";
 import type { JsonRpcResponse } from "./types";
 
@@ -141,6 +142,14 @@ export async function readMcpJsonRpcResponse(
 /** Options controlling a single MCP JSON-RPC HTTP request. */
 export interface CallMcpOptions {
 	signal?: AbortSignal;
+	/** Transport override; defaults to global `fetch`. */
+	fetch?: FetchImpl;
+	/** Extra request headers merged over the JSON-RPC defaults. */
+	headers?: Record<string, string>;
+	/** Map a non-2xx response (body already read) to the error thrown. */
+	onHttpError?: (response: Response, body: string) => Error;
+	/** Map a malformed/unmatched JSON-RPC response to the error thrown. */
+	onParseError?: (error: unknown) => Error;
 }
 
 /**
@@ -164,19 +173,23 @@ export async function callMCP(
 		method,
 		params: params ?? {},
 	};
-
 	const signal = options?.signal ?? AbortSignal.timeout(MCP_DEFAULT_TIMEOUT_MS);
-	const response = await fetch(url, {
+
+	const response = await (options?.fetch ?? fetch)(url, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
+			...options?.headers,
 		},
 		body: JSON.stringify(body),
 		signal,
 	});
 
 	if (!response.ok) {
+		if (options?.onHttpError) {
+			throw options.onHttpError(response, await response.text());
+		}
 		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
 		logger.error(errorMsg, { url: redactUrlForLog(url), method, params });
 		throw new Error(errorMsg);
@@ -190,6 +203,6 @@ export async function callMCP(
 			method,
 			error: error instanceof Error ? error.message : String(error),
 		});
-		throw error;
+		throw options?.onParseError?.(error) ?? error;
 	}
 }

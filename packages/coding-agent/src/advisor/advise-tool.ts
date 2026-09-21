@@ -1,4 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
+import { type AdvisorSeverity, type AdvisorNote } from "@oh-my-pi/pi-tui/chat/messages";
+export { type AdvisorSeverity, type AdvisorNote, type AdvisorMessageDetails } from "@oh-my-pi/pi-tui/chat/messages";
 import type {
 	AgentIdentity,
 	AgentTelemetryConfig,
@@ -20,26 +22,11 @@ const adviseSchema = type({
 
 export type AdviseParams = typeof adviseSchema.infer;
 
-export type AdvisorSeverity = "nit" | "concern" | "blocker";
-
 export interface AdviseDetails {
 	note: string;
 	severity?: AdvisorSeverity;
 	/** Which configured advisor produced this note (omitted for the default advisor). */
 	advisor?: string;
-}
-
-/** One queued advice note. */
-export interface AdvisorNote {
-	note: string;
-	severity?: AdvisorSeverity;
-	/** Which configured advisor produced this note (omitted for the default advisor). */
-	advisor?: string;
-}
-
-/** Details payload on the batched `advisor` custom message rendered in the transcript. */
-export interface AdvisorMessageDetails {
-	notes: AdvisorNote[];
 }
 
 /**
@@ -93,16 +80,18 @@ export function isAdvisorInterruptImmuneTurnActive(opts: {
  *
  * - A `preserveOnly` caller records every note that arrives while the primary
  *   is idle as a visible card and never starts a new primary turn.
- * - A non-interrupting `nit` always rides the non-interrupting aside queue.
+ * - A non-interrupting `nit` rides the non-interrupting aside queue while
+ *   streaming, or is preserved as a visible card when idle after a terminal answer.
  * - An interrupting `concern`/`blocker` is normally steered into the agent: into
  *   the live turn while one is streaming, or (when idle) a triggered turn so the
  *   advice is acted on immediately.
  * - If the primary tail is already a terminal text answer and there is no queued
- *   work, a late `concern` is preserved as a visible card instead of waking the
- *   primary to restate completion. A `blocker` is the exception: it means the
- *   agent handed off broken or unexercised work, so it still steers a triggered
- *   turn to force the primary to acknowledge and continue before the turn is
- *   considered done (#5628) — deferring it to the next user turn is the bug.
+ *   work, late non-blocker advice (a `nit` or `concern`) is preserved as a visible
+ *   card instead of waking the primary to restate completion. A `blocker` is the
+ *   exception: it means the agent handed off broken or unexercised work, so it
+ *   still steers a triggered turn to force the primary to acknowledge and continue
+ *   before the turn is considered done (#5628) — deferring it to the next user
+ *   turn is the bug.
  * - After a deliberate user interrupt (`autoResumeSuppressed`) the advisor must
  *   not auto-resume the stopped run. While the agent is idle — or still tearing
  *   the interrupted turn down (`aborting`) — the note is preserved as a visible
@@ -126,10 +115,10 @@ export function resolveAdvisorDeliveryChannel(opts: {
 	preserveOnly?: boolean;
 }): AdvisorDeliveryChannel {
 	if (opts.preserveOnly && !opts.streaming) return "preserve";
-	if (!isInterruptingSeverity(opts.severity)) return "aside";
-	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
 	if (opts.terminalAnswerNoQueuedWork && opts.severity !== "blocker" && !opts.streaming && !opts.aborting)
 		return "preserve";
+	if (!isInterruptingSeverity(opts.severity)) return "aside";
+	if (opts.autoResumeSuppressed && (opts.aborting || !opts.streaming)) return "preserve";
 	if (opts.interruptImmuneTurnActive && opts.severity !== "blocker") return "aside";
 	return "steer";
 }
@@ -174,37 +163,16 @@ function advisorSeverityRank(severity: AdvisorSeverity | undefined): number {
 	return ADVISOR_SEVERITY_RANK[severity ?? "nit"];
 }
 
-/**
- * Live admission: the guard accepted the note and handed it to the session's
- * delivery routing. That is the whole truthful claim — `onAdvice` is
- * synchronous void and MAY only buffer the note for a terminal-boundary flush
- * or preserve it as a card; no actual send or consumption acknowledgment
- * exists at this layer.
- */
-const ADVISOR_ACK_SENT = "Accepted for primary delivery.";
-
-/**
- * Deferred admission: the note holds a reservation behind an in-progress
- * primary turn and flushes automatically when the turn completes. The promise
- * is conditional on priority: a strictly-higher-severity note from the SAME
- * review may still displace it at a full budget. Truthful for both a fresh
- * reservation and a re-raise of an already-queued note.
- */
-const ADVISOR_ACK_DEFERRED =
-	"Deferred — primary is mid-turn; this note is queued for automatic delivery when the turn completes, " +
-	"unless a higher-severity note from the same review displaces it. Do not re-raise the same point.";
-
-/**
- * Rejections, keyed by the guard's suppression reason. A suppressed note is
- * never described as recorded, queued, or scheduled for delivery — the
- * advisor learns the note was dropped and why, so a rate-limited note is not
- * mislabeled a duplicate and a dropped deferred note is never promised.
- */
+/** Admission acks: one line each — the advisor needs the verdict, not a policy essay. */
+const ADVISOR_ACK_SENT = "Delivered.";
+/** Held behind the in-progress primary turn; flushed when it completes. */
+const ADVISOR_ACK_DEFERRED = "Queued for the end of the turn. Do not re-raise.";
+/** A suppressed note is never described as recorded or queued. */
 const ADVISOR_ACK_SUPPRESSED: Record<AdvisorSuppressionReason, string> = {
-	empty: "Not recorded — empty note.",
-	noise: "Not recorded — the note carries no concrete, actionable content.",
-	duplicate: "Duplicate advice ignored — this point was already raised.",
-	"rate-limit": "Not recorded — this update's non-blocker advice budget is spent; the note was dropped.",
+	empty: "Dropped: empty note.",
+	noise: "Dropped: nothing actionable.",
+	duplicate: "Dropped: already raised.",
+	"rate-limit": "Dropped: this update's advice budget is spent.",
 };
 
 export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails> {

@@ -34,7 +34,7 @@ import type {
 import { isAnthropicSigningProxyUrl, isAzureAnthropicRoute, isOfficialAnthropicApiUrl } from "./anthropic";
 import { applyCompatOverrides } from "./apply";
 import { API_COMPAT_RECORDS, AXES, type CompatRecordName } from "./axes";
-import { resolveCascade } from "./cascade";
+import { hasModelScopedEffortsRule, resolveCascade } from "./cascade";
 import { compareRevision, parseRevision, type Revision } from "./revision";
 import { classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
 import type { ModelIdentity, ResolvedAxes, ResolveTarget } from "./types";
@@ -311,6 +311,7 @@ function detectOpenAI(
 	reasoningCapable: boolean,
 ): OpenAIDetection {
 	const provider = spec.provider;
+	const backendProvider = spec.providerType ?? provider;
 	const baseUrl = spec.baseUrl;
 	const hostModel = { provider, baseUrl };
 	const isZai = modelMatchesHost(hostModel, "zai");
@@ -321,8 +322,8 @@ function detectOpenAI(
 	const isDeepseekFamily = modelMatchesHost(hostModel, "deepseekFamily") || facts.is("deepseek");
 	const isDeepseekReasoning = isDeepseekFamily && reasoningCapable;
 	const isLocalOpenAICompatBackend =
-		PROXY_OPENAI_COMPAT_PROVIDERS[provider] !== true &&
-		(LOCAL_OPENAI_COMPAT_PROVIDERS[provider] === true || hasLocalLoopbackBaseUrl(baseUrl));
+		PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
+		(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl));
 	return {
 		facts,
 		isClinePass: provider === "cline-pass",
@@ -521,12 +522,8 @@ function detectOpenAICompat(
 		replayReasoningContent: d.isLocalOpenAICompatBackend,
 		qwenPreserveThinking:
 			(thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template") && d.isLocalOpenAICompatBackend,
-		qwenTemplateReasoningEffort:
-			(thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template") &&
-			d.isLocalOpenAICompatBackend &&
-			provider !== "ollama" &&
-			isQwen &&
-			facts.revGte("3.8"),
+		// Template effort support is a reviewed backend × model contract in KDL.
+		qwenTemplateReasoningEffort: false,
 		requiresAssistantContentForToolCalls: facts.is("kimi") || d.isDirectDeepseekReasoning,
 		cacheControlFormat:
 			(d.isClinePass && (isQwen || isAnthropicModel)) || (d.isOpenRouter && isAnthropicModel)
@@ -692,6 +689,7 @@ function resolveOpenAIResponsesPolicy(
 ): ResolvedOpenAIResponsesCompat {
 	const baseUrl = spec.baseUrl ?? "";
 	const provider = spec.provider;
+	const backendProvider = spec.providerType ?? provider;
 	const hostModel = { provider, baseUrl };
 	const isAzure = modelMatchesHost(hostModel, "azureOpenAI");
 	const isOpenRouter = modelMatchesHost(hostModel, "openrouter");
@@ -703,7 +701,8 @@ function resolveOpenAIResponsesPolicy(
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] = isOpenRouter ? "openrouter" : "openai";
 	const reasoningCapable = compatReasoning(spec, axes);
 	const isLocalServingBackend =
-		(PROXY_OPENAI_COMPAT_PROVIDERS[provider] !== true && LOCAL_OPENAI_COMPAT_PROVIDERS[provider] === true) ||
+		(PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
+			LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true) ||
 		hasLocalLoopbackBaseUrl(baseUrl);
 	const isAnthropicModel = facts.is("anthropic");
 	const isDeepseekFamily = facts.is("deepseek");
@@ -1063,8 +1062,8 @@ function readRuleThinking(axes: ResolvedAxes): RuleThinking {
 
 /**
  * Compat-time reasoning capability. `axes.reasoning` also promotes targets on
- * any exact `thinking-efforts` rule (the cascade's thinking-axis gate), but
- * compat may only be repaired where the provider contract opted in with
+ * reviewed effort corrections (the cascade's thinking-axis gate), but compat
+ * may only be repaired where the matching contract opted in with
  * `thinking-upgrade-neutral`; everywhere else a spec that reports no reasoning
  * stays the authoritative capability surface.
  */
@@ -1104,7 +1103,7 @@ function resolveThinkingPolicy<TApi extends Api>(
 	// reasoning (e.g. Synthetic's `none`-only off-switch): reviewed KDL must
 	// not re-expand it into an unadvertised ladder. Absent metadata is
 	// repaired only where KDL opts in with `thinking-upgrade-neutral`
-	// alongside an exact `thinking-efforts` ladder (the cascade upgrade for
+	// alongside a reviewed `thinking-efforts` ladder (the cascade upgrade for
 	// stale source capability data); otherwise the neutral default holds.
 	if (!spec.reasoning && (explicitThinking !== undefined || rule.upgradeNeutral !== true)) return undefined;
 	if (
@@ -1210,9 +1209,13 @@ function fillExplicitThinking<TApi extends Api>(
 // Entry
 // ---------------------------------------------------------------------------
 
-function buildResolveTarget<TApi extends Api>(spec: ModelSpec<TApi>, identity: ModelIdentity): ResolveTarget {
+function buildResolveTarget<TApi extends Api>(
+	spec: ModelSpec<TApi>,
+	identity: ModelIdentity,
+	providerType = spec.providerType ?? spec.provider,
+): ResolveTarget {
 	const target: ResolveTarget = {
-		provider: spec.provider,
+		provider: providerType,
 		api: spec.api,
 		class: identity.class,
 		model: spec.id,
@@ -1225,6 +1228,13 @@ function buildResolveTarget<TApi extends Api>(spec: ModelSpec<TApi>, identity: M
 
 function specUsesApi<TApi extends Api>(spec: ModelSpec<Api>, api: TApi): spec is ModelSpec<TApi> {
 	return spec.api === api;
+}
+
+/** Resolve the request adapter assigned to a discovery backend before materialization. */
+export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string): Api {
+	const identity = resolveIdentity(spec);
+	const discoveryApi = resolveCascade(buildResolveTarget(spec, identity, providerType)).catalog.discoveryApi;
+	return typeof discoveryApi === "string" ? discoveryApi : spec.api;
 }
 
 /**
@@ -1270,4 +1280,17 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		thinking: resolveThinkingPolicy(spec, facts, axes, compat),
 		catalog: axes.catalog,
 	};
+}
+
+/**
+ * Whether reviewed rules know THIS model's effort ladder, as opposed to it
+ * inheriting a provider-wide default or {@link resolveThinkingPolicy} falling
+ * through to the neutral wire ladder.
+ *
+ * Discovery uses this to tell "omp knows this model's tiers" apart from "omp
+ * is guessing them", so catalog-published tiers can correct the guess without
+ * ever overriding reviewed knowledge.
+ */
+export function hasModelScopedEffortLadder<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	return hasModelScopedEffortsRule(buildResolveTarget(spec, resolveIdentity(spec)));
 }

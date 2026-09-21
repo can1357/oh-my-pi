@@ -3,7 +3,6 @@ import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
-import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { loadSlashCommands } from "../extensibility/slash-commands";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
@@ -235,12 +234,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
-		name: "drop",
+		name: "delete",
 		icon: "trash",
 		description: "Delete the current session and start a new one",
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleDropCommand();
+			await runtime.ctx.handleDeleteCommand();
 		},
 	},
 	{
@@ -341,7 +340,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "handoff",
 		icon: "handoff",
-		description: "Hand off session context to a new session",
+		description: "Summarize the session into a handoff document and compact in place",
 		acpDescription: "Summarize the session into a handoff document and compact in place",
 		inlineHint: "[focus instructions]",
 		allowArgs: true,
@@ -880,7 +879,6 @@ async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): 
 	setProjectDir(cwd);
 	await runtime.settings.reloadForCwd(cwd);
 	await rebindMemoryBackendForCwd(runtime.session);
-	applyProviderGlobalsFromSettings(runtime.settings);
 	clearClaudePluginRootsCache();
 	const src = discoverTitleSystemPromptFile(cwd);
 	const p = await resolvePromptInput(src, "title system prompt");

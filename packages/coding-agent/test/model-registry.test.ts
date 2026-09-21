@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,9 +9,12 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -35,6 +38,7 @@ describe("ModelRegistry", () => {
 	let bootOllamaBaseUrl: string | undefined;
 	let bootOllamaHost: string | undefined;
 	let bootOllamaContextLength: string | undefined;
+	const spies: Array<{ mockRestore: () => void }> = [];
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -55,6 +59,7 @@ describe("ModelRegistry", () => {
 
 	afterEach(() => {
 		resetSettingsForTest();
+		for (const spy of spies.splice(0)) spy.mockRestore();
 		if (originalOllamaBaseUrl === undefined) {
 			delete Bun.env.OLLAMA_BASE_URL;
 		} else {
@@ -234,6 +239,139 @@ describe("ModelRegistry", () => {
 		);
 	}
 
+	describe("model kind pools", () => {
+		test("zero-argument pools remain chat-only while find remains kind-agnostic", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(registry.getAll().every(model => modelKind(model) === "chat")).toBe(true);
+			expect(registry.getAvailable().every(model => modelKind(model) === "chat")).toBe(true);
+			expect(registry.getAll().some(model => ["local", "web", "typesafe"].includes(model.provider))).toBe(false);
+			expect(registry.getAvailable().some(model => ["local", "web", "typesafe"].includes(model.provider))).toBe(
+				false,
+			);
+			expect(registry.find("local", "falcon-h1-90m")).toMatchObject({ kind: "tiny" });
+			expect(registry.find("web", "duckduckgo")).toMatchObject({ kind: "search" });
+			expect(registry.find("typesafe", "jev-latest")).toMatchObject({ kind: "judge" });
+		});
+
+		test("all and kind pools expose keyless runners and authenticated TypeSafe models", () => {
+			let allowTypeSafeAuth = false;
+			const hasAuth = authStorage.hasAuth.bind(authStorage);
+			spies.push(
+				spyOn(authStorage, "hasAuth").mockImplementation(provider =>
+					provider === "typesafe" && !allowTypeSafeAuth ? false : hasAuth(provider),
+				),
+			);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(registry.getAll("all")).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ provider: "local", id: "falcon-h1-90m", kind: "tiny" }),
+					expect.objectContaining({ provider: "local", id: "kokoro", kind: "tts" }),
+					expect.objectContaining({ provider: "local", id: "whisper-base", kind: "stt" }),
+					expect.objectContaining({ provider: "web", id: "duckduckgo", kind: "search" }),
+					expect.objectContaining({ provider: "typesafe", id: "jev-latest", kind: "judge" }),
+				]),
+			);
+			expect(registry.getAvailable("tiny")).toContainEqual(
+				expect.objectContaining({ provider: "local", id: "falcon-h1-90m" }),
+			);
+			expect(registry.getAvailable("tts")).toContainEqual(
+				expect.objectContaining({ provider: "local", id: "kokoro" }),
+			);
+			expect(registry.getAvailable("stt")).toContainEqual(
+				expect.objectContaining({ provider: "local", id: "whisper-base" }),
+			);
+			expect(registry.getAvailable("search")).toContainEqual(
+				expect.objectContaining({ provider: "web", id: "duckduckgo" }),
+			);
+			expect(registry.getAvailable("judge").some(model => model.provider === "typesafe")).toBe(false);
+			expect(registry.getAvailable("all").some(model => model.provider === "typesafe")).toBe(false);
+
+			authStorage.setRuntimeApiKey("typesafe", "typesafe-test-key");
+			allowTypeSafeAuth = true;
+			expect(registry.getAvailable("judge")).toContainEqual(
+				expect.objectContaining({ provider: "typesafe", id: "jev-latest" }),
+			);
+			expect(registry.getAvailable("all")).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ provider: "local", id: "falcon-h1-90m" }),
+					expect.objectContaining({ provider: "web", id: "duckduckgo" }),
+					expect.objectContaining({ provider: "typesafe", id: "jev-latest" }),
+				]),
+			);
+		});
+
+		test("keeps image and speech fallback runners across authoritative chat cache and refresh", async () => {
+			authStorage.setRuntimeApiKey("deepinfra", "deepinfra-test-key");
+			const settings = Settings.isolated({
+				modelRoles: { image: "deepinfra/missing-image", speech: "deepinfra/missing-speech" },
+				"retry.fallbackChains": {
+					image: ["deepinfra/black-forest-labs/FLUX-2-pro"],
+					speech: ["deepinfra/hexgrad/Kokoro-82M"],
+				},
+			});
+			const cachedChat = buildModel({
+				id: "cached-chat",
+				name: "Cached Chat",
+				provider: "deepinfra",
+				api: "openai-completions",
+				baseUrl: "https://api.deepinfra.com/v1/openai",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32_000,
+				maxTokens: 4096,
+			});
+			writeModelCache(
+				"deepinfra",
+				Date.now(),
+				[cachedChat],
+				true,
+				fingerprintStaticModels(getBundledModels("deepinfra"), true),
+				path.join(tempDir, "models.db"),
+			);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings,
+				fetch: async () => Response.json({ data: [] }),
+			});
+			const runnerRoutes = () =>
+				["image", "speech"].flatMap(role =>
+					resolveRoleChain(role, settings, roleCandidatePool(role, settings, registry)).map(
+						({ model }) => `${model.provider}/${model.id}`,
+					),
+				);
+			const expectedRoutes = ["deepinfra/black-forest-labs/FLUX-2-pro", "deepinfra/hexgrad/Kokoro-82M"];
+
+			expect(runnerRoutes()).toEqual(expectedRoutes);
+			expect(
+				registry
+					.getAll()
+					.filter(model => model.provider === "deepinfra")
+					.map(model => model.id),
+			).toEqual([cachedChat.id]);
+			expect(runnerRoutes()).toEqual(expectedRoutes);
+
+			await registry.refreshProvider("deepinfra", "online");
+
+			expect(runnerRoutes()).toEqual(expectedRoutes);
+			expect(registry.getAll().filter(model => model.provider === "deepinfra")).toEqual([]);
+		});
+
+		test("disabled runner providers remain excluded from available kind and all pools", () => {
+			authStorage.setRuntimeApiKey("typesafe", "typesafe-test-key");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				settings: Settings.isolated({ disabledProviders: ["local", "web", "typesafe"] }),
+			});
+
+			for (const kind of ["tiny", "tts", "stt", "search", "judge", "all"] as const) {
+				expect(
+					registry.getAvailable(kind).some(model => ["local", "web", "typesafe"].includes(model.provider)),
+				).toBe(false);
+			}
+		});
+	});
+
 	describe("OpenRouter routed suffix fallback", () => {
 		let registry: ModelRegistry;
 		beforeAll(() => {
@@ -353,18 +491,18 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("overriding headers merges with model headers", () => {
+		test("overriding headers merges with model headers", async () => {
 			const anthropicModels = getModelsForProvider(anthropicProxyHeaders, "anthropic");
 			for (const model of anthropicModels) {
-				expect(model.headers?.["X-Custom-Header"]).toBe("custom-value");
+				expect((await anthropicProxyHeaders.resolveModelHeaders(model))?.["X-Custom-Header"]).toBe("custom-value");
 			}
 		});
 
-		test("headers-only override applies to built-in models", () => {
+		test("headers-only override applies to built-in models", async () => {
 			const anthropicModels = getModelsForProvider(anthropicHeadersOnly, "anthropic");
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			for (const model of anthropicModels) {
-				expect(model.headers?.["X-Custom-Header"]).toBe("custom-only");
+				expect((await anthropicHeadersOnly.resolveModelHeaders(model))?.["X-Custom-Header"]).toBe("custom-only");
 			}
 		});
 
@@ -375,20 +513,21 @@ describe("ModelRegistry", () => {
 			expect(model?.supportsComputerUse).toBe(false);
 		});
 
-		test("provider header lookup excludes unrelated model overrides", () => {
-			expect(xaiModelScopedHeaders.find("xai", otherXaiModelId)?.headers?.["X-Model-Tenant"]).toBe(
+		test("provider header lookup excludes unrelated model overrides", async () => {
+			const model = xaiModelScopedHeaders.find("xai", otherXaiModelId);
+			expect(model && (await xaiModelScopedHeaders.resolveModelHeaders(model))?.["X-Model-Tenant"]).toBe(
 				"other-model-tenant",
 			);
-			expect({ ...xaiModelScopedHeaders.getProviderHeaders("xai") }).toEqual({
+			expect({ ...(await xaiModelScopedHeaders.getProviderHeaders("xai")) }).toEqual({
 				"X-Provider-Tenant": "search-tenant",
 			});
 		});
 
-		test("authHeader override applies bearer auth to built-in models without custom models", () => {
+		test("authHeader override applies bearer auth to built-in models without custom models", async () => {
 			const anthropicModels = getModelsForProvider(anthropicAuthHeader, "anthropic");
 			expect(anthropicModels.length).toBeGreaterThan(1);
 			for (const model of anthropicModels) {
-				expect(model.headers?.Authorization).toBe("Bearer issue-929-key");
+				expect((await anthropicAuthHeader.resolveModelHeaders(model))?.Authorization).toBe("Bearer issue-929-key");
 			}
 		});
 
@@ -1257,11 +1396,12 @@ describe("ModelRegistry", () => {
 			expect(sonnetModels[0].baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
 
-		test("custom same-id replacement does not keep bundled headers", () => {
+		test("custom same-id replacement does not keep bundled headers", async () => {
 			const model = copilotReplace.find("github-copilot", "gpt-4o");
-			expect(model?.headers).toEqual({ "X-Proxy": "proxy" });
-			expect(model?.headers?.["User-Agent"]).toBeUndefined();
-			expect(model?.headers?.["Editor-Version"]).toBeUndefined();
+			const headers = model ? await copilotReplace.resolveModelHeaders(model) : undefined;
+			expect(headers).toEqual({ "X-Proxy": "proxy" });
+			expect(headers?.["User-Agent"]).toBeUndefined();
+			expect(headers?.["Editor-Version"]).toBeUndefined();
 		});
 
 		test("custom provider with same name as built-in does not affect other built-in providers", () => {
@@ -1455,8 +1595,9 @@ describe("ModelRegistry", () => {
 
 			const discovered = registry.find("openai", "gpt-5.5");
 			expect(discovered?.baseUrl).toBe("https://provider.example.com/v1");
-			expect(discovered?.headers?.["X-Provider"]).toBe("provider");
-			expect(discovered?.headers?.["X-Model"]).toBeUndefined();
+			const headers = discovered ? await registry.resolveModelHeaders(discovered) : undefined;
+			expect(headers?.["X-Provider"]).toBe("provider");
+			expect(headers?.["X-Model"]).toBeUndefined();
 		});
 
 		test("same-id replacement uses configured compat without bundled compat leak", () => {
@@ -1826,9 +1967,9 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("model override can add headers", () => {
+		test("model override can add headers", async () => {
 			const sonnet = getModelsForProvider(addHeaders, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
-			expect(sonnet?.headers?.["X-Custom-Model-Header"]).toBe("value");
+			expect(sonnet && (await addHeaders.resolveModelHeaders(sonnet))?.["X-Custom-Model-Header"]).toBe("value");
 		});
 
 		test("refresh() picks up model override changes", async () => {
@@ -2229,14 +2370,14 @@ describe("ModelRegistry", () => {
 			const testSettings = Settings.isolated();
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
 			const legacy = registry.find("openai-codex", "gpt-5.5");
-			const spark = registry.find("openai-codex", "gpt-5.3-codex-spark");
-			if (!legacy || !spark) throw new Error("Expected bundled Codex models");
+			const extended = registry.find("openai-codex", "gpt-5.6-luna");
+			if (!legacy || !extended) throw new Error("Expected bundled Codex models");
 			writeModelCache(
 				"openai-codex",
 				Date.now(),
 				[
 					{ ...legacy, maxContextWindow: 640_000 },
-					{ ...spark, maxContextWindow: 64_000 },
+					{ ...extended, maxContextWindow: 64_000 },
 				],
 				true,
 				"",
@@ -2247,7 +2388,7 @@ describe("ModelRegistry", () => {
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(640_000);
 			// An advertised maximum smaller than the current window cannot shrink it.
-			expect(registry.find("openai-codex", "gpt-5.3-codex-spark")?.contextWindow).toBe(128_000);
+			expect(registry.find("openai-codex", "gpt-5.6-luna")?.contextWindow).toBe(1_000_000);
 
 			testSettings.set("extendedContext", false);
 			await registry.reapplyModelPolicies();
@@ -2471,7 +2612,7 @@ describe("ModelRegistry", () => {
 			expect(model?.guardrailTrace).toBeUndefined();
 		});
 
-		test("transport and header overrides apply to a synthesized ARN model", () => {
+		test("transport and header overrides apply to a synthesized ARN model", async () => {
 			const transportOverride = readonlyRegistry({
 				providers: {
 					"amazon-bedrock": {
@@ -2485,7 +2626,9 @@ describe("ModelRegistry", () => {
 			const model = transportOverride.find("amazon-bedrock", profileArn);
 			expect(model).toBeDefined();
 			expect(model?.transport).toBe("pi-native");
-			expect(model?.headers).toEqual({ "X-Custom-Header": "custom-value" });
+			expect(model && (await transportOverride.resolveModelHeaders(model))).toEqual({
+				"X-Custom-Header": "custom-value",
+			});
 			expect(model?.guardrailIdentifier).toBe("arn:aws:bedrock:eu-west-2:123456789012:guardrail/abcd1234");
 		});
 	});

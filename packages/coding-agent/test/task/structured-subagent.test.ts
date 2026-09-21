@@ -19,7 +19,8 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const AGENT: AgentDefinition = {
@@ -104,6 +105,30 @@ afterEach(() => {
 });
 
 describe("structured subagent primitive", () => {
+	it("resolves user-tagged model agents for task and eval but rejects untagged names", async () => {
+		mockDiscovery();
+		const taggedSession = session();
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		for (const invocationKind of ["task", "eval"] satisfies StructuredSubagentRequest["invocationKind"][]) {
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: taggedSession, agent: "m1", invocationKind }),
+			);
+			expect(policy.agent.name).toBe("m1");
+			expect(policy.modelOverride).toEqual(["a/x"]);
+		}
+		await expect(resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m9" }))).rejects.toThrow(
+			'Unknown agent "m9". Available: worker, m1',
+		);
+	});
+
+	it("keeps discovered agents authoritative on pseudonym collisions", async () => {
+		mockDiscovery({ ...AGENT, name: "m1", model: ["b/y"] });
+		const taggedSession = session();
+		taggedSession.getSessionAgents = () => [{ ...AGENT, name: "m1", model: ["a/x"] }];
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: taggedSession, agent: "m1" }));
+		expect(policy.modelOverride).toEqual(["b/y"]);
+	});
+
 	it("uses caller, agent, then session schemas in precedence order", async () => {
 		mockDiscovery();
 		const callerSchema = { type: "object", properties: { caller: { type: "string" } } };

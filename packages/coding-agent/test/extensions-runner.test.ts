@@ -1156,12 +1156,12 @@ describe("ExtensionRunner", () => {
 				vi.useRealTimers();
 			}
 		});
-		it("continues to later handlers after empty continuation feedback", async () => {
+		it("gives a later hard block precedence over advisory continuation feedback", async () => {
 			await Bun.write(
-				path.join(extensionsDir, "session-stop-empty.ts"),
+				path.join(extensionsDir, "session-stop-precedence.ts"),
 				`
 				export default function(pi) {
-					pi.on("session_stop", async () => ({ continue: true }));
+					pi.on("session_stop", async () => ({ continue: true, additionalContext: "Earlier advisory." }));
 					pi.on("session_stop", async () => ({ decision: "block", reason: "Continue from second handler." }));
 				}
 			`,

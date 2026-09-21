@@ -6,9 +6,15 @@ import { FileLock, Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-n
 import { isEnoent, logger, postmortem, procmgr, sanitizeText, setProcessName } from "@oh-my-pi/pi-utils";
 import { TerminalQueryResponder } from "@oh-my-pi/pi-utils/vterm";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
-import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
+import {
+	truncateHead,
+	truncateHeadBytes,
+	truncateTail,
+	truncateTailBytes,
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
+import type { DaemonReadySpec, DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/hub";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
@@ -18,11 +24,8 @@ import {
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonCompletionNotification,
 	type DaemonOperation,
-	type DaemonReadySpec,
 	type DaemonRpcResult,
 	type DaemonSignal,
-	type DaemonSnapshot,
-	type DaemonSpec,
 	type DaemonWireRequest,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
@@ -1141,9 +1144,13 @@ class DaemonBroker {
 			if (generationEnded()) return true;
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
-				if (!match) return false;
-				matched = match[0].slice(0, 500);
-				return true;
+				if (match) {
+					matched = match[0].slice(0, 500);
+					return true;
+				}
+				// No further output can arrive once the process is gone; blocking
+				// for the full window would hide the exit behind a bogus timeout.
+				return terminalState(record.snapshot.state);
 			}
 			if (operation.for === "exit") return terminalState(record.snapshot.state);
 			// Wake on observed readiness or any terminal state so the wait never

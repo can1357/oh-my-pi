@@ -38,21 +38,36 @@ export class AmbiguousOverlapError extends Error {
 /**
  * Anchored `*`-wildcard match; both sides must be pre-lowercased. `*` spans
  * any substring; non-wildcard text stays anchored in order.
+ *
+ * Rule-owned patterns are static after index build, so the split is memoized
+ * per pattern string; derived/live patterns share the same bounded cache.
  */
-export function globMatch(pattern: string, value: string): boolean {
+const globSegmentsCache = new Map<string, readonly string[]>();
+const GLOB_SEGMENTS_MAX = 4096;
+
+function globSegments(pattern: string): readonly string[] {
+	const cached = globSegmentsCache.get(pattern);
+	if (cached !== undefined) return cached;
 	const segments = pattern.split("*");
+	if (globSegmentsCache.size >= GLOB_SEGMENTS_MAX) globSegmentsCache.clear();
+	globSegmentsCache.set(pattern, segments);
+	return segments;
+}
+
+export function globMatch(pattern: string, value: string): boolean {
+	const segments = globSegments(pattern);
 	if (segments.length === 1) return value === pattern;
-	const head = segments[0];
+	const head = segments[0] ?? "";
 	if (!value.startsWith(head)) return false;
 	let remainder = value.slice(head.length);
 	for (let i = 1; i < segments.length - 1; i++) {
-		const segment = segments[i];
+		const segment = segments[i] ?? "";
 		if (!segment) continue;
 		const found = remainder.indexOf(segment);
 		if (found === -1) return false;
 		remainder = remainder.slice(found + segment.length);
 	}
-	const last = segments[segments.length - 1];
+	const last = segments[segments.length - 1] ?? "";
 	return last === "" || remainder.endsWith(last);
 }
 
@@ -224,6 +239,30 @@ function rankCompare(a: readonly [number, number, number], b: readonly [number, 
 	return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
 }
 
+function contestAxis(
+	winners: WinnerTable,
+	axis: string,
+	rank: readonly [number, number, number],
+	rule: IndexedRule,
+	target: ResolveTarget,
+): void {
+	const held = winners[axis];
+	if (held) {
+		const order = rankCompare(held.rank, rank);
+		if (order === 0) {
+			throw new AmbiguousOverlapError(
+				target.provider,
+				target.model,
+				axis,
+				held.rule.compiled.source,
+				rule.compiled.source,
+			);
+		}
+		if (order > 0) return;
+	}
+	winners[axis] = { rank, rule };
+}
+
 function contest(
 	winners: WinnerTable,
 	axes: Record<string, unknown> | undefined,
@@ -232,23 +271,7 @@ function contest(
 	target: ResolveTarget,
 ): void {
 	if (!axes) return;
-	for (const axis in axes) {
-		const held = winners[axis];
-		if (held) {
-			const order = rankCompare(held.rank, rank);
-			if (order === 0) {
-				throw new AmbiguousOverlapError(
-					target.provider,
-					target.model,
-					axis,
-					held.rule.compiled.source,
-					rule.compiled.source,
-				);
-			}
-			if (order > 0) continue;
-		}
-		winners[axis] = { rank, rule };
-	}
+	for (const axis in axes) contestAxis(winners, axis, rank, rule, target);
 }
 
 function collect(winners: WinnerTable, pick: (rule: CompiledRule) => Record<string, unknown> | undefined) {
@@ -299,8 +322,9 @@ function cloneAxes(axes: ResolvedAxes): ResolvedAxes {
 
 /**
  * Resolve wire, thinking, and catalog assignments for one structured target.
- * Exact model effort corrections can enable reasoning; absent family/revision
- * facts never satisfy selectors that require them. Returned axes are caller-owned.
+ * Exact model effort corrections and identity-scoped neutral-upgrade policies
+ * can enable reasoning; absent family/revision facts never satisfy selectors
+ * that require them. Returned axes are caller-owned.
  *
  * @throws AmbiguousOverlapError when equal-rank rules contest one axis.
  */
@@ -325,15 +349,52 @@ export function resolveCascadeRules(cascade: CompiledCascade, target: ResolveTar
 	return cloneAxes(resolveOverIndex(buildRuleIndex(cascade), target));
 }
 
+/**
+ * Whether the effort ladder this target resolves to comes from a rule scoped
+ * to the model's identity (a recognized class, family, revision, or an explicit
+ * model selector), rather than a provider/api-wide or fallback unknown-class
+ * rule that any unrecognized id at that provider inherits.
+ *
+ * Discovery reads this to tell reviewed tiers apart from a blanket default, so
+ * catalog-published tiers can correct the latter and never the former.
+ */
+export function hasModelScopedEffortsRule(target: ResolveTarget): boolean {
+	const winners: WinnerTable = {};
+	for (const { rule, rank } of rankRelevantRules(getRuleIndex(), prepareTarget(target))) {
+		contest(winners, rule.compiled.thinking, rank, rule, target);
+	}
+	const winner = winners.efforts?.rule.compiled;
+	if (winner === undefined) return false;
+	return (
+		(winner.class !== undefined && winner.class !== "unknown") ||
+		winner.family !== undefined ||
+		winner.revision !== undefined ||
+		winner.models !== undefined
+	);
+}
+
 function resolveOverIndex(index: RuleIndex, target: ResolveTarget): ResolvedAxes {
 	const ranked = rankRelevantRules(index, prepareTarget(target));
 	let reasoning = target.reasoning === true;
 	if (!reasoning) {
+		const upgrade: WinnerTable = {};
+		let hasEfforts = false;
 		for (const { rule, rank } of ranked) {
-			if (rule.hasExactEffortsRule && rank[0] === 2) {
-				reasoning = true;
-				break;
-			}
+			const thinking = rule.compiled.thinking;
+			if (thinking === undefined) continue;
+			if ("upgradeNeutral" in thinking) contestAxis(upgrade, "upgradeNeutral", rank, rule, target);
+			if ("efforts" in thinking) hasEfforts = true;
+			if (rule.hasExactEffortsRule && rank[0] === 2) reasoning = true;
+		}
+		const upgradeRule = upgrade.upgradeNeutral?.rule.compiled;
+		const identityScoped =
+			upgradeRule !== undefined &&
+			((upgradeRule.class !== undefined && upgradeRule.class !== "unknown") ||
+				upgradeRule.family !== undefined ||
+				upgradeRule.revision !== undefined ||
+				upgradeRule.models !== undefined);
+		if (identityScoped && upgradeRule?.thinking?.upgradeNeutral === true && hasEfforts) {
+			reasoning = true;
 		}
 	}
 	const wire: WinnerTable = {};

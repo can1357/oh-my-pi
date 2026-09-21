@@ -204,4 +204,35 @@ describe("Yolo-Auto provider discovery", () => {
 			vi.restoreAllMocks();
 		}
 	});
+
+	test("discovers qwen3.8-flash and yolo at the documented 256K deployment cap", async () => {
+		// The flat-rate /v1/models response carries bare ids with no limit
+		// fields. Without provider-local seeds the bare qwen3.8-flash slug
+		// resolved through the global reference index, which prefers the
+		// largest bundled window (1M) and misreported the deployment cap.
+		const fetch: FetchImpl = async () =>
+			new Response(JSON.stringify({ data: [{ id: "qwen3.8-flash" }, { id: "yolo" }] }), { status: 200 });
+		const models = await yoloAutoModelManagerOptions({ apiKey: "yolo-test-key", fetch }).fetchDynamicModels?.();
+
+		for (const id of ["qwen3.8-flash", "yolo"]) {
+			const spec = models?.find(candidate => candidate.id === id);
+			if (!spec) throw new Error(`yolo-auto/${id} missing from discovery`);
+			const model = buildModel(spec);
+			expect(model).toMatchObject({
+				provider: "yolo-auto",
+				contextWindow: 262144,
+				maxTokens: 131072,
+				identity: { class: "qwen", revision: "3.8.0" },
+				compat: {
+					supportsReasoningEffort: true,
+					thinkingFormat: "qwen-chat-template",
+					supportsStore: false,
+					supportsDeveloperRole: false,
+				},
+			});
+			// The opaque `yolo` alias must carry the same tokenizer as the
+			// explicit Flash row or context accounting falls back to estimates.
+			expect(model.tokenizer).toBe("qwen3");
+		}
+	});
 });

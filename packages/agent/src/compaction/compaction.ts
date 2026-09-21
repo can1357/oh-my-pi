@@ -25,9 +25,9 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import {
 	buildTransformedCodexRequestBody,
-	createOpenAICodexCompactionRequestContext,
 	type OpenAICodexCompactionBody,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { InputItem as CodexInputItem } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
@@ -460,7 +460,13 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 	return cutPoints;
 }
 
-function isTurnStartEntry(entry: SessionEntry): boolean {
+/**
+ * True for entries that begin a conversational turn (a user request, a
+ * bash-execution card, a branch summary, or a custom user-role message).
+ * Compaction cut alignment, turn discovery, and the collapsed display
+ * transcript's orphan-head trim all share this boundary definition.
+ */
+export function isTurnStartEntry(entry: SessionEntry): boolean {
 	if (entry.type === "branch_summary" || entry.type === "custom_message") {
 		return true;
 	}

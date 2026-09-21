@@ -14,7 +14,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
 import { daemonRuntimeDir } from "../../launch/paths";
-import type { DaemonSnapshot } from "../../launch/protocol";
+import type { DaemonSnapshot } from "@oh-my-pi/pi-tui/tools/hub";
 import { throwIfAborted } from "../tool-errors";
 import { probeCdpStatus } from "./attach";
 import { resolveSharedBrowserLaunchSpec } from "./launch";

@@ -7,7 +7,14 @@ import type {
 	WebSearchServerToolUseBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import type { AssistantMessage, AssistantMessageEvent, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Model,
+	ToolCall,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai/types";
+import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -617,6 +624,82 @@ describe("anthropic-messages encodeResponse", () => {
 			/request aborted/,
 		);
 	});
+
+	it("reports tool_use when a client-executed tool call ends the turn on `stop`", () => {
+		// Cursor's exec protocol has no tool-use stop: it hands a tool the
+		// caller declared back for the caller to run and then ends the turn,
+		// leaving `stopReason: "stop"` with the call unpaired. An Anthropic
+		// client runs tools while `stop_reason === "tool_use"`, so `end_turn`
+		// here strands the call it was asked to execute.
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "Checking the weather." },
+				{ type: "toolCall", id: "toolu_handoff", name: "get_weather", arguments: { city: "Paris" } },
+			],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "cursor/cursor-grok-4.6");
+		expect(encoded.stop_reason).toBe("tool_use");
+		expect(encoded.content).toContainEqual({
+			type: "tool_use",
+			id: "toolu_handoff",
+			name: "get_weather",
+			input: { city: "Paris" },
+		});
+	});
+
+	it("keeps a Cursor-resolved native call out of the turn and off the wire", () => {
+		// Cursor runs `todo` / `web_fetch` / `connect_scm` (and any native the
+		// gateway declined) on its own exec channel and stamps the block
+		// resolved. The client never declared those tools and the operation is
+		// already committed, so reporting `tool_use` would make the canonical
+		// loop repeat a side effect and post a result for a tool it does not
+		// have.
+		const resolved: ToolCall = { type: "toolCall", id: "call_todo", name: "todo", arguments: { todos: [] } };
+		(resolved as CursorExecResolvedCarrier)[kCursorExecResolved] = true;
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [resolved, { type: "text", text: "Plan updated." }],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "cursor/cursor-grok-4.6");
+		expect(encoded.stop_reason).toBe("end_turn");
+		expect(encoded.content).toEqual([{ type: "text", text: "Plan updated." }]);
+	});
+
+	it("still hands back an unresolved call when a resolved one precedes it", () => {
+		const resolved: ToolCall = { type: "toolCall", id: "call_todo", name: "todo", arguments: { todos: [] } };
+		(resolved as CursorExecResolvedCarrier)[kCursorExecResolved] = true;
+		const message: AssistantMessage = {
+			role: "assistant",
+			content: [
+				resolved,
+				{ type: "toolCall", id: "toolu_handoff", name: "get_weather", arguments: { city: "Paris" } },
+			],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const encoded = encodeResponse(message, "cursor/cursor-grok-4.6");
+		expect(encoded.stop_reason).toBe("tool_use");
+		expect(encoded.content).toEqual([
+			{ type: "tool_use", id: "toolu_handoff", name: "get_weather", input: { city: "Paris" } },
+		]);
+	});
 });
 
 describe("anthropic-messages encodeStream", () => {
@@ -878,6 +961,116 @@ describe("anthropic-messages encodeStream", () => {
 		const last = sse.at(-1)!;
 		expect(last.event).toBe("error");
 		expect(last.data).toEqual({ type: "error", error: { type: "api_error", message: "boom" } });
+	});
+
+	it("reports tool_use in message_delta when a client-executed tool call ends the turn on `stop`", async () => {
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "toolu_handoff",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		};
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [toolCall],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 0, partial: finalMessage },
+			{ type: "toolcall_end", contentIndex: 0, toolCall, partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "cursor/cursor-grok-4.6"));
+		const delta = sse.find(event => event.event === "message_delta")!.data as {
+			delta: { stop_reason: string };
+		};
+		expect(delta.delta.stop_reason).toBe("tool_use");
+	});
+
+	it("drops a Cursor-resolved call from the stream and renumbers the blocks after it", async () => {
+		const resolved: ToolCall = { type: "toolCall", id: "call_todo", name: "todo", arguments: { todos: [] } };
+		(resolved as CursorExecResolvedCarrier)[kCursorExecResolved] = true;
+		const handoff: ToolCall = {
+			type: "toolCall",
+			id: "toolu_handoff",
+			name: "get_weather",
+			arguments: { city: "Paris" },
+		};
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [resolved, { type: "text", text: "Plan updated." }, handoff],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 0, partial: finalMessage },
+			{ type: "toolcall_delta", contentIndex: 0, delta: '{"todos":[]}', partial: finalMessage },
+			{ type: "toolcall_end", contentIndex: 0, toolCall: resolved, partial: finalMessage },
+			{ type: "text_start", contentIndex: 1, partial: finalMessage },
+			{ type: "text_delta", contentIndex: 1, delta: "Plan updated.", partial: finalMessage },
+			{ type: "text_end", contentIndex: 1, content: "Plan updated.", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 2, partial: finalMessage },
+			{ type: "toolcall_end", contentIndex: 2, toolCall: handoff, partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "cursor/cursor-grok-4.6"));
+		// The resolved `todo` never reaches the client, and every block after it
+		// shifts down so the client's index-addressed snapshot stays aligned.
+		const blocks = sse.filter(event => event.event === "content_block_start").map(event => event.data);
+		expect(blocks).toEqual([
+			{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+			{
+				type: "content_block_start",
+				index: 1,
+				content_block: { type: "tool_use", id: "toolu_handoff", name: "get_weather", input: {} },
+			},
+		]);
+		expect(sse.filter(event => event.event === "content_block_delta").map(event => event.data)).toEqual([
+			{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Plan updated." } },
+		]);
+		expect(sse.filter(event => event.event === "content_block_stop").map(event => event.data.index)).toEqual([0, 1]);
+		expect(sse.find(event => event.event === "message_delta")?.data.delta).toEqual({
+			stop_reason: "tool_use",
+			stop_sequence: null,
+		});
+	});
+
+	it("ends the turn when every call in it was resolved by Cursor's exec channel", async () => {
+		const resolved: ToolCall = { type: "toolCall", id: "call_todo", name: "todo", arguments: { todos: [] } };
+		(resolved as CursorExecResolvedCarrier)[kCursorExecResolved] = true;
+		const finalMessage: AssistantMessage = {
+			role: "assistant",
+			content: [resolved],
+			api: "anthropic-messages",
+			provider: "cursor",
+			model: "cursor-grok-4.6",
+			usage: emptyUsage(),
+			stopReason: "stop",
+			timestamp: 0,
+		};
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: finalMessage },
+			{ type: "toolcall_start", contentIndex: 0, partial: finalMessage },
+			{ type: "toolcall_end", contentIndex: 0, toolCall: resolved, partial: finalMessage },
+			{ type: "done", reason: "stop", message: finalMessage },
+		];
+		const sse = await collectSse(encodeStream(makeStream(events), "cursor/cursor-grok-4.6"));
+		expect(sse.map(event => event.event)).toEqual(["message_start", "message_delta", "message_stop"]);
+		expect(sse.find(event => event.event === "message_delta")?.data.delta).toEqual({
+			stop_reason: "end_turn",
+			stop_sequence: null,
+		});
 	});
 
 	it("emits a complete envelope when the stream ends without an explicit done", async () => {

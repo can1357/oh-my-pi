@@ -2,12 +2,64 @@
 
 ## [Unreleased]
 
+## [18.2.7] - 2026-09-21
+
+### Added
+
+- Added model-kind and grounded-search capability metadata, along with catalogs for local inference and search-engine models.
+- Added OpenRouter image-model discovery and live TypeSafe judge-model discovery.
+- Added the `buildDiscoveredModel` helper for defining custom providers.
+- Added glob-based patterns for identity overrides.
+
+### Changed
+
+- Updated input cost for TypeSafe models to 0.042
+- Improved model routing and thinking-policy handling for llama.cpp Qwen models, Bonsai lineage aliases, and custom provider names.
+
+## [18.2.5] - 2026-09-17
+
+### Added
+
+- Added the `stencil` authentication provider for `omp stream`, supporting OAuth code + PKCE sign-in with `auth.stencil.so`, configurable via `STENCIL_API_KEY`, `STENCIL_AUTH_URL`, and `STENCIL_BASE_URL`. This is an authentication-only provider, not a model provider; OAuth-code login configuration also supports `base-url` and `auth-url` nodes with `{base}` and `{auth}` URL placeholders.
+
+### Fixed
+
+- Corrected Yolo-Auto metadata for Qwen Flash: `qwen3.8-flash` and the paid `yolo` route now report the documented 256K context window and use the Qwen chat-template reasoning dialect, with `qwen3.8-flash` as the provider default.
+
+## [18.2.4] - 2026-09-17
+
+### Added
+
+- Added `typesafe` authentication for TypeSafe System One judgments via the `TYPESAFE_API_KEY` configuration and API-key validation against the TypeSafe models endpoint.
+
+## [18.2.3] - 2026-09-17
+
+### Added
+
+- Models can carry deferred request-header resolvers, and model managers can reconstruct omitted cached headers from authoritative local configuration without persisting credentials.
+
+## [18.2.2] - 2026-09-16
+
+### Added
+
+- OpenAI-compatible model discovery now fills in reasoning-effort tiers for unrecognized models using the shared catalog’s published reasoning options, while preserving explicit discovery metadata and reviewed model rules.
+
+### Fixed
+
+- Fixed recovery of corrupted model caches so private backups are preserved and concurrent recovery cannot overwrite a cache that has already been restored.
+- Fixed pricing for Devin (SWE-2, SWE-1.7, and GLM-5.2 High) and Kimi Code models when upstream discovery omits cost information. SWE-2 now reflects its promotional pricing through December 31, 2026, then switches to list pricing on January 1, 2027.
+- Fixed pricing and chat routing for Devin Fusion models so composite models use their own headline rates and supported Fusion lanes connect directly instead of failing through an incompatible routing path.
+
+## [18.2.1] - 2026-09-15
+
 ### Added
 
 - DeepSeek V4.1 Flash (`deepseek-flash`) now accepts image inputs and resolves its reasoning metadata, name, and effort ladder from upstream instead of shipping as a text-only row without them.
 
 ### Fixed
 
+- Fixed Cerebras Qwen 3.8 reasoning control by enabling correct effort tiers and disable behavior
+- Fixed Cerebras Qwen models using incorrect reasoning format, enabling proper support for thinking modes
 - Fixed Command Code's `deepseek/deepseek-v4.1-flash` row exposing its documented low/high/max thinking levels and image input, and made live discovery resolve the reasoning contract its rules declare ([#1666](https://github.com/can1357/oh-my-pi/issues/1666), [#11703](https://github.com/can1357/oh-my-pi/pull/11703) by [@aliefe04](https://github.com/aliefe04)).
 - Fixed Meta Model API and Muse Code requests failing with 400 whenever omp forced a tool choice: `api.meta.ai/v1` accepts only `tool_choice: "auto"`, so `none`, `required`, and named choices (subagent final-retry `yield`, forced tools, structured output, compaction handoff) are now omitted instead of sent ([#11635](https://github.com/can1357/oh-my-pi/pull/11635) by [@quantmind-br](https://github.com/quantmind-br)).
 - Bedrock's Qwen rows no longer ask for more output tokens than the model accepts, which Bedrock rejected with a 400. ([#12117](https://github.com/can1357/oh-my-pi/pull/12117) by [@Huang-404-Q](https://github.com/Huang-404-Q))

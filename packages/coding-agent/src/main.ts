@@ -26,18 +26,19 @@ import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/arg
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import type { selectSession } from "./cli/session-picker";
+import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
+import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
-	formatModelSelectorValue,
-	parseModelString,
 	getModelMatchPreferences,
 	resolveCliModel,
+	resolveConfiguredModelPatterns,
+	type ResolveCliModelResult,
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
@@ -64,9 +65,9 @@ import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
-import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
-import type * as SetupWizardModule from "./modes/setup-wizard";
-import type { SetupScene } from "./modes/setup-wizard";
+import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
+import type * as SetupWizardModule from "./modes/setup";
+import type { SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
 import {
 	applyStartupComposerPreferences,
@@ -75,7 +76,7 @@ import {
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "./modes/startup-composer";
-import { ensureTheme, initTheme, stopThemeWatcher } from "./modes/theme/theme";
+import { ensureTheme, initTheme, stopThemeWatcher } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -100,12 +101,18 @@ import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } fr
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import {
+	discoverSystemPromptOverride,
+	discoverTitleSystemPromptFile,
+	loadSystemPromptTemplateFile,
+	resolvePromptInput,
+} from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
-import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
+import { registerLocalInferenceApi } from "./tiny/local-inference-api";
+import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { LspStartupServerInfo } from "./tools";
-import { sanitizeDisplayWarnings } from "./tools/render-utils";
+import { sanitizeDisplayWarnings } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 
@@ -123,9 +130,34 @@ async function loadInteractiveModeConstructor() {
 	return (await import("./modes/interactive-mode")).InteractiveMode;
 }
 
+type SessionPicker = (
+	sessions: SessionInfo[],
+	options?: SessionPickerOptions<SessionInfo>,
+) => Promise<SessionInfo | null>;
+
 /** Resume/import-only graph boundary; ordinary launches never construct a picker. */
-async function loadSessionPicker(): Promise<typeof selectSession> {
-	return (await import("./cli/session-picker")).selectSession;
+async function loadSessionPicker(): Promise<SessionPicker> {
+	const [{ selectSession }, { HistoryStorage }, { loadPinnedSessionIds }, { FileSessionStorage }] = await Promise.all([
+		import("@oh-my-pi/pi-tui/apps/session-picker"),
+		import("./session/history-storage"),
+		import("./session/session-pins"),
+		import("./session/session-storage"),
+	]);
+	return (sessions, options) => {
+		const storage = new FileSessionStorage();
+		return selectSession(sessions, options, {
+			loadPinnedIds: loadPinnedSessionIds,
+			loadHistoryMatcher: () => {
+				const history = HistoryStorage.open();
+				return query => history.matchingSessionIds(query);
+			},
+			deleteSession: async session => {
+				await storage.deleteSessionWithArtifacts(session.path);
+				return true;
+			},
+			loadAllSessions: () => SessionManager.listAllForPicker(storage),
+		});
+	};
 }
 
 /** Join-only graph boundary; the full built-in slash-command registry is otherwise unnecessary at startup. */
@@ -594,7 +626,7 @@ async function runInteractiveMode(
 		const storedSetupVersion = settings.get("setupVersion");
 		setupWizard =
 			forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash
-				? await import("./modes/setup-wizard")
+				? await import("./modes/setup")
 				: undefined;
 		setupScenes = setupWizard
 			? await setupWizard.selectSetupScenes(storedSetupVersion, setupWizard.ALL_SCENES, mode, {
@@ -1159,21 +1191,6 @@ export async function createSessionManager(
 	return undefined;
 }
 
-/** Discover SYSTEM.md file if no CLI system prompt was provided */
-function discoverSystemPromptFile(): string | undefined {
-	// Check project-local first (.omp/SYSTEM.md, .pi/SYSTEM.md legacy)
-	const projectPath = findConfigFile("SYSTEM.md", { user: false });
-	if (projectPath) {
-		return projectPath;
-	}
-	// If not found, check SYSTEM.md file in the global directory.
-	const globalPath = findConfigFile("SYSTEM.md", { user: true });
-	if (globalPath) {
-		return globalPath;
-	}
-	return undefined;
-}
-
 /** Discover APPEND_SYSTEM.md file if no CLI append system prompt was provided */
 function discoverAppendSystemPromptFile(): string | undefined {
 	const projectPath = findConfigFile("APPEND_SYSTEM.md", { user: false });
@@ -1193,7 +1210,7 @@ export function applyResolvedSystemPromptInputs(
 	resolvedSystemPrompt: string | undefined,
 	resolvedAppendPrompt: string | undefined,
 ): void {
-	if (resolvedSystemPrompt) {
+	if (resolvedSystemPrompt !== undefined) {
 		options.customSystemPrompt = resolvedSystemPrompt;
 	}
 	if (resolvedAppendPrompt) {
@@ -1226,15 +1243,36 @@ export async function buildSessionOptions(
 		options.deadline = Date.now() + parsed.maxTime * 1000;
 	}
 
-	// Auto-discover SYSTEM.md if no CLI system prompt provided
-	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();
+	// Explicit prompt inputs win over discovered SYSTEM_TEMPLATE.md/SYSTEM.md.
+	if (parsed.systemPrompt !== undefined && parsed.systemPromptTemplate !== undefined) {
+		throw new Error("--system-prompt and --system-prompt-template cannot be combined");
+	}
+	const cwd = options.cwd;
+	const discoveredOverride =
+		parsed.systemPrompt === undefined && parsed.systemPromptTemplate === undefined
+			? await discoverSystemPromptOverride(cwd)
+			: undefined;
+	const systemPromptSource =
+		parsed.systemPrompt ?? (discoveredOverride?.kind === "text" ? discoveredOverride.path : undefined);
+	const templatePath =
+		parsed.systemPromptTemplate ?? (discoveredOverride?.kind === "template" ? discoveredOverride.path : undefined);
 	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
-	const titleSystemPromptSource = discoverTitleSystemPromptFile();
-	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt] = await Promise.all([
-		resolvePromptInput(systemPromptSource, "system prompt"),
-		resolvePromptInput(appendPromptSource, "append system prompt"),
-		resolvePromptInput(titleSystemPromptSource, "title system prompt"),
-	]);
+	const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
+	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt, resolvedSystemPromptTemplate] =
+		await Promise.all([
+			discoveredOverride?.kind === "text"
+				? Promise.resolve(discoveredOverride.content)
+				: resolvePromptInput(systemPromptSource, "system prompt"),
+			resolvePromptInput(appendPromptSource, "append system prompt"),
+			resolvePromptInput(titleSystemPromptSource, "title system prompt"),
+			// Discovered templates arrive pre-loaded from the capability; only
+			// explicit CLI paths hit the strict file loader here.
+			discoveredOverride?.kind === "template" && parsed.systemPromptTemplate === undefined
+				? Promise.resolve(discoveredOverride.content)
+				: templatePath === undefined
+					? Promise.resolve(undefined)
+					: loadSystemPromptTemplateFile(templatePath),
+		]);
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
@@ -1253,6 +1291,7 @@ export async function buildSessionOptions(
 			parsed.model !== undefined ||
 			parsed.thinking !== undefined ||
 			parsed.systemPrompt !== undefined ||
+			parsed.systemPromptTemplate !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
 			parsed.noTools === true;
@@ -1266,6 +1305,10 @@ export async function buildSessionOptions(
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
 	const modelMatchPreferences = getModelMatchPreferences(activeSettings);
+	// `--model` rewrites the session's `default` role below. Preserve the
+	// configured assignment so explicit prewalk role targets still resolve
+	// against the value that existed when the CLI was invoked.
+	const preModelOverrideDefaultRole = activeSettings.getModelRole("default");
 	// True when a configured `default` role was deliberately left unresolved for
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
@@ -1378,22 +1421,81 @@ export async function buildSessionOptions(
 			? true
 			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
-		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
-		let resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
-		// A target from a configured discovery provider is absent from the cold
-		// startup catalog. Refresh only the provider named by the selector: a
-		// typo, missing role, or extension-only provider must not make startup
-		// await unrelated remote discovery before prewalk degrades (issue #11820).
-		if (resolved.error || !resolved.model) {
-			const requestedProvider = parseModelString(rolePattern)?.provider.toLowerCase();
-			const discoverableProvider = requestedProvider
-				? modelRegistry.getDiscoverableProviders().find(provider => provider.toLowerCase() === requestedProvider)
-				: undefined;
-			if (discoverableProvider) {
-				await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
-				resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
+		let targetPatterns: string[];
+
+		if (parsed.prewalkInto === undefined) {
+			// Preserve the existing default-prewalk behavior; this PR only needs
+			// pre-override role semantics for an explicit target.
+			targetPatterns = [expandRoleAlias(DEFAULT_PREWALK_TARGET, activeSettings)];
+		} else {
+			// `--model` mutates only the session default role. Resolve explicit
+			// prewalk aliases against the pre-mutation default while leaving all
+			// other role lookups live.
+			const preModelOverrideRoleLookup = {
+				getModelRole: (role: string) =>
+					role === "default" ? preModelOverrideDefaultRole : activeSettings.getModelRole(role),
+			};
+
+			// Bare `default` is a backwards-compatible special selector handled
+			// by expandRoleAlias rather than the prefixed role-alias grammar.
+			const targetSelector =
+				target.trim() === "default" ? expandRoleAlias(target, preModelOverrideRoleLookup) : target;
+			const configuredPatterns = resolveConfiguredModelPatterns(targetSelector, preModelOverrideRoleLookup);
+			targetPatterns = configuredPatterns.length > 0 ? configuredPatterns : [targetSelector];
+		}
+
+		const resolveCandidate = (pattern: string) =>
+			resolveCliModel({ cliModel: pattern, modelRegistry, preferences: modelMatchPreferences });
+
+		const discoverableProviders = new Map(
+			modelRegistry.getDiscoverableProviders().map(provider => [provider.toLowerCase(), provider]),
+		);
+		const refreshedProviders = new Set<string>();
+		let authenticatedResolution: ResolveCliModelResult | undefined;
+		let firstUnauthenticatedResolution: ResolveCliModelResult | undefined;
+		let lastResolution: ResolveCliModelResult | undefined;
+
+		// Preserve fallback priority. Each provider-qualified candidate gets its
+		// scoped discovery opportunity before we advance to the next candidate.
+		for (const pattern of targetPatterns) {
+			let candidate = resolveCandidate(pattern);
+			lastResolution = candidate;
+
+			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
+				authenticatedResolution = candidate;
+				break;
+			}
+			if (candidate.model) {
+				firstUnauthenticatedResolution ??= candidate;
+				continue;
+			}
+
+			const requestedProvider = parseModelString(pattern)?.provider.toLowerCase();
+			if (!requestedProvider || refreshedProviders.has(requestedProvider)) continue;
+			const discoverableProvider = discoverableProviders.get(requestedProvider);
+			if (!discoverableProvider) continue;
+
+			refreshedProviders.add(requestedProvider);
+			await modelRegistry.refreshDiscoverableProviders([discoverableProvider], "online-if-uncached");
+
+			candidate = resolveCandidate(pattern);
+			lastResolution = candidate;
+			if (candidate.model && modelRegistry.hasConfiguredAuth(candidate.model)) {
+				authenticatedResolution = candidate;
+				break;
+			}
+			if (candidate.model) {
+				firstUnauthenticatedResolution ??= candidate;
 			}
 		}
+
+		const resolved =
+			authenticatedResolution ??
+			firstUnauthenticatedResolution ??
+			lastResolution ??
+			resolveCandidate(targetPatterns[0] ?? target);
+
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
@@ -1402,7 +1504,6 @@ export async function buildSessionOptions(
 		// no configured auth, warn and leave prewalk unarmed rather than aborting
 		// startup and locking the user out of the app (issue #6064).
 		if (resolved.error || !resolved.model) {
-			const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
 			process.stderr.write(
 				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
 			);
@@ -1458,6 +1559,9 @@ export async function buildSessionOptions(
 
 	// System prompt
 	applyResolvedSystemPromptInputs(options, resolvedSystemPrompt, resolvedAppendPrompt);
+	if (resolvedSystemPromptTemplate !== undefined) {
+		options.systemPromptTemplate = resolvedSystemPromptTemplate;
+	}
 	// Replan-driven title refresh resolves the override from this same field on
 	// `AgentSession`, so threading it through `CreateAgentSessionOptions` keeps
 	// both first-input titling (`input-controller.ts`) and replan refresh
@@ -1526,7 +1630,7 @@ export async function buildSessionOptions(
 interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
-	selectSession?: typeof selectSession;
+	selectSession?: SessionPicker;
 	runAcpMode?: RunAcpMode;
 	createForeignSessionStore?: (source: ForeignSessionSource) => ForeignSessionStore;
 	settings?: Settings;
@@ -1885,8 +1989,8 @@ export async function runRootCommand(
 		// resolved) rejects a native --resume, so the picker must not run first.
 		if (parsedArgs.resume === true && !parsedArgs.fork && !parsedArgs.noSession) {
 			const folderSessions = await logger.time(
-				"SessionManager.list",
-				SessionManager.list,
+				"SessionManager.listForPicker",
+				SessionManager.listForPicker,
 				cwd,
 				parsedArgs.sessionDir,
 			);
@@ -1897,7 +2001,10 @@ export async function runRootCommand(
 				// silently surfaced other projects' history when the cwd was empty
 				// (issue #3099). The preloaded list also makes the user's Tab switch
 				// instant on the way in.
-				preloadedAllSessions = await logger.time("SessionManager.listAll", SessionManager.listAll);
+				preloadedAllSessions = await logger.time(
+					"SessionManager.listAllForPicker",
+					SessionManager.listAllForPicker,
+				);
 				if (preloadedAllSessions.length === 0) {
 					writeStartupNotice(parsedArgs, `${chalk.dim("No sessions found")}\n`);
 					stopStartupWatchdog();
@@ -2279,6 +2386,7 @@ export async function runRootCommand(
 }
 
 export async function main(args: string[]): Promise<void> {
+	registerLocalInferenceApi();
 	const { runCli } = await import("./cli");
 	await runCli(args.length === 0 ? ["launch"] : args);
 }

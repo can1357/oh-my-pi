@@ -12,7 +12,7 @@ import {
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { execReplace } from "@oh-my-pi/pi-natives";
 import type {
@@ -61,9 +61,8 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
-import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
+import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
-import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
 	onModelRolesChanged,
@@ -86,7 +85,8 @@ import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import type { Goal, GoalModeState } from "../goals/state";
+import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
+import type { GoalModeState } from "../goals/state";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
@@ -105,7 +105,8 @@ import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
-import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import type { AgentHubRegistry } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -117,23 +118,27 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
+import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
+import { modelMentionChipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
-import { formatDuration } from "../slash-commands/helpers/format";
+import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
-import { agentTypeBadge, formatTaskId } from "../task/render";
-import type { ConfiguredThinkingLevel } from "../thinking";
-import { tinyTitleClient } from "../tiny/title-client";
+import { agentTypeBadge, formatTaskId } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { StreamPublisher } from "../stream/publisher";
+import { StreamRedactor } from "../stream/redactor";
 import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatFeedModelBadge,
@@ -144,37 +149,41 @@ import {
 	shortenPath,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
-} from "../tools/render-utils";
+} from "@oh-my-pi/pi-tui/render/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	createTodoHudStateData,
-	formatPhaseDisplayName,
 	getTodoHudVisibility,
-	isClosedTodo,
 	nextActionableTask,
-	selectCollapsedTodos,
-	setActiveTodoDescriptionsProvider,
 	TODO_HUD_STATE_CUSTOM_TYPE,
 	USER_TODO_EDIT_CUSTOM_TYPE,
-	todoMatchesAnyDescription,
 	type TodoHudStateEntryData,
 } from "../tools/todo";
+import {
+	formatPhaseDisplayName,
+	isClosedTodo,
+	selectCollapsedTodos,
+	setActiveTodoDescriptionsProvider,
+	todoMatchesAnyDescription,
+} from "@oh-my-pi/pi-tui/tools/todo";
 import { vocalizer } from "../tts/vocalizer";
-import { applyHyperlinkSetting, fileHyperlink } from "../tui/hyperlink";
-import { renderTreeList } from "../tui/tree-list";
+import { applyHyperlinkSetting, fileHyperlink } from "@oh-my-pi/pi-tui/render/hyperlink";
+import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { resumeCommand } from "../utils/resume-command";
-import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
-import { messageHasDisplayableThinking } from "../utils/thinking-display";
+import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-tui/theme/session-color";
+import { messageHasDisplayableThinking } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import type { TokenRateMeter } from "../utils/token-rate";
 import {
 	disposeTerminalTitleState,
 	initTerminalTitleState,
 	popTerminalTitle,
 	pushTerminalTitle,
 	setSessionTerminalTitle,
+	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
@@ -183,30 +192,33 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
-import type { AssistantMessageComponent } from "./components/assistant-message";
-import { AttachmentChipsBand } from "./components/attachment-chips";
-import type { BashExecutionComponent } from "./components/bash-execution";
-import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
-import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
-import { CustomEditor } from "./components/custom-editor";
-import { DynamicBorder } from "./components/dynamic-border";
-import { EditorTopGap } from "./components/editor-top-gap";
-import { ErrorBannerComponent } from "./components/error-banner";
-import type { EvalExecutionComponent } from "./components/eval-execution";
-import type { HookEditorComponent } from "./components/hook-editor";
-import type { HookInputComponent } from "./components/hook-input";
-import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
-import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/plan-review-overlay";
-import { PlanSaveOverlay, type PlanSaveOverlayResult } from "./components/plan-save-overlay";
-import { ServedModelTracker } from "./components/served-model-marker";
-import { SessionInfoOverlay } from "./components/session-info-overlay";
-import { SkillMessageComponent } from "./components/skill-message";
-import { StatusLineComponent } from "./components/status-line";
-import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
-import { TranscriptContainer } from "./components/transcript-container";
-import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
-import { Composer, PINNED_HUD_TOGGLE_ID, type ComposerStatusSnapshot } from "./composer";
-import { writeComposerStatusCache, writeComposerWelcomeCache } from "./composer-cache";
+import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { AttachmentChipsBand } from "@oh-my-pi/pi-tui/prompt/attachment-chips";
+import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
+import { ChatBlock, type ChatBlockHost } from "@oh-my-pi/pi-tui/chrome/chat-block";
+import { CodexResetFireworksController } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
+import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
+import { ErrorBannerComponent } from "@oh-my-pi/pi-tui/overlays/error-banner";
+import type { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
+import type { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import type { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
+import type { HookSelectorComponent, HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
+import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { PlanSaveOverlay, type PlanSaveOverlayResult } from "@oh-my-pi/pi-tui/overlays/plan-save-overlay";
+import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
+import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
+import { SkillMessageComponent } from "@oh-my-pi/pi-tui/chat/skill-message";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { statusLineHost } from "./status-line-host";
+import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import type { LspServerInfo as WelcomeLspServerInfo } from "@oh-my-pi/pi-tui/prompt/welcome";
+import { Composer, PINNED_HUD_TOGGLE_ID, type ComposerStatusSnapshot } from "@oh-my-pi/pi-tui/prompt/composer";
+import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import { MAGIC_KEYWORDS } from "./magic-keywords";
+import { writeComposerStatusCache, writeComposerWelcomeCache } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -221,13 +233,8 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
-import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
-import {
-	describeLoopCondition,
-	evaluateLoopCondition,
-	type LoopConditionConfig,
-	type LoopConditionVerdict,
-} from "./loop-condition";
+import { imageReferenceHyperlink, materializeImageReferenceLinks } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -235,33 +242,36 @@ import {
 	describeLoopLimitRuntime,
 	isLoopDurationExpired,
 	isLoopLimitExhausted,
-	type LoopLimitRuntime,
 	parseLoopArgs,
 } from "./loop-limit";
+import type { LoopConditionConfig, LoopLimitRuntime } from "@oh-my-pi/pi-tui/status-line/loop";
 import { OAuthManualInputManager } from "./oauth-manual-input";
-import { getRunningSubagentBadgeAgentIds, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
+import {
+	getRunningSubagentBadgeAgentIds,
+	getRunningSubagentBadgeRegistry,
+} from "@oh-my-pi/pi-tui/overlays/running-subagent-badge";
 import {
 	type ObservableSession,
 	type SessionObserverChangeKind,
 	SessionObserverRegistry,
-} from "./session-observer-registry";
+} from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { createSessionTeardown, type SessionTeardown } from "./session-teardown";
-import { runProviderSetupWizard } from "./setup-wizard/lazy";
-import { sanitizeStatusText } from "./shared";
+import { sanitizeStatusText } from "@oh-my-pi/pi-tui/chrome/shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
-import { clearMermaidCache } from "./theme/mermaid-cache";
-import { type ShimmerPalette, shimmerEnabled, shimmerText } from "./theme/shimmer";
-import type { Theme } from "./theme/theme";
+import { clearMermaidCache } from "@oh-my-pi/pi-tui/theme/mermaid-cache";
+import { type ShimmerPalette, shimmerEnabled, shimmerText } from "@oh-my-pi/pi-tui/theme/shimmer";
+import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	getEditorTheme,
 	getMarkdownTheme,
 	onTerminalAppearanceChange,
 	onThemeChange,
 	setMarkdownMermaidRendering,
+	setSymbolPreset,
 	startMacOSAppearanceReprobeFallback,
 	theme,
-} from "./theme/theme";
-import { getSlashCommandTypeIcon } from "./theme/tui-adapters";
+} from "@oh-my-pi/pi-tui/theme";
+import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
 	AgentHubOpenOptions,
 	CompactionQueuedMessage,
@@ -270,9 +280,8 @@ import type {
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
 	SubmittedUserInput,
-	TodoItem,
-	TodoPhase,
 } from "./types";
+import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
@@ -820,10 +829,32 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!name) return undefined;
 		return `\x1b[2;3m${sanitizeStatusText(name)}\x1b[23;22m`;
 	}
-	/** Idle stand-in for the working row in band mode: the docked title stays
-	 * readable between turns, in the same spot the loader's trailer uses. */
+	/** Live gen tok/s for the working row: the viewed session's own meter, so a
+	 * focused subagent shows its own reading and the main session's survives
+	 * focus round-trips. */
+	get tokenRate(): TokenRateMeter {
+		return this.viewSession.tokenRate;
+	}
+	/** Generation tok/s: live while streaming, the last reading between
+	 * turns, blank until a run has produced enough tokens to measure. */
+	#tokenRateLabel(): string | undefined {
+		if (!settings.get("composer.tokenRate")) return undefined;
+		const rate = this.tokenRate.rate();
+		if (rate === null) return undefined;
+		return theme.fg("dim", `${theme.icon.throughput} ${rate.toFixed(1)} tok/s`);
+	}
+	/** Right-docked suffix of the working row: the tok/s readout, then the band-mode title. */
+	#workingRowTrailer(): string | undefined {
+		const rate = this.#tokenRateLabel();
+		const title = this.#workingTitleTrailer();
+		if (rate && title) return `${rate}  ${title}`;
+		return rate ?? title;
+	}
+	/** Idle stand-in for the working row: the last tok/s reading and the
+	 * band-mode title stay readable between turns, docked where the loader's
+	 * trailer was. */
 	renderIdleStatusHud(width: number): readonly string[] | undefined {
-		const trailer = this.#workingTitleTrailer();
+		const trailer = this.#workingRowTrailer();
 		if (!trailer) return undefined;
 		return ["", " ".repeat(Math.max(0, width - visibleWidth(trailer))) + trailer];
 	}
@@ -846,6 +877,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	lastLeftTapTime = 0;
 	shutdownRequested = false;
 	#isShuttingDown = false;
+	/**
+	 * Set once a graceful {@link shutdown} teardown threw. The teardown is
+	 * promise-memoized (and the session manager latches its disk error), so
+	 * re-running it repeats the identical failure — without this flag the user is
+	 * trapped in a process that can never close (#12238: a corrupted session file
+	 * makes the close-time rewrite refuse to clobber it). The next shutdown is the
+	 * escape hatch: exit without writing the session log.
+	 */
+	#teardownFailed = false;
+	/** True once a graceful `shutdown()` teardown failed at the memoized
+	 *  dispose stage. Surfaced to the input controller so the next single
+	 *  Ctrl+C skips the double-tap gate and runs `shutdown()` — which
+	 *  force-quits — instead of merely clearing the editor (#12238). */
+	get teardownFailed(): boolean {
+		return this.#teardownFailed;
+	}
 	/** True once `shutdown()` has begun teardown. Surfaced to the input
 	 *  controller so a Ctrl+C arriving while teardown is in flight can hard-
 	 *  abort the remaining work instead of stacking another no-op call. */
@@ -865,6 +912,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Owned room; use {@link collabController}.host for current-session reuse and links. */
 	collabHost?: CollabHost;
 	collabGuest?: CollabGuestLink;
+	#streamPublisher: StreamPublisher | undefined;
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
@@ -942,6 +990,23 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #focusController: SessionFocusController;
 	get viewSession(): AgentSession {
 		return this.#focusController.target ?? this.session;
+	}
+	get assistantImagesVisible(): boolean {
+		return this.settings.get("terminal.showImages");
+	}
+	resolveAssistantMessageLinks(texts: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		const session = this.viewSession;
+		return resolveMarkdownLinkTargets(texts, {
+			cwd: session.sessionManager.getCwd(),
+			sessionFile: session.sessionFile,
+			settings: session.settings,
+			localProtocolOptions: {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			},
+			skills: session.skills,
+			rules: session.ttsrManager?.getRules(),
+		});
 	}
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
@@ -1051,7 +1116,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#observerUiSyncTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
 	#agentRegistryUnsubscribe?: () => void;
-	#agentRegistrySubscriptionTarget?: AgentRegistry;
+	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
@@ -1090,6 +1155,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			spellingAutocorrect: settings.get("spelling.autocorrect"),
 		};
 		const wasStarted = composer?.started ?? false;
+		setMagicKeywords(MAGIC_KEYWORDS);
 		this.composer =
 			composer ??
 			new Composer({
@@ -1111,6 +1177,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.editor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
+		this.editor.modelMentionLabel = selector => {
+			const model = this.session.findMentionableModel(selector);
+			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
+		};
+		this.editor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		this.editor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		this.#ownsStartedUi = wasStarted;
 		this.keybindings = KeybindingsManager.inMemory();
@@ -1220,7 +1291,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			materializeImageReferenceLinks(images, this.sessionManager.putBlob.bind(this.sessionManager));
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
-		this.statusLine = new StatusLineComponent(session);
+		this.statusLine = new StatusLineComponent(session, statusLineHost);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 		this.#codexResetFireworksController = new CodexResetFireworksController(this);
 		this.statusLine.setCodexResetFireworksHandler(event => {
@@ -1500,6 +1571,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// after shutdown can never write into the parent shell's tab.
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
+		setTerminalTitleSpinnerStyle(this.settings.get("tui.titleSpinner"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
@@ -1532,6 +1604,28 @@ export class InteractiveMode implements InteractiveModeContext {
 		// TUI's multiplexer, output-backlog, and image safety gates.
 		this.ui.renderNow();
 
+		const streamCwd = this.sessionManager.getCwd();
+		this.#streamPublisher =
+			(await StreamPublisher.connectLazy({
+				cwd: streamCwd,
+				sessionId: this.sessionManager.getSessionId(),
+				title: path.basename(streamCwd),
+				tui: this.ui,
+				loadRedactor: () => StreamRedactor.load(streamCwd, this.settings.get("stream.redactPatterns")),
+				onStatus: status => {
+					this.statusLine.setStreamStatus(status);
+					this.ui.requestRender();
+				},
+				onChat: message => {
+					const chat = truncateToWidth(
+						replaceTabs(sanitizeText(`${message.name}: ${message.text}`)).replace(/[\r\n]+/g, " "),
+						TRUNCATE_LENGTHS.LINE,
+					);
+					this.showStatus(chat);
+				},
+			})) ?? undefined;
+		if (this.#streamPublisher) this.ui.renderNow();
+
 		// Prewarm the local tiny-title worker off the submit hot path: spawn it
 		// now, idle and unref'd, so the first submit reuses a live subprocess
 		// instead of paying spawn latency ahead of the first frame (issue #6462).
@@ -1541,7 +1635,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// spawn syscall never lands in the same loop turn ahead of the first paint.
 		setImmediate(() => {
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
-				tinyTitleClient.prewarm(this.settings.get("providers.tinyModel"));
+				this.#inputController.prewarmTinyTitleModel();
 			}
 		});
 
@@ -1651,6 +1745,19 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.ui.requestRender(true, { clearScrollback: true });
 			}),
 		);
+		// A confirmed Glyph Protocol handshake means omp's own icons render in
+		// this terminal without a Nerd Font, so the default `unicode` preset is
+		// upgraded to `nerd` for this session. The persisted setting is left
+		// alone: it travels to terminals (ssh, tmux) where the upgrade would
+		// show tofu. Explicit `ascii`/`nerd` choices are never touched.
+		this.ui.terminal.onGlyphProtocolReport?.(supported => {
+			if (!supported || settings.get("symbolPreset") !== "unicode" || theme.getSymbolPreset() !== "unicode") return;
+			void setSymbolPreset("nerd").then(() => {
+				this.statusLine.invalidate();
+				this.ui.invalidate();
+				this.ui.requestRender();
+			});
+		});
 
 		// Subscribe to terminal dark/light appearance changes.
 		// The terminal queries background color via OSC 11 at startup and on
@@ -1853,11 +1960,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				// before the move commits so the next prompt cannot recall or
 				// retain against the source project's memory.
 				await rebindMemoryBackendForCwd(this.session);
-				// Reapply provider preferences from the newly-loaded settings so the
-				// module-level search/image provider state reflects the destination
-				// project's configuration. Without this, the previous project's
-				// exclusions leak and newly-excluded providers are still used.
-				applyProviderGlobalsFromSettings(settings);
 			}
 			// Re-warm plugin roots, capabilities, slash commands, and the ssh tool so
 			// the next prompt sees everything scoped to the new project directory.
@@ -1877,7 +1979,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (isSettingsInitialized()) {
 					await settings.reloadForCwd(previousCwd);
 					await rebindMemoryBackendForCwd(this.session);
-					applyProviderGlobalsFromSettings(settings);
 				}
 				clearClaudePluginRootsCache();
 				await this.refreshTitleSystemPrompt(previousCwd);
@@ -1891,7 +1992,6 @@ export class InteractiveMode implements InteractiveModeContext {
 					if (isSettingsInitialized()) {
 						await settings.reloadForCwd(actual);
 						await rebindMemoryBackendForCwd(this.session);
-						applyProviderGlobalsFromSettings(settings);
 					}
 					clearClaudePluginRootsCache();
 					await this.refreshTitleSystemPrompt(actual);
@@ -2651,7 +2751,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
-		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+		const registry = getRunningSubagentBadgeRegistry(this.collabGuest, AgentRegistry.global());
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;
@@ -4971,7 +5071,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			`Objective: ${goal.objective}`,
 			`Status: ${goal.status}${state?.enabled ? "" : " (paused)"}`,
 			`Tokens: ${budgetLine}`,
-			`Time spent: ${formatDuration(goal.timeUsedSeconds * 1000)}`,
+			`Time spent: ${formatCoarseDuration(goal.timeUsedSeconds * 1000)}`,
 		];
 		this.showStatus(lines.join("\n"));
 	}
@@ -5373,6 +5473,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#appearanceRefreshRequest = undefined;
+		this.#streamPublisher?.dispose();
+		this.#streamPublisher = undefined;
 		// Last chance to refresh the startup status placeholder for the next launch.
 		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
@@ -5427,12 +5529,27 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async shutdown(): Promise<void> {
 		if (this.#isShuttingDown) return;
+		// The previous graceful teardown failed AT the memoized session.dispose()
+		// (the session is already disposing), so it re-rejects identically forever
+		// and the process can never close (#12238: a corrupted session file makes
+		// the close-time rewrite refuse to clobber it). This second attempt is the
+		// escape hatch: quit without writing the session log. 130 = 128 + SIGINT,
+		// matching the Ctrl+C hard-abort exit code in input-controller.
+		if (this.#teardownFailed) {
+			try {
+				await postmortem.quit(130);
+			} catch {
+				// Extension/hook loading temporarily guards process.exit. Cleanup
+				// has already run; bypass that guard for this host-owned escape.
+				postmortem.exitProcess(130);
+			}
+			return;
+		}
 		this.#isShuttingDown = true;
 		try {
 			await this.#teardown();
 		} catch (error) {
-			this.#isShuttingDown = false;
-			this.showError(`Could not close session: ${error instanceof Error ? error.message : String(error)}`);
+			this.#handleTeardownError("close", error);
 			return;
 		}
 
@@ -5445,6 +5562,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		await postmortem.quit(0);
+	}
+
+	#handleTeardownError(action: "close" | "restart", error: unknown): void {
+		this.#isShuttingDown = false;
+		const detail = error instanceof Error ? error.message : String(error);
+		// Arm the escape hatch only once dispose() has begun: its promise is
+		// memoized, so a retry can only re-fail. A failure BEFORE dispose (a
+		// transient BTW/live-command flush) leaves the session undisposed and
+		// the teardown genuinely retryable, so it must not force-quit.
+		this.#teardownFailed = this.session.isDisposed;
+		this.showError(
+			this.#teardownFailed
+				? `Could not ${action} session: ${detail}\nPress Ctrl+C again to exit without saving the session log.`
+				: `Could not ${action} session: ${detail}`,
+		);
 	}
 
 	/**
@@ -5464,8 +5596,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			await this.#teardown();
 		} catch (error) {
-			this.#isShuttingDown = false;
-			this.showError(`Could not restart session: ${error instanceof Error ? error.message : String(error)}`);
+			this.#handleTeardownError("restart", error);
 			return;
 		}
 
@@ -5518,6 +5649,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showStatus("Still closing… (flushing memory backend / network)");
 		}, STILL_CLOSING_DELAY_MS);
 		try {
+			this.#streamPublisher?.dispose();
+			this.#streamPublisher = undefined;
 			// Guests get goodbye and the registry entry disappears before the
 			// session is disposed, under the same still-closing progress notice.
 			await this.collabController.shutdown("host exited");
@@ -5625,6 +5758,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.skillFilePath = name => this.skillCommands.get(`skill:${name}`)?.filePath;
+		nextEditor.modelMentionLabel = selector => {
+			const model = this.session.findMentionableModel(selector);
+			return model ? modelMentionChipLabel(modelMentionDisplayName(model)) : undefined;
+		};
+		nextEditor.modelMentionSelector = agent => this.session.modelMentions.find(m => m.agent === agent)?.selector;
 		nextEditor.fileHyperlink = (filePath, text) => fileHyperlink(filePath, text, { line: 1 });
 		nextEditor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
@@ -5944,7 +6082,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// status rows so the interrupt glyph reads as indented.
 				[` ${theme.icon.esc}`],
 			);
-			this.loadingAnimation.setTrailer(() => this.#workingTitleTrailer());
+			this.loadingAnimation.setTrailer(() => this.#workingRowTrailer());
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
 			this.statusContainer.disposeChildren();
@@ -6088,10 +6226,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.truncateTranscriptFromMessage(message);
 	}
 
-	getUserMessageText(message: Message): string {
-		return this.#uiHelpers.getUserMessageText(message);
-	}
-
 	findLastAssistantMessage(): AssistantMessage | undefined {
 		return this.#uiHelpers.findLastAssistantMessage();
 	}
@@ -6189,10 +6323,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleResetContextCommand();
 	}
 
-	async handleDropCommand(): Promise<void> {
+	async handleDeleteCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		await this.prepareSessionSwitch();
-		await this.#commandController.handleDropCommand();
+		await this.#commandController.handleDeleteCommand();
 	}
 
 	async handleForkCommand(): Promise<void> {
@@ -6240,7 +6374,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#sttController.toggle(this.editor, {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
-			requestRender: () => this.ui.requestRender(),
 			onStateChange: (state: SttState) => {
 				// Duck assistant speech while the user is talking (push-to-talk); restore after.
 				if (state === "recording") vocalizer.duck();
@@ -6454,8 +6587,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.showResetUsageSelector();
 	}
 
-	showProviderSetup(): Promise<void> {
-		return runProviderSetupWizard(this);
+	async showProviderSetup(): Promise<void> {
+		const { runProviderSetupWizard } = await import("./setup");
+		await runProviderSetupWizard(this);
 	}
 
 	showHookConfirm(title: string, message: string): Promise<boolean> {

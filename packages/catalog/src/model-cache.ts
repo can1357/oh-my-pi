@@ -2,9 +2,8 @@
  * SQLite-backed model cache for atomic cross-process access.
  * Replaces per-provider JSON files with a single cache.db.
  */
-import { Database } from "bun:sqlite";
-import { renameSync } from "node:fs";
-import { getModelDbPath, isEnoent, isSqliteCorruptionError, logger, VERSION } from "@oh-my-pi/pi-utils";
+import type { Database } from "bun:sqlite";
+import { getModelDbPath, isSqliteCorruptionError, openSqliteDatabaseSync, VERSION } from "@oh-my-pi/pi-utils";
 import RULES from "./compat/rules.json" with { type: "json" };
 import type { Api, Model } from "./types";
 
@@ -31,12 +30,19 @@ const HEADER_RESTORE_VERSION = 1;
  * Explicit compatibility gate for materialized rows. Bump whenever buildModel
  * semantics change without an app-version change. The compiled-rules content
  * hash catches every KDL policy edit even when the package version is unchanged;
- * it is computed once per process rather than once per provider or model.
+ * computed lazily on first cache access and memoized, so processes that never
+ * touch the model cache skip the stringify entirely.
  */
 const MODEL_MATERIALIZATION_VERSION = 1;
-const MATERIALIZATION_POLICY =
-	`app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${RULES.version}-` +
-	Bun.hash(JSON.stringify(RULES)).toString(36);
+let cachedMaterializationPolicy: string | undefined;
+function materializationPolicy(): string {
+	if (cachedMaterializationPolicy === undefined) {
+		cachedMaterializationPolicy =
+			`app-${VERSION}:builder-${MODEL_MATERIALIZATION_VERSION}:rules-${RULES.version}-` +
+			Bun.hash(JSON.stringify(RULES)).toString(36);
+	}
+	return cachedMaterializationPolicy;
+}
 
 interface CacheRow {
 	provider_id: string;
@@ -88,14 +94,50 @@ export interface CacheEntry<TApi extends Api = Api> {
 let sharedDb: Database | null = null;
 let sharedDbPath: string | null = null;
 
-function openDb(resolvedPath: string): Database {
-	const db = new Database(resolvedPath, { create: true });
-	// Install the busy handler BEFORE any lock-taking statement. See
-	// https://github.com/can1357/oh-my-pi/issues/2421.
-	db.run("PRAGMA busy_timeout = 3000");
-	// Schema invalidation can delete rows containing credentials written by old
-	// versions. Overwrite deleted SQLite cells instead of leaving their bytes in
-	// free pages where a raw scan of models.db can still recover them (#5780).
+const readRowCache = new Map<string, { dataVersion: number; entry: CacheEntry<Api> | null }>();
+const READ_ROW_CACHE_MAX = 64;
+
+function readCacheKey(resolvedPath: string, providerId: string): string {
+	return `${resolvedPath} ${providerId}`;
+}
+
+function dbDataVersion(db: Database): number | null {
+	try {
+		const row = db.query<{ data_version: number }, []>("PRAGMA data_version").get();
+		return typeof row?.data_version === "number" ? row.data_version : null;
+	} catch {
+		return null;
+	}
+}
+
+function withFreshness<TApi extends Api>(
+	entry: CacheEntry<TApi> | null,
+	ttlMs: number,
+	now: () => number,
+): CacheEntry<TApi> | null {
+	if (entry === null) return null;
+	const ageMs = now() - entry.updatedAt;
+	const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= ttlMs;
+	return fresh === entry.fresh ? entry : { ...entry, fresh };
+}
+function invalidateReadRow(providerId: string, dbPath?: string): void {
+	try {
+		readRowCache.delete(readCacheKey(dbPath ?? getModelDbPath(), providerId));
+	} catch {
+		// Best-effort only; a missed invalidation just costs one extra parse.
+	}
+}
+
+function invalidateReadPath(resolvedPath: string): void {
+	for (const key of readRowCache.keys()) {
+		if (key.startsWith(`${resolvedPath} `)) readRowCache.delete(key);
+	}
+}
+
+function initializeDb(db: Database): void {
+	// The shared opener installs the busy handler before any lock-taking
+	// statement. Schema invalidation can delete rows containing credentials
+	// written by old versions, so scrub deleted cells (#5780).
 	db.run("PRAGMA secure_delete = ON");
 	db.run("PRAGMA journal_mode = WAL");
 	db.run(`
@@ -113,91 +155,53 @@ function openDb(resolvedPath: string): Database {
 		)
 	`);
 	migrateCacheSchema(db);
-	return db;
 }
 
-function getSharedDb(resolvedPath: string): Database {
-	if (sharedDb && sharedDbPath === resolvedPath) {
-		return sharedDb;
-	}
-	if (sharedDb) {
-		sharedDb.close();
-		sharedDb = null;
-		sharedDbPath = null;
-	}
-	const db = openDb(resolvedPath);
-	sharedDb = db;
-	sharedDbPath = resolvedPath;
-	return db;
+function closeSharedDb(): void {
+	if (!sharedDb) return;
+	sharedDb.close();
+	sharedDb = null;
+	sharedDbPath = null;
 }
 
 function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: Database) => T): T {
-	if (shared) return useDb(getSharedDb(resolvedPath));
-	const db = openDb(resolvedPath);
-	try {
-		return useDb(db);
-	} finally {
-		db.close();
-	}
-}
-
-// Paths already reported corrupt this process: the first unrecoverable failure
-// is logged at `error`, later heals at `debug`, so a dying disk cannot spam.
-const reportedCorruptPaths = new Set<string>();
-
-/**
- * Move a physically corrupt `models.db` (plus its `-wal`/`-shm` sidecars) aside
- * so {@link openDb} can recreate a fresh cache at the original path. Renames are
- * best-effort: a vanished sidecar (already healed by a peer process) is fine,
- * and any other rename failure is left for {@link openDb} to surface.
- */
-function quarantineCorruptModelCache(resolvedPath: string): void {
-	const stamp = Date.now();
-	for (const suffix of ["", "-wal", "-shm"]) {
+	if (shared && sharedDb && sharedDbPath !== resolvedPath) closeSharedDb();
+	if (shared && sharedDb) {
 		try {
-			renameSync(`${resolvedPath}${suffix}`, `${resolvedPath}.corrupt-${stamp}${suffix}`);
-		} catch (err) {
-			if (!isEnoent(err)) {
-				logger.debug("model cache: could not quarantine corrupt file", { path: `${resolvedPath}${suffix}` });
-			}
+			return useDb(sharedDb);
+		} catch (error) {
+			if (!isSqliteCorruptionError(error)) throw error;
+			// The opener owns recovery for new handles. Drop this stale handle
+			// first so its WAL cannot remain attached to the replacement.
+			closeSharedDb();
+			invalidateReadPath(resolvedPath);
+			return runModelCacheDb(resolvedPath, shared, useDb);
 		}
 	}
-}
 
-/**
- * Recover from unrecoverable `models.db` corruption: drop the cached handle,
- * quarantine the broken files, and let the next open recreate the cache. A
- * corrupt cache would otherwise be re-queried on every read/write forever,
- * permanently masking a successful live catalog (issue #8867). Only
- * {@link isSqliteCorruptionError} codes reach here; BUSY/permission errors keep
- * their existing best-effort paths.
- */
-function healCorruptModelCache(resolvedPath: string, shared: boolean, err: unknown): void {
-	if (shared && sharedDb) {
-		sharedDb.close();
-		sharedDb = null;
-		sharedDbPath = null;
-	}
-	quarantineCorruptModelCache(resolvedPath);
-	const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
-	if (reportedCorruptPaths.has(resolvedPath)) {
-		logger.debug("model cache: re-healed corrupt database", { path: resolvedPath, code });
-	} else {
-		reportedCorruptPaths.add(resolvedPath);
-		logger.error("model cache corrupt; quarantined and recreated a fresh cache", { path: resolvedPath, code });
-	}
+	return openSqliteDatabaseSync(
+		resolvedPath,
+		db => {
+			initializeDb(db);
+			const result = useDb(db);
+			if (shared) {
+				sharedDb = db;
+				sharedDbPath = resolvedPath;
+			} else {
+				db.close();
+			}
+			return result;
+		},
+		{
+			recoverCorruption: true,
+			onCorruptionPreserved: () => invalidateReadPath(resolvedPath),
+		},
+	);
 }
 
 function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
 	const resolvedPath = dbPath ?? getModelDbPath();
-	const shared = dbPath === undefined;
-	try {
-		return runModelCacheDb(resolvedPath, shared, useDb);
-	} catch (err) {
-		if (!isSqliteCorruptionError(err)) throw err;
-		healCorruptModelCache(resolvedPath, shared, err);
-		return runModelCacheDb(resolvedPath, shared, useDb);
-	}
+	return runModelCacheDb(resolvedPath, dbPath === undefined, useDb);
 }
 
 function migrateCacheSchema(db: Database): void {
@@ -232,7 +236,7 @@ function migrateCacheSchema(db: Database): void {
 	// compaction path even after CACHE_SCHEMA_VERSION was bumped).
 	db.run("DELETE FROM model_cache WHERE version <> ? OR materialization_policy <> ?", [
 		CACHE_SCHEMA_VERSION,
-		MATERIALIZATION_POLICY,
+		materializationPolicy(),
 	]);
 }
 
@@ -313,7 +317,6 @@ function parseModelIds(serialized: string): string[] | null {
 		return null;
 	}
 }
-
 export function readModelCache<TApi extends Api>(
 	providerId: string,
 	ttlMs: number,
@@ -321,46 +324,77 @@ export function readModelCache<TApi extends Api>(
 	dbPath?: string,
 ): CacheEntry<TApi> | null {
 	try {
-		return withModelCacheDb(dbPath, db => {
-			const stmt = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?");
-			try {
-				const row = stmt.get(providerId);
-				if (!row || row.version !== CACHE_SCHEMA_VERSION || row.materialization_policy !== MATERIALIZATION_POLICY) {
-					return null;
+		const resolvedPath = dbPath ?? getModelDbPath();
+		const key = readCacheKey(resolvedPath, providerId);
+		// Monotonic change signal: same-shaped WAL overwrites after checkpoint
+		// can leave every size:mtime pair identical, so file metadata alone
+		// cannot invalidate. PRAGMA data_version increments on each committed
+		// write transaction visible to a new reader.
+		const entry = withModelCacheDb(dbPath, db => {
+			const dataVersion = dbDataVersion(db);
+			if (dataVersion !== null) {
+				const cached = readRowCache.get(key);
+				if (cached !== undefined && cached.dataVersion === dataVersion) {
+					// Freshness is time-relative: recompute per call from the
+					// cached row's updatedAt so a long-lived process goes stale.
+					return { hit: true as const, entry: withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now) };
 				}
-				const models = parseMaterializedModels<TApi>(row.models);
-				const headerOmittedModelIds = parseModelIds(row.header_omitted_model_ids);
-				const unrestorableHeaderModelIds = parseModelIds(row.unrestorable_header_model_ids);
-				if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
-					// Fail closed on corrupt header provenance: treating malformed
-					// markers as empty could return a model with required credentials
-					// silently absent. secure_delete scrubs the rejected payload.
-					db.run("DELETE FROM model_cache WHERE provider_id = ?", [providerId]);
-					return null;
-				}
-				const ageMs = now() - row.updated_at;
-				const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= ttlMs;
-				return {
-					models,
-					fresh,
-					authoritative: row.authoritative === 1,
-					updatedAt: row.updated_at,
-					headerOmittedModelIds,
-					unrestorableHeaderModelIds,
-					legacyHeaderRestoreMarkers: row.header_restore_version < HEADER_RESTORE_VERSION,
-					staticFingerprint: row.static_fingerprint ?? "",
-				};
-			} finally {
-				stmt.finalize();
 			}
+			const fresh = readRowUncached<TApi>(db, providerId, ttlMs, now);
+			if (dataVersion !== null) {
+				if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
+				readRowCache.set(key, { dataVersion, entry: fresh as CacheEntry<Api> | null });
+			}
+			return { hit: false as const, entry: fresh };
 		});
+		return entry.entry;
 	} catch {
 		return null;
 	}
 }
 
+function readRowUncached<TApi extends Api>(
+	db: Database,
+	providerId: string,
+	ttlMs: number,
+	now: () => number,
+): CacheEntry<TApi> | null {
+	const stmt = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?");
+	try {
+		const row = stmt.get(providerId);
+		if (!row || row.version !== CACHE_SCHEMA_VERSION || row.materialization_policy !== materializationPolicy()) {
+			return null;
+		}
+		const models = parseMaterializedModels<TApi>(row.models);
+		const headerOmittedModelIds = parseModelIds(row.header_omitted_model_ids);
+		const unrestorableHeaderModelIds = parseModelIds(row.unrestorable_header_model_ids);
+		if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
+			// Fail closed on corrupt header provenance: treating malformed
+			// markers as empty could return a model with required credentials
+			// silently absent. secure_delete scrubs the rejected payload.
+			db.run("DELETE FROM model_cache WHERE provider_id = ?", [providerId]);
+			return null;
+		}
+		const ageMs = now() - row.updated_at;
+		const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= ttlMs;
+		return {
+			models,
+			fresh,
+			authoritative: row.authoritative === 1,
+			updatedAt: row.updated_at,
+			headerOmittedModelIds,
+			unrestorableHeaderModelIds,
+			legacyHeaderRestoreMarkers: row.header_restore_version < HEADER_RESTORE_VERSION,
+			staticFingerprint: row.static_fingerprint ?? "",
+		};
+	} finally {
+		stmt.finalize();
+	}
+}
+
 /** Whether a live model carries at least one request header. */
 function hasModelHeaders(model: Model<Api>): boolean {
+	if (model.resolveHeaders) return true;
 	const headers = model.headers;
 	if (!headers) return false;
 	for (const _key in headers) return true;
@@ -376,7 +410,7 @@ function hasModelHeaders(model: Model<Api>): boolean {
  * so a compatible cache can be consumed without running `buildModel`.
  */
 function toCachedModel<TApi extends Api>(model: Model<TApi>): PersistedModel<TApi> {
-	const { headers: _headers, ...rest } = model;
+	const { headers: _headers, resolveHeaders: _resolveHeaders, ...rest } = model;
 	return {
 		...rest,
 		supportsComputerUseConfig: model.supportsComputerUseConfig ?? null,
@@ -406,6 +440,7 @@ export function writeModelCache<TApi extends Api>(
 	restorableHeaderFallback?: Record<string, string>,
 ): void {
 	try {
+		invalidateReadRow(providerId, dbPath);
 		withModelCacheDb(dbPath, db => {
 			const headerOmittedModelIds: string[] = [];
 			const unrestorableHeaderModelIds: string[] = [];
@@ -424,9 +459,11 @@ export function writeModelCache<TApi extends Api>(
 					// headers equal a trusted provider-wide fallback that the reader can
 					// re-derive without persisting it. This keeps reference-less models
 					// with constant or configured headers alive offline.
-					const matchesStatic = staticHeaderSource
-						? headersEqual(model.headers, staticHeaderSource.headers)
-						: headersEqual(model.headers, restorableHeaderFallback);
+					const matchesStatic = model.resolveHeaders
+						? staticHeaderSource?.resolveHeaders === model.resolveHeaders
+						: staticHeaderSource
+							? headersEqual(model.headers, staticHeaderSource.headers)
+							: headersEqual(model.headers, restorableHeaderFallback);
 					if (!matchesStatic) {
 						unrestorableHeaderModelIds.push(model.id);
 					}
@@ -442,7 +479,7 @@ export function writeModelCache<TApi extends Api>(
 				[
 					providerId,
 					CACHE_SCHEMA_VERSION,
-					MATERIALIZATION_POLICY,
+					materializationPolicy(),
 					updatedAt,
 					authoritative ? 1 : 0,
 					staticFingerprint,

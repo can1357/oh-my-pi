@@ -26,6 +26,7 @@ import type {
 	OAuthAuthInfo,
 	OAuthController,
 	OAuthCredentials,
+	OAuthPrompt,
 	OAuthProvider,
 	OAuthProviderId,
 } from "./registry/oauth/types";
@@ -1635,8 +1636,8 @@ export class AuthStorage {
 	 * Lower priority than {@link setRuntimeApiKey} so a CLI `--api-key`
 	 * still wins for the duration of a single invocation.
 	 */
-	setConfigApiKey(provider: string, apiKey: string): void {
-		this.#configOverrides.set(provider, apiKey);
+	setConfigApiKey(provider: string, apiKeyConfig: string): void {
+		this.#configOverrides.set(provider, apiKeyConfig);
 	}
 
 	/**
@@ -1660,6 +1661,15 @@ export class AuthStorage {
 	 */
 	setFallbackResolver(resolver: (provider: string) => string | undefined): void {
 		this.#fallbackResolver = resolver;
+	}
+	/**
+	 * Install the host's async config-value resolver. Coding-agent uses this so
+	 * every stored/config credential reference shares command caching,
+	 * failure backoff, and process hardening even when AuthStorage was created
+	 * independently and later attached to a registry.
+	 */
+	setConfigValueResolver(resolver: (config: string) => Promise<string | undefined>): void {
+		this.#configValueResolver = resolver;
 	}
 
 	/**
@@ -3169,7 +3179,7 @@ export class AuthStorage {
 			/** onAuth is required by auth-storage but optional in OAuthController */
 			onAuth: (info: OAuthAuthInfo) => void;
 			/** onPrompt is required for some providers (github-copilot, openai-codex) */
-			onPrompt: (prompt: { message: string; placeholder?: string }) => Promise<string>;
+			onPrompt: (prompt: OAuthPrompt) => Promise<string>;
 		},
 	): Promise<OAuthLoginIdentity | undefined> {
 		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
@@ -3783,7 +3793,7 @@ export class AuthStorage {
 	ingestUsageHeaders(
 		provider: Provider,
 		headers: Record<string, string>,
-		options?: { sessionId?: string; baseUrl?: string },
+		options?: { sessionId?: string; baseUrl?: string; responseStatus?: number },
 	): boolean {
 		if (this.#fetchUsageReportsOverride) return false;
 		const parseHeaders = this.#resolveUsageProvider(provider)?.parseRateLimitHeaders;
@@ -3796,7 +3806,7 @@ export class AuthStorage {
 			this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl),
 		);
 		const now = Date.now();
-		const parsedReport = parseHeaders(headers, now);
+		const parsedReport = parseHeaders(headers, now, { responseStatus: options?.responseStatus });
 		if (!parsedReport) return false;
 		// Throttled to one ingest per interval — except when a window reads
 		// exhausted: persist that snapshot immediately. A full-backed cache can
@@ -4697,7 +4707,7 @@ export class AuthStorage {
 	async #resolveCredentialTarget(
 		provider: string,
 		sessionId: string | undefined,
-		options?: { credentialId?: number; apiKey?: string },
+		options?: { credentialId?: number; apiKey?: string; allowStaleOAuthBearer?: boolean },
 	): Promise<{ type: AuthCredential["type"]; index: number; explicit: boolean } | undefined> {
 		const explicit = options?.credentialId !== undefined || options?.apiKey !== undefined;
 		if (explicit) {
@@ -4720,6 +4730,15 @@ export class AuthStorage {
 				if (entry && (await this.#credentialMatchesApiKey(entry.credential, options.apiKey))) {
 					return { type: entry.credential.type, index, explicit: true };
 				}
+			}
+			// Quota and account policy survive token refresh; hard auth failures do not.
+			if (options.allowStaleOAuthBearer && options.credentialId === undefined) {
+				const credentialId = this.#findOAuthCredentialIdForBearer(provider, options.apiKey);
+				const index =
+					credentialId === undefined
+						? -1
+						: stored.findIndex(entry => entry.id === credentialId && entry.credential.type === "oauth");
+				if (index >= 0) return { type: "oauth", index, explicit: true };
 			}
 		}
 		if (explicit) return undefined;
@@ -4856,23 +4875,11 @@ export class AuthStorage {
 		},
 	): Promise<UsageLimitMarkResult> {
 		await this.#adoptExternalCredentialChanges();
-		let sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
+		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
+			allowStaleOAuthBearer: true,
 		});
-		if (!sessionCredential && options?.credentialId === undefined && options?.apiKey !== undefined) {
-			// Account quota survives OAuth bearer rotation. Attribute a delayed
-			// usage-limit response through the durable row id captured when this
-			// exact bearer was resolved; never use this alias for hard auth errors.
-			const credentialId = this.#findOAuthCredentialIdForBearer(provider, options.apiKey);
-			const index =
-				credentialId === undefined
-					? -1
-					: this.#getStoredCredentials(provider).findIndex(
-							entry => entry.id === credentialId && entry.credential.type === "oauth",
-						);
-			if (index >= 0) sessionCredential = { type: "oauth", index, explicit: true };
-		}
 		if (!sessionCredential) return { switched: false };
 		const target = this.#getStoredCredentials(provider)[sessionCredential.index];
 		if (!target || target.credential.type !== sessionCredential.type) return { switched: false };
@@ -5960,8 +5967,8 @@ export class AuthStorage {
 		}
 
 		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
+		if (configKey !== undefined) {
+			return await this.#configValueResolver(configKey);
 		}
 
 		await this.#adoptExternalCredentialChanges();
@@ -6028,8 +6035,8 @@ export class AuthStorage {
 		// honor it instead of forwarding an upstream OAuth token that the proxy
 		// won't accept.
 		const configKey = this.#configOverrides.get(provider);
-		if (configKey) {
-			return configKey;
+		if (configKey !== undefined) {
+			return await this.#configValueResolver(configKey);
 		}
 
 		// Precedence: a deliberate OAuth/login credential wins, then an explicit env var,
@@ -6964,8 +6971,8 @@ export class AuthStorage {
 	 * stale session stickiness. Fall back to the session-sticky credential only
 	 * when neither explicit target is available. For hard-auth errors, an explicit
 	 * target that no longer matches storage returns `false` without mutation.
-	 * Delayed usage-limit errors may instead recover the durable OAuth row from
-	 * the bearer fingerprint recorded when the request resolved.
+	 * Delayed usage-limit and account-policy errors may instead recover the durable
+	 * OAuth row from the bearer fingerprint recorded when the request resolved.
 	 *
 	 * - usage-limit / account-rate-limit error → {@link AuthStorage.markUsageLimitReached}
 	 *   (temporary block via its own backoff — default plus server usage-report
@@ -7014,16 +7021,16 @@ export class AuthStorage {
 			).switched;
 		}
 
-		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
-			credentialId: options?.credentialId,
-			apiKey: options?.apiKey,
-		});
-		if (!sessionCredential) return false;
-
 		const deniedModel = AIError.codexChatGPTAccountPolicyModel(error);
 		const exactCodexModelPolicy =
 			deniedModel !== undefined && AIError.isCodexChatGPTAccountPolicyError(error, provider, options?.modelId);
 		const exactModelPolicy = exactCodexModelPolicy || exactCursorModelPolicy;
+		const sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
+			credentialId: options?.credentialId,
+			apiKey: options?.apiKey,
+			allowStaleOAuthBearer: accountPolicy || exactModelPolicy,
+		});
+		if (!sessionCredential) return false;
 		// The exact sentence is provider-controlled input. A non-Codex provider,
 		// absent request model, or mismatched model must not turn it into either a
 		// global block or a hard-auth invalidation.
@@ -7039,6 +7046,15 @@ export class AuthStorage {
 				options?.modelId,
 				modelPolicyScope,
 			);
+			// Account-wide denials must not inherit a quota scope that healthy usage can heal.
+			routing.blockScope = modelPolicyScope;
+			const sticky = this.#getSessionCredential(provider, sessionId);
+			if (
+				!sessionCredential.explicit ||
+				(sticky?.type === sessionCredential.type && sticky.index === sessionCredential.index)
+			) {
+				this.#clearSessionCredential(provider, sessionId);
+			}
 			return this.#blockCredentialForRotation(
 				provider,
 				sessionCredential.type,

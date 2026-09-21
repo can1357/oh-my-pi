@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [18.2.5] - 2026-09-17
+
+### Fixed
+
+- Improved SQLite vector search and import performance by reducing repeated database metadata checks.
+
+## [18.2.1] - 2026-09-15
+
 ### Fixed
 
 - Fixed an explicitly invalidated memory still being returned by an identical repeat query until the recall cache expired.

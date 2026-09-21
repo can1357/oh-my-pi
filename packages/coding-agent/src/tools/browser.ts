@@ -1,9 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
-import { enforceInlineByteCap } from "../session/streaming-output";
+import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
 import { resolveSpawnArgs } from "./browser/attach";
 import {
@@ -19,7 +19,7 @@ import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveRelayKind } from "./browser/relay/kind";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
 import type { ScreenshotResult } from "./browser/tab-protocol";
-import type { OutputMeta } from "./output-meta";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 import {
 	type AcquireTabResult,
 	acquireTab,
@@ -33,8 +33,9 @@ import {
 } from "./browser/tab-supervisor";
 import { renderTabCall } from "./browser/tab-call";
 import { resolveToCwd } from "./path-utils";
-import { renderFunctionRun } from "./run-code";
-import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
+import { renderCallChain, renderFunctionRun } from "./run-code";
+import { ToolAbortError, throwIfAborted } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -155,9 +156,29 @@ export function createBrowserPrelude(session: ToolSession): EvalPreludeDefinitio
 	// Eval-first-use boundary: source/declaration assets stay unloaded until a
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { createBrowserPreludeDefinition } = require("./browser/prelude-definition");
-	return createBrowserPreludeDefinition(session, (parameters: unknown, context: EvalPreludeContext) =>
-		invokeBrowser(session, parameters, context),
-	);
+	return createBrowserPreludeDefinition(session, {
+		invoke: (parameters: unknown, context: EvalPreludeContext) => invokeBrowser(session, parameters, context),
+		status: describeBrowserCall,
+	});
+}
+
+/** Status-tree line for a completed browser call: `open main https://…`, `main.id(5).click()`, `close all`. */
+function describeBrowserCall(parameters: unknown, result: AgentToolResult<unknown>): string | undefined {
+	const parsed = browserSchema(parameters);
+	if (parsed instanceof type.errors) return undefined;
+	const name = parsed.name ?? DEFAULT_TAB_NAME;
+	switch (parsed.action) {
+		case "open": {
+			const url = isRecord(result.details) ? result.details.url : undefined;
+			return typeof url === "string" && url.length > 0 ? `open ${name} ${url}` : `open ${name}`;
+		}
+		case "close":
+			return parsed.all ? "close all" : `close ${name}`;
+		case "run":
+			return `${name}.run(${parsed.fn !== undefined ? "fn" : (parsed.code?.trim().split("\n", 1)[0] ?? "")})`;
+		case "call":
+			return `${name}.${renderCallChain(parsed.chain ?? [])}`;
+	}
 }
 
 /** Drop headless tabs so a browser mode change applies to the next open. */

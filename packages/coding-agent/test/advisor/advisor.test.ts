@@ -15,9 +15,7 @@ import type {
 } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import type { TUI } from "@oh-my-pi/pi-tui";
 import {
 	AdviseTool,
 	type AdvisorAgent,
@@ -36,13 +34,9 @@ import {
 	isInterruptingSeverity,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
-	type WatchdogConfigDoc,
 } from "../../src/advisor";
-import type { ModelRegistry } from "../../src/config/model-registry";
-import type { Settings } from "../../src/config/settings";
-import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../../src/modes/components/advisor-config";
-import { createAdvisorMessageCard } from "../../src/modes/components/advisor-message";
-import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme";
+import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
+import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
 import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
@@ -739,13 +733,13 @@ describe("advisor", () => {
 				{ note, severity: "nit" },
 				{ note: "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!", severity: "blocker" },
 			]);
-			expect(JSON.stringify(blocker.content)).toContain("Accepted for primary delivery");
+			expect(JSON.stringify(blocker.content)).toContain("Delivered.");
 
 			// Equal/lower retags of the delivered blocker are duplicates.
 			const concern = await tool.execute("e-2", { note, severity: "concern" });
 			const nit = await tool.execute("e-3", { note, severity: "nit" });
-			expect(JSON.stringify(concern.content)).toContain("Duplicate advice ignored");
-			expect(JSON.stringify(nit.content)).toContain("Duplicate advice ignored");
+			expect(JSON.stringify(concern.content)).toContain("Dropped: already raised");
+			expect(JSON.stringify(nit.content)).toContain("Dropped: already raised");
 			expect(delivered).toHaveLength(2);
 		});
 
@@ -762,7 +756,7 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenCalledTimes(1);
 			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker");
 			// The tool tells the advisor the note is deferred, not silently "Recorded.".
-			expect(JSON.stringify(deferred.content)).toContain("Deferred");
+			expect(JSON.stringify(deferred.content)).toContain("Queued for the end of the turn");
 
 			// A second distinct concern in a later in-progress update queues its own slot.
 			tool.beginUpdate(true);
@@ -853,10 +847,10 @@ describe("advisor", () => {
 			const accepted = await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
 			const rejected = await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
 			const rejected2 = await tool.execute("x-2", { note: "Third mid-turn concern.", severity: "concern" });
-			expect(JSON.stringify(accepted.content)).toContain("Deferred");
+			expect(JSON.stringify(accepted.content)).toContain("Queued for the end of the turn");
 			for (const result of [rejected, rejected2]) {
 				const text = JSON.stringify(result.content);
-				expect(text).toContain("Not recorded");
+				expect(text).toContain("Dropped:");
 				expect(text).toContain("budget");
 				expect(text).not.toContain("delivered automatically");
 				expect(text).not.toContain("queued");
@@ -905,7 +899,7 @@ describe("advisor", () => {
 			await tool.execute("p-1", { note: "Nit from the second review.", severity: "nit" });
 			const escalation = await tool.execute("p-2", { note: "Concern from the second review.", severity: "concern" });
 			// The concern was admitted — the SECOND review's nit paid for it.
-			expect(JSON.stringify(escalation.content)).toContain("Deferred");
+			expect(JSON.stringify(escalation.content)).toContain("Queued for the end of the turn");
 
 			tool.beginUpdate(false);
 			expect(delivered).toEqual([
@@ -965,7 +959,7 @@ describe("advisor", () => {
 			await tool.execute("d-2", { note: "Issue B.", severity: "concern" });
 			// Budget full (2/2), all slots at concern rank: "C" displaces nothing.
 			const rejected = await tool.execute("d-3", { note: "Issue C.", severity: "concern" });
-			expect(JSON.stringify(rejected.content)).toContain("Not recorded");
+			expect(JSON.stringify(rejected.content)).toContain("Dropped:");
 
 			tool.beginUpdate(false);
 			// Flush delivers the escalated "A" at its concern severity, then "B".
@@ -986,7 +980,7 @@ describe("advisor", () => {
 
 			tool.beginUpdate(true);
 			const noise = await tool.execute("n-0", { note: "Stop.", severity: "concern" });
-			expect(JSON.stringify(noise.content)).toContain("no concrete, actionable content");
+			expect(JSON.stringify(noise.content)).toContain("nothing actionable");
 			await tool.execute("n-1", {
 				note: "The migration drops the users table without a backup.",
 				severity: "concern",
@@ -1007,7 +1001,7 @@ describe("advisor", () => {
 			const first = await tool.execute("s-0", { note: "First distinct live concern.", severity: "concern" });
 			const second = await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
 			const third = await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
-			expect(JSON.stringify(first.content)).toContain("Accepted for primary delivery");
+			expect(JSON.stringify(first.content)).toContain("Delivered.");
 			for (const result of [second, third]) {
 				const text = JSON.stringify(result.content);
 				expect(text).toContain("budget");
@@ -1032,7 +1026,7 @@ describe("advisor", () => {
 				note: "Concern: the helper drops the lock early.",
 				severity: "concern",
 			});
-			expect(JSON.stringify(concern.content)).toContain("Not recorded");
+			expect(JSON.stringify(concern.content)).toContain("Dropped:");
 			expect(delivered).toEqual([{ note: "Nit: rename the helper.", severity: "nit" }]);
 		});
 
@@ -1127,135 +1121,6 @@ describe("advisor", () => {
 	});
 
 	describe("advisor unsafe-output quarantine", () => {
-		it("sanitizes unavailable tool calls before the advisor response reaches context", () => {
-			const message = {
-				role: "assistant",
-				content: [
-					{ type: "text", text: "Tell Jack about the hospital newborn registration workflow." },
-					{ type: "toolCall", id: "tc-1", name: "mcp__hospital__notify_parent", arguments: {} },
-				],
-				providerPayload: {
-					type: "openaiResponsesHistory",
-					provider: "openai",
-					items: [{ type: "message", content: [{ type: "output_text", text: "Tell Jack about the hospital." }] }],
-				},
-				stopDetails: { type: "tool_use", explanation: "Tell Jack about the hospital." },
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-
-			const errorMessage = quarantineAdvisorUnsafeOutput(message, new Set(["advise", "read"]));
-			if (errorMessage === undefined) throw new Error("expected unavailable tool quarantine");
-
-			expect(errorMessage).toBe(
-				"Advisor response quarantined: requested unavailable tool mcp__hospital__notify_parent",
-			);
-			expect(message.stopReason).toBe("error");
-			expect(message.errorMessage).toBe(errorMessage);
-			expect(message.content).toEqual([{ type: "text", text: errorMessage }]);
-			expect(message.providerPayload).toBeUndefined();
-			expect(message.stopDetails).toBeUndefined();
-			expect(JSON.stringify(message)).not.toContain("Jack");
-		});
-
-		it("leaves granted advisor tool calls intact", () => {
-			const message = {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "tc-1", name: "advise", arguments: { note: "Check the spec." } }],
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-			const originalContent = message.content;
-
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]))).toBeUndefined();
-			expect(message.stopReason).toBe("toolUse");
-			expect(message.content).toBe(originalContent);
-		});
-
-		it("leaves an authorized Cursor native delete call intact", () => {
-			const message = {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "tc-delete", name: "delete", arguments: { path: "obsolete.txt" } }],
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-			const originalContent = message.content;
-
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise", "write", "delete"]))).toBeUndefined();
-			expect(message.stopReason).toBe("toolUse");
-			expect(message.content).toBe(originalContent);
-		});
-
-		it("keeps advise when Cursor emits exec-resolved native tools outside the grant (issue #5900)", () => {
-			const message = {
-				role: "assistant",
-				content: [
-					{ type: "text", text: "Investigating the networking design." },
-					{
-						type: "toolCall",
-						id: "tc-grep",
-						name: "grep",
-						arguments: { pattern: "backoff" },
-						[kCursorExecResolved]: true,
-					},
-					{
-						type: "toolCall",
-						id: "tc-bash",
-						name: "bash",
-						arguments: { command: "ls" },
-						[kCursorExecResolved]: true,
-					},
-					{
-						type: "toolCall",
-						id: "tc-advise",
-						name: "advise",
-						arguments: { note: "The retry backoff looks unbounded." },
-					},
-				],
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-			const originalContent = message.content;
-
-			// Grant is `advise` only (WATCHDOG.yml `tools: []`). The native grep/bash
-			// frames already ran server-side through the advisor-scoped bridge, which
-			// rejected them in-band; they must not discard the legitimate advise.
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]))).toBeUndefined();
-			expect(message.stopReason).toBe("toolUse");
-			expect(message.content).toBe(originalContent);
-			expect(JSON.stringify(message)).toContain("unbounded");
-		});
-
-		it("still quarantines an ungranted native tool that was not exec-resolved", () => {
-			const message = {
-				role: "assistant",
-				content: [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "ls" } }],
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]))).toBe(
-				"Advisor response quarantined: requested unavailable tool bash",
-			);
-			expect(message.stopReason).toBe("error");
-		});
-
-		it("keeps a delivered advise note when a sibling call names an unavailable tool", () => {
-			const message = {
-				role: "assistant",
-				content: [
-					// A mis-transcribed tool name. It is outside the advisor's grant, so
-					// it fails at dispatch on its own; quarantining on its account would
-					// also destroy the advise call below, before the agent loop can run
-					// it — and that call is what actually delivers the advice.
-					{ type: "toolCall", id: "tc-miss", name: "mcp__abc123__xyz789_read", arguments: { path: "x" } },
-					{ type: "toolCall", id: "tc-advise", name: "advise", arguments: { note: "Rotate the leaked key." } },
-				],
-				stopReason: "toolUse",
-			} as unknown as AssistantMessage;
-			const originalContent = message.content;
-
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise", "read"]))).toBeUndefined();
-			expect(message.stopReason).toBe("toolUse");
-			expect(message.content).toBe(originalContent);
-			expect(JSON.stringify(message)).toContain("Rotate the leaked key.");
-		});
-
 		it("still quarantines a destructive note when the turn also delivers advice", () => {
 			const message = {
 				role: "assistant",
@@ -1273,7 +1138,7 @@ describe("advisor", () => {
 
 			// The carve-out covers the unavailable-tool reason only: a hazardous
 			// note must still be discarded no matter what else the turn carried.
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise", "read"]))).toBe(
+			expect(quarantineAdvisorUnsafeOutput(message)).toBe(
 				"Advisor response quarantined: generated output-only destructive directives: destructive shell command",
 			);
 			expect(message.stopReason).toBe("error");
@@ -1298,7 +1163,6 @@ describe("advisor", () => {
 
 			const errorMessage = quarantineAdvisorUnsafeOutput(
 				message,
-				new Set(["advise", "read", "grep", "glob"]),
 				"### Session update\n\nThe agent checked a networking design document.",
 			);
 			if (errorMessage === undefined) throw new Error("expected destructive advise-note quarantine");
@@ -1325,7 +1189,7 @@ describe("advisor", () => {
 				stopReason: "toolUse",
 			} as unknown as AssistantMessage;
 
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]))).toBe(
+			expect(quarantineAdvisorUnsafeOutput(message)).toBe(
 				"Advisor response quarantined: generated output-only destructive directives: destructive shell command",
 			);
 		});
@@ -1347,13 +1211,7 @@ describe("advisor", () => {
 				stopReason: "toolUse",
 			} as unknown as AssistantMessage;
 
-			expect(
-				quarantineAdvisorUnsafeOutput(
-					message,
-					new Set(["advise"]),
-					"User asked whether `rm -rf .` would be destructive.",
-				),
-			).toBe(
+			expect(quarantineAdvisorUnsafeOutput(message, "User asked whether `rm -rf .` would be destructive.")).toBe(
 				"Advisor response quarantined: generated output-only destructive directives: instruction override, destructive shell command",
 			);
 		});
@@ -1378,7 +1236,6 @@ describe("advisor", () => {
 
 			const errorMessage = quarantineAdvisorUnsafeOutput(
 				message,
-				new Set(["advise", "read", "grep", "glob"]),
 				"### Session update\n\nGrep found the networking document is internally consistent.",
 			);
 			if (errorMessage === undefined) throw new Error("expected destructive-output quarantine");
@@ -1417,7 +1274,7 @@ describe("advisor", () => {
 			} as unknown as AssistantMessage;
 			const originalContent = message.content;
 
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]), sourceText)).toBeUndefined();
+			expect(quarantineAdvisorUnsafeOutput(message, sourceText)).toBeUndefined();
 			expect(message.stopReason).toBe("stop");
 			expect(message.content).toBe(originalContent);
 		});
@@ -1462,7 +1319,7 @@ describe("advisor", () => {
 
 			expect(sourceText).toContain("README contains");
 			expect(sourceText).not.toContain("fabricated assistant");
-			expect(quarantineAdvisorUnsafeOutput(message, new Set(["advise"]), sourceText)).toBeUndefined();
+			expect(quarantineAdvisorUnsafeOutput(message, sourceText)).toBeUndefined();
 			expect(message.content).toBe(originalContent);
 		});
 	});
@@ -5688,28 +5545,26 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[1])).toContain("bbb");
 		});
 
-		it("latches alternating unavailable tools until the model/tool basis changes", async () => {
+		it("notifies the host after the advisor persistently quarantines its output (issue #6661)", async () => {
 			const state: { messages: AgentMessage[]; error?: string } = { messages: [] };
 			let promptCalls = 0;
 			let shouldQuarantine = true;
-			let quarantineBasis = "model/a\u001fadvise,read";
 			const agent: AdvisorAgent = {
 				prompt: async input => {
 					promptCalls++;
 					state.messages.push({ role: "user", content: input, timestamp: Date.now() } as AgentMessage);
 					if (shouldQuarantine) {
-						const unavailableTool = promptCalls % 2 === 1 ? "bash" : "write";
 						state.messages.push({
 							role: "assistant",
 							content: [
 								{ type: "text", text: "The agent skipped the required plan step." },
-								{ type: "toolCall", id: `tc-${promptCalls}`, name: unavailableTool, arguments: {} },
+								{ type: "toolCall", id: `tc-${promptCalls}`, name: "bash", arguments: { command: "ls" } },
 							],
 							stopReason: "toolUse",
 							timestamp: Date.now(),
 						} as unknown as AgentMessage);
 						throw new AdvisorOutputQuarantinedError(
-							`Advisor response quarantined: requested unavailable tool ${unavailableTool}`,
+							"Advisor response quarantined: requested unavailable tool bash",
 						);
 					}
 					state.messages.push({
@@ -5733,113 +5588,30 @@ describe("advisor", () => {
 			const messages: AgentMessage[] = [{ role: "user", content: "aaa", timestamp: 1 } as AgentMessage];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
-				getQuarantineBasis: () => quarantineBasis,
 				notifyFailure: err => notifyFailures.push(err instanceof Error ? err.message : String(err)),
 			};
 			const runtime = new AdvisorRuntime(agent, host, 0);
 
-			// The first quarantine preserves the one-off recovery path. The second
-			// quarantine on the same model/tool basis is terminal, even though its
-			// requested unavailable tool differs.
-			for (let i = 2; i <= 3; i++) {
+			// Every advisor turn calls an ungranted tool and is quarantined, so its
+			// advice never reaches the primary. A persistently-quarantining advisor is
+			// a supervision failure the user must see in the main UI, not an unbounded
+			// silent re-prime loop.
+			for (let i = 2; i <= 5; i++) {
 				messages.push({ role: "user", content: `msg-${i}`, timestamp: i } as AgentMessage);
 				runtime.onTurnEnd(messages);
 				await settleUntil(() => runtime.backlog === 0);
 			}
 
-			expect(promptCalls).toBe(2);
-			expect(notifyFailures).toEqual(["Advisor response quarantined: requested unavailable tool write"]);
+			expect(promptCalls).toBeGreaterThanOrEqual(2);
+			expect(notifyFailures).toEqual(["Advisor response quarantined: requested unavailable tool bash"]);
 			expect(runtime.failureNotified).toBe(true);
-			expect(runtime.halted).toBe(true);
 
-			// Later unchanged primary updates cannot purchase another bad turn.
-			for (let i = 4; i <= 5; i++) {
-				messages.push({ role: "user", content: `msg-${i}`, timestamp: i } as AgentMessage);
-				runtime.onTurnEnd(messages);
-			}
-			expect(promptCalls).toBe(2);
-
-			// A changed model/tool basis is new admissible review work. It does not
-			// grant either unavailable tool; it merely releases this optional latch.
 			shouldQuarantine = false;
-			quarantineBasis = "model/b\u001fadvise,read,grep";
 			messages.push({ role: "user", content: "recovered", timestamp: 6 } as AgentMessage);
 			runtime.onTurnEnd(messages);
-			await settleUntil(() => promptCalls === 3 && runtime.backlog === 0);
+			await settleUntil(() => runtime.backlog === 0);
 
 			expect(runtime.failureNotified).toBe(false);
-			expect(runtime.halted).toBe(false);
-		});
-
-		it("drops stale quarantine handling when reset happens during onTurnError", async () => {
-			const promptInputs: Array<string | AgentMessage[]> = [];
-			const hookEntered = Promise.withResolvers<void>();
-			const releaseHook = Promise.withResolvers<void>();
-			const failures: unknown[] = [];
-			const quarantinedOutputs: AssistantMessage[] = [];
-			const agent: AdvisorAgent = {
-				prompt: async input => {
-					promptInputs.push(input);
-					if (!promptText(input).includes("stale-turn")) return;
-					const unsafeOutput: AssistantMessage = {
-						role: "assistant",
-						content: [{ type: "toolCall", id: "stale-bash", name: "bash", arguments: { command: "true" } }],
-						api: "openai-responses",
-						provider: "openai",
-						model: "quarantine-reset-race",
-						usage: {
-							input: 1,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 1,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: "toolUse",
-						timestamp: Date.now(),
-					};
-					agent.state.messages.push(unsafeOutput);
-					quarantinedOutputs.push(unsafeOutput);
-					const quarantine = quarantineAdvisorUnsafeOutput(unsafeOutput, new Set(["advise"]));
-					if (quarantine !== undefined) throw new AdvisorOutputQuarantinedError(quarantine);
-				},
-				abort: () => {},
-				reset: () => {},
-				state: { messages: [] },
-			};
-			const runtime = new AdvisorRuntime(
-				agent,
-				{
-					snapshotMessages: () => [],
-					onTurnError: async () => {
-						hookEntered.resolve();
-						await releaseHook.promise;
-						return false;
-					},
-					notifyFailure: error => failures.push(error),
-				},
-				0,
-			);
-
-			runtime.onTurnEnd([{ role: "user", content: "stale-turn", timestamp: 1 } as AgentMessage]);
-			await hookEntered.promise;
-			runtime.reset();
-			runtime.onTurnEnd([{ role: "user", content: "fresh-turn", timestamp: 2 } as AgentMessage]);
-			releaseHook.resolve();
-			await runtime.waitForCatchup(1000, 1);
-
-			expect(promptInputs).toHaveLength(2);
-			expect(promptText(promptInputs[0])).toContain("stale-turn");
-			expect(promptText(promptInputs[1])).toContain("fresh-turn");
-			expect(runtime.halted).toBe(false);
-			expect(runtime.failureNotified).toBe(false);
-			expect(failures).toEqual([]);
-			expect(quarantinedOutputs).toMatchObject([
-				{
-					stopReason: "error",
-					errorMessage: "Advisor response quarantined: requested unavailable tool bash",
-				},
-			]);
 		});
 
 		it("drops the in-flight batch when a reset aborts the advisor prompt", async () => {
@@ -6768,110 +6540,6 @@ describe("advisor", () => {
 			expect(isAdvisorTranscriptName("__advisor-2.jsonl")).toBe(false);
 			expect(isAdvisorTranscriptName("Foo.jsonl")).toBe(false);
 			expect(isAdvisorTranscriptName("__advisor.arch.bak")).toBe(false);
-		});
-	});
-
-	describe("AdvisorConfigOverlayComponent", () => {
-		const deps = {
-			modelRegistry: {} as unknown as ModelRegistry,
-			settings: {} as unknown as Settings,
-			scopedModels: [],
-			availableToolNames: ["read", "grep", "glob", "lsp", "web_search"],
-		};
-		const callbacks = {
-			loadDoc: async () => ({ advisors: [] }),
-			save: async () => {},
-			close: () => {},
-			requestRender: () => {},
-			notify: () => {},
-		};
-		const strip = (lines: readonly string[]): string => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-		const make = (doc: WatchdogConfigDoc, extra?: Partial<AdvisorConfigDeps>): AdvisorConfigOverlayComponent =>
-			new AdvisorConfigOverlayComponent({} as unknown as TUI, { ...deps, ...extra }, "project", doc, callbacks);
-		const fullHeight = Math.max(14, process.stdout.rows || 40);
-
-		it("paints a full-screen split frame: roster sidebar + selected-advisor preview", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({
-				instructions: "shared baseline",
-				advisors: [
-					{ name: "Architecture", model: "x-ai/grok-code-fast:high" },
-					{ name: "Security", tools: ["read", "web_search"] },
-				],
-			});
-			const frame = overlay.render(200);
-			// Fills the screen top-to-bottom (the fix for the bottom-anchored frame
-			// whose offset broke mouse hit-testing and wasted the upper space).
-			expect(frame.length).toBe(fullHeight);
-			const text = strip(frame);
-			expect(text).toContain("Advisor configuration");
-			expect(text).toContain("project");
-			expect(text).toContain("Architecture");
-			expect(text).toContain("Security");
-			expect(text).toContain("+ Add advisor");
-			expect(text).toContain("Save & apply");
-			// Right preview reflects the highlighted (first) advisor.
-			expect(text).toContain("x-ai/grok-code-fast:high");
-			expect(text).toContain("read, grep, glob (default)");
-		});
-
-		it("renders an explicit no-tools advisor distinctly from the omitted default", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({
-				advisors: [{ name: "Blank", tools: [] }],
-			});
-
-			const text = strip(overlay.render(200));
-			expect(text.toLowerCase()).toContain("no tools");
-			expect(text).not.toContain("read, grep, glob (default)");
-		});
-
-		it("moves the preview with keyboard selection and preserves an explicit tool set", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({
-				advisors: [{ name: "Architecture" }, { name: "Security", tools: ["read", "web_search"] }],
-			});
-			overlay.render(200);
-			overlay.handleInput("\x1b[B"); // arrow down → highlight Security
-			expect(strip(overlay.render(200))).toContain("read, web_search");
-		});
-
-		it("opens an advisor's detail editor on a left click in the sidebar", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({ advisors: [{ name: "Architecture" }, { name: "Security" }] });
-			// Render once so the frame geometry is recorded; the first advisor sits on
-			// the first body row (0-based screen row 1 → SGR 1-based row 2).
-			overlay.render(120);
-			overlay.handleInput("\x1b[<0;4;2M"); // left-button press, col 4, row 2
-			const text = strip(overlay.render(120));
-			expect(text).toContain("Editing");
-			expect(text).toContain("Architecture");
-		});
-
-		it("shows disabled advisors with a dim circle marker and toggles them in the detail editor", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			setThemeInstance(uiTheme);
-			const overlay = make({
-				advisors: [
-					{ name: "Active", model: "x-ai/grok-code-fast:high" },
-					{ name: "Disabled", model: "openai/gpt-4", enabled: false },
-				],
-			});
-			const text = strip(overlay.render(200));
-			// The list shows ● for enabled and ○ for disabled.
-			expect(text).toContain("● Active");
-			expect(text).toContain("○ Disabled");
-			// The preview of the highlighted (first) advisor shows its enabled status.
-			expect(text).toContain("● on");
 		});
 	});
 });
