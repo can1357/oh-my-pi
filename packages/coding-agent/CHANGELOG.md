@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The `/btw` panel now keeps one blank line above its top border instead of sitting flush against the answer above it.
+- The `/btw` panel now keeps one blank line above its top border instead of sitting flush against the answer above it ([#12695](https://github.com/can1357/oh-my-pi/pull/12695) by [@iacore](https://github.com/iacore)).
 - Fixed multi-second UI freezes after every turn in long sessions caused by rescanning the whole provider context with every credential regex on each request; built-in patterns now skip text that contains none of their literal prefixes (1018 ms → 19 ms on a 716 KB context) ([#12666](https://github.com/can1357/oh-my-pi/pull/12666) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 ### Added
 
