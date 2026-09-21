@@ -1,0 +1,6 @@
+# Project provisioning for linked worktrees.
+# Dependency trees are copied by the explicit copy-ignored step; generated
+# agent plugin state must remain local to each checkout.
+
+[step.copy-ignored]
+exclude = [".omp/plugins/"]

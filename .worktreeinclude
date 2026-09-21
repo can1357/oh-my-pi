@@ -1,0 +1,4 @@
+# Gitignored dependency directories required by fresh linked worktrees.
+# Worktrunk reflinks these on supported filesystems.
+node_modules/
+target/
