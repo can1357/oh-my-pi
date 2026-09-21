@@ -95,6 +95,10 @@ function getMergedEnv(ctx: HelperContext): Record<string, string> {
 }
 
 const INTERNAL_URL_RE = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/i;
+/** Single-slash twin (`local:/x`); recovered to `://` below. Single-letter
+ *  schemes stay filesystem paths so Windows drive spellings (`C:/x`) never
+ *  route into protocol handling. */
+const INTERNAL_URL_SINGLE_SLASH_RE = /^([a-z][a-z0-9+.-]*):\/(?!\/)(.*)$/i;
 
 function resolvePath(ctx: HelperContext, value: string): string {
 	if (path.isAbsolute(value)) return path.normalize(value);
@@ -108,7 +112,9 @@ function resolvePath(ctx: HelperContext, value: string): string {
  * so we never silently create a literal `scheme:/` directory.
  */
 function resolveHelperPath(ctx: HelperContext, rawPath: string, op: "read" | "write"): string {
-	const match = INTERNAL_URL_RE.exec(rawPath);
+	const single = INTERNAL_URL_SINGLE_SLASH_RE.exec(rawPath);
+	const normalized = single && single[1].length > 1 ? `${single[1]}://${single[2]}` : rawPath;
+	const match = INTERNAL_URL_RE.exec(normalized);
 	if (!match) return resolvePath(ctx, rawPath);
 	const scheme = match[1].toLowerCase();
 	const root = ctx.localRoots()[scheme];
