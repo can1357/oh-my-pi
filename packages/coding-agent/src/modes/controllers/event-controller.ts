@@ -1570,6 +1570,14 @@ export class EventController {
 				const turnElapsed = settings.get("display.showTurnTime")
 					? turnElapsedMs(this.#turnStartedAt, event.message)
 					: undefined;
+				const turnTime =
+					turnElapsed !== undefined
+						? {
+								style: settings.get("display.turnTimeStyle"),
+								turnStartedAt: this.#turnStartedAt,
+								turnEndedAt: event.message.completedAt,
+							}
+						: undefined;
 				const usageAttached =
 					readCallIds !== undefined &&
 					(this.#lastReadGroup?.attachUsage(
@@ -1579,6 +1587,7 @@ export class EventController {
 						event.message.ttft,
 						event.message.timestamp,
 						turnElapsed,
+						turnTime,
 					) ??
 						false);
 				if (!usageAttached) {
@@ -1590,6 +1599,7 @@ export class EventController {
 							event.message.ttft,
 							event.message.timestamp,
 							turnElapsed,
+							turnTime,
 						),
 					);
 				}

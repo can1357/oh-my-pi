@@ -390,9 +390,19 @@ export class UiHelpers {
 		let pendingUsageTimestamp: number | undefined;
 		let pendingReadUsageCallIds: string[] | undefined;
 		let pendingUsageTurnElapsed: number | undefined;
+		let pendingUsageTurnStartedAt: number | undefined;
+		let pendingUsageTurnEndedAt: number | undefined;
 		let turnStartedAt: number | undefined;
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
+			const turnTime =
+				pendingUsageTurnElapsed !== undefined
+					? {
+							style: this.ctx.settings.get("display.turnTimeStyle"),
+							turnStartedAt: pendingUsageTurnStartedAt,
+							turnEndedAt: pendingUsageTurnEndedAt,
+						}
+					: undefined;
 			const usageAttached =
 				pendingReadUsageCallIds !== undefined &&
 				(readGroup?.attachUsage(
@@ -402,6 +412,7 @@ export class UiHelpers {
 					pendingUsageTtft,
 					pendingUsageTimestamp,
 					pendingUsageTurnElapsed,
+					turnTime,
 				) ??
 					false);
 			if (!usageAttached) {
@@ -414,6 +425,7 @@ export class UiHelpers {
 						pendingUsageTtft,
 						pendingUsageTimestamp,
 						pendingUsageTurnElapsed,
+						turnTime,
 					),
 				);
 			}
@@ -423,6 +435,8 @@ export class UiHelpers {
 			pendingUsageTimestamp = undefined;
 			pendingReadUsageCallIds = undefined;
 			pendingUsageTurnElapsed = undefined;
+			pendingUsageTurnStartedAt = undefined;
+			pendingUsageTurnEndedAt = undefined;
 		};
 		// Rebuild-time mirror of the event controller's displaceable-poll
 		// bookkeeping: a `hub` wait that found every watched job still running is
@@ -640,8 +654,9 @@ export class UiHelpers {
 				pendingUsageTurnElapsed = this.ctx.settings.get("display.showTurnTime")
 					? turnElapsedMs(turnStartedAt, message)
 					: undefined;
+				pendingUsageTurnStartedAt = pendingUsageTurnElapsed !== undefined ? turnStartedAt : undefined;
+				pendingUsageTurnEndedAt = pendingUsageTurnElapsed !== undefined ? message.completedAt : undefined;
 			} else if (message.role === "toolResult") {
-				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
 				const isReadGroupResult =
 					message.toolName === "read" &&

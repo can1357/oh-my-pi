@@ -758,6 +758,11 @@ export class SelectorController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.ui.resetDisplay();
 				break;
+			case "display.turnTimeStyle":
+				// Same rebuild as showTurnTime: the style changes the same segment.
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.ui.resetDisplay();
+				break;
 			case "tui.tight":
 				setTuiTight(value as boolean);
 				this.ctx.ui.invalidate();

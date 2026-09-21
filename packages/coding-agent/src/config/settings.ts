@@ -3439,6 +3439,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"display.showTurnTime": value => {
 		if (typeof value === "boolean") setChatTranscriptDisplayPreferences({ showTurnTime: value });
 	},
+	"display.turnTimeStyle": value => {
+		if (value === "elapsed" || value === "range") setChatTranscriptDisplayPreferences({ turnTimeStyle: value });
+	},
 	"tui.maxInlineImageColumns": value => {
 		if (typeof value === "number") setInlineImageMaxColumns(value);
 	},
