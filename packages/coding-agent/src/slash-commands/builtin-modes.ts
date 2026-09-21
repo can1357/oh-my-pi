@@ -39,6 +39,34 @@ function resolveSessionModelSelector(
 		preferences: getModelMatchPreferences(settings),
 	});
 }
+/**
+ * Split `/model` args into a model selector and an optional
+ * `--context-window <tokens>` override (issue #12578). Returns
+ * `contextWindow: NaN` for unparseable values so the caller can report usage.
+ */
+function parseModelArgs(args: string): { selector: string; contextWindow: number | undefined } {
+	const tokens = args.trim().split(/\s+/).filter(Boolean);
+	let contextWindow: number | undefined;
+	const selectorParts: string[] = [];
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index]!;
+		if (token === "--context-window" || token === "--context") {
+			const raw = tokens[index + 1];
+			index++;
+			const parsed = raw !== undefined ? Number(raw.replaceAll("_", "").replace(/k$/i, "000")) : NaN;
+			contextWindow = Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : NaN;
+			continue;
+		}
+		const inline = /^(?:--context-window|--context)=(.+)$/.exec(token);
+		if (inline) {
+			const parsed = Number(inline[1]!.replaceAll("_", "").replace(/k$/i, "000"));
+			contextWindow = Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : NaN;
+			continue;
+		}
+		selectorParts.push(token);
+	}
+	return { selector: selectorParts.join(" "), contextWindow };
+}
 
 async function runWithDetachedModeDraft(
 	command: ParsedSlashCommand,
@@ -332,8 +360,14 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
 		},
 		handle: async (command, runtime) => {
-			if (command.args) {
-				const selector = command.args.trim();
+			const { selector, contextWindow } = parseModelArgs(command.args);
+			if (contextWindow !== undefined && !Number.isInteger(contextWindow)) {
+				return usage(
+					`Invalid context window: ${command.args.trim()}. Use /model [<selector>] [--context-window <tokens>].`,
+					runtime,
+				);
+			}
+			if (selector) {
 				const resolved = resolveSessionModelSelector(selector, runtime.session, runtime.settings);
 				const match = resolved.model;
 				if (!match) {
@@ -343,9 +377,11 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					);
 				}
 				try {
-					await runtime.session.setModel(match);
+					await runtime.session.setModel(contextWindow !== undefined ? { ...match, contextWindow } : match);
 					if (resolved.thinkingLevel !== undefined) runtime.session.setThinkingLevel(resolved.thinkingLevel);
-					await runtime.output(`Model set to ${match.provider}/${match.id}.`);
+					await runtime.output(
+						`Model set to ${match.provider}/${match.id}${contextWindow !== undefined ? ` with ${contextWindow.toLocaleString()}-token context.` : "."}`,
+					);
 					await runtime.notifyTitleChanged?.();
 					await runtime.notifyConfigChanged?.();
 					return commandConsumed();
@@ -353,7 +389,21 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					return usage(`Failed to set model: ${errorMessage(err)}`, runtime);
 				}
 			}
-
+			if (contextWindow !== undefined) {
+				const model = runtime.session.model;
+				if (!model) return usage("No model is currently selected.", runtime);
+				try {
+					await runtime.session.setModel({ ...model, contextWindow });
+					await runtime.output(
+						`Context window set to ${contextWindow.toLocaleString()} tokens for ${model.provider}/${model.id} (this session).`,
+					);
+					await runtime.notifyTitleChanged?.();
+					await runtime.notifyConfigChanged?.();
+					return commandConsumed();
+				} catch (err) {
+					return usage(`Failed to set context window: ${errorMessage(err)}`, runtime);
+				}
+			}
 			const model = runtime.session.model;
 			await runtime.output(
 				model ? `Current model: ${model.provider}/${model.id}` : "No model is currently selected.",
