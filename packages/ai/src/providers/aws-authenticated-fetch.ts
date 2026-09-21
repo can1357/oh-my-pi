@@ -65,6 +65,7 @@ export function createAwsSignedFetch(
 	const signedFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const url = new URL(input instanceof Request ? input.url : input.toString());
 		const method = init?.method ?? (input instanceof Request ? input.method : "POST");
+		const signal = init?.signal ?? options.signal ?? (input instanceof Request ? input.signal : undefined);
 		const headers = new Headers(input instanceof Request ? input.headers : undefined);
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
 		// Sign every request header (guardrail X-Amzn-Bedrock-* included), not
@@ -80,7 +81,7 @@ export function createAwsSignedFetch(
 		const credentials = await resolveAwsCredentials({
 			profile: options.providerOptions?.profile,
 			region,
-			signal: init?.signal ?? options.signal,
+			signal,
 			fetch: baseFetch,
 		});
 		const signed = await signRequest({
@@ -99,7 +100,9 @@ export function createAwsSignedFetch(
 		}
 		const response = await baseFetch(
 			url,
-			method === "GET" || method === "HEAD" ? { ...init, method, headers } : { ...init, method, headers, body },
+			method === "GET" || method === "HEAD"
+				? { ...init, method, headers, signal }
+				: { ...init, method, headers, body, signal },
 		);
 		if (response.status === 401 || response.status === 403) {
 			invalidateAwsCredentialCache({ profile: options.providerOptions?.profile, region });
@@ -132,7 +135,11 @@ export function createAwsAuthenticatedFetch(service: string, options: AwsAuthent
 		const headers = new Headers(input instanceof Request ? input.headers : undefined);
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
 		headers.set("authorization", `Bearer ${bearerToken}`);
-		return baseFetch(input, { ...init, headers });
+		return baseFetch(input, {
+			...init,
+			headers,
+			signal: init?.signal ?? options.signal ?? (input instanceof Request ? input.signal : undefined),
+		});
 	};
 	return Object.assign(authenticatedFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
 }
