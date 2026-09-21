@@ -420,16 +420,18 @@ See [Models](./models.md) for the `models.yml` schema and custom-provider defini
 
 ### Advisor
 
-The advisor is a second model that reviews each completed turn and can inject advice into the primary session. Assign a model with `modelRoles.advisor`, then enable it with `advisor.enabled`, `/advisor on`, or by launching with the `--advisor` flag.
+Advisors are optional reviewer models with configurable cadence. Assign a model with `modelRoles.advisor` or a `WATCHDOG.yml` entry, then enable the subsystem with `advisor.enabled`, `/advisor on`, or the `--advisor` flag.
 
-See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, and bounded catch-up semantics.
+See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, cadence controls, and catch-up semantics.
 
 | Key                   | Type    | Default | Notes                                                                                                                                                |
 | --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `advisor.enabled`     | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                 |
 | `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
-| `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
-| `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
+| `advisor.syncBacklog` | enum    | `off`   | Default catch-up policy. `off` never waits; `1`, `3`, or `5` wait up to 30 seconds at that backlog threshold; `strict` waits for scheduled reviews without a wall-clock cap. Abort, failure, quota pause, transition, and disposal release waits. Optional `WATCHDOG.yml` per-advisor `syncBacklog` overrides this policy; omission inherits it. |
+| `advisor.immuneTurns` | number  | `3`     | After a concern or blocker interrupts, route further concerns as non-interrupting asides for this many primary turns, including tool-loop continuations. Blockers remain exempt. |
+| `advisor.reviewMode` | enum | `turn` | Review every primary turn, or only final yields with `agent-end`. Per-advisor `reviewMode` overrides this default. |
+| `advisor.reviewInterval` | number | `1` | Review every Nth eligible update. Skipped deltas accumulate; pending delivery never depends on cadence. |
 | `advisor.maxNotesPerUpdate` | number | `4` | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
 
 ### Thinking

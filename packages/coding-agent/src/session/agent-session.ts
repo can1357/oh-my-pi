@@ -1848,7 +1848,7 @@ export class AgentSession {
 			isDisposed: () => this.#isDisposed,
 			abortInProgress: () => this.#abortInProgress,
 			allowAgentInitiatedTurns: () => this.#allowAcpAgentInitiatedTurns,
-			planModeState: () => this.#planModeState,
+			planModeState: () => this.getPlanModeState(),
 			clientBridge: () => this.#clientBridge,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
