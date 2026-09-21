@@ -604,7 +604,45 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("42%");
 	});
 
-	it("does not render monthly usage for providers outside the single-bucket gate", async () => {
+	it("renders LiteLLM daily key and monthly user budgets", async () => {
+		const now = Date.now();
+		const component = makeComponent(
+			[
+				{
+					provider: "litellm",
+					limits: [
+						{
+							id: "litellm:key:daily",
+							scope: { windowId: "daily" },
+							window: { id: "daily", durationMs: 86_400_000, resetsAt: now + 6 * 3_600_000 },
+							amount: { used: 2.5, limit: 10, usedFraction: 0.25, unit: "usd" },
+						},
+						{
+							id: "litellm:user:monthly",
+							scope: { windowId: "monthly" },
+							window: { id: "monthly", resetsAt: now + 400 * 3_600_000 },
+							amount: { used: 40, limit: 100, usedFraction: 0.4, unit: "usd" },
+						},
+					],
+				},
+			],
+			{ provider: "litellm" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("1d");
+		expect(content).toContain("25%");
+		expect(content).toContain("mo");
+		expect(content).toContain("40%");
+	});
+
+	it("renders a monthly window for any provider that reports one", async () => {
+		// Window class is a property of the limit, not of a provider allowlist.
+		// github-copilot was never in the old allowlist, so it is the regression
+		// guard: a provider stating `monthly` renders without a renderer change.
 		const component = makeComponent(
 			[
 				{
@@ -619,8 +657,8 @@ describe("usage status-line segment", () => {
 		await flushUsageRefresh();
 		const content = stripVTControlCharacters(component.getTopBorder(200).content);
 
-		expect(content).not.toContain("mo");
-		expect(content).not.toContain("42%");
+		expect(content).toContain("mo");
+		expect(content).toContain("42%");
 	});
 
 	it("uses a distinct error color at the eighty-percent threshold", () => {
@@ -800,14 +838,7 @@ describe("usage status-line segment", () => {
 	it("ignores non-canonical windows without a reported span", async () => {
 		const component = makeComponent([
 			{
-				limits: [
-					{ scope: { windowId: "default" }, window: {}, amount: { usedFraction: 0.24 } },
-					{
-						scope: { windowId: "monthly" },
-						window: { durationMs: 30 * 86_400_000 },
-						amount: { usedFraction: 0.5 },
-					},
-				],
+				limits: [{ scope: { windowId: "default" }, window: {}, amount: { usedFraction: 0.24 } }],
 			},
 		]);
 
@@ -816,7 +847,6 @@ describe("usage status-line segment", () => {
 		const content = stripVTControlCharacters(component.getTopBorder(200).content);
 
 		expect(content).not.toContain("24%");
-		expect(content).not.toContain("50%");
 	});
 
 	it("prefers canonical window ids over a conflicting reported span", async () => {

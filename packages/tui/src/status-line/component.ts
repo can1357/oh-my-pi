@@ -62,6 +62,38 @@ interface UsageWindowCandidate {
 	resetsAt?: number;
 }
 
+/**
+ * Window class from the normalized usage data, never from the provider id.
+ *
+ * A provider allowlist here meant every new budget-reporting provider needed
+ * another branch in the renderer, which is the provider-conditional policy
+ * AGENTS.md keeps out of TypeScript. A provider states its window through
+ * `scope.windowId`, or reports a duration we can classify; either is a fact
+ * about the limit, so adding a provider now needs no change in this file.
+ */
+const USAGE_WINDOW_CLASS_BY_ID: Readonly<Record<string, UsageWindowCandidate["windowClass"]>> = {
+	"1d": "daily",
+	"24h": "daily",
+	"30d": "monthly",
+	"5h": "5h",
+	"7d": "7d",
+	daily: "daily",
+	monthly: "monthly",
+};
+
+/**
+ * Duration fallback, widest tolerance last. Monthly gets days of slack because a
+ * calendar month is 28-31 days; the shorter windows are exact and get a minute.
+ */
+const USAGE_WINDOW_CLASS_BY_DURATION: ReadonlyArray<
+	readonly [durationMs: number, toleranceMs: number, windowClass: UsageWindowCandidate["windowClass"]]
+> = [
+	[5 * 3_600_000, 60_000, "5h"],
+	[86_400_000, 60_000, "daily"],
+	[7 * 86_400_000, 60_000, "7d"],
+	[30 * 86_400_000, 3 * 86_400_000, "monthly"],
+];
+
 /** Limits sharing one model/tier scope, ranked as an indivisible display unit. */
 interface UsageScopeGroup {
 	priority: number;
@@ -1860,24 +1892,13 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 				const windowId = "windowId" in scope ? scope.windowId : undefined;
 				const durationValue = window && "durationMs" in window ? window.durationMs : undefined;
 				const durationMs = typeof durationValue === "number" ? durationValue : undefined;
-				const subscriptionWindow =
-					windowId === "5h" || windowId === "7d"
-						? windowId
-						: windowId === "daily" || windowId === "24h" || windowId === "1d"
-							? "daily"
-							: durationMs !== undefined && Math.abs(durationMs - 5 * 3_600_000) <= 60_000
-								? "5h"
-								: durationMs !== undefined && Math.abs(durationMs - 86_400_000) <= 60_000
-									? "daily"
-									: durationMs !== undefined && Math.abs(durationMs - 7 * 86_400_000) <= 60_000
-										? "7d"
-										: undefined;
 				const windowClass =
-					subscriptionWindow ??
-					((context.provider === "cursor" || context.provider === "opencode-go") &&
-					(windowId === "monthly" || windowId === "30d")
-						? "monthly"
-						: undefined);
+					(windowId === undefined ? undefined : USAGE_WINDOW_CLASS_BY_ID[windowId]) ??
+					(durationMs === undefined
+						? undefined
+						: USAGE_WINDOW_CLASS_BY_DURATION.find(
+								([expected, tolerance]) => Math.abs(durationMs - expected) <= tolerance,
+							)?.[2]);
 				if (!windowClass) continue;
 
 				const modelId = normalizeUsageScopeValue("modelId" in scope ? scope.modelId : undefined);

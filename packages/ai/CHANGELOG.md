@@ -4,6 +4,12 @@
 
 ### Added
 
+- Added a LiteLLM usage provider: the `/usage` command and status-line `usage` segment now show the virtual key's and owning user's spend against `max_budget` per budget window (daily/weekly/monthly), read from the proxy's self-service `/key/info` and `/user/info` routes ([#11711](https://github.com/can1357/oh-my-pi/pull/11711) by [@bse-ai](https://github.com/bse-ai)).
+
+### Fixed
+
+- Fixed a revoked LiteLLM virtual key being reported as unknown rather than failed: when every management route rejects the credential the provider now throws the auth status, so `checkCredentials()` fails and the cached last-good budget is purged instead of served indefinitely ([#11711](https://github.com/can1357/oh-my-pi/pull/11711) by [@bse-ai](https://github.com/bse-ai)).
+- Fixed a nearly exhausted LiteLLM user budget being hidden behind a healthier key budget when both share a `budget_duration`; the most-used limit now wins that window ([#11711](https://github.com/can1357/oh-my-pi/pull/11711) by [@bse-ai](https://github.com/bse-ai)).
 - Added `TypeSafeJudgeOptions.headers`, sent on every System One judgment request so proxy gateways can require routing or custom authentication headers.
 - Added support for text embeddings
 - Added support for document reranking
@@ -35,6 +41,8 @@
 - Fixed error handling for provider responses that do not include token usage information.
 
 ## [18.2.6] - 2026-09-18
+
+- Added historical decimation prompt-cache breakpoints every 15 user turns on Anthropic requests, so long conversations retain stable cached prefixes during branching, rewinds, and session resume ([#11665](https://github.com/can1357/oh-my-pi/pull/11665) by [@camjac251](https://github.com/camjac251)).
 
 ### Fixed
 
