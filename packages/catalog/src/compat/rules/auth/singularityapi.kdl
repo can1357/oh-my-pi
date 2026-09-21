@@ -1,0 +1,15 @@
+// Key validation probes the non-billable `GET /v1/models`: it answers 401
+// for a missing, malformed, or unknown key (verified 2026-09-21), so a bad
+// key is rejected without spending. Keys start with `sk-...`; `sapi_...`
+// dashboard keys belong to the separate app.singularityapi.dev API.
+auth "singularityapi" {
+	name "SingularityAPI"
+	env "SINGULARITYAPI_API_KEY"
+	login "api-key" {
+		auth-url "https://app.singularityapi.tech/compute/billing"
+		instructions "Create an API key from the SingularityAPI dashboard, then paste it here"
+		prompt "Paste your SingularityAPI API key" placeholder="sk-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="SingularityAPI" url="https://api.singularityapi.tech/v1/models"
+	}
+}
