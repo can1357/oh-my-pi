@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.7] - 2026-09-21
+
 ### Added
 
 - Added `renderMermaidAscii`, a native Mermaid-to-ASCII/Unicode renderer supporting flowcharts, state, sequence, class, ER, and xychart diagrams with color modes, themes, and direction overrides.

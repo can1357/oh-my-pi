@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.7] - 2026-09-21
+
 ### Breaking Changes
 
 - Image-generation overrides now use model selectors, and web-search CLI overrides use --model instead of --provider.

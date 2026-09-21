@@ -196,7 +196,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).toContain("fallback literal prompt");
-			expect(text).not.toContain("Helpful, trusted assistant");
+			expect(text).not.toContain("helpful, trusted assistant");
 		});
 	});
 
@@ -207,7 +207,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).not.toContain("TASK_BRANCH=");
-			expect(text).toContain("Helpful, trusted assistant");
+			expect(text).toContain("helpful, trusted assistant");
 		});
 	});
 
@@ -219,7 +219,7 @@ describe("system prompt Handlebars templates", () => {
 			const result = await buildSystemPrompt(options(cwd));
 			const text = result.systemPrompt.join("\n\n");
 			expect(text).toContain("fallback literal prompt");
-			expect(text).not.toContain("Helpful, trusted assistant");
+			expect(text).not.toContain("helpful, trusted assistant");
 		});
 	});
 

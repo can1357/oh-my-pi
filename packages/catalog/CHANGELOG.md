@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.7] - 2026-09-21
+
 ### Added
 
 - Added model-kind and grounded-search capability metadata, along with catalogs for local inference and search-engine models.

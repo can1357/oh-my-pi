@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.7] - 2026-09-21
+
 ### Breaking Changes
 
 - Removed specialized keyword modules in favor of a centralized registration system
