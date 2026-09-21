@@ -31,6 +31,7 @@ import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
+import { AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS } from "./config/model-patch";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	DEFAULT_PREWALK_TARGET,
@@ -1313,6 +1314,15 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
+	// Providers whose account catalog is authoritative must be discovered before
+	// an explicit `--model` is resolved: the bundled slice alone would accept a
+	// selector the account cannot call (issue: Copilot `model_not_supported`).
+	const requestedProvider = parsed.model
+		? (parsed.provider ?? parseModelString(parsed.model)?.provider)?.toLowerCase()
+		: undefined;
+	if (requestedProvider && AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(requestedProvider)) {
+		await modelRegistry.refresh("online-if-uncached");
+	}
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -1330,7 +1340,11 @@ export async function buildSessionOptions(
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
 		} else if (resolved.error) {
-			if (!parsed.provider && ((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))) {
+			if (
+				!parsed.provider &&
+				!requestedProvider &&
+				((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))
+			) {
 				// Model not found in built-in registry — defer resolution to after extensions load
 				// (extensions may register additional providers/models via registerProvider)
 				options.modelPattern = parsed.model;

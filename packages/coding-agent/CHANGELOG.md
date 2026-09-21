@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `--model github-copilot/<id>` accepting bundled models that the signed-in Copilot account cannot call: authoritative provider catalogs are now discovered before startup model resolution, provider-qualified selectors resolve only against account-available models, and shared catalog rows no longer re-add pruned ids.
+
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes

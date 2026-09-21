@@ -2097,9 +2097,14 @@ export class ModelRegistry {
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
 				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+				// Authoritative account catalogs own their roster: a shared
+				// stencil.so slice would re-add plan-gated ids the provider just
+				// pruned, so it is only layered under non-authoritative providers.
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
-					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
+					: descriptor.dynamicModelsAuthoritative
+						? undefined
+						: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
 				options.push(modelsDev ? { ...managerOptions, modelsDev } : managerOptions);
 			}
 		}

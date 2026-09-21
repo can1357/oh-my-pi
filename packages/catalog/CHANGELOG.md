@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- GitHub Copilot now treats the authenticated `/models` response as the account's authoritative catalog, so bundled models the account cannot call (plan-gated or disabled by organization policy) are no longer offered and no longer fail with `model_not_supported`.
+
 ## [18.2.7] - 2026-09-21
 
 ### Added
