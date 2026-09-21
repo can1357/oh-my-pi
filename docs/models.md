@@ -101,6 +101,10 @@ providers:
 - `google-generative-ai`
 - `google-gemini-cli`
 - `google-vertex`
+- `typesafe`
+- `openrouter-decisions`
+
+`typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
 
 ### Allowed auth/discovery values
 

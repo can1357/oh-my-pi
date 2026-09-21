@@ -1144,9 +1144,13 @@ class DaemonBroker {
 			if (generationEnded()) return true;
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
-				if (!match) return false;
-				matched = match[0].slice(0, 500);
-				return true;
+				if (match) {
+					matched = match[0].slice(0, 500);
+					return true;
+				}
+				// No further output can arrive once the process is gone; blocking
+				// for the full window would hide the exit behind a bogus timeout.
+				return terminalState(record.snapshot.state);
 			}
 			if (operation.for === "exit") return terminalState(record.snapshot.state);
 			// Wake on observed readiness or any terminal state so the wait never

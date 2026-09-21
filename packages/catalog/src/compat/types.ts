@@ -5,7 +5,7 @@
  * `behavior.ts`, `resolve.ts`) exposes to consumers.
  */
 import type { Effort } from "../effort";
-import type { Api, ThinkingControlMode, TokenCost } from "../types";
+import type { Api, KindApiKind, ThinkingControlMode, TokenCost } from "../types";
 import type { RevisionOp } from "./revision";
 
 /** Class-membership matcher kinds, most to least specific. */
@@ -648,7 +648,7 @@ export interface CompiledProvider {
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
 	/** Non-chat model kinds mapped to their runtime transport APIs. */
-	kindApis?: Partial<Record<"image" | "tts" | "stt", Api>>;
+	kindApis?: Partial<Record<KindApiKind, Api>>;
 	/** Authored bundled rows, when the provider cannot be discovered at generation time. */
 	seed?: CompiledSeed;
 }

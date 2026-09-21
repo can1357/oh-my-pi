@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.2.6",
+	"version": "18.2.7",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -553,6 +553,7 @@
 		"@opentelemetry/sdk-metrics": "catalog:",
 		"@opentelemetry/sdk-trace-base": "catalog:",
 		"@opentelemetry/sdk-trace-node": "catalog:",
+		"axe-core": "4.13.0",
 		"puppeteer-core": "catalog:"
 	},
 	"devDependencies": {

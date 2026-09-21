@@ -1,3 +1,6 @@
+import type { ApiKeyResolver } from "@oh-my-pi/pi-ai";
+import { transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
+import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -8,6 +11,7 @@ import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
+import { encodePcm16Wav } from "./wav";
 
 export type SttState = "idle" | "recording" | "transcribing";
 
@@ -33,12 +37,17 @@ interface CaptureHandle {
 
 type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
 
-export interface STTControllerDependencies {
-	settings: Settings;
-	registry: ModelBrowserRegistry;
+interface SttRegistry extends ModelBrowserRegistry {
+	resolver(model: Model<Api>, sessionId?: string): ApiKeyResolver;
 }
 
-/** Coordinates native microphone capture with incremental local transcription. */
+export interface STTControllerDependencies {
+	settings: Settings;
+	registry: SttRegistry;
+	getSessionId?: () => string;
+}
+
+/** Coordinates native microphone capture with streaming local or buffered cloud transcription. */
 export class STTController {
 	#state: SttState = "idle";
 	#resolvedModelKey: SttModelKey | null = null;
@@ -47,7 +56,8 @@ export class STTController {
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
 	readonly #settings: Settings;
-	readonly #registry: ModelBrowserRegistry | undefined;
+	readonly #registry: SttRegistry | undefined;
+	readonly #getSessionId: (() => string) | undefined;
 
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
@@ -56,6 +66,10 @@ export class STTController {
 	#streamCommitted = false;
 	#streamAbort: AbortController | null = null;
 	#streamUtterance = "";
+
+	// Buffered cloud capture.
+	#cloudModel: Model<Api> | null = null;
+	#cloudAudio: Float32Array[] = [];
 
 	/** Creates a controller; tests may replace the hardware capture boundary. */
 	constructor();
@@ -70,10 +84,12 @@ export class STTController {
 			this.#createCapture = createCaptureOrDependencies;
 			this.#settings = dependencies?.settings ?? settings;
 			this.#registry = dependencies?.registry;
+			this.#getSessionId = dependencies?.getSessionId;
 		} else {
 			this.#createCapture = onAudio => new AudioCapture(16_000, onAudio);
 			this.#settings = createCaptureOrDependencies?.settings ?? settings;
 			this.#registry = createCaptureOrDependencies?.registry;
+			this.#getSessionId = createCaptureOrDependencies?.getSessionId;
 		}
 	}
 
@@ -115,11 +131,14 @@ export class STTController {
 		}
 	}
 
-	#resolveModelKey(): SttModelKey {
-		if (!this.#registry) return resolveSttModelSpec(undefined).key;
+	#resolveModel(): Model<Api> | undefined {
+		if (!this.#registry) return undefined;
 		const pool = roleCandidatePool("dictation", this.#settings, this.#registry);
-		const selectedId = resolveRoleChain("dictation", this.#settings, pool)[0]?.model.id;
-		return resolveSttModelSpec(selectedId).key;
+		return resolveRoleChain("dictation", this.#settings, pool)[0]?.model;
+	}
+
+	#resolveModelKey(model = this.#resolveModel()): SttModelKey {
+		return resolveSttModelSpec(model?.id).key;
 	}
 
 	async #ensureDeps(options: ToggleOptions, modelKey = this.#resolveModelKey()): Promise<SttModelKey | null> {
@@ -174,9 +193,28 @@ export class STTController {
 	}
 
 	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
-		let modelKey = await this.#ensureDeps(options);
+		let model = this.#resolveModel();
+		if (model?.api === "openai-transcriptions") {
+			this.#startBuffered(editor, options, model);
+			return;
+		}
+		if (model && model.api !== "local-inference") {
+			options.showWarning(`Unsupported speech-to-text API: ${model.api}`);
+			return;
+		}
+
+		let modelKey = await this.#ensureDeps(options, this.#resolveModelKey(model));
 		if (!modelKey) return;
-		const startModelKey = this.#resolveModelKey();
+		model = this.#resolveModel();
+		if (model?.api === "openai-transcriptions") {
+			this.#startBuffered(editor, options, model);
+			return;
+		}
+		if (model && model.api !== "local-inference") {
+			options.showWarning(`Unsupported speech-to-text API: ${model.api}`);
+			return;
+		}
+		const startModelKey = this.#resolveModelKey(model);
 		if (startModelKey !== modelKey) {
 			modelKey = await this.#ensureDeps(options, startModelKey);
 			if (!modelKey) return;
@@ -185,7 +223,122 @@ export class STTController {
 	}
 
 	async #stop(options: ToggleOptions): Promise<void> {
-		await this.#stopStreaming(options);
+		if (this.#cloudModel) await this.#stopBuffered(options);
+		else await this.#stopStreaming(options);
+	}
+
+	// ── Buffered cloud transcription ────────────────────────────────
+
+	#startBuffered(editor: Editor, options: ToggleOptions, model: Model<Api>): void {
+		this.#streamEditor = editor;
+		this.#streamCommitted = false;
+		this.#streamUtterance = "";
+		this.#streamAbort = new AbortController();
+		this.#cloudModel = model;
+		this.#cloudAudio = [];
+
+		try {
+			this.#streamRecorder = this.#createCapture((error, samples) => {
+				if (this.#disposed || this.#cloudModel !== model || this.#state !== "recording") return;
+				if (error) {
+					logger.error("Native microphone capture failed", { error: error.message });
+					const recorder = this.#streamRecorder;
+					this.#streamRecorder = null;
+					try {
+						recorder?.stop();
+					} catch (cause) {
+						logger.debug("stt: microphone cleanup failed", {
+							error: cause instanceof Error ? cause.message : String(cause),
+						});
+					}
+					this.#streamAbort?.abort(error);
+					this.#streamEditor?.clearVolatileText();
+					this.#cleanupCloud();
+					this.#setState("idle", options);
+					options.showWarning(error.message);
+					return;
+				}
+				if (samples.length > 0) this.#cloudAudio.push(samples.slice());
+			});
+		} catch (err) {
+			this.#streamAbort?.abort();
+			this.#cleanupCloud();
+			const msg = err instanceof Error ? err.message : "Failed to start microphone capture";
+			options.showWarning(msg);
+			logger.error("STT recording failed to start", { error: msg });
+			return;
+		}
+
+		this.#setState("recording", options);
+		logger.debug("STT buffered recording started", { model: `${model.provider}/${model.id}` });
+	}
+
+	async #stopBuffered(options: ToggleOptions): Promise<void> {
+		const model = this.#cloudModel;
+		const recorder = this.#streamRecorder;
+		const abort = this.#streamAbort;
+		if (!model || !abort || !this.#registry) {
+			this.#cleanupCloud();
+			this.#setState("idle", options);
+			return;
+		}
+
+		this.#setState("transcribing", options);
+		options.showStatus("Transcribing...");
+		try {
+			recorder?.stop();
+		} catch (err) {
+			logger.debug("stt: buffered recorder stop failed", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+		this.#streamRecorder = null;
+
+		let failed = false;
+		let finalText = "";
+		try {
+			const language = this.#settings.get("stt.language");
+			const result = await transcribeAudio(
+				model,
+				{
+					audio: encodePcm16Wav(this.#cloudAudio),
+					mimeType: "audio/wav",
+					fileName: "dictation.wav",
+					responseFormat: "json",
+					...(language && { language }),
+				},
+				{
+					apiKey: this.#registry.resolver(model, this.#getSessionId?.()),
+					signal: abort.signal,
+				},
+			);
+			finalText = result.text.trim();
+		} catch (err) {
+			failed = true;
+			if (!this.#disposed) {
+				const msg = err instanceof Error ? err.message : "Transcription failed";
+				options.showWarning(msg);
+				logger.error("STT cloud transcription failed", { error: msg });
+			}
+		}
+		if (this.#disposed) {
+			this.#cleanupCloud();
+			return;
+		}
+
+		this.#finishTranscript(finalText, failed, options);
+		this.#cleanupCloud();
+		this.#setState("idle", options);
+	}
+
+	#cleanupCloud(): void {
+		this.#cloudModel = null;
+		this.#cloudAudio = [];
+		this.#streamRecorder = null;
+		this.#streamEditor = null;
+		this.#streamCommitted = false;
+		this.#streamAbort = null;
+		this.#streamUtterance = "";
 	}
 
 	// ── Live streaming ──────────────────────────────────────────────
@@ -296,6 +449,21 @@ export class STTController {
 			this.#cleanupStream();
 			return;
 		}
+		this.#finishTranscript(finalText, failed, options);
+		this.#cleanupStream();
+		this.#setState("idle", options);
+	}
+
+	#cleanupStream(): void {
+		this.#stream = null;
+		this.#streamRecorder = null;
+		this.#streamEditor = null;
+		this.#streamCommitted = false;
+		this.#streamAbort = null;
+		this.#streamUtterance = "";
+	}
+
+	#finishTranscript(finalText: string, failed: boolean, options: ToggleOptions): void {
 		if (!this.#streamCommitted && finalText) {
 			const prefixed = this.#prefixed(finalText);
 			this.#streamEditor?.commitVolatileText(prefixed);
@@ -316,18 +484,6 @@ export class STTController {
 				this.#streamEditor.submit();
 			}
 		}
-
-		this.#cleanupStream();
-		this.#setState("idle", options);
-	}
-
-	#cleanupStream(): void {
-		this.#stream = null;
-		this.#streamRecorder = null;
-		this.#streamEditor = null;
-		this.#streamCommitted = false;
-		this.#streamAbort = null;
-		this.#streamUtterance = "";
 	}
 
 	dispose(): void {
@@ -343,6 +499,8 @@ export class STTController {
 			// best effort cleanup
 		}
 		this.#cleanupStream();
+		this.#cloudModel = null;
+		this.#cloudAudio = [];
 		this.#state = "idle";
 		this.#resolvedModelKey = null;
 	}

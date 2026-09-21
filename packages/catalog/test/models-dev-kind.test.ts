@@ -60,6 +60,12 @@ describe("models.dev normalized kind mapping", () => {
 							tool_call: true,
 							modalities: { input: ["text", "image"], output: ["text", "image"] },
 						},
+						"openai/gpt-4o-mini-tts-2025-12-15": {
+							name: "OpenAI: GPT-4o Mini TTS",
+							kind: "tts",
+							tool_call: false,
+							modalities: { input: ["text"], output: ["speech"] },
+						},
 					},
 				},
 			},
@@ -87,6 +93,15 @@ describe("models.dev normalized kind mapping", () => {
 		expect(
 			models.find(model => model.provider === "openrouter" && model.id === "openrouter/auto")?.kind,
 		).toBeUndefined();
+		expect(
+			models.find(model => model.provider === "openrouter" && model.id === "openai/gpt-4o-mini-tts-2025-12-15"),
+		).toMatchObject({
+			api: "openai-speech",
+			kind: "tts",
+			reasoning: false,
+			input: ["text"],
+			supportsTools: false,
+		});
 		expect(models.find(model => model.provider === "openai" && model.id === "gpt-5")).toMatchObject({
 			api: "openai-responses",
 			reasoning: true,

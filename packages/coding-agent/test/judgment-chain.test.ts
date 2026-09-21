@@ -273,4 +273,54 @@ describe("ChainJudge", () => {
 		// corrections. A duplicated session fallback would add another three.
 		expect(attempted).toEqual([ONLINE.id, ONLINE.id, ONLINE.id, ONLINE_BACKUP.id]);
 	});
+
+	it("resolves and forwards configured headers to native judgment models", async () => {
+		const recordedHeaders: Record<string, string>[] = [];
+		const nativeModel = {
+			...JEV_PREVIEW,
+			id: "jev-custom-headers",
+			api: "openrouter-decisions" as const,
+			provider: "custom-judge",
+			baseUrl: "https://custom.example/v1",
+			resolveHeaders: async () => ({
+				"x-custom-routing": "router-1",
+				"x-custom-tenant": "tenant-abc",
+			}),
+		} as Model<Api>;
+
+		const settings = Settings.isolated({
+			modelRoles: { judge: "custom-judge/jev-custom-headers" },
+		});
+		const registry = makeRegistry([nativeModel], { "custom-judge": "test-key" });
+
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (_url, init) => {
+				const h = new Headers(init?.headers);
+				recordedHeaders.push({
+					auth: h.get("authorization") ?? "",
+					customRouting: h.get("x-custom-routing") ?? "",
+					customTenant: h.get("x-custom-tenant") ?? "",
+				});
+				return Response.json({
+					model: "typesafe/jev-1.13",
+					answers: { level: { type: "choice", choice: "low" } },
+					usage: { input_tokens: 10, output_tokens: 2 },
+				});
+			}),
+		);
+
+		const result = await new ChainJudge({ settings, registry }).judge({
+			state: "mechanical task",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(result.answers.level.choice).toBe("low");
+		expect(recordedHeaders).toEqual([
+			{
+				auth: "Bearer test-key",
+				customRouting: "router-1",
+				customTenant: "tenant-abc",
+			},
+		]);
+	});
 });

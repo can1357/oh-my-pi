@@ -3,9 +3,10 @@
 
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, type FetchImpl, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { MissingApiKeyError, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
-import { prompt, USER_AGENT } from "@oh-my-pi/pi-utils";
+import { DEFAULT_XAI_VOICE_ID, synthesizeSpeech, XAI_MAX_TEXT_LENGTH } from "@oh-my-pi/pi-ai/speech";
+import { prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleChain, type RoleChainCandidate } from "../config/model-resolver";
 import { roleCandidatePool } from "../config/model-roles";
@@ -16,12 +17,6 @@ import { DEFAULT_TTS_VOICE, KOKORO_VOICES } from "../tts/models";
 import { ttsClient } from "../tts/tts-client";
 import { encodeWav } from "../tts/wav";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
-
-// Hermes tts_tool.py L167-171
-const DEFAULT_XAI_VOICE_ID = "eve" as const;
-const DEFAULT_XAI_SAMPLE_RATE = 24_000;
-const DEFAULT_XAI_BIT_RATE = 128_000;
-const XAI_MAX_TEXT_LENGTH = 15_000;
 
 // Built-in voices per xAI Tier-1 docs (2026-05-16). xAI also accepts custom voice IDs,
 // so the schema does NOT enum-restrict voice_id; this constant only drives the description.
@@ -96,135 +91,42 @@ function readLocalVoice(settingsInstance: Settings): string {
 	}
 }
 
-/** Shared cloud-speech POST with a 60 s timeout fence. */
-async function postSpeechRequest(options: {
-	label: string;
-	url: string;
-	payload: Record<string, unknown>;
-	apiKey: ApiKey;
-	resolveHeaders?: () => Promise<Record<string, string> | undefined>;
-	fetchImpl: FetchImpl;
-	signal: AbortSignal | undefined;
-}): Promise<Uint8Array> {
-	const timeoutSignal = AbortSignal.timeout(60_000);
-	const combinedSignal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
-	const response = await withAuth(
-		options.apiKey,
-		async key => {
-			const configuredHeaders = await options.resolveHeaders?.();
-			const resp = await options.fetchImpl(options.url, {
-				method: "POST",
-				headers: {
-					...configuredHeaders,
-					Authorization: `Bearer ${key}`,
-					"Content-Type": "application/json",
-					"User-Agent": USER_AGENT,
-				},
-				body: JSON.stringify(options.payload),
-				signal: combinedSignal,
-			});
-			if (!resp.ok) {
-				const detail = await resp.text();
-				throw new ProviderHttpError(
-					`${options.label} failed (${resp.status}): ${detail.slice(0, 300)}`,
-					resp.status,
-					{ headers: resp.headers },
-				);
-			}
-			return resp;
+async function synthesizeCloud(
+	model: Model,
+	params: TtsSchemaType,
+	ctx: CustomToolContext,
+	outputPath: string,
+	displayPath: string,
+	codec: TtsCodec,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
+	const sessionId = ctx.sessionManager.getSessionId();
+	const result = await synthesizeSpeech(
+		model,
+		{
+			text: params.text,
+			format: codec,
+			...(params.voice_id !== undefined ? { voice: params.voice_id } : {}),
+			...(model.api === "xai-tts" && params.sample_rate !== undefined ? { sampleRate: params.sample_rate } : {}),
+			...(model.api === "xai-tts" && params.bit_rate !== undefined ? { bitRate: params.bit_rate } : {}),
 		},
-		{ signal: combinedSignal },
+		{
+			apiKey: ctx.modelRegistry.resolver(model, sessionId),
+			fetch: ctx.fetch,
+			signal,
+		},
 	);
-	return new Uint8Array(await response.arrayBuffer());
-}
-
-async function synthesizeXai(
-	model: Model,
-	params: TtsSchemaType,
-	ctx: CustomToolContext,
-	outputPath: string,
-	displayPath: string,
-	codec: TtsCodec,
-	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
-	const voiceId = params.voice_id ?? DEFAULT_XAI_VOICE_ID;
-	const sampleRate = params.sample_rate ?? DEFAULT_XAI_SAMPLE_RATE;
-	const bitRate = params.bit_rate ?? DEFAULT_XAI_BIT_RATE;
-	const payload: Record<string, unknown> = {
-		text: params.text,
-		voice_id: voiceId,
-		language: params.language,
-	};
-	// Hermes tts_tool.py L926-940 — only send output_format when caller overrides a default.
-	const codecOverridden = codec !== "mp3";
-	const sampleRateOverridden = sampleRate !== DEFAULT_XAI_SAMPLE_RATE;
-	const bitRateOverridden = codec === "mp3" && bitRate !== DEFAULT_XAI_BIT_RATE;
-	if (codecOverridden || sampleRateOverridden || bitRateOverridden) {
-		const fmt: Record<string, unknown> = { codec };
-		if (sampleRate) fmt.sample_rate = sampleRate;
-		if (codec === "mp3" && bitRate) fmt.bit_rate = bitRate;
-		payload.output_format = fmt;
-	}
-
-	const sessionId = ctx.sessionManager.getSessionId();
-	const apiKey: ApiKey = ctx.modelRegistry.resolver(model, sessionId);
-	const bytes = await postSpeechRequest({
-		label: `${model.provider}/${model.id}`,
-		url: `${model.baseUrl.replace(/\/+$/, "")}/tts`,
-		payload,
-		apiKey,
-		resolveHeaders: () => ctx.modelRegistry.resolveModelHeaders(model, signal),
-		fetchImpl: ctx.fetch ?? fetch,
-		signal,
-	});
-	await Bun.write(outputPath, bytes);
+	await Bun.write(outputPath, result.audio);
+	const voiceId = params.voice_id ?? (model.api === "xai-tts" ? DEFAULT_XAI_VOICE_ID : "default");
+	const backend: Exclude<TtsBackend, "local-inference"> = model.api === "xai-tts" ? "xai-tts" : "openai-speech";
 	return {
 		content: [
 			{
 				type: "text",
-				text: `Saved ${bytes.length} bytes to ${displayPath} (model=${model.provider}/${model.id}, voice=${voiceId}, codec=${codec}).`,
+				text: `Saved ${result.audio.length} bytes to ${displayPath} (model=${model.provider}/${model.id}, voice=${voiceId}, codec=${codec}).`,
 			},
 		],
-		details: { bytes: bytes.length, voiceId, codec, backend: "xai-tts" },
-	};
-}
-
-async function synthesizeOpenAiSpeech(
-	model: Model,
-	params: TtsSchemaType,
-	ctx: CustomToolContext,
-	outputPath: string,
-	displayPath: string,
-	codec: TtsCodec,
-	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<TtsToolDetails, TtsSchemaType>> {
-	const payload: Record<string, unknown> = {
-		model: model.id,
-		input: params.text,
-		response_format: codec,
-		...(params.voice_id ? { voice: params.voice_id } : {}),
-	};
-	const sessionId = ctx.sessionManager.getSessionId();
-	const apiKey: ApiKey = ctx.modelRegistry.resolver(model, sessionId);
-	const bytes = await postSpeechRequest({
-		label: `${model.provider}/${model.id}`,
-		url: `${model.baseUrl.replace(/\/+$/, "")}/audio/speech`,
-		payload,
-		apiKey,
-		resolveHeaders: () => ctx.modelRegistry.resolveModelHeaders(model, signal),
-		fetchImpl: ctx.fetch ?? fetch,
-		signal,
-	});
-	await Bun.write(outputPath, bytes);
-	const voiceLabel = params.voice_id ?? "default";
-	return {
-		content: [
-			{
-				type: "text",
-				text: `Saved ${bytes.length} bytes to ${displayPath} (model=${model.provider}/${model.id}, voice=${voiceLabel}, codec=${codec}).`,
-			},
-		],
-		details: { bytes: bytes.length, voiceId: voiceLabel, codec, backend: "openai-speech" },
+		details: { bytes: result.audio.length, voiceId, codec, backend },
 	};
 }
 
@@ -306,11 +208,8 @@ export const ttsTool: CustomTool<typeof ttsSchema, TtsToolDetails> = {
 				if (model.api === "local-inference") {
 					return await synthesizeLocal(model, params, settingsInstance, cwd, outputPath, signal);
 				}
-				if (model.api === "xai-tts") {
-					return await synthesizeXai(model, params, ctx, outputPath, displayPath, codec, signal);
-				}
-				if (model.api === "openai-speech") {
-					return await synthesizeOpenAiSpeech(model, params, ctx, outputPath, displayPath, codec, signal);
+				if (model.api === "xai-tts" || model.api === "openai-speech") {
+					return await synthesizeCloud(model, params, ctx, outputPath, displayPath, codec, signal);
 				}
 				throw new Error(`Unsupported speech model API: ${model.api}`);
 			} catch (error) {

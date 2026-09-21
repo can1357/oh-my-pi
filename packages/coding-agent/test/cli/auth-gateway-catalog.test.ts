@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { createSerializedRebuilder, indexModelsByRequestId } from "../../src/cli/auth-gateway-cli";
+import {
+	createSerializedRebuilder,
+	gatewayRoutableModels,
+	indexModelsByRequestId,
+} from "../../src/cli/auth-gateway-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
 const authStores: AuthStorage[] = [];
@@ -109,6 +114,22 @@ describe("indexModelsByRequestId (auth-gateway catalog)", () => {
 
 		expect(index.get(`anthropic/${anthropicModel.id}`)).toBeDefined();
 		expect(index.get(`${foreignModel.provider}/${foreignModel.id}`)).toBeUndefined();
+	});
+
+	test("serves judge-kind models alongside chat and keeps unrouted kinds out", async () => {
+		using tempDir = TempDir.createSync("@omp-auth-gateway-catalog-");
+		const registry = new ModelRegistry(await createAuthStorage(), tempDir.join("models.yml"));
+		const routable = gatewayRoutableModels(registry);
+		// `getAll()` alone is chat-only, which is what left `/v1/systemone` with
+		// "Unknown model: jev-latest" for a credentialed TypeSafe account.
+		expect(registry.getAll().some(model => model.provider === "typesafe")).toBe(false);
+
+		const index = indexModelsByRequestId(routable, new Set(["typesafe", "local"]));
+
+		expect(index.get("typesafe/jev-latest")?.api).toBe("typesafe");
+		expect(index.get("jev-latest")?.provider).toBe("typesafe");
+		// Tiny on-device models have no gateway route and are not advertised.
+		expect([...index.values()].some(model => modelKind(model) === "tiny")).toBe(false);
 	});
 });
 

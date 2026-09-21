@@ -1622,6 +1622,12 @@ export class AgentSession {
 		// injection boundary, but also expose a non-consuming interrupt peek so
 		// `hub` waits can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
+		// Completion notices (finished background jobs, exited supervised
+		// processes) queue here for the same boundary; peeking them lets a
+		// `hub wait` on something else return early instead of sitting on the
+		// notice for its whole window.
+		this.agent.hasBackgroundCompletions = () =>
+			this.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE) || this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE);
 		this.agent.setAsideMessageProvider(() => {
 			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => record);
 			thunks.push(...this.yieldQueue.drainLazy());
@@ -4685,6 +4691,7 @@ export class AgentSession {
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
+		this.agent.hasBackgroundCompletions = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
 	}

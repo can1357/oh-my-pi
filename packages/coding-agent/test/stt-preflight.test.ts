@@ -6,8 +6,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as asrClient from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
-import { STTController } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
-import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import { STTController, type STTControllerDependencies } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { getTinyModelsCacheDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -19,10 +18,11 @@ const DICTATION_MODELS = [
 	getBundledModel("local", "whisper-large-v3-turbo"),
 	getBundledModel("local", "parakeet-tdt-0.6b-v3"),
 ];
-const registry: ModelBrowserRegistry = {
+const registry: STTControllerDependencies["registry"] = {
 	getError: () => undefined,
 	getAvailable: () => DICTATION_MODELS,
 	getAll: () => DICTATION_MODELS,
+	resolver: () => () => "test-key",
 };
 
 async function touch(file: string): Promise<void> {
@@ -197,10 +197,11 @@ describe("STTController preflight", () => {
 
 	it("falls back to the full parakeet id when the dictation chain is empty", async () => {
 		settings.setModelRole("dictation", "missing/model");
-		const emptyRegistry: ModelBrowserRegistry = {
+		const emptyRegistry: STTControllerDependencies["registry"] = {
 			getError: () => undefined,
 			getAvailable: () => [],
 			getAll: () => [],
+			resolver: () => () => "test-key",
 		};
 		const isCached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
