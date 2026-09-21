@@ -1,0 +1,147 @@
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
+import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import { releaseAllTabs } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
+import { chromiumAvailable } from "./chromium-probe";
+
+const CHROMIUM_AVAILABLE = await chromiumAvailable();
+const TAB_NAME = `interactions-${crypto.randomUUID()}`;
+let tempDir = "";
+let uploadPath = "";
+
+const html = `<!doctype html>
+<style>
+body { margin: 0; font: 16px sans-serif; }
+#covered { position: absolute; left: 20px; top: 20px; width: 140px; height: 48px; }
+#overlay { position: fixed; left: 20px; top: 20px; width: 140px; height: 48px; z-index: 10; }
+#point { position: absolute; left: 300px; top: 20px; width: 100px; height: 50px; }
+#drop, #highlight { margin-top: 100px; width: 180px; height: 50px; border: 1px solid black; }
+</style>
+<button id="covered">Covered target</button><div id="overlay"></div>
+<label><input id="check" type="checkbox"> Toggle</label>
+<button id="double">Double</button><input id="keys">
+<button id="point">Point</button><div id="drop">Drop zone</div><div id="highlight">Highlight</div>
+<script>
+window.results = { covered: 0, doubles: 0, keys: [], point: 0, dropped: "" };
+document.querySelector("#covered").addEventListener("click", () => results.covered++);
+document.querySelector("#double").addEventListener("dblclick", () => results.doubles++);
+document.querySelector("#keys").addEventListener("keydown", event => results.keys.push(event.key + ":" + event.shiftKey));
+document.querySelector("#point").addEventListener("click", () => results.point++);
+document.querySelector("#drop").addEventListener("dragover", event => event.preventDefault());
+document.querySelector("#drop").addEventListener("drop", event => {
+  event.preventDefault();
+  results.dropped = event.dataTransfer.files[0]?.name || "";
+});
+</script>`;
+
+function valueFrom<T>(result: { details?: unknown }): T {
+	const details = result.details;
+	if (!details || typeof details !== "object") throw new Error("Browser result did not include details");
+	return ("value" in details ? details.value : undefined) as T;
+}
+
+function makeSession(): ToolSession {
+	return {
+		cwd: tempDir,
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings: Settings.isolated({
+			"browser.enabled": true,
+			"browser.headless": true,
+			"browser.cmux": false,
+			"tools.maxTimeout": 0,
+		}),
+	};
+}
+
+beforeAll(async () => {
+	tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-interactions-"));
+	uploadPath = path.join(tempDir, "drop-fixture.txt");
+	await Bun.write(uploadPath, "drop contents");
+});
+
+afterAll(async () => {
+	await releaseAllTabs({ kill: true });
+	await disposeAllVmContexts();
+	if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("browser interaction parity", () => {
+	test("guards covered clicks and drives keyboard, pointer, drop-zone, checked-state, and highlight interactions", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const invoke = (parameters: unknown) =>
+			prelude.invoke(parameters, { session, toolCallId: "browser-interactions" });
+		const call = async (method: string, args: unknown[] = []): Promise<unknown> => {
+			const result = await invoke({ action: "call", name: TAB_NAME, chain: [{ method, args }] });
+			return valueFrom<unknown>(result);
+		};
+
+		await invoke({
+			action: "open",
+			name: TAB_NAME,
+			url: `data:text/html,${encodeURIComponent(html)}`,
+		});
+		try {
+			const blocked = await invoke({
+				action: "run",
+				name: TAB_NAME,
+				code: `try {
+	await tab.click("#covered");
+	return "clicked";
+} catch (error) {
+	return error instanceof Error ? error.message : String(error);
+}`,
+				timeout: 10,
+			});
+			expect(valueFrom<string>(blocked)).toBe('tab.click("#covered") blocked: covered by <div#overlay>');
+			await call("evaluate", ["document.querySelector('#overlay').remove()"]);
+			await call("click", ["#covered"]);
+
+			await call("check", ["#check"]);
+			await call("check", ["#check"]);
+			expect(await call("evaluate", ["document.querySelector('#check').checked"])).toBe(true);
+			await call("uncheck", ["#check"]);
+			await call("uncheck", ["#check"]);
+			expect(await call("evaluate", ["document.querySelector('#check').checked"])).toBe(false);
+
+			await call("dblclick", ["#double"]);
+			await call("focus", ["#keys"]);
+			await call("keyDown", ["Shift"]);
+			await call("press", ["a"]);
+			await call("keyUp", ["Shift"]);
+			await call("clickAt", [350, 45]);
+			await call("uploadFile", ["#drop", uploadPath]);
+
+			const highlight = await invoke({
+				action: "run",
+				name: TAB_NAME,
+				code: `const pending = tab.highlight("#highlight", { duration: 100 });
+// This integration test must observe the real page timer while the helper remains pending.
+await Bun.sleep(20);
+const during = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);
+await pending;
+const after = await tab.evaluate(() => document.querySelectorAll("[data-omp-highlight-overlay]").length);
+return { during, after };`,
+			});
+			expect(valueFrom<{ during: number; after: number }>(highlight)).toEqual({ during: 1, after: 0 });
+
+			const results = await call("evaluate", ["window.results"]);
+			expect(results).toMatchObject({
+				covered: 1,
+				doubles: 1,
+				keys: ["Shift:true", "a:true"],
+				point: 1,
+				dropped: "drop-fixture.txt",
+			});
+		} finally {
+			await invoke({ action: "close", name: TAB_NAME, kill: true }).catch(() => undefined);
+		}
+	}, 30_000);
+});

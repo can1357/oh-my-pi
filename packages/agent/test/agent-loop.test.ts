@@ -2336,6 +2336,69 @@ describe("agentLoop with AgentMessage", () => {
 		).toBe(true);
 	});
 
+	it("cuts an interruptible wait short when a background completion is queued", async () => {
+		const toolSchema = type({});
+		let waiting = false;
+		let drained = false;
+		const notice = createUserMessage("process exited");
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until aborted, then rejects like a broker request",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				waiting = true;
+				// Only the interrupt abort releases this; a regression hangs into the test deadline.
+				const { promise, reject } = Promise.withResolvers<void>();
+				signal?.addEventListener("abort", () => reject(new Error("Daemon broker request aborted")), {
+					once: true,
+				});
+				await promise;
+				return { content: [{ type: "text", text: "waited" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasBackgroundCompletions: () => waiting && !drained,
+			getAsideMessages: async () => {
+				if (waiting && !drained) {
+					drained = true;
+					return [() => notice];
+				}
+				return [];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, mock.stream)) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "tool_execution_end" }> => e.type === "tool_execution_end",
+		);
+		const content = toolEnd?.result.content[0];
+		if (content?.type !== "text") throw new Error("tool result must be text");
+		expect(content.text).toContain("Skipped due to a queued background completion");
+		expect(
+			events.some(
+				e => e.type === "message_start" && e.message.role === "user" && e.message.content === "process exited",
+			),
+		).toBe(true);
+	});
+
 	it("keeps legacy steering queued until the injection boundary when no non-consuming peek exists", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];

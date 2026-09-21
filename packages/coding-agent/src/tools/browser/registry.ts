@@ -22,7 +22,14 @@ import { waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
 
 export type PuppeteerBrowserKind =
-	| { kind: "headless"; headless: boolean }
+	| {
+			kind: "headless";
+			headless: boolean;
+			/** Process-local launch flag; shared browsers use the tab-scoped CDP override instead. */
+			ignoreHttpsErrors?: boolean;
+			/** Process-local file access launch flag, unsupported by an already-running shared browser. */
+			allowFileAccess?: boolean;
+	  }
 	| { kind: "spawned"; path: string; args?: string[] }
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
@@ -79,7 +86,7 @@ const pendingOpens = new Map<string, Promise<BrowserHandle>>();
 export function browserKey(kind: BrowserKind): string {
 	switch (kind.kind) {
 		case "headless":
-			return `headless:${kind.headless ? "1" : "0"}`;
+			return `headless:${kind.headless ? "1" : "0"}:${kind.ignoreHttpsErrors ? "tls" : ""}:${kind.allowFileAccess ? "file" : ""}`;
 		case "spawned":
 			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
@@ -181,6 +188,8 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		const { browser, userDataDir } = await launchHeadlessBrowser({
 			headless: kind.headless,
 			viewport: opts.viewport,
+			ignoreHttpsErrors: kind.ignoreHttpsErrors,
+			allowFileAccess: kind.allowFileAccess,
 		});
 		return {
 			key: browserKey(kind),
@@ -400,6 +409,11 @@ async function openSharedHeadlessHandle(
 	kind: Extract<PuppeteerBrowserKind, { kind: "headless" }>,
 	opts: AcquireBrowserOptions,
 ): Promise<PuppeteerBrowserHandle> {
+	if (kind.allowFileAccess) {
+		throw new ToolError(
+			"browser.open({ allow_file_access:true }) requires a process-local Chromium launch and cannot be applied to the project-shared browser. Use app.path to launch a dedicated browser.",
+		);
+	}
 	const vp = opts.viewport ?? DEFAULT_VIEWPORT;
 	try {
 		const shared = await ensureSharedBrowser({

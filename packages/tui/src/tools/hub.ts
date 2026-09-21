@@ -870,6 +870,8 @@ export function launchRenderResult(
 								: "Wait timed out.",
 						),
 					);
+				} else if (details && params.pattern && details.matched === undefined) {
+					body.push(theme.fg("warning", `Process exited before output pattern /${params.pattern}/ matched.`));
 				}
 				break;
 			}

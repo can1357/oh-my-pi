@@ -238,42 +238,38 @@ registerProvider<MCPServer>(mcpCapability.id, {
 	load: loadMCPServers,
 });
 
-// System Prompt (SYSTEM.md)
+// System Prompt (SYSTEM.md, SYSTEM_TEMPLATE.md)
 async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemPrompt>> {
 	const items: SystemPrompt[] = [];
+	const warnings: string[] = [];
 
-	const userPath = path.join(getAgentDir(), "SYSTEM.md");
-	const userContent = await readFile(userPath);
-	if (userContent) {
-		items.push({
-			path: userPath,
-			content: userContent,
-			level: "user",
-			_source: createSourceMeta(PROVIDER_ID, userPath, "user"),
-		});
-	}
+	const load = async (filePath: string, level: "user" | "project", kind: "text" | "template"): Promise<void> => {
+		const content = await readFile(filePath);
+		if (!content) return;
+		if (kind === "template" && !content.trim()) {
+			warnings.push(`Ignoring empty system prompt template at ${filePath}`);
+			return;
+		}
+		items.push({ path: filePath, content, kind, level, _source: createSourceMeta(PROVIDER_ID, filePath, level) });
+	};
 
+	// Project entries first: dedupe is first-wins, so a project literal or
+	// template claims its key before a same-scope user file can survive.
 	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
 	if (nearestProjectConfigDir) {
-		const projectPath = path.join(nearestProjectConfigDir.dir, "SYSTEM.md");
-		const projectContent = await readFile(projectPath);
-		if (projectContent) {
-			items.push({
-				path: projectPath,
-				content: projectContent,
-				level: "project",
-				_source: createSourceMeta(PROVIDER_ID, projectPath, "project"),
-			});
-		}
+		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM.md"), "project", "text");
+		await load(path.join(nearestProjectConfigDir.dir, "SYSTEM_TEMPLATE.md"), "project", "template");
 	}
+	await load(path.join(getAgentDir(), "SYSTEM.md"), "user", "text");
+	await load(path.join(getAgentDir(), "SYSTEM_TEMPLATE.md"), "user", "template");
 
-	return { items, warnings: [] };
+	return { items, warnings };
 }
 
 registerProvider<SystemPrompt>(systemPromptCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Custom system prompt from SYSTEM.md",
+	description: "Custom system prompt from SYSTEM.md and SYSTEM_TEMPLATE.md",
 	priority: PRIORITY,
 	load: loadSystemPrompt,
 });

@@ -71,18 +71,13 @@ import type { SessionInfo as StoredSessionInfo } from "../../session/session-lis
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
+import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { OTHER_OPTION } from "../../tools/ask";
 import { normalizeLocalScheme } from "../../tools/path-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODELS,
-	TTS_LOCAL_VOICE_OPTIONS,
-} from "../../tts/models";
+import { DEFAULT_TTS_VOICE, TTS_LOCAL_MODELS, TTS_LOCAL_VOICE_OPTIONS } from "../../tts/models";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -253,32 +248,39 @@ type AcpSpeechTtsModelOption = AcpSpeechOption & {
 };
 
 function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
+	const localSelector = (modelId: string) => `local/${modelId}`;
+	const defaultSpeechModel = localSelector(TTS_LOCAL_MODELS[0].key);
+	const defaultDictationModel = localSelector(DEFAULT_STT_MODEL_KEY);
 	const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
 	return {
 		settings: {
-			speechToTextModel: "stt.modelName",
-			textToSpeechModel: "tts.localModel",
+			speechToTextModel: "modelRoles.dictation",
+			textToSpeechModel: "modelRoles.speech",
 			textToSpeechVoice: "tts.localVoice",
 			speechVoice: "speech.voice",
 		},
 		defaults: {
-			speechToTextModel: DEFAULT_STT_MODEL_KEY,
-			textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
+			speechToTextModel: defaultDictationModel,
+			textToSpeechModel: defaultSpeechModel,
 			voice: DEFAULT_TTS_VOICE,
 		},
 		speechToText: {
-			setting: "stt.modelName",
-			defaultValue: DEFAULT_STT_MODEL_KEY,
-			models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+			setting: "modelRoles.dictation",
+			defaultValue: defaultDictationModel,
+			models: STT_MODELS.map(({ key, label, description }) => ({
+				value: localSelector(key),
+				label,
+				description,
+			})),
 		},
 		textToSpeech: {
-			modelSetting: "tts.localModel",
+			modelSetting: "modelRoles.speech",
 			voiceSetting: "tts.localVoice",
 			speechVoiceSetting: "speech.voice",
-			defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
+			defaultModel: defaultSpeechModel,
 			defaultVoice: DEFAULT_TTS_VOICE,
 			models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
-				value: key,
+				value: localSelector(key),
 				label,
 				description,
 				voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),

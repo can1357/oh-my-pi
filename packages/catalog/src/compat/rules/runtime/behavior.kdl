@@ -140,7 +140,8 @@ behavior {
 	exclude-models provider="xiaomi-token-plan-sgp" substring="-tts" substring="-asr"
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
-	exclude-models provider="xai-oauth" prefix="grok-imagine-" prefix="grok-stt-" prefix="grok-voice-"
+	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
+		exact="grok-imagine-video" exact="grok-imagine-video-1.5" prefix="grok-stt-" prefix="grok-voice-"
 	// Meta's /v1/models lists image generation and transcription SKUs beside
 	// the Muse Spark chat models.
 	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-"

@@ -118,6 +118,7 @@ import {
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import { getEditStore } from "../edit/store";
 import { releaseCompletionHandles } from "../eval/completion-bridge";
+import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { WorkPoolRegistry } from "../task/workpool";
@@ -161,15 +162,11 @@ import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
-import { renderOrchestrateNotice } from "../modes/orchestrate";
-import { containsOrchestrate } from "@oh-my-pi/pi-tui/prompt/orchestrate";
+import { MAGIC_KEYWORDS, type MagicKeywordContext, type MagicKeywordId } from "../modes/magic-keywords";
+import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
-import { ULTRATHINK_NOTICE } from "../modes/ultrathink";
-import { containsUltrathink } from "@oh-my-pi/pi-tui/prompt/ultrathink";
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import { renderWorkflowNotice } from "../modes/workflow";
-import { containsWorkflow } from "@oh-my-pi/pi-tui/prompt/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
@@ -1625,6 +1622,12 @@ export class AgentSession {
 		// injection boundary, but also expose a non-consuming interrupt peek so
 		// `hub` waits can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#irc.hasInterrupts();
+		// Completion notices (finished background jobs, exited supervised
+		// processes) queue here for the same boundary; peeking them lets a
+		// `hub wait` on something else return early instead of sitting on the
+		// notice for its whole window.
+		this.agent.hasBackgroundCompletions = () =>
+			this.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE) || this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE);
 		this.agent.setAsideMessageProvider(() => {
 			const thunks: AsideMessage[] = this.#irc.drainPending().map(record => () => record);
 			thunks.push(...this.yieldQueue.drainLazy());
@@ -2307,6 +2310,7 @@ export class AgentSession {
 	#cancelOwnAsyncJobs(reason?: unknown): void {
 		if (!this.#agentId) return;
 		releaseCompletionHandles(this.#agentId);
+		releaseJudgmentBatches(this.#agentId);
 		WorkPoolRegistry.global().releaseOwner(this.#agentId);
 		const manager = this.#asyncJobManager;
 		manager?.cancelAll({ ownerId: this.#agentId }, reason);
@@ -4687,6 +4691,7 @@ export class AgentSession {
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
+		this.agent.hasBackgroundCompletions = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
 	}
@@ -6226,7 +6231,7 @@ export class AgentSession {
 		return this.#providerBoundary.normalizeAgentMessageImages(message);
 	}
 
-	#magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean {
+	#magicKeywordEnabled(keyword: MagicKeywordId): boolean {
 		return this.settings.get("magicKeywords.enabled") && this.settings.get(`magicKeywords.${keyword}`);
 	}
 
@@ -6235,47 +6240,27 @@ export class AgentSession {
 		const turnBudget = parseTurnBudget(text);
 		this.sessionManager.beginTurnBudget(turnBudget?.total ?? null, turnBudget?.hard ?? false);
 		const keywordNotices: CustomMessage[] = [];
-		if (this.#magicKeywordEnabled("ultrathink") && containsUltrathink(text)) {
+		let context: MagicKeywordContext | undefined;
+		for (const keyword of MAGIC_KEYWORDS) {
+			if (!this.#magicKeywordEnabled(keyword.id) || !containsMagicKeyword(text, keyword.word)) continue;
+			context ??= {
+				tools: this.getEnabledToolNames(),
+				taskBatch: this.settings.get("task.batch"),
+				scoutAvailable: this.#isScoutAvailable(),
+				evalTools: this.settings.get("eval.tools.enabled"),
+			};
+			// A notice whose contract needs an inactive tool would demand an
+			// unavailable capability; skip it rather than mislead the model.
+			const tools = context.tools;
+			if (!keyword.requires.every(tool => tools.includes(tool))) continue;
 			keywordNotices.push({
 				role: "custom",
-				customType: "ultrathink-notice",
-				content: ULTRATHINK_NOTICE,
+				customType: `${keyword.id}-notice`,
+				content: keyword.notice(context),
 				display: false,
 				attribution: "user",
 				timestamp,
 			});
-		}
-		if (this.#magicKeywordEnabled("orchestrate") && containsOrchestrate(text)) {
-			const enabledToolNames = this.getEnabledToolNames();
-			// The contract is entirely about `task` subagent dispatch; without the
-			// task tool the notice would demand an unavailable capability.
-			if (enabledToolNames.includes("task")) {
-				keywordNotices.push({
-					role: "custom",
-					customType: "orchestrate-notice",
-					content: renderOrchestrateNotice({ tools: enabledToolNames }),
-					display: false,
-					attribution: "user",
-					timestamp,
-				});
-			}
-		}
-		if (this.#magicKeywordEnabled("workflow") && containsWorkflow(text)) {
-			const enabledToolNames = this.getEnabledToolNames();
-			if (enabledToolNames.includes("task") && enabledToolNames.includes("eval")) {
-				keywordNotices.push({
-					role: "custom",
-					customType: "workflow-notice",
-					content: renderWorkflowNotice({
-						taskBatch: this.settings.get("task.batch"),
-						scoutAvailable: this.#isScoutAvailable(),
-						evalTools: this.settings.get("eval.tools.enabled"),
-					}),
-					display: false,
-					attribution: "user",
-					timestamp,
-				});
-			}
 		}
 		return keywordNotices;
 	}
@@ -6362,7 +6347,7 @@ export class AgentSession {
 		const templated = expandPromptTemplates ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
 		const expandedText = options?.synthetic ? templated : this.#modelMentions.expandMentions(templated);
 
-		// Magic keywords ("ultrathink", "orchestrate"): append hidden system notices after the
+		// Magic keywords (see modes/magic-keywords.ts): append hidden system notices after the
 		// user's message that steer this turn. User-authored prompts only — synthetic /
 		// agent-initiated turns never trigger them.
 		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);

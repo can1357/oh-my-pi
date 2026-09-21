@@ -267,16 +267,7 @@ describe("MCP fallback and prompt formatting", () => {
 	}
 
 	function sloppySection(path: string, find = "old", put = "new"): string {
-		return [
-			`<SM:EDIT path="${path}">`,
-			"<SM:FIND>",
-			find,
-			"</SM:FIND>",
-			"<SM:PUT>",
-			put,
-			"</SM:PUT>",
-			"</SM:EDIT>",
-		].join("\n");
+		return [`*** SM:EDIT ${path}`, "*** SM:FIND", find, "*** SM:PUT", put].join("\n");
 	}
 
 	it("shows the file from a sloppy edit section header", () => {

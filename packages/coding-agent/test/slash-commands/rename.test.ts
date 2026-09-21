@@ -29,7 +29,7 @@ function createRuntime(
 	authStorage = createInMemoryAuthStorage();
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
-		"providers.tinyModel": DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY,
+		modelRoles: { tiny: `local/${DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY}` },
 	});
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");

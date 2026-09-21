@@ -10,6 +10,7 @@ import { bashToolRenderer } from "./bash";
 import { debugToolRenderer } from "./debug";
 import { editToolRenderer } from "./edit";
 import { evalToolRenderer } from "./eval";
+import { findToolRenderer } from "./find";
 import { githubToolRenderer } from "./github";
 import { globToolRenderer } from "./glob";
 import { goalToolRenderer } from "./goal";
@@ -40,6 +41,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	eval: evalToolRenderer,
 	edit: editToolRenderer,
 	apply_patch: editToolRenderer,
+	find: findToolRenderer,
 	glob: globToolRenderer,
 	grep: grepToolRenderer,
 	lsp: lspToolRenderer,

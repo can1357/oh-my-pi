@@ -130,7 +130,7 @@ describe("SelectorController session replacement overlay", () => {
 			firstMessage: "first",
 			allMessagesText: "first second",
 		};
-		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
 
 		const overlayHidden = Promise.withResolvers<void>();
 		const hide = vi.fn(() => overlayHidden.resolve());

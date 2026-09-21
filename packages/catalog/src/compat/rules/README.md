@@ -50,14 +50,14 @@ class "anthropic" {
 
 Classification trims and lowercases the full model identifier. The **bare name** is the segment after its final `/`. Matcher tokens are also lowercased while parsing.
 
-| Node | Rank | Match |
-| --- | ---: | --- |
-| `exact "token"` | 4 | The whole bare name equals `token`. |
-| `bounded "token"` | 3 | The bare name equals `token`, or starts with it followed by `-`, `_`, `.`, `:`, or an ASCII digit. |
-| `namespace "token"` | 2 | A non-empty `/`-separated segment of the full identifier equals `token`. |
-| `namespace "token" bounded=#true` | 2 | Split the full identifier on `/`, `.`, and `:`; a segment must satisfy the bounded rule above. This is the only matcher property. |
-| `prefix "token"` | 1 | The bare name starts with `token`. |
-| `glob "pattern"` | 0 | An anchored `*` wildcard match over the bare name. `*` spans any substring; all non-wildcard text remains anchored in order. |
+| Node                              | Rank | Match                                                                                                                             |
+| --------------------------------- | ---: | --------------------------------------------------------------------------------------------------------------------------------- |
+| `exact "token"`                   |    4 | The whole bare name equals `token`.                                                                                               |
+| `bounded "token"`                 |    3 | The bare name equals `token`, or starts with it followed by `-`, `_`, `.`, `:`, or an ASCII digit.                                |
+| `namespace "token"`               |    2 | A non-empty `/`-separated segment of the full identifier equals `token`.                                                          |
+| `namespace "token" bounded=#true` |    2 | Split the full identifier on `/`, `.`, and `:`; a segment must satisfy the bounded rule above. This is the only matcher property. |
+| `prefix "token"`                  |    1 | The bare name starts with `token`.                                                                                                |
+| `glob "pattern"`                  |    0 | An anchored `*` wildcard match over the bare name. `*` spans any substring; all non-wildcard text remains anchored in order.      |
 
 A class match is ranked by `(matcher-kind rank, token byte length)`. The greatest tuple wins. Equal tuples from different classes are an ambiguity error; source order is not a tiebreak. If nothing matches, classification returns class `unknown` with no family or revision.
 
@@ -89,22 +89,22 @@ revision skip-bare "o1" "o3" "o4"
 
 ### Reviewed identity overrides
 
-`override` has properties only and no child block. Required string properties are `id` (stable, globally unique review ID), `model` (exact bare model identifier, compared case-insensitively), `rationale`, and `provenance`.
+`override` has properties only and no child block. Required string properties are `id` (stable, globally unique review ID), `rationale`, and `provenance`, plus exactly one selector: `model` (exact bare identifier) or `glob` (anchored `*` wildcard over the bare identifier). Both selectors compare case-insensitively; namespace prefixes before the final `/` are ignored.
 
 Optional properties are:
 
-| Property | Shape and meaning |
-| --- | --- |
-| `provider` | Exact provider key, compared case-insensitively. A matching provider-specific override wins over a provider-agnostic one. |
-| `logical` | Corrected logical model identifier. |
-| `class` | Corrected class ID; a non-empty string. |
-| `family` | Corrected product-family ID; a non-empty string. |
-| `revision` | One to three unsigned 8-bit components separated by `.` or `-`. |
-| `effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. |
-| `thinking-variant` | Boolean marker for a separately exposed thinking sibling. |
-| `expires-at-ms` | Non-negative Unix time in milliseconds. The override is inactive when the observation time is at or after this value. |
+| Property           | Shape and meaning                                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `provider`         | Exact provider key, compared case-insensitively. A matching provider-specific override wins over a provider-agnostic one. |
+| `logical`          | Corrected logical model identifier.                                                                                       |
+| `class`            | Corrected class ID; a non-empty string.                                                                                   |
+| `family`           | Corrected product-family ID; a non-empty string.                                                                          |
+| `revision`         | One to three unsigned 8-bit components separated by `.` or `-`.                                                           |
+| `effort`           | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.                                                             |
+| `thinking-variant` | Boolean marker for a separately exposed thinking sibling.                                                                 |
+| `expires-at-ms`    | Non-negative Unix time in milliseconds. The override is inactive when the observation time is at or after this value.     |
 
-The pair `(provider, model)` must also be unique, including provider-agnostic pairs. When no observation time is supplied, an expiring override remains active.
+The tuple `(provider, selector-kind, selector)` must also be unique, including provider-agnostic selectors. Active exact overrides take precedence over every glob. Within each selector kind, provider-scoped overrides precede provider-agnostic ones; matching globs rank by non-wildcard byte count. Equal-ranked globs are an ambiguity error, never resolved by declaration order. When no observation time is supplied, an expiring override remains active.
 
 ### Suffix collapse
 
@@ -124,6 +124,7 @@ collapse {
     provider-alias "devin" "opus" "claude-opus-5"
 }
 ```
+
 `variant-family` declares one reviewed provider-scoped collapsed family: positional provider and logical id, `name=` display name, and a body of `members "a" "b" …` (wire ids in priority order), `route "<tier>" "<wire-id>"` per effort tier (`off` included), and optional `mode`, `efforts`, `default-level`, `default-member`, `retired-members`, `effort-budget "<tier>" <n>`, `requires-effort`, `suppress-when-off`, `no-thinking`, `preserve-absent-effort-routes`, and `extra-aliases`. A `{rev}` placeholder in the logical id makes the node a **template**: it is instantiated once per revision found in live ids (`gemini-{rev}-flash` matches `gemini-3.8-flash-low` → family `gemini-3.8-flash`), every wire id in the body and the `name=` carry the same placeholder, and an optional `revision=` constraint (`">=3.6"`) bounds the generations it applies to. A concrete family with the same instantiated id wins over the template. `provider-alias` maps one provider-scoped selector spelling onto a logical id without making it a family member.
 
 `thinking-suffix` accepts one non-empty suffix and no properties. `pair-token` declares bounded (possibly infix) tokens naming the thinking sibling of a live bare twin (`sonar-reasoning-pro` beside `sonar-pro`); it drives thinking-pair derivation only — never identity suffix collapse — and negated `no-`/`non-` forms never match. `effort-suffix` additionally requires `tier` with one of the effort values above, and may have `except-bare-prefix`. `routing-variant-suffix` takes one non-empty suffix followed by one or more provider IDs: a wire identifier carrying the suffix on one of those providers is a **routing variant** of its plain identifier — discovery derives base-model metadata from the plain bundled SKU while keeping the suffixed wire identifier for requests; routing variants never participate in effort collapse. `effort-lane-suffix` takes one non-empty lane suffix followed by one or more provider IDs, plus an optional `bare-prefix` gate: on a declared provider, an identifier ending in the lane suffix collapses the effort suffix wedged before the lane token while keeping the lane on the logical id. `effort-family` takes a provider, the canonical logical id, and zero or more exact aliases that fold onto it.
@@ -178,21 +179,23 @@ provider "openrouter" {
 
 ### Selectors and nesting
 
-| Selector | Form | Matching semantics |
-| --- | --- | --- |
-| `class` | `class "id" { ... }` | Exact class ID. At document root it may contain `on`, `on-api`, `family`, `revision`, and `models`. Under `provider` it may contain `family`, `revision`, and `models`. |
-| `provider` | `provider "id" { ... }` | Exact provider ID. It is root-only and may contain `class` and `models`. |
-| `on` | `on "provider-a" "provider-b" { ... }` | One or more provider IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`. |
-| `on-api` | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`. |
-| `family` | `family "id" { ... }` | Exact classified family ID. It may contain `revision` and `models`. A target with no family does not match. |
-| `revision` | `revision ">=2.5 <4" { ... }` | A non-empty, whitespace-separated conjunction of comparisons. It may contain `models`. A target with no revision does not match. |
-| `models` | `models "id" "vendor/*" { ... }` | One or more alternatives, combined as OR. It cannot contain another selector. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics. |
+| Selector   | Form                                     | Matching semantics                                                                                                                                                      |
+| ---------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `class`    | `class "id" { ... }`                     | Exact class ID. At document root it may contain `on`, `on-api`, `family`, `revision`, and `models`. Under `provider` it may contain `family`, `revision`, and `models`. |
+| `provider` | `provider "id" { ... }`                  | Exact provider ID. It is root-only and may contain `class` and `models`.                                                                                                |
+| `on`       | `on "provider-a" "provider-b" { ... }`   | One or more provider IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`.                                  |
+| `on-api`   | `on-api "adapter-a" "adapter-b" { ... }` | One or more request adapter IDs, combined as OR. It is allowed only under a root `class`, and may contain `family`, `revision`, and `models`.                           |
+| `family`   | `family "id" { ... }`                    | Exact classified family ID. It may contain `revision` and `models`. A target with no family does not match.                                                             |
+| `revision` | `revision ">=2.5 <4" { ... }`            | A non-empty, whitespace-separated conjunction of comparisons. It may contain `models`. A target with no revision does not match.                                        |
+| `models`   | `models "id" "vendor/*" { ... }`         | One or more alternatives, combined as OR. It cannot contain another selector. `token="name"` matches an ASCII-case-insensitive token bounded by non-alphanumerics.      |
 
 Class, provider/`on`, `on-api`, and family selector values are compared exactly and case-sensitively to the structured resolve target. Revision operators are `>=`, `>`, `<=`, `<`, and `=`; operands have one to three dot-separated unsigned 8-bit components, omitted components zero.
 
 A `models` string without `*` is an exact, case-sensitive match against the provider-relative model identifier. A string containing `*` is an anchored, ASCII-case-insensitive wildcard match. Prefer taxonomy ranks; retain exact/glob lists only when they isolate the census member set exactly, and keep a `// residue:` comment explaining why ranks do not.
 
 `priority=N` is an optional signed integer property on the block that owns axis assignments. Its default is zero. Use it only to resolve an intentional equal-specificity overlap; do not use it to encode declaration order.
+
+`buildDiscoveredModel(spec, providerType)` resolves the catalog `discovery-api` axis before materializing compatibility. It preserves the credential-bearing provider ID and records `providerType` as the backend used for provider selectors on subsequent rebuilds. Ordinary `buildModel` preserves its input API. This lets custom-named llama.cpp deployments reuse the same rules without model-specific discovery code.
 
 ### Axis vocabulary and value shapes
 
@@ -262,7 +265,7 @@ The highest-ranked matching assignment wins for that axis. Two distinct rules th
 
 ### Capability gating
 
-Wire axes are considered for every matching target. Thinking axes are considered only when the structured resolve target sets `reasoning` — except that an exact model selector declaring `thinking-efforts` upgrades the target (a reviewed correction to stale source capability metadata). Family and revision selectors never match targets missing that rank. An unmatched target resolves to empty maps; the cascade does not infer negative capabilities from absence.
+Wire axes are considered for every matching target. Thinking axes require `reasoning`, except that an exact model selector declaring `thinking-efforts` opens the gate for reviewed corrections. A winning `thinking-upgrade-neutral #true` scoped to a recognized class, family, revision, or model selector also opens it when a matching effort ladder exists; provider-wide opt-in alone does not. Materializing a neutral spec as reasoning-capable requires that opt-in and no explicit thinking vocabulary. Family and revision selectors never match targets missing that rank. An unmatched target resolves to empty maps; the cascade does not infer negative capabilities from absence.
 
 ## Runtime behavior grammar
 
@@ -399,17 +402,17 @@ Only `discovery` enrolls a provider in `generate-models.ts`; providers without i
 
 ### Seed rows
 
-A `seed` *defines* bundled rows for providers whose catalog cannot be discovered at generation time — credential-scoped rosters, unauthenticated regens, or models ahead of upstream catalogs. Every other stratum patches rows; this one authors them. Runtime model managers hand the rows to `staticModels` through `seedModels(provider)`; the generator bundles them per the seed's `bundle` policy. Values are literal — a seed never derives from another provider's row, and pricing is never borrowed.
+A `seed` _defines_ bundled rows for providers whose catalog cannot be discovered at generation time — credential-scoped rosters, unauthenticated regens, or models ahead of upstream catalogs. Every other stratum patches rows; this one authors them. Runtime model managers hand the rows to `staticModels` through `seedModels(provider)`; the generator bundles them per the seed's `bundle` policy. Values are literal — a seed never derives from another provider's row, and pricing is never borrowed.
 
 `seed` properties: `api` and `base-url` are per-row defaults (a `model` may override either with the same property names); `bundle` defaults to `always`; `precedence="seed"` is optional. `model` takes the wire id positionally, requires `name=`, and its body MUST declare `reasoning`, `input` (`"text"` and/or `"image"`), `cost` (all four per-million rates), and `limits` (`context=` / `max-tokens=`, an omitted limit is `null`); `supports-tools #true` is optional. Any other directive is an axis from the cascade vocabulary: thinking axes become the row's explicit `thinking` (then `thinking-mode` and `thinking-efforts` are both required), wire axes become its explicit `compat` and must apply to the row's API, and catalog axes are rejected because they stay rule-owned in the cascade block. Explicit `thinking`/`compat` on a seed row win over the cascade exactly as they do for any authored spec.
 
 `bundle` decides when the generator includes the rows:
 
-| Policy | Rows enter the bundle |
-| --- | --- |
-| `always` | Every regeneration. Same-id upstream/discovery rows win dedup. |
+| Policy     | Rows enter the bundle                                                     |
+| ---------- | ------------------------------------------------------------------------- |
+| `always`   | Every regeneration. Same-id upstream/discovery rows win dedup.            |
 | `fallback` | Only when the provider's authoritative catalog discovery did not succeed. |
-| `empty` | Only when no other source produced a row for the provider. |
+| `empty`    | Only when no other source produced a row for the provider.                |
 
 `precedence="seed"` prepends the rows after the previous-snapshot merge and cross-provider reference fills, so the authored row wins dedup and same-id rows on other hosts never overwrite its name or capabilities (QwenCloud Token Plan, Meta). The default `upstream` precedence appends before the snapshot merge, so the current seed — not a stale snapshot copy — is the fallback row.
 

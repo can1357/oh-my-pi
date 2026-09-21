@@ -4,7 +4,7 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 {{#if hasEval}}Inline scripts, heredocs, `$(…)`, complex control flow/quoting, and non-trivial pipelines → `eval`.{{else}}Inline scripts, heredocs, `$(…)`, and complex control flow → a purpose-built tool or checked-in script.{{/if}}
 
 <instruction>
-- Set `cwd` instead of `cd`; use `env: { NAME: "…" }` for multiline/quote-heavy values.
+- Set `cwd` instead of `cd`.
 - `pty: true` only for terminal interaction (`sudo`, `ssh`).
 - Order-dependent commands use `&&` in one call; independent calls may run concurrently.
 {{#if hasSkills}}- Skill instructions resolve as `skill://<name>`; other internal URIs auto-resolve to paths.
@@ -15,7 +15,7 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 </instruction>
 
 <critical>
-{{#if hasGrep}}- NEVER use shell `grep`/`rg`; use built-in `grep`.{{/if}}
+{{#if hasGrep}}- NEVER use shell `grep`/`rg`; use built-in `grep`{{#if hasFind}} for literal patterns and `find` for locating behavior by description{{/if}}.{{/if}}
 {{#if hasRead}}{{#if hasGlob}}- List directories with `read` and find paths with `glob`; NEVER use `ls`/`find`.{{/if}}{{/if}}
 - Avoid `head`, `tail`, and redirection: output is captured, truncated, and linked as `artifact://<id>`.
 {{#if hasLaunch}}- Services, watchers, debuggers, and REPLs MUST use `hub` (`op:"start"`).{{/if}}
