@@ -11,6 +11,7 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"read",
 	"grep",
 	"glob",
+	"find",
 	"web_search",
 	"ast_grep",
 	"yield",
@@ -20,7 +21,6 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"reflect",
 	"retain",
 	"memory_edit",
-	"inspect_image",
 	"checkpoint",
 	"rewind",
 ]);

@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
-import { isMarkdownPath } from "../utils/lang-from-path";
+import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
 import { validateRelativePath } from "./skill-protocol";
@@ -488,6 +488,17 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		}
 
 		const resolved = await resolveLocalTarget(url, opts);
+		if (context?.pathOnly) {
+			const sourcePath = resolved.kind === "listing" ? resolved.root : resolved.path;
+			return {
+				url: url.href,
+				content: "",
+				contentType: getContentType(sourcePath),
+				sourcePath,
+				size: resolved.kind === "file" ? resolved.size : undefined,
+				isDirectory: resolved.kind !== "file",
+			};
+		}
 		if (resolved.kind === "listing") {
 			return buildListing(url, resolved.root);
 		}

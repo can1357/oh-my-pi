@@ -55,6 +55,8 @@ export interface Config {
 	thinking: string | null;
 	/** Extra args forwarded verbatim to the in-container omp CLI invocation (repeatable). */
 	agentArgs: string[];
+	/** omp tool allowlist (`--tools`); `null` keeps omp's default tool set. */
+	tools: string[] | null;
 
 	agent: string;
 	install: "source" | "local" | "published";
@@ -98,6 +100,7 @@ function defaultConfig(): Config {
 		exclude: [],
 		thinking: null,
 		agentArgs: [],
+		tools: null,
 
 		agent: "omp",
 		install: "source",
@@ -147,6 +150,7 @@ Model / agent:
       --tarball <path>           Reuse a prebuilt omp tarball (implies --install local, --no-build)
       --no-build                 Skip packing; reuse newest tarball in bench dir (--install local)
       --agent-arg <arg>          Extra arg forwarded verbatim to the in-container omp CLI (repeatable)
+      --tools <a,b,c>            omp tool allowlist; enables the find tool when listed
       --env <KEY[=VALUE]>        Forward env into omp container (repeatable).
                                  KEY alone forwards host value; host PI_* auto-forwarded.
 
@@ -249,6 +253,13 @@ export function parseArgs(argv: string[]): Config {
 				break;
 			case "--agent-arg":
 				cfg.agentArgs.push(take(arg));
+				break;
+			case "--tools":
+				cfg.tools = take(arg)
+					.split(",")
+					.map(tool => tool.trim())
+					.filter(tool => tool.length > 0);
+				if (cfg.tools.length === 0) throw new Error("--tools must name at least one tool");
 				break;
 			case "-l":
 			case "--tasks":
@@ -1312,7 +1323,8 @@ function buildHarborArgs(
 	composeOverlayPath: string | null,
 	mountsJson: string | null,
 ): string[] {
-	const a: string[] = ["run", "-d", cfg.dataset, "-o", cfg.jobsDir, "--job-name", jobName];
+	const datasetFlag = fs.existsSync(cfg.dataset) ? "-p" : "-d";
+	const a: string[] = ["run", datasetFlag, cfg.dataset, "-o", cfg.jobsDir, "--job-name", jobName];
 	a.push("-n", String(cfg.concurrency), "-k", String(cfg.attempts), "-l", String(cfg.tasks));
 	for (const m of cfg.models) a.push("-m", m);
 	for (const inc of cfg.include) a.push("-i", inc);
@@ -1408,6 +1420,7 @@ export function buildHarborEnv(
 	if (cfg.binaryX64) env.OMP_BENCH_BINARY_X64 = cfg.binaryX64;
 	if (cfg.thinking) env.OMP_BENCH_THINKING = cfg.thinking;
 	if (cfg.agentArgs.length > 0) env.OMP_BENCH_AGENT_ARGS = JSON.stringify(cfg.agentArgs);
+	if (cfg.tools) env.OMP_BENCH_TOOLS = cfg.tools.join(",");
 	if (cfg.webSearch) env.OMP_BENCH_WEB_SEARCH = "1";
 	env.OMP_BENCH_GATEWAY = cfg.gateway ? "1" : "0";
 	if (cfg.gateway) {

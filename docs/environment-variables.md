@@ -20,7 +20,7 @@ Most runtime lookups use `$env` from `@oh-my-pi/pi-utils` (`packages/utils/src/e
 4. Active config-root `.env` (normally `~/.omp/.env`) for keys whose current value is empty/unset
 5. Home `.env` (`~/.env`) for keys whose current value is empty/unset
 
-The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the default profile—`PI_CODING_AGENT_DIR`. Dotenv names must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); unsafe names/values are discarded. OMP's parser keeps values literal; only Bun's own launch-directory dotenv autoload may perform Bun-supported expansion before this module runs.
+The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the default profile—`PI_CODING_AGENT_DIR`. Whole dotenv files are parsed with Bun's `node:util.parseEnv`, including quoted multiline values, escaped newlines, and inline comments. Names must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); unsafe names/values are discarded. Variable references remain literal in this parser; only Bun's launch-directory dotenv autoload performs variable expansion before this module runs. Child-shell filtering uses the same parser to identify project dotenv values.
 
 Additional rule inside each `.env` file: every `OMP_*` key is mirrored to its `PI_*` alias, and that mirrored value replaces a same-file `PI_*` value. This mirroring applies to parsed dotenv files, not arbitrary variables inherited from the parent process.
 
@@ -78,6 +78,8 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `QWEN_OAUTH_TOKEN`              | Qwen Portal auth                                 | Using `qwen-portal` with OAuth token                           | Takes precedence over `QWEN_PORTAL_API_KEY`                                                         |
 | `QWEN_PORTAL_API_KEY`           | Qwen Portal auth                                 | Using `qwen-portal` with API key                               | Fallback after `QWEN_OAUTH_TOKEN`                                                                   |
 | `ZENMUX_API_KEY`                | ZenMux auth                                      | Using `zenmux` provider                                        | Used for ZenMux OpenAI and Anthropic-compatible routes                                              |
+| `COMMAND_CODE_API_KEY`          | Command Code auth                                | Using `commandcode` provider                                   | `COMMANDCODE_API_KEY` is accepted as a legacy alias                                                 |
+| `CHARM_HYPER_API_KEY`           | Charm Hyper auth                                 | Using `charm-hyper` provider                                   | `HYPER_API_KEY` is accepted as a fallback alias                                                     |
 | `VLLM_API_KEY`                  | vLLM auth/discovery opt-in                       | Using `vllm` provider (local OpenAI-compatible servers)        | Any non-empty value works for no-auth local servers                                                 |
 | `CURSOR_ACCESS_TOKEN`           | Cursor provider auth                             | Using Cursor provider                                          | `CURSOR_API_KEY` is accepted as an alias                                                            |
 | `AI_GATEWAY_API_KEY`            | Vercel AI Gateway auth                           | Using `vercel-ai-gateway` provider                             | `VERCEL_AI_GATEWAY_API_KEY` is accepted as an alias                                                 |
@@ -107,11 +109,12 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 
 ### GitHub/Copilot tokens
 
-| Variable               | Used for                       | Notes                                     |
-| ---------------------- | ------------------------------ | ----------------------------------------- |
-| `COPILOT_GITHUB_TOKEN` | GitHub Copilot provider auth   | Generic GitHub tokens are not used here   |
-| `GH_TOKEN`             | GitHub API auth in web scraper | Web scraper fallback after `GITHUB_TOKEN` |
-| `GITHUB_TOKEN`         | GitHub API auth in web scraper | Web scraper checks this before `GH_TOKEN` |
+| Variable                  | Used for                                        | Notes                                                                                                                                                                                                                                                   |
+| ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `COPILOT_GITHUB_TOKEN`    | GitHub Copilot provider auth                    | Generic GitHub tokens are not used here                                                                                                                                                                                                                 |
+| `COPILOT_INTEGRATION_ID`  | GitHub Copilot client identity override         | Default `copilot-chat` (chat surface). Denied requests retry once as the Copilot CLI; set to pin the client id and skip the retry ([#11372](https://github.com/can1357/oh-my-pi/issues/11372)) |
+| `GH_TOKEN`                | GitHub API auth in web scraper                  | Web scraper fallback after `GITHUB_TOKEN`                                                                                                                                                                                                               |
+| `GITHUB_TOKEN`            | GitHub API auth in web scraper                  | Web scraper checks this before `GH_TOKEN`                                                                                                                                                                                                               |
 
 ### Auth broker / auth gateway (remote credential vault)
 
@@ -353,17 +356,15 @@ therefore completes through the paste-code path.
 | `PI_PERPLEXITY_API_MODEL`                           | Perplexity direct API model override (default `sonar-pro`)                |
 | `FIRECRAWL_API_KEY`                                 | Firecrawl search provider (keyless fallback when unset) and fetch reader backend (required) |
 | `FIRECRAWL_BASE_URL`                                | Firecrawl API endpoint override (`FIRECRAWL_API_URL` is a fallback alias) |
-| `GOOGLE_GEMINI_BASE_URL`                            | Gemini search endpoint override; must be a valid absolute HTTP(S) URL     |
 | `TAVILY_API_KEY`                                    | Tavily search provider                                                    |
 | `ZAI_API_KEY`                                       | z.ai search provider (also checks stored OAuth in `agent.db`)             |
-| `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search provider availability/auth                                   |
-| `PI_CODEX_WEB_SEARCH_MODEL`                         | Codex search provider model override                                      |
-| `GEMINI_SEARCH_MODEL`                               | Gemini search model override                                              |
+| `OPENAI_API_KEY` / Codex OAuth in DB                | Codex search model availability/auth                                      |
 | `MOONSHOT_SEARCH_API_KEY` / `KIMI_SEARCH_API_KEY`   | Kimi/Moonshot search provider env auth                                    |
 | `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` | Kimi/Moonshot search endpoint override                                    |
 | `KAGI_API_KEY`                                      | Kagi search provider                                                      |
 | `JINA_API_KEY`                                      | Jina search provider                                                      |
 | `PARALLEL_API_KEY`                                  | Parallel search provider                                                  |
+| `OLLAMA_CLOUD_API_KEY`                              | Ollama web search provider                                                |
 | `SEARXNG_ENDPOINT`, `SEARXNG_TOKEN`                 | SearXNG endpoint and optional bearer token                                |
 | `SEARXNG_BASIC_USERNAME`, `SEARXNG_BASIC_PASSWORD`  | SearXNG HTTP Basic Auth credentials                                       |
 
@@ -371,36 +372,34 @@ DuckDuckGo search is keyless — it queries the no-JS HTML frontend (`html.duckd
 
 SearXNG also reads the equivalent `searxng.endpoint`, `searxng.token`, `searxng.basicUsername`, and `searxng.basicPassword` settings from `~/.omp/agent/config.yml`; environment variables are fallbacks.
 
-### Anthropic web search auth chain
+### Anthropic web search authentication
 
-`searchAnthropic()` resolves credentials in this order:
+For an Anthropic catalog model, `searchAnthropic()` uses credentials in this order:
 
 1. `ANTHROPIC_SEARCH_API_KEY`
-2. `authStorage.getApiKey("anthropic")` fallback credentials (runtime and config overrides, stored OAuth, a login-sourced API key, generic Anthropic environment fallback, then other stored API keys; the environment fallback is `ANTHROPIC_FOUNDRY_API_KEY` → `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` in Foundry mode, or `ANTHROPIC_OAUTH_TOKEN` → `ANTHROPIC_API_KEY` otherwise)
+2. The model registry's credential resolver for the selected model/provider, including configured runtime credentials, stored OAuth or API-key login, and that provider's normal environment fallback
 
-For either credential path, base URL resolution is:
+`ANTHROPIC_SEARCH_API_KEY` is a search-only auth source: it does not change chat credentials. The selected catalog model supplies the model ID and endpoint, so there are no separate Anthropic search model or base-URL environment overrides.
 
-1. `ANTHROPIC_SEARCH_BASE_URL`
-2. `FOUNDRY_BASE_URL` when `CLAUDE_CODE_USE_FOUNDRY` is enabled
-3. `ANTHROPIC_BASE_URL`
-4. `https://api.anthropic.com`
-
-Related vars:
-
-| Variable                    | Default / behavior                                                                                                                                                                                                                         |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ANTHROPIC_SEARCH_API_KEY`  | API key used exclusively for the Anthropic web search provider. Highest-priority search auth; overrides `ANTHROPIC_API_KEY` / OAuth / Foundry for search calls without affecting chat completions.                                         |
-| `ANTHROPIC_SEARCH_BASE_URL` | Base URL used exclusively for the Anthropic web search provider. Applied to either `ANTHROPIC_SEARCH_API_KEY` or fallback Anthropic credentials; overrides `ANTHROPIC_BASE_URL` (and `FOUNDRY_BASE_URL` in Foundry mode) for search calls. |
-| `ANTHROPIC_SEARCH_MODEL`    | Search model override. Defaults to `claude-haiku-4-5`.                                                                                                                                                                                     |
-| `ANTHROPIC_BASE_URL`        | Generic fallback base URL for Anthropic requests when no search-specific base URL is set.                                                                                                                                                  |
-
-Use `ANTHROPIC_SEARCH_BASE_URL` (optionally with `ANTHROPIC_SEARCH_API_KEY`) to keep chat routed through an enterprise gateway (`ANTHROPIC_BASE_URL` or `CLAUDE_CODE_USE_FOUNDRY=true`) while pointing web search at a direct Anthropic endpoint, or vice versa.
+| Variable                   | Default / behavior                                                                                                                                                                                 |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ANTHROPIC_SEARCH_API_KEY` | API key used exclusively for an Anthropic web-search request. It is tried before the selected model's normal credential resolver and does not affect chat completions.                             |
 
 ### Perplexity OAuth flow behavior flag
 
 | Variable            | Behavior                                                                        |
 | ------------------- | ------------------------------------------------------------------------------- |
 | `PI_AUTH_NO_BORROW` | If set, disables macOS native-app token borrowing path in Perplexity login flow |
+
+### TypeSafe judgments
+
+Small typed decisions the app makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging, and `judge()` eval helper) use the `judge` model role. With a TypeSafe credential, the catalog discovers the account-visible judge roster from `GET /v1/models`—including `jev-latest` and `jev-preview` when advertised—and the role selects an exact catalog model. The built-in judge chain starts with `typesafe/jev-latest`, then falls back through `tiny`, `smol`, `default`, and the active-session model; configure `modelRoles.judge` or `retry.fallbackChains.judge` to select `typesafe/jev-preview` or another judge candidate.
+
+| Variable                 | Default / behavior                                                                                                                                                                                                                                       |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TYPESAFE_API_KEY`       | TypeSafe API key for discovery and System One requests; alternatively use `/login typesafe`                                                                                                                                                             |
+| `TYPESAFE_BASE_URL`      | API root override (default `https://api.typesafe.ai`), used by model discovery, `/login` validation, and System One requests                                                                                                                             |
+| `TYPESAFE_DEFAULT_MODEL` | Standalone `pi-ai` TypeSafe client default when its caller does not pass a model (default `jev-latest`). The coding-agent app passes the model selected by the `judge` role, so this variable does not override app role selection or discovered model IDs. |
 
 ---
 
@@ -446,7 +445,7 @@ Python subprocess filtering denies common API keys and allows safe base variable
 | `SMITHERY_URL`               | Smithery web URL override (default `https://smithery.ai`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `SMITHERY_API_URL`           | Smithery API base URL override (default `https://api.smithery.ai`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `SMITHERY_API_KEY`           | Smithery API key for managed MCP auth lookup                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `PUPPETEER_EXECUTABLE_PATH`  | Browser tool Chromium executable override                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `PUPPETEER_EXECUTABLE_PATH`  | Eval browser runtime Chromium executable override                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `LITELLM_BASE_URL`           | LiteLLM proxy base URL fallback (`http://localhost:4000/v1` if unset); explicit `providers.litellm.baseUrl` / `models.yml` config wins                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `LM_STUDIO_BASE_URL`         | Default implicit LM Studio discovery base URL override (`http://127.0.0.1:1234/v1` if unset)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `OLLAMA_BASE_URL`            | Default implicit Ollama discovery base URL override (`OLLAMA_HOST` if unset, then `http://127.0.0.1:11434`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -466,7 +465,7 @@ Python subprocess filtering denies common API keys and allows safe base variable
 | `PI_AUTO_QA`                 | Boolean flag with highest precedence for the automatic tool-issue report injection/recording (`dev.autoqa` setting is consulted next); `0`/`false` disables, `1`/`true` forces on                                                                                                                                                                                                                                                                                                                                                                                          |
 | `PI_AUTO_QA_PUSH`            | `1`/`true` bypasses the consent dialog and forces tool-issue push recording in headless/non-interactive environments                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `PI_AUTO_QA_PUSH_URL`        | Endpoint override for auto QA grievance push; wins over the `dev.autoqaPush.endpoint` setting                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `PI_BROWSER_RELAY`           | `0`/`1` kill switch for the browser relay; overrides the `browser.relay` setting (relay auto-starts when the browser tool needs it)                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `PI_BROWSER_RELAY`           | `0`/`1` kill switch for the browser relay; overrides the `browser.relay` setting (relay auto-starts when Eval's browser API needs it)                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ### Hindsight memory backend
 
@@ -571,11 +570,12 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | `PI_HARDWARE_CURSOR`           | If `1`, enables hardware cursor mode                                                                                                                                                                                                               |
 | `PI_NO_SYNC_OUTPUT`            | If set (any non-empty value), disables DEC 2026 synchronized-output wrappers while keeping TUI autowrap guards                                                                                                                                     |
 | `PI_NO_DECCARA`                | If set (truthy), disables Kitty DECCARA rectangular-SGR background fills (forces padded-string rendering)                                                                                                                                          |
+| `PI_NO_GLYPH_PROTOCOL`         | If `1`, skips the Glyph Protocol handshake (APC `25a1`), so nerd-preset icons come only from the terminal's own fonts instead of the outlines omp registers in-band on Rio/Ghostty                                                             |
 | `PI_DEBUG_REDRAW`              | If `1`, enables redraw debug logging                                                                                                                                                                                                               |
 | `PI_FORCE_IMAGE_PROTOCOL`      | Forces terminal image protocol detection (`kitty`, `iterm2`/`iterm`, `sixel`, `none`). Setting `kitty` inside a terminal multiplexer also opts into Kitty Unicode placeholder placement unless `PI_KITTY_PLACEHOLDERS=0` or `PI_NO_KITTY_PLACEHOLDERS=1` disables it |
 | `PI_KITTY_PLACEHOLDERS`        | `1` forces Kitty Unicode placeholder placement on; `0` forces it off. Under a terminal multiplexer, use `1` only after confirming the outer terminal supports Kitty `U=1` placeholders—otherwise U+10EEEE may render as literal PUA boxes              |
 | `PI_NO_KITTY_PLACEHOLDERS`     | `1` hard-disables Kitty Unicode placeholder placement and takes precedence over `PI_KITTY_PLACEHOLDERS`                                                                                                                                            |
-| `PI_TUI_RESIZE_IN_PLACE`       | `1`/`true` force in-place resize (no alt-screen borrow, no ED3 rewrap); `0`/`false` force the alt-screen fast path. Default-on for Warp, which re-reports its size on alt-screen toggles                                                           |
+| `PI_TUI_RESIZE_IN_PLACE`       | `1`/`true` force in-place resize (no alt-screen borrow, no ED3 rewrap); `0`/`false` force the alt-screen fast path. Default-on for Warp, which re-reports its size on alt-screen toggles — except on a ConPTY host (Windows, and WSL through `wslhost`), where conhost owns the grid and repaints its own viewport on resize, so the anchor cannot be recovered |
 
 ### Browser launch/proxy controls
 

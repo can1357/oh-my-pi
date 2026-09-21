@@ -14,14 +14,17 @@
  *    background ("running") finalizes and untracks it.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { BashToolDetails } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { BashToolDetails } from "@oh-my-pi/pi-tui/tools/bash";
+import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 function taskResult(asyncState: "running" | "completed" | "failed" | undefined, text: string) {
 	const details: TaskToolDetails = {
@@ -55,29 +58,14 @@ describe("EventController async update finalization", () => {
 		resetSettingsForTest();
 	});
 
-	function createFixture() {
-		const chatContainer = new TranscriptContainer();
+	function createFixture(isStreaming = false) {
 		const pendingTools = new Map<string, ToolExecutionComponent>();
-		const ctx = {
-			isInitialized: true,
-			init: vi.fn(async () => {}),
-			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-			statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
-			updateEditorTopBorder: vi.fn(),
-			toolOutputExpanded: false,
-			transcriptMessageComponents: new WeakMap(),
+		const ctx = createInteractiveModeContext({
 			pendingTools,
-			chatContainer,
-			session: { getToolByName: () => undefined, hasBuiltInTool: () => true, isStreaming: true },
-			showWarning: vi.fn(),
-			viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => true, isStreaming: false },
-			sessionManager: { getCwd: () => process.cwd() },
-			setTodos: vi.fn(),
-			clearPinnedError: vi.fn(),
-			statusContainer: { disposeChildren: vi.fn() },
-			ensureLoadingAnimation: vi.fn(),
-		} as unknown as InteractiveModeContext;
-		return { controller: new EventController(ctx), pendingTools, chatContainer, ctx };
+			session: { isStreaming: true },
+			viewSession: { isStreaming },
+		});
+		return { controller: new EventController(ctx), pendingTools, chatContainer: ctx.chatContainer, ctx };
 	}
 
 	async function startTask(controller: EventController, pendingTools: Map<string, ToolExecutionComponent>) {
@@ -145,6 +133,84 @@ describe("EventController async update finalization", () => {
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 
+	for (const arrival of ["early", "replay"] as const) {
+		for (const state of ["completed", "failed"] as const) {
+			it(`renders the ${state} outcome after a ${arrival} background task result`, async () => {
+				const { controller, pendingTools, chatContainer, ctx } = createFixture(true);
+				ctx.eventController = controller;
+				const helpers = new UiHelpers(ctx);
+				ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+				const running = taskResult("running", "Spawned background worker.");
+				if (arrival === "early") {
+					await controller.handleEvent({
+						type: "tool_execution_end",
+						toolCallId: "tc-task",
+						toolName: "task",
+						result: running,
+						isError: false,
+					});
+					await controller.handleEvent({
+						type: "tool_execution_start",
+						toolCallId: "tc-task",
+						toolName: "task",
+						args: { tasks: [{ task: "work" }] },
+					});
+				} else {
+					const result: ToolResultMessage = {
+						role: "toolResult",
+						toolCallId: "tc-task",
+						toolName: "task",
+						...running,
+						isError: false,
+						timestamp: 2,
+					};
+					ctx.viewSession.agent.getPendingToolResults = () => [result];
+					controller.resetTranscriptAnchors();
+					const assistant: AssistantMessage = {
+						role: "assistant",
+						content: [
+							{ type: "toolCall", id: "tc-task", name: "task", arguments: { tasks: [{ task: "work" }] } },
+						],
+						api: "anthropic-messages",
+						provider: "anthropic",
+						model: "test",
+						stopReason: "toolUse",
+						timestamp: 1,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+					};
+					helpers.renderSessionContext({ messages: [assistant] } as SessionContext);
+					controller.restorePendingToolResults();
+					ctx.viewSession.agent.getPendingToolResults = () => [];
+				}
+				const component = chatContainer.children.find(
+					(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
+				)!;
+				sealed.push(component);
+				component.setExpanded(true);
+				await controller.handleEvent({ type: "agent_start" });
+				const outcome =
+					state === "completed" ? "Worker produced the final report." : "Worker failed to read its input.";
+				await controller.handleEvent({
+					type: "tool_execution_update",
+					toolCallId: "tc-task",
+					toolName: "task",
+					args: {},
+					partialResult: taskResult(state, outcome),
+				});
+				expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain(outcome);
+				expect(pendingTools.has("tc-task")).toBe(false);
+				expect(component.isTranscriptBlockFinalized()).toBe(true);
+			});
+		}
+	}
+
 	it("finalizes a backgrounded Bash block without tracking later job updates", async () => {
 		const { controller, pendingTools } = createFixture();
 		await controller.handleEvent({
@@ -165,6 +231,38 @@ describe("EventController async update finalization", () => {
 		});
 
 		expect(pendingTools.has("tc-bash")).toBe(false);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("settles an early Hub wait result while another reported job remains running", async () => {
+		const { controller, pendingTools, chatContainer } = createFixture();
+		const details: CoordinationDetails = {
+			op: "wait",
+			jobs: [
+				{ id: "Job1", type: "task", status: "completed", label: "Finished work", durationMs: 5 },
+				{ id: "Job2", type: "task", status: "running", label: "Background work", durationMs: 5 },
+			],
+		};
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-hub",
+			toolName: "hub",
+			result: { content: [{ type: "text", text: "Job1 finished; Job2 is still running." }], details },
+			isError: false,
+		});
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-hub",
+			toolName: "hub",
+			args: { op: "wait", ids: ["Job1", "Job2"] },
+		});
+		const component = chatContainer.children.find(
+			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
+		)!;
+		sealed.push(component);
+		component.setExpanded(true);
+		expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain("Job1 Finished work");
+		expect(pendingTools.has("tc-hub")).toBe(false);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 

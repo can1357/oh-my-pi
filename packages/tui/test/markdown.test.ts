@@ -3,6 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import {
 	autolinkSchemeScanIndex,
 	clearRenderCache,
+	extractMarkdownLinks,
 	Markdown,
 	renderInlineMarkdown,
 	urlTokenPossible,
@@ -50,6 +51,26 @@ describe("renderInlineMarkdown", () => {
 	it("applies baseColor to fallback for non-string input", () => {
 		const rendered = renderInlineMarkdown(null as unknown as string, defaultMarkdownTheme, t => `[${t}]`);
 		expect(rendered).toBe("[]");
+	});
+});
+
+describe("extractMarkdownLinks", () => {
+	it("returns formatted labels as visible text", () => {
+		expect(extractMarkdownLinks("[**bold** and _em_](https://example.com)")).toEqual([
+			{ text: "bold and em", href: "https://example.com" },
+		]);
+	});
+
+	it("collapses multiline labels to one row", () => {
+		expect(extractMarkdownLinks("[line one\nline two  \nline three](https://example.com)")).toEqual([
+			{ text: "line one line two line three", href: "https://example.com" },
+		]);
+	});
+
+	it("returns codespan labels without Markdown delimiters", () => {
+		expect(extractMarkdownLinks("[run `bun test`](https://example.com)")).toEqual([
+			{ text: "run bun test", href: "https://example.com" },
+		]);
 	});
 });
 

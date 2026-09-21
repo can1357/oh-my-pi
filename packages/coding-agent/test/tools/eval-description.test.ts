@@ -2,17 +2,27 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import type { Tool as AiTool } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool, getEvalToolDescription } from "@oh-my-pi/pi-coding-agent/tools/eval";
 
-function makeSession(opts: { spawns?: string | null; backends?: Record<string, boolean> }): ToolSession {
+function makeSession(opts: {
+	spawns?: string | null;
+	backends?: Record<string, boolean>;
+	preludes?: () => readonly EvalPreludeDefinition[];
+	taskDepth?: number;
+	maxRecursionDepth?: number;
+}): ToolSession {
 	const settings = Settings.isolated();
 	for (const [key, value] of Object.entries(opts.backends ?? {})) settings.set(key as never, value);
+	if (opts.maxRecursionDepth !== undefined) settings.set("task.maxRecursionDepth", opts.maxRecursionDepth);
 	return {
 		cwd: "/tmp/eval-test",
 		hasUI: false,
 		getSessionFile: () => null,
 		getSessionSpawns: () => opts.spawns ?? "*",
+		taskDepth: opts.taskDepth,
+		...(opts.preludes ? { getEvalPreludes: opts.preludes } : {}),
 		settings,
 	} as unknown as ToolSession;
 }
@@ -49,11 +59,13 @@ describe("eval tool description", () => {
 		expect(text).toContain("agent(prompt");
 	});
 
-	it("omits agent() when the session forbids spawning", () => {
+	it("omits spawning helpers but keeps wait() when the session forbids spawning", () => {
 		// Subagents with spawns: undefined (resolved to "") cannot launch tasks.
-		// The prelude doc must not promise a helper that always throws.
+		// wait() remains usable with completion() handles.
 		const text = getEvalToolDescription({ py: true, js: true, spawns: false });
 		expect(text).not.toContain("agent(prompt");
+		expect(text).not.toContain("workpool(");
+		expect(text).toContain("wait(handles");
 	});
 
 	it("EvalTool description reflects spawn policy from the session", () => {
@@ -63,6 +75,19 @@ describe("eval tool description", () => {
 		expect(denied).not.toContain("agent(prompt");
 	});
 
+	it("omits spawning helpers but keeps wait() when recursion depth is exhausted", () => {
+		const belowCap = new EvalTool(makeSession({ taskDepth: 1, maxRecursionDepth: 2 })).description;
+		const atCap = new EvalTool(makeSession({ taskDepth: 2, maxRecursionDepth: 2 })).description;
+		const spawningDisabled = new EvalTool(makeSession({ taskDepth: 0, maxRecursionDepth: 0 })).description;
+
+		expect(belowCap).toContain("agent(prompt");
+		for (const description of [atCap, spawningDisabled]) {
+			expect(description).not.toContain("agent(prompt");
+			expect(description).not.toContain("workpool(");
+			expect(description).toContain("wait(handles");
+		}
+	});
+
 	it("hides eval-defined tool guidance when eval.tools.enabled is off", () => {
 		const enabled = getEvalToolDescription({ evalTools: true });
 		const disabled = getEvalToolDescription({ evalTools: false });
@@ -70,6 +95,25 @@ describe("eval tool description", () => {
 		expect(enabled).toContain("tools?=None");
 		expect(disabled).not.toContain("@tool");
 		expect(disabled).not.toContain("tools?=None");
+	});
+
+	it("composes only current enabled prelude documentation", () => {
+		let enabled = true;
+		const prelude: EvalPreludeDefinition = {
+			name: "fixture",
+			documentation: "CURRENT PRELUDE DOCUMENTATION",
+			javascript: "",
+			python: "",
+			exports: [],
+			enabled: () => enabled,
+			async invoke() {
+				return { content: [] };
+			},
+		};
+		const tool = new EvalTool(makeSession({ preludes: () => [prelude] }));
+		expect(tool.description).toContain("CURRENT PRELUDE DOCUMENTATION");
+		enabled = false;
+		expect(tool.description).not.toContain("CURRENT PRELUDE DOCUMENTATION");
 	});
 });
 

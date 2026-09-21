@@ -61,6 +61,7 @@ const codexModelEntrySchema = type({
 	"id?": "unknown",
 	"display_name?": "unknown",
 	"context_window?": "unknown",
+	"max_context_window?": "unknown",
 	"default_reasoning_level?": "unknown",
 	"supported_reasoning_levels?": "unknown",
 	"input_modalities?": "unknown",
@@ -110,6 +111,13 @@ export interface CodexModelDiscoveryOptions {
 export interface CodexModelDiscoveryResult {
 	models: ModelSpec<"openai-codex-responses">[];
 	etag?: string;
+	/**
+	 * Set when the backend rejected the credential itself (401/403, e.g.
+	 * `token_revoked`); `models` is empty. A definitive per-account denial,
+	 * unlike the `null` result for transport/parse failures, so multi-account
+	 * discovery can skip the account instead of aborting.
+	 */
+	rejectedStatus?: 401 | 403;
 }
 
 /**
@@ -139,6 +147,9 @@ export async function fetchCodexModels(options: CodexModelDiscoveryOptions): Pro
 			continue;
 		}
 
+		if (response.status === 401 || response.status === 403) {
+			return { models: [], rejectedStatus: response.status };
+		}
 		if (!response.ok) {
 			continue;
 		}
@@ -279,6 +290,7 @@ interface ParsedCodexModelEntry {
 	slug: string;
 	name: string;
 	contextWindow: number | null;
+	maxContextWindow: number | null;
 	reasoning: boolean;
 	input: ("text" | "image")[];
 	preferWebsockets: boolean;
@@ -308,6 +320,7 @@ function parseCodexModelEntry(entry: unknown): ParsedCodexModelEntry | null {
 		slug,
 		name: toNonEmptyString(payload.display_name) ?? slug,
 		contextWindow: toPositiveInt(payload.context_window),
+		maxContextWindow: toPositiveInt(payload.max_context_window),
 		reasoning: supportsReasoning(payload.default_reasoning_level, payload.supported_reasoning_levels),
 		input: normalizeInputModalities(payload.input_modalities),
 		preferWebsockets: toBoolean(payload.prefer_websockets) === true,
@@ -360,11 +373,12 @@ function buildNormalizedCodexModel(
 			baseUrl,
 			reasoning: parsed.reasoning,
 			input: parsed.input,
-			// Daybreak standard API pricing is rule-owned (`providers/openai-codex.kdl`
-			// cost-patch) and corrected at build time.
+			// Codex discovery omits pricing; documented subscription credit-equivalent
+			// rates are rule-owned (`providers/openai-codex.kdl`) and applied at build time.
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			remoteCompaction: CODEX_REMOTE_COMPACTION,
 			contextWindow,
+			...(parsed.maxContextWindow !== null ? { maxContextWindow: parsed.maxContextWindow } : {}),
 			maxTokens,
 			...(parsed.preferWebsockets ? { preferWebsockets: true } : {}),
 			...(parsed.useResponsesLite ? { useResponsesLite: true } : {}),

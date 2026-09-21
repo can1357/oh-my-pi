@@ -31,7 +31,9 @@ describe("eval js agent() handle", () => {
 			seenArgs = args as Record<string, unknown>;
 			return { id: "abc123", agent: "task" };
 		});
-		const handle = (await (sandbox.agent as AgentHelper)("say hi", { label: "Greeter" })) as Record<string, unknown>;
+		const handle = (await (sandbox.agent as AgentHelper)("say hi", {
+			label: "Greeter",
+		})) as Record<string, unknown>;
 		expect(seenName).toBe("__agent__");
 		expect(seenArgs).toEqual({ prompt: "say hi", label: "Greeter" });
 		expect(handle.kind).toBe("agent");
@@ -70,11 +72,15 @@ describe("eval js agent() handle", () => {
 
 	it("throws when the bridge omits the handle id", async () => {
 		const sandbox = loadPrelude(async () => ({ text: "lonely" }));
-		await expect((sandbox.agent as AgentHelper)("x")).rejects.toThrow("agent() did not return a handle");
+		// The factory returns a thenable handle wrapper, so normalize to a Promise
+		// before asserting rejection (Bun's `.rejects` requires a real Promise).
+		await expect(Promise.resolve((sandbox.agent as AgentHelper)("x"))).rejects.toThrow(
+			"agent() did not return a handle",
+		);
 	});
 
 	it("parses wait() text as JSON only when a schema was given", async () => {
-		const sandbox = loadPrelude(async (name, args) => {
+		const sandbox = loadPrelude(async name => {
 			if (name === "__agent__") return { id: "id-9", agent: "task" };
 			if (name === "__wait__") return { items: [{ status: "completed", text: '{"k":1}' }] };
 			throw new Error(`unexpected bridge call ${name}`);
@@ -84,8 +90,39 @@ describe("eval js agent() handle", () => {
 		})) as { wait(): Promise<unknown> };
 		expect(await withSchema.wait()).toEqual({ k: 1 });
 
-		const plain = (await (sandbox.agent as AgentHelper)("emit")) as { wait(): Promise<unknown> };
+		const plain = (await (sandbox.agent as AgentHelper)("emit")) as {
+			wait(): Promise<unknown>;
+		};
 		expect(await plain.wait()).toBe('{"k":1}');
+	});
+});
+
+describe("eval js immediate-handle contract", () => {
+	// Regression for #10986: the JS factories return immediately, so the
+	// documented pattern `const h = completion(...); await h.wait()` must work
+	// without first `await`-ing the factory itself.
+	it("exposes handle methods on the un-awaited factory result", async () => {
+		const sandbox = loadPrelude(async name => {
+			if (name === "__completion__") return { id: "c-1" };
+			if (name === "__wait__") return { items: [{ status: "completed", text: "OK" }] };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const completion = sandbox.completion as (prompt: string, opts?: unknown) => { wait(): Promise<unknown> };
+
+		const handle = completion("Return OK", { model: "smol" });
+		expect(typeof handle.wait).toBe("function");
+		expect(await handle.wait()).toBe("OK");
+	});
+
+	it("treats an un-awaited factory result as a single handle in wait()", async () => {
+		const sandbox = loadPrelude(async name => {
+			if (name === "__agent__") return { id: "a-2", agent: "task" };
+			if (name === "__wait__") return { items: [{ status: "completed", text: "done" }] };
+			throw new Error(`unexpected bridge call ${name}`);
+		});
+		const waitAll = sandbox.wait as (handles: unknown) => Promise<unknown[]>;
+
+		expect(await waitAll((sandbox.agent as AgentHelper)("go"))).toEqual(["done"]);
 	});
 });
 

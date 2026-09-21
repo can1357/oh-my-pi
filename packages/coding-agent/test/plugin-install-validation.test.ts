@@ -89,7 +89,7 @@ describe("PluginManager.install load validation", () => {
 
 	test("installs npm protocol specs with the resolved package name", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "npm:pi-figma-remote-auth"]);
+			expect(cmd).toEqual(["bun", "install", "--no-cache", "npm:pi-figma-remote-auth"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -126,9 +126,75 @@ describe("PluginManager.install load validation", () => {
 		expect(result.path).toBe(path.join(pluginsNodeModules, "pi-figma-remote-auth"));
 	});
 
+	// #11634: bun caches the registry packument per its Cache-Control TTL, so a
+	// plain `bun install <name>` kept re-resolving a stale version after a new one
+	// was published (and `install <name>@<newVersion>` failed to resolve). The npm
+	// branch must pass `--no-cache` so the manifest is re-fetched; the exact spec —
+	// including a version pin — must survive unchanged.
+	test("bypasses bun's manifest cache for npm installs so new versions resolve", async () => {
+		let recordedCmd: string[] | undefined;
+		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
+			recordedCmd = cmd;
+			const prepare = (async () => {
+				await Bun.write(
+					pluginsPkgJson,
+					JSON.stringify(
+						{ name: "omp-plugins", private: true, dependencies: { "welcome-plugin": "0.1.9" } },
+						null,
+						2,
+					),
+				);
+				await writePluginPackage(pluginsNodeModules, "welcome-plugin", {
+					version: "0.1.9",
+					source: "export default function() {}\n",
+				});
+			})();
+			return {
+				pid: 1,
+				stdout: emptyStream(),
+				stderr: emptyStream(),
+				exited: prepare.then(() => 0),
+			} as Subprocess;
+		}) as typeof Bun.spawn);
+
+		const result = await new PluginManager(tmpRoot).install("welcome-plugin@0.1.9");
+
+		expect(recordedCmd).toEqual(["bun", "install", "--no-cache", "welcome-plugin@0.1.9"]);
+		expect(result.version).toBe("0.1.9");
+	});
+
+	test("forces bun to replace an existing scoped npm plugin", async () => {
+		const name = "@scope/plugin";
+		await writePluginPackage(pluginsNodeModules, name, {
+			version: "1.0.3",
+			source: 'export default function(pi) { pi.registerCommand("scoped", { handler: async () => {} }); }\n',
+		});
+		const packageJson = JSON.stringify({
+			name: "omp-plugins",
+			private: true,
+			dependencies: { [name]: "^1.0.3" },
+		});
+		await Bun.write(pluginsPkgJson, packageJson);
+		const install = Bun.spawn(["bun", "-e", ""], {
+			stdin: "ignore",
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const spawnSpy = vi.spyOn(Bun, "spawn").mockReturnValue(install);
+
+		const result = await new PluginManager(tmpRoot).install(name, { force: true });
+		expect(spawnSpy).toHaveBeenCalledWith(
+			["bun", "install", "--no-cache", "--force", name],
+			expect.objectContaining({ cwd: pluginsDir }),
+		);
+
+		expect(result.version).toBe("1.0.3");
+		expect((await Bun.file(pluginsPkgJson).json()).dependencies).toEqual({ [name]: "^1.0.3" });
+	});
+
 	test("rejects and rolls back an install when the extension factory throws", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "factory-failure-plugin"]);
+			expect(cmd).toEqual(["bun", "install", "--no-cache", "factory-failure-plugin"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -170,7 +236,7 @@ describe("PluginManager.install load validation", () => {
 
 	test("rejects an install whose extension entry cannot resolve its dependencies", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "broken-plugin"]);
+			expect(cmd).toEqual(["bun", "install", "--no-cache", "broken-plugin"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -224,7 +290,7 @@ describe("PluginManager.install load validation", () => {
 		});
 
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "broken-plugin"]);
+			expect(cmd).toEqual(["bun", "install", "--no-cache", "broken-plugin"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -346,7 +412,7 @@ describe("PluginManager.install load validation", () => {
 
 	test("rejects an install whose manifest declares a missing extension entry", async () => {
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "partial-plugin"]);
+			expect(cmd).toEqual(["bun", "install", "--no-cache", "partial-plugin"]);
 
 			const prepare = (async () => {
 				await Bun.write(
@@ -485,7 +551,7 @@ describe("PluginManager.install load validation", () => {
 		expect(await Bun.file(bunLockPath).exists()).toBe(false);
 
 		vi.spyOn(Bun, "spawn").mockImplementation(((cmd: string[]) => {
-			expect(cmd).toEqual(["bun", "install", "broken-plugin"]);
+			expect(cmd).toEqual(["bun", "install", "--no-cache", "broken-plugin"]);
 			const prepare = (async () => {
 				await Bun.write(bunLockPath, '# bun.lock\n"broken-plugin": "1.0.0"\n');
 				await Bun.write(

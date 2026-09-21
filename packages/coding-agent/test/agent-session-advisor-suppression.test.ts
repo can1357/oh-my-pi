@@ -25,7 +25,7 @@ import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/hub";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -39,7 +39,7 @@ interface MockYieldDetails {
 }
 
 const mockYieldParameters = type({
-	result: "unknown",
+	data: "unknown",
 	"type?": "unknown",
 });
 
@@ -122,11 +122,6 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		return { session, sessionManager, mock, streamStarted: started.promise };
 	}
 
-	function readYieldResultData(result: unknown): unknown {
-		if (!result || typeof result !== "object" || !("data" in result)) return undefined;
-		return result.data;
-	}
-
 	function isYieldType(value: unknown): value is string | string[] {
 		return (
 			typeof value === "string" ||
@@ -141,7 +136,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			description: "Mock yield tool",
 			parameters: mockYieldParameters,
 			execute: async (_toolCallId, params) => {
-				const details: MockYieldDetails = { status: "success", data: readYieldResultData(params.result) };
+				const details: MockYieldDetails = { status: "success", data: params.data };
 				if (isYieldType(params.type)) details.type = params.type;
 				return {
 					content: [{ type: "text", text: "Result submitted." }],
@@ -151,7 +146,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		};
 	}
 
-	function createYieldMockResponse(args: { result: { data: unknown }; type?: string | string[] }): MockResponse {
+	function createYieldMockResponse(args: { data: unknown; type?: string | string[] }): MockResponse {
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: `call_yield_${Snowflake.next()}`,
@@ -263,7 +258,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
 			responses: [
-				createYieldMockResponse({ result: { data: "FINAL RESULT" } }),
+				createYieldMockResponse({ data: "FINAL RESULT" }),
 				{ content: ["must not run"], stopReason: "stop" },
 			],
 		});
@@ -338,7 +333,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(mock.calls.length).toBe(1);
 	});
 
-	it("waits for preserved advisor card hooks and persistence before reporting catch-up", async () => {
+	it("persists a preserved advisor card immediately but holds catch-up until its hooks settle", async () => {
 		const hookStarted = Promise.withResolvers<void>();
 		const releaseHook = Promise.withResolvers<void>();
 		const extensionRunner: AdvisorTestExtensionRunner = {
@@ -357,8 +352,10 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		await session.prompt("answer with exactly one line");
 		await hookStarted.promise;
 
+		// Persistence is committed in emission order and never waits on extension
+		// listeners, so the card is already durable while its hook is still held.
+		expect(persisted.at(-1)).toContain("Fixture verdict confirmed");
 		expect(await session.waitForAdvisorCatchup(0)).toBe(false);
-		expect(persisted).toEqual([]);
 
 		let catchupSettled = false;
 		const catchup = session.waitForAdvisorCatchup(1000).then(caughtUp => {
@@ -367,11 +364,10 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		});
 		await Promise.resolve();
 		expect(catchupSettled).toBe(false);
-		expect(persisted).toEqual([]);
 
 		releaseHook.resolve();
 		expect(await catchup).toBe(true);
-		expect(persisted.at(-1)).toContain("Fixture verdict confirmed");
+		expect(persisted).toHaveLength(1);
 		expect(mock.calls).toHaveLength(1);
 	});
 
@@ -669,7 +665,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 				if (providerCalls > 1) {
 					throw new Error("terminal yield must not start a second provider call");
 				}
-				return createYieldMockResponse({ result: { data: { ok: true } } });
+				return createYieldMockResponse({ data: { ok: true } });
 			},
 		});
 		const agent = new Agent({

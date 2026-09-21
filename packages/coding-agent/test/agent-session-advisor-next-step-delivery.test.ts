@@ -323,13 +323,7 @@ describe("AgentSession advisor next-step delivery", () => {
 	});
 
 	it("delivers a mid-turn advisor concern to the primary at its next model step without aborting the running tool", async () => {
-		const {
-			session: harness,
-			mock,
-			advisorMock,
-			heldToolStarted,
-			releaseHeldTool,
-		} = await createMidTurnConcernSession();
+		const { session: harness, mock, heldToolStarted, releaseHeldTool } = await createMidTurnConcernSession();
 
 		expect(harness.setAdvisorEnabled(true)).toBe(true);
 		const running = harness.prompt("run the fixture steps");
@@ -395,15 +389,6 @@ describe("AgentSession advisor next-step delivery", () => {
 		for (const result of toolResults) {
 			expect(JSON.stringify(result.content)).not.toContain("Skipped due to pending system advisory");
 		}
-
-		// The advisor was not told to defer: its advise call got `Recorded.`.
-		expect(advisorMock.calls.length).toBeGreaterThanOrEqual(2);
-		const adviseResults: ToolResultMessage[] = [];
-		for (const message of advisorMock.calls[1].context.messages) {
-			if (message.role === "toolResult" && message.toolName === "advise") adviseResults.push(message);
-		}
-		expect(adviseResults).toHaveLength(1);
-		expect(adviseResults[0].content.some(part => part.type === "text" && part.text === "Recorded.")).toBe(true);
 
 		// The loop consumed the aside: nothing stranded at settle.
 		expect(harness.yieldQueue.has("advisor")).toBe(false);

@@ -5,13 +5,13 @@
  * SearchResponse shape used by the web search tool.
  */
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type QuerySyntax } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, normalizeSearchText, withHardTimeout } from "./utils";
 
 const TINYFISH_SEARCH_URL = "https://api.search.tinyfish.ai";
 const DEFAULT_NUM_RESULTS = 10;
@@ -127,7 +127,7 @@ function appendTinyFishSources(
 		sources.push({
 			title: result.title?.trim() || siteName || url,
 			url,
-			snippet: result.snippet?.replace(/\s+/g, " ").trim() || undefined,
+			snippet: normalizeSearchText(result.snippet),
 			author: siteName || undefined,
 		});
 	}

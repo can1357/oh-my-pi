@@ -67,6 +67,27 @@ describe("LocalProtocolHandler", () => {
 		});
 	});
 
+	it("resolves path-only files and directories without returning their contents", async () => {
+		await withTempDir(async tempDir => {
+			const localFile = path.join(tempDir, "local", "report.json");
+			await Bun.write(localFile, '{"report":true}');
+			const context = {
+				localProtocolOptions: { getArtifactsDir: () => tempDir },
+				pathOnly: true,
+			};
+			const router = InternalUrlRouter.instance();
+			const file = await router.resolve("local://report.json", context);
+			expect(file.sourcePath).toBe(await fs.realpath(localFile));
+			expect(file.content).toBe("");
+			expect(file.isDirectory).toBe(false);
+			const directory = await router.resolve("local://", context);
+			expect(directory.sourcePath).toBe(await fs.realpath(path.dirname(localFile)));
+			expect(directory.content).toBe("");
+			expect(directory.isDirectory).toBe(true);
+			await expect(router.resolve("local://missing.json", context)).rejects.toThrow("Local file not found");
+		});
+	});
+
 	it("blocks path traversal attempts", async () => {
 		await withTempDir(async tempDir => {
 			LocalProtocolHandler.setOverride({

@@ -1,16 +1,52 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_shared_library", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_shared_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
-# The NAPI cdylib. build.rs is intentionally not wired in: its only effects are
-# napi_build::setup() link args (hardcoded in linkopts below — see napi-build
-# src/lib.rs) and a vestigial no-op filter-defs scan that belongs to pi-shell.
-# TypeScript typedef regeneration stays a cargo-side dev flow
-# (`bun --cwd packages/natives run build:bindings`); index.js/index.d.ts are
-# committed, so artifact builds never need the napi CLI.
+genrule(
+    name = "oauth_callback_darwin_helper",
+    srcs = ["src/oauth_callback/darwin-helper.m"],
+    outs = ["oauth_callback_darwin_helper.bin"],
+    cmd = select({
+        "//bazel/triples:aarch64-apple-darwin": "/usr/bin/xcrun clang -x objective-c -fobjc-arc -fblocks -fno-ident -Os -mmacosx-version-min=12.0 -arch arm64 -framework AppKit -Wl,-dead_strip -Wl,-adhoc_codesign $(location src/oauth_callback/darwin-helper.m) -o $@",
+        "//bazel/triples:x86_64-apple-darwin": "/usr/bin/xcrun clang -x objective-c -fobjc-arc -fblocks -fno-ident -Os -mmacosx-version-min=12.0 -arch x86_64 -framework AppKit -Wl,-dead_strip -Wl,-adhoc_codesign $(location src/oauth_callback/darwin-helper.m) -o $@",
+        "//conditions:default": "echo 'macOS OAuth callback helper selected for a non-macOS target' >&2; exit 1",
+    }),
+    target_compatible_with = ["@platforms//os:macos"],
+)
+
+rust_binary(
+    name = "oauth_callback_relay",
+    srcs = [
+        "src/oauth_callback/publication.rs",
+        "src/oauth_callback/relay.rs",
+    ],
+    crate_root = "src/oauth_callback/relay.rs",
+    edition = "2024",
+    rustc_flags = [
+        "-Ccodegen-units=1",
+        "-Copt-level=z",
+        "-Cpanic=abort",
+        "-Cstrip=symbols",
+    ] + select({
+        "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
+        "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
+        "//conditions:default": [],
+    }) + select({
+        "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+        "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
+        "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//conditions:default": [],
+    }),
+)
+
+# The NAPI cdylib. build.rs is intentionally not wired in: napi_build::setup()
+# link args are hardcoded below and the OAuth relay is a separate target whose
+# executable is embedded as compile data. TypeScript typedef regeneration stays
+# a cargo-side dev flow (`bun --cwd packages/natives run build:bindings`);
+# index.js/index.d.ts are committed, so artifact builds never need the napi CLI.
 rust_shared_library(
     name = "pi_natives",
     srcs = glob(["src/**/*.rs"]),
@@ -21,10 +57,21 @@ rust_shared_library(
         "data/*.bin.zst",
         "src/utok/claude/testdata/*.json",
         "fixtures/*.json",
-    ]),
+    ]) + select({
+        "@platforms//os:macos": [":oauth_callback_darwin_helper"],
+        "//conditions:default": [":oauth_callback_relay"],
+    }),
     crate_features = [],
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = select({
+        "@platforms//os:macos": {
+            "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
+        },
+        "//conditions:default": {
+            "OMP_OAUTH_RELAY_BINARY": "$(execpath :oauth_callback_relay)",
+        },
+    }),
     rustc_flags = select({
         "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
         "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
@@ -63,6 +110,16 @@ rust_shared_library(
         "//crates/pi-voice",
         "//crates/pi-walker",
     ],
+)
+
+rust_test(
+    name = "oauth_callback_relay_test",
+    srcs = [
+        "src/oauth_callback/publication.rs",
+        "src/oauth_callback/relay.rs",
+    ],
+    crate_root = "src/oauth_callback/relay.rs",
+    edition = "2024",
 )
 
 rust_test(

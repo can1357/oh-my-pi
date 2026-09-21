@@ -10,6 +10,8 @@ import type {
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
+import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -22,6 +24,7 @@ interface FakeAcpBuiltinSession {
 	sessionFile: string | undefined;
 	sessionId: string;
 	sessionName: string;
+	titleGenerationSignal: AbortSignal;
 	_todoPhases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	_switchedTo: string | undefined;
 	_movedFromEmptySessionFile: string | undefined;
@@ -52,11 +55,19 @@ interface FakeAcpBuiltinSession {
 	getTodoPhases(): Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
 	setTodoPhases(phases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>): void;
 	refreshBaseSystemPrompt(): Promise<void>;
+	getHindsightSessionState(): undefined;
+	applyMemoryBackend(): Promise<void>;
 	getToolByName(name: string): unknown;
 	compact(args?: string): Promise<void>;
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
+	scopedModels: Array<{ model: { provider: string; id: string } }>;
+	modelRegistry: {
+		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
+		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
+	};
 	setModel(model: unknown): Promise<void>;
+	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<void>;
 	listResetCredits: () => Promise<ResetCreditAccountStatus[]>;
 	redeemResetCredit: (target: ResetCreditTarget) => Promise<ResetCreditRedeemOutcome>;
 }
@@ -71,6 +82,7 @@ function createRuntime() {
 		sessionFile: undefined,
 		sessionId: "fake-session-id",
 		sessionName: "Fake Session",
+		titleGenerationSignal: new AbortController().signal,
 		_todoPhases: [],
 		_switchedTo: undefined,
 		_movedFromEmptySessionFile: undefined,
@@ -133,6 +145,9 @@ function createRuntime() {
 			this._todoPhases = phases;
 		},
 		async refreshBaseSystemPrompt() {},
+		// Headless `/move` and `/wt` rebind memory for the destination project.
+		getHindsightSessionState: () => undefined,
+		async applyMemoryBackend() {},
 		getAsyncJobSnapshot: () => null,
 		formatSessionAsText: () => "",
 		dumpLlmRequestToTmpDir: async () => undefined,
@@ -144,7 +159,13 @@ function createRuntime() {
 		async compact(_args?: string) {},
 		getContextUsage: () => undefined,
 		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
+		scopedModels: [],
+		modelRegistry: {
+			getAll: () => session.getAvailableModels(),
+			getAvailable: () => session.getAvailableModels(),
+		},
 		async setModel(_model: unknown) {},
+		async setModelTemporary(_model: unknown, _thinkingLevel?: string) {},
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
 	const fakeSessionManager = {
@@ -532,6 +553,51 @@ describe("ACP builtin slash commands", () => {
 		expect(configNotified).toBe(0);
 	});
 
+	// /switch resolves like `omp bench`: fuzzy ids, @role aliases, :level suffixes
+	it("switch opus:low: fuzzy-resolves a session-only model with the thinking suffix", async () => {
+		const { output, runtime, session } = createRuntime();
+		const available = [
+			{ provider: "anthropic", id: "claude-opus-4-5", contextWindow: 200_000 },
+			{ provider: "anthropic", id: "claude-sonnet-4-5", contextWindow: 200_000 },
+		];
+		session.getAvailableModels = () => available;
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+		const setModelSpy = spyOn(session, "setModel").mockResolvedValue(undefined);
+
+		const result = await executeAcpBuiltinSlashCommand("/switch opus:low", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(temporarySpy).toHaveBeenCalledWith(available[0], "low");
+		expect(setModelSpy).not.toHaveBeenCalled();
+		expect(output[0]).toContain("Session-only model: anthropic/claude-opus-4-5");
+	});
+
+	it("switch @smol: resolves the configured role alias", async () => {
+		const { runtime, session } = createRuntime();
+		const available = [
+			{ provider: "anthropic", id: "claude-opus-4-5", contextWindow: 200_000 },
+			{ provider: "anthropic", id: "claude-haiku-4-5", contextWindow: 200_000 },
+		];
+		session.getAvailableModels = () => available;
+		runtime.settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+
+		await executeAcpBuiltinSlashCommand("/switch @smol", runtime);
+
+		expect(temporarySpy).toHaveBeenCalledWith(available[1], undefined);
+	});
+
+	it("switch unknown: reports the selector and leaves the model alone", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.getAvailableModels = () => [{ provider: "anthropic", id: "claude-opus-4-5" }];
+		const temporarySpy = spyOn(session, "setModelTemporary").mockResolvedValue(undefined);
+
+		await executeAcpBuiltinSlashCommand("/switch gpt-fake-9000", runtime);
+
+		expect(temporarySpy).not.toHaveBeenCalled();
+		expect(output[0]).toContain("Unknown model: gpt-fake-9000");
+	});
+
 	// Removed TUI-only and dropped commands fall through as false
 	it("removed commands return false (fall through to model)", async () => {
 		const removedCommands = [
@@ -548,7 +614,7 @@ describe("ACP builtin slash commands", () => {
 			"/copy",
 			"/btw hi",
 			"/new",
-			"/drop",
+			"/delete",
 			"/fork",
 		];
 		for (const cmd of removedCommands) {
@@ -900,6 +966,108 @@ describe("wave 3 commands", () => {
 		}
 	});
 
+	it("/wt: with worktree.cleanSource=true, cleans the source checkout while preserving the worktree", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		runtime.settings.override("worktree.cleanSource", true);
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-clean-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "edited\n");
+			await Bun.write(path.join(repoDir, "untracked.txt"), "new\n");
+			await Bun.write(path.join(repoDir, "build/out.txt"), "ignored\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/clean", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			const movedTo = fakeSessionManager._movedTo;
+			expect(movedTo).toBeDefined();
+			expect(movedTo!.startsWith(await fs.realpath(worktreeBase))).toBe(true);
+			expect(output[0]).toContain(`Moved to worktree ${movedTo} on branch feature/clean`);
+			expect(output[0]).toContain("uncommitted changes moved, source checkout cleaned");
+			// The worktree carries all uncommitted changes.
+			expect(await Bun.file(path.join(movedTo!, "tracked.txt")).text()).toBe("edited\n");
+			expect(await Bun.file(path.join(movedTo!, "untracked.txt")).text()).toBe("new\n");
+			// The source checkout was reset and cleaned.
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("committed\n");
+			expect(await Bun.file(path.join(repoDir, "untracked.txt")).exists()).toBe(false);
+			// Ignored files survive in the source checkout.
+			expect(await Bun.file(path.join(repoDir, "build/out.txt")).text()).toBe("ignored\n");
+			expect(await git("symbolic-ref", "HEAD")).toBe("refs/heads/main");
+			expect(await git("status", "--porcelain")).toBe("");
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	it("/wt: aborts and leaves source checkout untouched when settings flush fails", async () => {
+		const { output, runtime, fakeSessionManager } = createRuntime();
+		spyOn(runtime.settings, "flush").mockRejectedValue(new Error("disk full"));
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-wt-flush-fail-"));
+		const repoDir = path.join(root, "repo");
+		const worktreeBase = path.join(root, "wt");
+		const originalProjectDir = process.cwd();
+		const originalWorktreeDir = process.env.OMP_WORKTREE_DIR;
+		process.env.OMP_WORKTREE_DIR = worktreeBase;
+		const git = async (...args: string[]) => {
+			const proc = Bun.spawn(["git", ...args], { cwd: repoDir, stdout: "pipe", stderr: "pipe" });
+			const [stdout, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+			expect(code).toBe(0);
+			return stdout.trim();
+		};
+		try {
+			await fs.mkdir(repoDir, { recursive: true });
+			await git("init", "-q", "-b", "main");
+			await git("config", "user.email", "t@example.com");
+			await git("config", "user.name", "t");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
+			await git("add", "-A");
+			await git("commit", "-qm", "init");
+			await Bun.write(path.join(repoDir, "tracked.txt"), "dirty\n");
+			fakeSessionManager._cwd = repoDir;
+
+			const result = await executeAcpBuiltinSlashCommand("/wt feature/flush-fail", runtime);
+
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("Failed to save pending settings: disk full");
+			expect(fakeSessionManager._movedTo).toBeUndefined();
+			expect(await Bun.file(path.join(repoDir, "tracked.txt")).text()).toBe("dirty\n");
+			// Assert aborted BEFORE branch or worktree snapshot creation
+			const branchExists = await git("branch", "--list", "feature/flush-fail");
+			expect(branchExists).toBe("");
+			const worktrees = await git("worktree", "list", "--porcelain");
+			expect(worktrees).not.toContain("feature/flush-fail");
+			const wtDirs = await fs.readdir(worktreeBase).catch(() => []);
+			expect(wtDirs).toEqual([]);
+		} finally {
+			setProjectDir(originalProjectDir);
+			if (originalWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
+			else process.env.OMP_WORKTREE_DIR = originalWorktreeDir;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	// /memory
 	it("/memory unknown: returns usage message", async () => {
 		const { output, runtime } = createRuntime();
@@ -1091,6 +1259,21 @@ describe("wave 4 commands", () => {
 	});
 
 	// /plugins
+	it("/plugin list: the singular alias dispatches the plugins builtin", async () => {
+		const npmSpy = spyOn(PluginManager.prototype, "list").mockResolvedValue([
+			{ name: "@czottmann/pi-automode", version: "1.16.0" } as never,
+		]);
+		const installedSpy = spyOn(MarketplaceManager.prototype, "listInstalledPlugins").mockResolvedValue([]);
+		try {
+			const { output, runtime } = createRuntime();
+			const result = await executeAcpBuiltinSlashCommand("/plugin list", runtime);
+			expect(result).toEqual({ consumed: true });
+			expect(output[0]).toContain("@czottmann/pi-automode@1.16.0");
+		} finally {
+			npmSpy.mockRestore();
+			installedSpy.mockRestore();
+		}
+	});
 
 	// /todo start with in_progress status in fuzzy list
 	it("/todo start: resolves ambiguous matches by preferring active tasks", async () => {

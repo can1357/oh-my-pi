@@ -8,7 +8,7 @@ auth "openai-codex" {
 		authorize-params {
 			id_token_add_organizations "true"
 			codex_cli_simplified_flow "true"
-			originator "pi"
+			originator "omp"
 		}
 		instructions "A browser window should open. Complete login to finish."
 		// OpenAI only allowlists this exact URI; a busy port must fail rather than fall back.

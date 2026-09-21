@@ -6,8 +6,12 @@ export const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 
 /**
  * Pinned OpenAI Codex client version (corresponds to @openai/codex package version).
+ *
+ * The backend version-gates model availability against this value on both
+ * `/models?client_version=` and `/responses` (`gpt-6-astra` requires ≥ 0.153.0);
+ * an older pin silently hides newer SKUs from discovery.
  */
-export const CODEX_CLIENT_VERSION = "0.144.1";
+export const CODEX_CLIENT_VERSION = "0.153.0";
 
 export const OPENAI_HEADERS = {
 	BETA: "OpenAI-Beta",
@@ -31,13 +35,20 @@ export const OPENAI_HEADERS = {
 	ATTESTATION: "x-oai-attestation",
 	/** Client-declared data residency for region-pinned enterprise workspaces. */
 	RESIDENCY: "x-openai-internal-codex-residency",
+	/**
+	 * Model routing hint (codex-rs `X_CODEX_ROUTING_HINT_HEADER`): `model=<slug>`
+	 * or `model=<slug>;tier=<service_tier>`; sent on every ChatGPT-OAuth
+	 * Responses, compaction, and WebSocket handshake request. Built by
+	 * {@link codexRoutingHint}.
+	 */
+	ROUTING_HINT: "x-codex-routing-hint",
 } as const;
 
 export const OPENAI_HEADER_VALUES = {
 	BETA_RESPONSES: "responses=experimental",
 	BETA_RESPONSES_WEBSOCKETS_V2: "responses_websockets=2026-02-06",
 	REMOTE_COMPACTION_V2: "remote_compaction_v2",
-	ORIGINATOR_CODEX: "pi",
+	ORIGINATOR_CODEX: "omp",
 } as const;
 
 export const URL_PATHS = {
@@ -46,6 +57,16 @@ export const URL_PATHS = {
 } as const;
 
 export const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
+
+/**
+ * Build the `x-codex-routing-hint` value for a request (codex-rs
+ * `build_routing_hint_header`): the requested model slug plus the explicit
+ * service tier when one is set. Callers set it only on ChatGPT-OAuth requests
+ * to the Codex backend; API-key OpenAI traffic never carries it.
+ */
+export function codexRoutingHint(model: string, serviceTier: string | null | undefined): string {
+	return serviceTier ? `model=${model};tier=${serviceTier}` : `model=${model}`;
+}
 
 /**
  * Extract account ID from a Codex JWT access token.

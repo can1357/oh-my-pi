@@ -2,9 +2,12 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
-import { type CursorExecResolvedCarrier, kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { logger } from "@oh-my-pi/pi-utils";
-import { obfuscateToolArguments } from "../secrets/message-transform";
+import {
+	collectNativeReplayRegexSecretValues,
+	obfuscateNativeReplay,
+	obfuscateToolArguments,
+} from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import {
 	formatExecutionSourcePreview,
@@ -36,8 +39,6 @@ export interface AdvisorAgent {
 export interface AdvisorRuntimeHost {
 	/** Live primary transcript (use `agent.state.messages`). */
 	snapshotMessages(): AgentMessage[];
-	/** Surface one advice note to the primary (enqueues into the session YieldQueue). */
-	enqueueAdvice(note: string, severity?: "nit" | "concern" | "blocker"): void;
 	/** Redact primary transcript bytes before they reach the advisor model. */
 	obfuscator?: SecretObfuscator;
 	/**
@@ -133,45 +134,23 @@ const ADVISOR_OUTPUT_ONLY_HAZARDS: readonly AdvisorOutputHazard[] = [
 ];
 
 /**
- * Replaces an advisor assistant turn that requested unavailable tools or generated
- * output-only destructive directives with a sanitized error before dispatch.
+ * Replaces an advisor assistant turn that generated output-only destructive
+ * directives with a sanitized error before dispatch.
  *
  * The agent loop records assistant turns before dispatching tools. Without this
- * pre-dispatch rewrite, an advisor hallucination can leave unrelated text in the
- * advisor transcript even though the action itself never executes.
+ * pre-dispatch rewrite, a hazardous advisor turn would stay in the advisor
+ * transcript as model-visible context. Calls to tools the advisor was not
+ * granted are not a quarantine matter: the loop answers them with a
+ * self-correcting `Tool <name> not found` result.
  */
-export function quarantineAdvisorUnsafeOutput(
-	message: AssistantMessage,
-	availableToolNames: ReadonlySet<string>,
-	sourceText = "",
-): string | undefined {
+export function quarantineAdvisorUnsafeOutput(message: AssistantMessage, sourceText = ""): string | undefined {
 	const reasons: string[] = [];
-	const unavailableToolNames = new Set<string>();
 	const generatedParts: string[] = [];
 	for (const block of message.content) {
-		// Cursor exec-channel native blocks (bash/read/grep/...) are stamped
-		// kCursorExecResolved: they already ran server-side through the
-		// advisor-scoped CursorExecHandlers bridge, which rejects ungranted
-		// tools in-band ("Tool not available") and lets the model self-correct.
-		// Quarantining them would discard the legitimate advise emitted in the
-		// same turn (issue #5900). The scoped bridge is the grant gate here, not
-		// this pre-dispatch check.
-		if (
-			block.type === "toolCall" &&
-			!availableToolNames.has(block.name) &&
-			(block as CursorExecResolvedCarrier)[kCursorExecResolved] !== true
-		) {
-			unavailableToolNames.add(block.name);
-		}
 		if (block.type === "toolCall" && block.name === "advise" && typeof block.arguments.note === "string") {
 			generatedParts.push(block.arguments.note);
 		}
 		if (block.type === "text") generatedParts.push(block.text);
-	}
-	if (unavailableToolNames.size > 0) {
-		const names = [...unavailableToolNames].sort();
-		const toolLabel = names.length === 1 ? "tool" : "tools";
-		reasons.push(`requested unavailable ${toolLabel} ${names.join(", ")}`);
 	}
 
 	const generatedText = generatedParts.join("\n");
@@ -637,9 +616,9 @@ export class AdvisorRuntime {
 	 * Shared obfuscation side effects for BOTH render paths (single-block
 	 * {@link #renderPreparedDelta} and multi-message
 	 * {@link #formatRawDeltaMessageChunks}): collect regex secret values from
-	 * primary-context custom messages and the rendered markdown, scrub the
-	 * advisor's own history, and refresh pending placeholder prefixes when new
-	 * secrets appear. Returns whether new secret values were discovered.
+	 * primary-context custom messages, rendered markdown and native advisor history
+	 * before scrubbing that history, then refresh pending placeholder prefixes.
+	 * Returns whether new secret values were discovered.
 	 * Idempotent across the two calls one drain makes for the same prepared
 	 * list: the second call discovers nothing new and skips the strip.
 	 */
@@ -672,14 +651,20 @@ export class AdvisorRuntime {
 			if (message.role === "toolResult") addTextualContent(message.content as TextualContent);
 		}
 		addRegexValues(renderedMd);
-		scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues);
+		discoveredNewRegexSecretValue =
+			scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues) ||
+			discoveredNewRegexSecretValue;
 		if (discoveredNewRegexSecretValue) {
-			this.#pending = this.#pending.map(delta => ({
-				...delta,
-				text: obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(delta.text, this.#advisorRegexSecretValues),
-			}));
+			this.#refreshPendingSecretPrefixes(obfuscator);
 		}
 		return discoveredNewRegexSecretValue;
+	}
+
+	#refreshPendingSecretPrefixes(obfuscator: SecretObfuscator): void {
+		this.#pending = this.#pending.map(delta => ({
+			...delta,
+			text: obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(delta.text, this.#advisorRegexSecretValues),
+		}));
 	}
 
 	/**
@@ -980,6 +965,16 @@ export class AdvisorRuntime {
 				// Epoch guard — a reset/dispose during the maintainContext await
 				// invalidates this batch.
 				if (this.#epoch !== epoch) return null;
+				// Maintenance can commit unseen native plaintext or a snapshot predating
+				// concurrent collisions. Collect before scrubbing and refresh both queues
+				// before another round can send history or the popped batch to compaction.
+				const obfuscator = this.host.obfuscator;
+				if (obfuscator?.hasSecrets()) {
+					if (scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues)) {
+						this.#refreshPendingSecretPrefixes(obfuscator);
+					}
+					batchText = obfuscator.stripUnsafeFriendlyPlaceholderPrefixes(batchText, this.#advisorRegexSecretValues);
+				}
 
 				if (shouldResetContext) {
 					// Once coalescing has begun (round > 0), deltas that arrived during
@@ -1667,11 +1662,32 @@ function obfuscateAdvisorMessage(
 function scrubAdvisorHistory(
 	obfuscator: SecretObfuscator,
 	messages: AgentMessage[],
-	sharedRegexSecretValues: ReadonlySet<string>,
-): void {
+	sharedRegexSecretValues: Set<string>,
+): boolean {
+	const previousSize = sharedRegexSecretValues.size;
+	// Collect across the entire history first: redacting a search-only regex
+	// value would otherwise erase the evidence needed to scrub an earlier prefix.
+	for (const message of messages) {
+		if (
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+		) {
+			collectNativeReplayRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
+		}
+	}
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index]!;
-		const next = obfuscateAdvisorMessage(obfuscator, message, sharedRegexSecretValues);
+		const replay =
+			message.role === "user" ||
+			message.role === "developer" ||
+			message.role === "assistant" ||
+			message.role === "compactionSummary"
+				? obfuscateNativeReplay(obfuscator, message, sharedRegexSecretValues)
+				: message;
+		const next = obfuscateAdvisorMessage(obfuscator, replay, sharedRegexSecretValues);
 		if (next !== message) messages[index] = next;
 	}
+	return sharedRegexSecretValues.size !== previousSize;
 }

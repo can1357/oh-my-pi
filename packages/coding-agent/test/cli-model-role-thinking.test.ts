@@ -72,4 +72,69 @@ describe("--model role override thinking suffix", () => {
 			"anthropic/claude-opus-4-5:high",
 		);
 	});
+
+	test("prewalk @default resolves the configured default before --model overrides the session role", async () => {
+		const startupModel = getBundledModel("anthropic", "claude-opus-4-5");
+		const configuredDefault = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!startupModel || !configuredDefault) throw new Error("expected bundled models");
+
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+
+		const settings = Settings.isolated({ defaultThinkingLevel: "auto" });
+		settings.setModelRole("default", `${configuredDefault.provider}/${configuredDefault.id}`);
+
+		const options = await buildSessionOptions(
+			parseArgs(["--model", `${startupModel.provider}/${startupModel.id}`, "--prewalk-into", "@default"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+
+		expect(options.model?.id).toBe(startupModel.id);
+		expect(options.prewalk?.target.id).toBe(configuredDefault.id);
+	});
+
+	test("prewalk bare default resolves the configured default before --model overrides the session role", async () => {
+		const startupModel = getBundledModel("anthropic", "claude-opus-4-5");
+		const configuredDefault = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!startupModel || !configuredDefault) throw new Error("expected bundled models");
+
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+
+		const settings = Settings.isolated({ defaultThinkingLevel: "auto" });
+		settings.setModelRole("default", `${configuredDefault.provider}/${configuredDefault.id}`);
+
+		const options = await buildSessionOptions(
+			parseArgs(["--model", `${startupModel.provider}/${startupModel.id}`, "--prewalk-into", "default"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+
+		expect(options.model?.id).toBe(startupModel.id);
+		expect(options.prewalk?.target.id).toBe(configuredDefault.id);
+	});
+
+	test("prewalk @default preserves configured fallback candidates before --model override", async () => {
+		const startupModel = getBundledModel("anthropic", "claude-opus-4-5");
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!startupModel || !fallbackModel) throw new Error("expected bundled models");
+
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+
+		const settings = Settings.isolated({ defaultThinkingLevel: "auto" });
+		settings.setModelRole("default", `runtime-provider/missing,${fallbackModel.provider}/${fallbackModel.id}`);
+
+		const options = await buildSessionOptions(
+			parseArgs(["--model", `${startupModel.provider}/${startupModel.id}`, "--prewalk-into", "@default"]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+
+		expect(options.prewalk?.target.id).toBe(fallbackModel.id);
+	});
 });

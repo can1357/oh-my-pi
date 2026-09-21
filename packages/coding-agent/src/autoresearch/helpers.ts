@@ -1,5 +1,5 @@
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import type { ASIData, ASIValue, MetricDirection, NumericMetricMap } from "./types";
+import type { ASIData, ASIValue, NumericMetricMap } from "@oh-my-pi/pi-tui/tools/autoresearch";
 
 export const METRIC_LINE_PREFIX = "METRIC";
 export const ASI_LINE_PREFIX = "ASI";
@@ -67,40 +67,6 @@ export function mergeAsi(base: ASIData | null, override: ASIData | undefined): A
 	};
 }
 
-export function commas(value: number): string {
-	const sign = value < 0 ? "-" : "";
-	const digits = String(Math.trunc(Math.abs(value)));
-	const groups: string[] = [];
-	for (let index = digits.length; index > 0; index -= 3) {
-		groups.unshift(digits.slice(Math.max(0, index - 3), index));
-	}
-	return sign + groups.join(",");
-}
-
-export function fmtNum(value: number, decimals: number = 0): string {
-	if (decimals <= 0) return commas(Math.round(value));
-	const absolute = Math.abs(value);
-	const whole = Math.floor(absolute);
-	const fraction = (absolute - whole).toFixed(decimals).slice(1);
-	return `${value < 0 ? "-" : ""}${commas(whole)}${fraction}`;
-}
-
-export function formatNum(value: number | null, unit: string): string {
-	if (value === null) return "-";
-	if (Number.isInteger(value)) return `${fmtNum(value)}${unit}`;
-	return `${fmtNum(value, 2)}${unit}`;
-}
-
-export function formatElapsed(milliseconds: number): string {
-	const totalSeconds = Math.floor(milliseconds / 1000);
-	const minutes = Math.floor(totalSeconds / 60);
-	const seconds = totalSeconds % 60;
-	if (minutes > 0) {
-		return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
-	}
-	return `${seconds}s`;
-}
-
 export function killTree(pid: number, signal: NodeJS.Signals | number = "SIGTERM"): void {
 	try {
 		process.kill(-pid, signal);
@@ -111,10 +77,6 @@ export function killTree(pid: number, signal: NodeJS.Signals | number = "SIGTERM
 			// Process already exited.
 		}
 	}
-}
-
-export function isBetter(current: number, best: number, direction: MetricDirection): boolean {
-	return direction === "lower" ? current < best : current > best;
 }
 
 export function inferMetricUnitFromName(name: string): string {

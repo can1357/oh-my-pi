@@ -49,6 +49,11 @@ import {
 } from "../utils/tool-choice";
 import { compactGrammarDefinition } from "./grammar";
 import {
+	getOpenAIEffortControlState,
+	type OpenAIEffortControlState,
+	planStableOpenAIEffort,
+} from "./openai-configuration-update";
+import {
 	applyOpenAIReasoningEffortFallback,
 	clearOpenAIReasoningEffortFallbackState,
 	createOpenAIReasoningEffortFallbackKey,
@@ -59,8 +64,10 @@ import {
 	rememberOpenAIReasoningEffortFallback,
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
+import { resolveCopilotRequestIdentity, wrapFetchForCopilotFallback } from "./github-copilot-headers";
 import type {
 	Tool as OpenAITool,
+	ReasoningEffort,
 	ResponseCreateParamsStreaming,
 	ResponseInput,
 	ResponseInputContent,
@@ -197,7 +204,12 @@ interface OpenAIResponsesProviderSessionState
 	nativeHistoryReplayWarmed: boolean;
 	/** Stateful `previous_response_id` chain baselines, keyed by baseUrl/model/session. */
 	chains: Map<string, OpenAIResponsesChainState>;
+	/** `configuration_update` effort baselines, keyed by baseUrl/model/session. */
+	effortControls: Map<string, OpenAIEffortControlState<ResponsesStableEffort>>;
 }
+
+/** Wire efforts a `configuration_update` can carry: every real tier, never `none`/null. */
+type ResponsesStableEffort = Exclude<ReasoningEffort, "none" | null>;
 
 interface OpenAIResponsesChainState {
 	/**
@@ -224,9 +236,11 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 		...reasoningEffortFallbackState,
 		nativeHistoryReplayWarmed: false,
 		chains: new Map(),
+		effortControls: new Map(),
 		close: () => {
 			state.nativeHistoryReplayWarmed = false;
 			state.chains.clear();
+			state.effortControls.clear();
 			clearOpenAIStrictToolsState(state);
 			clearOpenAIReasoningEffortFallbackState(state);
 		},
@@ -279,6 +293,33 @@ function resetOpenAIResponsesChainState(state: OpenAIResponsesChainState): void 
 	state.lastResponseId = undefined;
 	state.lastResponseItems = undefined;
 	state.lastPromptCacheBreakpointPolicy = undefined;
+}
+
+/**
+ * Drop the account-bound half of every retained `openai-responses` record in
+ * `states`: the stateful `previous_response_id` chain baselines.
+ *
+ * Chaining stores the turn server-side under the account that created it, so a
+ * baseline minted by one credential is dead weight the moment the session is
+ * switched to a sibling account — the next delta request answers
+ * `Previous response not found` and burns a turn re-learning that. Everything
+ * else this record holds describes the *deployment*, not the account
+ * (strict-tools demotion, reasoning-effort fallback, native-history-replay
+ * warmup, the chaining circuit breaker), and is deliberately preserved:
+ * re-learning an endpoint's limits on every credential switch is the cost this
+ * state exists to avoid.
+ */
+export function resetOpenAIResponsesAccountScopedState(states: Map<string, ProviderSessionState>): void {
+	for (const [key, value] of states) {
+		if (!key.startsWith(OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX)) continue;
+		const state = value as OpenAIResponsesProviderSessionState;
+		for (const chain of state.chains.values()) {
+			resetOpenAIResponsesChainState(chain);
+			// The stale-failure counter tallies the previous account's 404s; a
+			// fresh account must not inherit a tripped circuit breaker.
+			chain.staleFailures = 0;
+		}
+	}
 }
 
 interface OpenAIResponsesChainedParams {
@@ -408,6 +449,7 @@ const streamOpenAIResponsesOnce = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 		let chainState: OpenAIResponsesChainState | undefined;
 		let sentPreviousResponseId: string | undefined;
+		let lastSubmittedRequestWasFullReplay: boolean | undefined;
 		const abortTracker = createAbortSourceTracker(options?.signal);
 		const firstEventTimeoutAbortError = new AIError.StreamTimeoutError(OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE);
 		const { requestAbortController, requestSignal } = abortTracker;
@@ -440,14 +482,15 @@ const streamOpenAIResponsesOnce = (
 			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
 			const promptCacheSessionId = getOpenAIPromptCacheKey(options);
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
-			const { headers, copilotPremiumRequests, baseUrl } = resolveOpenAIRequestSetup(model, {
-				apiKey,
-				extraHeaders: options?.headers,
-				initiatorOverride: options?.initiatorOverride,
-				messages: context.messages,
-				sessionId: options?.sessionId ?? routingSessionId,
-				promptCacheSessionId,
-			});
+			const { headers, copilotPremiumRequests, baseUrl, copilotCacheKey, copilotCacheSnapshot } =
+				resolveOpenAIRequestSetup(model, {
+					apiKey,
+					extraHeaders: options?.headers,
+					initiatorOverride: options?.initiatorOverride,
+					messages: context.messages,
+					sessionId: options?.sessionId ?? routingSessionId,
+					promptCacheSessionId,
+				});
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);
@@ -537,6 +580,7 @@ const streamOpenAIResponsesOnce = (
 					typeof requestParams.model === "string" ? requestParams.model : model.id,
 				);
 				activeRequestParams = requestParams;
+				lastSubmittedRequestWasFullReplay = requestParams.previous_response_id === undefined;
 				let requestTimeout: NodeJS.Timeout | undefined;
 				if (requestTimeoutMs !== undefined) {
 					requestTimeout = setTimeout(
@@ -554,7 +598,16 @@ const streamOpenAIResponsesOnce = (
 						headers: headersWithTimeout,
 						body: requestParams,
 						signal: requestSignal,
-						fetch: options?.fetch,
+						fetch: wrapFetchForCopilotFallback(
+							options?.fetch,
+							model.provider === "github-copilot",
+							resolveCopilotRequestIdentity(options?.headers),
+							copilotCacheKey,
+							copilotCacheSnapshot,
+						),
+						shouldRetryResponse: (response, bodyText) =>
+							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
+							lastSubmittedRequestWasFullReplay !== true,
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
@@ -578,11 +631,21 @@ const streamOpenAIResponsesOnce = (
 					try {
 						openaiStream = await openResponsesStream(chained.params);
 						if (pendingReasoningEffortFallback) {
-							rememberOpenAIReasoningEffortFallback(
-								providerSessionState,
-								pendingReasoningEffortFallback.key,
-								pendingReasoningEffortFallback.fallback,
-							);
+							// Explicit-disable fallbacks (none -> lowest allowed) are
+							// per-request: persisting them under the model key would
+							// silently downgrade later normal turns sharing the
+							// session state. A retained effort preference does not
+							// make the disable less explicit. Keep them in the
+							// per-request map only.
+							const isExplicitDisable =
+								options?.forceReasoningOff === true || options?.disableReasoning === true;
+							if (!isExplicitDisable) {
+								rememberOpenAIReasoningEffortFallback(
+									providerSessionState,
+									pendingReasoningEffortFallback.key,
+									pendingReasoningEffortFallback.fallback,
+								);
+							}
 							pendingReasoningEffortFallback = undefined;
 						}
 						break;
@@ -592,8 +655,7 @@ const streamOpenAIResponsesOnce = (
 							activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
 								? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
 										explicitDisable:
-											options?.forceReasoningOff === true ||
-											(options?.disableReasoning === true && options.reasoning === undefined),
+											options?.forceReasoningOff === true || options?.disableReasoning === true,
 									})
 								: undefined;
 						if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
@@ -848,7 +910,7 @@ const streamOpenAIResponsesOnce = (
 							: activeParams,
 					);
 					chainState.lastPromptCacheBreakpointPolicy = promptCacheBreakpointPolicy;
-					if (output.responseId) {
+					if (output.responseId && replayableResponseItems.length === nativeOutputItems.length) {
 						chainState.lastResponseId = output.responseId;
 						chainState.lastResponseItems = replayableResponseItems;
 						chainState.canAppend = true;
@@ -856,8 +918,12 @@ const streamOpenAIResponsesOnce = (
 						// full-context success must not mask categorical rejection.
 						if (sentPreviousResponseId) chainState.staleFailures = 0;
 					} else {
-						// Without a response id the append baseline cannot be trusted.
+						// No response id, or replay sanitization dropped an item the server
+						// still holds. Sanitization is 1:1-or-fewer, so either case makes the
+						// append baseline untrustworthy; next turn must replay in full.
 						chainState.canAppend = false;
+						chainState.lastResponseId = undefined;
+						chainState.lastResponseItems = undefined;
 					}
 				}
 			} else if (chainState) {
@@ -896,6 +962,9 @@ const streamOpenAIResponsesOnce = (
 			output.errorStatus = result.status;
 			output.errorId = result.id;
 			output.errorMessage = result.message;
+			if (AIError.isRequestBodyReadTimeout(result.status, result.message) && lastSubmittedRequestWasFullReplay) {
+				output.requestBodyReadTimeoutFullReplay = true;
+			}
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
@@ -1123,6 +1192,11 @@ export function buildParams(
 	});
 	const strictResponsesPairing = policy.tools.strictResponsesPairing;
 	const shouldReplayNativeHistory = providerSessionState?.nativeHistoryReplayWarmed ?? true;
+	// Filtering native reasoning must not be undone by reconstruction when the
+	// target also rejects synthetic items (Muse on OpenRouter). Unfiltered targets
+	// retain required text/placeholder replay, including DeepSeek's #10690 fallback.
+	const canReconstructReasoningReplay =
+		!policy.reasoning.filterReasoningHistory || policy.reasoning.allowsSyntheticReasoningContentForToolCalls;
 	const messages = buildResponsesInput({
 		model,
 		context,
@@ -1134,9 +1208,13 @@ export function buildParams(
 		},
 		includeThinkingSignatures: shouldReplayNativeHistory && !policy.reasoning.filterReasoningHistory,
 		requiresReasoningReplayForAllTurns:
-			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForAllAssistantTurns,
+			policy.reasoning.enabled &&
+			policy.reasoning.requiresReasoningContentForAllAssistantTurns &&
+			canReconstructReasoningReplay,
 		requiresReasoningReplayForToolCalls:
-			policy.reasoning.enabled && policy.reasoning.requiresReasoningContentForToolCalls,
+			policy.reasoning.enabled &&
+			policy.reasoning.requiresReasoningContentForToolCalls &&
+			canReconstructReasoningReplay,
 		repairOrphanOutputs: true,
 	});
 
@@ -1275,6 +1353,7 @@ export function buildParams(
 	if (model.reasoningMode && !options?.forceReasoningOff) {
 		params.reasoning = { ...params.reasoning, mode: model.reasoningMode };
 	}
+	applyResponsesStableEffort(model, params, messages, options, providerSessionState);
 
 	if (model.compat.isVercelGatewayHost) {
 		applyVercelResponsesCacheControls(params, model.compat, cacheRetention);
@@ -1297,6 +1376,33 @@ export function buildParams(
 	}
 
 	return { params, trailingScaffoldingItems, strictToolsApplied };
+}
+
+/**
+ * Keep the request-level effort byte-stable across a conversation and carry
+ * later changes as `configuration_update` items (GPT-6 Astra). Requires a
+ * routing session id and provider session state to remember the baseline;
+ * without them every request stands alone and sends its own effort.
+ */
+function applyResponsesStableEffort(
+	model: Model<"openai-responses">,
+	params: OpenAIResponsesSamplingParams,
+	input: ResponseInput,
+	options: OpenAIResponsesOptions | undefined,
+	providerSessionState: OpenAIResponsesProviderSessionState | undefined,
+): void {
+	if (!model.compat.supportsConfigurationUpdate || !providerSessionState) return;
+	const reasoning = params.reasoning;
+	if (!reasoning || !("effort" in reasoning)) return;
+	const effort = reasoning.effort;
+	if (effort === undefined || effort === null || effort === "none") return;
+	const sessionId = getOpenAIResponsesRoutingSessionId(options);
+	if (!sessionId) return;
+	const state = getOpenAIEffortControlState(
+		providerSessionState.effortControls,
+		`${model.baseUrl ?? ""}\u0000${model.id}\u0000${sessionId}`,
+	);
+	params.reasoning = { ...reasoning, effort: planStableOpenAIEffort(state, input, effort) };
 }
 
 /**

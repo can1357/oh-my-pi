@@ -21,6 +21,8 @@ export const BUILTIN_DEFAULTS_PROVIDER_ID = "builtin-defaults";
  * Parsed frontmatter from rule files.
  */
 export interface RuleFrontmatter {
+	/** Whether discovery should omit this rule. */
+	enabled?: boolean;
 	description?: string;
 	globs?: string[];
 	alwaysApply?: boolean;

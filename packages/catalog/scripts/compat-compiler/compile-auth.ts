@@ -212,6 +212,8 @@ function expiry(node: KdlNodeView): CompiledCredentialExpiry {
 				if (!from) malformed(node);
 				result.fromPath = from;
 			}
+			const fallback = propInt(node, "fallback-ms");
+			if (fallback !== undefined) result.fallbackMs = fallback;
 			return result;
 		}
 		case "jwt": {
@@ -385,6 +387,7 @@ function callback(node: KdlNodeView): CompiledCallback {
 		"redirect-uri-env",
 		"port-fallback",
 		"manual-only",
+		"native-scheme",
 	]);
 	if (node.args.length > 0 || node.children) malformed(node);
 	const port = propInt(node, "port");
@@ -395,6 +398,7 @@ function callback(node: KdlNodeView): CompiledCallback {
 		hostname: propString(node, "hostname") ?? "localhost",
 		portFallback: propBool(node, "port-fallback") ?? true,
 		manualOnly: propBool(node, "manual-only") ?? false,
+		nativeScheme: propBool(node, "native-scheme") ?? false,
 	};
 	const redirectUri = propString(node, "redirect-uri");
 	const redirectUriEnv = propString(node, "redirect-uri-env");
@@ -433,6 +437,12 @@ function oauthCodeLogin(node: KdlNodeView): CompiledOAuthCodeLogin {
 				break;
 			case "client-secret":
 				login.clientSecret = authValue(child);
+				break;
+			case "base-url":
+				login.baseUrl = authValue(child);
+				break;
+			case "auth-url":
+				login.authUrl = authValue(child);
 				break;
 			case "authorize-url":
 				login.authorizeUrl = authValue(child);
@@ -693,6 +703,13 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 			case "allows-missing-api-key":
 				result.allowsMissingApiKey = singleBool(child);
 				break;
+			case "native-auth-api": {
+				leaf(child, []);
+				const apis = positionalStrings(child);
+				if (apis.length === 0 || apis.some(api => !api)) malformed(child);
+				result.nativeAuthApis = apis;
+				break;
+			}
 			case "available":
 				result.available = singleBool(child);
 				break;

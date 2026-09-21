@@ -15,7 +15,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -178,6 +178,31 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		created.session.setFastMode(true);
 		const onFast = (await fetchSlashItems(providerSlot.current!, "/fast")).find(item => item.value === "fast");
 		expect(onFast?.description).toBe("Fast: on");
+	});
+
+	it("normalizes file-command hints before autocomplete renders them", async () => {
+		const created = createHarness([]);
+		const providerSlot = captureAutocompleteProvider(created.mode);
+
+		await created.mode.refreshSlashCommandState(tempDir.path(), [
+			{
+				name: "git-sync",
+				description: "Sync branches",
+				content: "body",
+				source: "test",
+				argumentHint: "[base\tbranch]\n[next]",
+			},
+		]);
+
+		const provider = providerSlot.current;
+		expect(provider).toBeDefined();
+		const item = (await fetchSlashItems(provider!, "/git-sync")).find(candidate => candidate.value === "git-sync");
+		const inlineHint = provider!.getInlineHint?.(["/git-sync "], 0, "/git-sync ".length);
+
+		expect(item?.description).toContain("[next] - Sync branches");
+		expect(item?.description).not.toMatch(/[\t\r\n]/);
+		expect(inlineHint).toContain("[next]");
+		expect(inlineHint).not.toMatch(/[\t\r\n]/);
 	});
 
 	it("does not duplicate templates whose names collide with builtin slash commands", async () => {

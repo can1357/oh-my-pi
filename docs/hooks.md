@@ -59,6 +59,15 @@ Default sessions load JS/TS hook factories discovered by `hookCapability` throug
 3. Append plugin extension entry points
 4. Append explicitly configured paths
 
+### Native discovery location
+
+The native provider scans only two subdirectories per config root — a factory placed **directly** in `hooks/` is not discovered:
+
+- Project: `<cwd>/.omp/hooks/pre/*.{ts,js}` and `<cwd>/.omp/hooks/post/*.{ts,js}`
+- User: `<agentDir>/hooks/pre/*.{ts,js}` and `<agentDir>/hooks/post/*.{ts,js}` (default `~/.omp/agent/hooks/...`; profile- and `PI_CODING_AGENT_DIR`-aware)
+
+So `<cwd>/.omp/hooks/psy-guards.ts` (no `pre/`/`post/` subdirectory) loads nothing and reports no error — move it into `pre/` or `post/`, e.g. `<cwd>/.omp/hooks/pre/psy-guards.ts`. This mirrors `.claude/hooks/pre|post/`. Only `.ts`/`.js` factories are appended to the extension pipeline and bound through the extension runner. See [Extension Loading](./extension-loading.md) for the shared module pipeline these factories flow through (native `.omp/extensions/` roots, plugin entries, configured paths, load order, and disable controls).
+
 The legacy `discoverAndLoadHooks(configuredPaths, cwd)` helper still exists and does:
 
 1. Load discovered hooks from capability registry (`loadCapability("hooks")`)
@@ -110,10 +119,10 @@ Hook events are strongly typed in `types.ts`.
 
 ### Tool events (pre/post model)
 
-- `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string; input?: Record<string, unknown> }`. A non-blocking handler that returns `input` replaces the arguments the tool executes with (the raw execution input, not the normalized `event.input` view); ignored when `block` is true, and not applied to `computer` tool calls.
+- `tool_call` (pre-execution) → can return `{ block?: boolean; reason?: string; input?: Record<string, unknown> }`. A non-blocking handler that returns `input` replaces the arguments the tool executes with (the raw execution input, not the normalized `event.input` view); ignored when `block` is true.
 - `tool_result` (post-execution) → can return `{ content?; details?; isError? }`
 
-This is the hook subsystem’s core pre/post interception model.
+This is the hook subsystem’s core pre/post interception model. Eval prelude invocations such as `browser.open(...)`, direct `BrowserTab` helpers, `tab.run(...)`, direct `computer` helpers, and `computer.run(fnOrCode, options)` are host bridge calls, not AgentTool calls, so they do not emit `tool_call` or `tool_result`.
 
 ```text
 Hook tool interception flow
@@ -165,14 +174,13 @@ On tool failure, wrapper emits `tool_result` with `isError: true` and error text
 ### What hooks can mutate
 
 - LLM context for a single call via `context` (`messages` replacement chain)
-- raw tool execution arguments by returning `input` from `tool_call` (except `computer` calls)
+- raw tool execution arguments by returning `input` from `tool_call`
 - tool output content/details on successful tool calls (`tool_result` path)
 - pre-agent injected message via `before_agent_start`
 - cancellation/custom compaction/tree behavior via `session_before_*` and `session.compacting`
 
 ### What hooks cannot mutate in this implementation
 
-- a `computer` tool call's raw parameters
 - execution continuation after thrown tool errors (error path rethrows)
 - final success/error status in wrapper behavior (returned `isError` is typed but not applied by `HookToolWrapper`)
 

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
-import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { isCursorMaxModeWireId } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
 	ConversationStep,
 	CursorRule,
@@ -957,7 +958,7 @@ function streamCursorWithWireMode(
 			endCurrentThinkingBlock(output, stream, state);
 			flushOpenToolCalls(output, stream, state);
 
-			calculateCost(model, output.usage);
+			calculateCost(model, output.usage, output.timestamp);
 
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
@@ -2614,15 +2615,15 @@ function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: 
  * and nullable for the one caller whose block is NOT pre-resolved: MCP without
  * an `mcp` handler, which `agent-loop.ts` runs locally and pairs itself.
  */
-export async function resolveExecHandler<TArgs, TResult>(
+export async function resolveExecHandler<TArgs, R>(
 	args: TArgs,
-	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<TResult>>) | undefined,
+	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<R>>) | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
-	buildFromToolResult: (toolResult: ToolResultMessage) => TResult,
-	buildRejected: (reason: string) => TResult,
-	buildError: (error: string) => TResult,
+	buildFromToolResult: (toolResult: ToolResultMessage) => R,
+	buildRejected: (reason: string) => R,
+	buildError: (error: string) => R,
 	pairing: CursorExecPairing | null,
-): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> {
+): Promise<{ execResult: R; toolResult?: ToolResultMessage }> {
 	const pair = async (text: string, isError: boolean): Promise<ToolResultMessage | undefined> => {
 		// `null` only for MCP without a handler: that block is never marked
 		// resolved, so `agent-loop.ts` runs it locally and pairs its own result.
@@ -2650,7 +2651,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 		const finalToolResult = await applyToolResultHandler(toolResult, onToolResult);
 
 		if (execResult) {
-			// TResult-only is a supported return form, so the transcript entry has to
+			// R-only is a supported return form, so the transcript entry has to
 			// be synthesized here. Deriving its state from the raw result keeps the
 			// two views consistent: every exec result is a proto oneof whose only
 			// non-failure variant is `success`, so a `rejected`/`error`/
@@ -2673,7 +2674,7 @@ export async function resolveExecHandler<TArgs, TResult>(
 
 /**
  * Derive the transcript state of an exec result the SDK handler returned in the
- * TResult-only form, which carries no `toolResult` to copy it from.
+ * R-only form, which carries no `toolResult` to copy it from.
  *
  * Every exec result in `agent.proto` is a `oneof result` whose success variant
  * is named `success` — the rest (`error`, `rejected`, `file_not_found`,
@@ -2716,8 +2717,8 @@ function mcpContentToText(content: unknown[] | undefined): string {
 	return parts.join("\n");
 }
 
-function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult>): {
-	execResult?: TResult;
+function splitExecHandlerResult<R>(result: CursorExecHandlerResult<R>): {
+	execResult?: R;
 	toolResult?: ToolResultMessage;
 } {
 	if (isToolResultMessage(result)) {
@@ -2727,27 +2728,27 @@ function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult
 		const record = result as Record<string, unknown>;
 		if ("execResult" in record) {
 			const { execResult, toolResult } = record as {
-				execResult: TResult;
+				execResult: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 		if ("toolResult" in record && !isToolResultMessage(record)) {
 			const { result: execResult, toolResult } = record as {
-				result?: TResult;
+				result?: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 		if ("result" in record && !("$typeName" in record)) {
 			const { result: execResult, toolResult } = record as {
-				result: TResult;
+				result: R;
 				toolResult?: ToolResultMessage;
 			};
 			return { execResult, toolResult };
 		}
 	}
-	return { execResult: result as TResult };
+	return { execResult: result as R };
 }
 
 function isToolResultMessage(value: unknown): value is ToolResultMessage {
@@ -3549,13 +3550,10 @@ function describeEditResult(toolCall: CursorEditToolCallCarrier | undefined): { 
 	return { text: "Edit reported no result", isError: true };
 }
 
-function remapExecHandlerToolName<TResult>(
-	result: CursorExecHandlerResult<TResult>,
-	toolName: string,
-): CursorExecHandlerResult<TResult> {
+function remapExecHandlerToolName<R>(result: CursorExecHandlerResult<R>, toolName: string): CursorExecHandlerResult<R> {
 	if (isToolResultMessage(result)) return { ...result, toolName };
 	if (result && typeof result === "object" && "toolResult" in result) {
-		const record = result as { result?: TResult; toolResult?: ToolResultMessage };
+		const record = result as { result?: R; toolResult?: ToolResultMessage };
 		if (record.toolResult && record.result !== undefined) {
 			return { result: record.result, toolResult: { ...record.toolResult, toolName } };
 		}
@@ -4507,7 +4505,13 @@ export function processInteractionUpdate(
 				let persisted: ToolResultMessage | undefined;
 				let hostError: string | null = null;
 				try {
-					persisted = state.onTodoSnapshot?.(snapshot, settled.id, error) ?? undefined;
+					persisted =
+						state.onTodoSnapshot?.(
+							snapshot,
+							settled.id,
+							error,
+							toolCall && selectTodoCalls(toolCall).read ? "read" : "update",
+						) ?? undefined;
 				} catch (callbackError) {
 					// A throwing host callback (e.g. session persistence failing on
 					// disk error) must not leave the resolved block unpaired: the
@@ -5232,6 +5236,46 @@ function extractImages(content: (TextContent | ImageContent)[]) {
 }
 
 /**
+ * Resolve `max_mode` for the wire id a request actually routes to.
+ *
+ * `GetUsableModels` marks max-mode models per raw row and discovery copies that
+ * onto `cursorMaxMode`, so on a row that puts its own id on the wire the marker
+ * is the authority — Cursor serves the whole Opus `-fast` lane in max mode
+ * (`claude-opus-4-8-high-fast` included) and leaves reasoning tiers such as
+ * `claude-4.6-opus-max` out of it, neither of which the wire slug can tell.
+ *
+ * Collapsing a family ORs the members' markers onto the logical row, so there
+ * `cursorMaxMode: true` only means *some* tier needs max mode; sending it for
+ * every tier is the refused `-low` request of issue #9478. The members' own
+ * markers survive per wire id in `cursorMaxModeRoutes`, so the routed id is
+ * looked up there first.
+ *
+ * A row's own wire id still owns its marker even when it has effort routing
+ * (for example a bare/thinking pair). Logical-only bundled rows and routes
+ * discovery never advertised have no per-id marker; only those use the suffix.
+ * A collapsed row whose `true` no route's suffix can explain keeps it for every
+ * route: the marker came from a member the suffix rule cannot see.
+ */
+function resolveCursorMaxMode(model: Model<"cursor-agent">, wireModelId: string): boolean {
+	const discovered = model.cursorMaxModeRoutes?.[wireModelId];
+	if (discovered !== undefined) return discovered;
+	const routing = model.thinking?.effortRouting;
+	if (routing === undefined || wireModelId === model.id) {
+		return model.cursorMaxMode ?? isCursorMaxModeWireId(wireModelId);
+	}
+	let routesOwnId = routing.off === model.id;
+	let hasInferredMaxRoute = typeof routing.off === "string" && isCursorMaxModeWireId(routing.off);
+	for (const effort of THINKING_EFFORTS) {
+		const target = routing[effort];
+		if (target === model.id) routesOwnId = true;
+		if (typeof target === "string" && isCursorMaxModeWireId(target)) hasInferredMaxRoute = true;
+	}
+	if (routesOwnId) return model.cursorMaxMode ?? isCursorMaxModeWireId(wireModelId);
+	if (model.cursorMaxMode === true && !hasInferredMaxRoute) return true;
+	return isCursorMaxModeWireId(wireModelId);
+}
+
+/**
  * Resolve the Cursor Run wire model id and its parameter list.
  *
  * Cursor's `GetUsableModels` lists reasoning models as per-effort sibling
@@ -5239,8 +5283,11 @@ function extractImages(content: (TextContent | ImageContent)[]) {
  * The Run endpoint rejects a sibling slug as the wire `model_id` with
  * `resource_exhausted` (errorId 528384); the official `cursor-agent` splits the
  * slug into its base model id plus a `reasoning` effort parameter. Mirror that
- * for OpenAI-family ids: strip a trailing effort tier and emit
- * `{ id: "reasoning", value: <effort> }`.
+ * for OpenAI-family ids: split the tier with the compiled catalog policy
+ * (`collapseVariantId`, KDL suffix/lane rules) and emit
+ * `{ id: "reasoning", value: <effort> }`. The off tier (`-none`) is a sibling
+ * slug too, so it normalizes to the bare (lane-preserving) base with no
+ * reasoning parameter instead of going out raw.
  *
  * Non-OpenAI ids pass through unchanged — Cursor-native ids (`composer-*`,
  * `cursor-grok-*`, `default`) carry no effort suffix, and Claude/other siblings
@@ -5255,24 +5302,29 @@ function resolveCursorWireModel(
 ): {
 	modelId: string;
 	parameters: RequestedModel_ModelParameterbytes[];
+	maxMode: boolean;
 } {
 	const wireModelId = requestModelId ?? model.requestModelId ?? model.id;
-	if (wireMode === "discovered") return { modelId: wireModelId, parameters: [] };
-	// Cursor's fast lane follows the effort token (`-high-fast`), while the
-	// standard lane ends at it (`-high`). Preserve the lane in the base id.
-	const match = /^(.*)-(minimal|low|medium|high|xhigh|max)(-fast)?$/.exec(wireModelId);
-	const base = match?.[1];
-	const effort = match?.[2];
-	if (
-		base &&
-		effort &&
-		(THINKING_EFFORTS as readonly string[]).includes(effort) &&
-		classifyModel("cursor", base).class === "openai"
-	) {
-		return {
-			modelId: `${base}${match[3] ?? ""}`,
-			parameters: [create(RequestedModel_ModelParameterbytesSchema, { id: "reasoning", value: effort })],
-		};
+	const maxMode = resolveCursorMaxMode(model, wireModelId);
+	if (wireMode === "discovered") return { modelId: wireModelId, parameters: [], maxMode };
+	// `collapseVariantId` keeps the lane in the logical id (`-high-fast` →
+	// base `-fast`) and decodes the KDL effort (`-none` → `off`).
+	const collapsed = collapseVariantId("cursor", wireModelId);
+	const effort = collapsed.effort;
+	const base = effort !== undefined ? collapsed.logicalId : undefined;
+	if (effort !== undefined && base && classifyModel("cursor", base).class === "openai") {
+		if (effort === "off") {
+			return { modelId: base, parameters: [], maxMode };
+		}
+		if ((THINKING_EFFORTS as readonly string[]).includes(effort)) {
+			return {
+				modelId: base,
+				maxMode,
+				parameters: [
+					create(RequestedModel_ModelParameterbytesSchema, { id: "reasoning", value: collapsed.effort }),
+				],
+			};
+		}
 	}
 	// A bare `composer-2.5` id resolves to the Fast variant server-side
 	// (can1357/oh-my-pi#9012). Pin the Standard tier explicitly; `-fast`
@@ -5281,9 +5333,10 @@ function resolveCursorWireModel(
 		return {
 			modelId: wireModelId,
 			parameters: [create(RequestedModel_ModelParameterbytesSchema, { id: "fast", value: "false" })],
+			maxMode,
 		};
 	}
-	return { modelId: wireModelId, parameters: [] };
+	return { modelId: wireModelId, parameters: [], maxMode };
 }
 
 async function buildGrpcRequestForWireMode(
@@ -5393,12 +5446,11 @@ async function buildGrpcRequestForWireMode(
 		turns,
 	});
 
-	const { modelId: wireModelId, parameters: wireParameters } = resolveCursorWireModel(
-		model,
-		options?.wireModelId,
-		wireMode,
-	);
-	const cursorMaxMode = model.cursorMaxMode === true;
+	const {
+		modelId: wireModelId,
+		parameters: wireParameters,
+		maxMode: cursorMaxMode,
+	} = resolveCursorWireModel(model, options?.wireModelId, wireMode);
 	const modelDetails = create(ModelDetailsSchema, {
 		modelId: wireModelId,
 		displayModelId: model.id,

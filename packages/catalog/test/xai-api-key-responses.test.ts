@@ -5,9 +5,10 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { calculateCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { CATALOG_PROVIDERS, DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
+import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { applyXaiCatalogPricing, xaiModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { ModelSpec, Usage } from "@oh-my-pi/pi-catalog/types";
+import { modelKind, type ModelSpec, type Usage } from "@oh-my-pi/pi-catalog/types";
 
 const XAI_RESPONSES_SPEC: ModelSpec<"openai-responses"> = {
 	id: "grok-4.5",
@@ -36,7 +37,7 @@ const XAI_COMPLETIONS_SPEC: ModelSpec<"openai-completions"> = {
 
 describe("paid xai (XAI_API_KEY) Responses contract", () => {
 	it("registers xai on the catalog Responses discovery path", () => {
-		const entry = CATALOG_PROVIDERS.find(provider => provider.id === "xai");
+		const entry = providerEntry("xai");
 		expect(entry, "xai catalog descriptor").toBeDefined();
 		expect(entry!.defaultModel).toBe("grok-4.6");
 		expect(DEFAULT_MODEL_PER_PROVIDER.xai).toBe("grok-4.6");
@@ -53,11 +54,55 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 	});
 
 	it("bundles every paid xai chat model on openai-responses", () => {
-		const models = getBundledModels("xai");
-		expect(models.length).toBeGreaterThan(0);
+		const models = getBundledModels("xai").filter(model => modelKind(model) === "chat");
 		for (const model of models) {
 			expect(model.api, `${model.provider}/${model.id}`).toBe("openai-responses");
 			expect(model.baseUrl).toBe("https://api.x.ai/v1");
+		}
+	});
+
+	it("keeps the image runner transport when the live chat roster repeats its id", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-xai-runner-collision-"));
+		try {
+			const resolved = await resolveProviderModels(
+				{
+					...xaiModelManagerOptions({
+						apiKey: "test-key",
+						fetch: async input => {
+							if (String(input) !== "https://api.x.ai/v1/models") {
+								return new Response(null, { status: 404 });
+							}
+							return Response.json({
+								data: [
+									{ id: "grok-imagine-image", name: "Grok Imagine Image (chat roster)" },
+									{
+										id: "grok-4.5",
+										name: "Grok 4.5 Live",
+										context_length: 333_000,
+										max_completion_tokens: 44_000,
+									},
+								],
+							});
+						},
+					}),
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+
+			expect(resolved.models.find(model => model.id === "grok-imagine-image")).toMatchObject({
+				api: "openai-images",
+				kind: "image",
+				supportsTools: false,
+			});
+			expect(resolved.models.find(model => model.id === "grok-4.5")).toMatchObject({
+				name: "Grok 4.5 Live",
+				api: "openai-responses",
+				contextWindow: 333_000,
+				maxTokens: 44_000,
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 

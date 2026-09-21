@@ -2,11 +2,11 @@ import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import * as sessionColor from "@oh-my-pi/pi-coding-agent/utils/session-color";
+import * as sessionColor from "@oh-my-pi/pi-tui/theme/session-color";
 import { adjustHsv, TempDir } from "@oh-my-pi/pi-utils";
 
 type Harness = {
@@ -62,6 +62,8 @@ async function createHarness(sessionName: string): Promise<Harness> {
 		isStreaming: true,
 		model: undefined,
 		thinkingLevel: undefined,
+		titleGenerationSignal: new AbortController().signal,
+		notifyTitleGenerationStart: () => undefined,
 	} as unknown as AgentSession;
 	const mode = new InteractiveMode(session, "test");
 	harness = { mode, sessionManager, tempDir };
@@ -201,5 +203,22 @@ describe("InteractiveMode working activity", () => {
 		} finally {
 			loader.stop();
 		}
+	});
+
+	it("restarts a working loader detached by transient status cleanup", async () => {
+		const { mode } = await createHarness("Detached loader session");
+		mode.ensureLoadingAnimation();
+		const loader = defined(mode.loadingAnimation);
+		expect(loader.debugState()).toMatchObject({ running: true });
+
+		mode.statusContainer.disposeChildren();
+		expect(loader.debugState()).toMatchObject({ running: false });
+
+		mode.ensureLoadingAnimation();
+
+		expect(mode.loadingAnimation).toBe(loader);
+		expect(mode.statusContainer.children).toContain(loader);
+		expect(loader.debugState()).toMatchObject({ running: true });
+		loader.stop();
 	});
 });

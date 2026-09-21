@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
 	compact,
@@ -23,7 +23,10 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import * as ai from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { getOpenAICodexTransportDetails } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	buildTransformedCodexRequestBody,
+	getOpenAICodexTransportDetails,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -31,6 +34,7 @@ import type {
 	Model,
 	ProviderSessionState,
 	ToolResultMessage,
+	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
@@ -904,6 +908,71 @@ describe("requestCompactionV2Streaming", () => {
 		expect(result.usage?.cachedInputTokens).toBe(7);
 		expect(result.usage?.reasoningOutputTokens).toBe(1);
 	});
+	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
+		"retries a transient socket closure: %s",
+		async socketCloseMessage => {
+			const model = makeOpenAiModel({
+				remoteCompaction: {
+					enabled: true,
+					v2StreamingEnabled: true,
+					v2Endpoint: "https://compact.example/v1/responses",
+				},
+			});
+			const userItem = { type: "message", role: "user", content: [{ type: "input_text", text: "real user" }] };
+			const request = buildCompactionV2Request(model, [userItem], "instructions");
+			const compactionItem = { type: "compaction", encrypted_content: "enc_123" };
+			let attempts = 0;
+			const fetchMock: FetchImpl = async () => {
+				attempts++;
+				if (attempts === 1) {
+					throw new Error(socketCloseMessage);
+				}
+				return sseResponse([
+					{ type: "response.output_item.done", output_index: 0, item: compactionItem },
+					{ type: "response.completed" },
+				]);
+			};
+
+			const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+				fetch: fetchMock,
+				retryWait: async () => {},
+			});
+
+			expect(attempts).toBe(2);
+			expect(result.compactionItem).toEqual(compactionItem);
+		},
+	);
+	test("does not select Codex's unsupported V1 compact endpoint by default", () => {
+		const model = makeOpenAiModel({
+			provider: "openai-codex",
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+			},
+		});
+
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+	});
+	test("requires explicit opt-in for custom Codex API compaction", () => {
+		const model = buildModel({
+			id: "custom-gpt-5",
+			name: "Custom GPT-5",
+			api: "openai-codex-responses",
+			provider: "custom-provider",
+			baseUrl: "https://compact.example/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+			remoteCompaction: {
+				api: "openai-codex-responses",
+				endpoint: "https://compact.example/v1/responses/compact",
+			},
+		});
+
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+	});
 
 	test("negotiates Codex V2 compaction for an explicit Responses endpoint", async () => {
 		const model = buildModel({
@@ -931,6 +1000,7 @@ describe("requestCompactionV2Streaming", () => {
 		);
 		let betaFeaturesHeader: string | undefined;
 		let residencyHeader: string | undefined;
+		let clientMetadata: Record<string, unknown> | undefined;
 		const fetchMock: FetchImpl = async (_input, init) => {
 			if (!init?.headers || init.headers instanceof Headers || Array.isArray(init.headers)) {
 				throw new Error("Expected V2 compaction to send headers as a plain object");
@@ -939,6 +1009,10 @@ describe("requestCompactionV2Streaming", () => {
 			const rawResidencyHeader = init.headers["x-openai-internal-codex-residency"];
 			betaFeaturesHeader = typeof rawBetaFeaturesHeader === "string" ? rawBetaFeaturesHeader : undefined;
 			residencyHeader = typeof rawResidencyHeader === "string" ? rawResidencyHeader : undefined;
+			const parsedBody: unknown = JSON.parse(String(init.body));
+			if (isRecord(parsedBody) && isRecord(parsedBody.client_metadata)) {
+				clientMetadata = parsedBody.client_metadata;
+			}
 			return sseResponse([
 				{
 					type: "response.output_item.done",
@@ -953,6 +1027,7 @@ describe("requestCompactionV2Streaming", () => {
 
 		expect(betaFeaturesHeader).toBe("remote_compaction_v2");
 		expect(residencyHeader).toBe("us");
+		expect(clientMetadata?.["x-codex-installation-id"]).toBe(TEST_INSTALLATION_ID);
 	});
 
 	test("retries transient V2 stream failures with a fresh request attempt", async () => {
@@ -1197,6 +1272,53 @@ describe("Responses Lite remote compaction", () => {
 		});
 		expect(captured?.body.input?.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
+
+	test.each([false, true])(
+		"V2 compaction preserves Codex input and disabled reasoning (Lite: %s)",
+		async responsesLite => {
+			const model = makeCodexLiteModel({ useResponsesLite: responsesLite });
+			const systemPrompt = ["base instructions", "workspace instructions"];
+			const messages: UserMessage[] = [
+				{ role: "user", content: "first user request", timestamp: 1 },
+				{ role: "user", content: "second user request", timestamp: 2 },
+			];
+			const normalBody = await buildTransformedCodexRequestBody(
+				model,
+				{ systemPrompt, messages },
+				{ sessionId: "codex-cache-session", responsesLite, forceReasoningOff: true },
+			);
+			const preparation: CompactionPreparation = {
+				firstKeptEntryId: "kept-1",
+				messagesToSummarize: [messages[0]],
+				turnPrefixMessages: [],
+				recentMessages: [messages[1]],
+				isSplitTurn: false,
+				tokensBefore: 100_000,
+				fileOps: createFileOps(),
+				settings: {
+					...DEFAULT_COMPACTION_SETTINGS,
+					remoteStreamingV2Enabled: true,
+				},
+			};
+			let captured: CapturedLiteExchange | undefined;
+			const fetchMock: FetchImpl = async (_input, init) => {
+				captured = captureStreamLite(init);
+				return sseResponse(compactionV2Events("enc-cache"));
+			};
+
+			await compact(preparation, model, CODEX_RESIDENCY_TOKEN, undefined, undefined, {
+				fetch: fetchMock,
+				remoteSystemPrompt: systemPrompt,
+				sessionId: "codex-cache-session",
+				thinkingLevel: ThinkingLevel.Off,
+			});
+
+			expect(JSON.stringify(captured?.body.input?.slice(0, -1))).toBe(JSON.stringify(normalBody.input));
+			expect(captured?.body.instructions).toEqual(normalBody.instructions);
+			expect(captured?.body.reasoning).toEqual(normalBody.reasoning);
+			expect(captured?.body.reasoning?.effort).toBe("none");
+		},
+	);
 
 	test("V2 compaction isolates its Lite WebSocket from the full Responses session", async () => {
 		const providerSessionState = new Map<string, ProviderSessionState>();
@@ -1891,6 +2013,62 @@ describe("compact() remote compaction failure handling", () => {
 		};
 	}
 
+	test.each(["v1", "v2", "codex-v2"])(
+		"preserves local summary history when entering native replay (%s)",
+		async protocol => {
+			const streaming = protocol !== "v1";
+			const preparation = makePreparation();
+			preparation.previousSummary = "Archived decision: use port 4242.";
+			preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: streaming };
+			const baseModel = makeOpenAiModel({
+				remoteCompaction: { enabled: true, v2StreamingEnabled: streaming },
+			});
+			const model: Model =
+				protocol === "codex-v2"
+					? {
+							...baseModel,
+							api: "openai-codex-responses",
+							provider: "openai-codex",
+							baseUrl: "https://chatgpt.example/backend-api",
+							preferWebsockets: false,
+							remoteCompaction: { enabled: true, api: "openai-codex-responses", v2StreamingEnabled: true },
+						}
+					: baseModel;
+			const requests: Array<{ input: Array<Record<string, unknown>> }> = [];
+			const fetchMock: FetchImpl = async (_url, init) => {
+				requests.push(JSON.parse(String(init?.body)) as (typeof requests)[number]);
+				const item = { type: "compaction", encrypted_content: `history-${requests.length}` };
+				return streaming
+					? sseResponse([
+							{ type: "response.output_item.done", output_index: 0, item },
+							{
+								type: "response.completed",
+								response: { usage: { input_tokens: 100, output_tokens: 1, total_tokens: 101 } },
+							},
+						])
+					: new Response(JSON.stringify({ output: [item] }));
+			};
+			const first = await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+			const firstInput = JSON.stringify(requests[0].input);
+			expect(firstInput.match(/Archived decision: use port 4242\./g)).toHaveLength(1);
+			expect(firstInput).toContain("long history");
+			expect(firstInput).toContain("recent");
+
+			await compact(
+				{ ...preparation, previousSummary: first.summary, previousPreserveData: first.preserveData },
+				model,
+				"test-key",
+				undefined,
+				undefined,
+				{ fetch: fetchMock },
+			);
+			const secondInput = JSON.stringify(requests[1].input);
+			expect(secondInput.match(/history-1/g)).toHaveLength(1);
+			expect(secondInput).not.toContain(first.summary);
+			expect(secondInput).not.toContain(preparation.previousSummary);
+		},
+	);
+
 	test("streams V2 compaction before V1 when both settings and model opt in", async () => {
 		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
@@ -2060,8 +2238,10 @@ describe("compact() remote compaction failure handling", () => {
 		expect(requestInput.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
 
-	test("re-expands a prior V2 compaction's originals when no candidate can reuse the replay", async () => {
-		vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("re-expanded local summary"));
+	test("re-expands native history for local preparation when new native compaction is disabled", async () => {
+		const localComplete = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(localSummaryMessage("re-expanded local summary"));
 		const compactionItem = { type: "compaction", encrypted_content: "enc_v2" };
 		const v2Model = makeOpenAiModel({
 			remoteCompaction: {
@@ -2085,8 +2265,6 @@ describe("compact() remote compaction failure handling", () => {
 					},
 				]),
 		});
-		// V2 success persists only the opaque placeholder — no second local summarization round.
-		expect(v2Result.summary).toContain("Remote compaction preserved provider-native history");
 
 		// Session branch after that V2 compaction: originals + compaction boundary + new turns.
 		const ts = (n: number) => new Date(n).toISOString();
@@ -2125,11 +2303,23 @@ describe("compact() remote compaction failure handling", () => {
 		];
 		const baseSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 };
 
-		// Remote disabled → the V2 replay is unusable → re-expand the pre-V2 original.
-		const reexpanded = prepareCompaction(entries, { ...baseSettings, remoteEnabled: false }, v2Model);
-		expect(reexpanded).toBeDefined();
-		const reexpandedText = JSON.stringify(reexpanded?.messagesToSummarize ?? []);
-		expect(reexpandedText).toContain("ORIGINAL ALPHA port 4242");
+		// Normal replay still works, but local preparation must re-expand the
+		// originals rather than send an opaque placeholder to its summarizer.
+		for (const { model, settings } of [
+			{ model: v2Model, settings: { ...baseSettings, remoteEnabled: false } },
+			{
+				model: { ...v2Model, remoteCompaction: { ...v2Model.remoteCompaction, enabled: false } },
+				settings: baseSettings,
+			},
+		]) {
+			const reexpanded = prepareCompaction(entries, settings, model);
+			if (!reexpanded) throw new Error("Expected local compaction preparation");
+			localComplete.mockClear();
+			await compact(reexpanded, model, "k");
+			expect(JSON.stringify(localComplete.mock.calls.map(([, context]) => context.messages))).toContain(
+				"ORIGINAL ALPHA port 4242",
+			);
+		}
 
 		// Remote + V2 still enabled, same provider → reuse the replay, don't re-summarize originals.
 		const reused = prepareCompaction(entries, { ...baseSettings, remoteStreamingV2Enabled: true }, v2Model);

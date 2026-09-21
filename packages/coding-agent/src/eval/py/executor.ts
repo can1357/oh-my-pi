@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 
 import { getProjectDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import type { OutputArtifactError } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
 	buildManagedKernelEnv,
@@ -15,6 +16,7 @@ import {
 	waitForPromiseWithCancellation,
 } from "../executor-base";
 import type { JsStatusEvent } from "../js/shared/types";
+import { getEnabledEvalPreludes } from "../preludes";
 import type { EvalToolDescriptor, EvalToolInvokeResult } from "../types";
 import {
 	createKernelSessionRegistry,
@@ -25,6 +27,7 @@ import {
 	normalizeKernelSessionCwd,
 	requireRemainingKernelTimeoutMs,
 } from "../kernel-session-registry";
+import type { PythonShadowPlan, PythonShadowSnapshot } from "./kernel";
 import {
 	checkPythonKernelAvailability,
 	type KernelDisplayOutput,
@@ -32,6 +35,7 @@ import {
 	type KernelExecuteResult,
 	type KernelShutdownResult,
 	PythonKernel,
+	type PythonPreludeSource,
 } from "./kernel";
 import { resolveExplicitPythonRuntime } from "./runtime";
 import { ensurePyToolBridge, registerPyToolBridge } from "./tool-bridge";
@@ -125,6 +129,11 @@ export interface PythonExecutorOptions {
 
 export interface PythonKernelExecutor {
 	execute: (code: string, options?: KernelExecuteOptions) => Promise<KernelExecuteResult>;
+	syncPreludes?: (
+		preludes: readonly PythonPreludeSource[],
+		signal: AbortSignal | undefined,
+		timeoutMs: number,
+	) => Promise<void>;
 }
 
 export interface PythonResult {
@@ -138,6 +147,7 @@ export interface PythonResult {
 	truncated: boolean;
 	/** Artifact ID if full output was saved to artifact storage */
 	artifactId?: string;
+	artifactError?: OutputArtifactError;
 	/** Total number of lines in the output stream */
 	totalLines: number;
 	/** Total number of bytes in the output stream */
@@ -326,11 +336,26 @@ async function acquireLiveSessionKernel(
 // Execution
 // ---------------------------------------------------------------------------
 
+function pythonPreludeSources(session: ToolSession | undefined): PythonPreludeSource[] {
+	const definitions = getEnabledEvalPreludes(session?.getEvalPreludes?.() ?? []);
+	return definitions.flatMap(definition =>
+		definition.python.trim().length === 0
+			? []
+			: [{ name: definition.name, exports: [...definition.exports], source: definition.python }],
+	);
+}
+
 async function executeWithKernel(
 	kernel: PythonKernelExecutor,
 	code: string,
 	options: PythonExecutorOptions | undefined,
 ): Promise<PythonResult> {
+	const remainingMs = getRemainingTimeoutMs(options?.deadlineMs);
+	await kernel.syncPreludes?.(
+		pythonPreludeSources(options?.toolSession),
+		options?.signal,
+		Math.max(1, remainingMs ?? 10_000),
+	);
 	return executeWithKernelBase<PythonExecutorOptions>({
 		kernel,
 		code,
@@ -501,6 +526,39 @@ export async function disposeAllKernelSessions(): Promise<void> {
 
 export async function disposeKernelSessionsByOwner(ownerId: string): Promise<void> {
 	await sessionRegistry.disposeByOwner(ownerId);
+}
+
+/** Projects against an already-retained, idle Python session without starting a kernel. */
+export async function shadowPlanPythonIfPresent(options: {
+	cwd: string;
+	sessionId: string;
+	kernelOwnerId?: string;
+	code: string;
+	timeoutMs?: number;
+}): Promise<PythonShadowPlan | null> {
+	const cwd = normalizeKernelSessionCwd(options.cwd);
+	const session = sessionRegistry.getPresentSession(cwd, {
+		sessionId: options.sessionId,
+		kernelOwnerId: options.kernelOwnerId,
+	});
+	if (!session?.kernel.isAlive()) return null;
+	return await session.kernel.shadowPlan(options.code, options.timeoutMs);
+}
+
+/** Captures the current retained-namespace token without planning or starting a kernel. */
+export async function snapshotPythonNamespaceIfPresent(options: {
+	cwd: string;
+	sessionId: string;
+	kernelOwnerId?: string;
+	timeoutMs?: number;
+}): Promise<Pick<PythonShadowSnapshot, "revision" | "digest"> | null> {
+	const cwd = normalizeKernelSessionCwd(options.cwd);
+	const session = sessionRegistry.getPresentSession(cwd, {
+		sessionId: options.sessionId,
+		kernelOwnerId: options.kernelOwnerId,
+	});
+	if (!session?.kernel.isAlive()) return null;
+	return await session.kernel.snapshotUserNamespace(options.timeoutMs);
 }
 
 export async function executePythonWithKernel(

@@ -1,14 +1,38 @@
 import type { AgentOptions } from "@oh-my-pi/pi-agent-core";
 import type { OAuthAccessResolution } from "@oh-my-pi/pi-ai";
 import type { ApiKeyResolver } from "@oh-my-pi/pi-ai/auth-retry";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import type { AuthStorage } from "../session/auth-storage";
-import type { SecurityAccountRef } from "./contracts";
+import type { SecurityAccountRef, SecurityAuthRef } from "./contracts";
 
+/** Inputs required to resolve one immutable OAuth account reference. */
 export interface ExactSecurityOAuthOptions {
 	authStorage: AuthStorage;
 	account: SecurityAccountRef;
 }
 
+/** Model identity fields used to select a supported scan authentication route. */
+export interface SecurityAuthModel {
+	provider: string;
+	api: string;
+}
+
+/** Inputs required to enforce a scan authentication reference at request time. */
+export interface SecurityAuthResolverOptions {
+	authStorage: AuthStorage;
+	auth: SecurityAuthRef;
+	providerResolver: NonNullable<AgentOptions["getApiKey"]>;
+}
+
+function isOAuthAccount(auth: SecurityAuthRef): auth is SecurityAccountRef {
+	return "credentialId" in auth;
+}
+
+function supportsProviderAuth(model: SecurityAuthModel): boolean {
+	return getProviderDefinition(model.provider)?.nativeAuthApis?.includes(model.api) ?? false;
+}
+
+/** Rejects changes to any durable OAuth identity field captured by preflight. */
 export function assertSecurityIdentityMatches(
 	account: SecurityAccountRef,
 	resolution: {
@@ -30,34 +54,66 @@ export function assertSecurityIdentityMatches(
 	}
 }
 
-export function selectSecurityAccount(
+function selectOAuthAccount(
 	authStorage: AuthStorage,
 	provider: string,
 	requestedCredentialId?: number,
 	sessionId?: string,
-): SecurityAccountRef {
+): SecurityAccountRef | undefined {
 	const accounts = authStorage.listOAuthAccounts(provider, sessionId);
 	const selected =
 		requestedCredentialId !== undefined
 			? accounts.find(account => account.credentialId === requestedCredentialId)
 			: (accounts.find(account => account.active) ?? (accounts.length === 1 ? accounts[0] : undefined));
-	if (!selected) {
-		if (accounts.length === 0) throw new Error(`Security scans require a stored OAuth account for ${provider}`);
-		if (requestedCredentialId !== undefined) {
-			throw new Error(`Security OAuth credential ${requestedCredentialId} is not available for ${provider}`);
-		}
+	if (selected) {
+		const account: SecurityAccountRef = { provider, credentialId: selected.credentialId };
+		if (selected.accountId !== undefined) account.accountId = selected.accountId;
+		if (selected.email !== undefined) account.email = selected.email;
+		if (selected.orgId !== undefined) account.organizationId = selected.orgId;
+		if (selected.orgName !== undefined) account.organizationName = selected.orgName;
+		return account;
+	}
+	if (requestedCredentialId !== undefined) {
+		throw new Error(`Security OAuth credential ${requestedCredentialId} is not available for ${provider}`);
+	}
+	if (accounts.length > 0) {
 		throw new Error(
 			`Multiple OAuth accounts are available for ${provider}; supply credentialId to pin one exact account`,
 		);
 	}
-	const account: SecurityAccountRef = { provider, credentialId: selected.credentialId };
-	if (selected.accountId !== undefined) account.accountId = selected.accountId;
-	if (selected.email !== undefined) account.email = selected.email;
-	if (selected.orgId !== undefined) account.organizationId = selected.orgId;
-	if (selected.orgName !== undefined) account.organizationName = selected.orgName;
+	return undefined;
+}
+
+/** Selects one exact OAuth row for native or Codex Security cloud scans. */
+export function selectSecurityOAuthAccount(
+	authStorage: AuthStorage,
+	provider: string,
+	requestedCredentialId?: number,
+	sessionId?: string,
+): SecurityAccountRef {
+	const account = selectOAuthAccount(authStorage, provider, requestedCredentialId, sessionId);
+	if (!account) throw new Error(`Security scans require a stored OAuth account for ${provider}`);
 	return account;
 }
 
+/** Selects either one exact OAuth row or an explicitly supported provider-owned auth route. */
+export function selectSecurityAuth(
+	authStorage: AuthStorage,
+	model: SecurityAuthModel,
+	requestedCredentialId?: number,
+	sessionId?: string,
+): SecurityAuthRef {
+	const account = selectOAuthAccount(authStorage, model.provider, requestedCredentialId, sessionId);
+	if (account) return account;
+	if (supportsProviderAuth(model)) return { provider: model.provider, api: model.api };
+	const nativeApis = getProviderDefinition(model.provider)?.nativeAuthApis;
+	if (nativeApis) {
+		throw new Error(`Security scans do not support provider authentication for ${model.provider}/${model.api}`);
+	}
+	throw new Error(`Security scans require a stored OAuth account for ${model.provider}`);
+}
+
+/** Resolves one pinned OAuth row and verifies that its durable identity has not changed. */
 export async function resolveExactSecurityOAuthAccess(
 	authStorage: AuthStorage,
 	account: SecurityAccountRef,
@@ -94,5 +150,27 @@ export function createExactSecurityOAuthResolver(
 			return resolution.accessToken;
 		};
 		return resolver;
+	};
+}
+
+/**
+ * Builds the scan resolver while preserving either its exact OAuth row or provider-owned auth boundary.
+ */
+export function createSecurityAuthResolver(
+	options: SecurityAuthResolverOptions,
+): NonNullable<AgentOptions["getApiKey"]> {
+	const { auth, authStorage, providerResolver } = options;
+	if (isOAuthAccount(auth)) return createExactSecurityOAuthResolver({ authStorage, account: auth });
+	return model => {
+		if (model.provider !== auth.provider) {
+			throw new Error("Security scan authentication provider mismatch");
+		}
+		if (model.api !== auth.api) {
+			throw new Error("Security scan authentication API mismatch");
+		}
+		if (!supportsProviderAuth(model)) {
+			throw new Error(`Security scans do not support provider authentication for ${model.provider}/${model.api}`);
+		}
+		return providerResolver(model);
 	};
 }
