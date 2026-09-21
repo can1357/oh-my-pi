@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.2.8] - 2026-09-21
+
+### Changed
+
+- Improved Bash tool background-task notices by providing completed output as a follow-up and discouraging unnecessary polling.
+
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes

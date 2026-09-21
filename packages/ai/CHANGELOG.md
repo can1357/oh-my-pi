@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.2.8] - 2026-09-21
+
 ### Added
 
 - Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
@@ -13,15 +15,17 @@
 - Added support for audio speech synthesis
 - Added support for audio transcription services
 - Added System One judgment API route
+- Added support for text embeddings, document reranking, video generation, image generation across multiple providers, audio speech synthesis, and audio transcription services.
+- Added support for the System One judgment API, including configurable request headers for proxy routing and custom authentication.
 
 ### Changed
 
-- Updated API response headers to report costs based on usage totals
-- Added optional `kind` field to model list responses
+- Updated API response cost reporting to use aggregate usage totals.
+- Model list responses now optionally include a model kind.
 
 ### Fixed
 
-- Fixed detection of Claude usage limit errors
+- Fixed detection of Claude usage-limit errors.
 
 ## [18.2.7] - 2026-09-21
 

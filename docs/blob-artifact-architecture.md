@@ -169,12 +169,9 @@ Failure behavior:
 
 Handled by `AgentProtocolHandler` over registered active session artifact directories and `<artifactsDir>/<id>.md`:
 
-- `agent://<id>` returns markdown text
-- `agent://Parent/Child` first tries the nested output `Parent.Child.md`
-- only when no nested output matches does a slash path fall back to JSON extraction from the base output
-- `?q=` always performs JSON extraction
-- path and query extraction cannot be combined
-- extraction requires valid JSON and returns `application/json`
+- `agent://<id>` returns markdown text; nested subagent outputs use the dotted id (`agent://Parent.Child` reads `Parent.Child.md`)
+- a slash path is always JSON extraction: `agent://<id>/<key>/<index>/…` walks object keys and array indexes (`agent://Parent.Child/reports/0/data`)
+- extraction reads the `<id>.json` sidecar when present, else parses `<id>.md`; it requires valid JSON and returns `application/json` (a string leaf is returned as `text/markdown` prose)
 
 Failure behavior:
 
