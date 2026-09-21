@@ -370,9 +370,25 @@ describe("connectProxiedSocket", () => {
 			);
 
 			expect(result).toBeInstanceOf(AIError.StreamTimeoutError);
-			const socket = await proxy.accepted;
-			await waitForSocketClose(socket);
-			expect(socket.destroyed).toBe(true);
+			// The timeout is armed at call time in connectProxiedSocket, before
+			// net.connect. Under parallel load the 20ms timer can destroy the
+			// client socket before the silent proxy's `connection` callback
+			// fires, in which case `proxy.accepted` never resolves and a bare
+			// await would hang to bun's 30s per-test ceiling. Fake timers are
+			// no substitute: the code under test races a real platform timer
+			// against real TCP accept, and the awaited signal is the *absence*
+			// of a connection — only a bounded real grace can observe that.
+			// When the proxy did see the connection (the normal case), still
+			// assert it observes the teardown; when it never did, the
+			// pre-accept destroy already proves the client gave up.
+			const socket = await Promise.race([
+				proxy.accepted,
+				Bun.sleep(250).then(() => undefined as net.Socket | undefined),
+			]);
+			if (socket) {
+				await waitForSocketClose(socket);
+				expect(socket.destroyed).toBe(true);
+			}
 		} finally {
 			await proxy.close();
 		}

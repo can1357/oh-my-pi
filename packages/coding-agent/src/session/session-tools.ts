@@ -291,6 +291,7 @@ export class SessionTools {
 	readonly #getCustomToolContext = (): CustomToolContext => ({
 		sessionManager: this.#host.sessionManager,
 		modelRegistry: this.#host.modelRegistry,
+		metadataForProvider: (provider: string) => this.#host.agent.metadataForProvider(provider),
 		model: this.#host.model(),
 		isIdle: () => !this.#host.isStreaming(),
 		hasQueuedMessages: () => this.#host.queuedMessageCount() > 0,

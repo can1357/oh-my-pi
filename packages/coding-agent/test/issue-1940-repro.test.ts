@@ -140,6 +140,35 @@ describe("tiny title client prompt construction", () => {
 			await client.terminate();
 		}
 	});
+
+	it("forwards a system prompt on local completions only when one is given", async () => {
+		const sent: TinyWorkerRequest[] = [];
+		const worker = new FakeTinyWorker((message, worker) => {
+			if (message.type !== "chat") return;
+			sent.push(message);
+			worker.emit({ type: "text", id: message.id, text: "YES" });
+		});
+		const client = new TinyTitleClient(async () => worker);
+		try {
+			expect(await client.complete("lfm2-1.2b", "New command:\nls -la", { systemPrompt: "Classifier rules" })).toBe(
+				"YES",
+			);
+			expect(sent[0]).toMatchObject({
+				type: "chat",
+				messages: [
+					{ role: "system", content: "Classifier rules" },
+					{ role: "user", content: "New command:\nls -la" },
+				],
+			});
+
+			// The worker renders whatever turns it gets: an omitted system prompt
+			// must not surface as an empty system turn.
+			await client.complete("lfm2-1.2b", "Extract facts");
+			expect(sent[1]).toMatchObject({ type: "chat", messages: [{ role: "user", content: "Extract facts" }] });
+		} finally {
+			await client.terminate();
+		}
+	});
 });
 
 describe("issue #1940 — local model failures release the worker process", () => {
