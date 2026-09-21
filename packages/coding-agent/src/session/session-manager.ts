@@ -1476,7 +1476,7 @@ export class SessionManager {
 		this.#clearDiskError();
 		this.#expectedDiskSize = null;
 		this.#reconcileSessionDirForFallback();
-		this.#sessionId = mintSessionId();
+		this.#sessionId = options?.sessionId ?? mintSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
 		this.#titleUpdatedAt = "";
@@ -3261,11 +3261,18 @@ export class SessionManager {
 	 * Create a new session.
 	 * @param cwd Working directory (stored in the session header)
 	 * @param sessionDir Optional session directory; defaults to the cwd-derived dir.
+	 * @param storage Session storage backend.
+	 * @param sessionId Prescribed session id (`--session-id`); minted when omitted.
 	 */
-	static create(cwd: string, sessionDir?: string, storage: SessionStorage = new FileSessionStorage()): SessionManager {
+	static create(
+		cwd: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		sessionId?: string,
+	): SessionManager {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
 		const manager = new SessionManager(cwd, dir, true, storage);
-		manager.#resetToNewSession();
+		manager.#resetToNewSession(sessionId === undefined ? undefined : { sessionId });
 		return manager;
 	}
 

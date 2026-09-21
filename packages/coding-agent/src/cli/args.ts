@@ -52,6 +52,8 @@ export interface Args {
 	externalThinking?: boolean;
 	continue?: boolean;
 	resume?: string | true;
+	/** Exact session id for create-or-resume (`--session-id`); no prefix matching. */
+	sessionId?: string;
 	fromClaude?: boolean;
 	fromCodex?: boolean;
 	help?: boolean;
