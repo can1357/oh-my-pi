@@ -258,6 +258,7 @@ export class MCPManager {
 	#authHandler?: MCPAuthHandler;
 	#notificationListeners = new Set<(serverName: string, method: string, params: unknown) => void>();
 	#connectionStatusListeners = new Set<(event: McpConnectionStatusEvent) => void>();
+	#lastConnectionErrors = new Map<string, string>();
 	#catalogChangeListeners = new Set<(event: McpCatalogChangeEvent) => void>();
 	/**
 	 * Notifications received before any listener attached, to be drained on
@@ -316,6 +317,8 @@ export class MCPManager {
 	}
 
 	#emitConnectionStatus(event: McpConnectionStatusEvent): void {
+		if (event.type === "failed") this.#lastConnectionErrors.set(event.serverName, event.error);
+		else if (event.type === "connected") this.#lastConnectionErrors.delete(event.serverName);
 		for (const listener of this.#connectionStatusListeners) {
 			try {
 				listener(event);
@@ -994,6 +997,11 @@ export class MCPManager {
 		)
 			return "connecting";
 		return "disconnected";
+	}
+
+	/** Latest connection failure for a server, cleared after its next successful connection. */
+	getLastConnectionError(name: string): string | undefined {
+		return this.#lastConnectionErrors.get(name);
 	}
 
 	/**

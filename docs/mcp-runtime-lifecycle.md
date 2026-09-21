@@ -237,13 +237,18 @@ Top-level sessions own managers they create. `AgentSession.dispose()` disconnect
 
 ## Implementation files
 
-- [`src/mcp/loader.ts`](../packages/coding-agent/src/mcp/loader.ts) — loader facade, discovery error normalization, `LoadedCustomTool` conversion.
-- [`src/mcp/manager.ts`](../packages/coding-agent/src/mcp/manager.ts) — lifecycle state registries, parallel connect/list flow, refresh/disconnect.
-- [`src/mcp/client.ts`](../packages/coding-agent/src/mcp/client.ts) — transport setup, initialize handshake, list/call/disconnect.
-- [`src/mcp/index.ts`](../packages/coding-agent/src/mcp/index.ts) — MCP module API exports.
-- [`src/sdk.ts`](../packages/coding-agent/src/sdk.ts) — startup wiring into session/tool registry.
-- [`src/mcp/config.ts`](../packages/coding-agent/src/mcp/config.ts) — config discovery/filtering/validation used by manager.
-- [`src/mcp/tool-bridge.ts`](../packages/coding-agent/src/mcp/tool-bridge.ts) — `MCPTool` and `DeferredMCPTool` runtime behavior.
-- [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — `refreshMCPTools` live rebinding.
-- [`src/modes/controllers/mcp-command-controller.ts`](../packages/coding-agent/src/modes/controllers/mcp-command-controller.ts) — interactive reload/reconnect flows.
-- [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts) — subagent MCP proxying via parent manager connections.
+* [`src/mcp/loader.ts`](../packages/coding-agent/src/mcp/loader.ts) — loader facade, discovery error normalization, `LoadedCustomTool` conversion.
+* [`src/mcp/manager.ts`](../packages/coding-agent/src/mcp/manager.ts) — lifecycle state registries, parallel connect/list flow, refresh/disconnect.
+* [`src/mcp/client.ts`](../packages/coding-agent/src/mcp/client.ts) — transport setup, initialize handshake, list/call/disconnect.
+* [`src/mcp/server-actions.ts`](../packages/coding-agent/src/mcp/server-actions.ts) — shared test, reconnect, OAuth, credential-clear, enable/disable, and reload operations used by both `/mcp` and the dashboard.
+* [`src/mcp/auth-capability.ts`](../packages/coding-agent/src/mcp/auth-capability.ts) — transport/source-aware action availability and authentication ownership labels.
+* [`src/mcp/interactive-oauth.ts`](../packages/coding-agent/src/mcp/interactive-oauth.ts) — cancellable, single-owner interactive OAuth flow shared by command and dashboard surfaces.
+* [`src/modes/components/extensions/mcp-action-runtime.ts`](../packages/coding-agent/src/modes/components/extensions/mcp-action-runtime.ts) — binds discovered dashboard rows to live manager state and shared actions.
+* [`../tui/src/overlays/extensions/mcp-action-panel.ts`](../packages/tui/src/overlays/extensions/mcp-action-panel.ts) — per-server status and action panel mounted from the consolidated MCP tab.
+* [`src/mcp/index.ts`](../packages/coding-agent/src/mcp/index.ts) — MCP module API exports.
+* [`src/sdk.ts`](../packages/coding-agent/src/sdk.ts) — startup wiring into session/tool registry.
+* [`src/mcp/config.ts`](../packages/coding-agent/src/mcp/config.ts) — config discovery/filtering/validation used by manager.
+* [`src/mcp/tool-bridge.ts`](../packages/coding-agent/src/mcp/tool-bridge.ts) — `MCPTool` and `DeferredMCPTool` runtime behavior.
+* [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — `refreshMCPTools` live rebinding.
+* [`src/modes/controllers/mcp-command-controller.ts`](../packages/coding-agent/src/modes/controllers/mcp-command-controller.ts) — interactive reload/reconnect flows.
+* [`src/task/executor.ts`](../packages/coding-agent/src/task/executor.ts) — subagent MCP proxying via parent manager connections.

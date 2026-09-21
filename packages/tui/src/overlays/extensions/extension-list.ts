@@ -42,6 +42,7 @@ export interface ExtensionListCallbacks {
 	getProviders?: () => readonly ExtensionProvider[];
 	onSelectionChange?: (extension: Extension | null) => void;
 	onToggle?: (extensionId: string, enabled: boolean) => void;
+	onActivate?: (extension: Extension) => void;
 	onMasterToggle?: (providerId: string) => void;
 	onUserSourceToggle?: (providerId: string) => void;
 	masterSwitchProvider?: string | null;
@@ -552,8 +553,8 @@ export class ExtensionList implements Component {
 		);
 	}
 
-	/** Toggle the selected item, or flip the provider master switch when on it. */
-	#activateSelected(): void {
+	/** Activate the selected item. MCP rows drill down on primary activation; Space remains a direct toggle. */
+	#activateSelected(mode: "primary" | "toggle" = "primary"): void {
 		const item = this.#menu.selectedItem;
 		if (item?.type === "master") {
 			this.#callbacks.onMasterToggle?.(item.providerId);
@@ -561,9 +562,11 @@ export class ExtensionList implements Component {
 			if (this.#callbacks.getProviders?.().find(provider => provider.id === item.providerId)?.enabled !== false)
 				this.#callbacks.onUserSourceToggle?.(item.providerId);
 		} else if (item?.type === "extension") {
-			// Shadowed same-name rows share the winner's id (`mcp:github`).
-			// Toggling them would mutate whichever config `find(id)` hits first.
 			if (isShadowedExtension(item.item)) return;
+			if (mode === "primary" && item.item.kind === "mcp" && this.#callbacks.onActivate) {
+				this.#callbacks.onActivate(item.item);
+				return;
+			}
 			const masterDisabled =
 				this.#masterSwitchProvider !== null &&
 				this.#callbacks.getProviders?.().find(provider => provider.id === this.#masterSwitchProvider)?.enabled ===
@@ -625,9 +628,13 @@ export class ExtensionList implements Component {
 			return;
 		}
 
-		// Space or Enter: activate the selected row (toggle item / master switch)
-		if (data === " " || matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
-			this.#activateSelected();
+		// Space is the direct toggle; Enter opens MCP details and otherwise toggles.
+		if (data === " ") {
+			this.#activateSelected("toggle");
+			return;
+		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			this.#activateSelected("primary");
 			return;
 		}
 

@@ -9,8 +9,8 @@
  * Navigation:
  * - Tab/Shift+Tab or ←/→: switch view tab
  * - Up/Down or wheel: move list selection
- * - Space/Enter or click: toggle selected item (or provider master switch)
- * - Wheel over the inspector, or PageUp/PageDown when the inspector overflows: scroll the detail pane
+ * - Enter or click: open MCP actions, otherwise toggle the selected item
+ * - Space: toggle the selected item or provider master switch
  * - Esc: clear search (if active) then close
  */
 import type { Component } from "../../tui";
@@ -36,6 +36,7 @@ import { InspectorPanel, type ToolRuntimeSource } from "./inspector-panel";
 import type { ExtensionInspectorSource } from "./inspector-model";
 import { snapshotToolRuntimeSource } from "./live-tool-session";
 import type { MCPRuntimeSource } from "./mcp-runtime";
+import { MCPActionPanel, type MCPActionPanelRuntime } from "./mcp-action-panel";
 import {
 	applyDisabledExtensionsToState,
 	applyFilter,
@@ -65,6 +66,7 @@ export interface ExtensionDashboardRuntime {
 	subscribeMcpChanges(onChange: () => void): Array<() => void>;
 	mcpSource?: MCPRuntimeSource;
 	inspectorSource?: ExtensionInspectorSource;
+	mcpActions?: MCPActionPanelRuntime;
 }
 
 export interface ExtensionDashboardOptions {
@@ -74,7 +76,7 @@ export interface ExtensionDashboardOptions {
 }
 
 function extFooter(): string {
-	return ` ↑/↓: navigate · Space: toggle · ←/→: provider · PgUp/PgDn: inspector · ${expandKeyHint()}: expand · Esc: close`;
+	return ` ↑/↓: navigate · Enter: MCP actions · Space: toggle · ←/→: view · PgUp/PgDn: inspector · ${expandKeyHint()}: expand · Esc: close`;
 }
 
 /**
@@ -101,6 +103,7 @@ export class ExtensionDashboard implements Component {
 	#inspector!: InspectorPanel;
 	#tabBar!: TabBar;
 	#body!: TwoColumnBody;
+	#mcpActionPanel?: MCPActionPanel;
 	#refreshToken = 0;
 	// Persistent fullscreen frame: top, tabs, divider, body, divider, footer,
 	// bottom. The fullscreen overlay paints from screen row 0, so mouse rows
@@ -170,6 +173,7 @@ export class ExtensionDashboard implements Component {
 					this.#body.resetInspectorScroll();
 				},
 				onToggle: (extensionId, enabled) => this.#handleExtensionToggle(extensionId, enabled),
+				onActivate: extension => void this.#openMcpActions(extension),
 				onMasterToggle: providerId => this.#handleProviderToggle(providerId),
 				onUserSourceToggle: providerId => this.#handleUserSourceToggle(providerId),
 				masterSwitchProvider: this.#getActiveProviderId(),
@@ -213,6 +217,7 @@ export class ExtensionDashboard implements Component {
 	 * the bottom border.
 	 */
 	render(width: number): readonly string[] {
+		if (this.#mcpActionPanel) return this.#mcpActionPanel.render(width);
 		const height = Math.max(14, this.#terminalRows());
 		const innerWidth = Math.max(1, width - 4);
 
@@ -238,6 +243,10 @@ export class ExtensionDashboard implements Component {
 	}
 
 	invalidate(): void {
+		if (this.#mcpActionPanel) {
+			this.#mcpActionPanel.invalidate();
+			return;
+		}
 		this.#frame.invalidate();
 		this.#tabBar.invalidate();
 		this.#mainList.invalidate();
@@ -488,7 +497,30 @@ export class ExtensionDashboard implements Component {
 		this.onRequestRender?.();
 	}
 
+	async #openMcpActions(extension: Extension): Promise<void> {
+		const runtime = this.#runtime.mcpActions;
+		if (!runtime || extension.kind !== "mcp") return;
+		try {
+			const panel = new MCPActionPanel(extension, await runtime.loadState(extension), runtime, this.#terminalHeight);
+			panel.onRequestRender = () => this.onRequestRender?.();
+			panel.onChanged = () => void this.#refreshFromState();
+			panel.onClose = () => {
+				panel.dispose();
+				if (this.#mcpActionPanel === panel) this.#mcpActionPanel = undefined;
+				this.onRequestRender?.();
+			};
+			this.#mcpActionPanel = panel;
+			this.onRequestRender?.();
+		} catch (error) {
+			logger.warn("Failed to open MCP action panel", { name: extension.name, error: String(error) });
+		}
+	}
+
 	handleInput(data: string): void {
+		if (this.#mcpActionPanel) {
+			this.#mcpActionPanel.handleInput(data);
+			return;
+		}
 		// SGR mouse reports (the fullscreen overlay enables tracking).
 		if (data.startsWith("\x1b[<")) {
 			this.#handleMouse(data);
@@ -555,6 +587,8 @@ export class ExtensionDashboard implements Component {
 	}
 
 	dispose(): void {
+		this.#mcpActionPanel?.dispose();
+		this.#mcpActionPanel = undefined;
 		for (const unsub of this.#unsubscribers) unsub();
 		this.#unsubscribers = [];
 	}

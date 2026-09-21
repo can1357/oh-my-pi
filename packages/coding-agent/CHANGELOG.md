@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+* Added a consolidated **MCP Servers** tab to `/extensions`, with live cross-source connection status, tool/resource/prompt inspection, and contextual test, reconnect, reauthenticate, credential-clear, enable, and disable actions.
+
 ## [18.2.6] - 2026-09-18
 
 ### Fixed

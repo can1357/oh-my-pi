@@ -100,6 +100,43 @@ describe("ExtensionList mouse routing", () => {
 	});
 });
 
+describe("ExtensionList activation routing", () => {
+	test("Enter opens MCP actions while preserving inactive-row enable behavior", () => {
+		const mcp: Extension = {
+			id: "mcp:github",
+			kind: "mcp",
+			name: "github",
+			path: "/tmp/github-mcp.json",
+			displayName: "github",
+			source: { provider: "native", providerName: "Native", level: "user" },
+			state: "active",
+			raw: {},
+		};
+		const opened: string[] = [];
+		const mcpList = new ExtensionList([mcp], {
+			masterSwitchProvider: null,
+			onActivate: item => opened.push(item.id),
+		});
+		mcpList.setFocused(true);
+		mcpList.render(40);
+		mcpList.handleClick(3);
+		mcpList.handleInput("\r");
+		expect(opened).toEqual(["mcp:github"]);
+
+		const toggled: Array<{ id: string; enabled: boolean }> = [];
+		const inactiveSkill = skill("inactive", "disabled");
+		const skillList = new ExtensionList([inactiveSkill], {
+			masterSwitchProvider: null,
+			onToggle: (id, enabled) => toggled.push({ id, enabled }),
+		});
+		skillList.setFocused(true);
+		skillList.render(40);
+		skillList.handleClick(3);
+		skillList.handleInput("\r");
+		expect(toggled).toEqual([{ id: "skill:inactive", enabled: true }]);
+	});
+});
+
 describe("buildProviderTabs", () => {
 	test("mutes empty enabled providers but keeps disabled providers selectable", () => {
 		const tabs = buildTabBarTabs([

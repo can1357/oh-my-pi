@@ -513,6 +513,10 @@ export class SelectorController {
 				onMcpToolsChanged: tools => this.ctx.session.refreshMCPTools(tools),
 				browserMcpFilterEnabled: () =>
 					this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
+				authStorage: this.ctx.session.modelRegistry.authStorage,
+				getExtensionRoots: () => this.ctx.session.effectiveExtensionRoots,
+				clearMcpPromptCommands: () => this.ctx.session.setMCPPromptCommands([]),
+				hasPendingManualOAuth: () => this.ctx.oauthManualInput.hasPending(),
 			}),
 			terminalHeight: this.ctx.ui.terminal.rows,
 			toolSource: {

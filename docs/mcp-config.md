@@ -54,6 +54,19 @@ Project-scoped MCP config (`.omp/mcp.json`) is keyed to the working directory, n
 
 MCP follows the same profile rules as the rest of OMP-native config; see [Configuration Discovery → Profiles](./config-usage.md#profiles).
 
+## Consolidated MCP control center
+
+In an interactive session, run `/extensions` and open the **MCP Servers** tab to inspect every discovered server across OMP, Claude Code, Codex, Gemini CLI, Cursor, Windsurf, VS Code, and installed plugins in one view.
+
+* The inventory shows live connection state, transport, tool/resource/prompt counts, configuration source, and the most recent connection error.
+* The inspector lists available tools, resources, and prompts for the selected server. Use the expand binding to reveal the full catalog.
+* Select a server and press Enter, or click an already-selected row, to open contextual actions: test, reconnect, reauthenticate, clear authentication, enable, or disable.
+* Actions operate on the active session's `MCPManager`, so status and tool changes take effect without restarting OMP. Enable/disable changes persist to a writable MCP source or the active profile's allowlist/denylist override.
+* OMP-managed reauthentication is available only for direct HTTP/SSE servers. Static `Authorization` headers, stdio-owned credentials, and external proxies remain under their owning process and show an explicit reason instead of an unsafe action.
+* Clearing stored authentication and disabling a server require confirmation. Esc cancels an in-flight test, reconnect, or OAuth flow without closing the control center.
+
+The existing `/mcp` commands remain available for scripting and text-oriented operation. Both surfaces operate on the same manager and configuration state, and their interactive OAuth paths use the same cancellable flow.
+
 ## Add a schema reference
 
 Add this line at the top of the file for editor autocomplete and validation:

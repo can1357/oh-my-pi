@@ -1,14 +1,17 @@
 import type { ExtensionDashboardRuntime } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { getMCPConfigPath } from "@oh-my-pi/pi-utils";
 import { parseRuleAgents, parseRuleConditionAndScope } from "../../../capability/rule";
+import type { EffectiveExtensionRoots } from "../../../capability/types";
 import type { Settings } from "../../../config/settings";
 import { getAllProvidersInfo, isForeignUserProvider, isUserSourceEnabled } from "../../../discovery";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
 import type { MCPManager } from "../../../mcp/manager";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL } from "../../../mcp/startup-events";
+import type { AuthStorage } from "../../../session/auth-storage";
 import type { EventBus } from "../../../utils/event-bus";
 import { toolFileHeaderDescription } from "./inspector-runtime";
+import { createMCPActionRuntime } from "./mcp-action-runtime";
 import { applyMcpToggleRuntime } from "./mcp-runtime";
 import { loadAllExtensions, toggleProvider, toggleUserSource } from "./state-manager";
 
@@ -20,8 +23,23 @@ export function createExtensionDashboardRuntime(options: {
 	eventBus?: EventBus;
 	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
 	browserMcpFilterEnabled?: () => boolean;
+	authStorage?: AuthStorage;
+	getExtensionRoots?: () => EffectiveExtensionRoots;
+	clearMcpPromptCommands?(): void;
+	hasPendingManualOAuth?: () => boolean;
 }): ExtensionDashboardRuntime {
-	const { cwd, settings, mcpManager, eventBus, onMcpToolsChanged, browserMcpFilterEnabled } = options;
+	const {
+		cwd,
+		settings,
+		mcpManager,
+		eventBus,
+		onMcpToolsChanged,
+		browserMcpFilterEnabled,
+		authStorage,
+		getExtensionRoots,
+		clearMcpPromptCommands,
+		hasPendingManualOAuth,
+	} = options;
 	return {
 		getDisabledExtensions: () => settings.get("disabledExtensions") ?? [],
 		setDisabledExtensions: ids => settings.set("disabledExtensions", ids),
@@ -69,6 +87,20 @@ export function createExtensionDashboardRuntime(options: {
 			return subscriptions;
 		},
 		mcpSource: mcpManager,
+		mcpActions: authStorage
+			? createMCPActionRuntime({
+					cwd,
+					settings,
+					mcpManager,
+					authStorage,
+					eventBus,
+					onMcpToolsChanged,
+					clearMcpPromptCommands,
+					browserMcpFilterEnabled,
+					getExtensionRoots,
+					hasPendingManualOAuth,
+				})
+			: undefined,
 		inspectorSource: {
 			readToolHeader: toolFileHeaderDescription,
 			parseRule: raw => ({ ...parseRuleConditionAndScope(raw), agents: parseRuleAgents(raw.agents) }),

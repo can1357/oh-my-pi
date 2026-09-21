@@ -37,7 +37,7 @@ export interface LoadMCPConfigsResult {
 /**
  * Convert canonical MCPServer to legacy MCPServerConfig.
  */
-function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
+export function mcpServerToConfig(server: MCPServer): MCPServerConfig {
 	// Determine transport type
 	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
 	const shared = {
@@ -139,7 +139,7 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	let configs: Record<string, MCPServerConfig> = {};
 	let sources: Record<string, SourceMeta> = {};
 	for (const server of result.items) {
-		configs[server.name] = convertToLegacyConfig(server);
+		configs[server.name] = mcpServerToConfig(server);
 		sources[server.name] = server._source;
 	}
 
