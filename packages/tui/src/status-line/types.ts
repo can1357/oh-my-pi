@@ -36,7 +36,13 @@ export interface CollabStatus {
 
 export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
-	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
+	path?: {
+		abbreviate?: boolean;
+		maxLength?: number;
+		stripWorkPrefix?: boolean;
+		/** Extra project roots trimmed like ~/Projects and /work (issue #12207). */
+		projectRoots?: string[];
+	};
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
