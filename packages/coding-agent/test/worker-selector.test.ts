@@ -204,6 +204,32 @@ describe("worker selector dispatch", () => {
 		child.kill("SIGKILL");
 		expect(alive).toBe(true);
 	});
+
+	it("reaps worker when OMP_WORKER_IDLE_TTL_MS expires without activity", async () => {
+		const repoRoot = path.resolve(__dirname, "../../..");
+		const child = Bun.spawn({
+			cmd: [process.execPath, "packages/coding-agent/src/cli.ts", "__omp_worker_js_eval_process"],
+			cwd: repoRoot,
+			env: { ...process.env, OMP_WORKER_IDLE_TTL_MS: "300" },
+			ipc() {},
+			serialization: "advanced",
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+
+		let running = isPidRunning(child.pid);
+		for (let i = 0; i < 30 && running; i++) {
+			await Bun.sleep(50);
+			running = isPidRunning(child.pid);
+		}
+		if (running) {
+			try {
+				child.kill("SIGKILL");
+			} catch {}
+		}
+		expect(running).toBe(false);
+	});
 });
 
 describe("computer worker entry", () => {
