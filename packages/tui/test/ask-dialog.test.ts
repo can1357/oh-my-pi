@@ -226,7 +226,6 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
 	});
-
 	it("multi-select: intrinsic Recommended suffix visibly follows selection state", () => {
 		const onSubmit = vi.fn();
 		const component = new AskDialogComponent(
@@ -1106,7 +1105,7 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
 	});
 
-	it("multi-select: Enter submits an empty selection instead of dead-ending", () => {
+	it("multi-select: Enter with nothing selected confirms on Submit instead of submitting (issue #12521)", () => {
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
@@ -1123,10 +1122,12 @@ describe("AskDialogComponent", () => {
 			onPrompt: vi.fn(),
 		});
 
-		// Enter with nothing selected submits the empty selection rather than
-		// toggling or blocking on the Submit tab.
+		// First Enter must not submit an untouched multi-select; it lands on
+		// the Submit tab, where a second Enter confirms explicitly.
 		component.handleInput(ENTER);
+		expect(onSubmit).not.toHaveBeenCalled();
 
+		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
 	});
