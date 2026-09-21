@@ -1,0 +1,74 @@
+// SingularityAPI universal inference gateway (api.singularityapi.dev):
+// one OpenAI-compatible endpoint for 300+ models (DeepSeek, Kimi, GLM,
+// frontier flagships), `sapi_...` bearer keys issued from the dashboard at
+// app.singularityapi.dev. `GET /v1/models` publishes each row's per-endpoint
+// capabilities — context window, max/default output tokens, and per-million
+// 12-decimal pricing strings — with `cache-control: no-store`, so discovery
+// reads limits and tariffs live and no rows are frozen here.
+//
+// Deliberately no `discovery` node: live discovery needs a user credential,
+// and enrolling would freeze one account's snapshot into models.json on every
+// credential-less regen. The provider stays runtime-only and
+// `dynamic-models-authoritative` prunes stale rows.
+provider "singularityapi" {
+	default-model "deepseek-v4-flash"
+	env "SINGULARITYAPI_API_KEY"
+	dynamic-models-authoritative #true
+
+	// Gateway-wide request shape, from the OpenAI-compatibility contract
+	// (docs.singularityapi.dev/get-started/open-ai-compatibility): chat
+	// completions accept `max_tokens` and `max_completion_tokens`
+	// interchangeably; the gateway normalizes to the model's canonical
+	// field. Unknown/reserved fields 400 instead of dropping, duplicate
+	// JSON keys and NaN/Infinity 400, context overflow 400s before spend.
+	// Rows the `models` rules below do not review inherit exactly this
+	// shape instead of the openai-completions default, because the roster
+	// is account-scoped and unreviewed model ids are expected.
+	max-tokens-field "max_tokens"
+
+	// Reviewed lane rules for the DeepSeek rows the gateway publishes,
+	// keyed as case-insensitive globs (`models` exact selectors compare the
+	// raw id verbatim while the compiler lowercases them, so exact rules
+	// can never match mixed-case wire ids). DeepSeek V4 Flash rows classify
+	// deepseek/flash by taxonomy but publish no reasoning metadata, so the
+	// upgrade rule owns the low/high/max ladder; reasoning arrives as
+	// top-level `reasoning_content` on messages and streamed deltas, and
+	// `none` forces it off. V4 Pro the same, with the Pro ladder.
+	models "*deepseek-v4-flash*" {
+		thinking-upgrade-neutral #true
+		max-tokens-field "max_tokens"
+		thinking-efforts "low" "high" "max"
+		reasoning-disable-mode "none-effort"
+		reasoning-content-field "reasoning_content"
+	}
+	models "*deepseek-v4-pro*" {
+		thinking-upgrade-neutral #true
+		max-tokens-field "max_tokens"
+		thinking-efforts "low" "high" "max"
+		reasoning-disable-mode "none-effort"
+		reasoning-content-field "reasoning_content"
+	}
+	// Responses-capable flagships (gpt-5.6-sol/terra/luna): five-tier
+	// low..max ladder with the wire-exact off switch, per the published
+	// pricing table. Reasoning effort is mandatory alongside tools on chat
+	// completions (omitting it with tools 400s upstream), matching the
+	// first-party GPT-5.6 contract.
+	models "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna" {
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		reasoning-disable-mode "none-effort"
+	}
+	// Gateway image models serve POST /v1/images/generations, never billed
+	// by tokens: FLUX per megapixel, GPT Image per image. Catalog rows for
+	// them carry the image transport so chat routing never selects them.
+	models "flux-1-schnell" "flux-pro-1.1" {
+		kind "image"
+	}
+	models "gpt-image-2" "gpt-image-1.5" {
+		kind "image"
+	}
+	// The gateway's DeepSeek rows reject tool_choice: the API defaults to
+	// auto when tools exist. Matches the first-party DeepSeek transport.
+	models "*deepseek*" {
+		supports-tool-choice #false
+	}
+}

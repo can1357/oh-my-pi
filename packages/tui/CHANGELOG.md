@@ -7,6 +7,12 @@
 - `Editor.setHistoryStorage()` accepts an optional `sourceKey` callback: when the key changes, the editor re-seeds its list from `storage` at the start of the next navigation, carrying its own canceled drafts over. Omitted, the list stays fixed for the editor's lifetime and locally remembered drafts are never reloaded ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - `Editor.addToHistory()` records under the context active at the call, so a command that switches sessions or moves the working directory belongs to the host recording it before dispatch ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 
+## [18.2.8] - 2026-09-21
+
+### Changed
+
+- Improved Bash tool background-task notices by providing completed output as a follow-up and discouraging unnecessary polling.
+
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes

@@ -294,7 +294,7 @@ describe("ChainJudge", () => {
 		const registry = makeRegistry([nativeModel], { "custom-judge": "test-key" });
 
 		vi.spyOn(globalThis, "fetch").mockImplementation(
-			asGlobalFetch(async (_url, init) => {
+			asGlobalFetch((_url, init) => {
 				const h = new Headers(init?.headers);
 				recordedHeaders.push({
 					auth: h.get("authorization") ?? "",

@@ -35,7 +35,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
 - Navigation and re-renders invalidate observed ids and refs. Re-observe, then act in the same cell. Use `pushState(url)` for SPA navigation without a document load.
 - Use `tab.select` for `<select>` elements; `tab.fill` does not support them.
 - Raw `page.setRequestInterception` and `page.on("request")` inside `tab.run` coexist with persistent `tab.route` handlers and are cleaned up after that run; `tab.route` persists until `tab.unroute` or tab close.
-- `browser.open({ allowed_domains: [...] })` allows exact hosts and `*.example.com` patterns (including the bare domain), aborting other navigation, subresource, fetch, and WebSocket requests.
+- `browser.open({ allowed_domains: […] })` allows exact hosts and `*.example.com` patterns (including the bare domain), aborting other navigation, subresource, fetch, and WebSocket requests.
 
 Application modes:
 
@@ -65,7 +65,6 @@ await tab.id(observed["elements"][0]["id"]).click()
 title = await tab.run("return await tab.title();", timeout=30)
 await tab.close()
 ```
-
 </examples>
 
 <critical>

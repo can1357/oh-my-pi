@@ -368,7 +368,7 @@ describe("provider catalog grammar", () => {
 		expect(() => compileKindApis('\t\timage "openai-images"\n\t\timage "openai-responses"')).toThrow(
 			/directive `image` has a malformed value/,
 		);
-		expect(() => compileKindApis('\t\tvideo "openai-images"')).toThrow(/unexpected node `video` under `kind-apis`/);
+		expect(() => compileKindApis('\t\tjudge "openai-images"')).toThrow(/unexpected node `judge` under `kind-apis`/);
 		expect(() => compileKindApis('\t\timage "openai-images" "openai-responses"')).toThrow(
 			/directive `image` has a malformed value/,
 		);
