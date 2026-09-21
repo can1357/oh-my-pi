@@ -523,6 +523,7 @@ export class InputController {
 				return;
 			}
 			if (this.ctx.loadingAnimation) {
+				this.ctx.viewSession.getHindsightSessionState()?.abortPendingRecall();
 				if (this.ctx.cancelPendingSubmission()) {
 					return;
 				}

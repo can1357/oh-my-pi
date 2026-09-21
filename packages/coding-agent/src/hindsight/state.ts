@@ -228,6 +228,8 @@ export class HindsightSessionState {
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
 	#recallGeneration = 0;
+	/** Abort controller for the in-flight auto-recall, if any. Aborted by Esc (#12668). */
+	#pendingRecallController: AbortController | undefined = undefined;
 	/** Cached `<mental_models>` block injected into developer instructions. */
 	mentalModelsSnippet?: string;
 	/** When the current bootstrap/boundary load settled; gates the first-turn race. */
@@ -303,6 +305,7 @@ export class HindsightSessionState {
 				types: this.config.recallTypes.length > 0 ? this.config.recallTypes : undefined,
 				tags: this.recallTags,
 				tagsMatch: this.recallTagsMatch,
+				signal,
 			});
 			if (signal?.aborted) return { context: null, ok: false };
 			const results = response.results ?? [];
@@ -442,18 +445,36 @@ export class HindsightSessionState {
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
-		const { context, ok } = await this.recallForContext(truncated);
-		if (!ok) return undefined;
+		// Esc (#12668) must release the admitted submission stuck awaiting recall.
+		// Track the in-flight recall's controller so abortPendingRecall() can cancel
+		// the HTTP fetch; the await below then rejects fast instead of running to
+		// the recall timeout, and commit() refuses to publish the stale result.
+		const controller = new AbortController();
+		this.#pendingRecallController = controller;
+		try {
+			const { context, ok } = await this.recallForContext(truncated, controller.signal);
+			if (!ok) return undefined;
 
-		return {
-			context: context ?? undefined,
-			commit: () => {
-				if (this.#recallGeneration !== generation) return false;
-				this.hasRecalledForFirstTurn = true;
-				if (context) this.lastRecallSnippet = context;
-				return true;
-			},
-		};
+			return {
+				context: context ?? undefined,
+				commit: () => {
+					if (this.#recallGeneration !== generation) return false;
+					if (controller.signal.aborted) return false;
+					this.hasRecalledForFirstTurn = true;
+					if (context) this.lastRecallSnippet = context;
+					return true;
+				},
+			};
+		} finally {
+			if (this.#pendingRecallController === controller) this.#pendingRecallController = undefined;
+		}
+	}
+
+	/** Cancel the in-flight auto-recall fetch, if any (#12668). Safe to call anytime. */
+	abortPendingRecall(reason?: string): void {
+		this.#recallGeneration++;
+		this.#pendingRecallController?.abort(reason ? new Error(reason) : undefined);
+		this.#pendingRecallController = undefined;
 	}
 
 	async recallForCompaction(messages: HindsightMessage[]): Promise<string | undefined> {
