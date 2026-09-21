@@ -896,7 +896,54 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(shortWindow.blockedUntilMs!).toBeLessThanOrEqual(Date.now() + 7_200_000);
 	});
 
-	test("rotateSessionCredential switches to sibling and soft-blocks on Anthropic oauth_not_allowed_for_organization", async () => {
+	test("organization denial rotates past a concurrently refreshed account after quota exhaustion", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+		await authStorage.set("anthropic", [
+			{ type: "oauth", access: "quota-access", refresh: "quota-refresh", expires: farExpiry(), orgId: "quota-org" },
+			{
+				type: "oauth",
+				access: "denied-access",
+				refresh: "denied-refresh",
+				expires: farExpiry(),
+				orgId: "denied-org",
+			},
+			{
+				type: "oauth",
+				access: "healthy-access",
+				refresh: "healthy-refresh",
+				expires: farExpiry(),
+				orgId: "healthy-org",
+			},
+		]);
+
+		const sessionId = "sess-anthropic-policy-refresh";
+		const quotaKey = await authStorage.getApiKey("anthropic", sessionId);
+		expect(quotaKey).toBe("quota-access");
+		await authStorage.rotateSessionCredential("anthropic", sessionId, {
+			error: usageLimitError(),
+			apiKey: quotaKey,
+		});
+		const deniedKey = await authStorage.getApiKey("anthropic", sessionId);
+		expect(deniedKey).toBe("denied-access");
+		const deniedRow = store
+			.listAuthCredentials("anthropic")
+			.find(row => row.credential.type === "oauth" && row.credential.access === deniedKey);
+		if (deniedRow?.credential.type !== "oauth") throw new Error("expected denied OAuth credential");
+		store.updateAuthCredential(deniedRow.id, { ...deniedRow.credential, access: "denied-refreshed" });
+		await authStorage.reload();
+
+		const switched = await authStorage.rotateSessionCredential("anthropic", sessionId, {
+			error: new ProviderHttpError("OAuth authentication is currently not allowed for this organization.", 403, {
+				code: "oauth_not_allowed_for_organization",
+			}),
+			apiKey: deniedKey,
+		});
+
+		expect(switched).toBe(true);
+		expect(await authStorage.getApiKey("anthropic", sessionId)).toBe("healthy-access");
+	});
+
+	test("organization policy denials soft-block a matching Anthropic bearer", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 		await authStorage.set("anthropic", [
 			{ type: "oauth", access: "token-org-1", refresh: "ref-1", expires: farExpiry(), orgId: "org-1" },
