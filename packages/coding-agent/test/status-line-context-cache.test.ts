@@ -444,6 +444,31 @@ describe("StatusLineComponent context breakdown", () => {
 		expect(plain).toContain("200K");
 	});
 
+	it("keeps session_tokens on the line when embedded context absorbs context_pct", () => {
+		// The embedded gauge replaces only the segments it renders itself
+		// (`removeContextSegments`). `session_tokens` reads the same breakdown but is
+		// not one of them — listing it there would delete the absolute token count
+		// for every embedded-context user while the gauge still shows only a percent.
+		const { session } = makeSession({
+			messages: [userMessage("hi"), assistantMessage("done")],
+			usage: { tokens: 80_000, contextWindow: 1_000_000, percent: 8 },
+		});
+		const comp = statusLines.track(new StatusLineComponent(session, statusLineHost));
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi", "context_pct"],
+			rightSegments: ["session_tokens"],
+			separator: "powerline-thin",
+			sessionAccent: false,
+			contextLine: "embedded",
+		});
+
+		const plain = comp.getTopBorder(120).content.replaceAll(/\x1b\[[0-9;]*m/g, "");
+		expect(plain).toContain("80K");
+		expect(plain).toContain("8%");
+		expect(plain).not.toContain("8.0%/1M");
+	});
+
 	it("preserves a status segment when embedded context labels cannot fit", () => {
 		const { session } = makeSession({
 			messages: [userMessage("hi"), assistantMessage("done")],

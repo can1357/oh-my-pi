@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the opt-in `session_tokens` status-line segment, showing the live context token count so it drops after `/handoff` or compaction, unlike the cumulative `token_total` ([#11643](https://github.com/can1357/oh-my-pi/issues/11643)).
+
 ## [18.2.8] - 2026-09-21
 
 ### Added

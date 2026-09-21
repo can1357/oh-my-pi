@@ -544,6 +544,28 @@ const tokenTotalSegment: StatusLineSegment = {
 	},
 };
 
+/**
+ * Live context load in absolute tokens, formatted like {@link tokenTotalSegment}
+ * (`140K`). Reads the compaction-aware `ctx.contextTokens` — the same breakdown
+ * `context_pct` renders — so the number drops after `/handoff` or auto-compaction
+ * instead of climbing forever like the cumulative `token_total` meter (#11643).
+ * Colored as context rather than spend so both segments stay distinguishable
+ * when configured side by side.
+ */
+const sessionTokensSegment: StatusLineSegment = {
+	id: "session_tokens",
+	render(ctx) {
+		const tokens = ctx.contextTokens;
+		if (!tokens) return { content: "", visible: false };
+
+		const content = formatMetric({
+			leading: theme.icon.tokens || undefined,
+			value: statusValue(ctx, formatNumber(tokens)),
+		});
+		return { content: theme.fg("statusLineContext", content ?? ""), visible: true };
+	},
+};
+
 const tokenRateSegment: StatusLineSegment = {
 	id: "token_rate",
 	render(ctx) {
@@ -905,6 +927,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	token_in: tokenInSegment,
 	token_out: tokenOutSegment,
 	token_total: tokenTotalSegment,
+	session_tokens: sessionTokensSegment,
 	token_rate: tokenRateSegment,
 	cost: costSegment,
 	context_pct: contextPctSegment,
