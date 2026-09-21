@@ -3,6 +3,28 @@
 provider "amazon-bedrock" {
 	default-model "us.anthropic.claude-opus-4-8"
 
+	// AWS publishes Kimi K3 only as the global/us cross-region inference
+	// profiles (no in-region or bare sku), served over the OpenAI Chat
+	// Completions endpoint. SigV4 signing is provided by the transport via
+	// the provider's native AWS auth chain.
+	// precedence="seed": generate-models dedup places upstream rows ahead of
+	// seeds under the default upstream precedence, which would let a same-id
+	// models.dev Converse row shadow these reviewed Chat rows.
+	seed api="openai-completions" base-url="https://bedrock-runtime.{region}.amazonaws.com/openai/v1" bundle="always" precedence="seed" {
+		model "global.moonshotai.kimi-k3" name="Kimi K3 (Global)" {
+			reasoning #true
+			input "text" "image"
+			cost input=3 output=15 cache-read=0.3 cache-write=3.75
+			limits context=1000000 max-tokens=128000
+		}
+		model "us.moonshotai.kimi-k3" name="Kimi K3 (US)" {
+			reasoning #true
+			input "text" "image"
+			cost input=3.3 output=16.5 cache-read=0.33 cache-write=4.125
+			limits context=1000000 max-tokens=128000
+		}
+	}
+
 	// The Converse assembler positions content blocks by wire index
 	// (`amazon-bedrock.ts`), so a block can land above text already rendered.
 	stream-revision "possible"
@@ -35,6 +57,28 @@ provider "amazon-bedrock" {
 	class "minimax" {
 		family "m2" {
 			thinking-mode "budget"
+		}
+	}
+	class "kimi" {
+		family "k3" {
+			// K3 is always-thinking on the Chat route and reasons for long
+			// stretches without emitting bytes; mirror the Moonshot-native
+			// hosts' stream-idle ceiling.
+			stream-idle-timeout-ms 300000
+			// The live OpenAI-route output cap (128000) is below the seeded
+			// ceiling, so clamp oversize requests instead of 400ing.
+			clamp-output-to-model-max #true
+			// Root verified the live AWS Chat route accepts
+			// max_completion_tokens=128000 with reasoning_effort=max.
+			max-tokens-field "max_completion_tokens"
+			// Marks always-thinking K3: native reasoning stays enabled when a
+			// tool is forced (root verified tool_choice="required" round-trips
+			// with reasoning_effort=max), and a named forced tool choice is
+			// downgraded to "required" instead of pinning a function.
+			native-kimi-k3-reasoning #true
+			// AWS requires genuine replayed reasoning_content; never fall back
+			// to a synthetic "." placeholder on tool-call continuation.
+			allows-synthetic-reasoning-content-for-tool-calls #false
 		}
 	}
 	class "unknown" {

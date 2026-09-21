@@ -17,4 +17,10 @@ class "kimi" {
     override id="kilo-kimi-k2-thinking-product" provider="kilo" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
     override id="openrouter-kimi-k2-thinking-product" provider="openrouter" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
     override id="vercel-kimi-k2-thinking-product" provider="vercel-ai-gateway" model="kimi-k2-thinking" logical="moonshotai/kimi-k2-thinking" class="kimi" rationale="Oracle exposes this independently priced product rather than an effort route" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    // Bedrock publishes K3 only as the global/us cross-region inference profiles;
+    // the geo+vendor dotted prefix defeats both the namespace matcher (which
+    // splits the id on `/`) and the bounded kimi matcher (bare starts with
+    // `global.`/`us.`), so exact pins are required to reach family k3.
+    override id="bedrock-kimi-k3-global" provider="amazon-bedrock" model="global.moonshotai.kimi-k3" logical="moonshotai/kimi-k3" class="kimi" family="k3" rationale="AWS publishes K3 only as the global cross-region inference profile; the dotted prefix defeats the namespace/bounded kimi matchers" provenance="https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-moonshot-ai-kimi-k3.html"
+    override id="bedrock-kimi-k3-us" provider="amazon-bedrock" model="us.moonshotai.kimi-k3" logical="moonshotai/kimi-k3" class="kimi" family="k3" rationale="AWS publishes K3 only as the US cross-region inference profile; the dotted prefix defeats the namespace/bounded kimi matchers" provenance="https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-moonshot-ai-kimi-k3.html"
 }
