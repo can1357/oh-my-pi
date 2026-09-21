@@ -13,6 +13,9 @@ import {
 	type TreeNode,
 } from "./types";
 
+/** Aggregate dashboard tab for every MCP server, regardless of config source. */
+export const MCP_SERVERS_TAB_ID = "__mcp_servers__";
+
 export function resolveExtensionState(
 	source: { provider: string; level: string },
 	isDisabled: boolean,
@@ -182,8 +185,10 @@ export function buildProviderTabs(extensions: Extension[], providers: readonly E
 	const tabs: ProviderTab[] = [];
 
 	// Count extensions per provider
+	let mcpCount = 0;
 	const countByProvider = new Map<string, number>();
 	for (const ext of extensions) {
+		if (ext.kind === "mcp") mcpCount++;
 		const count = countByProvider.get(ext.source.provider) ?? 0;
 		countByProvider.set(ext.source.provider, count + 1);
 	}
@@ -195,6 +200,17 @@ export function buildProviderTabs(extensions: Extension[], providers: readonly E
 		enabled: true,
 		count: extensions.length,
 	});
+
+	// Cross-source MCP inventory. Imported Claude/Codex servers otherwise live
+	// under their provider tabs, while the "MCP Config" provider can be empty.
+	if (mcpCount > 0) {
+		tabs.push({
+			id: MCP_SERVERS_TAB_ID,
+			label: "MCP Servers",
+			enabled: true,
+			count: mcpCount,
+		});
+	}
 
 	// Provider tabs (skip native)
 	for (const provider of providers) {
@@ -208,10 +224,13 @@ export function buildProviderTabs(extensions: Extension[], providers: readonly E
 		});
 	}
 
-	// Sort: ALL first, then enabled by count, then disabled by count, then empty
+	// Sort: ALL first, cross-source MCP second, then enabled by count,
+	// disabled by count, and empty providers last.
 	tabs.sort((a, b) => {
 		if (a.id === "all") return -1;
 		if (b.id === "all") return 1;
+		if (a.id === MCP_SERVERS_TAB_ID) return -1;
+		if (b.id === MCP_SERVERS_TAB_ID) return 1;
 
 		// Categorize: 0 = enabled with content, 1 = disabled, 2 = empty+enabled
 		const category = (t: ProviderTab) => {
@@ -237,6 +256,9 @@ export function buildProviderTabs(extensions: Extension[], providers: readonly E
 export function filterByProvider(extensions: Extension[], providerId: string): Extension[] {
 	if (providerId === "all") {
 		return extensions;
+	}
+	if (providerId === MCP_SERVERS_TAB_ID) {
+		return extensions.filter(ext => ext.kind === "mcp");
 	}
 	return extensions.filter(ext => ext.source.provider === providerId);
 }

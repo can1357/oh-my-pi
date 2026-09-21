@@ -2,12 +2,12 @@
  * ExtensionDashboard - Fullscreen alternate-screen control center for extensions.
  *
  * Chrome mirrors the `/settings` overlay: a titled rounded box, a shared
- * {@link TabBar} for provider selection, and a two-column body (inventory list |
+ * {@link TabBar} for provider and aggregate views, and a two-column body (inventory list |
  * inspector). Both panes are mouse-aware — wheel scrolls, hover highlights, and
  * clicks select/activate — routed from a single SGR-mouse handler.
  *
  * Navigation:
- * - Tab/Shift+Tab or ←/→: switch provider tab
+ * - Tab/Shift+Tab or ←/→: switch view tab
  * - Up/Down or wheel: move list selection
  * - Space/Enter or click: toggle selected item (or provider master switch)
  * - Wheel over the inspector, or PageUp/PageDown when the inspector overflows: scroll the detail pane
@@ -41,6 +41,7 @@ import {
 	applyFilter,
 	createInitialState,
 	filterByProvider,
+	MCP_SERVERS_TAB_ID,
 	refreshState,
 } from "./state-manager";
 import {
@@ -191,14 +192,14 @@ export class ExtensionDashboard implements Component {
 
 		this.#tabBar = new TabBar("", buildTabBarTabs(this.#state.tabs), getTabBarTheme());
 		this.#tabBar.showHint = false;
-		this.#tabBar.onTabChange = tab => this.#selectProviderById(tab.id);
+		this.#tabBar.onTabChange = tab => this.#selectTabById(tab.id);
 		const activeId = this.#state.tabs[this.#state.activeTabIndex]?.id;
 		if (activeId) this.#tabBar.setActiveById(activeId);
 	}
 
 	#getActiveProviderId(): string | null {
 		const tab = this.#state.tabs[this.#state.activeTabIndex];
-		return tab && tab.id !== "all" ? tab.id : null;
+		return tab && tab.id !== "all" && tab.id !== MCP_SERVERS_TAB_ID ? tab.id : null;
 	}
 
 	/** Live terminal height so the dashboard tracks resize while open. */
@@ -304,8 +305,8 @@ export class ExtensionDashboard implements Component {
 		}
 	}
 
-	/** Switch to the provider tab with `id`, re-filtering the list around it. */
-	#selectProviderById(id: string): void {
+	/** Switch to the tab with `id`, re-filtering the list around it. */
+	#selectTabById(id: string): void {
 		const index = this.#state.tabs.findIndex(t => t.id === id);
 		if (index < 0) return;
 		this.#state.activeTabIndex = index;
