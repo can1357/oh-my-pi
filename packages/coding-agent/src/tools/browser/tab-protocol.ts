@@ -1,4 +1,5 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { CursorMode } from "./cursor";
 
 export type Transferable = Bun.Transferable;
 
@@ -47,7 +48,6 @@ export type WorkerInitPayload =
 			mode: "headless";
 			browserWSEndpoint: string;
 			safeDir: string;
-			/** Keep the page tied to an OMP-owned worker without pinning a visible window's layout viewport. */
 			emulateViewport?: boolean;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
@@ -61,6 +61,8 @@ export type WorkerInitPayload =
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
 			ignoreHttpsErrors?: boolean;
+			/** Resolved cursor mode; auto policy is resolved before the worker starts. */
+			cursorMode: CursorMode;
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 			timeoutMs: number;
@@ -81,25 +83,21 @@ export type WorkerInitPayload =
 			userAgent?: string;
 			/** Ignore invalid HTTPS certificates for this page. */
 			ignoreHttpsErrors?: boolean;
+			/** Resolved cursor mode; auto policy is resolved before the worker starts. */
+			cursorMode: CursorMode;
 			url?: string;
 			waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 			timeoutMs: number;
-			/**
-			 * Post-timeout recycle: before adopting the page, dismiss any open JS dialog and
-			 * stop a pending navigation so a blocked target cannot stall worker init (which
-			 * previously force-killed the tab). Never set for first-time Electron attach.
-			 */
+			/** Post-timeout recycle before adopting a blocked target. */
 			recover?: boolean;
-			/** Restore focus emulation when recycling an OMP-owned tab, never a borrowed user tab. */
+			/** Restore focus emulation when recycling an OMP-owned tab. */
 			emulateFocus?: boolean;
-			/**
-			 * Whether the worker may raise this tab before capturing a screenshot. Unset
-			 * behaves as `true`; the supervisor clears it for browsers we did not launch.
-			 */
+			/** Preserve OMP ownership when an existing owned target is reattached after worker restart. */
+			ownsPage?: boolean;
+			/** Whether the worker may raise this tab before capturing a screenshot. */
 			activateForScreenshot?: boolean;
 	  };
 
-/** Result of one host tool requested by browser-run JavaScript. */
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
 export type WorkerInbound =
@@ -107,6 +105,7 @@ export type WorkerInbound =
 	| { type: "run"; id: string; name: string; code: string; timeoutMs: number; session: SessionSnapshot }
 	| { type: "abort"; id: string; expectedCleanup?: boolean }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
+	| { type: "detach" }
 	| { type: "close" };
 
 export interface ReadyInfo {
@@ -133,29 +132,16 @@ export interface RunErrorPayload {
 }
 
 export type WorkerOutbound =
-	| {
-			/**
-			 * Puppeteer loaded, browser connected. Sent before page acquisition so the supervisor's cold-start budget
-			 * bounds only the realm setup (cold import + connect); page creation and the first navigation run under the
-			 * ready wait.
-			 */
-			type: "setup";
-	  }
-	| {
-			/**
-			 * The headless page was created (before the potentially slow post-creation CDP work such as stealth and
-			 * viewport). Lets the supervisor close exactly this target if it kills the worker during init — a killed
-			 * worker can't clean up after itself.
-			 */
-			type: "page-created";
-			targetId: string;
-	  }
+	| { type: "setup" }
+	| { type: "page-created"; targetId: string }
+	| { type: "cursor-preload-registered"; identifier: string }
 	| { type: "ready"; info: ReadyInfo }
 	| { type: "init-failed"; error: RunErrorPayload }
 	| { type: "result"; id: string; ok: true; payload: RunResultOk }
 	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "log"; level: "debug" | "warn" | "error"; msg: string; meta?: Record<string, unknown> }
+	| { type: "detached" }
 	| { type: "closed" };
 
 export interface Transport {

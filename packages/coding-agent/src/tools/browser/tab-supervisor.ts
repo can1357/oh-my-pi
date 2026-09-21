@@ -1,3 +1,4 @@
+import { cleanupCursorPage, resolveCursorMode, type CursorMode, type CursorPolicy } from "./cursor";
 import {
 	getProjectDir,
 	getPuppeteerDir,
@@ -109,6 +110,10 @@ export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle>
 	backend: "worker";
 	worker: WorkerHandle;
 	activateForScreenshot: boolean;
+	cursorMode: CursorMode;
+	cursorPreloadIdentifier?: string;
+	/** The exact target is OMP-owned and must close even when a restarted worker attaches to it. */
+	ownsPage: boolean;
 }
 
 export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
@@ -147,6 +152,7 @@ export interface AcquireTabOptions {
 	userAgent?: string;
 	/** Ignore invalid HTTPS certificates for this page. */
 	ignoreHttpsErrors?: boolean;
+	cursor?: CursorPolicy;
 	cmuxSurface?: string;
 	/**
 	 * Session id of the acquirer. Recorded on the tab when created (never on
@@ -186,6 +192,7 @@ const tabs = new Map<string, TabSession>();
 // recorded target instead. A shared browser's other targets must never be
 // touched.
 const workerPageTargets = new WeakMap<WorkerHandle, string>();
+const workerCursorPreloads = new WeakMap<WorkerHandle, string>();
 // Per-name acquisition chain: serializes concurrent `acquireTab` calls for the
 // same tab name so the existence check and `tabs.set` (separated by several
 // awaits) cannot interleave and leak a worker + browser refCount.
@@ -208,6 +215,7 @@ const READY_BUDGET_FLOOR_MS = 500;
 // vanished instead of a bare "not alive". Cleared when the name is opened again.
 const killedTabs = new Map<string, string>();
 const DEFAULT_TAB_CLOSE_TIMEOUT_MS = 5_000;
+const CURSOR_CLEANUP_TIMEOUT_MS = 250;
 class RecoverableWorkerError extends ToolError {}
 const REPORTED_INIT_FAILURE = Symbol("reported-init-failure");
 
@@ -359,6 +367,17 @@ async function acquireTabImpl(
 						`Tab ${JSON.stringify(name)} is frozen and could not be resumed. Close and reopen it.`,
 					);
 				}
+				if (existing.backend === "worker") {
+					const requestedCursorMode = resolveCursorMode(opts.cursor, browser.kind.kind === "relay");
+					if (existing.cursorMode !== requestedCursorMode) {
+						try {
+							await restartWorkerTab(existing, opts.timeoutMs + GRACE_MS, requestedCursorMode, false);
+						} catch (error) {
+							await forceKillTab(name, `Failed to reconfigure cursor mode for tab ${JSON.stringify(name)}`);
+							throw error;
+						}
+					}
+				}
 				// The creator may opt out later: an explicit `persist` on
 				// reuse by the owning session updates the tab (omitted
 				// leaves it). Reuse by any other session never changes it.
@@ -435,6 +454,7 @@ async function acquireTabImpl(
 		// `BuildMessage`-class failures arrive asynchronously via the worker's `error` event,
 		// after `spawnTabWorker`'s synchronous try/catch has already returned. Fall back to
 		// the inline worker here so module-resolution failures don't poison every tab open.
+		await cleanupInitializingWorkerCursor(browser, worker, initPayload);
 		await worker.terminate().catch(() => undefined);
 		// A headless worker that died mid-init may have already created its page in the
 		// shared browser — a killed worker can't close it, so close the target the worker
@@ -458,6 +478,7 @@ async function acquireTabImpl(
 		try {
 			info = await initializeTabWorker(worker, initPayload, initBudgetMs, startedAt);
 		} catch (inlineError) {
+			await cleanupInitializingWorkerCursor(browser, worker, initPayload);
 			await worker.terminate().catch(() => undefined);
 			closeAbandonedWorkerPage(browser, worker);
 			if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false });
@@ -477,6 +498,7 @@ async function acquireTabImpl(
 	// the registry; a browser still leased/held elsewhere (refCount > 0) is left
 	// for its owner to release.
 	if (opts.signal?.aborted) {
+		await cleanupCursorTarget(browser, info.targetId, workerCursorPreloads.get(worker));
 		await worker.terminate().catch(() => undefined);
 		closeAbandonedWorkerPage(browser, worker);
 		if (tempHold || browser.refCount === 0) await releaseBrowser(browser, { kill: false }).catch(() => undefined);
@@ -498,6 +520,9 @@ async function acquireTabImpl(
 		allowedDomains: opts.allowedDomains ? [...opts.allowedDomains] : undefined,
 		kindTag: browser.kind.kind,
 		activateForScreenshot: initPayload.mode === "headless" || initPayload.activateForScreenshot !== false,
+		cursorMode: initPayload.cursorMode,
+		cursorPreloadIdentifier: workerCursorPreloads.get(worker),
+		ownsPage: initPayload.mode === "headless",
 		ownerSessionId: opts.ownerSessionId,
 		persist: opts.persist ?? false,
 		lastActivityAt: Date.now(),
@@ -745,7 +770,7 @@ async function runInTabWithSnapshot(
 							: "Browser request interception cleanup failed; tab killed";
 						await forceKillTab(name, reason);
 					} else {
-						await recycleTimedOutWorkerTab(tab, opts.timeoutMs + GRACE_MS);
+						await restartWorkerTab(tab, opts.timeoutMs + GRACE_MS, tab.cursorMode, true);
 					}
 				} catch (recycleError) {
 					logger.warn("Failed to recycle browser tab worker; killing tab", {
@@ -891,8 +916,11 @@ async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOp
 			forced = true;
 		}
 	}
+	if (forced && tab.backend === "worker") {
+		await cleanupCursorTarget(tab.browser, tab.targetId, tab.cursorPreloadIdentifier);
+	}
 	await tab.worker.terminate().catch(() => undefined);
-	if (forced && tab.kindTag === "headless") {
+	if (forced && tab.ownsPage) {
 		try {
 			await waitForTabCleanup(
 				tab,
@@ -1281,6 +1309,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			downloadsPath: opts.downloadsPath,
 			userAgent: opts.userAgent,
 			ignoreHttpsErrors: opts.ignoreHttpsErrors,
+			cursorMode: resolveCursorMode(opts.cursor, false),
 			url: opts.url,
 			waitUntil: opts.waitUntil,
 			timeoutMs: opts.timeoutMs,
@@ -1307,6 +1336,7 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		downloadsPath: opts.downloadsPath,
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
+		cursorMode: resolveCursorMode(opts.cursor, browser.kind.kind === "relay"),
 		url: opts.url,
 		waitUntil: opts.waitUntil,
 		timeoutMs: opts.timeoutMs,
@@ -1398,11 +1428,20 @@ function toErrorPayload(error: unknown): RunErrorPayload {
 	return { name: "Error", message: String(error), isAbort: false, isToolError: false };
 }
 
-async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number): Promise<void> {
-	// Same deadline carry-over as acquireTabImpl: the inline-fallback retry
-	// must not restart the recycle's init budget.
+async function restartWorkerTab(
+	tab: WorkerTabSession,
+	timeoutMs: number,
+	cursorMode: CursorMode,
+	recover: boolean,
+): Promise<void> {
+	// The old worker must not retain a preload on the exact target inherited by
+	// its replacement. Cleanup is best effort, while target identity is fixed.
+	await cleanupCursorTarget(tab.browser, tab.targetId, tab.cursorPreloadIdentifier);
+	tab.cursorPreloadIdentifier = undefined;
+	tab.state = "dead";
 	const startedAt = performance.now();
 	const oldWorker = tab.worker;
+	await detachWorker(oldWorker).catch(() => undefined);
 	await oldWorker.terminate().catch(() => undefined);
 	const browserWSEndpoint = tab.browser.browser.wsEndpoint();
 	if (!browserWSEndpoint) throw new ToolError("Browser websocket endpoint is unavailable");
@@ -1410,12 +1449,14 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		mode: "attach",
 		browserWSEndpoint,
 		safeDir: getPuppeteerDir(),
+		cursorMode,
 		targetId: tab.targetId,
 		dialogs: tab.dialogPolicy,
 		allowedDomains: tab.allowedDomains,
-		// Unblock a wedged page (open JS dialog, hung navigation) before adopting it —
-		// otherwise init stalls, times out, and the tab gets force-killed.
-		recover: true,
+		// Timeout recovery additionally unblocks dialogs and hung navigation;
+		// policy-only restarts preserve the page exactly as it is.
+		recover,
+		ownsPage: tab.ownsPage,
 		emulateFocus: tab.kindTag === "headless",
 		timeoutMs,
 		activateForScreenshot: tab.activateForScreenshot,
@@ -1425,9 +1466,12 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		const info = await initializeTabWorker(worker, payload, timeoutMs, startedAt);
 		tab.worker = worker;
 		tab.info = info;
+		tab.cursorMode = cursorMode;
+		tab.cursorPreloadIdentifier = workerCursorPreloads.get(worker);
 		tab.state = "alive";
 		worker.onMessage(msg => handleTabMessage(tab, msg));
 	} catch (error) {
+		await cleanupInitializingWorkerCursor(tab.browser, worker, payload);
 		await worker.terminate().catch(() => undefined);
 		// The recycle's budget is exhausted: the run caller already timed out, so a
 		// retried init can't beat its deadline — fail fast and let the caller
@@ -1440,12 +1484,15 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 			const info = await initializeTabWorker(worker, payload, timeoutMs, startedAt);
 			tab.worker = worker;
 			tab.info = info;
+			tab.cursorMode = cursorMode;
+			tab.cursorPreloadIdentifier = workerCursorPreloads.get(worker);
 			tab.state = "alive";
 			worker.onMessage(msg => handleTabMessage(tab, msg));
 		} catch (inlineError) {
+			await cleanupInitializingWorkerCursor(tab.browser, worker, payload);
 			await worker.terminate().catch(() => undefined);
 			const finalError = new ToolError(
-				`Failed to recycle timed-out browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
+				`Failed to restart browser tab worker (inline fallback also failed): ${inlineError instanceof Error ? inlineError.message : String(inlineError)}`,
 			);
 			Object.defineProperty(finalError, "cause", { value: error, configurable: true });
 			throw finalError;
@@ -1466,8 +1513,9 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
 		tabs.delete(name);
 		return;
 	}
+	await cleanupCursorTarget(tab.browser, tab.targetId, tab.cursorPreloadIdentifier);
 	await tab.worker.terminate().catch(() => undefined);
-	if (tab.kindTag === "headless") await closeOrphanTarget(tab);
+	if (tab.ownsPage) await closeOrphanTarget(tab);
 	await releaseBrowser(tab.browser, { kill: false });
 	tabs.delete(name);
 	const scope = sharedScopeOf(tab.browser);
@@ -1480,6 +1528,40 @@ async function forceKillTab(name: string, reason: string): Promise<void> {
  * wedged during initialization can make Puppeteer's page close wait for the
  * protocol timeout, retaining the cleanup hold for tens of seconds.
  */
+async function cleanupCursorTarget(
+	browser: PuppeteerBrowserHandle,
+	targetId: string,
+	registrationIdentifier?: string,
+): Promise<void> {
+	if (!registrationIdentifier) return;
+	try {
+		await withTimeout(
+			(async () => {
+				for (const target of browser.browser.targets()) {
+					if ((await targetIdForTarget(target).catch(() => "")) !== targetId) continue;
+					const page = await target.page();
+					if (page) await cleanupCursorPage(page, registrationIdentifier);
+					return;
+				}
+			})(),
+			CURSOR_CLEANUP_TIMEOUT_MS,
+			"Timed out cleaning up native cursor",
+		);
+	} catch {
+		// Best effort only: worker teardown must never be blocked by cleanup.
+	}
+}
+
+async function cleanupInitializingWorkerCursor(
+	browser: PuppeteerBrowserHandle,
+	worker: WorkerHandle,
+	payload: WorkerInitPayload,
+): Promise<void> {
+	const targetId = payload.mode === "attach" ? payload.targetId : workerPageTargets.get(worker);
+	if (!targetId) return;
+	await cleanupCursorTarget(browser, targetId, workerCursorPreloads.get(worker));
+}
+
 async function closeTargetById(browser: PuppeteerBrowserHandle, targetId: string): Promise<void> {
 	await closeCdpTarget(browser.browser, targetId);
 }
@@ -1535,6 +1617,19 @@ async function waitForClosed(tab: WorkerTabSession): Promise<void> {
 	});
 	try {
 		await raceWithTimeout(promise, GRACE_MS, "Timed out closing browser tab worker");
+	} finally {
+		unsubscribe();
+	}
+}
+
+async function detachWorker(worker: WorkerHandle): Promise<void> {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const unsubscribe = worker.onMessage(msg => {
+		if (msg.type === "detached") resolve();
+	});
+	try {
+		worker.send({ type: "detach" });
+		await raceWithTimeout(promise, GRACE_MS, "Timed out detaching browser tab worker");
 	} finally {
 		unsubscribe();
 	}
@@ -1734,6 +1829,8 @@ async function initializeTabWorker(
 			// post-creation CDP work: if this init is killed before ready,
 			// the supervisor closes exactly this target.
 			workerPageTargets.set(worker, msg.targetId);
+		} else if (msg.type === "cursor-preload-registered") {
+			workerCursorPreloads.set(worker, msg.identifier);
 		} else if (msg.type === "setup") {
 			setupDone = true;
 			setup.resolve();

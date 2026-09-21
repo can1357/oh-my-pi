@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added configurable cursor feedback for headed relay clicks without changing driver-owned target selection or click dispatch ([#12702](https://github.com/can1357/oh-my-pi/pull/12702) by [@srobroek](https://github.com/srobroek)).
+
 ## [18.2.8] - 2026-09-21
 
 ### Added

@@ -68,6 +68,7 @@ const initPayload = {
 	mode: "headless" as const,
 	browserWSEndpoint: "ws://127.0.0.1/devtools/browser/test",
 	safeDir: "/tmp/omp-puppeteer",
+	cursorMode: "off" as const,
 	timeoutMs: 1_000,
 };
 
@@ -361,6 +362,109 @@ describe("OMP-owned browser input", () => {
 		},
 		45_000,
 	);
+});
+
+describe.skipIf(!CHROMIUM_AVAILABLE)("native cursor worker lifecycle", () => {
+	it("installs the enabled preload before the initially requested navigation", async () => {
+		const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+		const name = `cursor-preload-${process.pid}-${Math.random().toString(36).slice(2)}`;
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			settings: { get: () => undefined },
+			getSessionFile: () => null,
+		} as unknown as ToolSession;
+		try {
+			const body =
+				"<script>globalThis.__cursorPresentAtFirstScript = Boolean(globalThis.__ompNativeCursor)</script>";
+			await acquireTab(name, browser, {
+				url: `data:text/html,${encodeURIComponent(body)}`,
+				cursor: "instant",
+				timeoutMs: 30_000,
+			});
+			const result = await runInTab(name, {
+				code: `return await tab.evaluate(() => ({
+					atFirstScript: globalThis.__cursorPresentAtFirstScript,
+					presentNow: Boolean(globalThis.__ompNativeCursor),
+				}));`,
+				timeoutMs: 10_000,
+				session,
+			});
+			expect(result.returnValue).toEqual({ atFirstScript: true, presentNow: true });
+		} finally {
+			await releaseTab(name, { kill: true });
+			if (browser.browser.connected) await releaseBrowser(browser, { kill: true });
+		}
+	}, 45_000);
+
+	it("changes cursor policy without changing the managed target or page state", async () => {
+		const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+		if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
+		const name = `cursor-reconfigure-${process.pid}-${Math.random().toString(36).slice(2)}`;
+		const afterUrl = `data:text/html,${encodeURIComponent("<main>after cleanup</main>")}`;
+		let released = false;
+		const session = {
+			cwd: process.cwd(),
+			hasUI: false,
+			settings: { get: () => undefined },
+			getSessionFile: () => null,
+		} as unknown as ToolSession;
+		try {
+			const initial = await acquireTab(name, browser, {
+				url: `data:text/html,${encodeURIComponent("<title>cursor state</title><main>kept</main>")}`,
+				cursor: "off",
+				timeoutMs: 30_000,
+			});
+			await runInTab(name, {
+				code: 'await tab.evaluate("globalThis.__preservedCursorState = { value: 37 }")',
+				timeoutMs: 10_000,
+				session,
+			});
+
+			const enabled = await acquireTab(name, browser, { cursor: "instant", timeoutMs: 30_000 });
+			expect(enabled.created).toBe(false);
+			expect(enabled.tab.targetId).toBe(initial.tab.targetId);
+			const enabledState = await runInTab(name, {
+				code: `return await tab.evaluate(() => ({
+					value: globalThis.__preservedCursorState?.value,
+					cursorPresent: Boolean(globalThis.__ompNativeCursor),
+				}));`,
+				timeoutMs: 10_000,
+				session,
+			});
+			expect(enabledState.returnValue).toEqual({ value: 37, cursorPresent: true });
+
+			const disabled = await acquireTab(name, browser, { cursor: "off", timeoutMs: 30_000 });
+			expect(disabled.created).toBe(false);
+			expect(disabled.tab.targetId).toBe(initial.tab.targetId);
+			const disabledState = await runInTab(name, {
+				code: `
+					const beforeNavigation = await tab.evaluate(() => ({
+						value: globalThis.__preservedCursorState?.value,
+						cursorPresent: Boolean(globalThis.__ompNativeCursor),
+					}));
+					await tab.goto(${JSON.stringify(afterUrl)});
+					const afterNavigation = await tab.evaluate(() => Boolean(globalThis.__ompNativeCursor));
+					return { beforeNavigation, afterNavigation };
+				`,
+				timeoutMs: 10_000,
+				session,
+			});
+			expect(disabledState.returnValue).toEqual({
+				beforeNavigation: { value: 37, cursorPresent: false },
+				afterNavigation: false,
+			});
+			const managedPage = (await browser.browser.pages()).find(page => page.url() === afterUrl);
+			if (!managedPage) throw new Error("Expected the reconfigured managed page");
+			expect(await releaseTab(name, { kill: false })).toBe(true);
+			released = true;
+			expect(managedPage.isClosed()).toBe(true);
+		} finally {
+			if (!released) await releaseTab(name, { kill: true });
+			if (browser.browser.connected) await releaseBrowser(browser, { kill: true });
+		}
+	}, 60_000);
 });
 
 describe("visible OMP-owned browser tabs", () => {

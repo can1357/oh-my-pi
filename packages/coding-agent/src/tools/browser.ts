@@ -383,6 +383,7 @@ async function openBrowser(
 					downloadsPath,
 					userAgent: params.user_agent,
 					ignoreHttpsErrors: params.ignore_https_errors,
+					cursor: session.settings.get("browser.cursor"),
 					signal: openSignal,
 					ownerSessionId: session.getSessionId?.() ?? undefined,
 					// Omitted stays undefined: creation defaults it to false

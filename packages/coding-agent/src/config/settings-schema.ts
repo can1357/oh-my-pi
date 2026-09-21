@@ -4526,6 +4526,24 @@ export const SETTINGS_SCHEMA = {
 				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser prelude needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
 		},
 	},
+	"browser.cursor": {
+		type: "enum",
+		values: ["auto", "off", "instant", "animated"],
+		default: "auto",
+		ui: {
+			tab: "tools",
+			group: "Grep & Browser",
+			label: "Browser Cursor",
+			description:
+				"Visualize native browser actions in relay-headed tabs. Auto enables the cursor only for the built-in relay; off, instant, and animated select an explicit policy.",
+			options: [
+				{ value: "auto", label: "Auto" },
+				{ value: "off", label: "Off" },
+				{ value: "instant", label: "Instant" },
+				{ value: "animated", label: "Animated" },
+			],
+		},
+	},
 
 	"browser.relayUrl": {
 		type: "string",

@@ -159,6 +159,7 @@ import {
 	clickAt,
 	clickElement,
 	clickQueryHandlerText,
+	type ClickLifecycle,
 	highlightElement,
 	type HighlightOptions,
 	type InteractionHandle,
@@ -199,6 +200,7 @@ import {
 	resolveFrame,
 } from "./frames";
 import { pushState, reloadPage, traverseHistory, type NavigationWaitUntil } from "./navigation";
+import { CursorPreloadManager } from "./cursor";
 
 import { cloneSafe, RunOutput } from "./run-output";
 import type {
@@ -713,6 +715,7 @@ export function toActionableHandle(
 	handle: ElementHandle,
 	guard?: HandleOpGuard,
 	invalidate?: () => Promise<void>,
+	clickLifecycle?: ClickLifecycle,
 ): ActionableHandle {
 	const enriched = handle as HandleWithRawMethods;
 	const methods = enriched as unknown as Partial<Record<GuardedHandleMethod, RawHandleMethod>>;
@@ -726,10 +729,13 @@ export function toActionableHandle(
 		}
 		enriched.fill = value => fillViaHandle(enriched, value, undefined, preserved?.type);
 		enriched.click = options =>
-			clickElement(enriched, "handle.click()", undefined, {
-				button: options?.button,
-				clickCount: options?.count,
-			});
+			clickElement(
+				enriched,
+				"handle.click()",
+				undefined,
+				{ button: options?.button, clickCount: options?.count },
+				clickLifecycle,
+			);
 		enriched.dblclick = () => clickElement(enriched, "handle.dblclick()", undefined, { clickCount: 2 });
 		enriched.check = () => setElementChecked(enriched, true, "handle.check()");
 		enriched.uncheck = () => setElementChecked(enriched, false, "handle.uncheck()");
@@ -795,10 +801,13 @@ export function toActionableHandle(
 				"handle.click()",
 				signal,
 				() =>
-					clickElement(enriched, "handle.click()", signal, {
-						button: options?.button,
-						clickCount: options?.count,
-					}),
+					clickElement(
+						enriched,
+						"handle.click()",
+						signal,
+						{ button: options?.button, clickCount: options?.count },
+						clickLifecycle,
+					),
 				invalidate,
 			),
 		);
@@ -1233,7 +1242,6 @@ export function describeInflight(inflight: Map<number, InflightOp>): string {
 		.map(op => `${op.label} (${((now - op.startedAt) / 1000).toFixed(1)}s)`)
 		.join(", ");
 }
-
 export class WorkerCore {
 	#transport: Transport;
 	#browser?: Browser;
@@ -1246,7 +1254,7 @@ export class WorkerCore {
 	#unsub: () => void;
 	#isolated: boolean;
 	#uninstallRejectionGuard: () => void;
-	#mode?: WorkerInitPayload["mode"];
+	#ownsPage = false;
 	#activateForScreenshot = true;
 	#dialogs?: RuntimeDialogController;
 	#network?: BrowserNetworkManager;
@@ -1259,6 +1267,8 @@ export class WorkerCore {
 	#screenshotHistory = new Map<string, ScreenshotHistory>();
 	#webmcp?: WebMcpController;
 	readonly #recording = new RecordingController();
+	#cursorManager = new CursorPreloadManager();
+	#cursorMode: NonNullable<WorkerInitPayload["cursorMode"]> = "off";
 
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
@@ -1351,6 +1361,9 @@ export class WorkerCore {
 			case "tool-reply":
 				this.#deliverToolReply(msg.id, msg.reply);
 				return;
+			case "detach":
+				await this.#detach();
+				return;
 			case "close":
 				await this.#close();
 				return;
@@ -1358,8 +1371,9 @@ export class WorkerCore {
 	}
 
 	async #init(payload: WorkerInitPayload): Promise<void> {
+		this.#cursorMode = payload.cursorMode;
 		try {
-			this.#mode = payload.mode;
+			this.#ownsPage = payload.mode === "headless" || (payload.mode === "attach" && payload.ownsPage === true);
 			this.#activateForScreenshot = payload.mode === "headless" || payload.activateForScreenshot !== false;
 			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
 			registerSemanticQueryHandlers(puppeteer);
@@ -1424,6 +1438,11 @@ export class WorkerCore {
 			this.#tracing = new BrowserTracingController(this.#page);
 			this.#network = new BrowserNetworkManager(this.#page, payload.allowedDomains);
 			await this.#network.start();
+			const cursorPreloadIdentifier = await this.#cursorManager.register(this.#page, this.#cursorMode);
+			if (cursorPreloadIdentifier) {
+				this.#transport.send({ type: "cursor-preload-registered", identifier: cursorPreloadIdentifier });
+			}
+			if (!payload.url) await this.#cursorManager.bootstrap(this.#page, this.#cursorMode);
 			if (payload.url) {
 				await this.#page.goto(payload.url, {
 					// Default to "load" because dev servers with HMR/WS never reach networkidle.
@@ -1434,13 +1453,13 @@ export class WorkerCore {
 			this.#targetId = await targetIdForPage(this.#page);
 			this.#transport.send({ type: "ready", info: await this.#currentReadyInfo() });
 		} catch (error) {
-			// A failed headless init leaves the worker's page orphaned in the shared
-			// browser (the supervisor retries with a fresh worker), so close it before
-			// reporting. Attach mode adopts an existing target — never close it.
+			// Failed initialization closes only OMP-owned pages. Borrowed targets
+			// remain open even when the worker had attached to them.
 			const page = this.#page;
+			if (page && !page.isClosed()) await this.#cursorManager.cleanup(page);
 			await this.#webmcp?.dispose().catch(() => undefined);
 			this.#webmcp = undefined;
-			if (payload.mode === "headless" && page && !page.isClosed()) {
+			if (this.#ownsPage && page && !page.isClosed()) {
 				await page.close().catch(() => undefined);
 			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
@@ -1877,6 +1896,20 @@ export class WorkerCore {
 			fn: (sig: AbortSignal) => Promise<T>,
 			selectorOpts?: { selector?: string; zeroMatchAfterMs?: number },
 		): Promise<T> => markHandled(this.#runOp(active, label, signal, perOpMs, fn, selectorOpts));
+		const clickLifecycle: ClickLifecycle = {
+			beforeClick: async point => {
+				if (this.#cursorMode === "off") return false;
+				await this.#cursorManager.show(page, point.x, point.y, this.#cursorMode);
+				return true;
+			},
+			beforeDispatch: point => {
+				if (this.#cursorMode === "off") return;
+				void this.#cursorManager.show(page, point.x, point.y, "instant");
+			},
+			afterClick: async () => {
+				await this.#cursorManager.hide(page);
+			},
+		};
 		// Hand user-facing handles the fail-fast per-op guard so their interactive
 		// methods (`.click()`, `.type()`, …) can't outrun the cell budget (issue #9535).
 		const enrich = (handle: ElementHandle): ActionableHandle =>
@@ -1889,6 +1922,7 @@ export class WorkerCore {
 					this.#clearElementCache();
 					await this.#stopLoading();
 				},
+				clickLifecycle,
 			);
 		return {
 			name,
@@ -1970,7 +2004,7 @@ export class WorkerCore {
 					const label = `tab.click(${JSON.stringify(selector)})`;
 					const resolved = normalizeSelector(selector);
 					if (resolved.startsWith("text/") && parseAriaRefSelector(selector) === null) {
-						await clickQueryHandlerText(page, resolved, label, actionOpMs, sig);
+						await clickQueryHandlerText(page, resolved, label, actionOpMs, sig, clickLifecycle);
 						return;
 					}
 					const handle =
@@ -1979,7 +2013,7 @@ export class WorkerCore {
 							: ((await untilAborted(sig, () => page.$(resolved))) as ElementHandle | null);
 					if (!handle) throw new ToolError(`${label} matched no visible element`);
 					try {
-						await clickElement(handle, label, sig);
+						await clickElement(handle, label, sig, {}, clickLifecycle);
 					} finally {
 						void handle.dispose().catch(() => undefined);
 					}
@@ -2172,7 +2206,7 @@ export class WorkerCore {
 			loadState: filePath =>
 				op("tab.loadState()", actionOpMs, sig =>
 					loadStorageState(page, filePath, session.cwd, {
-						allowOtherOrigins: this.#mode === "headless",
+						allowOtherOrigins: this.#ownsPage,
 						navigationTimeoutMs: actionOpMs,
 						signal: sig,
 					}),
@@ -2976,12 +3010,29 @@ export class WorkerCore {
 	}
 
 	async #close(): Promise<void> {
+		await this.#shutdown(true, true);
+		this.#transport.send({ type: "closed" });
+		this.#transport.close();
+	}
+
+	async #detach(): Promise<void> {
+		await this.#shutdown(false, false).catch(error => {
+			this.#log("warn", "Failed to fully clean up browser tab worker during handoff", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		if (this.#browser?.connected) this.#browser.disconnect();
+		this.#transport.send({ type: "detached" });
+		this.#transport.close();
+	}
+
+	async #shutdown(cleanupCursor: boolean, closeOwnedPage: boolean): Promise<void> {
 		this.#unsub();
 		this.#uninstallRejectionGuard();
 		this.#clearElementCache();
 		const page = this.#page;
 		await this.#recording.close().catch(error => {
-			this.#log("warn", "Failed to finalize active browser recording during tab close", {
+			this.#log("warn", "Failed to finalize active browser recording during tab worker shutdown", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		});
@@ -2993,10 +3044,9 @@ export class WorkerCore {
 		await this.#tracing?.dispose();
 		await this.#consoleCapture.detach();
 		this.#emulation?.dispose();
-		if (this.#mode === "headless" && page && !page.isClosed()) await page.close().catch(() => undefined);
+		if (cleanupCursor && page && !page.isClosed()) await this.#cursorManager.cleanup(page);
+		if (closeOwnedPage && this.#ownsPage && page && !page.isClosed()) await page.close().catch(() => undefined);
 		if (this.#browser?.connected) this.#browser.disconnect();
-		this.#transport.send({ type: "closed" });
-		this.#transport.close();
 	}
 
 	#requirePage(): Page {

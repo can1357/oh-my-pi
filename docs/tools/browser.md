@@ -1,6 +1,6 @@
 # Browser Eval prelude
 
-The Eval `browser` facade opens, reuses, scripts, and closes named Chromium, Electron, CDP, relay, or cmux tabs. Use [`read`](./read.md) for static URLs; use `browser` for authenticated state, JavaScript execution, or interaction.
+The Eval `browser` facade manages named browser tabs and remote surfaces. Use [`read`](./read.md) for static URLs. Use `browser` for authenticated state, JavaScript execution, or interaction.
 
 ## Source
 
@@ -41,7 +41,14 @@ await tab.close();
 - `browser.close({ name?, all?, kill?, timeout? }) -> Promise<void>` releases one or all managed tabs.
 - `tab.close({ kill?, timeout? }) -> Promise<void>` releases that handle's tab.
 
-`open` accepts `name`, `url`, `viewport`, `wait_until`, `dialogs`, `app`, and `timeout`. `timeout` is in seconds, defaults to 30, and is clamped to 1–300.
+`open` accepts:
+
+- `name` and `url`;
+- `viewport` and `wait_until`;
+- `dialogs` and `app`;
+- `timeout`.
+
+`timeout` uses seconds. It defaults to 30 and accepts values from 1 to 300.
 
 ### Direct tab helpers
 
@@ -53,7 +60,12 @@ Direct helpers cross the host bridge and return real structured values:
 - Waiting: `waitFor(selector, { timeout? })`, `waitForSelector(selector, { timeout?, visible?, hidden? })`, `waitForUrl(stringOrRegExp, { timeout? })`
 - Page execution: `evaluate(fnOrSource, ...args)`
 
-Direct `waitFor` and `waitForSelector` return booleans. `tab.id(number)` and `tab.ref("e5")` instead return `BrowserElement` handles. Handles support `click`, `type`, `fill`, `press`, `hover`, `focus`, `select`, `uploadFile`, `scrollIntoView`, `boundingBox`, `isVisible`, `isHidden`, and `evaluate`. A string passed to `BrowserElement.evaluate` is a function expression invoked with the element as its first argument.
+Direct `waitFor` and `waitForSelector` return booleans. `tab.id(number)` and `tab.ref("e5")` return `BrowserElement` handles:
+
+- Actions: `click`, `type`, `fill`, `press`, `hover`, `focus`, `select`, `uploadFile`, `scrollIntoView`
+- Inspection: `boundingBox`, `isVisible`, `isHidden`, `evaluate`
+
+A string passed to `BrowserElement.evaluate` is a function expression. The function receives the element as its first argument.
 
 Selectors accept CSS and Puppeteer `aria/…`, `text/…`, `xpath/…`, and `pierce/…` query handlers. Playwright-only pseudos such as `:has-text()` and `:visible` are rejected. `tab.select` is required for `<select>` elements; `tab.fill` does not support them.
 
@@ -76,11 +88,11 @@ const title = await tab.run(
 
 Functions receive `{ tab, page, browser, wait, assert }` as their first argument. Additional `args` follow it. Plain data, functions, and `RegExp` values are serialized; the function cannot capture Eval-cell closures. Code strings use the same names as globals and allow top-level `await`.
 
-The inner `tab` is the full worker helper API. In addition to the direct surface it includes handle-returning `waitFor`/`waitForSelector` and run-scoped `waitForNavigation`/`waitForResponse`. Start a navigation/response wait before the action that triggers it.
+The inner `tab` exposes the full worker helper API. It adds handle-returning `waitFor` and `waitForSelector`. It also adds run-scoped `waitForNavigation` and `waitForResponse`. Start a navigation or response wait before its triggering action.
 
 Runs use the shared JavaScript runtime with ordinary Eval helpers and full Bun/Node and tool-bridge access. This is API isolation, not a security sandbox. Request interception is cleaned up at the end of each run.
 
-The return value stays structured. Nonempty text emitted by inner `display(...)` calls prints in the outer Eval cell, object/image displays remain Eval output, and a run with no display text emits no placeholder.
+The return value stays structured. Nonempty text from inner `display(...)` calls prints in the outer Eval cell. Object and image displays remain Eval output. A run with no display text emits no placeholder.
 
 ## Python API
 
@@ -98,7 +110,18 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 
 ## Browser modes
 
-`browser.open` selects a browser in this order when explicitly requested: `app.cdp_url`, `app.path`, then `app.relay`. Without explicit selection it considers relay settings, configured CDP, cmux, then project-shared headless Chromium.
+An explicit request uses this order:
+
+1. `app.cdp_url`
+2. `app.path`
+3. `app.relay`
+
+Automatic selection uses this order:
+
+1. relay settings
+2. configured CDP
+3. cmux
+4. project-shared headless Chromium
 
 - **Headless:** creates an omp-owned page in project-shared Chromium and applies stealth patches.
 - **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here.
@@ -107,6 +130,17 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 - **Cmux:** drives an available cmux WKWebView surface.
 
 Reusing one tab name across browser kinds is rejected until the existing tab is closed. Closing omp-owned headless pages and owned cmux surfaces closes them. Connected and relay pages remain open. Spawned browser processes remain open unless `kill: true` releases their last managed tab and terminates the process.
+
+`browser.cursor` accepts four modes:
+
+- `auto` animates click targets only in relay-headed tabs.
+- `off` disables visualization.
+- `instant` moves the marker without travel animation.
+- `animated` shows travel and the target pulse.
+
+The pointer-transparent marker uses instant movement for reduced-motion and hidden-page states. It clears after each click. A rendering failure leaves the validated click path available.
+
+Visualization covers `tab.click` and handles returned by `tab.id`, `tab.ref`, and `tab.waitFor`. Raw Puppeteer `page`, locator, and element-handle clicks remain unwrapped. Use the `tab` helpers when the marker is required.
 
 ## Screenshots and output
 

@@ -44,12 +44,22 @@ export type InteractionHandle = ElementHandle & {
 	highlight(options?: HighlightOptions): Promise<void>;
 };
 
-interface ClickPoint {
+export interface ClickPoint {
 	x: number;
 	y: number;
 }
 
-type ActionabilityResult = { ok: true; x: number; y: number } | { ok: false; reason: string; coveredBy?: string };
+export type ActionabilityResult =
+	| { ok: true; x: number; y: number }
+	| { ok: false; reason: string; coveredBy?: string };
+
+/** Optional best-effort decoration around a driver-owned element click. */
+export interface ClickLifecycle {
+	/** Return false only when no decoration was awaited and the initial point remains current. */
+	beforeClick?(point: Readonly<ClickPoint>, signal?: AbortSignal): Promise<boolean | void>;
+	beforeDispatch?(point: Readonly<ClickPoint>): void;
+	afterClick?(): Promise<void>;
+}
 
 interface FilePayload {
 	name: string;
@@ -209,14 +219,38 @@ export async function clickElement(
 	label: string,
 	signal?: AbortSignal,
 	options: ClickAtOptions = {},
+	lifecycle?: ClickLifecycle,
 ): Promise<void> {
-	const point = await actionableClickPoint(handle, label, signal);
-	await untilAborted(signal, () =>
-		handle.frame.page().mouse.click(point.x, point.y, {
-			button: options.button,
-			count: options.clickCount,
-		}),
-	);
+	const initialPoint = await actionableClickPoint(handle, label, signal);
+	try {
+		let decorated = false;
+		if (lifecycle?.beforeClick) {
+			decorated = true;
+			try {
+				decorated = (await lifecycle.beforeClick(initialPoint, signal)) !== false;
+			} catch {
+				// Decoration cannot change whether the driver click succeeds.
+			}
+		}
+		const point = decorated ? await actionableClickPoint(handle, label, signal) : initialPoint;
+		try {
+			lifecycle?.beforeDispatch?.(point);
+		} catch {
+			// Final visual synchronization is non-blocking and optional.
+		}
+		await untilAborted(signal, () =>
+			handle.frame.page().mouse.click(point.x, point.y, {
+				button: options.button,
+				count: options.clickCount,
+			}),
+		);
+	} finally {
+		try {
+			await lifecycle?.afterClick?.();
+		} catch {
+			// Hiding decoration cannot turn a completed driver click into a failure.
+		}
+	}
 }
 
 /** Resolve text-query matches to the first visible clickable candidate in document order. */
@@ -262,6 +296,7 @@ export async function clickQueryHandlerText(
 	label: string,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	lifecycle?: ClickLifecycle,
 ): Promise<void> {
 	const timeoutSignal = AbortSignal.timeout(timeoutMs);
 	const clickSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -275,7 +310,7 @@ export async function clickQueryHandlerText(
 				await untilAborted(clickSignal, () => Bun.sleep(50));
 				continue;
 			}
-			await clickElement(target, label, clickSignal);
+			await clickElement(target, label, clickSignal, {}, lifecycle);
 			return;
 		} finally {
 			if (target && !handles.includes(target)) await target.dispose().catch(() => undefined);
