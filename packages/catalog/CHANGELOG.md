@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Global and US Kimi K3 inference profiles on Amazon Bedrock with Chat Completions, 1M context, 128K output, image input, and `low`/`high`/`max` reasoning effort.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
