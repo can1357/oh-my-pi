@@ -128,7 +128,16 @@ export async function executeBuiltinSlashCommand(
 	if (!parsed) return false;
 
 	const command = BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name);
-	if (!command) return false;
+	if (!command) {
+		if (parsed.name !== "help") return false;
+		const query = parsed.args.trim().toLowerCase();
+		const lines = BUILTIN_SLASH_COMMAND_DEFS.filter(
+			def => !query || def.name.includes(query) || def.description.toLowerCase().includes(query),
+		).map(def => `/${def.name} — ${def.description}`);
+		runtime.ctx.editor.setText("");
+		runtime.ctx.showSessionInfo(lines.length > 0 ? lines.join("\n") : `No commands match "${parsed.args.trim()}".`);
+		return true;
+	}
 	if (parsed.args.length > 0 && !command.allowArgs) {
 		return false;
 	}
