@@ -3,7 +3,7 @@
 provider "amazon-bedrock" {
 	default-model "us.anthropic.claude-opus-4-8"
 
-	// AWS publishes Kimi K3 only as the global/us cross-region inference
+	// AWS publishes Kimi K3 only as the `global.`/`us.` cross-region inference
 	// profiles (no in-region or bare sku), served over the OpenAI Chat
 	// Completions endpoint. SigV4 signing is provided by the transport via
 	// the provider's native AWS auth chain.
@@ -25,9 +25,6 @@ provider "amazon-bedrock" {
 		}
 	}
 
-	// The Converse assembler positions content blocks by wire index
-	// (`amazon-bedrock.ts`), so a block can land above text already rendered.
-	stream-revision "possible"
 	class "anthropic" {
 		family "fable" {
 			revision ">=5.1 <5.2" {
@@ -65,17 +62,19 @@ provider "amazon-bedrock" {
 			// stretches without emitting bytes; mirror the Moonshot-native
 			// hosts' stream-idle ceiling.
 			stream-idle-timeout-ms 300000
-			// The live OpenAI-route output cap (128000) is below the seeded
-			// ceiling, so clamp oversize requests instead of 400ing.
-			clamp-output-to-model-max #true
 			// Root verified the live AWS Chat route accepts
-			// max_completion_tokens=128000 with reasoning_effort=max.
-			max-tokens-field "max_completion_tokens"
-			// Marks always-thinking K3: native reasoning stays enabled when a
-			// tool is forced (root verified tool_choice="required" round-trips
-			// with reasoning_effort=max), and a named forced tool choice is
+			// max_completion_tokens=128000 with reasoning_effort=max — equal
+			// to the seeded model maximum, so clamp oversize requests
+			// instead of 400ing.
+			clamp-output-to-model-max #true
+			// Marks always-thinking K3: a named forced tool choice is
 			// downgraded to "required" instead of pinning a function.
 			native-kimi-k3-reasoning #true
+			// K3 never stops reasoning when a tool is forced, and AWS accepts
+			// reasoning_effort=max alongside tool_choice="required" (root
+			// live-verified), so the provider-wide suppression never applies
+			// to these rows.
+			disable-reasoning-on-forced-tool-choice #false
 			// AWS requires genuine replayed reasoning_content; never fall back
 			// to a synthetic "." placeholder on tool-call continuation.
 			allows-synthetic-reasoning-content-for-tool-calls #false
@@ -116,4 +115,18 @@ provider "amazon-bedrock" {
 			max-tokens 16000
 		}
 	}
+}
+
+// The Converse assembler positions content blocks by wire index
+// (`amazon-bedrock.ts`), so a block can land above text already rendered;
+// kimi chat templates likewise revise already-streamed bytes. Declared
+// revision-possible for every amazon-bedrock row. The taxonomy overrides that
+// pin the seeded Kimi K3 inference profiles make this provider-wide
+// assignment and the class-wide kimi stream-revision (classes/kimi.kdl)
+// contest the axis at equal rank ([0,1,0]) on exactly those two rows; the
+// explicit priority resolves that reviewed equal-value overlap (README tie
+// rules) without touching classes/kimi.kdl. The value stays "possible"
+// everywhere amazon-bedrock, so no resolved row changes.
+provider "amazon-bedrock" priority=1 {
+	stream-revision "possible"
 }
