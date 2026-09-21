@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added passive cursor-adjacent popup rendering for command suggestions without allocating transcript rows ([#11946](https://github.com/can1357/oh-my-pi/pull/11946) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+- Added opt-in cursor-adjacent popup placement for non-command autocomplete triggers without allocating transcript rows ([#12671](https://github.com/can1357/oh-my-pi/pull/12671) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes

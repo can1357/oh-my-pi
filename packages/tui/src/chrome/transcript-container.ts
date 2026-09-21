@@ -432,7 +432,9 @@ export class TranscriptContainer extends Container {
 		if (!this.#replayPending) return undefined;
 		const rows = this.#renderReplay(width);
 		this.#replayPending = false;
-		if (rows.length === 0) return undefined;
+		// Even an empty ledger needs an acknowledged replay transaction: TUI
+		// uses its completion to release a destructive reset and restore the
+		// mutable viewport after a damaged popup.
 		const batch: HistoryBatch = { id: this.#nextBatchId++, rows, kind: "replay" };
 		this.#offered = { batch, kind: "replay" };
 		return batch;
@@ -780,8 +782,7 @@ export class TranscriptContainer extends Container {
 	}
 
 	#startReplay(): void {
-		const head = this.#entries[this.#frontier];
-		this.#replayPending = this.#frontier > 0 || (head?.mode === "appendOnly" && head.emitted > 0);
+		this.#replayPending = true;
 		this.#replayRequested = false;
 	}
 
