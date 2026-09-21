@@ -49,7 +49,9 @@ export function renderComposerShapePreview(
 	width: number,
 	status?: ComposerPreviewStatusSource,
 ): readonly string[] {
-	const previewWidth = Math.max(24, Math.min(width, 96));
+	// Use the full overlay width: the old 96-column cap truncated the status
+	// bar to a stub while the live editor spans the terminal (issue #12500).
+	const previewWidth = Math.max(24, width);
 	const style = getComposerStyle(shape);
 	const paddingX = style.defaultPaddingX(undefined);
 	const chromeWidth = style.sideChromeWidth(paddingX);
