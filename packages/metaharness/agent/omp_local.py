@@ -576,9 +576,10 @@ class OmpLocal(BaseInstalledAgent):
         # the prompt as an unknown flag and exits 2. `--` forces positional mode.
         parts.append("--")
         parts.append(shlex.quote(instruction))
-        # No pipes/stdbuf (absent in minimal images): redirect raw JSONL to the
-        # mounted agent log dir; populate_context_post_run parses it on the host.
-        run = " ".join(parts) + f" > /logs/agent/{_OUTPUT_FILENAME} 2>&1"
+        # No pipes/stdbuf (absent in minimal images): stdin is unused because the
+        # prompt is positional, so close it explicitly; redirect raw JSONL to the
+        # mounted agent log dir for populate_context_post_run to parse on the host.
+        run = " ".join(parts) + f" < /dev/null > /logs/agent/{_OUTPUT_FILENAME} 2>&1"
         # Exec env for the omp run. Direct-auth (no-gateway) mode contributes the
         # selected providers' keys (via exec env, never argv); forwarded PI_* /
         # --env knobs apply last so an explicit --env always wins.

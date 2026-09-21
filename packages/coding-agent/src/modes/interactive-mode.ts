@@ -6369,7 +6369,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (!this.#sttController) {
-			this.#sttController = new STTController();
+			this.#sttController = new STTController({
+				settings: this.settings,
+				registry: this.session.modelRegistry,
+				getSessionId: () => this.session.sessionId,
+			});
 		}
 		await this.#sttController.toggle(this.editor, {
 			showWarning: (msg: string) => this.showWarning(msg),

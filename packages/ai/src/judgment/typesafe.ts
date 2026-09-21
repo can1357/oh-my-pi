@@ -66,6 +66,8 @@ export interface TypeSafeJudgeOptions {
 	baseUrl?: string;
 	/** Defaults to {@link typesafeModel}. */
 	model?: string;
+	/** Static headers attached to judgment requests (e.g. proxy routing, gateway auth). */
+	headers?: Record<string, string>;
 	fetch?: FetchImpl;
 	/** Per-attempt timeout; defaults to {@link DEFAULT_TIMEOUT_MS}. */
 	timeoutMs?: number;
@@ -102,6 +104,7 @@ export class TypeSafeJudge implements Judge {
 	readonly model: string;
 	readonly baseUrl: string;
 	readonly #apiKey: ApiKey;
+	readonly #headers: Record<string, string> | undefined;
 	readonly #fetch: FetchImpl;
 	readonly #timeoutMs: number;
 
@@ -111,6 +114,7 @@ export class TypeSafeJudge implements Judge {
 		this.provider = options.provider ?? TYPESAFE_PROVIDER;
 		this.baseUrl = (options.baseUrl ?? typesafeBaseUrl()).replace(/\/+$/, "");
 		this.model = options.model ?? typesafeModel();
+		this.#headers = options.headers;
 		this.#fetch = options.fetch ?? fetch;
 		this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 		this.label = `${this.provider}/${this.model}`;
@@ -145,6 +149,7 @@ export class TypeSafeJudge implements Judge {
 	async #attempt<T>(path: string, body: string, key: string, signal: AbortSignal | undefined): Promise<T> {
 		const url = `${this.baseUrl}${path}`;
 		const headers: Record<string, string> = {
+			...this.#headers,
 			Authorization: `Bearer ${key}`,
 			Accept: "application/json",
 			"Content-Type": "application/json",

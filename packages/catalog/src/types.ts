@@ -24,9 +24,23 @@ export type KnownApi =
 export type Api = KnownApi | (string & {});
 
 /** Catalog kinds used to isolate role-specific runners from session chat models. */
-export const MODEL_KINDS = ["chat", "tiny", "image", "tts", "stt", "search", "judge"] as const;
+export const MODEL_KINDS = [
+	"chat",
+	"tiny",
+	"image",
+	"tts",
+	"stt",
+	"search",
+	"judge",
+	"embedding",
+	"rerank",
+	"video",
+] as const;
 /** Technical capability of a catalog model; absent model kinds mean chat. */
 export type ModelKind = (typeof MODEL_KINDS)[number];
+/** Kinds a provider maps to a runner transport through `kind-apis` in its KDL; discovery drops rows of these kinds when the provider declares no API. */
+export const KIND_API_KINDS = ["image", "tts", "stt", "embedding", "rerank", "video"] as const;
+export type KindApiKind = (typeof KIND_API_KINDS)[number];
 /** Grounding transport available to chat models selected by the web role. */
 export type WebSearchGrounding = "gemini" | "anthropic" | "codex" | "xai" | "openrouter";
 /** Non-chat runner protocols accepted by catalog seeds, outside the chat dispatch union. */
@@ -39,6 +53,10 @@ export const RUNNER_APIS = [
 	"openrouter-images",
 	"xai-tts",
 	"openai-speech",
+	"openai-embeddings",
+	"openrouter-rerank",
+	"openrouter-video",
+	"openai-transcriptions",
 ] as const;
 
 /** Resolve a model's kind while preserving chat semantics for existing catalog rows. */

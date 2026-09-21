@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added comprehensive browser tools for accessibility audits, React internals inspection, console/network monitoring, and performance tracing
+- Introduced tab management, disk-backed screen recording with cursor overlays, and WebMCP protocol support for cross-frame tool discovery
+- Implemented advanced browser control options including custom init scripts, download management, and persistent storage state persistence
+- Added semantic DOM querying support for roles, test-ids, labels, and placeholders to improve element interaction reliability
+- Added `typesafe` and `openrouter-decisions` to the `models.yml` provider/model `api` values, so a native judge can be declared as a custom provider with `baseUrl`, `apiKey`, and `headers`.
+
+### Changed
+
+- Enhanced browser resilience with configurable HTTPS error ignoring, domain allow-listing, and automatic tab recycling for security-sensitive state changes
+
+### Fixed
+
+- Fixed native judges ignoring configured `headers`: the judge chain now resolves model headers and passes them to the System One transport, so gateway-authenticated and header-routed judge providers work without extra configuration.
+- Added support for buffered cloud transcription using OpenAI-compatible models
+- Added visual change detection capabilities for video processing using FFMPEG and SVG overlaying
+- Prevented LSP client from hanging when a request is aborted while waiting for a previous write
+
 ## [18.2.7] - 2026-09-21
 
 ### Breaking Changes
