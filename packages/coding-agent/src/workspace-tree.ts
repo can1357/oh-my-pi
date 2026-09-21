@@ -45,9 +45,9 @@ export interface BuildWorkspaceTreeOptions {
 
 /**
  * Build a generic directory tree using a single native scan. Hidden files are
- * shown, .gitignore is not consulted, and the standard non-source directories
- * (`node_modules`, `.git`, build outputs, caches…) are pruned by the native
- * walker. Used by the read tool's directory-listing path.
+ * shown, gitignored paths are skipped like the glob tool, and the standard
+ * non-source directories (`node_modules`, `.git`, build outputs, caches…) are
+ * pruned by the native walker. Used by the read tool's directory-listing path.
  */
 export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTreeOptions = {}): Promise<DirectoryTree> {
 	const rootPath = path.resolve(cwd);
@@ -62,7 +62,7 @@ export async function buildDirectoryTree(cwd: string, options: BuildDirectoryTre
 			path: rootPath,
 			maxDepth,
 			hidden: true,
-			gitignore: false,
+			gitignore: true,
 		});
 		entries = result.entries;
 		nativeTruncated = result.truncated;
