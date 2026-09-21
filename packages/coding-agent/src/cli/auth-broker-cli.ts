@@ -15,6 +15,7 @@
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
+import { writeSync as writeStderrSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
@@ -152,6 +153,25 @@ export function refreshBrokerOAuthCredential(
 }
 
 async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	try {
+		await startBrokerAndWait(flags);
+	} catch (error) {
+		failServeStart("auth-broker", error);
+	}
+}
+
+/**
+ * Loud startup failure for `serve` (issue #12442): a supervisor's only
+ * signals are the exit code and the log, so a serve that never binds must
+ * name the reason on stderr and exit non-zero instead of dying quietly.
+ */
+function failServeStart(service: string, error: unknown): never {
+	const message = error instanceof Error ? error.message : String(error);
+	writeStderrSync(process.stderr.fd, `${service} serve failed to start: ${message}\n`);
+	process.exit(1);
+}
+
+async function startBrokerAndWait(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	// The broker is a long-running headless service: route structured logs to
 	// stdout so a process supervisor (pm2, journald, k8s) captures them, and
 	// skip the rotating ~/.omp/logs/ file the TUI default would have used.

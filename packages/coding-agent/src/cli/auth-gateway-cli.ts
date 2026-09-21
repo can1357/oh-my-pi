@@ -14,6 +14,7 @@
  */
 import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
+import { writeSync as writeStderrSync } from "node:fs";
 import * as path from "node:path";
 import {
 	type Api,
@@ -214,6 +215,25 @@ export function createSerializedRebuilder(run: (force: boolean) => Promise<void>
 }
 
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+	try {
+		await startGatewayAndWait(flags);
+	} catch (error) {
+		failServeStart("auth-gateway", error);
+	}
+}
+
+/**
+ * Loud startup failure for `serve` (issue #12442): a supervisor's only
+ * signals are the exit code and the log, so a serve that never binds must
+ * name the reason on stderr and exit non-zero instead of dying quietly.
+ */
+function failServeStart(service: string, error: unknown): never {
+	const message = error instanceof Error ? error.message : String(error);
+	writeStderrSync(process.stderr.fd, `${service} serve failed to start: ${message}\n`);
+	process.exit(1);
+}
+
+async function startGatewayAndWait(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
 		throw new Error(
