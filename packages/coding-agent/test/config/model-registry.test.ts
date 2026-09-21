@@ -4,7 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { Model } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "../../src/config/model-registry";
+import { roleCandidatePool } from "../../src/config/model-roles";
+import { Settings } from "../../src/config/settings";
 
 const testModel = buildModel({
 	id: "test-model",
@@ -170,5 +173,99 @@ describe("ModelRegistry", () => {
 		vi.spyOn(registry, "getApiKey").mockRejectedValue(new Error("auth failed"));
 
 		expect(await registry.getApiKeyAndHeaders(model)).toEqual({ ok: false, error: "auth failed" });
+	});
+
+	describe("models.yml image runner models", () => {
+		/** One keyless ComfyUI model, one keyless openai-images model, one ordinary chat model. */
+		const modelsYml = [
+			"providers:",
+			"  comfy-local:",
+			"    baseUrl: http://127.0.0.1:8188",
+			"    auth: none",
+			// Declared at the provider level: models inherit it (see images-local
+			// below for the per-model form).
+			"    api: comfyui",
+			"    models:",
+			"      - id: flux-dev",
+			"        kind: image",
+			"        comfyui:",
+			"          generation:",
+			"            path: ./workflows/flux.json",
+			"            prompt:",
+			'              - nodeId: "6"',
+			"                input: text",
+			"            width:",
+			'              - nodeId: "5"',
+			"                input: width",
+			"            height:",
+			'              - nodeId: "5"',
+			"                input: height",
+			'            outputNode: "9"',
+			"          edit:",
+			'            path: "~/comfy/flux-edit.json"',
+			"            prompt:",
+			'              - nodeId: "6"',
+			"                input: text",
+			"            images:",
+			'              - nodeId: "7"',
+			"                input: image",
+			'            outputNode: "9"',
+			"          timeoutMs: 600000",
+			"  images-local:",
+			"    baseUrl: http://127.0.0.1:9000/v1",
+			"    auth: none",
+			"    models:",
+			"      - id: acme-image",
+			"        kind: image",
+			"        api: openai-images",
+			"  chat-local:",
+			"    baseUrl: http://127.0.0.1:9100/v1",
+			"    auth: none",
+			"    models:",
+			"      - id: acme-chat",
+			"        name: Acme Chat",
+			"        api: openai-completions",
+			"",
+		].join("\n");
+
+		function configuredRegistry(): { registry: ModelRegistry; settings: Settings } {
+			const modelsPath = path.join(tmpDir, "models.yml");
+			fs.writeFileSync(modelsPath, modelsYml);
+			const settings = Settings.isolated();
+			return { registry: new ModelRegistry(authStorage, modelsPath, { settings }), settings };
+		}
+
+		test("admits a keyless comfyui model to the image role with workflow paths anchored outside the cwd", () => {
+			const { registry, settings } = configuredRegistry();
+
+			const flux = roleCandidatePool("image", settings, registry).find(model => model.id === "flux-dev");
+			expect(flux).toMatchObject({ provider: "comfy-local", kind: "image", api: "comfyui" });
+			// A relative workflow path belongs to the models.yml that declared it, and
+			// `~` to the home directory — never to the cwd a session happens to run in.
+			expect(flux?.comfyui?.generation.path).toBe(path.join(tmpDir, "workflows", "flux.json"));
+			expect(flux?.comfyui?.edit?.path).toBe(path.join(os.homedir(), "comfy", "flux-edit.json"));
+			expect(flux?.comfyui?.timeoutMs).toBe(600000);
+		});
+
+		test("admits a keyless openai-images model to the image role", () => {
+			const { registry, settings } = configuredRegistry();
+
+			expect(roleCandidatePool("image", settings, registry)).toContainEqual(
+				expect.objectContaining({ provider: "images-local", id: "acme-image", kind: "image" }),
+			);
+		});
+
+		test("keeps image runners out of the chat catalog and leaves ordinary chat models unchanged", () => {
+			const { registry, settings } = configuredRegistry();
+			const isImageRunner = (model: Model) => model.id === "flux-dev" || model.id === "acme-image";
+
+			expect(registry.getAll().some(isImageRunner)).toBe(false);
+			expect(registry.getAvailable().some(isImageRunner)).toBe(false);
+			expect(roleCandidatePool("image", settings, registry).some(model => model.id === "acme-chat")).toBe(false);
+			const chat = registry.getAll().find(model => model.id === "acme-chat");
+			expect(chat).toMatchObject({ provider: "chat-local", api: "openai-completions" });
+			expect(chat?.kind).toBeUndefined();
+			expect(chat?.comfyui).toBeUndefined();
+		});
 	});
 });

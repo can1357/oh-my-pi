@@ -2,7 +2,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, type FetchImpl, isOfficialCodexApiUrl, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import {
+	type ApiKey,
+	type FetchImpl,
+	isOfficialCodexApiUrl,
+	type Model,
+	NO_AUTH_SENTINEL,
+	withAuth,
+} from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import { fetchAntigravityImageModel } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import {
@@ -32,6 +39,7 @@ import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
+import { generateComfyUIImage } from "./comfyui-image";
 import { resolveReadPath } from "./path-utils";
 const IMAGE_TIMEOUT = 3 * 60 * 1000; // 3 minutes
 const MAX_IMAGE_SIZE = 35 * 1024 * 1024;
@@ -407,7 +415,7 @@ async function postImageEndpointRequest(options: {
 				method: "POST",
 				headers: {
 					...configuredHeaders,
-					Authorization: `Bearer ${key}`,
+					...(key !== NO_AUTH_SENTINEL ? { Authorization: `Bearer ${key}` } : {}),
 					"Content-Type": "application/json",
 					"User-Agent": USER_AGENT,
 				},
@@ -1007,6 +1015,20 @@ function imageBaseUrl(model: Model): string {
 	return model.baseUrl.replace(/\/+$/, "");
 }
 
+function resolveComfyUIImageSize(params: ImageGenParams): { width: number; height: number } | undefined {
+	if (params.image_size) {
+		const [width, height] = params.image_size.split("x").map(Number);
+		return { width, height };
+	}
+	if (!params.aspect_ratio) return undefined;
+	const [horizontal, vertical] = params.aspect_ratio.split(":").map(Number);
+	const ratio = horizontal / vertical;
+	return {
+		width: Math.round((1024 * Math.sqrt(ratio)) / 32) * 32,
+		height: Math.round(1024 / Math.sqrt(ratio) / 32) * 32,
+	};
+}
+
 async function generateOpenAIImages(
 	model: Model,
 	apiKey: ApiKey,
@@ -1385,9 +1407,10 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 	description: prompt.render(imageGenDescription),
 	parameters: imageGenSchema,
 	async execute(_toolCallId, params, _onUpdate, ctx, signal) {
+		let comfyPromptId: string | undefined;
 		return untilAborted(signal, async () => {
 			const sessionId = ctx.sessionManager.getSessionId();
-			const requestSignal = ptree.combineSignals(signal, IMAGE_TIMEOUT);
+			let defaultRequestSignal: AbortSignal | undefined;
 			const fetchImpl = ctx.fetch ?? fetch;
 			const effectiveSettings = ctx.settings ?? settings;
 			const pool = roleCandidatePool("image", effectiveSettings, ctx.modelRegistry);
@@ -1407,13 +1430,18 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 			const skipped: string[] = [];
 			let inputImages: InlineImageData[] | undefined;
 			for (const model of candidates) {
+				const requestSignal =
+					model.api === "comfyui" && model.comfyui?.timeoutMs !== undefined
+						? signal
+						: (defaultRequestSignal ??= ptree.combineSignals(signal, IMAGE_TIMEOUT));
 				if (
 					model.api !== "openai-images" &&
 					model.api !== "openrouter-images" &&
 					model.api !== "google-generative-ai" &&
 					model.api !== "google-gemini-cli" &&
 					model.api !== "openai-responses" &&
-					model.api !== "openai-codex-responses"
+					model.api !== "openai-codex-responses" &&
+					model.api !== "comfyui"
 				) {
 					logger.warn("Skipping unsupported image model API", {
 						provider: model.provider,
@@ -1425,7 +1453,9 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 				}
 
 				const initialKey = await ctx.modelRegistry.getApiKey(model, sessionId, { signal: requestSignal });
-				if (!isAuthenticated(initialKey)) {
+				const keylessImageTransport =
+					model.api === "openai-images" || model.api === "openrouter-images" || model.api === "comfyui";
+				if (!isAuthenticated(initialKey) && !(keylessImageTransport && initialKey === NO_AUTH_SENTINEL)) {
 					skipped.push(`${model.provider}/${model.id} (credentials unavailable)`);
 					continue;
 				}
@@ -1471,6 +1501,25 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 
 				try {
 					switch (model.api) {
+						case "comfyui": {
+							if (!model.comfyui)
+								throw new Error(`ComfyUI workflow configuration missing for ${model.provider}/${model.id}`);
+							const images = await generateComfyUIImage({
+								baseUrl: imageBaseUrl(model),
+								config: model.comfyui,
+								prompt: assemblePrompt(params),
+								inputImages,
+								size: resolveComfyUIImageSize(params),
+								apiKey: ctx.modelRegistry.resolver(model, sessionId),
+								resolveHeaders: () => ctx.modelRegistry.resolveModelHeaders(model, requestSignal),
+								fetchImpl,
+								signal: requestSignal,
+								onQueued: promptId => {
+									comfyPromptId = promptId;
+								},
+							});
+							return buildImageEndpointResult(model.provider, model.id, images);
+						}
 						case "openai-images":
 							return await generateOpenAIImages(
 								model,
@@ -1539,6 +1588,14 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 				failures,
 				`Image generation exhausted the resolved image chain${attempted ? `: ${attempted}` : "."}${suffix}`,
 			);
+		}).catch(error => {
+			if (signal?.aborted && comfyPromptId) {
+				throw new Error(
+					`Stopped waiting for ComfyUI prompt ${comfyPromptId}; the remote render may still be running. Check its history before retrying.`,
+					{ cause: error },
+				);
+			}
+			throw error;
 		});
 	},
 };

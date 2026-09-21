@@ -90,6 +90,14 @@ export const getModelsConfigSchemaBundle = once(() => {
 		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex"',
 	);
 
+	/**
+	 * Model-level API vocabulary: the chat union plus the image runner
+	 * transports a custom model may declare. `kind: "image"` is required for,
+	 * and only for, the runner APIs — `validateProviderConfiguration` owns that
+	 * pairing because it also sees a provider-level `api`.
+	 */
+	const ModelApiSchema = ApiSchema.or('"openai-images" | "openrouter-images" | "comfyui"');
+
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 
 	const ThinkingControlModeSchema = type(
@@ -172,10 +180,81 @@ export const getModelsConfigSchemaBundle = once(() => {
 		return true;
 	});
 
+	/** One API-format workflow node input a render fills. */
+	const ComfyUIInputBindingSchema = type({
+		nodeId: "string",
+		input: "string",
+	}).narrow((value, ctx) => {
+		if (typeof value.nodeId === "string" && value.nodeId.length === 0) {
+			return ctx.mustBe("comfyui binding nodeId a non-empty string");
+		}
+		if (typeof value.input === "string" && value.input.length === 0) {
+			return ctx.mustBe("comfyui binding input a non-empty string");
+		}
+		return true;
+	});
+
+	/**
+	 * One API-format workflow plus the inputs a render fills. `width`/`height`
+	 * are paired — a workflow that accepts one dimension accepts both — and a
+	 * declared binding list is never empty, so an unmet render value fails
+	 * validation instead of silently keeping a preconfigured node value.
+	 */
+	const ComfyUIWorkflowConfigSchema = type({
+		path: "string",
+		prompt: ComfyUIInputBindingSchema.array(),
+		"images?": ComfyUIInputBindingSchema.array(),
+		"width?": ComfyUIInputBindingSchema.array(),
+		"height?": ComfyUIInputBindingSchema.array(),
+		outputNode: "string",
+	}).narrow((value, ctx) => {
+		if (value.path.length === 0) {
+			return ctx.mustBe("comfyui workflow path a non-empty string");
+		}
+		if (value.outputNode.length === 0) {
+			return ctx.mustBe("comfyui workflow outputNode a non-empty string");
+		}
+		if (value.prompt.length === 0) {
+			return ctx.mustBe("comfyui workflow prompt with at least one binding");
+		}
+		if (value.images !== undefined && value.images.length === 0) {
+			return ctx.mustBe("comfyui workflow images with at least one binding when declared");
+		}
+		if ((value.width === undefined) !== (value.height === undefined)) {
+			return ctx.mustBe("comfyui workflow width and height bindings together");
+		}
+		if (value.width !== undefined && value.width.length === 0) {
+			return ctx.mustBe("comfyui workflow width with at least one binding when declared");
+		}
+		if (value.height !== undefined && value.height.length === 0) {
+			return ctx.mustBe("comfyui workflow height with at least one binding when declared");
+		}
+		return true;
+	});
+
+	/** Largest delay a 32-bit timer accepts (~24.8 days); anything longer never fires. */
+	const MAX_TIMER_TIMEOUT_MS = 2_147_483_647;
+
+	const ComfyUIConfigSchema = type({
+		generation: ComfyUIWorkflowConfigSchema,
+		"edit?": ComfyUIWorkflowConfigSchema,
+		"timeoutMs?": "number",
+	}).narrow((value, ctx) => {
+		if (value.timeoutMs === undefined) return true;
+		if (!Number.isFinite(value.timeoutMs) || value.timeoutMs <= 0) {
+			return ctx.mustBe("comfyui.timeoutMs a positive finite number");
+		}
+		if (value.timeoutMs > MAX_TIMER_TIMEOUT_MS) {
+			return ctx.mustBe(`comfyui.timeoutMs at most ${MAX_TIMER_TIMEOUT_MS}`);
+		}
+		return true;
+	});
+
 	const ModelDefinitionSchema = type({
 		id: "string",
+		"kind?": '"chat" | "image"',
 		"name?": "string",
-		"api?": ApiSchema,
+		"api?": ModelApiSchema,
 		"baseUrl?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
@@ -199,6 +278,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"contextPromotionTarget?": "string",
 		"compactionModel?": "string",
 		"remoteCompaction?": RemoteCompactionSchema,
+		"comfyui?": ComfyUIConfigSchema,
 	}).narrow((value, ctx) => {
 		// Enforce id non-empty
 		if (typeof value.id === "string" && value.id.length === 0) {
@@ -301,7 +381,9 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ProviderConfigSchema = type({
 		"baseUrl?": "string",
 		"apiKey?": "string",
-		"api?": ApiSchema,
+		// A provider-level api is inherited by its models, so it accepts the
+		// image runner APIs too; pairing with `kind` is enforced per model.
+		"api?": ModelApiSchema,
 		"headers?": { "[string]": "string" },
 		"compat?": ApiCompatSchema,
 		"remoteCompaction?": RemoteCompactionSchema,
@@ -350,6 +432,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	return {
 		OpenAICompatSchema,
+		ComfyUIConfigSchema,
 		ModelOverrideSchema,
 		ProviderDiscoverySchema,
 		ProviderAuthSchema,

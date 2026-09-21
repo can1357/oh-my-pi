@@ -3,6 +3,7 @@
  */
 
 import type { Api, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { type ComfyUIConfig, IMAGE_RUNNER_APIS, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { ConfigFile } from "./config-file";
 import type { ModelsConfig, ProviderAuthMode, ProviderDiscovery } from "./models-config-schema";
 import { getModelsConfigSchema } from "./models-config-schema-bundle";
@@ -11,7 +12,11 @@ export type ProviderValidationMode = "models-config" | "runtime-register";
 
 export interface ProviderValidationModel {
 	id: string;
+	/** Catalog kind of the declared model; absent means chat. */
+	kind?: ModelKind;
 	api?: Api;
+	/** ComfyUI runner configuration, required for and only for `api: "comfyui"`. */
+	comfyui?: ComfyUIConfig;
 	contextWindow?: number;
 	supportsTools?: boolean;
 	maxTokens?: number;
@@ -94,6 +99,30 @@ export function validateProviderConfiguration(
 		}
 		if (!modelDef.id) {
 			throw new Error(`Provider ${providerName}: model missing "id"`);
+		}
+		// The effective API can come from the provider, so pairing lives here
+		// rather than in the model-definition schema.
+		const modelApi = modelDef.api ?? config.api;
+		if (modelApi !== undefined) {
+			const isImageRunner = IMAGE_RUNNER_APIS.some(value => value === modelApi);
+			if (isImageRunner && modelDef.kind !== "image") {
+				throw new Error(
+					`Provider ${providerName}, model ${modelDef.id}: api "${modelApi}" requires kind: "image".`,
+				);
+			}
+			if (!isImageRunner && modelDef.kind === "image") {
+				throw new Error(
+					`Provider ${providerName}, model ${modelDef.id}: kind "image" requires an image api (${IMAGE_RUNNER_APIS.join(", ")}).`,
+				);
+			}
+			if (modelApi === "comfyui" && !modelDef.comfyui) {
+				throw new Error(
+					`Provider ${providerName}, model ${modelDef.id}: api "comfyui" requires a "comfyui" workflow config.`,
+				);
+			}
+			if (modelApi !== "comfyui" && modelDef.comfyui) {
+				throw new Error(`Provider ${providerName}, model ${modelDef.id}: "comfyui" config requires api "comfyui".`);
+			}
 		}
 		if (mode === "models-config") {
 			if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0) {
