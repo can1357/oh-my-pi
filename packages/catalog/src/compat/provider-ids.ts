@@ -61,6 +61,7 @@ export type KnownProvider =
 	| "sakana"
 	| "siliconflow"
 	| "siliconflow-cn"
+	| "singularityapi"
 	| "synthetic"
 	| "together"
 	| "typesafe"

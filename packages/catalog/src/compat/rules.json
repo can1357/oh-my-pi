@@ -67,6 +67,7 @@
 		"auth/sakana.kdl",
 		"auth/siliconflow-cn.kdl",
 		"auth/siliconflow.kdl",
+		"auth/singularityapi.kdl",
 		"auth/stencil.kdl",
 		"auth/synthetic.kdl",
 		"auth/tavily.kdl",
@@ -168,6 +169,7 @@
 		"providers/sakana.kdl",
 		"providers/siliconflow-cn.kdl",
 		"providers/siliconflow.kdl",
+		"providers/singularityapi.kdl",
 		"providers/synthetic.kdl",
 		"providers/together.kdl",
 		"providers/typesafe.kdl",
@@ -7270,6 +7272,22 @@
 				"wire": { "includeEncryptedReasoning": false, "streamIdleTimeoutMs": 0 }
 			},
 			{
+				"source": "providers/singularityapi.kdl:38",
+				"providers": ["singularityapi"],
+				"models": [
+					{ "kind": "glob", "value": "*deepseek-v4-flash-0731" },
+					{ "kind": "glob", "value": "*deepseek-v4.1-flash" }
+				],
+				"wire": { "reasoningDisableMode": "none-effort", "clampOutputToModelMax": true, "stripImageInput": false },
+				"thinking": { "upgradeNeutral": true, "efforts": ["low", "high", "xhigh", "max"] },
+				"catalog": { "inputModalities": ["text", "image"], "limitsPatch": { "contextWindow": 262144 } }
+			},
+			{
+				"source": "providers/singularityapi.kdl:12",
+				"providers": ["singularityapi"],
+				"wire": { "maxTokensField": "max_tokens", "reasoningContentField": "reasoning_content" }
+			},
+			{
 				"source": "providers/synthetic.kdl:10",
 				"class": "unknown",
 				"providers": ["synthetic"],
@@ -10219,6 +10237,25 @@
 				"callbackPort": 54547,
 				"pasteCode": true
 			},
+			{
+				"id": "singularityapi",
+				"apiKeyFormat": "bearer",
+				"name": "SingularityAPI",
+				"env": { "vars": ["SINGULARITYAPI_API_KEY"] },
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://app.singularityapi.tech/compute/billing",
+					"instructions": "Create an API key from the SingularityAPI dashboard, then paste it here",
+					"prompt": "Paste your SingularityAPI API key",
+					"placeholder": "sk-...",
+					"normalize": "strip-bearer",
+					"validate": {
+						"kind": "models-endpoint",
+						"label": "SingularityAPI",
+						"url": "https://api.singularityapi.tech/v1/models"
+					}
+				}
+			},
 			{ "id": "aimlapi", "apiKeyFormat": "bearer", "name": "AIML API" },
 			{
 				"id": "amazon-bedrock",
@@ -11848,6 +11885,12 @@
 			"id": "siliconflow-cn",
 			"defaultModel": "deepseek-ai/DeepSeek-V4-Pro",
 			"envVars": ["SILICONFLOW_CN_API_KEY"],
+			"dynamicModelsAuthoritative": true
+		},
+		"singularityapi": {
+			"id": "singularityapi",
+			"defaultModel": "deepseek-ai/DeepSeek-V4.1-Flash",
+			"envVars": ["SINGULARITYAPI_API_KEY"],
 			"dynamicModelsAuthoritative": true
 		},
 		"synthetic": {
