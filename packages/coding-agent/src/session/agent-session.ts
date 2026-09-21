@@ -1573,6 +1573,14 @@ export class AgentSession {
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
+			if (this.settings.get("retry.refusalFallbackRevertPolicy") === "after-success") {
+				// message_end persistence and fallback attribution are asynchronous.
+				// Settle this response before restoring its model; maintenance below
+				// then checks the restored model's window before any continuation.
+				await Promise.allSettled(this.#inFlightEventHandlers);
+				if (signal?.aborted) return;
+				await this.#recovery.maybeRestoreRetryFallbackPrimary({ afterSuccessOnly: true });
+			}
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({

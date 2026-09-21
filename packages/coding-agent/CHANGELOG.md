@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `retry.refusalFallbackRevertPolicy: after-success` to return to the previous model after one successful refusal/content-block fallback response, including Codex cybersecurity blocks, without changing outage or rate-limit fallback behavior or overriding explicit model selections during restoration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
 ### Fixed
 
 - Fixed multi-second UI freezes after every turn in long sessions caused by rescanning the whole provider context with every credential regex on each request; built-in patterns now skip text that contains none of their literal prefixes (1018 ms → 19 ms on a 716 KB context) ([#12666](https://github.com/can1357/oh-my-pi/pull/12666) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
@@ -159,6 +162,7 @@
 
 ### Added
 
+- Added `tui.titleSpinner` (`braille` | `dots` | `line`, default `braille`) to pick the terminal-title working-state spinner glyphs alongside the existing `tui.titleState` on/off toggle.
 - Expanded built-in secret obfuscation to detect credentials in connection URLs regardless of environment-variable name, including PostgreSQL, MongoDB, MySQL, Redis, AMQP, and other supported schemes.
 - Expanded built-in secret obfuscation to cover AWS access keys, Google API keys, Slack, npm, Stripe secret/restricted keys and webhook secrets, Hugging Face and SendGrid tokens, JWTs, Bearer tokens, and PEM private keys.
 - Added the `tui.titleSpinner` setting to choose the terminal-title working-state animation (`braille`, `dots`, `line`, or `pulse`), alongside the existing `tui.titleState` toggle.

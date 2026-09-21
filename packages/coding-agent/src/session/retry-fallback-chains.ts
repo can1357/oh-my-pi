@@ -51,6 +51,12 @@ export interface ActiveRetryFallbackState {
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
 	pinned: boolean;
+	/** Request-scoped refusal fallback: restore only after a replacement response succeeds. */
+	restoreAfterSuccess?: boolean;
+	/** Availability fallback to resume when a request-scoped refusal fallback completes. */
+	previousFallback?: ActiveRetryFallbackState;
+	/** Preserve attribution when restoring a model reached by a non-chain fallback. */
+	originalWasFallback?: boolean;
 	/**
 	 * Set once a turn on the fallback target settles successfully. Until then the
 	 * switch is only a routing decision — nothing has been produced by the new

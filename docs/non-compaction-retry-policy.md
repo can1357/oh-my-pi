@@ -184,9 +184,37 @@ Defined in settings schema under retry group:
 - `retry.modelFallback` (default `true`; gates retry model-fallback switching)
 - `retry.fallbackChains`
 - `retry.fallbackRevertPolicy` (`"cooldown-expiry"` by default; `"never"` disables automatic restoration)
+- `retry.refusalFallbackRevertPolicy` (`"default"` preserves existing error-specific behavior; `"after-success"` restores after a successful refusal/content-block fallback response)
 - `retry.usageAwareFallback` (default `false`; runs a preflight for supported coding-plan usage reports)
 - `retry.usageReservePct` (default `10`; remaining-quota reserve threshold)
 - `retry.usageReservePolicy` (default `"confirm"`; `"auto"` and `"fail-closed"` are also supported)
+
+Main and task sessions pin classifier-refusal fallbacks by default, independently of
+`retry.fallbackRevertPolicy`. To retry a refused invocation on a fallback and then
+return to the previous model, opt in:
+
+```yaml
+retry:
+  refusalFallbackRevertPolicy: after-success
+  fallbackRevertPolicy: cooldown-expiry
+```
+
+This uses the existing `retry.fallbackChains`, structured `refusal` / `sensitive`
+stop metadata, and the normalized `AIError.Flag.ContentBlocked` classification
+(including Codex `cyber_policy` errors). It does not match ordinary assistant
+refusal prose. Account-policy errors still try sibling credentials before selecting
+a fallback model. Restoration happens after the first successful fallback response
+and its tool execution, before the next model invocation—even within the same user
+turn. Failed, aborted, and empty responses do not restore the model; the existing
+retry budget still bounds failed attempts. A request-scoped content block does not
+create an availability cooldown for the model it restores.
+
+The previous model must still be available and outside any existing cooldown.
+If the session was already on an availability fallback, that fallback and its
+original restoration policy resume rather than jumping to an unavailable primary.
+Explicit model changes take precedence. Response attribution stays with the model
+that produced it. The restored model receives the continued conversation, so a
+later invocation can trigger another refusal and fallback.
 
 Programmatic toggles in session:
 
@@ -250,5 +278,5 @@ A new retry chain can still start later on a future retryable error after counte
 - Classification uses normalized `AIError` flags/status plus provider-aware text fallback; it is not limited to structured errors or to regex matching alone.
 - Retry strips the failing assistant error from **runtime context** before re-continue, but session history still keeps that error entry. When the retry chain eventually succeeds, each persisted error entry from the chain is marked with a `retryRecovery` marker (`status: "recovered"`, plus kind/attempt/note and the superseding message; entries whose error was rendered moot carry `status: "superseded"` instead). Marked entries render as a dim, non-error one-line note instead of a red failure (live UI included, via the success event's `retryErrors`), and they are excluded when the LLM context is rebuilt — the display transcript still keeps them visible.
 - `RpcSessionState` currently exposes `autoCompactionEnabled` but not an `autoRetryEnabled` field; RPC callers must track their own toggle state or query settings through other APIs.
-- Model fallback changes append temporary `model_change` entries and may later restore the primary model when its cooldown expires, depending on `retry.fallbackRevertPolicy`.
+- Model fallback changes append temporary `model_change` entries. Availability fallbacks may restore the primary after its cooldown expires according to `retry.fallbackRevertPolicy`; request-scoped refusal fallbacks restore according to `retry.refusalFallbackRevertPolicy`.
 - Usage-aware fallback runs before a provider request when both `retry.modelFallback` and `retry.usageAwareFallback` are enabled. Unknown/unmapped usage fails open. At the reserve threshold, `"confirm"` asks interactive sessions and keeps the current model when declined; sessions without a confirmation UI automatically apply an eligible configured fallback. `"auto"` applies an eligible fallback without asking. `"fail-closed"` rejects reserve or depleted usage instead of spending it or selecting a fallback. Depleted usage under the other policies applies an eligible fallback without a reserve confirmation.
