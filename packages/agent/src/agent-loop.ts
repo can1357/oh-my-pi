@@ -37,6 +37,7 @@ import {
 	getStreamingPartialJson,
 	kCursorExecResolved,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
 import {
 	createHarmonyAuditEvent,
 	detectHarmonyLeakInAssistantMessage,
@@ -886,6 +887,29 @@ export function normalizeMessagesForProvider(
 const INTENT_FIELD_DESCRIPTION = "concise intent";
 const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 
+// Memoize injection per input schema identity: normalizeTools runs on every
+// model call and injectIntentIntoSchema mints a fresh root object each time,
+// which defeats the stamp-keyed schema memos downstream (toolWireSchema,
+// stripSchemaDescriptions, tryEnforceStrictSchema each deep-clone + re-walk
+// the whole catalog per request). The injected object is shared across
+// requests — the same profile as the intent-off path, where parameters IS the
+// shared memoized wire schema (see schema-immutability.test.ts). One stamp
+// key per (mode, describeIntent) variant; index 0 = bare, 1 = described.
+const INTENT_STAMPS = {
+	require: [Symbol("intent:require"), Symbol("intent:require:described")],
+	optional: [Symbol("intent:optional"), Symbol("intent:optional:described")],
+} as const;
+
+function memoizedInjectIntentIntoSchema(
+	schema: Record<string, unknown>,
+	mode: "require" | "optional",
+	describeIntent: boolean,
+): unknown {
+	return stamp(schema, INTENT_STAMPS[mode][describeIntent ? 1 : 0], host =>
+		injectIntentIntoSchema(host, mode, describeIntent),
+	);
+}
+
 function injectIntentIntoSchema(
 	schema: unknown,
 	mode: "require" | "optional" = "require",
@@ -965,12 +989,14 @@ export function normalizeTools(tools: AgentContext["tools"], options: NormalizeT
 		// re-inject `i` (without its hint, which `describeIntent: false` omits) so
 		// intent tracing keeps the field while no descriptions ride the wire.
 		if (pruneDescriptions) {
-			let parameters = stripSchemaDescriptions(toolWireSchema(t)) as TSchema;
-			if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode, false) as TSchema;
+			const stripped = stripSchemaDescriptions(toolWireSchema(t));
+			const parameters = (
+				doInjectIntent ? memoizedInjectIntentIntoSchema(stripped, intentMode, false) : stripped
+			) as TSchema;
 			return { ...t, parameters, description: "" };
 		}
-		let parameters = toolWireSchema(t) as TSchema;
-		if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode) as TSchema;
+		const wire = toolWireSchema(t);
+		const parameters = (doInjectIntent ? memoizedInjectIntentIntoSchema(wire, intentMode, true) : wire) as TSchema;
 		const description = t.description ?? "";
 		const examplesBlock = renderToolExamples({ ...t, parameters }, doInjectIntent ? INTENT_FIELD : undefined);
 		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
@@ -2813,6 +2839,7 @@ async function executeToolCalls(
 	const {
 		hasSteeringMessages,
 		hasIrcInterrupts,
+		hasBackgroundCompletions,
 		interruptMode = "immediate",
 		getToolContext,
 
@@ -2850,7 +2877,7 @@ async function executeToolCalls(
 	const interruptibleSignal: AbortSignal = signal
 		? AbortSignal.any([signal, steeringAbortController.signal, ircAbortController.signal])
 		: AbortSignal.any([steeringAbortController.signal, ircAbortController.signal]);
-	const interruptState: { triggered: boolean; source?: SteeringInterruptSource | "irc" } = { triggered: false };
+	const interruptState: { triggered: boolean; source?: AsideInterruptSource } = { triggered: false };
 
 	// Streamed messages were prepared (validation + `beforeToolCall`) before
 	// `message_end`, so hook revisions are already part of the message; anything
@@ -2901,19 +2928,22 @@ async function executeToolCalls(
 		};
 	});
 
-	const checkIrcInterrupts = async (): Promise<void> => {
-		// IRC only fires once: a peer interrupt already recorded on interruptState
+	const checkAsideInterrupts = async (): Promise<void> => {
+		// Asides only fire once: an interrupt already recorded on interruptState
 		// must not re-abort, and (unlike steering) never re-consumes a queue.
 		if (!shouldInterruptImmediately || signal?.aborted || interruptState.triggered) return;
-		if (hasIrcInterrupts && (await hasIrcInterrupts())) {
-			// Peer IRC hard-aborts interruptible waits only; foreground tools keep
-			// running (no partial side effects) but get the cooperative soft
-			// signal so backgroundable work can step aside for the peer message.
-			interruptState.triggered = true;
-			interruptState.source = "irc";
-			ircAbortController.abort();
-			steeringSoftController.abort();
-		}
+		// Peer IRC and background completions (finished jobs, exited supervised
+		// processes) hard-abort interruptible waits only; foreground tools keep
+		// running (no partial side effects) but get the cooperative soft signal
+		// so backgroundable work can step aside for the queued notice.
+		let source: AsideInterruptSource | undefined;
+		if (hasIrcInterrupts && (await hasIrcInterrupts())) source = "irc";
+		else if (hasBackgroundCompletions && (await hasBackgroundCompletions())) source = "background";
+		if (!source || interruptState.triggered) return;
+		interruptState.triggered = true;
+		interruptState.source = source;
+		ircAbortController.abort();
+		steeringSoftController.abort();
 	};
 
 	const checkSteering = async (): Promise<void> => {
@@ -2954,7 +2984,7 @@ async function executeToolCalls(
 			}
 			return;
 		}
-		await checkIrcInterrupts();
+		await checkAsideInterrupts();
 	};
 
 	const emitToolResult = (record: (typeof records)[number], result: AgentToolResult<any>, isError: boolean): void => {
@@ -3257,8 +3287,8 @@ async function executeToolCalls(
 	// and soft-signals cooperative tools (auto-background bash), so the boundary
 	// dequeue below injects the message promptly. Gated on immediate-interrupt
 	// mode; checkSteering is idempotent (no-op once triggered).
-	const watchSteeringWhileRunning =
-		shouldInterruptImmediately && (hasSteeringMessages !== undefined || hasIrcInterrupts !== undefined);
+	const hasAsidePeek = hasIrcInterrupts !== undefined || hasBackgroundCompletions !== undefined;
+	const watchSteeringWhileRunning = shouldInterruptImmediately && (hasSteeringMessages !== undefined || hasAsidePeek);
 	const eventDrivenSteeringWatch =
 		watchSteeringWhileRunning && config.waitForSteeringMessages !== undefined && hasSteeringMessages !== undefined;
 	const steeringWatchAbortController = new AbortController();
@@ -3297,13 +3327,13 @@ async function executeToolCalls(
 				}
 			})()
 		: undefined;
-	// IRC interrupt records have a separate session-owned queue and no wake
-	// callback. Keep its established timer fallback when that queue is present;
-	// system steering uses the event-driven path above and does not poll.
+	// IRC interrupt records and background completions live in session-owned
+	// queues with no wake callback. Keep the timer fallback when either peek is
+	// present; system steering uses the event-driven path above and does not poll.
 	const steeringWatchTimer =
-		watchSteeringWhileRunning && (!eventDrivenSteeringWatch || hasIrcInterrupts !== undefined)
+		watchSteeringWhileRunning && (!eventDrivenSteeringWatch || hasAsidePeek)
 			? setInterval(
-					() => void (eventDrivenSteeringWatch ? checkIrcInterrupts() : checkSteering()),
+					() => void (eventDrivenSteeringWatch ? checkAsideInterrupts() : checkSteering()),
 					STEERING_INTERRUPT_POLL_MS,
 				)
 			: undefined;
@@ -3512,8 +3542,11 @@ function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<unk
 	};
 }
 
+/** Origin of a mid-batch interrupt: queued steering, a peer IRC, or a background completion notice. */
+type AsideInterruptSource = SteeringInterruptSource | "irc" | "background";
+
 function createSkippedToolResult(
-	source: SteeringInterruptSource | "irc" | undefined,
+	source: AsideInterruptSource | undefined,
 	executionStarted: boolean,
 ): AgentToolResult<SyntheticToolResultDetails | InterruptedToolResultDetails> {
 	let reason = "pending steering message";
@@ -3530,6 +3563,9 @@ function createSkippedToolResult(
 	} else if (source === "irc") {
 		reason = "pending peer interrupt";
 		blocker = "interrupt";
+	} else if (source === "background") {
+		reason = "a queued background completion (job or supervised process)";
+		blocker = "completion notice";
 	}
 	return {
 		content: [

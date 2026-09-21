@@ -9,7 +9,7 @@
   - `crates/pi-natives/src/ast.rs` — native scan, parse, match engine
   - `crates/pi-ast/src/language/mod.rs` — language aliases and extension inference used by the native wrapper.
   - `packages/coding-agent/src/tools/path-utils.ts` — path/glob parsing and multi-path resolution
-  - `packages/coding-agent/src/tools/render-utils.ts` — parse-error dedupe and display caps
+  - `packages/tui/src/render/render-utils.ts` — parse-error dedupe and display caps
   - `packages/coding-agent/src/tools/match-line-format.ts` — hashline match rendering
   - `packages/coding-agent/src/utils/file-display-mode.ts` — hashline vs line-number output mode
   - `packages/natives/native/index.d.ts` — JS-visible native binding contract
@@ -89,7 +89,7 @@ Pattern grammar and language support exposed to the model:
   - Single-target calls rely on the native default limit of 50 in `crates/pi-natives/src/ast.rs`.
   - Multi-target calls fetch `skip + 50 + 1` matches per target, then re-page after global sort.
 - Native `limit` is clamped to at least `1`; omitted `offset` defaults to `0` in `crates/pi-natives/src/ast.rs`.
-- Parse issues are rendered with at most `PARSE_ERRORS_LIMIT = 20` lines in `packages/coding-agent/src/tools/render-utils.ts`; `capParseErrors()` also caps `details.parseErrors` to those 20 unique entries, with `details.parseErrorsTotal` holding the pre-cap deduplicated total.
+- Parse issues are rendered with at most `PARSE_ERRORS_LIMIT = 20` lines in `packages/tui/src/render/render-utils.ts`; `capParseErrors()` also caps `details.parseErrors` to those 20 unique entries, with `details.parseErrorsTotal` holding the pre-cap deduplicated total.
 - Directory scans use `include_hidden: true`, `use_gitignore: true`, and skip `node_modules` unless the glob text explicitly mentions `node_modules` in `crates/pi-natives/src/ast.rs`.
 - No hard file-count cap is applied by the wrapper or native `ast_grep`; candidate count is whatever the resolved path/glob expands to after gitignore filtering.
 - Multi-path union deduplicates identical path inputs before resolution in `resolveExplicitSearchPaths()`.

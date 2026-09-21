@@ -21,15 +21,8 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODELS,
-	TTS_LOCAL_VOICE_OPTIONS,
-} from "@oh-my-pi/pi-coding-agent/tts/models";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -1094,44 +1087,46 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("lists static speech models for ACP mobile voice settings", async () => {
+	it("lists role selectors for ACP mobile voice settings", async () => {
 		const harness = await createHarness();
-		const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
 
-		const result = await harness.agent.extMethod("speech.models.list", {});
+		const result = (await harness.agent.extMethod("speech.models.list", {})) as Record<string, unknown> & {
+			speechToText: { models: Array<{ value: string }> };
+			textToSpeech: { models: Array<{ value: string; voices: unknown[] }>; voices: unknown[] };
+		};
 
-		expect(result).toEqual({
+		expect(result).toMatchObject({
 			settings: {
-				speechToTextModel: "stt.modelName",
-				textToSpeechModel: "tts.localModel",
+				speechToTextModel: "modelRoles.dictation",
+				textToSpeechModel: "modelRoles.speech",
 				textToSpeechVoice: "tts.localVoice",
 				speechVoice: "speech.voice",
 			},
 			defaults: {
-				speechToTextModel: DEFAULT_STT_MODEL_KEY,
-				textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
-				voice: DEFAULT_TTS_VOICE,
+				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				textToSpeechModel: "local/kokoro",
+				voice: "af_heart",
 			},
 			speechToText: {
-				setting: "stt.modelName",
-				defaultValue: DEFAULT_STT_MODEL_KEY,
-				models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+				setting: "modelRoles.dictation",
+				defaultValue: "local/parakeet-tdt-0.6b-v3",
 			},
 			textToSpeech: {
-				modelSetting: "tts.localModel",
+				modelSetting: "modelRoles.speech",
 				voiceSetting: "tts.localVoice",
 				speechVoiceSetting: "speech.voice",
-				defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
-				defaultVoice: DEFAULT_TTS_VOICE,
-				models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }) => ({
-					value: key,
-					label,
-					description,
-					voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
-				})),
-				voices,
+				defaultModel: "local/kokoro",
+				defaultVoice: "af_heart",
 			},
 		});
+		expect(result.speechToText.models.map(model => model.value)).toEqual([
+			"local/whisper-base",
+			"local/whisper-small",
+			"local/whisper-large-v3-turbo",
+			"local/parakeet-tdt-0.6b-v3",
+		]);
+		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
+		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);

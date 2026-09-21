@@ -39,6 +39,7 @@ export function getExtraHelpText(): string {
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
   WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)
   YOLO_AUTO_API_KEY          - Yolo-Auto flat-rate Qwen models
+  SINGULARITYAPI_API_KEY     - SingularityAPI reserved DeepSeek lanes
 
   ${chalk.dim("# Cloud Providers")}
   AWS_PROFILE                - AWS Bedrock (or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY)
@@ -55,6 +56,7 @@ export function getExtraHelpText(): string {
   FIRECRAWL_API_KEY          - Firecrawl web search + fetch reader backend
   ANTHROPIC_SEARCH_API_KEY   - Anthropic web search (override; isolates search from main ANTHROPIC_API_KEY)
   ANTHROPIC_SEARCH_BASE_URL  - Anthropic web search base URL (override; pairs with ANTHROPIC_SEARCH_API_KEY)
+  TYPESAFE_API_KEY           - TypeSafe System One judgments (auto thinking, unexpected-stop, AI staging, eval judge())
 
   ${chalk.dim("# Configuration")}
   OMP_PROFILE                 - Named profile for isolated agent state (same as --profile)

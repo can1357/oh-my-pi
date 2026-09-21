@@ -21,7 +21,7 @@ import type { ExtensionRunner, ExtensionUIContext } from "@oh-my-pi/pi-coding-ag
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { AskToolDetails } from "@oh-my-pi/pi-coding-agent/tools/ask";
+import type { AskToolDetails } from "@oh-my-pi/pi-tui/tools/ask";
 
 const TEST_MODEL = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 

@@ -5,8 +5,9 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { FooterComponent } from "@oh-my-pi/pi-coding-agent/modes/components/footer";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { FooterComponent } from "@oh-my-pi/pi-tui/status-line/footer";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -80,7 +81,7 @@ describe("FooterComponent jj label sanitization", () => {
 		vi.spyOn(vcs, "repoForDisplay").mockReturnValue(jj);
 		vi.spyOn(vcs, "watch").mockImplementation((() => () => {}) as unknown as typeof vcs.watch);
 
-		const component = new FooterComponent(makeSession());
+		const component = new FooterComponent(makeSession(), statusLineHost);
 		component.watchBranch(() => {});
 		try {
 			component.render(80);

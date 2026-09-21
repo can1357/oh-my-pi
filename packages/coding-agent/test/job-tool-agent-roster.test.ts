@@ -11,7 +11,8 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool } from "../src/tools/hub";
+import { type CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { HubTool } from "../src/tools/hub";
 
 const managers: AsyncJobManager[] = [];
 

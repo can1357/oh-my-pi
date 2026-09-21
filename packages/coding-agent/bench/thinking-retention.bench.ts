@@ -1,8 +1,8 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { heapStats } from "bun:jsc";
 import { Settings } from "../src/config/settings";
-import { AssistantMessageComponent } from "../src/modes/components/assistant-message";
-import { initTheme } from "../src/modes/theme/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const steps = Number(process.argv[2] ?? 500);
 if (!Number.isSafeInteger(steps) || steps <= 0) throw new Error("Expected a positive publication count");

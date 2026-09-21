@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { renderTreeList } from "@oh-my-pi/pi-coding-agent/tui/tree-list";
+import { renderTreeList } from "@oh-my-pi/pi-tui/render/tree-list";
 import { truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 
 const stubTheme = {

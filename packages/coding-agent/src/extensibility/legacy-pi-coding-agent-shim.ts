@@ -40,7 +40,7 @@ import {
 	parseFrontmatter as parseOmpFrontmatter,
 } from "@oh-my-pi/pi-utils";
 import { getPackageDir as getOmpPackageDir } from "../config";
-import { formatKeyHints } from "../config/keybindings";
+import { formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { findScopedSettings, type SettingPath, Settings } from "../config/settings";
 import { EditTool } from "../edit";
@@ -58,17 +58,17 @@ import {
 	type TruncationResult,
 	truncateHead,
 	truncateTail,
-} from "../session/streaming-output";
+} from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { SessionEntry } from "../session/session-entries";
 import type { Tool, ToolSession } from "../tools";
 import { BashTool } from "../tools/bash";
 import { GlobTool } from "../tools/glob";
 import { GrepTool } from "../tools/grep";
 import { ReadTool } from "../tools/read";
-import { formatBytes } from "../tools/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
 import { WriteTool } from "../tools/write";
 import { EventBus } from "../utils/event-bus";
-import { convertImageToPng } from "../utils/image-loading";
+import { convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { discoverExtensionPaths, loadExtensionFromFactory, loadExtensions } from "./extensions";
 import { ExtensionRuntime } from "./extensions/loader";
 import type {
@@ -1591,7 +1591,7 @@ export { CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 export { parseArgs } from "../cli/args";
 
 export * from "../index";
-export { formatBytes as formatSize } from "../tools/render-utils";
+export { formatBytes as formatSize } from "@oh-my-pi/pi-tui/render/render-utils";
 export { copyToClipboard } from "../utils/clipboard";
 export { Type } from "./legacy-typebox";
 

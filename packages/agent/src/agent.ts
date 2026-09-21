@@ -486,6 +486,11 @@ export class Agent {
 	 * Hook that peeks whether interrupting IRC asides are queued for the next boundary.
 	 */
 	hasIrcInterrupts?: AgentLoopConfig["hasIrcInterrupts"];
+	/**
+	 * Hook that peeks whether background completions (jobs, supervised processes)
+	 * are queued for the next boundary.
+	 */
+	hasBackgroundCompletions?: AgentLoopConfig["hasBackgroundCompletions"];
 
 	constructor(opts: AgentOptions = {}) {
 		this.#state = { ...this.#state, ...opts.initialState };
@@ -1660,6 +1665,7 @@ export class Agent {
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,
+			hasBackgroundCompletions: this.hasBackgroundCompletions,
 			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal ?? loopSignal),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),

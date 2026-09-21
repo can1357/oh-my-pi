@@ -20,9 +20,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import * as discovery from "@oh-my-pi/pi-coding-agent/discovery";
+import MODEL_PRIO from "../src/priority.json" with { type: "json" };
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
-import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { getAgentDbPath, getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
@@ -1780,43 +1779,248 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("provider preference migration", () => {
-		it("expands a legacy providers.webSearch choice into the head of webSearchOrder", async () => {
-			await writeSettings({ providers: { webSearch: "exa" } });
+	describe("kind role settings migration", () => {
+		type LegacyMigrationCase = readonly [
+			name: string,
+			path: string,
+			value: unknown,
+			expectedRoles: Record<string, string>,
+			expectedChains: Record<string, string[]>,
+		];
 
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("providers.webSearchOrder")).toEqual([
+		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
+		const webOrderedHead = [
+			"google/gemini-2.5-flash",
+			"anthropic/claude-haiku-4-5",
+			"openai-codex/gpt-5.6-luna",
+			"xai/grok-4.5",
+			"web/exa",
+		];
+		const webOrderedCandidates = [
+			...webOrderedHead,
+			...MODEL_PRIO.web.filter(selector => !webOrderedHead.includes(selector)),
+		];
+		const webExcludedCandidates = MODEL_PRIO.web.filter(
+			selector => selector !== "web/public" && !selector.startsWith("xai/") && !selector.startsWith("xai-oauth/"),
+		);
+		const webGeminiOverrideCandidates = MODEL_PRIO.web.map(selector =>
+			selector === "google/gemini-2.5-flash"
+				? "google/gemini-custom"
+				: selector === "google-antigravity/gemini-2.5-flash"
+					? "google-antigravity/gemini-custom"
+					: selector,
+		);
+		const imageOrderedHead = [
+			"openai/gpt-image-1",
+			"openai-codex/gpt-image-1",
+			"google-antigravity/gemini-3-pro-image",
+			"xai/grok-imagine-image",
+			"openrouter/google/gemini-3-pro-image-preview",
+			"google/gemini-3-pro-image-preview",
+			"deepinfra/black-forest-labs/FLUX-2-pro",
+		];
+		const imageOrderedCandidates = [
+			...imageOrderedHead,
+			...MODEL_PRIO.image.filter(selector => !imageOrderedHead.includes(selector)),
+		];
+		const imageXaiCandidates = [
+			"xai/grok-imagine-image",
+			...MODEL_PRIO.image.filter(selector => selector !== "xai/grok-imagine-image"),
+		];
+		const cases: LegacyMigrationCase[] = [
+			[
+				"web search order",
+				"providers.webSearchOrder",
+				["gemini", "anthropic", "codex", "xai", "exa"],
+				{ web: webOrderedCandidates[0] },
+				{ web: webOrderedCandidates.slice(1) },
+			],
+			[
+				"web search exclusions",
+				"providers.webSearchExclude",
+				["xai", "public"],
+				{ web: webExcludedCandidates[0] },
+				{ web: webExcludedCandidates.slice(1) },
+			],
+			[
+				"Gemini web model override",
+				"providers.webSearchGeminiModel",
+				"gemini-custom",
+				{ web: webGeminiOverrideCandidates[0] },
+				{ web: webGeminiOverrideCandidates.slice(1) },
+			],
+			[
+				"image order",
+				"providers.imageOrder",
+				["openai", "openai-codex", "antigravity", "xai", "openrouter", "gemini", "deepinfra"],
+				{ image: imageOrderedCandidates[0] },
+				{ image: imageOrderedCandidates.slice(1) },
+			],
+			["local speech provider", "providers.tts", "local", { speech: "local/kokoro" }, { speech: [] }],
+			["xAI speech provider", "providers.tts", "xai", { speech: "xai/grok-tts" }, { speech: [] }],
+			[
+				"DeepInfra speech provider",
+				"providers.tts",
+				"deepinfra",
+				{ speech: "deepinfra/hexgrad/Kokoro-82M" },
+				{ speech: [] },
+			],
+			[
+				"judgment provider",
+				"providers.judgmentProvider",
+				"llm",
+				{ judge: "@tiny" },
+				{ judge: ["@smol", "@default"] },
+			],
+			[
+				"auto-thinking model",
+				"providers.autoThinkingModel",
+				"qwen3-1.7b",
+				{ judge: "typesafe/jev-latest" },
+				{ judge: ["local/qwen3-1.7b", "@tiny", "@smol", "@default"] },
+			],
+			[
+				"unexpected-stop model",
+				"providers.unexpectedStopModel",
+				"gemma-3-1b",
+				{ judge: "typesafe/jev-latest" },
+				{ judge: ["local/gemma-3-1b", "@tiny", "@smol", "@default"] },
+			],
+			["tiny model", "providers.tinyModel", "lfm2.5-230m", { tiny: "local/lfm2.5-230m" }, {}],
+			["memory model", "providers.memoryModel", "lfm2-1.2b", { memory: "local/lfm2-1.2b" }, {}],
+			["local speech model", "tts.localModel", "kokoro", {}, {}],
+			["fast dictation model", "stt.modelName", "fast", { dictation: "local/whisper-base" }, {}],
+			["balanced dictation model", "stt.modelName", "balanced", { dictation: "local/whisper-small" }, {}],
+			["turbo dictation model", "stt.modelName", "turbo", { dictation: "local/whisper-large-v3-turbo" }, {}],
+			[
+				"older web search preference",
+				"providers.webSearch",
 				"exa",
-				...SEARCH_PROVIDER_ORDER.filter(id => id !== "exa"),
-			]);
-		});
-
-		it("drops legacy providers.webSearch auto without seeding an order", async () => {
-			await writeSettings({ providers: { webSearch: "auto" } });
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("providers.webSearchOrder")).toEqual([]);
-		});
-
-		it("keeps an explicit webSearchOrder over the legacy webSearch preference", async () => {
-			await writeSettings({ providers: { webSearch: "exa", webSearchOrder: ["gemini"] } });
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("providers.webSearchOrder")).toEqual(["gemini"]);
-		});
-
-		it("expands a legacy providers.image choice into the head of imageOrder", async () => {
-			await writeSettings({ providers: { image: "xai" } });
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("providers.imageOrder")).toEqual([
+				{ web: webExaCandidates[0] },
+				{ web: webExaCandidates.slice(1) },
+			],
+			[
+				"older image preference",
+				"providers.image",
 				"xai",
-				...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== "xai"),
-			]);
+				{ image: imageXaiCandidates[0] },
+				{ image: imageXaiCandidates.slice(1) },
+			],
+		];
+
+		it.each(cases)(
+			"migrates nested and flat %s settings",
+			async (_name, legacyPath, value, expectedRoles, expectedChains) => {
+				const [root, key] = legacyPath.split(".");
+				for (const input of [{ [root]: { [key]: value } }, { [legacyPath]: value }]) {
+					await writeSettings(input);
+					const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+					expect(settings.get("modelRoles")).toEqual(expectedRoles);
+					expect(settings.get("retry.fallbackChains")).toEqual(expectedChains);
+
+					settings.set("display.showTokenUsage", true);
+					await settings.flush();
+					const saved = await readSettings();
+					expect(saved.modelRoles ?? {}).toEqual(expectedRoles);
+					expect((saved.retry as Record<string, unknown> | undefined)?.fallbackChains ?? {}).toEqual(
+						expectedChains,
+					);
+					expect(Object.hasOwn(saved, legacyPath)).toBe(false);
+					expect(Object.hasOwn((saved[root] as Record<string, unknown> | undefined) ?? {}, key)).toBe(false);
+				}
+			},
+		);
+
+		it("drops legacy defaults without materializing kind roles", async () => {
+			await writeSettings({
+				providers: {
+					webSearch: "auto",
+					webSearchOrder: [],
+					webSearchExclude: [],
+					webSearchGeminiModel: "",
+					image: "auto",
+					imageOrder: [],
+					tts: "auto",
+					judgmentProvider: "auto",
+					autoThinkingModel: "online",
+					unexpectedStopModel: "online",
+					tinyModel: "online",
+					memoryModel: "online",
+				},
+				stt: { modelName: "parakeet" },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("modelRoles")).toEqual({});
+			expect(settings.get("retry.fallbackChains")).toEqual({});
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect(saved.modelRoles).toBeUndefined();
+			expect(saved.retry).toBeUndefined();
+			expect(saved.providers).toBeUndefined();
+			expect(saved.stt).toBeUndefined();
+		});
+
+		it("prefers nested legacy values over flat forms", async () => {
+			await writeSettings({
+				providers: { webSearchOrder: ["exa"] },
+				"providers.webSearchOrder": ["gemini"],
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.getModelRole("web")).toBe(webExaCandidates[0]);
+			expect(settings.get("retry.fallbackChains").web).toEqual(webExaCandidates.slice(1));
+		});
+
+		it("preserves explicit roles and empty chains while prepending local tiny and memory models", async () => {
+			await writeSettings({
+				modelRoles: {
+					web: "custom/web",
+					image: "custom/image",
+					speech: "custom/speech",
+					dictation: "custom/dictation",
+					judge: "custom/judge",
+					tiny: "custom/tiny,@smol",
+					memory: "custom/memory",
+				},
+				retry: {
+					fallbackChains: { web: [], image: [], speech: [], dictation: [], judge: [] },
+				},
+				providers: {
+					webSearchOrder: ["exa"],
+					imageOrder: ["xai"],
+					tts: "local",
+					judgmentProvider: "llm",
+					autoThinkingModel: "qwen3-1.7b",
+					unexpectedStopModel: "gemma-3-1b",
+					tinyModel: "lfm2.5-230m",
+					memoryModel: "lfm2-1.2b",
+				},
+				stt: { modelName: "fast" },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("modelRoles")).toEqual({
+				web: "custom/web",
+				image: "custom/image",
+				speech: "custom/speech",
+				dictation: "custom/dictation",
+				judge: "custom/judge",
+				tiny: "local/lfm2.5-230m,custom/tiny,@smol",
+				memory: "local/lfm2-1.2b,custom/memory",
+			});
+			expect(settings.get("retry.fallbackChains")).toEqual({
+				web: [],
+				image: [],
+				speech: [],
+				dictation: [],
+				judge: [],
+			});
 		});
 	});
 
@@ -1944,27 +2148,30 @@ describe("Settings", () => {
 			expect((await readSettings()).computer).toEqual({ enabled: true });
 		});
 
-		it("maps retired local tiny title models to current equivalents", async () => {
+		it("normalizes retired local tiny title models before role migration", async () => {
 			await writeSettings({ providers: { tinyModel: "lfm2-350m" } });
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("providers.tinyModel")).toBe("lfm2.5-350m");
+			expect(settings.getModelRole("tiny")).toBe("local/lfm2.5-350m");
 			settings.set("display.showTokenUsage", true);
 			await settings.flush();
-			expect((await readSettings()).providers).toMatchObject({ tinyModel: "lfm2.5-350m" });
+			const saved = await readSettings();
+			expect(saved.modelRoles).toEqual({ tiny: "local/lfm2.5-350m" });
+			expect(saved.providers).toBeUndefined();
 		});
 
-		it("promotes retired flat tiny title keys into the nested setting", async () => {
+		it("normalizes retired flat tiny title keys before role migration", async () => {
 			await Bun.write(getConfigPath(), '"providers.tinyModel": lfm2-350m\n');
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("providers.tinyModel")).toBe("lfm2.5-350m");
+			expect(settings.getModelRole("tiny")).toBe("local/lfm2.5-350m");
 			settings.set("display.showTokenUsage", true);
 			await settings.flush();
 			const saved = await readSettings();
-			expect(saved.providers).toMatchObject({ tinyModel: "lfm2.5-350m" });
+			expect(saved.modelRoles).toEqual({ tiny: "local/lfm2.5-350m" });
+			expect(saved.providers).toBeUndefined();
 			expect("providers.tinyModel" in saved).toBe(false);
 		});
 
@@ -2136,9 +2343,8 @@ describe("Settings", () => {
 			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.41.0");
 		});
 
-		it("migrates legacy find and search settings to glob and grep", async () => {
+		it("migrates legacy search settings to grep", async () => {
 			await writeSettings({
-				find: { enabled: false },
 				search: {
 					enabled: false,
 					contextBefore: 2,
@@ -2148,15 +2354,13 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(false);
 			expect(settings.get("grep.enabled")).toBe(false);
 			expect(settings.get("grep.contextBefore")).toBe(2);
 			expect(settings.get("grep.contextAfter")).toBe(5);
 		});
 
-		it("migrates flat legacy find and search settings keys to nested glob and grep", async () => {
+		it("migrates flat legacy search settings keys to nested grep", async () => {
 			await writeSettings({
-				"find.enabled": false,
 				"search.enabled": false,
 				"search.contextBefore": 2,
 				"search.contextAfter": 5,
@@ -2164,28 +2368,31 @@ describe("Settings", () => {
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(false);
 			expect(settings.get("grep.enabled")).toBe(false);
 			expect(settings.get("grep.contextBefore")).toBe(2);
 			expect(settings.get("grep.contextAfter")).toBe(5);
 		});
 
-		it("does not clobber existing glob/grep settings when migrating legacy find/search ones", async () => {
+		it("does not clobber existing grep settings when migrating legacy search ones", async () => {
 			await writeSettings({
-				find: { enabled: false },
-				glob: { enabled: true },
 				search: { enabled: false },
 				grep: { enabled: true },
-				"find.enabled": false,
-				"glob.enabled": true,
 				"search.enabled": false,
 				"grep.enabled": true,
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			expect(settings.get("glob.enabled")).toBe(true);
 			expect(settings.get("grep.enabled")).toBe(true);
+		});
+
+		it("keeps find.enabled as the semantic find tool toggle across reloads", async () => {
+			await writeSettings({ find: { enabled: true }, glob: { enabled: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("find.enabled")).toBe(true);
+			expect(settings.get("glob.enabled")).toBe(false);
 		});
 
 		it("migrates nested dev.autoqa.consent and todo.reminders.max without configuring parents", async () => {

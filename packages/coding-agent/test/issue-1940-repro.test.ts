@@ -289,7 +289,7 @@ describe("issue #3939 — stt downloads keep the worker referenced", () => {
 		const client = new SttClient(() => worker);
 
 		try {
-			const download = client.downloadModel("turbo");
+			const download = client.downloadModel("whisper-large-v3-turbo");
 
 			expect(downloadRequestId).not.toBe("");
 			expect(worker.refCalls).toBe(1);
@@ -312,7 +312,7 @@ describe("issue #3939 — stt downloads keep the worker referenced", () => {
 		const client = new SttClient(() => worker);
 
 		try {
-			const download = client.downloadModel("turbo");
+			const download = client.downloadModel("whisper-large-v3-turbo");
 
 			expect(downloadRequestId).not.toBe("");
 			worker.emit({ type: "error", id: downloadRequestId, error: "Error: Hub returned 403" });

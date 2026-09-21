@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-ai",
-	"version": "18.2.3",
+	"version": "18.2.8",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"keywords": [
 		"ai",
@@ -41,6 +41,34 @@
 		"./error": {
 			"types": "./src/error/index.ts",
 			"import": "./src/error/index.ts"
+		},
+		"./embeddings": {
+			"types": "./src/embeddings/index.ts",
+			"import": "./src/embeddings/index.ts"
+		},
+		"./judgment": {
+			"types": "./src/judgment/index.ts",
+			"import": "./src/judgment/index.ts"
+		},
+		"./rerank": {
+			"types": "./src/rerank/index.ts",
+			"import": "./src/rerank/index.ts"
+		},
+		"./speech": {
+			"types": "./src/speech/index.ts",
+			"import": "./src/speech/index.ts"
+		},
+		"./images": {
+			"types": "./src/images/index.ts",
+			"import": "./src/images/index.ts"
+		},
+		"./transcription": {
+			"types": "./src/transcription/index.ts",
+			"import": "./src/transcription/index.ts"
+		},
+		"./video": {
+			"types": "./src/video/index.ts",
+			"import": "./src/video/index.ts"
 		},
 		"./*": {
 			"types": "./src/*.ts",

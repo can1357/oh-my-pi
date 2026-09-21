@@ -1,5 +1,11 @@
 import type { ElementHandle, JSHandle, Page } from "puppeteer-core";
-import { ToolError } from "../../tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import {
+	type AriaHrefMap,
+	collectAriaSnapshotRefs,
+	postProcessAriaSnapshot,
+	type SnapshotPostProcessOptions,
+} from "../snapshot-plus";
 import ariaBundle from "./aria-snapshot.bundle.txt" with { type: "text" };
 // `aria-snapshot.bundle.txt` is a generated, committed artifact: Playwright's
 // injected ARIA-snapshot sources (pinned, Apache-2.0) bundled to a CJS module.
@@ -7,11 +13,19 @@ import ariaBundle from "./aria-snapshot.bundle.txt" with { type: "text" };
 //   bun scripts/generate-aria-snapshot.ts
 // (fetches the pinned tag, bundles in a temp dir, rewrites the .txt artifact.)
 
-export interface AriaSnapshotOptions {
+export interface AriaSnapshotOptions extends SnapshotPostProcessOptions {
 	/** Maximum tree depth to render. */
 	depth?: number;
 	/** Append `[box=x,y,w,h]` bounding boxes to each node. */
 	boxes?: boolean;
+	/** Return a revisioned full, unchanged, or delta result. */
+	diff?: boolean;
+}
+
+/** Raw snapshot text and resolved link destinations produced in a browser realm. */
+export interface AriaSnapshotPayload {
+	snapshot: string;
+	hrefs: Record<string, string>;
 }
 
 /**
@@ -37,6 +51,10 @@ function buildEvaluator(params: string, call: string): (...args: unknown[]) => u
 // passed positionally to page.evaluate, never ones nested inside an object.
 const evaluateAriaSnapshot = buildEvaluator("root, request", "ariaSnapshot(root, request)");
 const evaluateResolveRef = buildEvaluator("ref", "resolveAriaRef(ref)");
+const evaluateAriaHrefs = new Function(
+	"refs",
+	`var module = { exports: {} };\n${ariaBundle}\nvar hrefs = {}; for (var ref of refs) { var el = module.exports.resolveAriaRef(ref); if (el && el.tagName === "A" && el.href) hrefs[ref] = el.href; } return hrefs;`,
+) as unknown as (refs: string[]) => Record<string, string>;
 
 /**
  * Capture a Playwright-format ARIA snapshot of `root` (or the whole document when
@@ -50,7 +68,13 @@ export async function captureAriaSnapshot(
 	options: AriaSnapshotOptions = {},
 ): Promise<string> {
 	const request = { depth: options.depth, boxes: options.boxes };
-	return (await page.evaluate(evaluateAriaSnapshot as never, root as never, request as never)) as string;
+	const snapshot = (await page.evaluate(evaluateAriaSnapshot as never, root as never, request as never)) as string;
+	let hrefs: AriaHrefMap = {};
+	if (options.urls) {
+		const refs = collectAriaSnapshotRefs(snapshot);
+		hrefs = (await page.evaluate(evaluateAriaHrefs as never, refs as never)) as Record<string, string>;
+	}
+	return postProcessAriaSnapshot(snapshot, options, hrefs);
 }
 
 /**
@@ -131,4 +155,14 @@ export function buildAriaSnapshotScript(selector: string | undefined, options: A
 	const request = { depth: options.depth, boxes: options.boxes };
 	const sel = selector ? JSON.stringify(selector) : "null";
 	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");return module.exports.ariaSnapshot(__root,${JSON.stringify(request)});})()`;
+}
+
+/** Build the cmux page-world expression returning snapshot text plus link destinations. */
+export function buildAriaSnapshotPayloadScript(
+	selector: string | undefined,
+	options: AriaSnapshotOptions = {},
+): string {
+	const request = { depth: options.depth, boxes: options.boxes };
+	const sel = selector ? JSON.stringify(selector) : "null";
+	return `(function(){var module={exports:{}};\n${ariaBundle}\nvar __sel=${sel};var __root=__sel?document.querySelector(__sel):null;if(__sel&&!__root)throw new Error("tab.ariaSnapshot: selector "+__sel+" matched no element");var snapshot=module.exports.ariaSnapshot(__root,${JSON.stringify(request)});var hrefs={};if(${options.urls === true}){for(var match of snapshot.matchAll(/\\[ref=(e\\d+)\\]/g)){var ref=match[1],el=module.exports.resolveAriaRef(ref);if(el&&el.tagName==="A"&&el.href)hrefs[ref]=el.href;}}return {snapshot:snapshot,hrefs:hrefs};})()`;
 }

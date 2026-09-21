@@ -36,6 +36,7 @@ import {
 	VimState,
 	visualRange,
 } from "../vim";
+import { scrollbarThumbRange } from "./scroll-viewport";
 import {
 	borderlessComposerStyle,
 	type ComposerChromeContext,
@@ -1113,8 +1114,12 @@ export class Editor implements Component, Focusable {
 		const lastGrapheme = beforeGraphemes[beforeGraphemes.length - 1]?.segment;
 		const lastGraphemeWidth = lastGrapheme ? visibleWidth(lastGrapheme) : 0;
 		const builtInCursor = this.#getStyledInputCursor();
+		// The end-of-line cursor borrows the last grapheme's cell, which the
+		// on-character cursor also highlights with reverse video. Underline the
+		// borrowed cell instead so insertion after the last character stays
+		// visually distinct from insertion before it.
 		const fallbackReplacement = lastGrapheme
-			? { text: this.#cursorCell(lastGrapheme), width: lastGraphemeWidth }
+			? { text: `\x1b[4m${lastGrapheme}\x1b[0m`, width: lastGraphemeWidth }
 			: builtInCursor;
 		const clampReplacement = (candidate: { text: string; width: number }): { text: string; width: number } => {
 			let text = sliceByColumn(candidate.text, 0, maxWidth, true);
@@ -1135,7 +1140,6 @@ export class Editor implements Component, Focusable {
 			// If even the highlighted trailing grapheme cannot fit, show the built-in single-column cursor.
 			clampedReplacement = clampReplacement(builtInCursor);
 		}
-
 		const replacedSpanWidth = Math.min(maxWidth, Math.max(lastGraphemeWidth, clampedReplacement.width));
 		const prefixWidth = Math.max(0, maxWidth - replacedSpanWidth);
 		const beforePrefix = sliceByColumn(before, 0, prefixWidth, true);
@@ -1151,17 +1155,14 @@ export class Editor implements Component, Focusable {
 		if (visibleWidth(text) < maxWidth) {
 			return text + marker;
 		}
-
-		let insertAt = text.length;
-		let offset = 0;
-		for (const seg of segmenter.segment(text)) {
-			if (visibleWidth(seg.segment) > 0) {
-				insertAt = offset;
-			}
-			offset += seg.segment.length;
-		}
-
-		return `${text.slice(0, insertAt)}${marker}${text.slice(insertAt)}`;
+		// The row is exactly full, so the marker lands before the last visible
+		// grapheme instead of after it. The mirrored on-character position renders
+		// the identical string; underline the final grapheme at end-of-line so the
+		// two insertion points stay visually distinct.
+		const graphemes = [...segmenter.segment(text)];
+		const lastGrapheme = graphemes[graphemes.length - 1]?.segment;
+		if (lastGrapheme === undefined) return text + marker;
+		return `${text.slice(0, text.length - lastGrapheme.length)}\x1b[4m${lastGrapheme}\x1b[0m${marker}`;
 	}
 
 	#getPageScrollStep(totalVisualLines: number): number {
@@ -1211,17 +1212,7 @@ export class Editor implements Component, Focusable {
 		const needsScrollbar = this.#scrollbarVisible && layoutLines.length > visibleContentHeight;
 		let scrollbarThumb: { start: number; end: number } | null = null;
 		if (needsScrollbar && visibleContentHeight > 0) {
-			const thumbSize = Math.max(
-				1,
-				Math.min(
-					Math.floor((visibleContentHeight * visibleContentHeight) / layoutLines.length),
-					visibleContentHeight,
-				),
-			);
-			const travel = visibleContentHeight - thumbSize;
-			const maxOffset = Math.max(0, layoutLines.length - visibleContentHeight);
-			const start = maxOffset === 0 ? 0 : Math.round((this.#scrollOffset / maxOffset) * travel);
-			scrollbarThumb = { start, end: start + thumbSize };
+			scrollbarThumb = scrollbarThumbRange(visibleContentHeight, layoutLines.length, this.#scrollOffset);
 		}
 
 		// Resolve the custom top-border content once per frame; the style decides
@@ -3264,7 +3255,14 @@ export class Editor implements Component, Focusable {
 
 	#recordUndoState(): void {
 		if (this.#suspendUndo) return;
-		this.#undoStack.push(structuredClone(this.#state));
+		// EditorState holds only primitives plus an array of immutable strings:
+		// a shallow array copy is a complete snapshot. structuredClone pays for
+		// general-case dispatch per element on every edit keystroke.
+		this.#undoStack.push({
+			lines: this.#state.lines.slice(),
+			cursorLine: this.#state.cursorLine,
+			cursorCol: this.#state.cursorCol,
+		});
 		if (this.#undoStack.length > MAX_UNDO_STACK) {
 			this.#undoStack.shift();
 		}
