@@ -179,6 +179,23 @@ export class YieldQueue {
 		return thunks;
 	}
 
+	/**
+	 * Build and remove every queued entry of one kind without injecting it.
+	 * Used to re-record advisor asides that missed the loop's last poll as
+	 * visible cards. Returns null when nothing is queued or the dispatcher
+	 * skipped the batch.
+	 */
+	drainKind(kind: string): AgentMessage | null {
+		const dispatcher = this.#dispatchers.get(kind);
+		if (!dispatcher) return null;
+		const entries = this.#drain(kind);
+		if (entries.length === 0) return null;
+		const built = this.#build(kind, dispatcher, entries);
+		if (!built) return null;
+		this.#resolveEntries(built.entries);
+		return built.message;
+	}
+
 	/** Drop queued entries. With `kind`, drop only that kind's entries (leaving
 	 *  any pending idle-flush for other kinds intact); otherwise drop everything. */
 	clear(kind?: string): void {

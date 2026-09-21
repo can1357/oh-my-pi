@@ -712,64 +712,51 @@ describe("advisor", () => {
 			expect(onAdvice).toHaveBeenNthCalledWith(3, note, "blocker");
 		});
 
-		it("routes a same-text blocker escalation of an already-delivered note with the production guard", async () => {
-			// Reproduced failure: a nit that already reached the primary, re-raised
-			// as a blocker, was rejected by guard dedupe and never routed. Dedupe is
-			// rank-aware: strictly-higher severity is a real escalation, while equal
-			// or lower retags of the same text stay suppressed.
-			const delivered: { note: string; severity?: string }[] = [];
+		it("routes a normalized blocker escalation of an already-delivered note with the production guard", async () => {
+			// Regression: dedupe used to reject a delivered nit re-raised as a
+			// blocker. Normalization must retain rank-aware escalation.
+			const delivered: AdvisorNote[] = [];
 			const tool = new AdviseTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard(),
 			);
 			const note = "The migration drops the users table without a backup.";
+			const escalatedNote = "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!";
 
 			await tool.execute("e-0", { note, severity: "nit" });
-			const blocker = await tool.execute("e-1", {
-				note: "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!",
-				severity: "blocker",
-			});
+			await tool.execute("e-1", { note: escalatedNote, severity: "blocker" });
+			await tool.execute("e-2", { note, severity: "concern" });
+			await tool.execute("e-3", { note, severity: "nit" });
 			expect(delivered).toEqual([
 				{ note, severity: "nit" },
-				{ note: "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!", severity: "blocker" },
+				{ note: escalatedNote, severity: "blocker" },
 			]);
-			expect(JSON.stringify(blocker.content)).toContain("Delivered.");
-
-			// Equal/lower retags of the delivered blocker are duplicates.
-			const concern = await tool.execute("e-2", { note, severity: "concern" });
-			const nit = await tool.execute("e-3", { note, severity: "nit" });
-			expect(JSON.stringify(concern.content)).toContain("Dropped: already raised");
-			expect(JSON.stringify(nit.content)).toContain("Dropped: already raised");
-			expect(delivered).toHaveLength(2);
 		});
 
-		it("defers non-blockers per update and flushes the backlog on the next completed update", async () => {
+		it("defers only nits per update; concerns and blockers route immediately", async () => {
 			const onAdvice = vi.fn();
 			const tool = new AdviseTool(onAdvice);
 			const note = "The result still needs a focused regression test.";
 
 			tool.beginUpdate(true);
-			const deferred = await tool.execute("tc-1", { note, severity: "concern" });
+			await tool.execute("tc-1", { note, severity: "concern" });
 			await tool.execute("tc-2", { note: "A destructive command is running.", severity: "blocker" });
 
-			// Deferred notes are NOT delivered mid-turn; blocker still goes through.
-			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith("A destructive command is running.", "blocker");
-			// The tool tells the advisor the note is deferred, not silently "Recorded.".
-			expect(JSON.stringify(deferred.content)).toContain("Queued for the end of the turn");
+			expect(onAdvice).toHaveBeenCalledTimes(2);
+			expect(onAdvice).toHaveBeenNthCalledWith(1, note, "concern");
+			expect(onAdvice).toHaveBeenNthCalledWith(2, "A destructive command is running.", "blocker");
 
-			// A second distinct concern in a later in-progress update queues its own slot.
 			tool.beginUpdate(true);
 			await tool.execute("tc-3", { note: "Minor naming cleanup.", severity: "nit" });
+			expect(onAdvice).toHaveBeenCalledTimes(2);
 
-			// Completing the turn deterministically flushes both withheld notes,
-			// oldest first — no reliance on the advisor model re-raising them.
+			// Completing the turn deterministically flushes the withheld nit — no
+			// reliance on the advisor model re-raising it.
 			tool.beginUpdate(false);
 			expect(onAdvice).toHaveBeenCalledTimes(3);
-			expect(onAdvice).toHaveBeenNthCalledWith(2, note, "concern");
 			expect(onAdvice).toHaveBeenNthCalledWith(3, "Minor naming cleanup.", "nit");
 
-			// A later explicit re-raise of the same note is deduped (already delivered).
+			// A later explicit re-raise of the delivered concern is deduped.
 			await tool.execute("tc-4", { note, severity: "concern" });
 			expect(onAdvice).toHaveBeenCalledTimes(3);
 		});
@@ -780,90 +767,137 @@ describe("advisor", () => {
 			const note = "Same point raised repeatedly.";
 
 			tool.beginUpdate(true);
-			await tool.execute("tc-1", { note, severity: "concern" });
-			await tool.execute("tc-2", { note, severity: "concern" });
-			await tool.execute("tc-3", { note, severity: "concern" });
+			await tool.execute("tc-1", { note, severity: "nit" });
+			await tool.execute("tc-2", { note, severity: "nit" });
+			await tool.execute("tc-3", { note, severity: "nit" });
 
 			tool.beginUpdate(false);
-			// Identical note queued once, flushed once.
+			// Identical nit queued once, flushed once.
 			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith(note, "concern");
+			expect(onAdvice).toHaveBeenCalledWith(note, "nit");
 		});
 
-		it("retains the highest severity when duplicate deferred advice escalates", async () => {
-			const onAdvice = vi.fn();
-			const tool = new AdviseTool(onAdvice);
+		it("routes a concern escalation of a queued nit immediately without freeing its budget slot", async () => {
+			const delivered: AdvisorNote[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
 
 			tool.beginUpdate(true);
-			await tool.execute("tc-1", { note: "Same point raised repeatedly.", severity: "nit" });
+			await tool.execute("tc-1", { note: "Same point raised repeatedly." });
+			expect(delivered).toEqual([]);
 			await tool.execute("tc-2", { note: "Same   point raised repeatedly.", severity: "concern" });
+			expect(delivered).toEqual([{ note: "Same   point raised repeatedly.", severity: "concern" }]);
 
-			tool.beginUpdate(false);
-			expect(onAdvice).toHaveBeenCalledTimes(1);
-			expect(onAdvice).toHaveBeenCalledWith("Same point raised repeatedly.", "concern");
+			await tool.execute("tc-3", { note: "Same point raised repeatedly.", severity: "nit" });
+			await tool.execute("tc-4", { note: "Same point raised repeatedly.", severity: "concern" });
+			await tool.execute("tc-5", { note: "Another live concern.", severity: "concern" });
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([{ note: "Same   point raised repeatedly.", severity: "concern" }]);
 		});
 
-		it("flushes one deferred concern per update past the per-update emission budget on a late catch-up", async () => {
+		it("does not refund a routed concern's slot when its pending nit escalates again to blocker", async () => {
+			const delivered: AdvisorNote[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+			const note = "The write path drops buffered data.";
+
+			tool.beginUpdate(true);
+			await tool.execute("r-0", { note, severity: "nit" });
+			await tool.execute("r-1", { note, severity: "concern" });
+			await tool.execute("r-2", { note, severity: "blocker" });
+			await tool.execute("r-3", { note: "Another distinct concern.", severity: "concern" });
+			await tool.execute("r-4", { note: "Another distinct nit.", severity: "nit" });
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([
+				{ note, severity: "concern" },
+				{ note, severity: "blocker" },
+			]);
+		});
+
+		it("preserves an older pending nit when its concern escalation exceeds the current update budget", async () => {
+			const delivered: AdvisorNote[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+			const note = "Check the lock lifetime.";
+
+			tool.beginUpdate(true);
+			await tool.execute("p-0", { note, severity: "nit" });
+			tool.beginUpdate(true);
+			await tool.execute("p-1", { note: "A separate live concern.", severity: "concern" });
+			await tool.execute("p-2", { note, severity: "concern" });
+			expect(delivered).toEqual([{ note: "A separate live concern.", severity: "concern" }]);
+
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([
+				{ note: "A separate live concern.", severity: "concern" },
+				{ note, severity: "nit" },
+			]);
+			tool.beginUpdate(false);
+			await tool.execute("p-3", { note, severity: "concern" });
+			expect(delivered).toEqual([
+				{ note: "A separate live concern.", severity: "concern" },
+				{ note, severity: "nit" },
+				{ note, severity: "concern" },
+			]);
+		});
+
+		it("flushes one deferred nit per update past the per-update emission budget on a late catch-up", async () => {
 			// Regression for #10271 ("The Advisor is Late"): in yolo mode the primary
 			// is continuously mid-turn, so the advisor runs many in-progress updates
-			// (one concern each) and the whole backlog is replayed in a single catch-up
+			// (one nit each) and the whole backlog is replayed in a single catch-up
 			// flush. Each note cleared the emission guard when it was emitted, so the
 			// flush must deliver the full backlog instead of collapsing it to one note.
 			const delivered: string[] = [];
-			// Mirror AgentSession: admission (filter + per-update budget) runs at
-			// emission; routing never re-filters.
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard());
-			const concerns = [
+			// Admission runs at emission; the flush must not re-filter the backlog.
+			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+			const nits = [
 				"Bare `location` cannot work outside the page; inspect with `await page.url()`.",
 				"Scope navigation to the visualizer's own `.viz-container`.",
 				'BFS uses `progressType="bar"`, so it has no `.viz-pill` controls.',
 				"Tab switching delegates from a trusted click; a dispatched KeyboardEvent is untrusted.",
 			];
+			const concern = "The migration drops the users table without a backup.";
 
-			// Each concern arrives in its own in-progress advisor update.
-			for (const [i, note] of concerns.entries()) {
+			// Each nit arrives in its own in-progress advisor update.
+			for (const [i, note] of nits.entries()) {
 				tool.beginUpdate(true);
-				await tool.execute(`c-${i}`, { note, severity: "concern" });
+				await tool.execute(`c-${i}`, { note, severity: "nit" });
 			}
 			// All withheld mid-turn — nothing reaches the primary yet.
 			expect(delivered).toEqual([]);
 
-			// Turn completes: the deferred backlog flushes, oldest first, in full.
+			// A later concern routes ahead of the withheld nit backlog.
+			tool.beginUpdate(true);
+			await tool.execute("c-4", { note: concern, severity: "concern" });
+			expect(delivered).toEqual([concern]);
+
 			tool.beginUpdate(false);
-			expect(delivered).toEqual(concerns);
+			expect(delivered).toEqual([concern, ...nits]);
 		});
 
-		it("caps an in-progress prompt spraying distinct notes and says so without promising delivery", async () => {
-			// A single in-progress advisor prompt that emits several distinct notes
-			// spends the update's one budget slot on the first; the rest are dropped
-			// at emission, so the flush cannot deliver an unbounded batch (#3520).
-			// The rejected calls must be told they were dropped — the previous
-			// unconditional "will be delivered automatically" promised delivery for
-			// notes the guard had already rejected, and the advice was lost.
+		it("caps an in-progress prompt spraying distinct nits before flushing", async () => {
+			// A single in-progress prompt must not build an unbounded backlog
+			// (#3520): the guard charges reservations at emission, not flush.
 			const delivered: string[] = [];
 			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(true);
-			const accepted = await tool.execute("x-0", { note: "First mid-turn concern.", severity: "concern" });
-			const rejected = await tool.execute("x-1", { note: "Second mid-turn concern.", severity: "concern" });
-			const rejected2 = await tool.execute("x-2", { note: "Third mid-turn concern.", severity: "concern" });
-			expect(JSON.stringify(accepted.content)).toContain("Queued for the end of the turn");
-			for (const result of [rejected, rejected2]) {
-				const text = JSON.stringify(result.content);
-				expect(text).toContain("Dropped:");
-				expect(text).toContain("budget");
-				expect(text).not.toContain("delivered automatically");
-				expect(text).not.toContain("queued");
-			}
+			await tool.execute("x-0", { note: "First mid-turn nit.", severity: "nit" });
+			await tool.execute("x-1", { note: "Second mid-turn nit.", severity: "nit" });
+			await tool.execute("x-2", { note: "Third mid-turn nit.", severity: "nit" });
+			expect(delivered).toEqual([]);
 			tool.beginUpdate(false);
-			expect(delivered).toEqual(["First mid-turn concern."]);
+			expect(delivered).toEqual(["First mid-turn nit."]);
 		});
 
-		it("flushes only the concern when it displaces a pending nit from the same in-progress update", async () => {
-			// Rank escalation inside one in-progress update is not a flood: the
-			// concern takes the update's slot and the guard names the displaced
-			// pending nit, which must not be flushed alongside it.
-			const delivered: { note: string; severity?: string }[] = [];
+		it("routes a concern immediately and drops the same-update pending nit it displaces", async () => {
+			const delivered: AdvisorNote[] = [];
 			const tool = new AdviseTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
@@ -872,22 +906,19 @@ describe("advisor", () => {
 			tool.beginUpdate(true);
 			await tool.execute("e-0", { note: "Nit: rename the helper.", severity: "nit" });
 			await tool.execute("e-1", { note: "Concern: the helper drops the lock early.", severity: "concern" });
-			// A blocker in the same update delivers live without touching the slot.
+			expect(delivered).toEqual([{ note: "Concern: the helper drops the lock early.", severity: "concern" }]);
+			// A distinct blocker is budget-exempt without displacing any reservation.
 			await tool.execute("e-2", { note: "Blocker: the write path is broken.", severity: "blocker" });
-			expect(delivered).toEqual([{ note: "Blocker: the write path is broken.", severity: "blocker" }]);
-
 			tool.beginUpdate(false);
 			expect(delivered).toEqual([
-				{ note: "Blocker: the write path is broken.", severity: "blocker" },
 				{ note: "Concern: the helper drops the lock early.", severity: "concern" },
+				{ note: "Blocker: the write path is broken.", severity: "blocker" },
 			]);
 		});
 
 		it("keeps a prior update's pending reservation when the current update displaces its own", async () => {
-			// Displacement is scoped to the update that owns the budget slot: an
-			// older update's accepted reservation holds no slot in the current
-			// update and must survive its eviction rounds.
-			const delivered: { note: string; severity?: string }[] = [];
+			// Older reservations hold no current-update slot and cannot be displaced.
+			const delivered: AdvisorNote[] = [];
 			const tool = new AdviseTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
@@ -897,123 +928,101 @@ describe("advisor", () => {
 			await tool.execute("p-0", { note: "Nit from the first review.", severity: "nit" });
 			tool.beginUpdate(true);
 			await tool.execute("p-1", { note: "Nit from the second review.", severity: "nit" });
-			const escalation = await tool.execute("p-2", { note: "Concern from the second review.", severity: "concern" });
-			// The concern was admitted — the SECOND review's nit paid for it.
-			expect(JSON.stringify(escalation.content)).toContain("Queued for the end of the turn");
+			await tool.execute("p-2", { note: "Concern from the second review.", severity: "concern" });
+			expect(delivered).toEqual([{ note: "Concern from the second review.", severity: "concern" }]);
 
 			tool.beginUpdate(false);
 			expect(delivered).toEqual([
-				{ note: "Nit from the first review.", severity: "nit" },
 				{ note: "Concern from the second review.", severity: "concern" },
+				{ note: "Nit from the first review.", severity: "nit" },
 			]);
 		});
 
-		it("accepts multiple deferred notes up to budget and evicts lowest-rank at capacity", async () => {
-			// With budget > 1, the guard accepts multiple same-update notes into
-			// free slots. When full, a higher-severity note displaces the
-			// lowest-rank PENDING entry — not the first one, never a routed one.
-			const delivered: { note: string; severity?: string }[] = [];
+		it("admits multiple pending nits up to budget and displaces only pending notes at capacity", async () => {
+			const delivered: AdvisorNote[] = [];
 			const tool = new AdviseTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 3 }),
 			);
 
 			tool.beginUpdate(true);
-			// Three free slots: nit, nit, concern all accepted.
-			await tool.execute("b-0", { note: "Nit: naming.", severity: "nit" });
-			await tool.execute("b-1", { note: "Nit: formatting.", severity: "nit" });
-			await tool.execute("b-2", { note: "Concern: lock leak.", severity: "concern" });
-			// Budget full (3/3). New concern evicts the lowest-rank entry (a nit),
-			// not the first note or the existing concern.
+			await tool.execute("b-0", { note: "Concern: lock leak.", severity: "concern" });
+			await tool.execute("b-1", { note: "Nit: naming.", severity: "nit" });
+			await tool.execute("b-2", { note: "Nit: formatting.", severity: "nit" });
+			expect(delivered).toEqual([{ note: "Concern: lock leak.", severity: "concern" }]);
 			await tool.execute("b-3", { note: "Concern: null deref.", severity: "concern" });
+			expect(delivered).toEqual([
+				{ note: "Concern: lock leak.", severity: "concern" },
+				{ note: "Concern: null deref.", severity: "concern" },
+			]);
 
 			tool.beginUpdate(false);
-			// Flush delivers 3 notes: the surviving nit, first concern, second concern.
-			// The evicted nit (lowest-rank at capacity) must NOT appear.
-			expect(delivered).toHaveLength(3);
-			const notes = delivered.map(d => d.note);
-			expect(notes).toContain("Concern: lock leak.");
-			expect(notes).toContain("Concern: null deref.");
-			// Exactly one nit survived (either one — both are rank 1).
-			const nits = notes.filter(n => n.startsWith("Nit:"));
-			expect(nits).toHaveLength(1);
+			expect(delivered).toEqual([
+				{ note: "Concern: lock leak.", severity: "concern" },
+				{ note: "Concern: null deref.", severity: "concern" },
+				{ note: "Nit: formatting.", severity: "nit" },
+			]);
 		});
 
-		it("rate-limits an equal-rank newcomer after a pending note escalates in place", async () => {
-			// When a deferred note is re-emitted at higher severity, the tool
-			// escalates it in place and the guard's slot tracks the real rank —
-			// so an equal-rank newcomer at a full budget is rate-limited instead
-			// of displacing the genuinely-escalated note.
-			const delivered: { note: string; severity?: string }[] = [];
+		it("charges one slot for a pending nit escalated to concern and rate-limits after the remaining slot fills", async () => {
+			const delivered: AdvisorNote[] = [];
 			const tool = new AdviseTool(
 				(note, severity) => delivered.push({ note, severity }),
 				new AdvisorEmissionGuard({ budgetPerUpdate: 2 }),
 			);
 
 			tool.beginUpdate(true);
-			// Slot 1: "A" admitted as nit.
 			await tool.execute("d-0", { note: "Issue A.", severity: "nit" });
-			// Re-emit "A" as concern — escalates in place; the slot's rank follows.
 			await tool.execute("d-1", { note: "Issue A.", severity: "concern" });
-			// Slot 2: "B" admitted as concern.
 			await tool.execute("d-2", { note: "Issue B.", severity: "concern" });
-			// Budget full (2/2), all slots at concern rank: "C" displaces nothing.
-			const rejected = await tool.execute("d-3", { note: "Issue C.", severity: "concern" });
-			expect(JSON.stringify(rejected.content)).toContain("Dropped:");
+			await tool.execute("d-3", { note: "Issue C.", severity: "concern" });
+			expect(delivered).toEqual([
+				{ note: "Issue A.", severity: "concern" },
+				{ note: "Issue B.", severity: "concern" },
+			]);
 
 			tool.beginUpdate(false);
-			// Flush delivers the escalated "A" at its concern severity, then "B".
 			expect(delivered).toEqual([
 				{ note: "Issue A.", severity: "concern" },
 				{ note: "Issue B.", severity: "concern" },
 			]);
 		});
 
-		it("does not let a suppressed phrase burn the deferred slot ahead of a real concern", async () => {
-			// A noise phrase emitted before a substantive concern in the same
-			// in-progress update must not consume the update's slot. The emission
-			// guard filters it out at emission without spending the budget, so the
-			// following concern is still reserved and flushed — and the noise call
-			// is told it carried no content.
-			const delivered: string[] = [];
-			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+		it.each(["nit", "concern"] as const)(
+			"does not let suppressed noise spend the budget ahead of a real %s",
+			async severity => {
+				const delivered: string[] = [];
+				const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
+				const note = "The migration drops the users table without a backup.";
 
-			tool.beginUpdate(true);
-			const noise = await tool.execute("n-0", { note: "Stop.", severity: "concern" });
-			expect(JSON.stringify(noise.content)).toContain("nothing actionable");
-			await tool.execute("n-1", {
-				note: "The migration drops the users table without a backup.",
-				severity: "concern",
-			});
-			tool.beginUpdate(false);
-			expect(delivered).toEqual(["The migration drops the users table without a backup."]);
-		});
+				tool.beginUpdate(true);
+				await tool.execute("n-0", { note: "Stop.", severity });
+				await tool.execute("n-1", { note, severity });
+				expect(delivered).toEqual(severity === "nit" ? [] : [note]);
+				tool.beginUpdate(false);
+				expect(delivered).toEqual([note]);
+			},
+		);
 
-		it("labels a live over-budget note as rate-limited, not a duplicate", async () => {
-			// Live path with an explicit budget of 1: the first distinct concern is
-			// routed; the second is rejected for budget, and the acknowledgment
-			// must say so — mislabeling it "Duplicate advice ignored." told the
-			// advisor the note had already landed, so it never re-raised.
+		it("admits a rate-limited live concern on the next update without replaying delivered notes", async () => {
 			const delivered: string[] = [];
 			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(false);
-			const first = await tool.execute("s-0", { note: "First distinct live concern.", severity: "concern" });
-			const second = await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
-			const third = await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
-			expect(JSON.stringify(first.content)).toContain("Delivered.");
-			for (const result of [second, third]) {
-				const text = JSON.stringify(result.content);
-				expect(text).toContain("budget");
-				expect(text).not.toContain("Duplicate");
-			}
+			await tool.execute("s-0", { note: "First distinct live concern.", severity: "concern" });
+			await tool.execute("s-1", { note: "Second distinct live concern.", severity: "concern" });
+			await tool.execute("s-2", { note: "Third distinct live concern.", severity: "concern" });
 			expect(delivered).toEqual(["First distinct live concern."]);
+
+			tool.beginUpdate(false);
+			await tool.execute("s-3", { note: "First distinct live concern.", severity: "concern" });
+			await tool.execute("s-4", { note: "Second distinct live concern.", severity: "concern" });
+			await tool.execute("s-5", { note: "Third distinct live concern.", severity: "concern" });
+			expect(delivered).toEqual(["First distinct live concern.", "Second distinct live concern."]);
 		});
 
 		it("cannot create an extra live slot by escalating past a delivered nit", async () => {
-			// A delivered (routed) nit keeps its budget slot: delivery cannot be
-			// retracted. A distinct higher-severity note later in the same update
-			// is rate-limited instead of producing a second over-budget delivery.
+			// A routed nit keeps its budget slot: delivery cannot be retracted.
 			const delivered: { note: string; severity?: string }[] = [];
 			const tool = new AdviseTool(
 				(note, severity) => delivered.push({ note, severity }),
@@ -1022,16 +1031,15 @@ describe("advisor", () => {
 
 			tool.beginUpdate(false);
 			await tool.execute("r-0", { note: "Nit: rename the helper.", severity: "nit" });
-			const concern = await tool.execute("r-1", {
+			await tool.execute("r-1", {
 				note: "Concern: the helper drops the lock early.",
 				severity: "concern",
 			});
-			expect(JSON.stringify(concern.content)).toContain("Dropped:");
 			expect(delivered).toEqual([{ note: "Nit: rename the helper.", severity: "nit" }]);
 		});
 
 		it("delivers a blocker escalation of a reserved note live instead of dropping it as already seen", async () => {
-			// A note reserved as a nit/concern during an in-progress update, then
+			// A note reserved as a nit during an in-progress update, then
 			// escalated to blocker before the backlog flushes, even with
 			// casing/punctuation changed, must reuse its normalized reservation and
 			// interrupt at blocker severity now — not be rejected as already-seen
@@ -1045,7 +1053,7 @@ describe("advisor", () => {
 			const escalatedNote = "THE MIGRATION DROPS THE USERS TABLE WITHOUT A BACKUP!";
 
 			tool.beginUpdate(true);
-			await tool.execute("e-0", { note, severity: "concern" });
+			await tool.execute("e-0", { note, severity: "nit" });
 			// Reserved, not delivered.
 			expect(delivered).toEqual([]);
 
@@ -1054,9 +1062,33 @@ describe("advisor", () => {
 			// The blocker escalation is delivered live, at blocker severity.
 			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
 
-			// The consumed reservation is not re-delivered as a stale concern at flush.
+			// The consumed reservation is not re-delivered as a stale nit at flush.
 			tool.beginUpdate(false);
 			expect(delivered).toEqual([{ note: escalatedNote, severity: "blocker" }]);
+		});
+
+		it("releases only a still-pending nit's budget slot when it escalates directly to blocker", async () => {
+			const delivered: AdvisorNote[] = [];
+			const tool = new AdviseTool(
+				(note, severity) => delivered.push({ note, severity }),
+				new AdvisorEmissionGuard({ budgetPerUpdate: 1 }),
+			);
+			const note = "The migration has no rollback.";
+
+			tool.beginUpdate(true);
+			await tool.execute("b-0", { note, severity: "nit" });
+			await tool.execute("b-1", { note, severity: "blocker" });
+			await tool.execute("b-2", { note: "Check the rollback lock.", severity: "concern" });
+			expect(delivered).toEqual([
+				{ note, severity: "blocker" },
+				{ note: "Check the rollback lock.", severity: "concern" },
+			]);
+
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([
+				{ note, severity: "blocker" },
+				{ note: "Check the rollback lock.", severity: "concern" },
+			]);
 		});
 
 		it("flushDeferredNotes delivers the backlog without resetting the update budget", async () => {
@@ -1076,12 +1108,13 @@ describe("advisor", () => {
 
 			tool.flushDeferredNotes();
 			expect(delivered).toEqual([{ note: "Nit held behind the turn.", severity: "nit" }]);
+			tool.flushDeferredNotes();
+			expect(delivered).toEqual([{ note: "Nit held behind the turn.", severity: "nit" }]);
 
 			// Same update continues: the flushed nit's slot is charged and routed,
 			// so a distinct concern is rate-limited — no second delivery.
-			const concern = await tool.execute("f-1", { note: "Concern after the flush.", severity: "concern" });
-			expect(JSON.stringify(concern.content)).toContain("budget");
-			expect(delivered).toHaveLength(1);
+			await tool.execute("f-1", { note: "Concern after the flush.", severity: "concern" });
+			expect(delivered).toEqual([{ note: "Nit held behind the turn.", severity: "nit" }]);
 
 			// The next advisor update starts with a fresh budget.
 			tool.beginUpdate(false);
@@ -1097,7 +1130,7 @@ describe("advisor", () => {
 			const tool = new AdviseTool(note => delivered.push(note), new AdvisorEmissionGuard({ budgetPerUpdate: 1 }));
 
 			tool.beginUpdate(true);
-			await tool.execute("q-0", { note: "Queued but never flushed.", severity: "concern" });
+			await tool.execute("q-0", { note: "Queued but never flushed.", severity: "nit" });
 			tool.resetDeliveredNotes();
 
 			// The pending reservation is gone: no flush replay after the reset.
@@ -1105,7 +1138,7 @@ describe("advisor", () => {
 			expect(delivered).toEqual([]);
 
 			// The guard's dedupe memory is gone too: the same note admits again.
-			await tool.execute("q-1", { note: "Queued but never flushed.", severity: "concern" });
+			await tool.execute("q-1", { note: "Queued but never flushed.", severity: "nit" });
 			expect(delivered).toEqual(["Queued but never flushed."]);
 		});
 
@@ -6363,6 +6396,12 @@ describe("advisor", () => {
 	// window (`streaming: false`) a suppressed note must `preserve`, never `steer`,
 	// or it strands and #drainStrandedQueuedMessages auto-resumes it. Do not swap
 	// the call site back to session `isStreaming`.
+	//
+	// Delivery channels: an aside is only routed while the loop is live
+	// (streaming and not aborting) — that is the only window in which the loop
+	// polls getAsideMessages again. Once the loop is idle, a nit (and an
+	// immune-window idle concern) is preserved as a visible card instead of
+	// parking a note nothing will ever drain.
 	describe("resolveAdvisorDeliveryChannel", () => {
 		it("preserves every severity when a headless drain forbids primary turns", () => {
 			for (const severity of [undefined, "nit", "concern", "blocker"] as const) {
@@ -6389,50 +6428,84 @@ describe("advisor", () => {
 					preserveOnly: true,
 				}),
 			).toBe("aside");
-			for (const severity of ["concern", "blocker"] as const) {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+					preserveOnly: true,
+				}),
+			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+					preserveOnly: true,
+				}),
+			).toBe("steer");
+		});
+
+		it("routes a nit as an aside only while the loop is live, preserving it otherwise", () => {
+			for (const severity of [undefined, "nit"] as const) {
 				expect(
 					resolveAdvisorDeliveryChannel({
 						severity,
 						autoResumeSuppressed: false,
 						streaming: true,
 						aborting: false,
-						preserveOnly: true,
 					}),
-				).toBe("steer");
+				).toBe("aside");
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: true,
+						streaming: true,
+						aborting: true,
+					}),
+				).toBe("preserve");
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+					}),
+				).toBe("preserve");
 			}
 		});
 
-		it("routes a non-interrupting nit to the aside queue regardless of state", () => {
+		it("a concern raised against a streaming primary never steers", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
-					severity: "nit",
-					autoResumeSuppressed: true,
-					streaming: true,
-					aborting: true,
-				}),
-			).toBe("aside");
-			expect(
-				resolveAdvisorDeliveryChannel({
-					severity: undefined,
+					severity: "concern",
 					autoResumeSuppressed: false,
-					streaming: false,
+					streaming: true,
 					aborting: false,
 				}),
 			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("steer");
 		});
 
-		it("steers concern/blocker when no user interrupt is in effect", () => {
+		it("an idle mid-work concern or blocker steers a triggered turn", () => {
 			for (const severity of ["concern", "blocker"] as const) {
-				for (const streaming of [true, false]) {
-					expect(
-						resolveAdvisorDeliveryChannel({
-							severity,
-							autoResumeSuppressed: false,
-							streaming,
-							aborting: false,
-						}),
-					).toBe("steer");
-				}
+				expect(
+					resolveAdvisorDeliveryChannel({
+						severity,
+						autoResumeSuppressed: false,
+						streaming: false,
+						aborting: false,
+					}),
+				).toBe("steer");
 			}
 		});
 
@@ -6460,7 +6533,7 @@ describe("advisor", () => {
 			).toBe("steer");
 		});
 
-		it("downgrades concern to aside during immune turns, but still steers a blocker (#5628)", () => {
+		it("preserves an idle concern during immune turns, keeps a streaming one on the aside queue, and still steers a blocker (#5628)", () => {
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "concern",
@@ -6470,6 +6543,15 @@ describe("advisor", () => {
 					interruptImmuneTurnActive: true,
 				}),
 			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: false,
+					aborting: false,
+					interruptImmuneTurnActive: true,
+				}),
+			).toBe("preserve");
 			expect(
 				resolveAdvisorDeliveryChannel({
 					severity: "blocker",
@@ -6489,6 +6571,18 @@ describe("advisor", () => {
 				}),
 			).toBe("preserve");
 		});
+
+		it("steers a concern during abort teardown when no user interrupt is in effect", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: false,
+					streaming: true,
+					aborting: true,
+				}),
+			).toBe("steer");
+		});
+
 		it("preserves an interrupting note while suppressed AND idle (no auto-resume of a stopped run)", () => {
 			for (const severity of ["concern", "blocker"] as const) {
 				expect(
@@ -6515,17 +6609,23 @@ describe("advisor", () => {
 			).toBe("preserve");
 		});
 
-		it("steers an interrupting note while suppressed once a turn is streaming again and not aborting (the fix)", () => {
-			for (const severity of ["concern", "blocker"] as const) {
-				expect(
-					resolveAdvisorDeliveryChannel({
-						severity,
-						autoResumeSuppressed: true,
-						streaming: true,
-						aborting: false,
-					}),
-				).toBe("steer");
-			}
+		it("delivers a suppressed note once a turn is streaming again and not aborting instead of stranding it (the fix)", () => {
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "concern",
+					autoResumeSuppressed: true,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("aside");
+			expect(
+				resolveAdvisorDeliveryChannel({
+					severity: "blocker",
+					autoResumeSuppressed: true,
+					streaming: true,
+					aborting: false,
+				}),
+			).toBe("steer");
 		});
 	});
 	describe("advisor transcript filenames", () => {

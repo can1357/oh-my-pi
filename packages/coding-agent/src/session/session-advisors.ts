@@ -363,6 +363,7 @@ export interface SessionAdvisorsHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
+	isAgentConnected(): boolean;
 	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
 	clientBridge(): ClientBridge | undefined;
@@ -739,6 +740,21 @@ export class SessionAdvisors {
 	/** Waits for all advisor-card persistence handlers currently in flight. */
 	async waitForPendingCardEvents(): Promise<void> {
 		await Promise.allSettled(this.#pendingAdvisorCardEvents);
+	}
+
+	/** Remove every queued advisor aside, built into one card, for a caller that preserves it itself (the user-interrupt abort). */
+	drainQueuedAdvice(): CustomMessage[] {
+		const card = this.#host.yieldQueue.drainKind("advisor");
+		return card && isAdvisorCard(card) ? [card] : [];
+	}
+
+	/** Re-record advisor asides that missed the loop's last poll as visible cards.
+	 *  No-op while the loop still runs, while an abort is tearing it down, or while
+	 *  the session is disconnected from agent events (`/compact`), because a card
+	 *  emitted then has no subscriber to persist it. */
+	preserveQueuedAdvice(): void {
+		if (this.#host.agent.state.isStreaming || this.#host.abortInProgress() || !this.#host.isAgentConnected()) return;
+		for (const card of this.drainQueuedAdvice()) this.#host.preserveAdvisorCard(card);
 	}
 
 	// Advisor runtime lifecycle
@@ -1238,10 +1254,8 @@ export class SessionAdvisors {
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
-					// Flushes the deferred backlog on the in-progress→completed
-					// transition (notes already cleared admission when reserved) and
-					// resets the guard's per-update budget for this prompt's live
-					// notes — both owned by the tool now.
+					// Begin the review's budget and flush admitted nits when the
+					// primary transitions from in-progress to completed work.
 					advisorRef.adviseTool.beginUpdate(inProgress);
 				},
 				onTurnError: (error, failedMessages, signal) =>
@@ -1316,7 +1330,7 @@ export class SessionAdvisors {
 		}
 
 		// One shared non-blocking aside channel for all advisors; the build callback
-		// aggregates every advisor's queued nits into one card (each entry already
+		// aggregates every advisor's queued nits and concerns into one card (each entry already
 		// carries its own `advisor` name).
 		if (this.#advisors.length > 0 && !this.#advisorYieldQueueUnsubscribe) {
 			this.#advisorYieldQueueUnsubscribe = this.#host.yieldQueue.register<AdvisorNote>("advisor", {
@@ -1339,19 +1353,7 @@ export class SessionAdvisors {
 		return this.#advisors.length > 0;
 	}
 
-	/**
-	 * Route one accepted advice note from `advisor` to the primary. Concern and
-	 * blocker interrupt the running agent through the steering channel; once the
-	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
-	 * no queued work, late non-blocker advice (a nit or concern) is preserved as a
-	 * visible advisor card, while a blocker wakes the primary to acknowledge work
-	 * it handed off incorrectly. After a deliberate user interrupt auto-resume is
-	 * suppressed while idle/unwinding (the note becomes a preserved card re-entering
-	 * on resume); a live-streaming turn is steered in directly. A plain nit rides
-	 * the non-interrupting YieldQueue aside during streaming. The emission guard
-	 * has already accepted the note; rejected calls never enter this route and
-	 * receive their specific policy outcome from `AdviseTool`.
-	 */
+	/** Ignore preserved advisor cards when checking whether the primary finished its work. */
 	#hasTerminalTextAnswerWithoutQueuedWork(): boolean {
 		if (this.#host.agent.hasQueuedMessages() || this.#host.hasPendingNextTurnMessages()) return false;
 		const messages = this.#host.agent.state.messages;

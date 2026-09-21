@@ -15,6 +15,7 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { isAdvisorCard } from "@oh-my-pi/pi-coding-agent/session/queued-messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as advisorModule from "../src/advisor";
@@ -1194,19 +1195,22 @@ describe("AgentSession advisor toggle", () => {
 			const tool = advisor.state.tools?.find(candidate => candidate.name === "advise");
 			if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
 
+			// Keep the primary idle after a final answer so accepted concerns become
+			// visible cards without starting another model request.
+			session.agent.replaceMessages([advisorMessage(0, 0)]);
+			const notes = Array.from({ length: budget }, (_, index) => `${prefix} note ${index + 1}`);
 			tool.beginUpdate(true);
-			for (let i = 1; i <= budget; i++) {
-				const result = await tool.execute(`${prefix}-${i}`, {
-					note: `${prefix} note ${i}`,
-					severity: "concern",
-				});
-				expect(JSON.stringify(result.content)).toContain("Queued for the end of the turn");
+			for (const [index, note] of notes.entries()) {
+				await tool.execute(`${prefix}-${index + 1}`, { note, severity: "concern" });
 			}
-			const rejected = await tool.execute(`${prefix}-${budget + 1}`, {
+			await tool.execute(`${prefix}-${budget + 1}`, {
 				note: `${prefix} note ${budget + 1}`,
 				severity: "concern",
 			});
-			expect(JSON.stringify(rejected.content)).toContain("budget is spent");
+			await session.waitForIdle();
+
+			const delivered = session.messages.filter(isAdvisorCard).map(message => message.content);
+			expect(delivered).toEqual(notes.map(note => expect.stringContaining(note)));
 		};
 
 		session.settings.set("advisor.maxNotesPerUpdate", 2);

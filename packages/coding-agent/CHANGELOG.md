@@ -16,10 +16,12 @@
 ### Changed
 
 - Enhanced browser resilience with configurable HTTPS error ignoring, domain allow-listing, and automatic tab recycling for security-sensitive state changes
+- Advisor concerns raised while the agent is mid-turn now reach it at its next step as non-interrupting asides instead of after the turn completes; only blockers interrupt a running tool ([#10600](https://github.com/can1357/oh-my-pi/issues/10600)).
 
 ### Fixed
 
 - Fixed native judges ignoring configured `headers`: the judge chain now resolves model headers and passes them to the System One transport, so gateway-authenticated and header-routed judge providers work without extra configuration.
+- Fixed advisor notes lingering invisibly until the next prompt when they arrived after the agent's last step or while it was idle; they are now shown as advisor cards ([#10600](https://github.com/can1357/oh-my-pi/issues/10600)).
 - Added support for buffered cloud transcription using OpenAI-compatible models
 - Added visual change detection capabilities for video processing using FFMPEG and SVG overlaying
 - Prevented LSP client from hanging when a request is aborted while waiting for a previous write
