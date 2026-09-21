@@ -1139,7 +1139,7 @@ Mistral AI provides access to Mistral, Codestral, Devstral, Ministral, and Pixtr
 - **Array `delta.content` Streaming Normalization (`packages/ai/src/providers/openai-completions.ts`: `normalizeStreamingContentText`)**: Unpacks streaming response chunks where models (e.g. `mistral-medium-2604`) deliver `delta.content` as typed arrays (`[{ type: "text", text: "..." }]`), preventing `[object Object]` string coercion bugs.
 
 ### Auth & usage
-- **Authentication**: Authenticates using bearer tokens from the `MISTRAL_API_KEY` environment variable (`packages/catalog/src/provider-models/descriptors.ts`: `mistral`).
+- **Authentication**: Declared in `packages/catalog/src/compat/rules/auth/mistral.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`) that stores the pasted key and validates it via `GET /v1/models`; the `MISTRAL_API_KEY` environment variable remains a fallback (`packages/catalog/src/provider-models/descriptors.ts`: `mistral`).
 - **Usage Tracking**: Standard OpenAI chat completions usage parsing (`packages/ai/src/providers/openai-completions.ts`).
 
 ### Catalog model handling

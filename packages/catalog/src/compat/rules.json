@@ -9642,6 +9642,19 @@
 				}
 			},
 			{
+				"id": "mistral",
+				"apiKeyFormat": "bearer",
+				"name": "Mistral",
+				"login": {
+					"kind": "api-key",
+					"authUrl": "https://console.mistral.ai/api-keys",
+					"instructions": "Create or copy your API key from the Mistral console",
+					"prompt": "Paste your Mistral API key",
+					"placeholder": "...",
+					"validate": { "kind": "models-endpoint", "label": "mistral", "url": "https://api.mistral.ai/v1/models" }
+				}
+			},
+			{
 				"id": "cerebras",
 				"apiKeyFormat": "bearer",
 				"name": "Cerebras",
@@ -10246,7 +10259,6 @@
 			{ "id": "groq", "apiKeyFormat": "bearer", "name": "Groq" },
 			{ "id": "local", "apiKeyFormat": "bearer", "name": "Local models", "allowsMissingApiKey": true },
 			{ "id": "minimax", "apiKeyFormat": "bearer", "name": "MiniMax" },
-			{ "id": "mistral", "apiKeyFormat": "bearer", "name": "Mistral" },
 			{ "id": "openai", "apiKeyFormat": "bearer", "name": "OpenAI" },
 			{ "id": "web", "apiKeyFormat": "bearer", "name": "Web search engines", "allowsMissingApiKey": true }
 		]

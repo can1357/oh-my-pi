@@ -7,7 +7,7 @@
 - Added support for embedding, rerank, and video generation capabilities in OpenRouter provider
 - Added support for speech-to-text (STT) capabilities in OpenAI provider
 - Added five STT models to OpenRouter provider
-- Added support for TTS and STT API capabilities in OpenRouter provider
+- Added Mistral to `/login` with an API-key flow that validates against `https://api.mistral.ai/v1/models`, so `MISTRAL_API_KEY` no longer has to come from the environment
 
 ## [18.2.7] - 2026-09-21
 
