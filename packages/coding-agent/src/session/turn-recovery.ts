@@ -2281,12 +2281,13 @@ export class TurnRecovery {
 				this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 				this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 			}
-			await this.#host.syncAfterModelChange(previousEditMode);
+			await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 			await this.#host.emitSessionEvent({
 				type: "retry_fallback_applied",
 				from: currentSelector,
 				to: selector.raw,
 				role,
+				reason: options?.reason,
 			});
 			return true;
 		} finally {
@@ -2560,7 +2561,7 @@ export class TurnRecovery {
 		try {
 			this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 			this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
-			await this.#host.syncAfterModelChange(previousEditMode);
+			await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 			await this.#host.emitSessionEvent({
 				type: "retry_fallback_applied",
 				from: currentSelector,

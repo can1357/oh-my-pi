@@ -4,6 +4,7 @@ import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
@@ -70,7 +71,7 @@ describe("AgentSession model_select extension event", () => {
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-model-select-event-");
 		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		authStorage.keys.setRuntime("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -286,6 +287,60 @@ describe("AgentSession model_select extension event", () => {
 		expect(observed?.lastModelChange).toBe("anthropic/claude-sonnet-4-6");
 	});
 
+	it("delivers after a role switch applies its explicit thinking level", async () => {
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => session.thinkingLevel,
+				setThinkingLevel: level => session.setThinkingLevel(level),
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => session.model,
+				isIdle: () => !session.isStreaming,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+		);
+		const target = bundledAnthropicModel("claude-sonnet-4-6");
+		if (!target.thinking) throw new Error("Expected claude-sonnet-4-6 to carry a thinking config");
+		// The role's explicit level (low) differs from the model default the
+		// handler observes; a post-transaction tail would overwrite the
+		// handler's `pi.setThinkingLevel("high")` with "low" after delivery.
+		const withDefaultLevel: Model<Api> = { ...target, thinking: { ...target.thinking, defaultLevel: Effort.Low } };
+		let observedLevel: string | undefined;
+		(globalThis as GateGlobal).__ompModelSelectAction = pi => {
+			observedLevel = session.thinkingLevel;
+			pi.setThinkingLevel(Effort.High);
+		};
+
+		await session.applyRoleModel({
+			role: "slow",
+			model: withDefaultLevel,
+			thinkingLevel: Effort.Low,
+			explicitThinkingLevel: true,
+		});
+		await waitForDeliveries();
+
+		// The handler saw the role's explicit low, and its high survives — the
+		// role tail no longer runs after the `model_select` commit.
+		expect(observedLevel).toBe(Effort.Low);
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
 	it("resolves dispose within the shutdown bound while a handler is parked, then fences new deliveries", async () => {
 		testSetSessionShutdownHandlerTimeoutMs(50);
 		try {
@@ -393,15 +448,14 @@ describe("AgentSession model_select extension event", () => {
 
 	it("reports the attempted restore then the rollback restore when a switch fails mid-tail", async () => {
 		const target = bundledAnthropicModel("claude-sonnet-4-6");
-		const { switcher, restoreEvents, targetFile, settings } = await buildSwitchPair(target);
+		const { switcher, restoreEvents, targetFile } = await buildSwitchPair(target);
 		// Cheapest injectable failure AFTER the model-restore block: the first
 		// `defaultThinkingLevel` read of the switch tail (`parseConfiguredThinkingLevel`
 		// below the restore) — every later seam is either wrapped in try/catch or
 		// internal. Throwing there lands in the rollback catch with the restore
 		// already committed.
-		const getSpy = vi.spyOn(settings, "get").mockImplementation((key: string) => {
-			if (key === "defaultThinkingLevel") throw new Error("injected post-restore failure");
-			return Settings.isolated().get(key as Parameters<Settings["get"]>[0]);
+		const getSpy = vi.spyOn(cfgDefaultThinkingLevel, "get").mockImplementation(() => {
+			throw new Error("injected post-restore failure");
 		});
 		try {
 			await expect(switcher.switchSession(targetFile)).rejects.toThrow("injected post-restore failure");

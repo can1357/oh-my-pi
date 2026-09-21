@@ -153,7 +153,6 @@ import type {
 	ExtensionCommandContext,
 	ExtensionRunner,
 	ExtensionUIContext,
-	ModelSelectSource,
 	PreparedExtension,
 	SessionBeforeBranchResult,
 	SessionBeforeSwitchResult,
@@ -11707,6 +11706,9 @@ export class AgentSession implements SettingsScope {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/** Apply this level inside the switch transaction (before the
+			 * `model_select` commit); see {@link ModelControls.setModel}. */
+			applyThinkingLevel?: ConfiguredThinkingLevel;
 		},
 	): Promise<{ switched: boolean }> {
 		return this.#models.setModel(model, role, options);
@@ -13322,7 +13324,6 @@ export class AgentSession implements SettingsScope {
 				this.#closeAllProviderSessions("session reload");
 			}
 
-			let restoreResult: ModelSwitchResult | undefined;
 			if (targetModel) {
 				const currentModel = this.model;
 				const shouldResetProviderState =

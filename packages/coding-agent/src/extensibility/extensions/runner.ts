@@ -1022,7 +1022,6 @@ export class ExtensionRunner {
 					});
 					resolve(undefined);
 				}, extensionHandlerTimeoutMs);
-				timer.unref?.();
 				try {
 					const event = await promise;
 					if (!event || this.#shutdownStarted) return;

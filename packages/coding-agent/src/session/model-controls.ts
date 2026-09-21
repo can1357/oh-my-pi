@@ -30,7 +30,6 @@ import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import type { MagicKeywordId } from "../modes/magic-keywords";
-import type { ModelSelectSource } from "../extensibility/extensions/types";
 import {
 	AUTO_THINKING,
 	automaticThinkingLevel,
@@ -244,6 +243,12 @@ export class ModelControls {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/** Apply this level inside the switch transaction (before the
+			 * `model_select` commit) instead of the model's defaultLevel. Use for
+			 * role switches whose explicit level must land before extension
+			 * handlers observe the new model; `undefined` falls back to the
+			 * model's defaultLevel. */
+			applyThinkingLevel?: ConfiguredThinkingLevel;
 		},
 	): Promise<{ switched: boolean }> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
@@ -275,7 +280,11 @@ export class ModelControls {
 
 			// Re-apply thinking for the newly selected model. Prefer the model's
 			// configured defaultLevel; otherwise preserve the current level (or auto).
-			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+			if (options?.applyThinkingLevel !== undefined) {
+				this.setThinkingLevel(options.applyThinkingLevel);
+			} else {
+				this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+			}
 			await this.#host.syncAfterModelChange(previousEditMode);
 		} finally {
 			// Release the switch-time FIFO slot as the tail's last step — or on a
@@ -312,7 +321,11 @@ export class ModelControls {
 		try {
 			this.#host.sessionManager.appendModelChange(
 				`${targetModel.provider}/${targetModel.id}`,
-				options?.prewalk ? PREWALK_MODEL_CHANGE_ROLE : options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+				options?.prewalk
+					? PREWALK_MODEL_CHANGE_ROLE
+					: options?.ephemeral
+						? EPHEMERAL_MODEL_CHANGE_ROLE
+						: "temporary",
 			);
 			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
 
@@ -407,10 +420,12 @@ export class ModelControls {
 	 * settings. Shared with role cycling and the plan-approval model slider.
 	 */
 	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		await this.setModel(entry.model, entry.role);
-		if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
-			this.setThinkingLevel(entry.thinkingLevel);
-		}
+		// Apply the role's explicit level inside the switch transaction so the
+		// `model_select` commit observes it; callers must not set it after the
+		// switch — a handler's own `pi.setThinkingLevel` would be overwritten.
+		const roleLevel: ConfiguredThinkingLevel | undefined =
+			entry.explicitThinkingLevel && entry.thinkingLevel !== undefined ? entry.thinkingLevel : undefined;
+		await this.setModel(entry.model, entry.role, { applyThinkingLevel: roleLevel });
 	}
 
 	/**

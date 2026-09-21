@@ -1568,7 +1568,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage, "getModelUsageHealth").mockImplementation(async provider =>
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
 			provider === primaryModel.provider
 				? {
 						state: "reserve",
