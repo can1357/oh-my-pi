@@ -22,7 +22,6 @@
 // Jev outage — extra tokens and latency on the turn critical path for a
 // decision that should not exist. Jev down -> no routing decision -> top tier.
 
-import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { ChoiceAnswer, ChoiceQuestion, Judge, Questions, ScoreAnswer } from "@oh-my-pi/pi-ai";
 import { DEFAULT_ROUTING_POLICY, type RouteDecision, type RoutingPolicy, type TierSpec } from "./types";
 
@@ -65,9 +64,8 @@ export const ROUTING_JUDGE_TIMEOUT_MS = 1500;
  * user escape propagates. Internal timeout aborts and all other failures
  * return false -> `engine-unavailable` (fail expensive).
  */
-function isCallerAbort(error: unknown, callerSignal: AbortSignal | undefined): boolean {
-	if (!callerSignal?.aborted) return false;
-	return AIError.is(AIError.classify(error), AIError.Flag.Abort) || error instanceof Error;
+function isCallerAbort(_error: unknown, callerSignal: AbortSignal | undefined): boolean {
+	return callerSignal?.aborted === true;
 }
 
 function routingSignal(callerSignal: AbortSignal | undefined, timeoutMs: number): AbortSignal {

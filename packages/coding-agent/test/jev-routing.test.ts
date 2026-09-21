@@ -316,3 +316,65 @@ describe("cancellation", () => {
 		).rejects.toThrow();
 	});
 });
+
+// ---------------------------------------------------------------------------
+// resolveRoutingJudge — native-only gate on the judge role chain (spec §3.1:
+// undefined = no router -> top tier; non-native candidates never answer).
+// ---------------------------------------------------------------------------
+
+import { resolveRoutingJudge } from "../src/routing/judge";
+
+function routingDeps(models: Array<Record<string, unknown>>) {
+	const settings = {
+		get: (key: string) => {
+			if (key === "retry.fallbackChains" || key === "modelTags") return {};
+			if (key === "cycleOrder") return [];
+			return undefined;
+		},
+		getModelRoles: () => ({}),
+		getModelRole: () => undefined,
+	};
+	const registry = {
+		getAvailable: () => models,
+	};
+	return { settings, registry } as never;
+}
+
+const NATIVE_MODEL = {
+	provider: "typesafe",
+	id: "jev-latest",
+	api: "typesafe",
+	kind: "judge",
+	name: "Jev",
+	baseUrl: "https://api.typesafe.ai",
+} as never;
+
+const CHAT_MODEL = {
+	provider: "openai",
+	id: "gpt-5",
+	api: "openai-responses",
+	kind: "chat",
+	name: "GPT-5",
+} as never;
+
+describe("resolveRoutingJudge", () => {
+	it("returns undefined when the judge chain has no candidates", () => {
+		expect(resolveRoutingJudge(routingDeps([]))).toBeUndefined();
+	});
+
+	it("returns undefined when only chat models are available", () => {
+		expect(resolveRoutingJudge(routingDeps([CHAT_MODEL]))).toBeUndefined();
+	});
+
+	it("returns a judge when a native decisions model is on the chain", () => {
+		const judge = resolveRoutingJudge(routingDeps([NATIVE_MODEL]));
+		expect(judge).toBeDefined();
+		expect(judge?.label).toBe("routing/native-only");
+	});
+
+	it("returns a judge when the session model itself is native", () => {
+		const deps = routingDeps([]);
+		(deps as { sessionModel?: unknown }).sessionModel = NATIVE_MODEL;
+		expect(resolveRoutingJudge(deps)).toBeDefined();
+	});
+});
