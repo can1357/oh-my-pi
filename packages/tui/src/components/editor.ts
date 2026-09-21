@@ -14,8 +14,10 @@ import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keyb
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
 import type { SymbolTheme } from "../symbols";
-import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
+import { type Component, CURSOR_MARKER, type CursorOverlayRenderer, type Focusable } from "../tui";
+import { Box } from "./box";
 import {
+	applyBackgroundToLine,
 	getSegmenter,
 	getWidthConfigEpoch,
 	getWordNavKind,
@@ -585,6 +587,7 @@ export class Editor implements Component, Focusable {
 		| { line: number; startCol: number; endCol: number; original: string; cursorOffset: number }
 		| undefined;
 	#autocompletePrefix: string = "";
+	#autocompleteCommandArgument = false;
 	#autocompleteRequestId: number = 0;
 	#autocompletePendingRequest: AutocompleteRequest | undefined;
 	#autocompleteRequestRunning = false;
@@ -592,6 +595,11 @@ export class Editor implements Component, Focusable {
 	#autocompleteWaiters: Array<() => void> = [];
 	#autocompleteMaxVisible: number = 10;
 	onAutocompleteUpdate?: () => void;
+	/** Opt in to passive slash suggestions when a host supplies a popup renderer. */
+	commandSuggestionsPopup = false;
+	popupFill = false;
+	/** A frame host may paint suggestions over existing cells instead of allocating layout rows. */
+	onAutocompleteRender?: (render: CursorOverlayRenderer | undefined, cursorOffset: number, editorRows: number) => void;
 	/** Called after an async text-assist result mutates the document outside an input event, so hosts can schedule a repaint. */
 	onTextAssistApplied?: () => void;
 	/** Terminal height source for clamping the autocomplete dropdown. Hosts wire this to their Terminal's rows. */
@@ -753,6 +761,33 @@ export class Editor implements Component, Focusable {
 	isAutocompleteActive(): boolean {
 		return this.#autocompleteState !== null;
 	}
+
+	#autocompleteBox = new Box(0, 0).setIgnoreTight(true);
+
+	#renderAutocompleteOverlay: CursorOverlayRenderer = (width, maxRows) => {
+		if (!this.#autocompleteList || maxRows < 1) return [];
+		const framed = maxRows >= 3 && width >= 3;
+		this.#autocompleteList.setMaxVisible(Math.min(this.#autocompleteMaxVisible, maxRows - (framed ? 2 : 0)), true);
+
+		if (!framed) {
+			return this.popupFill
+				? this.#autocompleteList
+						.render(width)
+						.map(line => applyBackgroundToLine(line, width, this.#theme.surfaceColor ?? PASSTHROUGH_COLOR))
+				: this.#autocompleteList.render(width);
+		}
+		this.#autocompleteBox.setBorder({
+			chars: this.#theme.symbols.boxRound,
+			color: this.#theme.accentColor ?? this.borderColor,
+		});
+		this.#autocompleteBox.clear();
+		this.#autocompleteBox.addChild(this.#autocompleteList);
+		return this.popupFill
+			? this.#autocompleteBox
+					.render(width)
+					.map(line => applyBackgroundToLine(line, width, this.#theme.surfaceColor ?? PASSTHROUGH_COLOR))
+			: this.#autocompleteBox.render(width);
+	};
 
 	/**
 	 * Get the available width for top border content given a total terminal width.
@@ -1469,15 +1504,31 @@ export class Editor implements Component, Focusable {
 
 		// Add autocomplete list if active
 		if (this.#autocompleteState && this.#autocompleteList) {
-			// Clamp the dropdown to the terminal viewport: the editor rows already
-			// rendered above plus a small reserve must stay visible.
-			const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
-			this.#autocompleteList.setMaxVisible(
-				Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
-			);
-			const autocompleteResult = this.#autocompleteList.render(width);
-			result.push(...autocompleteResult);
+			if (
+				this.commandSuggestionsPopup &&
+				(this.#autocompleteCommandArgument ||
+					(findLeadingSlashCommandStart(this.#autocompletePrefix) !== null &&
+						!this.#selectedCompletionIsPath())) &&
+				this.onAutocompleteRender
+			) {
+				this.onAutocompleteRender(
+					this.focused ? this.#renderAutocompleteOverlay : undefined,
+					Math.max(
+						0,
+						result.findIndex(row => row.includes(CURSOR_MARKER)),
+					),
+					result.length,
+				);
+			} else {
+				this.onAutocompleteRender?.(undefined, 0, result.length);
+				const viewportRows = this.viewportRowsProvider?.() || process.stdout.rows || Number(Bun.env.LINES) || 24;
+				this.#autocompleteList.setMaxVisible(
+					Math.max(3, Math.min(this.#autocompleteMaxVisible, viewportRows - result.length - 2)),
+				);
+				result.push(...this.#autocompleteList.render(width));
+			}
 		}
+		if (!this.#autocompleteState || !this.#autocompleteList) this.onAutocompleteRender?.(undefined, 0, result.length);
 
 		return result;
 	}
@@ -4007,7 +4058,10 @@ export class Editor implements Component, Focusable {
 		prefix: string,
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
-		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : AUTOCOMPLETE_SELECT_LIST_LAYOUT;
+		const layout =
+			findLeadingSlashCommandStart(prefix) !== null
+				? SLASH_COMMAND_SELECT_LIST_LAYOUT
+				: AUTOCOMPLETE_SELECT_LIST_LAYOUT;
 		return new SelectList(items, this.#autocompleteMaxVisible, this.#theme.selectList, layout);
 	}
 
@@ -4062,6 +4116,7 @@ export class Editor implements Component, Focusable {
 		if (replacements.endCol > line.length) return;
 		const original = line.slice(replacements.startCol, replacements.endCol);
 		this.#autocompletePrefix = original;
+		this.#autocompleteCommandArgument = false;
 		this.#autocompleteList = this.#createAutocompleteList(
 			original,
 			replacements.items.map(value => ({ value, label: value })),
@@ -4121,6 +4176,7 @@ export class Editor implements Component, Focusable {
 		this.#autocompleteList = undefined;
 		this.#textAssistReplacement = undefined;
 		this.#autocompletePrefix = "";
+		this.#autocompleteCommandArgument = false;
 		if (notifyCancel && wasAutocompleting) {
 			this.onAutocompleteCancel?.();
 		}
@@ -4177,7 +4233,7 @@ export class Editor implements Component, Focusable {
 		const lines = [...this.#state.lines];
 		const cursorLine = this.#state.cursorLine;
 		const cursorCol = this.#state.cursorCol;
-		let suggestions: { items: AutocompleteItem[]; prefix: string } | null;
+		let suggestions: { items: AutocompleteItem[]; prefix: string; commandArgument?: boolean } | null;
 		try {
 			if (request.kind === "force") {
 				const getForceFileSuggestions = provider.getForceFileSuggestions;
@@ -4207,6 +4263,7 @@ export class Editor implements Component, Focusable {
 
 		if (suggestions && Array.isArray(suggestions.items) && suggestions.items.length > 0) {
 			this.#autocompletePrefix = suggestions.prefix;
+			this.#autocompleteCommandArgument = suggestions.commandArgument === true;
 			this.#autocompleteList = this.#createAutocompleteList(suggestions.prefix, suggestions.items);
 			this.#autocompleteState = request.kind === "force" ? "force" : "regular";
 			this.onAutocompleteUpdate?.();
