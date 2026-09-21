@@ -157,16 +157,30 @@ describe("BtwController", () => {
 		const controller = new BtwController(ctx);
 
 		await controller.start("Question?");
-		expect(btwContainer.children).toHaveLength(1);
+		expect(btwContainer.render(120).length).toBeGreaterThan(0);
 		expect(controller.handleEscape()).toBe(true);
 		expect(runEphemeralTurn.mock.calls[0]?.[0].signal?.aborted).toBe(true);
-		expect(btwContainer.children).toHaveLength(1);
+		expect(btwContainer.render(120).length).toBeGreaterThan(0);
 		expect(controller.hasActiveRequest()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);
-		expect(btwContainer.children).toHaveLength(0);
+		expect(btwContainer.render(120)).toHaveLength(0);
 		expect(controller.hasActiveRequest()).toBe(false);
 		pending.resolve({ replyText: "Late answer", assistantMessage: createAssistantMessage("Late answer") });
 		await drainBtwRequest();
+		await controller.dispose();
+	});
+
+	it("separates the panel from the transcript with one blank row", async () => {
+		const runEphemeralTurn = vi.fn(async () => Promise.withResolvers<RunEphemeralTurnResult>().promise);
+		const btwContainer = new Container();
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const controller = new BtwController(ctx);
+
+		await controller.start("Question?");
+
+		const rows = btwContainer.render(60).map(row => Bun.stripANSI(row));
+		expect(rows[0]).toBe("");
+		expect(rows[1] ?? "").toContain("/btw Question?");
 		await controller.dispose();
 	});
 
@@ -350,10 +364,9 @@ describe("BtwController", () => {
 		await Promise.resolve();
 		expect(controller.handlesBranchKey()).toBe(true);
 
-		const panel = btwContainer.children[0];
-		expect(Bun.stripANSI(panel?.render(120).join("\n") ?? "")).toContain("Branching to chat");
+		expect(Bun.stripANSI(btwContainer.render(120).join("\n"))).toContain("Branching to chat");
 		expect(controller.handleEscape()).toBe(true);
-		expect(btwContainer.children).toHaveLength(1);
+		expect(Bun.stripANSI(btwContainer.render(120).join("\n"))).toContain("Branching to chat");
 
 		branch.resolve();
 		await branchPromise;

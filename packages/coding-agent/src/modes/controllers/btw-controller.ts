@@ -1,5 +1,5 @@
 import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
-import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
+import { type OverlayHandle, replaceTabs, Spacer } from "@oh-my-pi/pi-tui";
 import { logger, prompt, Snowflake, toError, withTimeout } from "@oh-my-pi/pi-utils";
 import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
 import {
@@ -419,7 +419,7 @@ export class BtwController {
 			this.#activeRequest = request;
 			this.#visible = !previous || !this.#historyOverlay;
 			this.ctx.btwContainer.clear();
-			if (this.#visible) this.ctx.btwContainer.addChild(request.component);
+			if (this.#visible) this.#showInline(request.component);
 			this.ctx.ui.requestRender();
 			if (!(await this.#persist(request))) {
 				if (this.#activeRequest === request) {
@@ -525,7 +525,7 @@ export class BtwController {
 			request.component.setAnswer(getBtwLatestTurn(request.record).answer);
 			this.#visible = true;
 			this.ctx.btwContainer.clear();
-			this.ctx.btwContainer.addChild(request.component);
+			this.#showInline(request.component);
 		}
 		this.ctx.ui.requestRender();
 	}
@@ -649,6 +649,17 @@ export class BtwController {
 		}
 		this.#persist(request);
 		if (this.#isActiveRequest(request)) this.#refreshHistory();
+	}
+
+	/**
+	 * Mounts the inline panel under one blank row. The panel is anchored directly
+	 * under the transcript, so without the spacer its top border sits flush against
+	 * the last answer row; the pinned error banner and the model-cycle switch keep
+	 * the same separation for their anchored containers.
+	 */
+	#showInline(component: BtwPanelComponent): void {
+		this.ctx.btwContainer.addChild(new Spacer(1));
+		this.ctx.btwContainer.addChild(component);
 	}
 
 	#hideInline(): void {
