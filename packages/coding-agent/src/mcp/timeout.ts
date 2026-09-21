@@ -14,7 +14,18 @@ export function resolveMCPTimeoutMs(configTimeout?: number): number {
 			value: raw,
 		});
 	}
-	return configTimeout ?? DEFAULT_MCP_TIMEOUT_MS;
+	if (configTimeout === undefined) return DEFAULT_MCP_TIMEOUT_MS;
+	if (configTimeout > 0 && configTimeout < 1000) {
+		// Claude-Code-style manifests declare `timeout` in seconds; a bare
+		// sub-second value can never be a deliberate millisecond budget for
+		// an MCP server, so interpret it as seconds (issue #12485).
+		logger.warn("Interpreting sub-second MCP timeout as seconds (Claude Code units)", {
+			configTimeout,
+			resolvedMs: configTimeout * 1000,
+		});
+		return configTimeout * 1000;
+	}
+	return configTimeout;
 }
 
 export function isMCPTimeoutEnabled(timeoutMs: number): boolean {

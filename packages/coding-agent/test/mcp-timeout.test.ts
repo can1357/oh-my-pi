@@ -25,6 +25,39 @@ describe("MCP timeout configuration", () => {
 		expect(resolveMCPTimeoutMs(120_000)).toBe(120_000);
 	});
 
+	test("interprets sub-second config timeouts as seconds (Claude Code units)", () => {
+		delete process.env.OMP_MCP_TIMEOUT_MS;
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+
+		try {
+			expect(resolveMCPTimeoutMs(600)).toBe(600_000);
+			expect(warn).toHaveBeenCalledTimes(1);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	test("keeps millisecond config timeouts at or above one second verbatim", () => {
+		delete process.env.OMP_MCP_TIMEOUT_MS;
+		const warn = spyOn(logger, "warn").mockImplementation(() => {});
+
+		try {
+			expect(resolveMCPTimeoutMs(1000)).toBe(1000);
+			expect(resolveMCPTimeoutMs(30_000)).toBe(30_000);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	test("keeps zero as disabled", () => {
+		delete process.env.OMP_MCP_TIMEOUT_MS;
+
+		const timeout = resolveMCPTimeoutMs(0);
+		expect(timeout).toBe(0);
+		expect(isMCPTimeoutEnabled(timeout)).toBe(false);
+	});
+
 	test("allows the env override to disable MCP client-side timeouts", () => {
 		process.env.OMP_MCP_TIMEOUT_MS = "0";
 
