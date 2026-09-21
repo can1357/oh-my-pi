@@ -24,6 +24,19 @@ export interface AwsAuthenticatedFetchOptions {
 	providerOptions?: AwsBedrockProviderOptions;
 }
 
+/** Headers SigV4 generates; a caller copy must be dropped before signing or the signed value and wire value diverge. */
+// `host`/`authorization`/`content-length` included: the signer recomputes them
+// (host from the URL, authorization from the credential scope, length from the
+// serialized body), so a stale signed copy would not match what fetch sends.
+const SIGNER_OWNED_HEADERS: Record<string, true> = {
+	host: true,
+	authorization: true,
+	"content-length": true,
+	"x-amz-date": true,
+	"x-amz-content-sha256": true,
+	"x-amz-security-token": true,
+};
+
 async function requestBody(input: string | URL | Request, init?: RequestInit): Promise<Uint8Array> {
 	if (init?.body !== undefined && init.body !== null) {
 		if (typeof init.body === "string") return new TextEncoder().encode(init.body);
@@ -54,12 +67,20 @@ export function createAwsSignedFetch(
 		const method = init?.method ?? (input instanceof Request ? input.method : "POST");
 		const headers = new Headers(input instanceof Request ? input.headers : undefined);
 		for (const [name, value] of new Headers(init?.headers)) headers.set(name, value);
-		headers.delete("authorization");
+		// Sign every request header (guardrail X-Amzn-Bedrock-* included), not
+		// just content-type, matching the Converse convention of signing its full
+		// header set; the signer skips its own unsignable keys (aws-sigv4.ts).
+		const signableHeaders: Record<string, string> = {};
+		for (const [name, value] of headers) {
+			if (SIGNER_OWNED_HEADERS[name]) continue;
+			signableHeaders[name] = value;
+		}
+		for (const name in SIGNER_OWNED_HEADERS) headers.delete(name);
 		const body = await requestBody(input, init);
 		const credentials = await resolveAwsCredentials({
 			profile: options.providerOptions?.profile,
 			region,
-			signal: options.signal,
+			signal: init?.signal ?? options.signal,
 			fetch: baseFetch,
 		});
 		const signed = await signRequest({
@@ -71,7 +92,7 @@ export function createAwsSignedFetch(
 			region,
 			service,
 			credentials,
-			headers: { "content-type": headers.get("content-type") ?? "application/json" },
+			headers: signableHeaders,
 		});
 		for (const [name, value] of Object.entries(signed)) {
 			if (value !== undefined && name !== "host") headers.set(name, value);
