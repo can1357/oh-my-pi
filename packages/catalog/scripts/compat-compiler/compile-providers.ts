@@ -22,7 +22,14 @@ import type {
 	CompiledSeedModel,
 	SeedBundlePolicy,
 } from "../../src/compat/types";
-import { RUNNER_APIS, type Api, type KnownApi, type TokenCost } from "../../src/types";
+import {
+	KIND_API_KINDS,
+	RUNNER_APIS,
+	type Api,
+	type KindApiKind,
+	type KnownApi,
+	type TokenCost,
+} from "../../src/types";
 import { axisFor, collectAxis, type RuleAxes } from "./compile-axes";
 import {
 	CompatCompileError,
@@ -63,8 +70,6 @@ const MODEL_PROPS = ["name", "api", "base-url"] as const;
 const COST_PROPS = ["input", "output", "cache-read", "cache-write"] as const;
 const LIMIT_PROPS = ["context", "max-tokens"] as const;
 const DISCOVERY_PROPS = ["label", "oauth-provider", "allow-unauthenticated"] as const;
-const KIND_API_KINDS = ["image", "tts", "stt"] as const;
-type KindApiKind = (typeof KIND_API_KINDS)[number];
 
 /** Provider-root node names owned by this compiler; the cascade compiler skips them. */
 export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([

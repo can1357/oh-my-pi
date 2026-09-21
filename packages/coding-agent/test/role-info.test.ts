@@ -4,7 +4,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getRoleInfo } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
-function makeModel(id: string, metadata: Partial<Pick<Model, "kind" | "webSearch">> = {}): Model {
+function makeModel(id: string, metadata: Partial<Pick<Model, "api" | "kind" | "webSearch">> = {}): Model {
 	return buildModel({
 		id,
 		name: id,
@@ -27,9 +27,10 @@ const tiny = makeModel("tiny", { kind: "tiny" });
 const image = makeModel("image", { kind: "image" });
 const search = makeModel("search", { kind: "search" });
 const speech = makeModel("speech", { kind: "tts" });
-const dictation = makeModel("dictation", { kind: "stt" });
+const localDictation = makeModel("local-dictation", { api: "local-inference", kind: "stt" });
+const cloudDictation = makeModel("cloud-dictation", { api: "openai-transcriptions", kind: "stt" });
 const judge = makeModel("judge", { kind: "judge" });
-const fixtures = [chat, explicitChat, groundedChat, tiny, image, search, speech, dictation, judge];
+const fixtures = [chat, explicitChat, groundedChat, tiny, image, search, speech, localDictation, cloudDictation, judge];
 
 function acceptedIds(role: string, settings: Settings): string[] {
 	return fixtures.filter(getRoleInfo(role, settings).accepts).map(model => model.id);
@@ -45,7 +46,7 @@ describe("getRoleInfo", () => {
 		expect(acceptedIds("image", settings)).toEqual(["image"]);
 		expect(acceptedIds("web", settings)).toEqual(["grounded-chat", "search"]);
 		expect(acceptedIds("speech", settings)).toEqual(["speech"]);
-		expect(acceptedIds("dictation", settings)).toEqual(["dictation"]);
+		expect(acceptedIds("dictation", settings)).toEqual(["local-dictation", "cloud-dictation"]);
 		expect(acceptedIds("judge", settings)).toEqual(["chat", "explicit-chat", "grounded-chat", "tiny", "judge"]);
 	});
 

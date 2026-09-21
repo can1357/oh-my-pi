@@ -5,7 +5,12 @@ provider "openrouter" {
 	env "OPENROUTER_API_KEY"
 	discovery label="OpenRouter" allow-unauthenticated=#true
 	kind-apis {
+		embedding "openai-embeddings"
 		image "openrouter-images"
+		rerank "openrouter-rerank"
+		video "openrouter-video"
+		tts "openai-speech"
+		stt "openai-transcriptions"
 	}
 	web-search "openrouter"
 
@@ -19,9 +24,112 @@ provider "openrouter" {
 			cost input=0.042 output=0 cache-read=0 cache-write=0
 			limits context=32000 max-tokens=28800
 		}
+
+		// OpenRouter's STT roster mixes per-token and duration-based prices.
+		// Token-priced GPT rows map per-token rates to catalog per-million costs;
+		// duration-priced rows remain zero because ModelCost has no seconds axis.
+		model "openai/whisper-1" name="OpenAI: Whisper 1" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "openai/whisper-large-v3" name="OpenAI: Whisper Large V3" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "openai/gpt-4o-transcribe" name="OpenAI: GPT-4o Transcribe" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=2.5 output=10 cache-read=0 cache-write=0
+			limits context=128000 max-tokens=115200
+			supports-tools #false
+		}
+		model "microsoft/mai-transcribe-1.5" name="Microsoft AI: MAI-Transcribe 1.5" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "microsoft/mai-transcribe-2" name="Microsoft AI: MAI-Transcribe 2" api="openai-transcriptions" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+
+		// OpenRouter bills reranking per 1,000 searches, which has no catalog cost
+		// axis. Keep token costs at zero; the provider-reported response cost is authoritative.
+		model "cohere/rerank-v3.5" name="Cohere: Rerank v3.5" api="openrouter-rerank" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits context=4096 max-tokens=3686
+			supports-tools #false
+		}
+		// Bundled fallbacks keep the gateway useful offline; live
+		// `/embeddings/models` discovery refreshes this roster and its per-token
+		// pricing. Catalog token costs are per million input tokens.
+		model "openai/text-embedding-3-small" name="OpenAI: Text Embedding 3 Small" api="openai-embeddings" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0.02 output=0 cache-read=0 cache-write=0
+			limits context=8192
+			supports-tools #false
+		}
+		model "qwen/qwen3-embedding-8b" name="Qwen: Qwen3 Embedding 8B" api="openai-embeddings" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text"
+			cost input=0.01 output=0 cache-read=0 cache-write=0
+			limits context=32768
+			supports-tools #false
+		}
+		// OpenRouter bills generated video by output second and resolution/SKU,
+		// which ModelCost cannot represent. Keep token costs at zero; poll-reported
+		// cost is authoritative. Live `/videos/models` discovery refreshes the roster.
+		model "google/veo-3.1" name="Google: Veo 3.1" api="openrouter-video" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "minimax/hailuo-3" name="MiniMax: H3" api="openrouter-video" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "alibaba/wan-2.7" name="Alibaba: Wan 2.7" api="openrouter-video" base-url="https://openrouter.ai/api/v1" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 	}
 	models "~typesafe/*" "typesafe/*" {
 		kind "judge"
+	}
+	models "cohere/rerank-v3.5" {
+		kind "rerank"
+	}
+	models "openai/text-embedding-3-small" "qwen/qwen3-embedding-8b" {
+		kind "embedding"
+	}
+	models "google/veo-3.1" "minimax/hailuo-3" "alibaba/wan-2.7" {
+		kind "video"
+	}
+	models "openai/whisper-1" "openai/whisper-large-v3" "openai/gpt-4o-transcribe" \
+		"microsoft/mai-transcribe-1.5" "microsoft/mai-transcribe-2" {
+		kind "stt"
 	}
 
 	// Replaces the OpenRouter provider wire-model-id dispatch branch.
