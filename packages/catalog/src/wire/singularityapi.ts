@@ -2,7 +2,7 @@
  * SingularityAPI gateway endpoint, shared so a host migration — or a
  * self-hosted proxy override — touches a single module.
  */
-export const SINGULARITYAPI_API_BASE_URL = "https://api.singularityapi.tech/v1";
+export const SINGULARITYAPI_API_BASE_URL = "https://api.singularityapi.dev/v1";
 
 /**
  * Resolve a configured SingularityAPI base URL onto the gateway's `/v1`

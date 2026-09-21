@@ -7272,20 +7272,66 @@
 				"wire": { "includeEncryptedReasoning": false, "streamIdleTimeoutMs": 0 }
 			},
 			{
-				"source": "providers/singularityapi.kdl:38",
+				"source": "providers/singularityapi.kdl:37",
 				"providers": ["singularityapi"],
-				"models": [
-					{ "kind": "glob", "value": "*deepseek-v4-flash-0731" },
-					{ "kind": "glob", "value": "*deepseek-v4.1-flash" }
-				],
-				"wire": { "reasoningDisableMode": "none-effort", "clampOutputToModelMax": true, "stripImageInput": false },
-				"thinking": { "upgradeNeutral": true, "efforts": ["low", "high", "xhigh", "max"] },
-				"catalog": { "inputModalities": ["text", "image"], "limitsPatch": { "contextWindow": 262144 } }
+				"models": [{ "kind": "glob", "value": "*deepseek-v4-flash*" }],
+				"wire": {
+					"maxTokensField": "max_tokens",
+					"reasoningDisableMode": "none-effort",
+					"reasoningContentField": "reasoning_content"
+				},
+				"thinking": { "upgradeNeutral": true, "efforts": ["low", "high", "max"] }
 			},
 			{
-				"source": "providers/singularityapi.kdl:12",
+				"source": "providers/singularityapi.kdl:44",
 				"providers": ["singularityapi"],
-				"wire": { "maxTokensField": "max_tokens", "reasoningContentField": "reasoning_content" }
+				"models": [{ "kind": "glob", "value": "*deepseek-v4-pro*" }],
+				"wire": {
+					"maxTokensField": "max_tokens",
+					"reasoningDisableMode": "none-effort",
+					"reasoningContentField": "reasoning_content"
+				},
+				"thinking": { "upgradeNeutral": true, "efforts": ["low", "high", "max"] }
+			},
+			{
+				"source": "providers/singularityapi.kdl:56",
+				"providers": ["singularityapi"],
+				"models": [
+					{ "kind": "exact", "value": "gpt-5.6-sol" },
+					{ "kind": "exact", "value": "gpt-5.6-terra" },
+					{ "kind": "exact", "value": "gpt-5.6-luna" }
+				],
+				"wire": { "reasoningDisableMode": "none-effort" },
+				"thinking": { "efforts": ["low", "medium", "high", "xhigh", "max"] }
+			},
+			{
+				"source": "providers/singularityapi.kdl:63",
+				"providers": ["singularityapi"],
+				"models": [
+					{ "kind": "exact", "value": "flux-1-schnell" },
+					{ "kind": "exact", "value": "flux-pro-1.1" }
+				],
+				"catalog": { "kind": "image" }
+			},
+			{
+				"source": "providers/singularityapi.kdl:66",
+				"providers": ["singularityapi"],
+				"models": [
+					{ "kind": "exact", "value": "gpt-image-2" },
+					{ "kind": "exact", "value": "gpt-image-1.5" }
+				],
+				"catalog": { "kind": "image" }
+			},
+			{
+				"source": "providers/singularityapi.kdl:71",
+				"providers": ["singularityapi"],
+				"models": [{ "kind": "glob", "value": "*deepseek*" }],
+				"wire": { "supportsToolChoice": false }
+			},
+			{
+				"source": "providers/singularityapi.kdl:13",
+				"providers": ["singularityapi"],
+				"wire": { "maxTokensField": "max_tokens" }
 			},
 			{
 				"source": "providers/synthetic.kdl:10",
@@ -10244,15 +10290,15 @@
 				"env": { "vars": ["SINGULARITYAPI_API_KEY"] },
 				"login": {
 					"kind": "api-key",
-					"authUrl": "https://app.singularityapi.tech/compute/billing",
+					"authUrl": "https://app.singularityapi.dev",
 					"instructions": "Create an API key from the SingularityAPI dashboard, then paste it here",
 					"prompt": "Paste your SingularityAPI API key",
-					"placeholder": "sk-...",
+					"placeholder": "sapi_...",
 					"normalize": "strip-bearer",
 					"validate": {
 						"kind": "models-endpoint",
 						"label": "SingularityAPI",
-						"url": "https://api.singularityapi.tech/v1/models"
+						"url": "https://api.singularityapi.dev/v1/models"
 					}
 				}
 			},
@@ -11889,7 +11935,7 @@
 		},
 		"singularityapi": {
 			"id": "singularityapi",
-			"defaultModel": "deepseek-ai/DeepSeek-V4.1-Flash",
+			"defaultModel": "deepseek-v4-flash",
 			"envVars": ["SINGULARITYAPI_API_KEY"],
 			"dynamicModelsAuthoritative": true
 		},
