@@ -56,6 +56,8 @@ import { ReportPanel } from "@oh-my-pi/pi-tui/overlays/report-panel";
 import type { TspText } from "@oh-my-pi/pi-wire";
 import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
 import { buildSessionContextView } from "../../session/context-view";
+import { buildContextReportText } from "../../slash-commands/helpers/context-report";
+import { markdownFenceFor } from "../../utils/markdown-fence";
 import { buildHotkeysMarkdown, HotkeysSheetComponent } from "@oh-my-pi/pi-tui/hotkeys-markdown";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
@@ -981,8 +983,15 @@ export class CommandController {
 		this.#showMarkdownPanel("Available Tools", tools);
 	}
 
-	handleContextCommand(): void {
+	handleContextCommand(showAll = false): void {
 		const session = this.ctx.session;
+		if (showAll) {
+			// Keep the detailed text report without restoring the superseded static context view.
+			const report = buildContextReportText({ session }, true);
+			const fence = markdownFenceFor(report);
+			this.#showMarkdownPanel("Context Usage", `${fence}text\n${report}\n${fence}`);
+			return;
+		}
 		if (!session.model) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
