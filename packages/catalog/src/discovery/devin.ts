@@ -331,7 +331,9 @@ export async function fetchDevinModels(
 				supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
 			}),
 		});
-		const body = toBinary(GetCliModelConfigsRequestSchema, request);
+		// `toBinary` always allocates a fresh ArrayBuffer-backed view; the DOM
+		// `BodyInit` typing just cannot see that through its ArrayBufferLike signature.
+		const body = toBinary(GetCliModelConfigsRequestSchema, request) as Uint8Array<ArrayBuffer>;
 
 		const headers: Record<string, string> = {
 			"content-type": "application/proto",
