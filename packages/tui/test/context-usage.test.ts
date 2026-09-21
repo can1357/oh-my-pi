@@ -19,6 +19,7 @@ import {
 import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
 	type NonMessageTokenSource,
+	computeContextUsageDetails,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
 	estimateToolSchemaTokens,
@@ -27,6 +28,43 @@ import {
 } from "../src/status-line/context-usage";
 
 const tokenizer = new Tokenizer();
+
+describe("computeContextUsageDetails", () => {
+	it("omits deferred tool schemas and refreshes details when the model policy changes", () => {
+		const tools = [{ name: "read", description: "Read files.", parameters: { type: "object" } }];
+		const skillLine = "- visible: Visible skill.";
+		const blocks = [`You are an agent.\n${skillLine}\nEnd.`];
+		const systemPromptSources = {
+			blocks,
+			sources: [
+				{
+					id: "skill-0",
+					kind: "skills" as const,
+					label: "visible",
+					block: 0,
+					start: 18,
+					end: 18 + skillLine.length,
+				},
+			],
+		};
+		const session = {
+			model: { toolSchemasInContext: false } as Model,
+			agent: { tokenizer, state: { tools } },
+			systemPrompt: blocks,
+			systemPromptSources,
+		};
+
+		const deferred = computeContextUsageDetails(session);
+		expect(deferred.tools).toEqual([]);
+		expect(deferred.skills).toEqual([{ name: "visible", tokens: tokenizer.countTokens(skillLine) }]);
+
+		session.model = { toolSchemasInContext: true } as Model;
+		const inline = computeContextUsageDetails(session);
+		expect(inline.tools).toEqual([{ name: "read", tokens: estimateToolSchemaTokens(tools, tokenizer) }]);
+		// A source whose block changed after the build stays in System Prompt, like the Skills category.
+		expect(computeContextUsageDetails({ ...session, systemPrompt: [`${blocks[0]}\nhook`] }).skills).toEqual([]);
+	});
+});
 
 describe("estimateToolSchemaTokens", () => {
 	it("counts arktype tool schemas by their wire JSON Schema, not arktype internals", () => {
