@@ -197,16 +197,7 @@ const inspectionCases: Array<{
 	{
 		mode: "sloppy",
 		args: {
-			input: [
-				'<SM:EDIT path="sloppy.ts">',
-				"<SM:FIND>",
-				"old",
-				"</SM:FIND>",
-				"<SM:PUT>",
-				"sloppy",
-				"</SM:PUT>",
-				"</SM:EDIT>",
-			].join("\n"),
+			input: "*** SM:EDIT sloppy.ts\n*** SM:FIND\nold\n*** SM:PUT\nsloppy",
 		},
 		path: "sloppy.ts",
 		digest: "«\nold\n»\nsloppy",

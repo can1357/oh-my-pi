@@ -1257,6 +1257,13 @@ export class TUI extends Container {
 			if (!supported && isInsideHerdr() && status === 0) return;
 			this.#setSynchronizedOutput(supported);
 		});
+		// Icons painted before the Glyph Protocol registration landed may sit in
+		// the terminal as tofu; a full repaint re-emits them against the glossary.
+		this.terminal.onGlyphProtocolReport?.(supported => {
+			if (!supported || this.#stopped) return;
+			this.invalidate();
+			this.requestRender(true);
+		});
 		this.terminal.start(
 			data => this.#handleInput(data),
 			() => {

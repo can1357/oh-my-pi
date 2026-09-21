@@ -105,6 +105,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.dryBalanceHelp,
 	},
 	{
+		name: "find",
+		load: () => import("./commands/find").then(m => m.default),
+		help: commandHelp.findHelp,
+	},
+	{
 		name: "gc",
 		load: () => import("./commands/gc").then(m => m.default),
 		help: commandHelp.gcHelp,
@@ -245,7 +250,7 @@ export const commands: CommandEntry[] = [
 	{
 		name: "search",
 		load: () => import("./commands/web-search").then(m => m.default),
-		aliases: ["q"],
+		aliases: ["q", "web-search"],
 		help: commandHelp.searchHelp,
 	},
 ];

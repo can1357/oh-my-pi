@@ -3,14 +3,18 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { buildDiscoveredModel, buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels, resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import {
+	deepinfraModelManagerOptions,
+	openrouterModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function completionsSpec(overrides: Partial<ModelSpec<"openai-completions">> = {}): ModelSpec<"openai-completions"> {
@@ -62,6 +66,76 @@ function openrouterSpec(overrides: Partial<ModelSpec<"openrouter">> = {}): Model
 }
 
 describe("buildModel", () => {
+	describe("discovery backend policy", () => {
+		it("routes built-in and aliased llama discovery through the same persisted Qwen policy", () => {
+			const raw = responsesSpec({
+				id: "qwen3.8-27b",
+				name: "Qwen 3.8 27B",
+				provider: "llama.cpp",
+				baseUrl: "http://llama-box.local:8080",
+				reasoning: false,
+			});
+			const builtIn = buildDiscoveredModel(raw, "llama.cpp");
+			const aliased = buildDiscoveredModel({ ...raw, provider: "workbench" }, "llama.cpp");
+			const rebuilt = buildModel(toModelSpec(aliased));
+
+			expect(builtIn.api).toBe("openai-completions");
+			expect(aliased).toMatchObject({
+				api: "openai-completions",
+				provider: "workbench",
+				providerType: "llama.cpp",
+				reasoning: true,
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.Medium, Effort.XHigh],
+					requiresEffort: true,
+				},
+				compat: {
+					supportsStore: false,
+					supportsDeveloperRole: false,
+					supportsReasoningEffort: true,
+					supportsReasoningParams: true,
+					thinkingFormat: "qwen",
+					reasoningDisableMode: "qwen-enable-thinking-false",
+					qwenPreserveThinking: true,
+					qwenTemplateReasoningEffort: true,
+				},
+			});
+			expect(rebuilt).toEqual(aliased);
+			expect(builtIn.thinking).toEqual(aliased.thinking);
+			expect(builtIn.compat).toEqual(aliased.compat);
+		});
+
+		it("keeps non-Qwen capabilities neutral and lets explicit compat override backend policy", () => {
+			const plain = buildDiscoveredModel(
+				responsesSpec({
+					id: "plain-model",
+					provider: "workbench",
+					baseUrl: "https://llama.internal",
+					reasoning: false,
+				}),
+				"llama.cpp",
+			);
+			expect(plain.api).toBe("openai-responses");
+			expect(plain.reasoning).toBe(false);
+			expect(plain.thinking).toBeUndefined();
+
+			const explicit = buildDiscoveredModel(
+				{
+					...responsesSpec({
+						id: "qwen3.8-27b",
+						provider: "workbench",
+						baseUrl: "https://llama.internal",
+						reasoning: false,
+					}),
+					compat: { supportsStore: true },
+				},
+				"llama.cpp",
+			);
+			expect(explicit.compat).toMatchObject({ supportsStore: true });
+		});
+	});
+
 	it("resolves a complete compat record for an openai-completions spec with no compat", () => {
 		const model = buildModel(completionsSpec());
 
@@ -911,35 +985,37 @@ describe("OpenRouter model discovery", () => {
 		const routing = { only: ["anthropic"], order: ["anthropic"] };
 		const staticModel = openrouterSpec({ compat: { openRouterRouting: routing } });
 		const options = openrouterModelManagerOptions({
-			fetch: async () =>
-				new Response(
-					JSON.stringify({
-						data: [
-							{
-								id: staticModel.id,
-								name: "Anthropic: Claude Sonnet 4",
-								supported_parameters: ["tools", "tool_choice", "reasoning"],
-								architecture: { modality: "text+image" },
-								pricing: {
-									prompt: "0.000003",
-									completion: "0.000015",
-									input_cache_read: "0.0000003",
-									input_cache_write: "0.00000375",
-								},
-								top_provider: { max_completion_tokens: 32_000 },
-								context_length: 180_000,
-							},
-						],
-					}),
-					{ status: 200, headers: { "content-type": "application/json" } },
-				),
+			fetch: async url =>
+				String(url).endsWith("/images/models")
+					? Response.json({ data: [] })
+					: new Response(
+							JSON.stringify({
+								data: [
+									{
+										id: staticModel.id,
+										name: "Anthropic: Claude Sonnet 4",
+										supported_parameters: ["tools", "tool_choice", "reasoning"],
+										architecture: { modality: "text+image" },
+										pricing: {
+											prompt: "0.000003",
+											completion: "0.000015",
+											input_cache_read: "0.0000003",
+											input_cache_write: "0.00000375",
+										},
+										top_provider: { max_completion_tokens: 32_000 },
+										context_length: 180_000,
+									},
+								],
+							}),
+							{ status: 200, headers: { "content-type": "application/json" } },
+						),
 		});
 
 		try {
 			const dynamicModels = await options.fetchDynamicModels?.();
 			expect(dynamicModels?.[0]?.api).toBe("openrouter");
 
-			const online = await resolveProviderModels<"openrouter">(
+			const online = await resolveProviderModels(
 				{
 					...options,
 					staticModels: [staticModel],
@@ -951,8 +1027,7 @@ describe("OpenRouter model discovery", () => {
 			const model = online.models.find(candidate => candidate.id === staticModel.id);
 			expect(model?.api).toBe("openrouter");
 			expect(model?.provider).toBe("openrouter");
-			expect(model?.compat.isOpenRouterHost).toBe(true);
-			expect(model?.compat.openRouterRouting).toEqual(routing);
+			expect(model?.compat).toMatchObject({ isOpenRouterHost: true, openRouterRouting: routing });
 			expect(model?.input).toEqual(["text", "image"]);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
@@ -961,21 +1036,23 @@ describe("OpenRouter model discovery", () => {
 
 	it("maps OpenRouter's advertised reasoning effort ladder, default, and mandatory state", async () => {
 		const options = openrouterModelManagerOptions({
-			fetch: async () =>
-				Response.json({
-					data: [
-						{
-							id: "deepseek/deepseek-v4-flash-0731",
-							name: "DeepSeek V4 Flash 0731",
-							supported_parameters: ["tools", "reasoning", "reasoning_effort"],
-							reasoning: {
-								supported_efforts: ["max", "high", "low"],
-								default_effort: "high",
-								mandatory: true,
-							},
-						},
-					],
-				}),
+			fetch: async url =>
+				String(url).endsWith("/images/models")
+					? Response.json({ data: [] })
+					: Response.json({
+							data: [
+								{
+									id: "deepseek/deepseek-v4-flash-0731",
+									name: "DeepSeek V4 Flash 0731",
+									supported_parameters: ["tools", "reasoning", "reasoning_effort"],
+									reasoning: {
+										supported_efforts: ["max", "high", "low"],
+										default_effort: "high",
+										mandatory: true,
+									},
+								},
+							],
+						}),
 		});
 		const specs = await options.fetchDynamicModels?.();
 		const spec = specs?.find(model => model.id === "deepseek/deepseek-v4-flash-0731");
@@ -1003,7 +1080,7 @@ describe("OpenRouter model discovery", () => {
 		try {
 			writeModelCache("openrouter", Date.now(), [legacyModel], true, "", dbPath);
 
-			const offline = await resolveProviderModels<"openrouter">(
+			const offline = await resolveProviderModels(
 				{
 					...openrouterModelManagerOptions(),
 					staticModels: [],
@@ -1093,6 +1170,103 @@ describe("model cache materialized round trip", () => {
 			expect(model?.compat.supportsDeveloperRole).toBe(false);
 			expect(model?.compat.isOpenRouterHost).toBe(false);
 			expect(model?.compatConfig).toEqual(sparse);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps bundled runner models when authoritative chat discovery collides or empties", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-kind-discovery-"));
+		const providerId = "kind-discovery-test";
+		const image: ModelSpec = {
+			...completionsSpec({ id: "image-collision", provider: providerId }),
+			kind: "image",
+			api: "openai-images",
+			supportsTools: false,
+		};
+		const speech: ModelSpec = { ...image, id: "speech-static-only", kind: "tts", api: "openai-speech" };
+		let discovered: ModelSpec[] = [
+			completionsSpec({ id: image.id, provider: providerId }),
+			completionsSpec({ id: "live-chat", provider: providerId }),
+			{ ...image, id: "live-image" },
+		];
+		const options = {
+			providerId,
+			staticModels: [image, speech, completionsSpec({ id: "retired-chat", provider: providerId })],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: path.join(tempDir, "models.db"),
+			fetchDynamicModels: async () => discovered,
+		};
+		try {
+			const refreshed = await resolveProviderModels(options, "online");
+			expect(refreshed.models.map(model => model.id).sort()).toEqual([
+				"image-collision",
+				"live-chat",
+				"live-image",
+				"speech-static-only",
+			]);
+			expect(refreshed.models.find(model => model.id === image.id)).toMatchObject({
+				kind: "image",
+				api: "openai-images",
+				supportsTools: false,
+			});
+			const cached = await resolveProviderModels(options, "offline");
+			expect(cached.models.find(model => model.id === image.id)?.api).toBe("openai-images");
+
+			discovered = [
+				{
+					...image,
+					name: "Refreshed Image",
+					api: "openrouter-images",
+					contextWindow: 32_000,
+				},
+			];
+			const explicitImageRefresh = await resolveProviderModels(options, "online");
+			expect(explicitImageRefresh.models.find(model => model.id === image.id)).toMatchObject({
+				name: "Refreshed Image",
+				kind: "image",
+				api: "openrouter-images",
+				contextWindow: 32_000,
+			});
+
+			discovered = [];
+			const emptied = await resolveProviderModels(options, "online");
+			expect(emptied.models.map(model => model.id).sort()).toEqual([image.id, speech.id]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a DeepInfra image runner when the chat roster repeats its id", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-deepinfra-runner-collision-"));
+		try {
+			const resolved = await resolveProviderModels(
+				{
+					...deepinfraModelManagerOptions({
+						fetch: async () =>
+							Response.json({
+								data: [
+									{
+										id: "black-forest-labs/FLUX-2-pro",
+										metadata: {
+											tags: ["chat"],
+											context_length: 32_000,
+											pricing: { input_tokens: 1, output_tokens: 2 },
+										},
+									},
+								],
+							}),
+					}),
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+
+			expect(resolved.models.find(model => model.id === "black-forest-labs/FLUX-2-pro")).toMatchObject({
+				api: "openai-images",
+				kind: "image",
+				supportsTools: false,
+			});
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

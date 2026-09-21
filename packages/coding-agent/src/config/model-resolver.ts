@@ -48,6 +48,7 @@ import {
 	DEFAULT_MODEL_ROLE_ALIAS,
 	formatModelRoleAlias,
 	LEGACY_MODEL_ROLE_ALIAS_PREFIX,
+	CHAT_MODEL_ROLE_IDS,
 	MODEL_ROLE_ALIAS_PREFIX,
 	MODEL_ROLE_IDS,
 	type ModelRole,
@@ -1058,12 +1059,14 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
  * list. The advisor — a second-opinion reviewer — uses a configured `slow`
  * role before that list, but never inherits the primary's model when `slow`
  * is unset, so it stays a distinct strong model out of the box. The `tiny`
- * role — the override for online title/memory/classifier tasks — resolves
- * through `smol` so it picks the same configured, inherited, or built-in fast
- * model.
+ * role — the override for online title/classifier tasks — resolves through
+ * `smol` so it picks the same configured, inherited, or built-in fast model.
+ * The `memory` role first reuses a configured/effective `tiny` role, then the
+ * same `smol` priority list.
  */
 const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
 	advisor: "slow",
+	memory: "smol",
 	tiny: "smol",
 };
 
@@ -1075,13 +1078,19 @@ interface ConfiguredRoleFallback {
 
 const ROLE_CONFIGURED_FALLBACK: Partial<Record<ModelRole, ConfiguredRoleFallback>> = {
 	advisor: { role: "slow", configuredOnly: true },
+	memory: { role: "tiny", configuredOnly: false },
 	tiny: { role: "smol", configuredOnly: false },
 };
 
+function hasOwnKey<T extends object>(value: T, key: PropertyKey): key is keyof T {
+	return Object.hasOwn(value, key);
+}
+
 /** Built-in priority patterns for a role, following {@link ROLE_PRIORITY_ALIAS}. */
-function rolePriorityDefaults(role: ModelRole): string[] {
-	const key = ROLE_PRIORITY_ALIAS[role] ?? (role as keyof typeof MODEL_PRIO);
-	return normalizeModelPatternList(MODEL_PRIO[key]);
+export function rolePriorityDefaults(role: string): string[] {
+	const alias = hasOwnKey(ROLE_PRIORITY_ALIAS, role) ? ROLE_PRIORITY_ALIAS[role] : undefined;
+	const key = alias ?? role;
+	return hasOwnKey(MODEL_PRIO, key) ? normalizeModelPatternList(MODEL_PRIO[key]) : [];
 }
 
 /** Resolve aliases inside a configured pattern list without leaking cycles to model matching. */
@@ -1472,7 +1481,7 @@ export function resolveModelFromSettings(options: {
 	roleOrder?: readonly ModelRole[];
 }): Model<Api> | undefined {
 	const { settings, availableModels, matchPreferences, roleOrder } = options;
-	const roles = roleOrder ?? MODEL_ROLE_IDS;
+	const roles = roleOrder ?? CHAT_MODEL_ROLE_IDS;
 	let sawConfiguredProviderQualifiedRole = false;
 	for (const role of roles) {
 		const configured = settings.getModelRole(role);
@@ -1485,6 +1494,58 @@ export function resolveModelFromSettings(options: {
 		if (resolved) return resolved;
 	}
 	return sawConfiguredProviderQualifiedRole ? undefined : availableModels[0];
+}
+
+/** A resolved role-chain attempt and whether configuration explicitly admitted it. */
+export interface RoleChainCandidate {
+	model: Model<Api>;
+	explicit: boolean;
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/** Resolve a role's primary and retry candidates in effective attempt order. */
+export function resolveRoleChain(
+	role: string,
+	settings: Settings,
+	pool: Model<Api>[],
+	options?: { hoistProvider?: string },
+): RoleChainCandidate[] {
+	const configuredRoles = settings.getModelRoles();
+	const configured = settings.getModelRole(role)?.trim();
+	const primarySelector = configured || formatModelRoleAlias(role);
+	const configuredFallbacks = settings.get("retry.fallbackChains")[role];
+	const hasConfiguredFallbackChain = Array.isArray(configuredFallbacks);
+	const fallbackSelectors = hasConfiguredFallbackChain ? configuredFallbacks : rolePriorityDefaults(role);
+	const selectors = [
+		{ selector: primarySelector, explicit: Object.hasOwn(configuredRoles, role) },
+		...fallbackSelectors.map(selector => ({ selector, explicit: hasConfiguredFallbackChain })),
+	];
+	const candidates: RoleChainCandidate[] = [];
+	const candidateByRoute = new Map<string, RoleChainCandidate>();
+	for (const { selector, explicit } of selectors) {
+		const resolved = resolveModelRoleValue(selector, pool, { settings });
+		if (!resolved.model) continue;
+		const key = formatModelStringWithRouting(resolved.model);
+		const existing = candidateByRoute.get(key);
+		if (existing) {
+			if (explicit) existing.explicit = true;
+			continue;
+		}
+		const candidate: RoleChainCandidate = { model: resolved.model, explicit };
+		if (resolved.thinkingLevel !== undefined) candidate.thinkingLevel = resolved.thinkingLevel;
+		candidateByRoute.set(key, candidate);
+		candidates.push(candidate);
+	}
+
+	const hoistProvider = options?.hoistProvider;
+	if (!hoistProvider) return candidates;
+	const nonExplicit = candidates.filter(candidate => !candidate.explicit);
+	const hoisted = nonExplicit.filter(candidate => candidate.model.provider === hoistProvider);
+	if (hoisted.length === 0) return candidates;
+	const remaining = nonExplicit.filter(candidate => candidate.model.provider !== hoistProvider);
+	const reordered = [...hoisted, ...remaining];
+	let reorderedIndex = 0;
+	return candidates.map(candidate => (candidate.explicit ? candidate : reordered[reorderedIndex++]!));
 }
 
 /**

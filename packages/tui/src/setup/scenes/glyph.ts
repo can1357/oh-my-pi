@@ -1,4 +1,5 @@
 import { type SgrMouseEvent } from "../../mouse";
+import { TERMINAL } from "../../terminal-capabilities";
 import { type SelectItem, SelectList } from "../../components/select-list";
 import { Text } from "../../components/text";
 import { WizardStep } from "../../components/wizard-step";
@@ -111,10 +112,16 @@ class GlyphSceneController implements SetupSceneController {
 	}
 }
 
-/** Preview and persist the terminal glyph preset. */
+/**
+ * Preview and persist the terminal glyph preset. Skipped once the Glyph
+ * Protocol handshake confirmed the terminal renders omp's bundled icons: every
+ * row renders cleanly there, and the default `unicode` preset already upgrades
+ * to nerd at runtime while staying safe on terminals without the protocol.
+ */
 export const glyphSetupScene: SetupScene = {
 	id: "glyph-mode",
 	title: "Choose glyph mode",
 	minVersion: 1,
+	shouldRun: () => !TERMINAL.glyphProtocol,
 	mount: host => new GlyphSceneController(host),
 };

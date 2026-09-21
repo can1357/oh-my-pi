@@ -306,7 +306,7 @@ export function calculateRateLimitBackoffMs(reason: RateLimitReason): number {
 
 /** Detect usage/quota limit errors in error messages (persistent, requires credential switch). */
 const USAGE_LIMIT_PATTERN =
-	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
+	/usage.?limit|usage_limit_reached|usage_not_included|limit_reached|quota.?(?:exceeded|reached|insufficient)|额度不足|额度耗尽|resource.?exhausted|exhausted your capacity|quota will reset|insufficient.?(?:balance|quota)|balance.?exhausted|run out of credits|out of credits|out of (?:extra )?usage|spending[- _]?limit|personal-team-blocked|clinepass limit|free limit reached on model|access_terminated_error/i;
 
 /**
  * HTTP status codes that, absent richer body classification, represent an

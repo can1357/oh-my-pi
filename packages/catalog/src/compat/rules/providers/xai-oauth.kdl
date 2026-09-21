@@ -4,6 +4,11 @@ provider "xai-oauth" {
 	default-model "grok-4.6"
 	env "XAI_OAUTH_TOKEN" "XAI_API_KEY"
 	discovery label="xAI Grok OAuth (SuperGrok)" oauth-provider="xai-oauth"
+	kind-apis {
+		image "openai-images"
+		tts "xai-tts"
+	}
+	web-search "xai"
 
 	// Source of truth for the xai-oauth chat picker. Declaration order is headline order.
 	// Context windows from hermes-agent/agent/model_metadata.py:205-220
@@ -82,6 +87,27 @@ provider "xai-oauth" {
 			cost input=0 output=0 cache-read=0 cache-write=0
 			limits context=200000 max-tokens=200000
 		}
+		model "grok-tts" name="Grok TTS" api="xai-tts" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+		model "grok-imagine-image" name="Grok Imagine Image" api="openai-images" {
+			reasoning #false
+			input "text" "image"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
+	}
+
+	models "grok-imagine-image" {
+		kind "image"
+	}
+	models "grok-tts" {
+		kind "tts"
 	}
 
 	// Replaces the provider-keyed prompt-cache session-header baseline.

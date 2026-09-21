@@ -24,7 +24,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { supportsAnthropicCompaction } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { supportsAnthropicCompaction } from "@oh-my-pi/pi-ai/providers/anthropic-compaction";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type InstrumentedChatSpanOptions, instrumentedCompleteSimple } from "../telemetry";
 import anthropicCompactionInstructionsPrompt from "./prompts/anthropic-compaction-instructions.md" with { type: "text" };

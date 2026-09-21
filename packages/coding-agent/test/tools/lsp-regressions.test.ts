@@ -5273,12 +5273,13 @@ describe("lsp regressions", () => {
 			const controller = new AbortController();
 			const second = lspClient.sendNotification(client, "textDocument/didOpen", {}, controller.signal);
 			controller.abort();
-			await Bun.sleep(0);
 
+			// The caller must be released even while the earlier queue slot remains
+			// wedged; aborting a not-yet-started write must not kill the client.
+			await expect(second).rejects.toBeInstanceOf(Error);
 			expect(kill).not.toHaveBeenCalled();
 			firstFlush.resolve(0);
 			await first;
-			await expect(second).rejects.toBeInstanceOf(Error);
 			expect(kill).not.toHaveBeenCalled();
 			expect(writes).toHaveLength(1);
 		});

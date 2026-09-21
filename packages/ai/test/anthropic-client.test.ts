@@ -61,6 +61,37 @@ describe("AnthropicMessagesClient error mapping", () => {
 		expect(calls.length).toBe(1);
 	});
 
+	it("extracts error_code from details onto AnthropicApiError.code", async () => {
+		const body = JSON.stringify({
+			type: "error",
+			error: {
+				type: "permission_error",
+				message: "OAuth authentication is currently not allowed for this organization.",
+				details: { error_code: "oauth_not_allowed_for_organization" },
+			},
+			request_id: "req_oauth_403",
+		});
+		const { calls, fetch } = createFetchMock([
+			new Response(body, { status: 403, headers: { "request-id": "req_oauth_403" } }),
+		]);
+		const client = new AnthropicMessagesClient({ apiKey: "sk-test", baseURL: "https://api.anthropic.com", fetch });
+
+		const error = await client.messages
+			.create(params)
+			.asResponse()
+			.then(
+				() => undefined,
+				err => err,
+			);
+
+		expect(error).toBeInstanceOf(AIError.AnthropicApiError);
+		const apiError = error as AIError.AnthropicApiError;
+		expect(apiError.status).toBe(403);
+		expect(apiError.code).toBe("oauth_not_allowed_for_organization");
+		expect(apiError.requestId).toBe("req_oauth_403");
+		expect(calls.length).toBe(1);
+	});
+
 	it("does not invent a body when the error response is empty", async () => {
 		const { fetch } = createFetchMock([new Response(null, { status: 500 })]);
 		const client = new AnthropicMessagesClient({ apiKey: "sk-test", maxRetries: 0, fetch });

@@ -383,7 +383,11 @@ function queueWriteMessage(
 		throw err;
 	});
 	client.writeQueue = result.catch(() => {});
-	return result;
+	// Keep the internal queue chained so writes stay serialized, but do not make
+	// this caller wait forever behind an earlier wedged write. `writeMessage`
+	// observes the same signal once this write reaches the sink; until then the
+	// abort race only releases the caller and deliberately leaves the client alive.
+	return untilAborted(signal, result);
 }
 
 // =============================================================================

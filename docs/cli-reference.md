@@ -144,8 +144,9 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 
 | Flag | Description |
 | --- | --- |
-| `--system-prompt <text\|file>` | System prompt (default: coding assistant prompt). See [system prompt customization](./system-prompt-customization.md). |
-| `--append-system-prompt <text\|file>` | Append text or file contents to the system prompt. |
+| `--system-prompt <text\|file>` | Plain-text system prompt override (default: coding assistant prompt). See [system prompt customization](./system-prompt-customization.md). |
+| `--system-prompt-template <path>` | Strictly read `<path>` as a Handlebars system-prompt template; mutually exclusive with `--system-prompt`. See [system prompt customization](./system-prompt-customization.md). |
+| `--append-system-prompt <text\|file>` | Append plain text or file contents to the system prompt. |
 
 #### Output mode
 
@@ -245,7 +246,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `token` | Get the API key or OAuth token for a provider. | [secrets](./secrets.md) |
 | `ttsr` | Inspect and test Time-Traveling Stream Rules (TTSR). (Covers the CLI command; the [TTSR feature](./ttsr-injection-lifecycle.md) is documented separately.) | |
 | `worktree`, `wt` | List or clear agent-managed git worktrees (`~/.omp/wt`). | |
-| `search`, `q` | Test web search providers from the CLI. | [web_search tool](./tools/web_search.md) |
+| `search`, `q`, `web-search` | Test web search providers from the CLI. | [web_search tool](./tools/web_search.md) |
 
 > `install`, `join`, `browser-relay`, `auth-gateway`, and `tiny-models` are also
 > reachable through related mechanisms (the `plugin` command, the `/join` slash

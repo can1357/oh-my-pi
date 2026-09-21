@@ -11,7 +11,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { getDefault, settings } from "../../../config/settings";
 import { findApiKey, isSearchResponse } from "../../../exa/mcp-client";
 import { readMcpJsonRpcResponse } from "../../../mcp/json-rpc";
-import type { SearchResponse, SearchSource } from "@oh-my-pi/pi-tui/tools/web-search";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";
