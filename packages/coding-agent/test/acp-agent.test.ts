@@ -3485,3 +3485,68 @@ describe("ACP agent MCP server configuration (late-connecting servers)", () => {
 		}
 	}, 15_000);
 });
+
+describe("ACP per-message usage updates (issue #12667)", () => {
+	it("emits usage_update after each assistant message and compaction", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("session not registered");
+
+		let usedTokens = 0;
+		spyOn(session, "getContextUsage").mockImplementation(() => ({ contextWindow: 1000, tokens: usedTokens }) as never);
+		const msg1 = makeAssistantMessage("First answer.");
+		const msg2 = makeAssistantMessage("Second answer.");
+		session.prompt = async (): Promise<boolean> => {
+			session.isStreaming = true;
+			const fire = async (event: AgentSessionEvent): Promise<void> => {
+				for (const listener of session.listeners()) {
+					listener(event);
+				}
+				await Bun.sleep(0);
+			};
+			usedTokens = 100;
+			await fire({ type: "message_end", message: msg1 } as AgentSessionEvent);
+			usedTokens = 200;
+			await fire({ type: "message_end", message: msg2 } as AgentSessionEvent);
+			await fire({
+				type: "auto_compaction_end",
+				action: "context-full",
+				result: undefined,
+				aborted: false,
+				willRetry: false,
+			} as AgentSessionEvent);
+			usedTokens = 50;
+			await fire({ type: "agent_end", messages: [msg1, msg2] } as AgentSessionEvent);
+			session.isStreaming = false;
+			return true;
+		};
+
+		await harness.agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "Go" }] });
+
+		const used: number[] = [];
+		const collectUsage = (): void => {
+			used.length = 0;
+			for (const update of harness.updates) {
+				if (update.sessionId !== created.sessionId) continue;
+				const inner: unknown = update.update;
+				if (
+					typeof inner === "object" &&
+					inner !== null &&
+					"sessionUpdate" in inner &&
+					inner.sessionUpdate === "usage_update" &&
+					"used" in inner &&
+					typeof inner.used === "number"
+				) {
+					used.push(inner.used);
+				}
+			}
+		};
+		collectUsage();
+		for (let i = 0; i < 500 && used.length < 4; i++) {
+			await Bun.sleep(10);
+			collectUsage();
+		}
+		expect(used).toEqual([100, 200, 200, 50]);
+	});
+});
