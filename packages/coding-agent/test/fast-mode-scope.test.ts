@@ -55,11 +55,16 @@ describe("/fast targets the current model's service-tier family", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn,
 		});
-		authStorage = await AuthStorage.create(
-			path.join(tempDir.path(), "testauth.db"),
-			usageReports ? { fetchUsageReports: async () => usageReports } : {},
-		);
+
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime(model.provider, "token");
+		for (const report of usageReports ?? []) {
+			authStorage.keys.setRuntime(report.provider, "token");
+			authStorage.usage.setProvider(report.provider, {
+				id: report.provider,
+				fetchUsage: async () => report,
+			});
+		}
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 		session = new AgentSession({
 			agent,

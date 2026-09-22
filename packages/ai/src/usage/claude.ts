@@ -809,7 +809,7 @@ export function parseClaudeUsagePayload(
 			...(endpoint ? { endpoint } : {}),
 			...(accountId ? { accountId } : {}),
 			...(email ? { email } : {}),
-			...(payloadIdentity.orgId ?? identity.orgId ? { orgId: payloadIdentity.orgId ?? identity.orgId } : {}),
+			...(identity.orgId ? { orgId: identity.orgId } : {}),
 		},
 		raw: payload,
 	};
@@ -821,6 +821,7 @@ export const claudeUsageProvider: UsageProvider = {
 	// account email stop sharing a slot. v3 retires parsed reports created before
 	// Anthropic extra-usage rows existed; header ingestion can otherwise keep
 	// renewing those incomplete reports throughout the 24h last-good retention.
+	// v4 retires reports lacking priority entitlement evidence.
 	cacheVersion: 4,
 	fetchUsage: fetchClaudeUsage,
 	parseRateLimitHeaders: parseClaudeRateLimitHeaders,
