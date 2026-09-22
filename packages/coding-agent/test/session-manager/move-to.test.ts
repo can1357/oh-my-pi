@@ -818,4 +818,33 @@ describe("SessionManager.moveTo", () => {
 		expect(await fsp.readFile(path.join(homeArtifactsDir, "unique.md"), "utf8")).toBe("moves fine");
 		expect(await fsp.readdir(awayArtifactsDir)).toEqual(["raced.md"]);
 	});
+
+	it("copies the session file across devices when rename reports EXDEV (issue #12360)", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+
+		const oldFile = session.getSessionFile()!;
+		expect(fs.existsSync(oldFile)).toBe(true);
+		const realRename = fs.promises.rename.bind(fs.promises);
+		const renameSpy = spyOn(fs.promises, "rename").mockImplementation(async (source, target) => {
+			if (path.resolve(source.toString()) === path.resolve(oldFile)) {
+				throw Object.assign(new Error("EXDEV: cross-device link not permitted"), { code: "EXDEV" });
+			}
+			return realRename(source, target);
+		});
+		try {
+			await session.moveTo(cwdB);
+		} finally {
+			renameSpy.mockRestore();
+		}
+
+		expect(session.getCwd()).toBe(path.resolve(cwdB));
+		expect(fs.existsSync(oldFile)).toBe(false);
+		const newFile = session.getSessionFile()!;
+		expect(fs.existsSync(newFile)).toBe(true);
+		const entries = await loadEntriesFromFile(newFile);
+		expect(hasAssistantEntry(entries)).toBe(true);
+	});
 });
