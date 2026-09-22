@@ -60,6 +60,7 @@ import type {
 	NetworkRouteOptions,
 } from "../network";
 import { extractReadableFromHtml, type ReadableExtractOptions, type ReadableFormat } from "../readable";
+import { assertTabPressArgs } from "../tab-arguments";
 import type { VitalsOptions, VitalsResult } from "../react/vitals";
 import type { RecordingOptions, RecordingStartResult, RecordingStatus, RecordingStopResult } from "../recording";
 import type {
@@ -1081,6 +1082,7 @@ export class CmuxTab {
 	}
 
 	async press(key: string, opts?: { selector?: string }): Promise<void> {
+		assertTabPressArgs(key, opts);
 		if (opts?.selector) {
 			await this.focus(opts.selector);
 		}

@@ -3,6 +3,9 @@
 {{#if abortReason}}
 <abort-reason>{{abortReason}}{{#if resumable}} — the agent is still live with its full context; message it via `hub` to resume instead of redoing the work.{{/if}}</abort-reason>
 {{/if}}
+{{#if error}}
+<error>{{error}}</error>
+{{/if}}
 {{#if truncated}}
 <preview full-output="agent://{{id}}">
 {{preview}}

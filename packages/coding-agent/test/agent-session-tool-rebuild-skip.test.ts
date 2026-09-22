@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { type CustomMessage, convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
@@ -114,6 +115,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		exposeXdevCatalog?: boolean;
 		/** Optional per-turn system prompt replacement returned by before_agent_start. */
 		beforeAgentStartSystemPrompt?: string[];
+		/** Pre-loaded skills handed to the session's hint snapshot. */
+		skills?: Skill[];
 	}
 
 	function newSession(
@@ -202,6 +205,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			},
 			getMcpServerInstructions: options.getMcpServerInstructions,
 			xdev: options.xdev,
+			skills: options.skills,
 		});
 		sessions.push(session);
 		return {
@@ -677,6 +681,109 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		await refresh;
 
 		expect(session.systemPrompt).toEqual(["initial"]);
+	});
+
+	it("keeps the committed skill hint frozen when a conditional refresh is discarded", async () => {
+		const rebuild = Promise.withResolvers<void>();
+		const { session } = newSession(
+			async () => {
+				await rebuild.promise;
+				return "abandoned rebuild";
+			},
+			{
+				skills: [
+					{
+						name: "rebuild-skip-skill",
+						description: "Skill loaded for hint rollback coverage",
+						filePath: "/skills/rebuild-skip-skill/SKILL.md",
+						baseDir: "/skills/rebuild-skip-skill",
+						source: "test",
+					},
+				],
+			},
+		);
+
+		// Default skillful=true with a loaded skill: the committed snapshot
+		// starts true.
+		expect(session.getSkillHintVisible()).toBe(true);
+		// Flip the live setting mid-flight: a global pre-commit stage would
+		// publish false before the producer is refused and never restore it.
+		session.settings.set("skillful", false);
+
+		const refresh = session.refreshBaseSystemPrompt(() => false);
+		rebuild.resolve();
+		await refresh;
+
+		// The declined commit leaves the committed hint untouched: the candidate
+		// lived only inside the render frame.
+		expect(session.getSkillHintVisible()).toBe(true);
+		expect(session.systemPrompt).toEqual(["initial"]);
+	});
+
+	it("renders the prompt from the candidate hint visibility before publishing it", async () => {
+		const entered = Promise.withResolvers<void>();
+		const resume = Promise.withResolvers<void>();
+		const { session } = newSession(
+			async () => {
+				entered.resolve();
+				await resume.promise;
+				// The rebuild stub renders what the tool getters currently see:
+				// inside the frame the candidate, outside it the committed value.
+				return session.getSkillHintVisible() ? "hint-visible" : "hint-hidden";
+			},
+			{
+				skills: [
+					{
+						name: "scoped-render-skill",
+						description: "Skill loaded for scoped render coverage",
+						filePath: "/skills/scoped-render-skill/SKILL.md",
+						baseDir: "/skills/scoped-render-skill",
+						source: "test",
+					},
+				],
+			},
+		);
+
+		// Committed baseline: skillful=true + skill loaded.
+		expect(session.getSkillHintVisible()).toBe(true);
+		session.settings.set("skillful", false);
+
+		const refresh = session.refreshBaseSystemPrompt();
+		await entered.promise;
+		// Readers outside the suspended render still see the committed prefix.
+		expect(session.getSkillHintVisible()).toBe(true);
+		session.settings.set("skillful", true);
+		resume.resolve();
+		await refresh;
+
+		// The frame rendered the candidate false and the commit published it:
+		// prompt and committed snapshot describe the same state.
+		expect(session.systemPrompt).toEqual(["hint-hidden"]);
+		expect(session.getSkillHintVisible()).toBe(false);
+	});
+
+	it("preserves the committed prompt and hint when descriptor preparation throws", async () => {
+		const { session, toolRegistry } = newSession(async () => "uncommitted", {
+			skills: [
+				{
+					name: "test",
+					description: "test",
+					filePath: "/skills/test/SKILL.md",
+					baseDir: "/skills/test",
+					source: "test",
+				},
+			],
+		});
+		const read = toolRegistry.get("read")!;
+		Object.defineProperty(read, "description", {
+			get: () => {
+				throw new Error("descriptor unavailable");
+			},
+		});
+		session.settings.set("skillful", false);
+		await expect(session.refreshBaseSystemPrompt()).rejects.toThrow("descriptor unavailable");
+		expect(session.systemPrompt).toEqual(["initial"]);
+		expect(session.getSkillHintVisible()).toBe(true);
 	});
 
 	it("rebuilds when the refresh argument tool order changes", async () => {

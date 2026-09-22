@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Detected the otty terminal (`TERM_PROGRAM=otty`) with the Kitty graphics protocol, Unicode placeholder placement, OSC 8 hyperlinks and OSC 99 notifications; Sixel is absent and unverified capabilities (DECCARA, text sizing) keep conservative defaults ([#12665](https://github.com/can1357/oh-my-pi/pull/12665) by [@xiechimon](https://github.com/xiechimon)).
+- Detected the rio terminal (`TERM_PROGRAM=rio`) with Kitty graphics protocol and true color; unverified capabilities (hyperlinks, notifications, DECCARA) keep conservative defaults until proven in that terminal ([#12205](https://github.com/can1357/oh-my-pi/issues/12205)) ([#12263](https://github.com/can1357/oh-my-pi/pull/12263) by [@danilouchoa](https://github.com/danilouchoa)).
+- Added `stripTerminalSequences` export for extensions that strip CSI/OSC/APC sequences ([#12795](https://github.com/can1357/oh-my-pi/pull/12795) by [@RockinPaul](https://github.com/RockinPaul)).
+
+### Fixed
+
+- Composer shape previews now use the full overlay width instead of clipping at 96 columns ([#12713](https://github.com/can1357/oh-my-pi/pull/12713) by [@F0Rextasy](https://github.com/F0Rextasy)).
+- Fixed recalled one-line prompts placing the caret at the start when reached with Up but at the end when reached with Down; a history entry that fits on one visual row now always opens at the end, while multi-row entries keep their top/bottom anchors ([#12814](https://github.com/can1357/oh-my-pi/pull/12814) by [@H4vC](https://github.com/H4vC)).
+
 ## [18.2.8] - 2026-09-21
 
 ### Changed

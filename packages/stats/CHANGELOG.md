@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Ensure unique background span ids and correct job closing ([#12726](https://github.com/can1357/oh-my-pi/pull/12726) by [@404MaximWang](https://github.com/404MaximWang)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed
