@@ -9,7 +9,7 @@ import {
 	SPECULATED_BRIDGE_TOOL,
 	speculationKey,
 	streamedEvalCell,
-} from "../../src/eval/speculation";
+} from "../../src/eval/speculation/completion-store";
 import type { ToolSession } from "../../src/tools";
 
 /** Prompts recovered from `code`, in source order. */
@@ -49,8 +49,7 @@ describe("speculatable call scanner", () => {
 	// string's own body, phantom-launching a billable call.
 	test("never reads a string body as code", () => {
 		expect(prompts(`const p = "wrap completion('go') end`)).toEqual([]);
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: an interpolation is what makes the terminator unfindable
-		expect(prompts("const p = `x ${y} completion('go')`;")).toEqual([]);
+		expect(prompts("const p = `x $" + "{y} completion('go')`;")).toEqual([]);
 	});
 
 	// A findable terminator must be skipped past, not treated as end-of-scan.
@@ -67,8 +66,7 @@ describe("speculatable call scanner", () => {
 	// the speculation differently from the real call, wasting it silently.
 	test("refuses literals it cannot reproduce exactly", () => {
 		expect(prompts('completion("line\\nbreak")')).toEqual([]);
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: the placeholder is the subject under test
-		expect(prompts("completion(`interpolated ${name}`)")).toEqual([]);
+		expect(prompts("completion(`interpolated $" + "{name}`)")).toEqual([]);
 	});
 
 	// Reconstructing bridge args for an options object means mirroring the
