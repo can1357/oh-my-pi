@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Python eval preserves multiline strings containing magic-looking lines such as `!cmd` or `%%bash`. ([#12334](https://github.com/can1357/oh-my-pi/pull/12334) by [@iliaal](https://github.com/iliaal))
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
@@ -30,8 +34,6 @@
 
 ### Fixed
 
-- Fixed startup aborting when the plugins directory exists but cannot be read — a sandboxed run, a restrictive mode, or a manifest symlinked into a denied path; the unreadable root is now skipped with a warning.
-- Python eval preserves multiline strings containing magic-looking lines such as `!cmd` or `%%bash`. ([#12334](https://github.com/can1357/oh-my-pi/pull/12334) by [@iliaal](https://github.com/iliaal))
 - Fixed JavaScript `eval` assignments in cells containing top-level `await` so they persist into subsequent cells.
 - Fixed skill hints becoming out of sync with the active prompt after discarded rebuilds and in advisor sessions.
 - Restored `pi.pi.askToolRenderer` for extensions that replace the built-in ask tool, preserving native rendering.
