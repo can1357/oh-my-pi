@@ -19,6 +19,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isRetryableStatus } from "@oh-my-pi/pi-utils/fetch-retry";
 import * as AIError from "../error";
 import type { FetchImpl } from "../types";
 import { raceWithSignal } from "../utils/abort";
@@ -397,6 +398,7 @@ async function stsAssumeRole(
 		throw new AIError.AwsCredentialsError(
 			`AWS AssumeRole failed: ${response.status} ${xmlTag(xml, "Message") ?? xml.slice(0, 200)}`,
 			"assume-role",
+			{ status: response.status },
 		);
 	}
 	return parseStsCredentials(xml, "AWS AssumeRole", "assume-role");
@@ -460,8 +462,21 @@ async function readSsoCredentials(
 	// client registration lasts weeks. The AWS CLI refreshes transparently, so a
 	// profile that works under `aws` must not fail here; only a genuinely
 	// unrefreshable token warrants sending the user back to `aws sso login`.
+	// Transient refresh failures (aborts, network errors, 408/429/5xx) propagate
+	// once the old token can no longer authorize GetRoleCredentials; while it
+	// remains usable, they fall back to it so a degraded OIDC endpoint does not
+	// strand an otherwise working profile (no retry loop here — refresh happens
+	// once per resolution).
 	if (Number.isFinite(expiresAt) && expiresAt - SSO_TOKEN_REFRESH_SKEW_MS <= Date.now()) {
-		const refreshed = await refreshSsoToken(cached.token, cached.file, ssoRegion, signal, fetchImpl);
+		let refreshed: SsoCachedToken | undefined;
+		try {
+			refreshed = await refreshSsoToken(cached.token, cached.file, ssoRegion, signal, fetchImpl);
+		} catch (err) {
+			if (expired || signal?.aborted) throw err;
+			logger.debug("aws-credentials: SSO token refresh failed; using cached access token", {
+				err: String(err),
+			});
+		}
 		if (refreshed?.accessToken) accessToken = refreshed.accessToken;
 		else if (expired) {
 			throw new AIError.AwsCredentialsError(
@@ -485,6 +500,7 @@ async function readSsoCredentials(
 		throw new AIError.AwsCredentialsError(
 			`AWS SSO GetRoleCredentials failed: ${response.status} ${body.slice(0, 200)}`,
 			"sso-role",
+			{ status: response.status },
 		);
 	}
 	const json = (await response.json()) as {
@@ -548,10 +564,12 @@ async function loadSsoCachedToken(
  * Exchange the cached refresh token for a fresh access token via SSO OIDC
  * `CreateToken`, which is what the AWS CLI does transparently on every command.
  *
- * Returns `undefined` when refresh is impossible (no refresh grant material, or
- * the client registration itself has expired) or when the exchange fails, so a
+ * Returns `undefined` when refresh is impossible (no refresh grant material, the
+ * client registration itself has expired, or the reject is deterministic), so a
  * broken refresh surfaces the existing "run aws sso login" remedy rather than an
- * opaque network error.
+ * opaque network error. Abort signals, network failures, and transient 408/429/5xx
+ * responses are thrown so the caller distinguishes a retryable outage from a dead
+ * grant.
  */
 async function refreshSsoToken(
 	token: SsoCachedToken,
@@ -581,8 +599,9 @@ async function refreshSsoToken(
 			signal,
 		});
 	} catch (err) {
+		if (signal?.aborted) throw err;
 		logger.debug("aws-credentials: SSO token refresh request failed", { err: String(err) });
-		return undefined;
+		throw err;
 	}
 	if (!response.ok) {
 		const body = await response.text().catch(() => "");
@@ -590,6 +609,13 @@ async function refreshSsoToken(
 			status: response.status,
 			body: body.slice(0, 200),
 		});
+		if (isRetryableStatus(response.status)) {
+			throw new AIError.ProviderHttpError(
+				`AWS SSO token refresh failed: ${response.status} ${body.slice(0, 200)}`,
+				response.status,
+				{ headers: response.headers },
+			);
+		}
 		return undefined;
 	}
 	const json = (await response.json().catch(() => undefined)) as
@@ -905,6 +931,7 @@ async function assumeRoleWithWebIdentity(
 		throw new AIError.AwsCredentialsError(
 			`AWS AssumeRoleWithWebIdentity failed: ${response.status} ${xmlTag(xml, "Message") ?? xml.slice(0, 200)}`,
 			"web-identity",
+			{ status: response.status },
 		);
 	}
 	return parseStsCredentials(xml, "AWS web identity", "web-identity");
@@ -976,6 +1003,7 @@ async function readContainerCredentials(
 		throw new AIError.AwsCredentialsError(
 			`AWS container credential endpoint failed: ${response.status} ${body.slice(0, 200)}`,
 			"container",
+			{ status: response.status },
 		);
 	}
 	const body = (await response.json()) as ContainerCredentialResponse;

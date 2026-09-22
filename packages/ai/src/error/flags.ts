@@ -1,4 +1,4 @@
-import { isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
+import { isRetryableStatus, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 import type { Api, AssistantMessage, Usage } from "../types";
 import { AwsCredentialsError } from "./aws";
 import {
@@ -635,6 +635,9 @@ export function classify(error: unknown, api?: Api): number {
 
 		if (link instanceof AwsCredentialsError) {
 			kinds |= Flag.AuthFailed;
+			// Real credential-service HTTP statuses ride on the error; transient
+			// 408/429/5xx rejections stay retryable instead of reporting a dead credential.
+			if (link.status !== undefined && isRetryableStatus(link.status)) kinds |= Flag.Transient;
 		} else if (link instanceof AnthropicConnectionTimeoutError) {
 			kinds |= Flag.Timeout | Flag.Transient;
 		} else if (link instanceof AnthropicConnectionError) {

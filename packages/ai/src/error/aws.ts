@@ -22,11 +22,14 @@ export type AwsCredentialsErrorKind =
 /** A failure resolving AWS credentials for the Bedrock provider. */
 export class AwsCredentialsError extends Error {
 	readonly kind: AwsCredentialsErrorKind;
+	/** HTTP status from the failing credential-service response (STS/SSO/ECS); absent for setup, expiry, and malformed-response failures. */
+	readonly status: number | undefined;
 
-	constructor(message: string, kind: AwsCredentialsErrorKind, options?: { cause?: unknown }) {
+	constructor(message: string, kind: AwsCredentialsErrorKind, options?: { cause?: unknown; status?: number }) {
 		super(message, options?.cause === undefined ? undefined : { cause: options.cause });
 		this.name = "AwsCredentialsError";
 		this.kind = kind;
+		this.status = options?.status;
 	}
 }
 
