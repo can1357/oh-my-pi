@@ -181,6 +181,11 @@ async function runSmokeTest(): Promise<void> {
 	process.stdout.write("smoke-test: ok\n");
 }
 
+const AGENT_BRIDGE_CONTRACT = {
+	version: 1,
+	panelLineupFreeze: true,
+} as const;
+
 const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
 const STATS_SYNC_WORKER_ARG = "__omp_worker_stats_sync";
 const TAB_WORKER_ARG = "__omp_worker_tab";
@@ -516,6 +521,10 @@ export async function runCli(argv: string[]): Promise<void> {
 		// Command boundary: bundled notices are read only when requested.
 		const { formatLicenseOutput } = await import("./cli/license");
 		process.stdout.write(formatLicenseOutput());
+		return;
+	}
+	if (resolvedArgv[0] === "--agent-bridge-contract") {
+		process.stdout.write(`${JSON.stringify(AGENT_BRIDGE_CONTRACT)}\n`);
 		return;
 	}
 	let stopStartupComposer: (() => void) | undefined;
