@@ -228,6 +228,20 @@ export class PluginManager {
 		}
 	}
 
+	/**
+	 * Write a single dependency edge into `plugins/package.json`, restoring one
+	 * this install pruned when `bun install` exited 0 without touching the
+	 * manifest (an already-satisfied, unpinned spec re-installed with
+	 * `--force`). See the pruning step in {@link install} for context.
+	 */
+	async #restoreDependencyEntry(pkgJsonPath: string, name: string, value: string): Promise<void> {
+		const pkgJson: { dependencies?: Record<string, string>; [key: string]: unknown } =
+			await Bun.file(pkgJsonPath).json();
+		pkgJson.dependencies ??= {};
+		pkgJson.dependencies[name] = value;
+		await Bun.write(pkgJsonPath, JSON.stringify(pkgJson, null, 2));
+	}
+
 	#collectInstalledNames(deps: Record<string, string>, config: PluginRuntimeConfig): Set<string> {
 		const installedNames = new Set<string>();
 		for (const name of Object.keys(deps)) {
@@ -491,6 +505,7 @@ export class PluginManager {
 		// node_modules entry even if a step between `bun install` and the final
 		// validation throws.
 		let actualName: string | undefined;
+		let prunedDependencyValue: string | undefined;
 		try {
 			// Bun treats a dependency replacement from `repo#old-ref` to the same
 			// package at `repo`/`repo#new-ref` as a self-edge and bails with
@@ -516,6 +531,12 @@ export class PluginManager {
 					}
 				}
 				if (staleNames.length > 0) {
+					// Bun only rewrites this edge when the resolved spec actually
+					// changes; a `--force` reinstall of an already-satisfied, unpinned
+					// name can exit 0 without ever touching package.json. Remember the
+					// pruned value so it can be restored below if bun leaves the entry
+					// missing (#12296's fix must stay idempotent, not lossy).
+					prunedDependencyValue = depsBefore[npmName] ?? depsBefore[staleNames[0]];
 					await this.#removeDependencyEntries(pkgJsonPath, staleNames);
 				}
 			}
@@ -618,6 +639,17 @@ export class PluginManager {
 					throw new Error(`Package installed but package.json not found at ${pkgPath}`);
 				}
 				throw err;
+			}
+
+			if (!gitSource) {
+				const depsAfterInstall = await this.#readDeps(pkgJsonPath);
+				if (!(actualName in depsAfterInstall)) {
+					await this.#restoreDependencyEntry(
+						pkgJsonPath,
+						actualName,
+						prunedDependencyValue ?? `^${pkg.version}`,
+					);
+				}
 			}
 			const manifest: PluginManifest = pkg.omp || pkg.pi || { version: pkg.version };
 			manifest.version = pkg.version;

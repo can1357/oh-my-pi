@@ -1634,6 +1634,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// callback requestRender(true) queued above (immediates are FIFO) — the
 		// spawn syscall never lands in the same loop turn ahead of the first paint.
 		setImmediate(() => {
+			// stop() can run before this fires (a fast test teardown, or a
+			// resumed-session switch right after startup); without this guard the
+			// callback re-reads live mocks/session state that the caller already
+			// tore down and can prewarm against a disposed session's settings.
+			if (!this.isInitialized) return;
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				this.#inputController.prewarmTinyTitleModel();
 			}
