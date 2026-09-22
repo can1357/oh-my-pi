@@ -96,14 +96,13 @@ import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
 import { EVAL_COMPLETION_BRIDGE_NAME, runEvalCompletion } from "./eval/completion-bridge";
-import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { cfgEvalSpeculationEnabled, cfgEvalSpeculationMaxPerTurn } from "./eval/settings";
-import { EvalSpeculationStore, registerEvalSpeculation } from "./eval/speculation";
+import { EvalSpeculationStore, registerEvalSpeculation } from "./eval/speculation/completion-store";
 import {
 	type CustomCommandsLoadResult,
 	type LoadedCustomCommand,
@@ -2563,7 +2562,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// while the model streams, claimed by the eval bridge when the cell runs.
 		// Built here because it needs the tool session to dispatch through, and
 		// bound by weak identity so the bridge can find it without widening
-		// `ToolSession` (see `eval/speculation.ts`).
+		// `ToolSession` (see `eval/speculation/completion-store.ts`).
 		const evalSpeculation = new EvalSpeculationStore({
 			isEnabled: () => cfgEvalSpeculationEnabled.get(settings),
 			maxPerTurn: () => cfgEvalSpeculationMaxPerTurn.get(settings),
