@@ -69,6 +69,7 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"streamIdleTimeoutMs",
 	"reasoning",
 	"disableReasoning",
+	"forceReasoningOff",
 	"hideThinkingSummary",
 	"thinkingBudgets",
 	"toolChoice",

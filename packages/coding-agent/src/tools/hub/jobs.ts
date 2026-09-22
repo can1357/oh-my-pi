@@ -247,7 +247,7 @@ export function buildJobResult(
 				// 4k), which contradicts async-result.md's contract of pointing
 				// to `agent://<id>` instead (PR #10625 review).
 				if (hasData)
-					header += `; full payload at agent://${j.agentUrlId}, fields via agent://${j.agentUrlId}?q=.<field>`;
+					header += `; full payload at agent://${j.agentUrlId}, fields via agent://${j.agentUrlId}/<field>`;
 				lines.push(header);
 				if (j.structured.status !== "valid") {
 					const block = renderStructuredJson(j.structured);
