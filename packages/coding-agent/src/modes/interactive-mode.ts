@@ -348,7 +348,7 @@ import { cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
-import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
+import { cfgPlanDefaultOnStartup, cfgPlanEnabled, cfgPlanExecuteAfterCompactionFailure } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
 import { cfgSttEnabled } from "../stt/settings";
 import { combine, type SettingValueOf } from "../config/registry";
@@ -4314,8 +4314,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * Idempotent post-compaction model transition for the plan-approval compact
 	 * path. The deferred pre-plan state is consumed on first application, so a
 	 * second call (the before-flush hook vs. the short-circuit fallback) is a
-	 * no-op. "failed" intentionally stays on the plan model — the context is
-	 * intact and we dispatch best-effort.
+	 * no-op. A failed compaction keeps the plan model because the intact context
+	 * may exceed the selected execution model's window.
 	 */
 	async #applyDeferredPlanModelTransition(
 		outcome: CompactionOutcome | undefined,
@@ -5006,12 +5006,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Resolve the deferred plan-approval model transition. On the compact path
 		// the before-flush hook passed to handleCompactCommand already ran this (so
-		// any input queued during compaction executed on the post-compaction
+		// any input queued during successful compaction executed on the post-compaction
 		// model); the re-run here is idempotent and covers the short-circuit where
-		// compaction never executed. It runs for "cancelled" too — the operator
-		// aborted only the compaction, not the approval — so the next turn no longer
-		// lands on the plan model. "failed" stays on the plan model (context
-		// intact) and dispatches best-effort.
+		// compaction never executed. Cancellation restores the selected execution
+		// model; failure keeps the plan model because the intact context may not fit.
 		if (options.compactBeforeExecute) {
 			await this.#applyDeferredPlanModelTransition(compactOutcome, options.executionModel);
 		} else {
@@ -5027,6 +5025,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			// on the operator's next `prompt()` call.
 			this.showWarning(
 				"Plan approved, but compaction was cancelled — execution not dispatched. Submit a turn to continue.",
+			);
+			return false;
+		}
+
+		if (compactOutcome === "failed" && !cfgPlanExecuteAfterCompactionFailure.get(this.session.settings)) {
+			this.showWarning(
+				"Plan approved, but compaction failed — execution not dispatched. Retry compaction, choose a model that can hold the current context, or enable plan.executeAfterCompactionFailure.",
 			);
 			return false;
 		}
