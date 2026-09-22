@@ -15,6 +15,10 @@
 - Added visual change detection for video processing, including FFMPEG analysis and SVG overlays.
 - Added support for declaring native judges through custom providers using the `typesafe` and `openrouter-decisions` API values, with configurable base URLs, API keys, and headers.
 
+### Added
+
+- Documented every custom status-line segment id, hide rule, and `segmentOptions` key in the settings reference ([#12371](https://github.com/can1357/oh-my-pi/pull/12371) by [@Frank-zhu0404](https://github.com/Frank-zhu0404)).
+
 ### Changed
 
 - Expanded browser security and resilience controls with configurable HTTPS error handling, domain allow-listing, and automatic tab recycling when security-sensitive state changes.
