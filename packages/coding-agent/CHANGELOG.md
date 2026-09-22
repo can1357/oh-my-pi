@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `ask` tool to `/vibe` directors with an interactive UI so they can request user-owned decisions without leaving director mode.
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
