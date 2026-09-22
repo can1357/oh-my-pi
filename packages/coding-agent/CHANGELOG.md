@@ -5,7 +5,7 @@
 ### Added
 
 - `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
-- `providers.operationTimeoutSeconds` (default 900) caps the wall clock one provider request may spend across its internal retries on the Anthropic, OpenAI Responses, Codex Responses, Google and Gemini CLI paths plus the shared replay-safe stream retry. A retry whose backoff would cross the budget fails immediately with an error naming the budget and the elapsed time instead of sleeping, and the session saga replays an exhausted budget at most twice rather than running the full retry ladder — so a wedged provider surfaces in minutes instead of leaving a turn silent for hours. `0` disables the budget.
+- `providers.operationTimeoutSeconds` (default 900) caps the wall clock one provider request may spend across its internal retries on the Anthropic, OpenAI Responses, Codex Responses, Google and Gemini CLI paths plus the shared replay-safe stream retry. A retry whose backoff would cross the budget fails immediately with an error naming the budget and the elapsed time instead of sleeping, and the session saga replays an exhausted budget at most twice rather than running the full retry ladder — so a wedged provider surfaces in minutes instead of leaving a turn silent for hours. `0` disables the budget ([#12786](https://github.com/can1357/oh-my-pi/pull/12786) by [@geoyws](https://github.com/geoyws)).
 
 ## [18.2.8] - 2026-09-21
 
