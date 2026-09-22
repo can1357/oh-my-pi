@@ -2246,10 +2246,7 @@ export interface ResponseFunctionCallArgumentsDoneEvent {
 /**
  * A piece of message content, such as text, an image, or a file.
  */
-export type ResponseFunctionCallOutputItem =
-	| ResponseInputTextContent
-	| ResponseInputImageContent
-	| ResponseInputFileContent;
+export type ResponseFunctionCallOutputItem = ResponseInputText | ResponseInputImage | ResponseInputFile;
 /**
  * An array of content outputs (text, image, file) for the function tool call.
  */
