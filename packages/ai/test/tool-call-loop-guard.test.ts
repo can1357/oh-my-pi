@@ -53,6 +53,37 @@ describe("ToolCallLoopGuard", () => {
 		});
 	});
 
+	test("re-detects on every identical turn after the threshold (issue #12564)", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		const counts: number[] = [];
+		for (let index = 0; index < 8; index++) {
+			const toolCallId = `repeat-${index}`;
+			const detection = guard.recordTurn({
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: toolCallId, name: "todo", arguments: {} }],
+					api: "openai-completions",
+					provider: "test-provider",
+					model: "test-model",
+					usage: zeroUsage,
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				},
+				toolResults: [
+					{
+						role: "toolResult",
+						toolCallId,
+						toolName: "todo",
+						content: [{ type: "text", text: "Invalid todo arguments" }],
+						isError: true,
+						timestamp: Date.now(),
+					},
+				],
+			});
+			if (detection) counts.push(detection.count);
+		}
+		expect(counts).toEqual([5, 6, 7, 8]);
+	});
 	test("canonicalizes argument key order and ignores harness intent fields", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
 		expect(
