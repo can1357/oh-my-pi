@@ -8,7 +8,7 @@ import { validateRelativePath } from "../internal-urls/skill-protocol";
 import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import type { ImageAttachmentEntry } from ".";
 import { normalizeLocalScheme } from "./path-utils";
-import { ToolError } from "./tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 /**
  * A `skill://` URL that resolves outside its plugin root or to a missing target.

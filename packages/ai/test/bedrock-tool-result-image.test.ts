@@ -41,7 +41,7 @@ function assistant(target: Model<"bedrock-converse-stream">): AssistantMessage {
 	};
 }
 
-function toolResult(): ToolResultMessage {
+function toolResult(overrides: Partial<ToolResultMessage> = {}): ToolResultMessage {
 	return {
 		role: "toolResult",
 		toolCallId: "call_read",
@@ -52,6 +52,7 @@ function toolResult(): ToolResultMessage {
 		],
 		isError: false,
 		timestamp: 2,
+		...overrides,
 	};
 }
 
@@ -66,9 +67,12 @@ function arrayField(value: object, key: string): unknown[] {
 	return field;
 }
 
-async function capturePayload(target: Model<"bedrock-converse-stream">): Promise<object> {
+async function capturePayload(
+	target: Model<"bedrock-converse-stream">,
+	tr: ToolResultMessage = toolResult(),
+): Promise<object> {
 	const context: Context = {
-		messages: [{ role: "user", content: "Read the image.", timestamp: 0 }, assistant(target), toolResult()],
+		messages: [{ role: "user", content: "Read the image.", timestamp: 0 }, assistant(target), tr],
 	};
 	const controller = new AbortController();
 	controller.abort();
@@ -123,6 +127,29 @@ describe("Bedrock tool-result image placement", () => {
 
 		expect(nestedContent.some(block => Reflect.has(objectValue(block, "nested block"), "image"))).toBe(true);
 		expect(content.slice(1).some(block => Reflect.has(objectValue(block, "user block"), "image"))).toBe(false);
+	});
+
+	it("hoists images out of an error toolResult for Claude (text-only error content)", async () => {
+		// Bedrock Claude rejects an error toolResult carrying a non-text block:
+		// "all content must be type `text` if `is_error` is true" (issue #12809).
+		const errorResult = toolResult({
+			content: [
+				{ type: "text", text: "TypeError: boom" },
+				{ type: "image", data: PNG_DATA, mimeType: "image/png" },
+			],
+			isError: true,
+		});
+		const content = finalUserContent(await capturePayload(model("global.anthropic.claude-opus-5"), errorResult));
+		const toolResultInner = objectValue(
+			Reflect.get(objectValue(content[0], "tool result block"), "toolResult"),
+			"tool result",
+		);
+		const nestedContent = arrayField(toolResultInner, "content");
+
+		expect(Reflect.get(toolResultInner, "status")).toBe("error");
+		// Error content must be text-only; the image is hoisted to a sibling block.
+		expect(nestedContent.every(block => Reflect.has(objectValue(block, "nested block"), "text"))).toBe(true);
+		expect(content.slice(1).some(block => Reflect.has(objectValue(block, "user block"), "image"))).toBe(true);
 	});
 
 	it("hoists images for opaque OpenAI inference-profile ARNs classified as unknown", async () => {

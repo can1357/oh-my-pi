@@ -1,28 +1,54 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resolveFirecrawlUrl } from "@oh-my-pi/pi-coding-agent/web/firecrawl";
 import { FirecrawlProvider, searchFirecrawl } from "@oh-my-pi/pi-coding-agent/web/search/providers/firecrawl";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const TEST_KEY = "test-firecrawl-key";
 
-function makeAuthStorage(apiKey: string | undefined): AuthStorage {
-	return {
-		resolver(provider: string, options?: { sessionId?: string }) {
-			expect(provider).toBe("firecrawl");
-			expect(options?.sessionId).toBe("session-firecrawl-test");
-			return async () => apiKey;
-		},
-		hasAuth(provider: string) {
-			return provider === "firecrawl" && Boolean(apiKey);
-		},
-	} as unknown as AuthStorage;
+function createFirecrawlFixture(authStorage: AuthStorage) {
+	const modelRegistry = new ModelRegistry(authStorage);
+	const model = modelRegistry.find("web", "firecrawl");
+	if (!model) throw new Error("Expected bundled web/firecrawl model");
+	return { model, modelRegistry };
 }
 
-function makeParams(query: string, authStorage: AuthStorage = makeAuthStorage(TEST_KEY)) {
+const providerAuthStorage = createInMemoryAuthStorage();
+providerAuthStorage.setRuntimeApiKey("firecrawl", TEST_KEY);
+const providerFixture = createFirecrawlFixture(providerAuthStorage);
+
+const keylessAuthStorage = createInMemoryAuthStorage();
+const keylessFixture = createFirecrawlFixture(keylessAuthStorage);
+const keylessResolverSpy = vi.spyOn(keylessAuthStorage, "resolver").mockImplementation((provider, options) => {
+	expect(provider).toBe("firecrawl");
+	expect(options?.sessionId).toBe("session-firecrawl-test");
+	return async () => undefined;
+});
+const keylessHasAuthSpy = vi.spyOn(keylessAuthStorage, "hasAuth").mockImplementation(provider => {
+	expect(provider).toBe("firecrawl");
+	return false;
+});
+
+afterAll(() => {
+	keylessResolverSpy.mockRestore();
+	keylessHasAuthSpy.mockRestore();
+	providerAuthStorage.close();
+	keylessAuthStorage.close();
+});
+
+function makeParams(query: string, authStorage: AuthStorage = providerAuthStorage) {
+	const fixture =
+		authStorage === providerAuthStorage
+			? providerFixture
+			: authStorage === keylessAuthStorage
+				? keylessFixture
+				: createFirecrawlFixture(authStorage);
 	return {
 		query,
 		authStorage,
+		...fixture,
 		systemPrompt: "Firecrawl test prompt",
 		sessionId: "session-firecrawl-test",
 	} as const;
@@ -156,16 +182,15 @@ describe("Firecrawl web search provider", () => {
 
 	it("uses the initially resolved credential for the first authenticated request", async () => {
 		let resolutionCount = 0;
-		const authStorage = {
-			resolver(provider: string, options?: { sessionId?: string }) {
-				expect(provider).toBe("firecrawl");
-				expect(options?.sessionId).toBe("session-firecrawl-test");
-				return async () => {
-					resolutionCount += 1;
-					return resolutionCount === 1 ? "initial-firecrawl-key" : undefined;
-				};
-			},
-		} as unknown as AuthStorage;
+		const authStorage = createInMemoryAuthStorage();
+		const resolverSpy = vi.spyOn(authStorage, "resolver").mockImplementation((provider, options) => {
+			expect(provider).toBe("firecrawl");
+			expect(options?.sessionId).toBe("session-firecrawl-test");
+			return async () => {
+				resolutionCount += 1;
+				return resolutionCount === 1 ? "initial-firecrawl-key" : undefined;
+			};
+		});
 		const fetchMock: FetchImpl = async (_input, init) => {
 			expect(getHeader(init?.headers, "Authorization")).toBe("Bearer initial-firecrawl-key");
 			return new Response(JSON.stringify({ data: { web: [] } }), {
@@ -174,25 +199,29 @@ describe("Firecrawl web search provider", () => {
 			});
 		};
 
-		const response = await searchFirecrawl({
-			...makeParams("credential reuse", authStorage),
-			fetch: fetchMock,
-		});
+		try {
+			const response = await searchFirecrawl({
+				...makeParams("credential reuse", authStorage),
+				fetch: fetchMock,
+			});
 
-		expect(response.authMode).toBe("api_key");
-		expect(resolutionCount).toBe(1);
+			expect(response.authMode).toBe("api_key");
+			expect(resolutionCount).toBe(1);
+		} finally {
+			resolverSpy.mockRestore();
+			authStorage.close();
+		}
 	});
 
 	it("retries with a rotated credential after the seeded key is rejected", async () => {
 		const resolvedKeys = ["initial-firecrawl-key", "rotated-firecrawl-key"] as const;
 		let resolutionCount = 0;
-		const authStorage = {
-			resolver(provider: string, options?: { sessionId?: string }) {
-				expect(provider).toBe("firecrawl");
-				expect(options?.sessionId).toBe("session-firecrawl-test");
-				return async () => resolvedKeys[resolutionCount++];
-			},
-		} as unknown as AuthStorage;
+		const authStorage = createInMemoryAuthStorage();
+		const resolverSpy = vi.spyOn(authStorage, "resolver").mockImplementation((provider, options) => {
+			expect(provider).toBe("firecrawl");
+			expect(options?.sessionId).toBe("session-firecrawl-test");
+			return async () => resolvedKeys[resolutionCount++];
+		});
 		const authorizationHeaders: Array<string | null> = [];
 		const fetchMock: FetchImpl = async (_input, init) => {
 			authorizationHeaders.push(getHeader(init?.headers, "Authorization"));
@@ -208,17 +237,22 @@ describe("Firecrawl web search provider", () => {
 			throw new Error("unexpected Firecrawl request");
 		};
 
-		const response = await searchFirecrawl({
-			...makeParams("credential rotation", authStorage),
-			fetch: fetchMock,
-		});
+		try {
+			const response = await searchFirecrawl({
+				...makeParams("credential rotation", authStorage),
+				fetch: fetchMock,
+			});
 
-		expect(authorizationHeaders).toEqual(["Bearer initial-firecrawl-key", "Bearer rotated-firecrawl-key"]);
-		expect(resolutionCount).toBe(2);
-		expect(response).toMatchObject({
-			requestId: "rotated-firecrawl-request",
-			authMode: "api_key",
-		});
+			expect(authorizationHeaders).toEqual(["Bearer initial-firecrawl-key", "Bearer rotated-firecrawl-key"]);
+			expect(resolutionCount).toBe(2);
+			expect(response).toMatchObject({
+				requestId: "rotated-firecrawl-request",
+				authMode: "api_key",
+			});
+		} finally {
+			resolverSpy.mockRestore();
+			authStorage.close();
+		}
 	});
 
 	it.each([
@@ -245,7 +279,7 @@ describe("Firecrawl web search provider", () => {
 		delete process.env.FIRECRAWL_API_URL;
 		try {
 			const provider = new FirecrawlProvider();
-			const authStorage = makeAuthStorage(undefined);
+			const authStorage = keylessAuthStorage;
 
 			expect(provider.isAvailable(authStorage)).toBe(false);
 			expect(provider.isExplicitlyAvailable(authStorage)).toBe(true);
@@ -277,7 +311,7 @@ describe("Firecrawl web search provider", () => {
 				);
 			};
 			const response = await searchFirecrawl({
-				...makeParams("legacy query", makeAuthStorage(undefined)),
+				...makeParams("legacy query", keylessAuthStorage),
 				fetch: fetchMock,
 			});
 
@@ -316,7 +350,7 @@ describe("Firecrawl web search provider", () => {
 		};
 
 		const response = await searchFirecrawl({
-			...makeParams("keyless query", makeAuthStorage(undefined)),
+			...makeParams("keyless query", keylessAuthStorage),
 			fetch: fetchMock,
 		});
 

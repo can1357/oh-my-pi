@@ -2,6 +2,29 @@
 
 ## [Unreleased]
 
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed stale workspace addons failing when first used; the error now identifies the addon and provides the command to rebuild native addons.
+- Fixed background bash jobs hanging indefinitely when output forwarding stalls.
+
+## [18.2.7] - 2026-09-21
+
+### Added
+
+- Added `renderMermaidAscii`, a native Mermaid-to-ASCII/Unicode renderer supporting flowcharts, state, sequence, class, ER, and xychart diagrams with color modes, themes, and direction overrides.
+- Added a `default` package export condition so CommonJS consumers, including bytecode bundles, can load the native bindings.
+
+### Changed
+
+- Improved Mermaid flowchart rendering to respect dependency order, reduce crossings, align branches, and wrap long labels without truncation.
+
+### Fixed
+
+- Fixed Mermaid rendering issues involving arrowhead alignment and duplicate edge junctions around mixed-width node shapes.
+- Fixed sloppy edit grammar compatibility with Codex constrained decoding.
+
 ## [18.2.1] - 2026-09-15
 
 ### Added

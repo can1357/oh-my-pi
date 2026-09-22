@@ -21,8 +21,10 @@ import { chromiumAvailable, visibleBrowserAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 // Headful launches additionally need a display; `CHROMIUM_AVAILABLE` only
-// proves the binary execs (`chrome --version` exits 0 with no X server).
-const VISIBLE_BROWSER_AVAILABLE = await visibleBrowserAvailable();
+// checks headless CDP on Linux, which does not require an X server.
+// Never open a desktop window during ordinary test runs; exercise this manual
+// viewport smoke test only with OMP_TEST_VISIBLE_BROWSER=1.
+const VISIBLE_BROWSER_AVAILABLE = process.env.OMP_TEST_VISIBLE_BROWSER === "1" && (await visibleBrowserAvailable());
 
 class FakeStartupWorker {
 	#errorHandlers = new Set<(error: Error) => void>();

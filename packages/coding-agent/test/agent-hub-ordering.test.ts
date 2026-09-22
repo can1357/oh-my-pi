@@ -1,3 +1,4 @@
+import { createAgentHubRuntime } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 /**
  * Regression: the agent hub row order must be stable while the hub is open.
  *
@@ -9,9 +10,9 @@ import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "b
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
-import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
-import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
@@ -45,7 +46,7 @@ function stubStdoutGeometry(cols: number): GeometryStub {
 
 function makeHub(agents: AgentRegistry, overrides: Partial<AgentHubDeps> = {}) {
 	return new AgentHubOverlayComponent({
-		settings: Settings.isolated(),
+		...createAgentHubRuntime({ settings: Settings.isolated(), registry: agents }),
 		observers: new SessionObserverRegistry(),
 		hubKeys: [],
 		onDone: () => {},
@@ -53,6 +54,7 @@ function makeHub(agents: AgentRegistry, overrides: Partial<AgentHubDeps> = {}) {
 		registry: agents,
 		irc: new IrcBus(agents),
 		focusAgent: async () => {},
+		manageActivityLive: !overrides.activity,
 		...overrides,
 	});
 }
@@ -271,6 +273,7 @@ describe("Agent hub row ordering", () => {
 		const getSessions = vi.spyOn(observers, "getSessions");
 		const getSession = vi.spyOn(observers, "getSession");
 		const hub = new AgentHubOverlayComponent({
+			...createAgentHubRuntime({ registry: agents }),
 			observers,
 			hubKeys: [],
 			onDone: () => {},
@@ -326,6 +329,7 @@ describe("Agent hub row ordering", () => {
 		const observers = new SessionObserverRegistry();
 		const getSession = vi.spyOn(observers, "getSession");
 		const hub = new AgentHubOverlayComponent({
+			...createAgentHubRuntime({ registry: agents }),
 			observers,
 			hubKeys: [],
 			onDone: () => {},
@@ -933,10 +937,12 @@ describe("Agent hub row ordering", () => {
 		]);
 		const hub = makeHub(agents, {
 			observers,
-			settings: Settings.isolated({
-				modelRoles: { rapid: "openai/gpt-4o" },
-				modelTags: { rapid: { name: "Quick", color: "warning" } },
-			}),
+			getRoleInfo: createAgentHubRuntime({
+				settings: Settings.isolated({
+					modelRoles: { rapid: "openai/gpt-4o" },
+					modelTags: { rapid: { name: "Quick", color: "warning" } },
+				}),
+			}).getRoleInfo,
 		});
 
 		try {

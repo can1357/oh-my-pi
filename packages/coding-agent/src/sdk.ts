@@ -24,23 +24,16 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
-import {
-	getOpenAICodexTransportDetails,
-	prewarmOpenAICodexResponses,
-} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
-import {
-	$env,
-	$flag,
-	getAgentDir,
-	getModelDbPath,
-	getProjectDir,
-	logger,
-	postmortem,
-	prompt,
-	Snowflake,
-} from "@oh-my-pi/pi-utils";
+import { $env, $flag } from "@oh-my-pi/pi-utils/env";
+import { getAgentDir, getModelDbPath, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import * as logger from "@oh-my-pi/pi-utils/logger";
+import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
+import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import {
 	discoverAdvisorConfigs,
@@ -66,20 +59,18 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
-	formatModelSelectorValue,
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
 	parseModelPattern,
-	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAllowedModels,
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 } from "./config/model-resolver";
+import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
-import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
@@ -93,7 +84,7 @@ import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
-import type { EditMode } from "./edit";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	type CustomCommandsLoadResult,
 	type LoadedCustomCommand,
@@ -128,7 +119,8 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
-import { LocalProtocolHandler, type LocalProtocolOptions, stripXdUrlPrefix } from "./internal-urls";
+import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { stripXdUrlPrefix } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -139,9 +131,9 @@ import {
 	MCPManager,
 	MCPToolCache,
 	type MCPToolsLoadResult,
-	parseMCPToolName,
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
+import { parseMCPToolName } from "@oh-my-pi/pi-tui/tools/mcp";
 import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } from "./mcp/startup-events";
 import { resolveMCPToolAlias } from "./mcp/tool-bridge";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
@@ -200,7 +192,7 @@ import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
-import type { StructuredSubagentSchemaMode } from "./task/types";
+import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -211,7 +203,7 @@ import {
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
 	toReasoningEffort,
-} from "./thinking";
+} from "@oh-my-pi/pi-tui/thinking";
 import {
 	BashTool,
 	BUILTIN_TOOLS,
@@ -255,10 +247,11 @@ import { ttsTool } from "./tools/tts";
 import { resolveActiveRepoContext } from "./utils/active-repo-context";
 import { EventBus } from "./utils/event-bus";
 import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
-import { formatLocalCalendarDate } from "./utils/local-date";
+import { formatLocalCalendarDate } from "@oh-my-pi/pi-tui/chrome/local-date";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { buildNamedToolChoice } from "./utils/tool-choice";
 import { VibeSessionRegistry } from "./vibe/runtime";
+import { registerLocalInferenceApi } from "./tiny/local-inference-api";
 import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 type McpNotificationEntry = {
@@ -449,6 +442,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
+	/** Raw Handlebars template replacing the bundled default system prompt rendering. */
+	systemPromptTemplate?: string;
 	/** Already-loaded custom prompt text rendered through the bundled custom system prompt template. */
 	customSystemPrompt?: string;
 	/** Already-loaded text appended through the bundled system prompt templates. */
@@ -942,6 +937,8 @@ export interface BuildSystemPromptOptions {
 	contextFiles?: Array<{ path: string; content: string }>;
 	cwd?: string;
 	customPrompt?: string;
+	/** Raw Handlebars template replacing the bundled default system prompt rendering. */
+	systemPromptTemplate?: string;
 	appendPrompt?: string;
 	inlineToolDescriptors?: boolean;
 	includeWorkspaceTree?: boolean;
@@ -971,6 +968,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
 		customPrompt: options.customPrompt,
+		systemPromptTemplate: options.systemPromptTemplate,
 		skills: options.skills,
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
@@ -1333,6 +1331,7 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	registerLocalInferenceApi();
 	const extensionRoots = options.extensionRoots?.();
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
 	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
@@ -1340,6 +1339,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 }
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
+	if (options.systemPromptTemplate !== undefined && options.customSystemPrompt !== undefined) {
+		throw new Error("systemPromptTemplate cannot be combined with a literal custom system prompt");
+	}
 	const cwd = options.cwd ?? getProjectDir();
 	const agentDir = options.agentDir ?? getAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
@@ -1397,7 +1399,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			startupCredentialDisabledEvents.push(event);
 		}
 	});
-	await modelRegistry.hydrateCredentialScopedModelCaches();
+	await logger.time("hydrateCredentialScopedModelCaches", () => modelRegistry.hydrateCredentialScopedModelCaches());
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
 	}
@@ -1459,9 +1461,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 	discoveredSkillsPromise?.catch(() => {});
 
-	// Initialize provider preferences from settings
-	applyProviderGlobalsFromSettings(settings);
-
 	const sessionManager =
 		options.sessionManager ??
 		logger.time("sessionManager", () =>
@@ -1485,6 +1484,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.modelPattern !== undefined ||
 		options.thinkingLevel !== undefined ||
 		options.systemPrompt !== undefined ||
+		options.systemPromptTemplate !== undefined ||
 		options.customSystemPrompt !== undefined ||
 		options.appendSystemPrompt !== undefined ||
 		options.toolNames !== undefined ||
@@ -1764,7 +1764,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Only the first top-level session in a process owns an AsyncJobManager.
 	// Subagents inherit the parent's manager via `AsyncJobManager.instance()`
 	// (set below), and any additional top-level session spun up in-process
-	// (e.g. the agent-creation architect in `agents-hub.ts`) must share
+	// (e.g. the agent-creation architect in `agents-hub-deps.ts`) must share
 	// the live singleton — otherwise its dispose path would clobber the
 	// owning session's manager and break the `task`/`bash` async paths
 	// (issue #1923). The `instance()` guard means later sessions also skip
@@ -1841,6 +1841,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			enableLsp,
 			lspReadOnly,
 			enableIrc: restrictToolNames ? false : options.enableIrc,
+			/**
+			 * Frozen at the last system-prompt rebuild: a mid-session `/skillful`
+			 * toggle rides the next turn's notice, never the tool prefix. The
+			 * snapshot belongs to `SessionTools` (owner of the rebuild lifecycle);
+			 * before SessionTools exists this defaults to the startup settings.
+			 */
+			get skillHintVisible() {
+				return (
+					session?.getSkillHintVisible() ??
+					(settings.get("skillful") === true && (session?.skills ?? skills).length > 0)
+				);
+			},
 			restrictToolNames,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
@@ -3220,6 +3232,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// tool-availability caveat lives in the wrapper template.
 			advisorMemoryPrompt = formatAdvisorMemoryPrompt(memoryInstructions);
 			if (hasSession) session.setAdvisorMemoryPrompt(advisorMemoryPrompt);
+			// A fixed string or array in systemPrompt replaces all generated blocks.
+			// Preserve the bookkeeping above, but skip discovering or rendering a
+			// template whose output would be discarded.
+			if (options.systemPrompt !== undefined && typeof options.systemPrompt !== "function") {
+				return {
+					systemPrompt: typeof options.systemPrompt === "string" ? [options.systemPrompt] : options.systemPrompt,
+				};
+			}
 
 			// Build combined append prompt: memory instructions + auto-learn guidance
 			// + mounted MCP route guidance + optional MCP server instructions. For UI
@@ -3293,6 +3313,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? xdevDocsAll(toolSession.xdev, settings.get("tools.xdevDocs"), settings.get("tools.xdevInlineDevices"))
 					: "",
 				resolvedCustomPrompt: options.customSystemPrompt,
+				systemPromptTemplate: options.systemPromptTemplate,
 				skills: settings.get("skillful") ? (session?.skills ?? skills) : [],
 				contextFiles,
 				tools: promptTools,
@@ -3333,13 +3354,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				activeRepoContext,
 			});
 
-			if (options.systemPrompt === undefined) {
+			if (typeof options.systemPrompt !== "function") {
 				return defaultPrompt;
 			}
-			const customPrompt =
-				typeof options.systemPrompt === "function"
-					? options.systemPrompt(defaultPrompt.systemPrompt)
-					: options.systemPrompt;
+			const customPrompt = options.systemPrompt(defaultPrompt.systemPrompt);
 			return {
 				systemPrompt: typeof customPrompt === "string" ? [customPrompt] : customPrompt,
 			};
@@ -3794,6 +3812,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			get skillHintVisible() {
+				return toolSession.skillHintVisible;
+			},
 			hasEditTool: true,
 			requireYieldTool: false,
 			getSessionId: () => {
@@ -4165,13 +4186,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (model?.api === "openai-codex-responses") {
 			// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
 			const codexModel = model as Model<"openai-codex-responses">;
-			const codexTransport = getOpenAICodexTransportDetails(codexModel, {
-				sessionId: providerSessionId,
-				baseUrl: codexModel.baseUrl,
-				preferWebsockets: preferOpenAICodexWebsockets,
-				providerSessionState: session.providerSessionState,
-			});
-			if (codexTransport.websocketPreferred) {
+			if (isOpenAICodexWebSocketPreferred(codexModel, { preferWebsockets: preferOpenAICodexWebsockets })) {
 				void (async () => {
 					try {
 						const codexPrewarmApiKey = options.getApiKey

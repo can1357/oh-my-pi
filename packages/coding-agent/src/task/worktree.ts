@@ -1,3 +1,4 @@
+import { type NestedRepoPatch } from "@oh-my-pi/pi-tui/tools/task";
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -310,11 +311,6 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 	]);
 
 	return diffTreeOrEmpty(objectRepo, baselineTree, currentTree);
-}
-
-export interface NestedRepoPatch {
-	relativePath: string;
-	patch: string;
 }
 
 function unquoteGitDiffPath(rawPath: string): string {

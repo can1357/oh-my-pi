@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [18.2.7] - 2026-09-21
+
+### Changed
+
+- Mermaid diagrams are now rendered with the native renderer, with output remaining unchanged.
+- PI_TIMING span lines now include their start offset to make unspanned gaps easier to identify.
+
+### Fixed
+
+- Fixed a startup crash when PI_TIMING profiled modules loaded via require() or TypeScript declaration assets.
+
+## [18.2.5] - 2026-09-17
+
+### Added
+
+- Added utilities for reading dotenv-sourced environment values, customizing filtered child-shell environment values, converting color palettes to RGB, cleaning trailing spaces from YAML block headers, and counting newlines in text.
+
+### Fixed
+
+- Improved rotating file logging performance by reusing an append file descriptor for each active log file.
+- Improved JSON serialization performance by avoiding unnecessary bigint handling when serializing values without bigints.
+- Fixed `$which` cache collisions for lookups using different PATH or working-directory options.
+- SSE token reads now expose raw wire-line data only when explicitly requested; the default token path no longer includes per-line raw slices.
+
 ## [18.2.3] - 2026-09-17
 
 ### Fixed
@@ -574,7 +598,7 @@
 
 ### Changed
 
-- Mermaid diagrams are now rendered to ASCII by a first-party vendored renderer (`src/vendor/mermaid-ascii`, derived from the MIT-licensed `beautiful-mermaid`, ASCII pipeline only) with terminal display width measured via `Bun.stringWidth` (grapheme-aware, correct for wide/East-Asian glyphs and emoji). Inline label formatting (HTML formatting tags and markdown emphasis) is now reduced to plain text instead of printed raw.
+- Mermaid diagrams are now rendered to ASCII by a first-party renderer (initially derived from the MIT-licensed `beautiful-mermaid`, ASCII pipeline only) with terminal display width measured via `Bun.stringWidth` (grapheme-aware, correct for wide/East-Asian glyphs and emoji). Inline label formatting (HTML formatting tags and markdown emphasis) is now reduced to plain text instead of printed raw.
 
 ### Removed
 

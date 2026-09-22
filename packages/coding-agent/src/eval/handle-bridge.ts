@@ -1,7 +1,8 @@
 import type { AsyncJob, AsyncJobManager } from "../async";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
-import { ToolAbortError, ToolError } from "../tools/tool-errors";
+import { ToolAbortError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { getCompletionHandle, type CompletionHandleEntry } from "./completion-bridge";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -154,6 +155,9 @@ function emitProgress(
 	return first;
 }
 
+/** Largest setTimeout delay before 32-bit overflow (Node/Bun warn and fire in ~1ms past this). */
+const MAX_TIMER_MS = 2_147_483_647;
+
 async function waitForSettlement(
 	resolved: ResolvedHandle[],
 	timeoutMs: number | undefined,
@@ -166,8 +170,21 @@ async function waitForSettlement(
 	let timeout: NodeJS.Timeout | undefined;
 	if (timeoutMs !== undefined) {
 		const deferred = Promise.withResolvers<"timeout">();
-		timeout = setTimeout(() => deferred.resolve("timeout"), timeoutMs);
-		timeout.unref?.();
+		// setTimeout overflows past 2^31-1 ms (fires in ~1ms with a
+		// TimeoutOverflowWarning): re-arm in max-size chunks (#12375).
+		let remaining = timeoutMs;
+		const arm = (): void => {
+			timeout = setTimeout(
+				() => {
+					remaining -= MAX_TIMER_MS;
+					if (remaining > 0) arm();
+					else deferred.resolve("timeout");
+				},
+				Math.min(Math.max(0, remaining), MAX_TIMER_MS),
+			);
+			timeout.unref?.();
+		};
+		arm();
 		races.push(deferred.promise);
 	}
 	let onAbort: (() => void) | undefined;

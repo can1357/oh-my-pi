@@ -1,5 +1,5 @@
-//! `sloppy` mode: `<SM:FIND>` anchors with `<SM:PUT>` replacements or
-//! `<SM:AFTER>` insertions inside `<SM:EDIT>` file sections, with tolerant
+//! `sloppy` mode: `*** SM:FIND` anchors with `*** SM:PUT` replacements or
+//! `*** SM:AFTER` insertions inside `*** SM:EDIT` file sections, with tolerant
 //! matching.
 
 pub mod apply;
@@ -69,8 +69,7 @@ impl ModeEngine for SloppyEngine {
 			if !streaming && Self::missing_target(args) {
 				return vec![PreviewFile {
 					error: Some(
-						"Missing file target: start the payload with <SM:EDIT \
-						 path=\"relative/path.ts\">."
+						"Missing file target: start the payload with *** SM:EDIT relative/path.ts."
 							.to_owned(),
 					),
 					..PreviewFile::default()
@@ -138,7 +137,7 @@ impl ModeEngine for SloppyEngine {
 		let sections = split_sloppy_sections(input);
 		if sections.is_empty() {
 			return Err(EditError::parse(
-				"Missing file target: start the payload with <SM:EDIT path=\"relative/path.ts\">.",
+				"Missing file target: start the payload with *** SM:EDIT relative/path.ts.",
 			));
 		}
 		let multi_file = sections.len() > 1;

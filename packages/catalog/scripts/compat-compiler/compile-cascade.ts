@@ -80,8 +80,10 @@ function parseScope(node: KdlNodeView, scope: RuleScope, allowed: number, rules:
 	const priority = nodePriority(node);
 	const axes: RuleAxes = { wire: {}, thinking: {}, catalog: {} };
 	// Catalog-entry nodes (`default-model`, `env`, `seed`, …) share the root
-	// provider block with the cascade; `compile-providers.ts` owns them.
-	const isProviderRoot = allowed === PROVIDER_CHILDREN;
+	// provider block with the cascade; `compile-providers.ts` owns them. Only a
+	// provider root skips them — a root `on-api` scope rejects them like any
+	// other non-axis directive.
+	const isProviderRoot = scope.providers !== undefined && allowed === PROVIDER_CHILDREN;
 	for (const child of node.children ?? []) {
 		if (isProviderRoot && PROVIDER_CATALOG_NODES.has(child.name)) continue;
 		let kind: number;
@@ -174,6 +176,9 @@ export function compileCascade(sources: readonly { file: string; text: string }[
 			switch (node.name) {
 				case "class":
 					parseScope(node, { class: requiredName(node) }, CLASS_CHILDREN, rules);
+					break;
+				case "on-api":
+					parseScope(node, { apis: stringArguments(node) }, PROVIDER_CHILDREN, rules);
 					break;
 				case "provider":
 					parseScope(node, { providers: [requiredName(node)] }, PROVIDER_CHILDREN, rules);

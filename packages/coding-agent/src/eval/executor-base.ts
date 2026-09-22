@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { type OutputArtifactError, OutputSink } from "../session/streaming-output";
+import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";

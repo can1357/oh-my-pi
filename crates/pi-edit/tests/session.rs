@@ -9,10 +9,7 @@ use pi_edit::{ApplyRequest, EditMode, FileOp, session::PreviewBatch};
 const SOURCE: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
 
 fn sloppy_payload(path: &str) -> String {
-	format!(
-		"<SM:EDIT path=\"{path}\">\n<SM:FIND>\n    let x = 1;\n</SM:FIND>\n<SM:PUT>\n    let x = \
-		 2;\n</SM:PUT>\n</SM:EDIT>\n"
-	)
+	format!("*** SM:EDIT {path}\n*** SM:FIND\n    let x = 1;\n*** SM:PUT\n    let x = 2;\n")
 }
 
 #[tokio::test]
@@ -63,8 +60,7 @@ async fn multi_file_failure_stages_nothing() {
 	ws.write("a.rs", SOURCE);
 	ws.write("b.rs", "fn other() {}\n");
 	let input = format!(
-		"{}<SM:EDIT path=\"b.rs\">\n<SM:FIND>\nfn missing() {{}}\n</SM:FIND>\n<SM:PUT>\nfn \
-		 present() {{}}\n</SM:PUT>\n</SM:EDIT>\n",
+		"{}*** SM:EDIT b.rs\n*** SM:FIND\nfn missing() {{}}\n*** SM:PUT\nfn present() {{}}\n",
 		sloppy_payload("a.rs")
 	);
 	let writer = DiskWriter::default();

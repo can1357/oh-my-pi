@@ -46,7 +46,6 @@ const CHINA_CONSOLE = {
 		protocol: "V2",
 		console: "ONE_CONSOLE",
 		productCode: "p_efm",
-		switchAgent: 12608464,
 		switchUserType: 3,
 		domain: "bailian.console.aliyun.com",
 		consoleSite: "BAILIAN_ALIYUN",
@@ -219,6 +218,13 @@ async function fetchAlibabaTokenPlanUsage(
 		const payload: unknown = await usageResponse.json();
 		if (!isRecord(payload) || payload.successResponse === false || !isRecord(payload.data)) {
 			ctx.logger?.warn("Alibaba Token Plan usage response invalid", { provider: PROVIDER });
+			return null;
+		}
+		if (payload.data.success === false) {
+			ctx.logger?.warn("Alibaba Token Plan usage request rejected", {
+				provider: PROVIDER,
+				errorCode: typeof payload.data.errorCode === "string" ? payload.data.errorCode : "unknown",
+			});
 			return null;
 		}
 		const responseData = unwrapGatewayData(payload.data);

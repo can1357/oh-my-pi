@@ -648,7 +648,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_2_4(): void
+export declare function __piNativesV18_2_9(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1479,7 +1479,7 @@ export declare function execReplace(argv: Array<string>): void
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
 
-/** Locate `<SM:EDIT path="…">` payloads the model emitted as plain text. */
+/** Locate `*** SM:EDIT path` payloads the model emitted as plain text. */
 export declare function extractInlineSloppyRegions(text: string): Array<InlineSloppyRegion>
 
 /**
@@ -2104,6 +2104,36 @@ export declare function matchesKittySequence(data: string, expectedCodepoint: nu
  */
 export declare function matchesLegacySequence(data: string, keyName: string): boolean
 
+/**
+ * Options for [`render_mermaid_ascii`]; every field defaults like the
+ * TypeScript renderer (`useAscii: false`, paddings 5, border padding 1,
+ * `colorMode: "auto"`).
+ */
+export interface MermaidRenderOptions {
+  /** `+-|>` instead of Unicode box-drawing characters. */
+  useAscii?: boolean
+  paddingX?: number
+  paddingY?: number
+  boxBorderPadding?: number
+  /** Force the flowchart/state layout direction. */
+  direction?: 'TD' | 'TB' | 'LR' | 'BT' | 'RL'
+  /** `auto` (or omitted) detects from the terminal environment. */
+  colorMode?: 'none' | 'auto' | 'ansi16' | 'ansi256' | 'truecolor' | 'html'
+  theme?: MermaidTheme
+}
+
+/** Theme colors for [`render_mermaid_ascii`]; hex strings, all optional. */
+export interface MermaidTheme {
+  fg?: string
+  border?: string
+  line?: string
+  arrow?: string
+  accent?: string
+  bg?: string
+  corner?: string
+  junction?: string
+}
+
 /** N-API opt-in handle for the minimizer. */
 export interface MinimizerOptions {
   /** Master switch. Absent / false = disabled. */
@@ -2432,6 +2462,16 @@ export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxH
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+/**
+ * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
+ * xychart) to ASCII/Unicode art. Synchronous: callers render inside the
+ * TUI compositor.
+ *
+ * # Errors
+ * Unparseable flowchart source or an unknown `direction`/`colorMode` value.
+ */
+export declare function renderMermaidAscii(text: string, options?: MermaidRenderOptions | undefined | null): string
 
 /**
  * Render one snapcompact frame on a libuv worker: print pre-normalized text

@@ -13,7 +13,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 

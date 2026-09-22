@@ -227,6 +227,75 @@ describe("TypeSafeJudge", () => {
 		expect(result.usage.totalTokens).toBe(6);
 	});
 
+	it("posts OpenRouter decisions to the alpha route and carries the billed cost", async () => {
+		const urls: string[] = [];
+		const judge = new TypeSafeJudge({
+			apiKey: "or-key",
+			api: "openrouter-decisions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/alpha",
+			model: "~typesafe/jev-latest",
+			fetch: async url => {
+				urls.push(String(url));
+				return Response.json({
+					model: "typesafe/jev-1.13-20260917",
+					provider: "TypeSafe",
+					answers: { urgent: { type: "noul", noul: 0.9 } },
+					usage: { input_tokens: 336, output_tokens: 48, cost: 0.000014 },
+				});
+			},
+		});
+
+		const result = await judge.judge(request);
+
+		expect(urls).toEqual(["https://openrouter.ai/api/alpha/decisions"]);
+		expect(judge.label).toBe("openrouter/~typesafe/jev-latest");
+		expect(result).toMatchObject({
+			api: "openrouter-decisions",
+			provider: "openrouter",
+			model: "typesafe/jev-1.13-20260917",
+			usage: { input: 336, output: 48, cost: { input: 0.000014, total: 0.000014 } },
+		});
+	});
+
+	it("forwards configured headers on judgment requests", async () => {
+		const recordedHeaders: Record<string, string>[] = [];
+		const judge = new TypeSafeJudge({
+			apiKey: "test-key",
+			baseUrl: "https://gateway.example/v1/proxy",
+			api: "openrouter-decisions",
+			provider: "openrouter",
+			model: "typesafe/jev-1.13",
+			headers: {
+				"x-custom-routing": "router-1",
+				"x-custom-tenant": "tenant-abc",
+			},
+			fetch: async (_url, init) => {
+				const h = new Headers(init?.headers);
+				recordedHeaders.push({
+					auth: h.get("authorization") ?? "",
+					customRouting: h.get("x-custom-routing") ?? "",
+					customTenant: h.get("x-custom-tenant") ?? "",
+				});
+				return Response.json({
+					model: "typesafe/jev-1.13",
+					answers: { urgent: { type: "noul", noul: 0.8 } },
+					usage: { input_tokens: 10, output_tokens: 5 },
+				});
+			},
+		});
+
+		await judge.judge(request);
+
+		expect(recordedHeaders).toEqual([
+			{
+				auth: "Bearer test-key",
+				customRouting: "router-1",
+				customTenant: "tenant-abc",
+			},
+		]);
+	});
+
 	it("rotates the credential on 401 through the resolver and retries transient statuses", async () => {
 		const keys: string[] = [];
 		const statuses = [401, 529, 200];

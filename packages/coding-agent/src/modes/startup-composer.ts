@@ -1,16 +1,23 @@
 import { scheduler } from "node:timers/promises";
 import type { Terminal } from "@oh-my-pi/pi-tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import type { LspServerInfo, RecentSession } from "./components/welcome";
-import { COMPOSER_DEFAULTS, Composer, type ComposerPreferences, type ComposerWelcomeUpdate } from "./composer";
+import type { LspServerInfo, RecentSession } from "@oh-my-pi/pi-tui/prompt/welcome";
+import {
+	COMPOSER_DEFAULTS,
+	Composer,
+	type ComposerPreferences,
+	type ComposerWelcomeUpdate,
+} from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	type ComposerThemePreferences,
 	readComposerStartupCache,
 	writeComposerLspCache,
 	writeComposerRecentSessionsCache,
 	writeComposerUiCache,
-} from "./composer-cache";
-import { initThemeSync } from "./theme/theme";
+} from "@oh-my-pi/pi-tui/prompt/composer-cache";
+import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
+import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
+import { MAGIC_KEYWORDS } from "./magic-keywords";
 
 /** Inputs available at the CLI prepaint boundary before command modules load. */
 export interface PrepaintComposerOptions {
@@ -84,6 +91,7 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 			};
 	const theme = { ...cached.theme, ...options.theme };
 	initThemeSync(theme.symbolPreset, theme.colorBlindMode, theme.darkTheme, theme.lightTheme);
+	setMagicKeywords(MAGIC_KEYWORDS);
 	const preferences = { ...COMPOSER_DEFAULTS, ...cached.preferences, ...options.preferences };
 	const welcome: ComposerWelcomeUpdate = {
 		version: options.version ?? "",

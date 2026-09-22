@@ -5,47 +5,26 @@
  */
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "../../async";
-import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
-import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
-import type { Theme } from "../../modes/theme/theme";
-import { renderStructuredJson } from "../../session/async-job-delivery";
-import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import type { StructuredSubagentOutput } from "../../task/types";
-import { parseConfiguredThinkingLevel } from "../../thinking";
-import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
-import type { ToolSession } from "..";
-import { formatArtifactErrorNotice, stripOutputNotice } from "../output-meta";
-import {
-	FEED_MODEL_BADGE_WIDTH,
-	formatBadge,
-	formatDuration,
-	formatEmptyMessage,
-	formatFeedModelBadge,
-	formatStatusIcon,
-	getPreviewLines,
-	isFeedModelBadgeEnabled,
-	PREVIEW_LIMITS,
-	replaceTabs,
-	type ToolUIColor,
-	type ToolUIStatus,
-} from "../render-utils";
-import type { AgentActivitySnapshot, CancelOutcome, CoordinationDetails, HubRenderArgs, JobSnapshot } from "./types";
 
-/**
- * A wait snapshot where every watched job is still running and nothing was
- * cancelled — pure "still waiting" noise once a newer wait exists. The TUI
- * keeps such a block un-finalized (displaceable) so a follow-up `hub` call
- * replaces it instead of stacking another waiting frame in the transcript.
- */
-export function isWaitingPollDetails(details: unknown): boolean {
-	const d = details as CoordinationDetails | undefined;
-	if (!d || !Array.isArray(d.jobs) || d.jobs.length === 0) return false;
-	if (d.cancelled?.length) return false;
-	return d.jobs.every(job => job?.status === "running");
-}
+import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "../../async";
+
+import { renderStructuredJson, structuredStatusLabel } from "../../session/async-job-delivery";
+import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+
+import type { ToolSession } from "..";
+
+import { formatDuration } from "@oh-my-pi/pi-tui/render/render-utils";
+import type {
+	AgentActivitySnapshot,
+	CancelOutcome,
+	CoordinationDetails,
+	JobSnapshot,
+} from "@oh-my-pi/pi-tui/tools/hub";
+
+import { isWaitingPollDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 /**
  * Resolve a list of job ids to job records visible to the calling agent.
@@ -151,13 +130,18 @@ interface TrackedJobLike {
 	structured?: StructuredSubagentOutput;
 }
 
-export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
+export function snapshotJobs(
+	session: ToolSession,
+	jobs: TrackedJobLike[],
+	options: { includeResults?: boolean } = {},
+): JobSnapshot[] {
 	const now = Date.now();
 	return jobs.map(j => {
 		const current = session.asyncJobManager?.getJob(j.id);
 		const latest = current ?? j;
 		const resultConsumed = session.asyncJobManager?.isJobResultConsumed(latest.id) === true;
 		let resolvedModel: string | undefined;
+		const exitCode = typeof latest.latestDetails?.exitCode === "number" ? latest.latestDetails.exitCode : undefined;
 		let resolvedModelIdentity: string | undefined;
 		let resolvedThinkingLevel: JobSnapshot["resolvedThinkingLevel"];
 		let advisor = false;
@@ -197,16 +181,24 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			status: latest.status as JobSnapshot["status"],
 			label: latest.label,
 			durationMs: Math.max(0, now - latest.startTime),
+			...(exitCode !== undefined ? { exitCode } : {}),
 			...(resolvedModel ? { resolvedModel } : {}),
 			...(resolvedModelIdentity ? { resolvedModelIdentity } : {}),
 			...(resolvedThinkingLevel !== undefined ? { resolvedThinkingLevel } : {}),
 			...(advisor ? { advisor: true } : {}),
-			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
-			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
-			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
-			...(!resultConsumed && latest.structured
-				? { structured: latest.structured, agentUrlId: current?.agentId ?? latest.id }
+			...(!resultConsumed && options.includeResults !== false && latest.resultText
+				? { resultText: latest.resultText }
 				: {}),
+			...(!resultConsumed && options.includeResults !== false && latest.errorText
+				? { errorText: latest.errorText }
+				: {}),
+			...((options.includeResults === false || !resultConsumed) && latest.latestDetails?.meta
+				? { meta: latest.latestDetails.meta }
+				: {}),
+			...(!resultConsumed && options.includeResults !== false && latest.structured
+				? { structured: latest.structured }
+				: {}),
+			...(latest.type === "task" ? { agentUrlId: current?.agentId ?? latest.id } : {}),
 		};
 	});
 }
@@ -226,10 +218,12 @@ export function buildJobResult(
 		seen.add(j.id);
 		return true;
 	});
-	const jobResults = snapshotJobs(session, uniqueJobs);
+	const jobResults = snapshotJobs(session, uniqueJobs, { includeResults: op !== "jobs" });
 	const alreadyConsumed = new Set(jobResults.filter(job => manager.isJobResultConsumed(job.id)).map(job => job.id));
 
-	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
+	if (op !== "jobs") {
+		manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
+	}
 
 	const completed = jobResults.filter(j => j.status !== "running");
 	const running = jobResults.filter(j => j.status === "running");
@@ -242,7 +236,24 @@ export function buildJobResult(
 		lines.push("");
 	}
 
-	if (completed.length > 0) {
+	if (op === "jobs" && jobResults.length > 0) {
+		lines.push(`## Jobs (${jobResults.length})\n`);
+		for (const j of jobResults) {
+			const exit = j.exitCode === undefined ? "" : ` — exit ${j.exitCode}`;
+			const artifactId = j.meta?.truncation?.artifactId;
+			const artifact = artifactId ? ` — artifact://${artifactId}` : "";
+			const capture =
+				j.meta?.artifactError === undefined ? "" : ` — ${formatArtifactErrorNotice(j.meta.artifactError)}`;
+			const delivery =
+				j.status === "running" || j.status === "cancelled"
+					? ""
+					: ` — delivery ${alreadyConsumed.has(j.id) ? "delivered" : "pending"}`;
+			const agent = j.agentUrlId ? ` — agent://${j.agentUrlId}` : "";
+			lines.push(
+				`- \`${j.id}\` [${j.type}] — ${j.status} — ${j.label.replace(/\s+/g, " ")}${exit}${artifact}${capture}${delivery}${agent}`,
+			);
+		}
+	} else if (completed.length > 0) {
 		lines.push(`## Completed (${completed.length})\n`);
 		for (const j of completed) {
 			lines.push(`### ${j.id} [${j.type}] — ${j.status}`);
@@ -262,14 +273,14 @@ export function buildJobResult(
 			}
 			if (j.structured) {
 				const hasData = Object.hasOwn(j.structured, "data");
-				let header = `Structured output: schema ${j.structured.status}`;
+				let header = `Structured output: ${structuredStatusLabel(j.structured.status)}`;
 				if (j.structured.error) header += `: ${j.structured.error}`;
 				// Valid results never inline the JSON here — it duplicates the
 				// `<output>` block above (or breaks mid-JSON once truncated at
 				// 4k), which contradicts async-result.md's contract of pointing
 				// to `agent://<id>` instead (PR #10625 review).
 				if (hasData)
-					header += `; full payload at agent://${j.agentUrlId}, fields via agent://${j.agentUrlId}?q=.<field>`;
+					header += `; full payload at agent://${j.agentUrlId}, fields via agent://${j.agentUrlId}/<field>`;
 				lines.push(header);
 				if (j.structured.status !== "valid") {
 					const block = renderStructuredJson(j.structured);
@@ -280,7 +291,7 @@ export function buildJobResult(
 		}
 	}
 
-	if (running.length > 0) {
+	if (op !== "jobs" && running.length > 0) {
 		lines.push(`## Still Running (${running.length})\n`);
 		for (const j of running) {
 			lines.push(`- \`${j.id}\` [${j.type}] — ${j.label}`);
@@ -460,380 +471,4 @@ export function executeJobsSnapshot(
 ): AgentToolResult<CoordinationDetails> {
 	const jobs = manager.getAllJobs(ownerId ? { ownerId } : undefined);
 	return buildJobResult(session, manager, "jobs", jobs, [], runningAgentsOutsideJobs(session));
-}
-
-// =============================================================================
-// TUI Renderer (jobs half)
-// =============================================================================
-
-interface JobRenderArgs {
-	poll?: string[];
-	cancel?: string[];
-	list?: boolean;
-}
-
-/** Hub args → legacy job-renderer arg shape, preserving the exact frame titles. */
-function toJobRenderArgs(args: HubRenderArgs | undefined): JobRenderArgs | undefined {
-	if (!args) return undefined;
-	switch (args.op) {
-		case "wait":
-			return { poll: args.ids };
-		case "cancel":
-			return { cancel: args.ids ?? [] };
-		case "jobs":
-			return { list: true };
-		default:
-			return {};
-	}
-}
-
-const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
-const LABEL_MAX_WIDTH = 60;
-const PREVIEW_LINES_COLLAPSED = 1;
-const PREVIEW_LINES_EXPANDED = 4;
-const LABEL_LINES_COLLAPSED = 1;
-const LABEL_LINES_EXPANDED = 3;
-const PREVIEW_LINE_WIDTH = 80;
-
-function statusToIcon(status: JobSnapshot["status"]): ToolUIStatus {
-	switch (status) {
-		case "completed":
-			return "done";
-		case "failed":
-			return "error";
-		case "cancelled":
-			return "aborted";
-		case "running":
-			return "running";
-	}
-}
-
-function statusToColor(status: JobSnapshot["status"]): ToolUIColor {
-	switch (status) {
-		case "completed":
-			return "success";
-		case "failed":
-			return "error";
-		case "cancelled":
-			return "warning";
-		case "running":
-			return "accent";
-	}
-}
-
-/**
- * Task job results are delivered in the model-facing `<task-result>` envelope
- * (prompts/tools/task-summary.md) so the parent agent can parse status and the
- * `agent://` pointer. The wrapper markup is noise to a human — preview the
- * inner <output>/<preview> body instead.
- */
-function stripTaskResultEnvelope(text: string): string {
-	if (!text.startsWith("<task-result")) return text;
-	const body = /<(output|preview)(?:\s[^>]*)?>\n?([\s\S]*?)\n?<\/\1>/.exec(text)?.[2];
-	return body?.trim() || text;
-}
-
-/**
- * Pretty-printed JSON output wastes the collapsed one-line preview on a lone
- * "{" — flatten structured-looking bodies onto a single line. Slice first:
- * downstream truncation keeps at most a few hundred columns, so collapsing
- * whitespace across a multi-KB body would be pure waste.
- */
-function flattenStructuredPreview(text: string): string {
-	const first = text[0];
-	if (first !== "{" && first !== "[") return text;
-	return text.slice(0, PREVIEW_LINES_EXPANDED * PREVIEW_LINE_WIDTH * 2).replace(/\s+/g, " ");
-}
-
-function describeTarget(args: JobRenderArgs | undefined): string {
-	if (args?.list) return "background jobs";
-	const poll = args?.poll ?? [];
-	const cancel = args?.cancel ?? [];
-	const parts: string[] = [];
-	if (cancel.length > 0) {
-		parts.push(cancel.length === 1 ? `cancel ${cancel[0]}` : `cancel ${cancel.length} jobs`);
-	}
-	if (poll.length > 0) {
-		parts.push(poll.length === 1 ? `poll ${poll[0]}` : `poll ${poll.length} jobs`);
-	}
-	if (parts.length === 0) return "all running jobs";
-	return parts.join(", ");
-}
-
-/** Pending-call frame for job ops (wait/cancel/jobs). */
-export function jobsRenderCall(args: HubRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
-	const text = renderStatusLine({ icon: "pending", title: describeTarget(toJobRenderArgs(args)) || "Job" }, uiTheme);
-	return new Text(text, 0, 0);
-}
-
-/** Result frame for job snapshots (wait/cancel/jobs and the agents roster). */
-export function jobsRenderResult(
-	result: { content: Array<{ type: string; text?: string }>; details?: CoordinationDetails; isError?: boolean },
-	options: RenderResultOptions,
-	uiTheme: Theme,
-	hubArgs?: HubRenderArgs,
-): Component {
-	const args = toJobRenderArgs(hubArgs);
-	let jobs = result.details?.jobs ?? [];
-	const agents = result.details?.agents ?? [];
-
-	if (jobs.length === 0 && agents.length === 0) {
-		const fallback = result.content?.find(c => c.type === "text")?.text || "No jobs to process";
-		const header = renderStatusLine({ icon: "warning", title: describeTarget(args) || "Job" }, uiTheme);
-		return new Text([header, formatEmptyMessage(fallback, uiTheme)].join("\n"), 0, 0);
-	}
-
-	const isPollCall = args ? !args.list && (!args.cancel || args.cancel.length === 0 || args.poll !== undefined) : true;
-
-	// Agent-carrying results (jobs snapshot / empty-wait roster) are real
-	// snapshots, not displaceable waiting frames — only agentless waits
-	// collapse their still-running rows once sealed.
-	if (!options.isPartial && isPollCall && agents.length === 0) {
-		jobs = jobs.filter(job => job.status !== "running");
-		if (jobs.length === 0) {
-			return new Text("", 0, 0);
-		}
-	}
-
-	const counts = { completed: 0, failed: 0, cancelled: 0, running: 0 };
-	for (const job of jobs) counts[job.status]++;
-
-	// The title already carries the running count, so meta lists only the
-	// settled categories — "waiting on 19 of 19 · 19 running" read awkward.
-	const meta: string[] = [];
-	if (counts.completed > 0) meta.push(uiTheme.fg("success", `${counts.completed} done`));
-	if (counts.failed > 0) meta.push(uiTheme.fg("error", `${counts.failed} failed`));
-	if (counts.cancelled > 0) meta.push(uiTheme.fg("warning", `${counts.cancelled} cancelled`));
-	if (agents.length > 0 && jobs.length > 0) {
-		meta.push(uiTheme.fg("accent", `${agents.length} agent${agents.length === 1 ? "" : "s"}`));
-	}
-
-	const headerIcon: ToolUIStatus =
-		counts.failed > 0 ? "warning" : counts.running > 0 || agents.length > 0 ? "info" : "success";
-	const jobsNoun = jobs.length === 1 ? "job" : "jobs";
-	const description =
-		jobs.length === 0
-			? `${agents.length} running agent${agents.length === 1 ? "" : "s"} — no jobs`
-			: counts.running > 0
-				? counts.running === jobs.length
-					? `waiting on ${jobs.length} ${jobsNoun}`
-					: `waiting on ${counts.running} of ${jobs.length} ${jobsNoun}`
-				: `${jobs.length} ${jobsNoun} settled`;
-
-	const header = renderStatusLine(
-		{
-			icon: headerIcon,
-			spinnerFrame: counts.running > 0 || agents.length > 0 ? options.spinnerFrame : undefined,
-			title: description,
-			meta,
-		},
-		uiTheme,
-	);
-
-	const outputMeta = result.details?.meta;
-	// Historical snapshots promoted a job failure to the root. Render it there
-	// only when no row identifies that failure; new report capture errors are distinct.
-	const aggregateArtifactError =
-		outputMeta?.artifactError &&
-		(outputMeta.source?.type === "report" ||
-			!jobs.some(job => (job.meta?.artifactError ?? job.artifactError) === outputMeta.artifactError))
-			? outputMeta.artifactError
-			: undefined;
-
-	// Sort: running first (so user sees what's still pending), then failed, then completed/cancelled.
-	const statusOrder: Record<JobSnapshot["status"], number> = {
-		running: 0,
-		failed: 1,
-		cancelled: 2,
-		completed: 3,
-	};
-	const sortedJobs = [...jobs].sort((a, b) => {
-		const diff = statusOrder[a.status] - statusOrder[b.status];
-		if (diff !== 0) return diff;
-		return b.durationMs - a.durationMs;
-	});
-
-	let cached: RenderCache | undefined;
-	return {
-		render(width: number): readonly string[] {
-			const expanded = options.expanded;
-			const spinnerFrame = options.spinnerFrame ?? 0;
-			// Running-job labels shimmer while the wait block is live; the band
-			// phase is Date.now()-sampled at render time, so serving cached bytes
-			// would pin it to the ~12.5fps spinner-glyph cadence instead of the
-			// 30fps redraw. Bypass the cache while any row animates, and key on
-			// the animation state so a sealed block never hits stale shimmered
-			// bytes (spinnerFrame falls back to 0 on both sides of the seal).
-			const shimmerActive = counts.running > 0 && options.spinnerFrame !== undefined && shimmerEnabled();
-			const showModelBadge = isFeedModelBadgeEnabled();
-			const key = new Hasher()
-				.bool(expanded)
-				.u32(width)
-				.u32(spinnerFrame)
-				.bool(shimmerActive)
-				.bool(showModelBadge)
-				.digest();
-			if (!shimmerActive && cached?.key === key) return cached.lines;
-
-			const itemLines = renderTreeList<JobSnapshot>(
-				{
-					items: sortedJobs,
-					expanded,
-					maxCollapsed: COLLAPSED_LIST_LIMIT,
-					itemType: "job",
-					renderItem: (job, context) => {
-						const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
-						const lines: string[] = [];
-						const icon = formatStatusIcon(
-							statusToIcon(job.status),
-							uiTheme,
-							job.status === "running" ? options.spinnerFrame : undefined,
-						);
-						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
-						const durationSuffix = `${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
-						const displayId = truncateToWidth(
-							replaceTabs(job.id).replace(/\s+/g, " "),
-							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
-							Ellipsis.Unicode,
-						);
-						const rawLabelLines = (job.label || "(no label)").split(/\r?\n/);
-						const maxLabelLines = expanded ? LABEL_LINES_EXPANDED : LABEL_LINES_COLLAPSED;
-						const visibleLabelLines = rawLabelLines
-							.slice(0, maxLabelLines)
-							.map(l => truncateToWidth(replaceTabs(l), LABEL_MAX_WIDTH, Ellipsis.Unicode));
-						if (rawLabelLines.length > maxLabelLines && visibleLabelLines.length > 0) {
-							const last = visibleLabelLines[visibleLabelLines.length - 1]!;
-							visibleLabelLines[visibleLabelLines.length - 1] = `${last} …`;
-						}
-						const rowPrefix = `${icon} ${typeBadge} `;
-						const modelIdentity = job.resolvedModelIdentity ?? job.resolvedModel;
-						const modelBadge =
-							job.type === "task" && showModelBadge && typeof modelIdentity === "string"
-								? formatFeedModelBadge(
-										modelIdentity,
-										job.resolvedThinkingLevel,
-										job.advisor === true,
-										uiTheme,
-										Math.min(
-											FEED_MODEL_BADGE_WIDTH,
-											Math.max(0, rowWidth - visibleWidth(`${rowPrefix}${displayId}${durationSuffix}`) - 1),
-										),
-									)
-								: "";
-						const modelLead = modelBadge ? `${modelBadge} ` : "";
-						const headRaw = displayId;
-						// Running rows in a live block shimmer their label; once the block
-						// stops animating (sealed, or a settled snapshot — spinnerFrame
-						// cleared) they render static so scrollback never keeps a mid-sweep
-						// shimmer band.
-						const live = job.status === "running" && options.spinnerFrame !== undefined;
-						const headLabel = live
-							? shimmerEnabled()
-								? shimmerText(headRaw, uiTheme)
-								: uiTheme.fg("accent", headRaw)
-							: uiTheme.fg("toolOutput", headRaw);
-						let row = `${rowPrefix}${modelLead}${headLabel}`;
-						const distinctLabel = job.label.trim() !== job.id;
-						const label = visibleLabelLines[0] ?? "";
-						const inlineLabel = distinctLabel && visibleWidth(`${row} ${label}${durationSuffix}`) <= rowWidth;
-						if (inlineLabel) row += ` ${uiTheme.fg("toolOutput", label)}`;
-						row += durationSuffix;
-						lines.push(truncateToWidth(row, rowWidth, ""));
-						const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
-						for (let i = distinctLabel && !inlineLabel ? 0 : 1; i < visibleLabelLines.length; i++) {
-							lines.push(
-								`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
-							);
-						}
-						const artifactError = job.meta?.artifactError ?? job.artifactError;
-						if (artifactError) {
-							lines.push(
-								uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), rowWidth)),
-							);
-						}
-
-						// Legacy rows did not retain full metadata. Strip the known warning
-						// footer so the dedicated row/root warning remains the only copy.
-						const previewError =
-							artifactError ?? (outputMeta?.source?.type !== "report" ? outputMeta?.artifactError : undefined);
-						const previewMeta = job.meta ?? (previewError ? { artifactError: previewError } : undefined);
-
-						const preview = flattenStructuredPreview(
-							stripTaskResultEnvelope(
-								stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", previewMeta).trim(),
-							),
-						);
-						if (preview) {
-							const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
-							const previewLines = getPreviewLines(
-								preview,
-								maxLines,
-								Math.min(PREVIEW_LINE_WIDTH, continuationWidth),
-								Ellipsis.Unicode,
-							);
-							const tone = job.errorText ? "error" : "dim";
-							for (const pl of previewLines) {
-								lines.push(`  ${uiTheme.fg(tone, pl)}`);
-							}
-						}
-						return lines;
-					},
-				},
-				uiTheme,
-			);
-
-			// Agents run outside job control; render them as their own tree so
-			// they never skew the job counts or the "waiting on N jobs" title.
-			const agentLines =
-				agents.length === 0
-					? []
-					: renderTreeList<AgentActivitySnapshot>(
-							{
-								items: agents,
-								expanded,
-								maxCollapsed: COLLAPSED_LIST_LIMIT,
-								itemType: "agent",
-								renderItem: (agent, context) => {
-									const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
-									const icon = agent.live
-										? formatStatusIcon("running", uiTheme, options.spinnerFrame)
-										: formatStatusIcon("warning", uiTheme);
-									const badge = agent.live
-										? formatBadge("agent", "accent", uiTheme)
-										: formatBadge("agent · no turn", "warning", uiTheme);
-									const id = truncateToWidth(
-										replaceTabs(agent.id).replace(/\s+/g, " "),
-										Math.max(0, rowWidth - visibleWidth(`${icon}  ${badge}`)),
-										Ellipsis.Unicode,
-									);
-									const gist = agent.activity
-										? ` ${uiTheme.fg("toolOutput", truncateToWidth(replaceTabs(agent.activity), LABEL_MAX_WIDTH, Ellipsis.Unicode))}`
-										: "";
-									const parent = agent.parentId ? uiTheme.fg("dim", ` ← ${agent.parentId}`) : "";
-									const age = uiTheme.fg("dim", formatDuration(agent.ageMs));
-									return [
-										truncateToWidth(
-											`${icon} ${uiTheme.fg("muted", id)} ${badge}${gist} ${age}${parent}`,
-											rowWidth,
-											"",
-										),
-									];
-								},
-							},
-							uiTheme,
-						);
-
-			const all = [header];
-			if (aggregateArtifactError) {
-				all.push(uiTheme.fg("warning", formatArtifactErrorNotice(aggregateArtifactError)));
-			}
-			all.push(...itemLines, ...agentLines);
-			for (let i = 0; i < all.length; i++) all[i] = truncateToWidth(all[i]!, width, Ellipsis.Unicode);
-			cached = { key, lines: all };
-			return all;
-		},
-		invalidate() {
-			cached = undefined;
-		},
-	};
 }

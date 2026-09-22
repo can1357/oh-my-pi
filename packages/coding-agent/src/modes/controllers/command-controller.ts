@@ -29,17 +29,19 @@ import {
 	summarizeMentalModel,
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
-import { BashExecutionComponent, bashPtyViewport } from "../../modes/components/bash-execution";
-import { BorderedLoader } from "../../modes/components/bordered-loader";
-import { DynamicBorder } from "../../modes/components/dynamic-border";
-import { EvalExecutionComponent } from "../../modes/components/eval-execution";
-import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
-import { TranscriptBlock } from "../../modes/components/transcript-container";
-import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "../../modes/theme/theme";
+import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
+import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
+import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
+import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
+import { moveDirectorySource } from "../move-directory-source";
+import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
+import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { computeContextBreakdown, renderContextUsage } from "../../modes/utils/context-usage";
-import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
-import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
+import { renderContextUsage } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { computeSessionContextBreakdown } from "../../session/context-usage-runtime";
+import { buildHotkeysMarkdown } from "@oh-my-pi/pi-tui/hotkeys-markdown";
+import { buildToolsMarkdown } from "@oh-my-pi/pi-tui/prompt/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
@@ -53,10 +55,11 @@ import {
 } from "../../session/session-worktree";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
-import { formatProviderName } from "../../slash-commands/helpers/format";
+import { formatProviderName } from "@oh-my-pi/pi-tui/chrome/format";
+import { formatCompactQuota } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
-import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
+import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import {
 	getChangelogPath,
 	parseChangelog,
@@ -66,8 +69,12 @@ import {
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
-import { collapseSharedUsageReports } from "../../utils/usage-display";
-import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "../usage-amounts";
+import {
+	collapseSharedUsageReports,
+	formatLimitTitle,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { formatRemainingOnlyTotal, isUsedOnlyAbsoluteAmount } from "@oh-my-pi/pi-tui/prompt/usage-amounts";
 
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
@@ -504,11 +511,12 @@ export class CommandController {
 					info += `${theme.fg("dim", "Model:")} ${a.model.provider}/${a.model.id}\n`;
 				}
 				if (a.model && usageReports) {
+					const identity = resolveActiveAdvisorAccount(a.model.provider, a.sessionId);
 					const quota = formatCompactQuota(
 						a.model.provider,
-						usageReports,
+						collapseSharedUsageReports(usageReports),
 						nowMs,
-						resolveActiveAdvisorAccount(a.model.provider, a.sessionId),
+						(report, limit) => !identity || limitMatchesActiveAccount(report, limit, identity),
 					);
 					if (quota) info += `${theme.fg("dim", quota)}\n`;
 				}
@@ -546,11 +554,12 @@ export class CommandController {
 			info += `${theme.fg("dim", "Model:")} ${model.provider}/${model.id}\n`;
 		}
 		if (model && usageReports) {
+			const identity = resolveActiveAdvisorAccount(model.provider, stats.advisors[0]?.sessionId);
 			const quota = formatCompactQuota(
 				model.provider,
-				usageReports,
+				collapseSharedUsageReports(usageReports),
 				nowMs,
-				resolveActiveAdvisorAccount(model.provider, stats.advisors[0]?.sessionId),
+				(report, limit) => !identity || limitMatchesActiveAccount(report, limit, identity),
 			);
 			if (quota) {
 				info += `\n${theme.bold("Quota")}\n`;
@@ -673,7 +682,7 @@ export class CommandController {
 	}
 
 	handleContextCommand(): void {
-		const breakdown = computeContextBreakdown(this.ctx.session, { snapcompactSavings: true });
+		const breakdown = computeSessionContextBreakdown(this.ctx.session, { snapcompactSavings: true });
 		if (breakdown.contextWindow <= 0) {
 			this.ctx.showWarning("Context usage is unavailable: no model is selected for this session.");
 			return;
@@ -1159,7 +1168,8 @@ export class CommandController {
 		// No argument in TUI mode: open the path autocomplete overlay.
 		if (!input) {
 			const result = await this.ctx.showHookCustom<MoveOverlayResult | undefined>(
-				(_tui, _theme, _keybindings, done) => new MoveOverlay(this.ctx.sessionManager.getCwd(), done),
+				(_tui, _theme, _keybindings, done) =>
+					new MoveOverlay(this.ctx.sessionManager.getCwd(), done, moveDirectorySource),
 				{ overlay: true },
 			);
 			if (!result) return; // cancelled
@@ -1797,14 +1807,6 @@ function resolveProviderUsageTotal(reports: UsageReport[]): number {
 		.reduce((sum, value) => sum + value, 0);
 }
 
-function formatLimitTitle(limit: UsageLimit): string {
-	const tier = limit.scope.tier;
-	if (tier && !limit.label.toLowerCase().includes(tier.toLowerCase())) {
-		return `${limit.label} (${tier})`;
-	}
-	return limit.label;
-}
-
 function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme): string {
 	const normalizedLabel = label.toLowerCase();
 	const normalizedWindow = windowLabel.toLowerCase();
@@ -1978,57 +1980,6 @@ function resolveResetRange(limits: UsageLimit[], nowMs: number): string | null {
 	}
 	return `${verb} in ${formatDuration(minReset)}`;
 }
-/**
- * Compact one-line quota summary for a single advisor's provider.
- * Returns `null` when the provider has no usage data.
- * When `activeAccount` is provided, only limits matching that credential
- * are shown (mirrors `renderUsageReports`'s account-stickiness filtering).
- * Example output: `Quota: 7d window · 67% used · resets in 3.2d`
- */
-export function formatCompactQuota(
-	provider: string,
-	reports: UsageReport[],
-	nowMs: number,
-	activeAccount?: OAuthAccountIdentity,
-): string | null {
-	const providerReports = collapseSharedUsageReports(reports).filter(r => r.provider === provider);
-	if (providerReports.length === 0) return null;
-	// Group limits by window id so we show BOTH the 5-hour and 7-day windows
-	// (or any other distinct windows the provider exposes). Within each window,
-	// pick the highest used fraction across accounts — that's the most pressing.
-	const byWindow = new Map<string, { limit: UsageLimit; fraction: number }>();
-	for (const report of providerReports) {
-		for (const limit of report.limits) {
-			// Skip limits that belong to a different credential than the one
-			// the advisor is actually using, so we don't alarm the user with
-			// an exhausted account that isn't theirs.
-			if (activeAccount && !limitMatchesActiveAccount(report, limit, activeAccount)) continue;
-			const fraction = resolveUsedFraction(limit);
-			if (fraction === undefined) continue;
-			const key = limit.window?.id ?? limit.scope.windowId ?? "—";
-			const existing = byWindow.get(key);
-			if (!existing || fraction > existing.fraction) byWindow.set(key, { limit, fraction });
-		}
-	}
-	if (byWindow.size === 0) return null;
-	// Sort windows by urgency (highest fraction first) so the most pressing
-	// quota is always the first thing the user sees.
-	const entries = [...byWindow.values()].sort((a, b) => b.fraction - a.fraction);
-	const lines: string[] = [];
-	for (const { limit, fraction } of entries) {
-		const pct = Math.round(fraction * 100);
-		const windowLabel = limit.window?.label ?? limit.scope.windowId ?? "—";
-		// Include the limit label (account/tier) when it carries identity beyond
-		// the window name, so the user can tell which credential's quota is shown.
-		const identity = limit.label.trim();
-		const header = identity && identity !== windowLabel ? `${windowLabel} (${identity})` : windowLabel;
-		const parts = [`${header}: ${pct}% used`];
-		const reset = resolveResetRange([limit], nowMs);
-		if (reset) parts.push(reset);
-		lines.push(parts.join(" · "));
-	}
-	return `Quota: ${lines.join(" │ ")}`;
-}
 
 function resolveStatusIcon(status: AggregateDisplayStatus, uiTheme: Theme): string {
 	if (status === "neutral") return uiTheme.fg("dim", uiTheme.status.info);
@@ -2165,37 +2116,48 @@ export function renderUsageReports(
 
 		const resetAccountLines: string[] = [];
 		for (const report of providerReports) {
-			const count = report.resetCredits?.availableCount ?? 0;
-			if (count <= 0) continue;
-			const label =
+			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
+			if (!resets || resets.bankedCount <= 0) continue;
+			const identityLabel =
 				typeof report.metadata?.email === "string" && report.metadata.email
 					? report.metadata.email
 					: typeof report.metadata?.accountId === "string" && report.metadata.accountId
 						? report.metadata.accountId
 						: "account";
+			const orgLabel =
+				typeof report.metadata?.orgName === "string" && report.metadata.orgName
+					? report.metadata.orgName
+					: typeof report.metadata?.orgId === "string"
+						? report.metadata.orgId
+						: undefined;
+			const rawLabel = orgLabel && orgLabel !== identityLabel ? `${identityLabel} (${orgLabel})` : identityLabel;
+			const label = sanitizeText(rawLabel.replace(/[\r\n\t]+/g, " "));
+			const activeOrg = activeAccount?.orgId;
+			const reportOrg = typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined;
+			const orgMatches = !activeOrg && !reportOrg ? true : activeOrg === reportOrg;
 			const isActive =
+				orgMatches &&
 				!!activeAccount &&
 				((!!activeAccount.accountId && activeAccount.accountId === report.metadata?.accountId) ||
 					(!!activeAccount.email && activeAccount.email === report.metadata?.email));
+			const availability =
+				resets.redeemableCount === resets.bankedCount ? "" : ` · ${resets.redeemableCount} usable now`;
 			resetAccountLines.push(
-				`    • ${label}: ${count} saved reset${count === 1 ? "" : "s"}${isActive ? " (active)" : ""}`,
+				`    • ${label}: ${resets.bankedCount} saved reset${resets.bankedCount === 1 ? "" : "s"}${availability}${isActive ? " (active)" : ""}`,
 			);
-			const credits = report.resetCredits?.credits;
-			if (credits) {
-				for (const credit of credits) {
-					if (credit.expiresAt) {
-						const expiryMs = Date.parse(credit.expiresAt);
-						if (!Number.isNaN(expiryMs)) {
-							const remaining = expiryMs - nowMs;
-							const expiryDate = credit.expiresAt.slice(0, 10);
-							if (remaining > 0) {
-								resetAccountLines.push(`        expires in ${formatDuration(remaining)} (${expiryDate})`);
-							} else {
-								resetAccountLines.push(`        expired (${expiryDate})`);
-							}
-						}
-					}
+			if (resets.soonestExpiry) {
+				const expiryMs = Date.parse(resets.soonestExpiry);
+				const remaining = expiryMs - nowMs;
+				const expiryDate = resets.soonestExpiry.slice(0, 10);
+				if (remaining > 0) {
+					resetAccountLines.push(`        soonest expires in ${formatDuration(remaining)} (${expiryDate})`);
+				} else {
+					resetAccountLines.push(`        expired (${expiryDate})`);
 				}
+			}
+			if (resets.redeemableCount === 0 && resets.unavailableReason) {
+				const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
+				resetAccountLines.push(`        unavailable: ${reason}`);
 			}
 		}
 		if (resetAccountLines.length > 0) {

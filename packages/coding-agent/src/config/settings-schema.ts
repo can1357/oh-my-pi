@@ -1,6 +1,7 @@
 import { ADVISOR_DEFAULT_BUDGET_PER_UPDATE } from "../advisor/emission-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
-import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
+import { DEFAULT_SHARE_URL, DEFAULT_STREAM_URL } from "@oh-my-pi/pi-wire";
+import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
 	type BlobDestinationId,
@@ -9,15 +10,15 @@ import {
 } from "../blob-broker/destinations";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
-import type { SymbolKey } from "../modes/theme/symbols";
+import { MAGIC_KEYWORDS, type MagicKeywordId } from "../modes/magic-keywords";
+import type { AnyUiMetadata, SettingTab, SubmenuOption, UiBase } from "@oh-my-pi/pi-tui/overlays/settings-defs";
 import {
 	COMPACTION_METHOD_CHOICES,
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
-import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
+import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
@@ -28,33 +29,9 @@ import {
 	TINY_MODEL_DTYPE_SETTING_OPTIONS,
 	TINY_MODEL_DTYPE_SETTING_VALUES,
 } from "../tiny/dtype";
-import {
-	AUTO_THINKING_MODEL_OPTIONS,
-	AUTO_THINKING_MODEL_VALUES,
-	ONLINE_AUTO_THINKING_MODEL_KEY,
-	ONLINE_MEMORY_MODEL_KEY,
-	ONLINE_TINY_TITLE_MODEL_KEY,
-	TINY_MEMORY_MODEL_OPTIONS,
-	TINY_MEMORY_MODEL_VALUES,
-	TINY_TITLE_MODEL_OPTIONS,
-	TINY_TITLE_MODEL_VALUES,
-} from "../tiny/models";
-import { IMAGE_PROVIDER_CHOICES, type ImageProvider } from "../tools/image-providers";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODEL_OPTIONS,
-	TTS_LOCAL_MODEL_VALUES,
-	TTS_LOCAL_VOICE_OPTIONS,
-	TTS_LOCAL_VOICE_VALUES,
-} from "../tts/models";
+import { DEFAULT_TTS_VOICE, TTS_LOCAL_VOICE_OPTIONS, TTS_LOCAL_VOICE_VALUES } from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
-import {
-	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
-	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
-	SEARCH_PROVIDER_CHOICES,
-	type SearchProviderId,
-} from "../web/search/types";
+import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import {
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
@@ -102,208 +79,44 @@ const BLOB_BACKEND_CHOICES = BUILTIN_BLOB_DESTINATION_METADATA.filter(
 	description: destination.reason ?? destination.family,
 }));
 
-/** Composer shape id; extensions may register additional values at runtime. */
-export type ComposerShape = string;
-
-/** Built-in composer choices and their shared settings/setup copy. */
-export const BUILTIN_COMPOSER_SHAPES = [
-	{
-		value: "band",
-		label: "Status Band (Default)",
-		description: "Flush soft-capped status band above a curved prompt, no frame",
-	},
-	{
-		value: "box",
-		label: "Rounded Box",
-		description: "Status line embedded in top border, compact 2-line prompt",
-	},
-	{
-		value: "claude",
-		label: "Claude Code",
-		description: "Full-width horizontal rules above and below, status line at bottom",
-	},
-	{
-		value: "pi",
-		label: "Pi",
-		description: "Framed horizontal rules with status line at bottom",
-	},
-	{
-		value: "borderless",
-		label: "Borderless",
-		description: "Clean prompt glyph with status line at bottom, no box borders",
-	},
-	{
-		value: "rule",
-		label: "Top Rule Dock",
-		description: "Single top rule with status docked onto it and below",
-	},
-	{
-		value: "field",
-		label: "Compact Field",
-		description: "Filled one-row field with accent end caps",
-	},
-	{
-		value: "rail",
-		label: "Accent Rail",
-		description: "Filled one-row field anchored by a single accent rail",
-	},
-] as const;
-
-/** Built-in composer ids used by tests and non-runtime consumers. */
-export const COMPOSER_SHAPE_VALUES = BUILTIN_COMPOSER_SHAPES.map(shape => shape.value);
-
-export type ContextLineMode = "off" | "percentage" | "annotated" | "embedded";
-export const CONTEXT_LINE_MODE_VALUES = ["off", "percentage", "annotated", "embedded"] as const;
-
-export type SettingTab =
-	| "appearance"
-	| "model"
-	| "interaction"
-	| "context"
-	| "memory"
-	| "files"
-	| "shell"
-	| "tools"
-	| "tasks"
-	| "providers";
-
-/** Tab display metadata - icon is resolved via theme.symbol() */
-export type TabMetadata = { label: string; icon: Extract<SymbolKey, `tab.${string}`> };
-
-/** Ordered list of tabs for UI rendering */
-export const SETTING_TABS: SettingTab[] = [
-	"appearance",
-	"model",
-	"interaction",
-	"context",
-	"memory",
-	"files",
-	"shell",
-	"tools",
-	"tasks",
-	"providers",
-];
-
-/** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
-export const TAB_METADATA: Record<SettingTab, TabMetadata> = {
-	appearance: { label: "Appearance", icon: "tab.appearance" },
-	model: { label: "Model", icon: "tab.model" },
-	interaction: { label: "Interaction", icon: "tab.interaction" },
-	context: { label: "Context", icon: "tab.context" },
-	memory: { label: "Memory", icon: "tab.memory" },
-	files: { label: "Files", icon: "tab.files" },
-	shell: { label: "Shell", icon: "tab.shell" },
-	tools: { label: "Tools", icon: "tab.tools" },
-	tasks: { label: "Tasks", icon: "tab.tasks" },
-	providers: { label: "Providers", icon: "tab.providers" },
-};
-
-/**
- * Ordered section groups per tab. Settings declare their section via `ui.group`;
- * the settings UI renders groups in this order with a heading row between them.
- * Ungrouped settings render first, before any section heading.
- */
-export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
-	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
-	interaction: [
-		"Input",
-		"Approvals",
-		"Notifications",
-		"Speech",
-		"Collab",
-		"Magic Keywords",
-		"Startup & Updates",
-		"Power",
-		"Agent",
-		"Git",
-	],
-	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Sharpshooter"],
-	files: ["Editing", "Reading", "Read Summaries", "LSP"],
-	shell: ["Bash", "Eval & Runtimes"],
-	tools: [
-		"Available Tools",
-		"Todos",
-		"Grep & Browser",
-		"Computer",
-		"GitHub",
-		"Output Limits",
-		"Execution",
-		"Discovery & MCP",
-		"Extensions",
-		"Developer",
-	],
-	tasks: ["Modes", "Subagents", "Isolation", "Commands & Skills"],
-	providers: ["Services", "Fireworks", "Tiny Model", "Protocol", "Timeouts", "Privacy"],
-};
-
-/** Status line segment identifiers accepted by custom status-line settings. */
-export const STATUS_LINE_SEGMENT_IDS = [
-	"pi",
-	"status",
-	"model",
-	"mode",
-	"path",
-	"git",
-	"pr",
-	"subagents",
-	"token_in",
-	"token_out",
-	"token_total",
-	"token_rate",
-	"cost",
-	"context_pct",
-	"context_total",
-	"time_spent",
-	"time",
-	"session",
-	"hostname",
-	"cache_read",
-	"cache_write",
-	"cache_hit",
-	"session_name",
-	"usage",
-	"collab",
-	"vim",
-] as const;
-
-/** One identifier from the supported status-line segment catalog. */
-export type StatusLineSegmentId = (typeof STATUS_LINE_SEGMENT_IDS)[number];
-
-/** Baseline segments used when Custom is selected without segment overrides. */
-export const CUSTOM_STATUS_LINE_DEFAULTS: {
-	readonly left: StatusLineSegmentId[];
-	readonly right: StatusLineSegmentId[];
-} = {
-	left: ["vim", "model", "mode", "path", "git", "pr"],
-	right: ["session_name", "token_total", "cost", "context_pct"],
-};
-
-/** Submenu choice metadata. */
-export type SubmenuOption<V extends string = string> = {
-	value: V;
-	label: string;
-	description?: string;
-};
-
-interface UiBase {
-	tab: SettingTab;
-	/** Section within the tab; must be listed in TAB_GROUPS[tab]. Ungrouped settings render at the top. */
-	group?: string;
-	label: string;
-	description: string;
-	/**
-	 * Risk note. Marks the settings row with a warning glyph and renders above
-	 * the description in warning styling. For settings that can get the user
-	 * rate-limited, flagged, or banned — not for merely advanced options.
-	 */
-	warning?: string;
-	/** Condition function name - setting only shown when true */
-	condition?: string;
-}
+import {
+	CONTEXT_LINE_MODE_VALUES,
+	CUSTOM_STATUS_LINE_DEFAULTS,
+	STATUS_LINE_PRESET_VALUES,
+	STATUS_LINE_SEPARATOR_VALUES,
+	type StatusLinePreset,
+	type StatusLineSegmentId,
+	type StatusLineSeparatorStyle,
+} from "@oh-my-pi/pi-tui/status-line/schema";
+export {
+	CONTEXT_LINE_MODE_VALUES,
+	CUSTOM_STATUS_LINE_DEFAULTS,
+	STATUS_LINE_SEGMENT_IDS,
+	type ContextLineMode,
+	type StatusLinePreset,
+	type StatusLineSegmentId,
+	type StatusLineSeparatorStyle,
+} from "@oh-my-pi/pi-tui/status-line/schema";
 
 interface UiBoolean extends UiBase {}
+
+interface MagicKeywordSettingDef {
+	readonly type: "boolean";
+	readonly default: true;
+	readonly ui: UiBoolean;
+}
+
+/** One `magicKeywords.<id>` toggle per registered keyword, derived so the table stays the only list. */
+const MAGIC_KEYWORD_SETTINGS = Object.fromEntries(
+	MAGIC_KEYWORDS.map((keyword): [string, MagicKeywordSettingDef] => [
+		`magicKeywords.${keyword.id}`,
+		{
+			type: "boolean",
+			default: true,
+			ui: { tab: "interaction", group: "Magic Keywords", label: keyword.label, description: keyword.description },
+		},
+	]),
+) as { readonly [K in MagicKeywordId as `magicKeywords.${K}`]: MagicKeywordSettingDef };
 
 interface UiEnum<T extends readonly string[]> extends UiBase {
 	/** Submenu options. When omitted, the enum renders as an inline toggle derived from `values`. */
@@ -333,13 +146,6 @@ interface UiArray extends UiBase {
 	/** Selection order is meaningful; the editor renders positions and supports reordering. */
 	ordered?: boolean;
 }
-
-/** Wide ui shape exposed to consumers that walk the schema generically. */
-export type AnyUiMetadata = UiBase & {
-	options?: ReadonlyArray<SubmenuOption> | "runtime";
-	secret?: boolean;
-	ordered?: boolean;
-};
 
 /**
  * Marks a setting whose value is a credential.
@@ -754,7 +560,11 @@ export const SETTINGS_SCHEMA = {
 			description: "Glyph set for icons and symbols (Unicode, Nerd Font, or ASCII)",
 			options: [
 				{ value: "unicode", label: "Unicode", description: "Standard symbols (default)" },
-				{ value: "nerd", label: "Nerd Font", description: "Requires Nerd Font" },
+				{
+					value: "nerd",
+					label: "Nerd Font",
+					description: "Requires a Nerd Font, or a Glyph Protocol terminal (icons ship in-band)",
+				},
 				{ value: "ascii", label: "ASCII", description: "Maximum compatibility" },
 			],
 		},
@@ -797,7 +607,7 @@ export const SETTINGS_SCHEMA = {
 	// Status line
 	"statusLine.preset": {
 		type: "enum",
-		values: ["default", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const,
+		values: STATUS_LINE_PRESET_VALUES,
 		default: "default",
 		ui: {
 			tab: "appearance",
@@ -818,7 +628,7 @@ export const SETTINGS_SCHEMA = {
 
 	"statusLine.separator": {
 		type: "enum",
-		values: ["powerline", "powerline-thin", "slash", "pipe", "block", "none", "ascii"] as const,
+		values: STATUS_LINE_SEPARATOR_VALUES,
 		default: "powerline-thin",
 		ui: {
 			tab: "appearance",
@@ -2050,7 +1860,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Retry & Fallback",
 			label: "Anthropic Server-Side Fallback (Fable 5)",
 			description:
-				"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 4.8 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
+				"When a Claude Fable 5 / Mythos 5 request is blocked by Anthropic's safety classifier, retry it on Claude Opus 5.5 server-side (Anthropic `server-side-fallback-2026-06-01` beta). Opt-in — leaving this off preserves the pre-fallback behavior for every request.",
 		},
 	},
 
@@ -2196,7 +2006,7 @@ export const SETTINGS_SCHEMA = {
 
 	treeFilterMode: {
 		type: "enum",
-		values: ["default", "no-tools", "user-only", "labeled-only", "all"] as const,
+		values: TREE_FILTER_MODES,
 		default: "default",
 		ui: {
 			tab: "interaction",
@@ -2404,42 +2214,10 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Magic Keywords",
 			label: "Magic Keywords",
-			description: "Enable hidden notices for standalone ultrathink, orchestrate, and workflowz keywords",
+			description: `Enable hidden notices for standalone ${MAGIC_KEYWORDS.map(keyword => keyword.word).join(", ")} keywords`,
 		},
 	},
-
-	"magicKeywords.ultrathink": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Magic Keywords",
-			label: "Ultrathink Keyword",
-			description: "Let standalone ultrathink request maximum automatic thinking and append its hidden notice",
-		},
-	},
-
-	"magicKeywords.orchestrate": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Magic Keywords",
-			label: "Orchestrate Keyword",
-			description: "Let standalone orchestrate append its hidden multi-agent orchestration notice",
-		},
-	},
-
-	"magicKeywords.workflow": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Magic Keywords",
-			label: "Workflow Keyword",
-			description: "Let standalone workflowz append its hidden eval workflow notice",
-		},
-	},
+	...MAGIC_KEYWORD_SETTINGS,
 
 	// Notifications
 	"completion.notify": {
@@ -2633,6 +2411,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Live streaming (omp stream)
+	"stream.serverUrl": {
+		type: "string",
+		default: DEFAULT_STREAM_URL,
+		ui: {
+			tab: "interaction",
+			group: "Stream",
+			label: "Stream Server",
+			description:
+				"Live stream server used by `omp stream` (https://host[:port]); viewers watch at <base>/<your Stencil username>",
+		},
+	},
+
+	"stream.redactPatterns": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "interaction",
+			group: "Stream",
+			label: "Extra Redaction Patterns",
+			description:
+				"Additional regular expressions redacted from every streamed row, on top of env/secrets.yml values and built-in credential shapes",
+		},
+	},
+
 	// Speech-to-text
 	"stt.enabled": {
 		type: "boolean",
@@ -2650,19 +2453,6 @@ export const SETTINGS_SCHEMA = {
 		default: "en",
 	},
 
-	"stt.modelName": {
-		type: "enum",
-		values: STT_MODEL_VALUES,
-		default: DEFAULT_STT_MODEL_KEY,
-		ui: {
-			tab: "interaction",
-			group: "Speech",
-			label: "Speech Model",
-			description:
-				"Local on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
-			options: STT_MODEL_OPTIONS,
-		},
-	},
 	"stt.submitTrigger": {
 		type: "enum",
 		values: STT_SUBMIT_TRIGGER_VALUES,
@@ -3824,7 +3614,7 @@ export const SETTINGS_SCHEMA = {
 
 	"edit.enforceSeenLines": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "files",
 			group: "Editing",
@@ -4462,6 +4252,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "AST Edit",
 			description: "Enable the ast_edit tool for structural AST rewrites",
+		},
+	},
+
+	"find.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Find (semantic grep)",
+			description:
+				"Enable the find tool: natural-language search for files and line ranges, judged by the judge model role",
 		},
 	},
 
@@ -5567,30 +5369,6 @@ export const SETTINGS_SCHEMA = {
 				"Maximum concurrent Ollama Cloud subagent runs per process; 0 disables the provider-specific limit",
 		},
 	},
-	"providers.webSearchOrder": {
-		type: "array",
-		default: [] as SearchProviderId[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Web Search Provider Order",
-			description:
-				"Prioritized providers for the web_search tool; unlisted providers retain their default order afterward",
-			options: SEARCH_PROVIDER_CHOICES,
-			ordered: true,
-		},
-	},
-	"providers.webSearchExclude": {
-		type: "array",
-		default: [] as SearchProviderId[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Excluded Web Search Providers",
-			description: "Providers that web_search should never use, even as fallbacks",
-			options: SEARCH_PROVIDER_CHOICES,
-		},
-	},
 	"providers.webSearchTimeoutSeconds": {
 		type: "number",
 		default: DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -5606,16 +5384,6 @@ export const SETTINGS_SCHEMA = {
 				{ value: "180", label: "3 minutes" },
 				{ value: "300", label: "5 minutes" },
 			],
-		},
-	},
-	"providers.webSearchGeminiModel": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Gemini web_search model",
-			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
 		},
 	},
 	"providers.antigravityEndpoint": {
@@ -5644,19 +5412,6 @@ export const SETTINGS_SCHEMA = {
 					description: "Force sandbox endpoint only",
 				},
 			],
-		},
-	},
-	"providers.imageOrder": {
-		type: "array",
-		default: [] as ImageProvider[],
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Image Provider Order",
-			description:
-				"Prioritized providers for image generation; unlisted providers follow the active session provider and the built-in order",
-			options: IMAGE_PROVIDER_CHOICES,
-			ordered: true,
 		},
 	},
 	"providers.fireworksTier": {
@@ -5689,48 +5444,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Live Voice",
 			description: "Voice used by Codex-backed realtime voice sessions",
 			options: LIVE_VOICE_OPTIONS,
-		},
-	},
-	"providers.tts": {
-		type: "enum",
-		values: ["auto", "local", "xai", "deepinfra"] as const,
-		default: "auto",
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Text-to-Speech Provider",
-			description:
-				"Backend for the tts tool: local on-device neural TTS (Kokoro-82M), xAI Grok Voice, or DeepInfra speech",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Prefer local on-device TTS; route .mp3 output to xAI when credentials exist",
-				},
-				{ value: "local", label: "Local", description: "On-device neural TTS (Kokoro-82M); output is WAV/PCM16" },
-				{
-					value: "xai",
-					label: "xAI Grok Voice",
-					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
-				},
-				{
-					value: "deepinfra",
-					label: "DeepInfra Speech",
-					description: "Requires DEEPINFRA_API_KEY; MP3 or WAV",
-				},
-			],
-		},
-	},
-	"tts.localModel": {
-		type: "enum",
-		values: TTS_LOCAL_MODEL_VALUES,
-		default: DEFAULT_TTS_LOCAL_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Local TTS Model",
-			description: "On-device neural TTS model (Kokoro-82M) used by the local TTS backend",
-			options: TTS_LOCAL_MODEL_OPTIONS,
 		},
 	},
 	"tts.localVoice": {
@@ -5795,44 +5508,6 @@ export const SETTINGS_SCHEMA = {
 			options: TTS_LOCAL_VOICE_OPTIONS,
 		},
 	},
-	"providers.judgmentProvider": {
-		type: "enum",
-		values: ["auto", "typesafe", "llm"] as const,
-		default: "auto",
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Judgment Provider",
-			description:
-				"Preferred backend for typed judgments (auto-thinking difficulty, Smart unexpected-stop detection, git AI staging, eval judge()). Auto uses TypeSafe when authenticated; failed TypeSafe requests fall back through tiny, smol, default, then the active session model.",
-			options: [
-				{ value: "auto", label: "Auto", description: "TypeSafe when authenticated, else the LLM bridge (default)" },
-				{
-					value: "typesafe",
-					label: "TypeSafe",
-					description: "Prefer TypeSafe; fall back through the online model roles on failure",
-				},
-				{
-					value: "llm",
-					label: "LLM",
-					description: "Never TypeSafe; keyword prompts to the tiny/smol or local model",
-				},
-			],
-		},
-	},
-	"providers.tinyModel": {
-		type: "enum",
-		values: TINY_TITLE_MODEL_VALUES,
-		default: ONLINE_TINY_TITLE_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Tiny Model",
-			description:
-				"Session-title model: online (the TINY role from /models, else @smol) by default, or a local on-device model",
-			options: TINY_TITLE_MODEL_OPTIONS,
-		},
-	},
 	"providers.tinyModelDevice": {
 		type: "enum",
 		values: TINY_MODEL_DEVICE_SETTING_VALUES,
@@ -5857,35 +5532,6 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. Ignored by the MLX backend (its repos are pre-quantized 4-bit). The PI_TINY_DTYPE env var overrides this.",
 			options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
-		},
-	},
-	"providers.memoryModel": {
-		type: "enum",
-		values: TINY_MEMORY_MODEL_VALUES,
-		default: ONLINE_MEMORY_MODEL_KEY,
-		ui: {
-			tab: "memory",
-			group: "General",
-			label: "Memory Model",
-			description:
-				"Mnemopi LLM for fact extraction + consolidation: online (the TINY role from /models, else smol/remote) by default, or a local on-device model",
-			condition: "mnemopiActive",
-			options: TINY_MEMORY_MODEL_OPTIONS,
-		},
-	},
-
-	"providers.autoThinkingModel": {
-		type: "enum",
-		values: AUTO_THINKING_MODEL_VALUES,
-		default: ONLINE_AUTO_THINKING_MODEL_KEY,
-		ui: {
-			tab: "model",
-			group: "Thinking",
-			label: "Auto Thinking Model",
-			description:
-				"Difficulty classifier for the `auto` thinking level: online (the TINY role from /models, else smol) by default, or a local on-device model",
-			condition: "autoThinkingActive",
-			options: AUTO_THINKING_MODEL_OPTIONS,
 		},
 	},
 	"providers.autoThinkingMaxEffort": {
@@ -5928,20 +5574,6 @@ export const SETTINGS_SCHEMA = {
 					description: "Mechanical + small-model classification of text-only stops",
 				},
 			],
-		},
-	},
-	"providers.unexpectedStopModel": {
-		type: "enum",
-		values: TINY_MEMORY_MODEL_VALUES,
-		default: ONLINE_MEMORY_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Tiny Model",
-			label: "Unexpected Stop Model",
-			description:
-				"Classifier for Smart unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.",
-			condition: "unexpectedStopSmart",
-			options: TINY_MEMORY_MODEL_OPTIONS,
 		},
 	},
 
@@ -6150,6 +5782,61 @@ export const SETTINGS_SCHEMA = {
 			label: "Codex Reset Salvage Horizon",
 			description:
 				"Spend a saved Codex reset automatically when it would otherwise expire within this many hours and either chat window (5h or weekly) has meaningful usage to restore (0 disables expiry salvage).",
+		},
+	},
+	// Claude Cedar/Juniper rate-limit resets (independent auto-redeem consent)
+	"claudeResets.autoRedeem": {
+		type: "enum",
+		values: ["unset", "yes", "no"] as const,
+		default: "unset" as const,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Claude Auto-Redeem Resets",
+			description:
+				"Spend eligible Claude Cedar or Juniper resets automatically. Cedar is spent only for covered limits; Juniper can only recover a sole 5-hour block. unset asks before the first spend, yes spends without prompting, and no disables blocked recovery and expiry salvage.",
+			options: [
+				{
+					value: "unset",
+					label: "Unset",
+					description: "Check live eligibility, then ask before spending the first Claude reset.",
+				},
+				{ value: "yes", label: "Yes", description: "Spend eligible Claude resets without prompting." },
+				{ value: "no", label: "No", description: "Do not run Claude reset auto-redeem checks." },
+			],
+		},
+	},
+	"claudeResets.minBlockedMinutes": {
+		type: "number",
+		default: 60,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Claude Auto-Redeem Min Block",
+			description:
+				"Only auto-redeem when the natural unblock — the latest reset among the exhausted covered windows — is at least this many minutes away. A 5-hour-only reset is never used for a weekly or model-scoped block.",
+		},
+	},
+	"claudeResets.keepCredits": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Claude Auto-Redeem Reserve",
+			description:
+				"Keep at least this many Claude resets banked (0 allows the last eligible reset to be spent automatically). The reserve also applies to expiry salvage.",
+		},
+	},
+	"claudeResets.salvageHorizonHours": {
+		type: "number",
+		default: 12,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Claude Reset Salvage Horizon",
+			description:
+				"Use a server-selected Cedar reset within this many hours of expiry only when its covered windows have meaningful usage to restore and the grant permits early use or a covered window is exhausted (0 disables salvage).",
 		},
 	},
 	"provider.appendOnlyContext": {
@@ -6426,14 +6113,7 @@ export function getEnumValues(path: SettingPath): readonly string[] | undefined 
 // Derived Types from Schema
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Status line preset - derived from schema */
-export type StatusLinePreset = SettingValue<"statusLine.preset">;
-
-/** Status line separator style - derived from schema */
-export type StatusLineSeparatorStyle = SettingValue<"statusLine.separator">;
-
-/** Tree selector filter mode - derived from schema */
-export type TreeFilterMode = SettingValue<"treeFilterMode">;
+export type { TreeFilterMode } from "@oh-my-pi/pi-tui/overlays/tree-selector";
 
 /** Personality preset - derived from schema */
 export type Personality = SettingValue<"personality">;
@@ -6586,7 +6266,6 @@ export interface ThinkingBudgetsSettings {
 export interface SttSettings {
 	enabled: boolean;
 	language: string | undefined;
-	modelName: string;
 	streaming: boolean;
 }
 
@@ -6607,10 +6286,12 @@ export interface ShellMinimizerSettings {
 	sourceOutlineLevel: "default" | "aggressive";
 	legacyFilters: boolean | undefined;
 }
-export type CodexAutoRedeemMode = "unset" | "yes" | "no";
+/** Whether automatic reset redemption asks first, spends, or remains disabled. */
+export type ResetAutoRedeemMode = "unset" | "yes" | "no";
 
-export interface CodexResetsSettings {
-	autoRedeem: CodexAutoRedeemMode;
+/** Independent per-provider consent and scarcity policy for saved resets. */
+export interface ResetSettings {
+	autoRedeem: ResetAutoRedeemMode;
 	minBlockedMinutes: number;
 	keepCredits: number;
 	salvageHorizonHours: number;
@@ -6645,7 +6326,8 @@ export interface GroupTypeMap {
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
-	codexResets: CodexResetsSettings;
+	codexResets: ResetSettings;
+	claudeResets: ResetSettings;
 	gc: GcSettings;
 }
 

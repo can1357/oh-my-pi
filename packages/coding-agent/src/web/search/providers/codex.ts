@@ -4,9 +4,8 @@
  * Uses the configured Codex Responses transport for proxy/API-key setups and
  * the official ChatGPT backend for OAuth logins.
  */
-import { type AuthStorage, type FetchImpl, type Model, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
+import { type Api, type AuthStorage, type FetchImpl, type Model, withAuth, withOAuthAccess } from "@oh-my-pi/pi-ai";
 import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -15,38 +14,16 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
-import type { ModelRegistry } from "../../../config/model-registry";
-import type { SearchResponse, SearchSource } from "../../../web/search/types";
+import { readSseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
+import type { SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery } from "../query";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
-const FALLBACK_MODEL = "gpt-5.5";
-const DEFAULT_MODEL_PREFERENCES = [
-	"gpt-5.6-luna",
-	"gpt-5.6-terra",
-	"gpt-5.6-sol",
-	"gpt-5.5",
-	"gpt-5.4",
-	"gpt-5-codex",
-	"gpt-5",
-	"gpt-5.3-codex",
-	"gpt-5.2-codex",
-	"gpt-5.1-codex",
-	"gpt-5-codex-mini",
-];
 const DEFAULT_INSTRUCTIONS =
 	"You are a helpful assistant with web search capabilities. Search the web to answer the user's question accurately and cite your sources.";
-
-type CodexSearchModel = Model<"openai-codex-responses">;
-
-interface CodexModelCandidate {
-	modelId: string;
-	catalogModel?: CodexSearchModel;
-}
 
 interface CodexSearchTransport {
 	baseUrl: string;
@@ -61,85 +38,6 @@ interface CodexSearchResult {
 	model: string;
 	requestId: string;
 	usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
-}
-
-function getBundledCodexModels(): CodexSearchModel[] {
-	const models: CodexSearchModel[] = [];
-	for (const model of getBundledModels("openai-codex")) {
-		if (model.api === "openai-codex-responses") {
-			models.push(model as CodexSearchModel);
-		}
-	}
-	return models;
-}
-
-function getConfiguredModel(): CodexModelCandidate | undefined {
-	const configuredModel = $env.PI_CODEX_WEB_SEARCH_MODEL?.trim();
-	if (!configuredModel) return undefined;
-
-	const catalogModel = getBundledCodexModels().find(model => model.id === configuredModel);
-	return { modelId: configuredModel, ...(catalogModel ? { catalogModel } : {}) };
-}
-
-function getDefaultModelCandidates(): CodexModelCandidate[] {
-	const bundledModels = getBundledCodexModels();
-	const candidates: CodexModelCandidate[] = [];
-	for (const modelId of DEFAULT_MODEL_PREFERENCES) {
-		const catalogModel = bundledModels.find(model => model.id === modelId);
-		if (catalogModel) candidates.push({ modelId, catalogModel });
-	}
-
-	if (candidates.length > 0) {
-		return candidates;
-	}
-
-	const nonMini = bundledModels.find(model => !model.id.includes("mini") && !model.id.includes("spark"));
-	if (nonMini) {
-		return [{ modelId: nonMini.id, catalogModel: nonMini }];
-	}
-
-	const fallbackModel = bundledModels[0];
-	return fallbackModel ? [{ modelId: fallbackModel.id, catalogModel: fallbackModel }] : [{ modelId: FALLBACK_MODEL }];
-}
-
-/**
- * Raised when Codex produced an answer without invoking the hosted `web_search`
- * tool. GPT-5.6 Responses-Lite models receive `tool_choice: "auto"` (the forced
- * hosted choice is invalid under the lite shape — see #5771 / #5772), so the
- * model may skip searching and return a plain completion. A search command must
- * not present that as a successful, search-backed result (#6988); this advances
- * the candidate chain to a model that will search, or surfaces a clear failure
- * when the model was explicitly configured.
- */
-class CodexNoWebSearchError extends SearchProviderError {
-	constructor() {
-		super(
-			"codex",
-			"Codex returned a completion without running web search (no web_search_call event); refusing to treat a non-search answer as a search result",
-			502,
-		);
-		this.name = "CodexNoWebSearchError";
-	}
-}
-
-function shouldRetryWithNextDefaultModel(error: unknown): boolean {
-	if (error instanceof CodexNoWebSearchError) return true;
-	if (!(error instanceof SearchProviderError)) return false;
-	if (error.provider !== "codex" || error.status !== 400) return false;
-	return /model is not supported|requested model is not supported|not supported when using codex with a chatgpt account/i.test(
-		error.message,
-	);
-}
-
-export interface CodexSearchParams {
-	signal?: AbortSignal;
-	timeoutMs?: number;
-	fetch?: FetchImpl;
-	query: string;
-	system_prompt?: string;
-	num_results?: number;
-	/** Search context size: controls how much web content to include */
-	search_context_size?: "low" | "medium" | "high";
 }
 
 /** Codex API response structure */
@@ -375,23 +273,10 @@ function extractTextSources(text: string): SearchSource[] {
 	return sources;
 }
 
-async function resolveCodexSearchTransport(
-	modelRegistry: ModelRegistry | undefined,
-	modelId: string,
-): Promise<CodexSearchTransport> {
-	const registryModel = modelRegistry?.find("openai-codex", modelId);
-	const bundledModel = getBundledCodexModels().find(model => model.id === modelId);
-	const providerBaseUrl = modelRegistry?.getProviderBaseUrl("openai-codex");
-	let baseUrl = providerBaseUrl ?? registryModel?.baseUrl ?? CODEX_BASE_URL;
-	if (registryModel?.baseUrl && registryModel.baseUrl !== (bundledModel?.baseUrl ?? CODEX_BASE_URL)) {
-		baseUrl = registryModel.baseUrl;
-	}
-
+async function resolveCodexSearchTransport(params: SearchParams): Promise<CodexSearchTransport> {
+	const baseUrl = params.model.baseUrl;
 	const url = resolveCodexResponsesUrl(baseUrl);
-	const headers =
-		modelRegistry && registryModel
-			? await modelRegistry.resolveModelHeaders(registryModel)
-			: await modelRegistry?.getProviderHeaders("openai-codex");
+	const headers = await params.modelRegistry.resolveModelHeaders(params.model, params.signal);
 	return {
 		baseUrl,
 		url,
@@ -460,10 +345,7 @@ function classifyCodexSseErrorStatus(code: string, message: string): number {
 }
 
 /**
- * Calls the Codex Responses API with web search tool enabled.
- * The caller provides the exact model id to send; retry / fallback policy
- * lives one layer up in `searchCodex()` so we can distinguish explicit user
- * overrides from the default ChatGPT-account model-selection path.
+ * Calls the Codex Responses API with web search enabled for the exact selected model.
  */
 async function callCodexSearch(
 	auth: { accessToken: string; accountId?: string },
@@ -473,14 +355,14 @@ async function callCodexSearch(
 		timeoutMs?: number;
 		systemPrompt?: string;
 		searchContextSize?: "low" | "medium" | "high";
-		model: CodexModelCandidate;
+		modelId: string;
 		fetch?: FetchImpl;
 		transport: CodexSearchTransport;
 	},
 ): Promise<CodexSearchResult> {
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
-	const requestedModel = options.model.modelId;
+	const requestedModel = options.modelId;
 
 	const body: Record<string, unknown> = {
 		model: requestedModel,
@@ -631,7 +513,11 @@ async function callCodexSearch(
 	}
 
 	if (!webSearchInvoked) {
-		throw new CodexNoWebSearchError();
+		throw new SearchProviderError(
+			"codex",
+			"Codex returned a completion without running web search (no web_search_call event); refusing to treat a non-search answer as a search result",
+			502,
+		);
 	}
 
 	const finalAnswer = answerParts.join("\n\n").trim();
@@ -666,60 +552,9 @@ async function callCodexSearch(
 	};
 }
 
-async function runCodexSearchCandidates(options: {
-	auth: { accessToken: string; accountId?: string };
-	params: SearchParams;
-	query: string;
-	modelCandidates: CodexModelCandidate[];
-	modelWasConfigured: boolean;
-	transport: CodexSearchTransport;
-}): Promise<CodexSearchResult> {
-	let lastError: unknown;
-	for (let index = 0; index < options.modelCandidates.length; index += 1) {
-		const candidate = options.modelCandidates[index];
-		if (!candidate) continue;
-
-		try {
-			return await callCodexSearch(options.auth, options.query, {
-				signal: options.params.signal,
-				timeoutMs: options.params.timeoutMs,
-				systemPrompt: options.params.systemPrompt,
-				searchContextSize: "high",
-				model: candidate,
-				fetch: options.params.fetch,
-				transport: options.transport,
-			});
-		} catch (error) {
-			lastError = error;
-			const isLastCandidate = index === options.modelCandidates.length - 1;
-			if (options.modelWasConfigured || isLastCandidate || !shouldRetryWithNextDefaultModel(error)) {
-				throw error;
-			}
-		}
-	}
-	throw lastError ?? new Error("Codex search failed without returning a result");
-}
-
-/**
- * Executes a web search using OpenAI Codex's built-in web search tool.
- *
- * Default-model behavior:
- * - If `PI_CODEX_WEB_SEARCH_MODEL` is set, use it exactly once and surface any
- *   upstream error verbatim.
- * - Otherwise prefer ChatGPT-account-safe bundled defaults (GPT-5.6 Luna,
- *   Terra, Sol, GPT-5.5, …) and retry the next candidate only when Codex
- *   returns the known 400 "model is not supported" family. This avoids
- *   selecting `gpt-5-codex-mini` first on ChatGPT accounts, which OpenAI
- *   rejects.
- */
+/** Execute web search through the selected Codex model and transport. */
 export async function searchCodex(params: SearchParams): Promise<SearchResponse> {
-	const configuredModel = getConfiguredModel();
-	const modelCandidates = configuredModel ? [configuredModel] : getDefaultModelCandidates();
-	const firstCandidate = modelCandidates[0];
-	if (!firstCandidate) {
-		throw new SearchProviderError("codex", "No Codex web search model is configured.");
-	}
-	const transport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
+	const transport = await resolveCodexSearchTransport(params);
 	// The ChatGPT-backend Codex endpoint speaks the undocumented codex-rs
 	// request shape (responses-lite moves tools into an `additional_tools`
 	// developer item), so the documented `web_search.filters.allowed_domains`
@@ -732,69 +567,61 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 
 	let result: CodexSearchResult;
 	if (transport.customEndpoint) {
-		// ModelRegistry resolves command-backed provider keys before consulting
-		// its AuthStorage, so a lower-priority OAuth origin is irrelevant when
-		// that command source is configured.
-		const credentialSource = params.modelRegistry?.authStorage ?? params.authStorage;
-		const credentialOrigin = credentialSource.getCredentialOrigin("openai-codex");
-		const hasCommandBackedKey = params.modelRegistry?.hasCommandBackedApiKey("openai-codex") === true;
+		// The registry resolver and provenance guard must consult the same storage;
+		// params.authStorage may be a divergent caller handle. Command-backed keys
+		// still outrank lower-priority OAuth credentials in the registry storage.
+		const credentialOrigin = params.modelRegistry.authStorage.getCredentialOrigin(params.model.provider);
+		const hasCommandBackedKey = params.modelRegistry.hasCommandBackedApiKey(params.model.provider);
 		if (!hasCommandBackedKey && (credentialOrigin?.kind === "oauth" || credentialOrigin?.kind === "env")) {
 			throw new SearchProviderError(
 				"codex",
-				`Refusing to send official Codex OAuth credentials to custom endpoint ${transport.baseUrl}. Configure an API key for provider "openai-codex".`,
+				`Refusing to send official Codex OAuth credentials to custom endpoint ${transport.baseUrl}. Configure an API key for provider "${params.model.provider}".`,
 			);
 		}
 
-		const resolverOptions = {
-			sessionId: params.sessionId,
-			baseUrl: transport.baseUrl,
-			modelId: firstCandidate.modelId,
-		};
-		const keyOrResolver = params.modelRegistry
-			? params.modelRegistry.resolver("openai-codex", resolverOptions)
-			: params.authStorage.resolver("openai-codex", resolverOptions);
+		const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
 		result = await withAuth(
 			keyOrResolver,
 			async accessToken => {
-				const requestTransport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
-				return runCodexSearchCandidates({
-					auth: { accessToken },
-					params,
-					query,
-					modelCandidates,
-					modelWasConfigured: configuredModel !== undefined,
+				const requestTransport = await resolveCodexSearchTransport(params);
+				return callCodexSearch({ accessToken }, query, {
+					signal: params.signal,
+					timeoutMs: params.timeoutMs,
+					systemPrompt: params.systemPrompt,
+					searchContextSize: "high",
+					modelId: params.model.id,
+					fetch: params.fetch,
 					transport: requestTransport,
 				});
 			},
 			{
 				signal: params.signal,
-				missingKeyMessage: 'Codex credentials not found. Configure an API key for provider "openai-codex".',
+				missingKeyMessage: `Codex credentials not found for selected provider "${params.model.provider}".`,
 			},
 		);
 	} else {
-		const seed = await params.authStorage.getOAuthAccess("openai-codex", params.sessionId, {
+		const seed = await params.authStorage.getOAuthAccess(params.model.provider, params.sessionId, {
 			signal: params.signal,
 		});
 		if (!seed) {
-			throw new Error(
-				"No Codex OAuth credentials found. Login with 'omp /login openai-codex' to enable Codex web search.",
-			);
+			throw new Error(`No Codex OAuth credentials found for selected provider "${params.model.provider}".`);
 		}
 
 		result = await withOAuthAccess(
 			params.authStorage,
-			"openai-codex",
+			params.model.provider,
 			async access => {
 				// A refreshed/rotated credential can carry a different bearer and
 				// ChatGPT account id than the seed used to select the first attempt.
 				const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
-				const requestTransport = await resolveCodexSearchTransport(params.modelRegistry, firstCandidate.modelId);
-				return runCodexSearchCandidates({
-					auth: { accessToken: access.accessToken, accountId },
-					params,
-					query,
-					modelCandidates,
-					modelWasConfigured: configuredModel !== undefined,
+				const requestTransport = await resolveCodexSearchTransport(params);
+				return callCodexSearch({ accessToken: access.accessToken, accountId }, query, {
+					signal: params.signal,
+					timeoutMs: params.timeoutMs,
+					systemPrompt: params.systemPrompt,
+					searchContextSize: "high",
+					modelId: params.model.id,
+					fetch: params.fetch,
 					transport: requestTransport,
 				});
 			},
@@ -828,8 +655,8 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 /**
  * Checks whether Codex web search has an API key or OAuth credential.
  */
-export async function hasCodexSearch(authStorage: AuthStorage): Promise<boolean> {
-	return authStorage.hasAuth("openai-codex");
+export async function hasCodexSearch(authStorage: AuthStorage, model?: Model<Api>): Promise<boolean> {
+	return authStorage.hasAuth(model?.provider ?? "openai-codex");
 }
 
 /** Search provider for OpenAI Codex web search. */
@@ -837,8 +664,8 @@ export class CodexProvider extends SearchProvider {
 	readonly id = "codex";
 	readonly label = "OpenAI";
 
-	isAvailable(authStorage: AuthStorage): Promise<boolean> | boolean {
-		return hasCodexSearch(authStorage);
+	isAvailable(authStorage: AuthStorage, model?: Model<Api>): Promise<boolean> | boolean {
+		return hasCodexSearch(authStorage, model);
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {

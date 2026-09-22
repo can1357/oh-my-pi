@@ -542,7 +542,7 @@ describe("readSseEvents", () => {
 
 	it("skips comment lines but preserves them in raw", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode(": keep-alive\nevent: ping\ndata: ok\n\n")]);
-		const [evt] = await collectAsync(readSseEvents(stream));
+		const [evt] = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 		expect(evt.event).toBe("ping");
 		expect(evt.data).toBe("ok");
 		expect(evt.raw).toEqual([": keep-alive", "event: ping", "data: ok"]);
@@ -550,13 +550,13 @@ describe("readSseEvents", () => {
 
 	it("does not carry pure comment keepalives into the next event raw lines", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode(": keepalive\n\nevent: ping\ndata: ok\n\n")]);
-		const [evt] = await collectAsync(readSseEvents(stream));
+		const [evt] = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 		expect(evt.raw).toEqual(["event: ping", "data: ok"]);
 	});
 
 	it("yields control-only id/retry events for reconnecting transports", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode("id: stream-1\nretry: 25\n\n")]);
-		const events = await collectAsync(readSseEvents(stream));
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 
 		expect(events).toEqual([
 			{
@@ -620,7 +620,7 @@ describe("readSseEvents", () => {
 			encoder.encode("\n\r"),
 			encoder.encode("\nevent: next\r\ndata: ok\r\n\r\n"),
 		]);
-		const events = await collectAsync(readSseEvents(stream));
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 
 		expect(events).toEqual([
 			{ event: "utf", data: "café", raw: ["event: utf", "data: café"] },
@@ -651,10 +651,18 @@ describe("readSseEvents", () => {
 
 	it("flushes a pending event even without the trailing blank line", async () => {
 		const stream = bytesStreamFromChunks([encoder.encode("event: trailing\ndata: tail\n")]);
-		const events = await collectAsync(readSseEvents(stream));
+		const events = await collectAsync(readSseEvents(stream, undefined, { captureRaw: true }));
 		expect(events).toEqual([
 			{ event: "trailing", data: "tail", raw: ["event: trailing", "data: tail"] },
 		] satisfies ServerSentEvent[]);
+	});
+
+	it("leaves raw empty by default so the token path pays no per-line slices", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode("event: ping\ndata: ok\n\n")]);
+		const [evt] = await collectAsync(readSseEvents(stream));
+		expect(evt.event).toBe("ping");
+		expect(evt.data).toBe("ok");
+		expect(evt.raw).toEqual([]);
 	});
 
 	it("treats a tail without any newline as a complete final line", async () => {

@@ -19,7 +19,7 @@ import type {
 	HookMessage,
 	PythonExecutionMessage,
 } from "./messages";
-import { truncateMiddle } from "./streaming-output";
+import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 export interface HistoryFormatOptions {
 	/** Optional H1 prepended to the transcript. */

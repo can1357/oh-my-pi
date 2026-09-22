@@ -7,11 +7,11 @@
  * compat per request.
  */
 
-import { resolveModelPolicy } from "./compat/resolve";
+import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
-import type { Api, Model, ModelSpec } from "./types";
+import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -74,6 +74,18 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
+	const kind = MODEL_KINDS.find(value => value === catalog.kind);
+	if (kind !== undefined) model.kind = kind;
+	const webSearch = catalog.webSearch;
+	if (
+		webSearch === "gemini" ||
+		webSearch === "anthropic" ||
+		webSearch === "codex" ||
+		webSearch === "xai" ||
+		webSearch === "openrouter"
+	) {
+		model.webSearch = webSearch;
+	}
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
@@ -274,6 +286,16 @@ function supportsOpenAIGAComputerUse(
 }
 
 /**
+ * Build a discovered model using the backend's catalog-selected request API.
+ * The credential-bearing provider id remains unchanged while `providerType`
+ * persists the backend policy identity across cache and config round trips.
+ */
+export function buildDiscoveredModel(spec: ModelSpec<Api>, providerType: string): Model<Api> {
+	const api = resolveDiscoveryApi(spec, providerType);
+	return buildModel({ ...spec, api, providerType });
+}
+
+/**
  * Build one model from an authored spec. Bundled models.json rows are fully
  * materialized by the generator and consumed directly (see `models.ts`), so
  * this only runs for discovered/custom/override specs.
@@ -283,14 +305,14 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
-		// An exact `thinking-efforts` rule upgrades a stale `reasoning: false`
-		// discovery default (see `resolveThinkingPolicy`); materialize the
-		// correction so transports and the picker see a reasoning-capable model.
+		// A reviewed `thinking-upgrade-neutral` policy can repair a stale
+		// `reasoning: false` discovery default (see `resolveThinkingPolicy`);
+		// materialize the correction for transports and the picker.
 		reasoning: spec.reasoning || policy.thinking !== undefined,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",
-		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
+		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id, spec.provider),
 		thinking: policy.thinking,
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,

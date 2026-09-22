@@ -1,15 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { OmpErrors, type Type } from "@oh-my-pi/omptype";
-import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isEnoent, logger, stringifyYamlConfig } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
-
-const YAML_MAPPING_HEADER_TRAILING_SPACE = /: +$/gm;
-
-/** Serialize config YAML without Bun's trailing space on block mapping headers. */
-export function stringifyYamlConfig(value: unknown): string {
-	return YAML.stringify(value, null, 2).replace(YAML_MAPPING_HEADER_TRAILING_SPACE, ":");
-}
 
 /** Minimal subset of the AJV ConfigSchemaError shape this module actually relies on. */
 interface ConfigSchemaError {

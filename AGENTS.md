@@ -317,6 +317,8 @@ Test the contract the system exposes — not the easiest internal detail to asse
 
 Location: `packages/*/CHANGELOG.md` (per package).
 
+**NEVER update changelogs unless explicitly asked.** Do not add, edit, or reorder entries as part of a feature, fix, or PR unless the user requests it.
+
 **Format** — sections under `## [Unreleased]`:
 
 - `### Breaking Changes` (first if present)

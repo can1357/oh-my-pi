@@ -3,8 +3,8 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import {
 	createHandoffSummaryMessageComponent,
 	HandoffSummaryMessageComponent,
-} from "@oh-my-pi/pi-coding-agent/modes/components/compaction-summary-message";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+} from "@oh-my-pi/pi-tui/chat/compaction-summary-message";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 beforeAll(async () => {
