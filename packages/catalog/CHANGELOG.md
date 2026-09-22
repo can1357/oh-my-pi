@@ -2,10 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `max` thinking-effort tier to the standard Muse Spark 1.3 SKU on reseller hosts and Command Code, with the ladder owned by the class lineage.
+
 ### Changed
 
 - Updated default models for anthropic, amazon-bedrock, cloudflare-ai-gateway, kilo, litellm, opencode-zen, vercel-ai-gateway, and zenmux to claude-opus-5-5
 - Updated default model for commandcode to claude-sonnet-5
+
+### Fixed
+
+- Existing model caches no longer hide Muse Spark 1.3's new `max` thinking effort after upgrading.
+- Vercel's Muse Spark Anthropic route retains its supported thinking ladder instead of offering a duplicate `max` budget.
 
 ## [18.2.9] - 2026-09-22
 

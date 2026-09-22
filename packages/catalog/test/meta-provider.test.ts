@@ -65,13 +65,14 @@ describe("Meta Model API provider", () => {
 		// api.meta.ai/v1/models returns bare `{id}` rows: no name, limits,
 		// reasoning, or pricing. Without the seed as reference, a newly shipped
 		// revision surfaced as a text-only model with an unknown context window
-		// and "Current model does not support thinking".
+		// and "Current model does not support thinking". Seeded ids copy the
+		// bundled snapshot (already KDL-applied); assert the built ladder.
 		const options = metaModelManagerOptions({
 			apiKey: "meta-key",
 			fetch: async () => modelListResponse(["muse-spark-1.3", "muse-spark-1.3-contributor", "muse-image-1.0"]),
 		});
-		const models = await options.fetchDynamicModels?.();
-		const byId = new Map((models ?? []).map(model => [model.id, model]));
+		const specs = await options.fetchDynamicModels?.();
+		const byId = new Map((specs ?? []).map(spec => [spec.id, buildModel(spec)]));
 		expect(byId.get("muse-spark-1.3")).toMatchObject({
 			name: "Muse Spark 1.3",
 			reasoning: true,
@@ -83,6 +84,7 @@ describe("Meta Model API provider", () => {
 		expect(byId.get("muse-spark-1.3-contributor")).toMatchObject({
 			name: "Muse Spark 1.3 (C)",
 			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+			thinking: MUSE_SPARK_THINKING,
 		});
 		// Image/voice SKUs on the same roster are not chat models.
 		expect(byId.has("muse-image-1.0")).toBe(false);
