@@ -6,6 +6,7 @@
 
 - Fixed `StreamOptions.providerRetryWait` being dropped when simple stream options were mapped to per-API provider options, so a caller-supplied retry-wait hook never reached the provider retry loops that honour it. The hook now also covers `AnthropicMessagesClient`'s own 429/529/5xx retry sleeps, and receives an optional third argument with the waiting loop's `attempt`/`maxAttempts`.
 
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
@@ -20,7 +21,6 @@
 
 ### Fixed
 
-- Fixed detection of Claude usage limit errors
 - Fixed detection of Claude usage-limit errors.
 
 ## [18.2.7] - 2026-09-21
