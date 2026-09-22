@@ -27,8 +27,7 @@
     "check:types": "tsgo -p tsconfig.json --noEmit",
     "lint": "oxlint .",
     "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
-    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
-    "test": "bun test --parallel"
+    "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'"
   },
   "devDependencies": {
     "@types/bun": "catalog:"
