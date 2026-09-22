@@ -155,6 +155,7 @@
 		"providers/moonshot.kdl",
 		"providers/muse-code.kdl",
 		"providers/nanogpt.kdl",
+		"providers/native-tools.kdl",
 		"providers/novita.kdl",
 		"providers/nvidia.kdl",
 		"providers/ollama-cloud.kdl",
@@ -164,6 +165,7 @@
 		"providers/opencode-go.kdl",
 		"providers/opencode-zen.kdl",
 		"providers/openrouter.kdl",
+		"providers/output-limits.kdl",
 		"providers/qianfan.kdl",
 		"providers/qwen-portal.kdl",
 		"providers/sakana.kdl",
@@ -172,6 +174,7 @@
 		"providers/singularityapi.kdl",
 		"providers/synthetic.kdl",
 		"providers/together.kdl",
+		"providers/tool-free-history.kdl",
 		"providers/typesafe.kdl",
 		"providers/umans.kdl",
 		"providers/venice.kdl",
@@ -5522,21 +5525,21 @@
 				"thinking": { "mode": "effort" }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:21",
+				"source": "providers/google-antigravity.kdl:26",
 				"class": "anthropic",
 				"providers": ["google-antigravity"],
 				"family": "opus",
 				"thinking": { "mode": "budget" }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:29",
+				"source": "providers/google-antigravity.kdl:34",
 				"class": "gemini",
 				"providers": ["google-antigravity"],
 				"revision": [{ "op": ">=", "revision": "3.0.0" }],
 				"wire": { "requiresSkipThoughtSignatureOnFirstFunctionCall": true }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:33",
+				"source": "providers/google-antigravity.kdl:38",
 				"class": "gemini",
 				"providers": ["google-antigravity"],
 				"family": "flash",
@@ -5551,7 +5554,7 @@
 				}
 			},
 			{
-				"source": "providers/google-antigravity.kdl:43",
+				"source": "providers/google-antigravity.kdl:48",
 				"class": "gemini",
 				"providers": ["google-antigravity"],
 				"family": "flash",
@@ -5559,7 +5562,7 @@
 				"thinking": { "mode": "google-level", "requiresEffort": true }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:49",
+				"source": "providers/google-antigravity.kdl:54",
 				"class": "gemini",
 				"providers": ["google-antigravity"],
 				"family": "pro",
@@ -5570,31 +5573,31 @@
 				"thinking": { "suppressWhenOff": true }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:55",
+				"source": "providers/google-antigravity.kdl:60",
 				"providers": ["google-antigravity"],
 				"models": [{ "kind": "exact", "value": "claude-opus-4-6" }],
 				"thinking": { "efforts": ["minimal", "low", "medium", "high"] }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:59",
+				"source": "providers/google-antigravity.kdl:64",
 				"providers": ["google-antigravity"],
 				"models": [{ "kind": "exact", "value": "gemini-3-pro" }],
 				"thinking": { "mode": "google-level" }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:62",
+				"source": "providers/google-antigravity.kdl:67",
 				"providers": ["google-antigravity"],
 				"models": [{ "kind": "exact", "value": "gemini-3-pro-image" }],
 				"catalog": { "kind": "image" }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:66",
+				"source": "providers/google-antigravity.kdl:71",
 				"providers": ["google-antigravity"],
 				"models": [{ "kind": "exact", "value": "gemini-3.1-flash-lite" }],
 				"thinking": { "mode": "google-level", "requiresEffort": true }
 			},
 			{
-				"source": "providers/google-antigravity.kdl:71",
+				"source": "providers/google-antigravity.kdl:76",
 				"providers": ["google-antigravity"],
 				"models": [{ "kind": "exact", "value": "gemini-3.1-pro" }],
 				"thinking": { "effortBudgets": { "high": 10001, "low": 1001 }, "mode": "budget" }
@@ -5602,7 +5605,7 @@
 			{
 				"source": "providers/google-antigravity.kdl:3",
 				"providers": ["google-antigravity"],
-				"catalog": { "webSearch": "gemini" }
+				"catalog": { "webSearch": "gemini", "preservesMaxOutputTokens": false }
 			},
 			{
 				"source": "providers/google-gemini-cli.kdl:10",
@@ -6288,6 +6291,11 @@
 				"wire": { "streamMarkupHealingPattern": "dsml" }
 			},
 			{ "source": "providers/nanogpt.kdl:3", "providers": ["nanogpt"], "thinking": { "mode": "effort" } },
+			{
+				"source": "providers/native-tools.kdl:2",
+				"apis": ["cursor-agent"],
+				"catalog": { "requiresNativeTools": true }
+			},
 			{
 				"source": "providers/novita.kdl:11",
 				"class": "glm",
@@ -7255,6 +7263,11 @@
 				"catalog": { "webSearch": "openrouter" }
 			},
 			{
+				"source": "providers/output-limits.kdl:2",
+				"apis": ["openai-codex-responses", "cursor-agent", "gitlab-duo-agent"],
+				"catalog": { "omitMaxOutputTokens": true }
+			},
+			{
 				"source": "providers/qianfan.kdl:9",
 				"providers": ["qianfan"],
 				"models": [{ "kind": "exact", "value": "deepseek-v3.2" }],
@@ -7294,7 +7307,7 @@
 				"thinking": { "upgradeNeutral": true, "efforts": ["low", "high", "max"] }
 			},
 			{
-				"source": "providers/singularityapi.kdl:56",
+				"source": "providers/singularityapi.kdl:58",
 				"providers": ["singularityapi"],
 				"models": [
 					{ "kind": "exact", "value": "gpt-5.6-sol" },
@@ -7302,10 +7315,10 @@
 					{ "kind": "exact", "value": "gpt-5.6-luna" }
 				],
 				"wire": { "reasoningDisableMode": "none-effort" },
-				"thinking": { "efforts": ["low", "medium", "high", "xhigh", "max"] }
+				"thinking": { "upgradeNeutral": true, "efforts": ["low", "medium", "high", "xhigh", "max"] }
 			},
 			{
-				"source": "providers/singularityapi.kdl:63",
+				"source": "providers/singularityapi.kdl:68",
 				"providers": ["singularityapi"],
 				"models": [
 					{ "kind": "exact", "value": "flux-1-schnell" },
@@ -7314,7 +7327,7 @@
 				"catalog": { "kind": "image" }
 			},
 			{
-				"source": "providers/singularityapi.kdl:66",
+				"source": "providers/singularityapi.kdl:71",
 				"providers": ["singularityapi"],
 				"models": [
 					{ "kind": "exact", "value": "gpt-image-2" },
@@ -7323,7 +7336,7 @@
 				"catalog": { "kind": "image" }
 			},
 			{
-				"source": "providers/singularityapi.kdl:71",
+				"source": "providers/singularityapi.kdl:76",
 				"providers": ["singularityapi"],
 				"models": [{ "kind": "glob", "value": "*deepseek*" }],
 				"wire": { "supportsToolChoice": false }
@@ -7385,6 +7398,11 @@
 				"providers": ["together"],
 				"wire": { "supportsStrictMode": true },
 				"thinking": { "mode": "effort" }
+			},
+			{
+				"source": "providers/tool-free-history.kdl:4",
+				"apis": ["bedrock-converse-stream"],
+				"catalog": { "requiresToolFreeHistoryForToolOptOut": true }
 			},
 			{
 				"source": "providers/typesafe.kdl:18",

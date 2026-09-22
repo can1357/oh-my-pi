@@ -7420,21 +7420,14 @@ interface SingularityApiCapability extends Record<string, unknown> {
 	pricing?: unknown;
 }
 
-/**
- * One row of the gateway's per-endpoint `capabilities` array: limits and
- * 12-decimal per-million pricing strings for a single serving surface.
- * Chat rows (`/v1/chat/completions`) own the catalog row; responses/image
- * rows only mark the kind the gateway routes them to.
- */
-function singularityApiChatCapability(entry: OpenAICompatibleModelRecord): SingularityApiCapability | undefined {
+/** Endpoints that decide which transport serves a `/v1/models` row. */
+const SINGULARITYAPI_CHAT_ENDPOINT = "/v1/chat/completions";
+const SINGULARITYAPI_IMAGE_ENDPOINT = "/v1/images/generations";
+
+function singularityApiCapabilities(entry: OpenAICompatibleModelRecord): readonly SingularityApiCapability[] {
 	const capabilities = entry.capabilities;
-	if (!Array.isArray(capabilities)) return undefined;
-	for (const capability of capabilities) {
-		if (isRecord(capability) && capability.endpoint === "/v1/chat/completions") {
-			return capability;
-		}
-	}
-	return undefined;
+	if (!Array.isArray(capabilities)) return [];
+	return capabilities.filter((capability): capability is SingularityApiCapability => isRecord(capability));
 }
 
 function toSingularityApiRate(value: unknown): number {
@@ -7442,9 +7435,7 @@ function toSingularityApiRate(value: unknown): number {
 	return parsed !== undefined && parsed >= 0 ? parsed : 0;
 }
 
-function resolveSingularityApiCost(
-	capability: SingularityApiCapability | undefined,
-): ModelSpec<"openai-completions">["cost"] {
+function resolveSingularityApiCost(capability: SingularityApiCapability | undefined): ModelSpec<Api>["cost"] {
 	const pricing = capability !== undefined && isRecord(capability.pricing) ? capability.pricing : undefined;
 	if (!pricing) return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 	return {
@@ -7455,11 +7446,38 @@ function resolveSingularityApiCost(
 	};
 }
 
-function mapSingularityApiModel(
-	entry: OpenAICompatibleModelRecord,
-	defaults: ModelSpec<"openai-completions">,
-): ModelSpec<"openai-completions"> {
-	const capability = singularityApiChatCapability(entry);
+/**
+ * Map one `/v1/models` row onto its serving transport.
+ *
+ * The wire's own `capabilities` list decides the transport: a row that serves
+ * chat completions is a chat model, and a row whose only surface is
+ * `/v1/images/generations` is routed to `openai-images` so
+ * `generateImage`-style dispatch can reach it. Without that assignment the row
+ * kept the discovery default (`openai-completions`) while still being marked
+ * as an image model, so it was offered as an image target and then rejected by
+ * every image client. The gateway bills image requests per request, never by
+ * tokens, so those rows carry no token tariff.
+ */
+function mapSingularityApiModel(entry: OpenAICompatibleModelRecord, defaults: ModelSpec<Api>): ModelSpec<Api> {
+	const capabilities = singularityApiCapabilities(entry);
+	const capability = capabilities.find(candidate => candidate.endpoint === SINGULARITYAPI_CHAT_ENDPOINT);
+	if (
+		capability === undefined &&
+		capabilities.some(candidate => candidate.endpoint === SINGULARITYAPI_IMAGE_ENDPOINT)
+	) {
+		return {
+			...defaults,
+			api: "openai-images",
+			name: toModelName(entry.name, defaults.name),
+			kind: "image",
+			reasoning: false,
+			input: ["text", "image"],
+			supportsTools: false,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		};
+	}
 	return {
 		...defaults,
 		name: toModelName(entry.name, defaults.name),
@@ -7469,18 +7487,18 @@ function mapSingularityApiModel(
 	};
 }
 /**
- * SingularityAPI universal inference gateway: OpenAI-compatible chat
- * completions over a 300+ model catalog. `GET /v1/models` publishes each
- * row's per-endpoint capabilities — context window, max output tokens, and
- * per-million pricing as 12-decimal strings — with `cache-control:
- * no-store`, so discovery reads limits, tariffs, vision flags, and the
- * reasoning vocabulary straight off the wire. Rows without a reasoning
- * vocabulary stay non-reasoning; reviewed KDL rules own the ladders the
- * gateway leaves implicit (DeepSeek Flash/Pro, GPT-5.6 flagships).
+ * SingularityAPI universal inference gateway: chat completions over a 300+
+ * model catalog, plus image generation for the rows that advertise it.
+ * `GET /v1/models` publishes each row's per-endpoint capabilities — context
+ * window, max output tokens, and per-million pricing as 12-decimal strings —
+ * with `cache-control: no-store`, so discovery reads limits and tariffs
+ * straight off the wire and the endpoint list picks each row's transport.
+ * Rows without a reasoning vocabulary stay non-reasoning; reviewed KDL rules
+ * own the ladders the gateway leaves implicit (DeepSeek Flash/Pro, GPT-5.6
+ * flagships), because a model discovered as non-reasoning never sends a
+ * `reasoning_effort` and the gateway requires one alongside tools.
  */
-export function singularityApiModelManagerOptions(
-	config?: SingularityApiModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
+export function singularityApiModelManagerOptions(config?: SingularityApiModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
 	const baseUrl = normalizeSingularityApiBaseUrl(config?.baseUrl);
 	return {
@@ -7489,7 +7507,7 @@ export function singularityApiModelManagerOptions(
 		dynamicModelsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels({
+				fetchOpenAICompatibleModels<Api>({
 					api: "openai-completions",
 					provider: "singularityapi",
 					baseUrl,

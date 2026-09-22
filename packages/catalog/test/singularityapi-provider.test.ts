@@ -125,10 +125,39 @@ describe("SingularityAPI provider support", () => {
 		expect(model.compat.reasoningContentField).toBe("reasoning_content");
 	});
 
-	test("routes image rows to the image transport", () => {
+	test("materializes the GPT-5.6 ladder so an effort is always sent", () => {
+		// The wire publishes no reasoning metadata, so without the upgrade rule these
+		// rows stay non-reasoning and every chat request omits `reasoning_effort` —
+		// which the gateway rejects (400 from upstream) whenever `tools` are present.
+		for (const id of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+			const model = buildModel(bareSpec(id));
+			expect(model.reasoning).toBe(true);
+			expect(model.thinking).toMatchObject({
+				mode: "effort",
+				efforts: ["low", "medium", "high", "xhigh", "max"],
+			});
+			expect(model.compat.maxTokensField).toBe("max_tokens");
+			expect(model.compat.reasoningDisableMode).toBe("none-effort");
+		}
+	});
+
+	test("routes image rows to the image transport the wire advertises", async () => {
+		// `kind` keeps the documented image ids out of chat…
 		for (const id of ["flux-1-schnell", "flux-pro-1.1", "gpt-image-2", "gpt-image-1.5"]) {
 			expect(buildModel(bareSpec(id)).kind).toBe("image");
 		}
+		// …and discovery assigns the transport from the row's own capability list, so
+		// `generate_image` dispatches it instead of rejecting `openai-completions`.
+		const { fetch } = singularityApiModelsFetch();
+		const pending = singularityApiModelManagerOptions({ apiKey: "sapi-test", fetch }).fetchDynamicModels?.();
+		const models = pending ? await pending : pending;
+		expect(models?.find(model => model.id === "gpt-image-2")).toMatchObject({
+			api: "openai-images",
+			kind: "image",
+			supportsTools: false,
+			baseUrl: "https://api.singularityapi.dev/v1",
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		});
 	});
 
 	test("leaves rows no rule reviews on the gateway-wide wire shape", () => {
