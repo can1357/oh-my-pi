@@ -5,9 +5,12 @@ import * as path from "node:path";
 import type { Judge, JudgmentRequest, JudgmentResult, NoulAnswer, Questions } from "@oh-my-pi/pi-ai";
 import { tokenUsage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { isOmpDocsScope } from "@oh-my-pi/pi-coding-agent/internal-urls/omp-scope";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import { runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
 import { keywordsFromQuery } from "@oh-my-pi/pi-coding-agent/tools/jfind/keywords";
+import { materializeOmpScope } from "@oh-my-pi/pi-coding-agent/tools/jfind/omp-scope";
 import {
 	mergeHeat,
 	type Passage,
@@ -185,6 +188,13 @@ function stateOf(request: JudgmentRequest): Record<string, unknown> {
 	return request.state as Record<string, unknown>;
 }
 
+/** Doc paths of a materialized `omp://` corpus, with `/` separators on every platform. */
+async function materializedRels(dir: string): Promise<string[]> {
+	return (await Array.fromAsync(new Bun.Glob("**/*").scan({ cwd: dir })))
+		.map(file => file.split(path.sep).join("/"))
+		.sort();
+}
+
 describe("jfind cascade", () => {
 	it("verifies only sketched passages, reports merged ranges, and runs waves in parallel", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-cascade-"));
@@ -263,6 +273,58 @@ describe("jfind cascade", () => {
 			expect(result.stats.failures).toEqual(["sketches: sketch backend down"]);
 		} finally {
 			await removeWithRetries(dir);
+		}
+	});
+	it("detects omp scopes and rejects unknown docs and range selectors before judging", async () => {
+		expect(isOmpDocsScope("omp://")).toBe(true);
+		expect(isOmpDocsScope("OMP://tools/read.md")).toBe(true);
+		expect(isOmpDocsScope("packages/tui")).toBe(false);
+		await expect(materializeOmpScope("omp://nope.md")).rejects.toThrow("Documentation file not found");
+		await expect(materializeOmpScope("omp://tools/read.md:1-10")).rejects.toThrow(
+			"line-range selectors are not supported",
+		);
+	});
+
+	it("materializes one omp doc and remaps its cascade hits to the canonical URL", async () => {
+		const scope = await materializeOmpScope("omp://docs/tools/read.md");
+		try {
+			expect(scope.scopePath).toBe("omp://tools/read.md");
+			expect(await materializedRels(scope.dir)).toEqual(["tools/read.md"]);
+
+			const result = await runCascade({
+				root: scope.dir,
+				query: "read the contents of a file by path",
+				extraKeywords: ["read"],
+				judge: new FakeJudge(() => 0.9),
+				includeHidden: false,
+			});
+			expect(result.hits.map(hit => scope.toOmpRel(hit.rel))).toEqual(["omp://tools/read.md"]);
+		} finally {
+			await scope.cleanup();
+		}
+	});
+
+	it("expands the omp root scope to every embedded doc and cleans up after itself", async () => {
+		const completions = (await InternalUrlRouter.instance().complete("omp", "")) ?? [];
+		const rels = new Set(completions.map(completion => completion.value));
+
+		const scope = await materializeOmpScope("omp://");
+		try {
+			const materialized = await materializedRels(scope.dir);
+			expect(materialized).toHaveLength(rels.size);
+			expect(materialized).toContain("tools/read.md");
+			expect(await Bun.file(path.join(scope.dir, "tools", "read.md")).text()).toBe(
+				(await InternalUrlRouter.instance().resolve("omp://tools/read.md")).content,
+			);
+			await scope.cleanup();
+			expect(
+				await fs.stat(scope.dir).then(
+					() => true,
+					() => false,
+				),
+			).toBe(false);
+		} finally {
+			await scope.cleanup();
 		}
 	});
 
