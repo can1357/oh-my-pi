@@ -60,7 +60,7 @@ function registeredInputListeners(addInputListener: Mock<(listener: InputListene
 async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
-		"app.display.reset": ["ctrl+l"],
+		"app.display.reset": ["alt+l"],
 		"app.thinking.toggle": ["ctrl+t"],
 		"app.history.search": ["ctrl+r"],
 		"app.editor.external": ["ctrl+g"],
@@ -287,7 +287,7 @@ describe("InputController keybinding setup", () => {
 
 		controller.setupKeyHandlers();
 
-		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.reset", ["ctrl+l"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.display.reset", ["alt+l"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.selectTemporary", ["ctrl+y"]);
 		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.select", ["alt+m"]);
 		expect(editor.onDisplayReset).toBeDefined();
@@ -704,6 +704,7 @@ describe("InputController global editor actions", () => {
 	const CTRL_R = "\x12";
 	const CTRL_G = "\x07";
 	const CTRL_SHIFT_O = "\x1b[111;6u";
+	const ALT_L = "\x1bl";
 
 	beforeAll(async () => {
 		await initTheme(false);
@@ -730,6 +731,8 @@ describe("InputController global editor actions", () => {
 		expect(openExternalEditor).toHaveBeenCalledTimes(1);
 		expect(dispatchInput(listeners, CTRL_SHIFT_O)).toEqual({ consume: true });
 		expect(context.ctx.hideToolActivity).toBe(true);
+		expect(dispatchInput(listeners, ALT_L)).toEqual({ consume: true });
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
 
 	it("still routes transcript actions when the main editor holds focus", async () => {
@@ -751,6 +754,36 @@ describe("InputController global editor actions", () => {
 
 		expect(dispatchInput(listeners, CTRL_T)).toBeUndefined();
 		expect(context.ctx.toggleThinkingBlockVisibility).not.toHaveBeenCalled();
+		expect(dispatchInput(listeners, ALT_L)).toBeUndefined();
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
+	});
+
+	it("defers display reset to the tree selector's own Alt+L labeled-only filter", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+		const tree = [
+			{
+				entry: { id: "root", type: "message", parentId: null, message: { role: "user", content: "hi" } },
+				children: [],
+			},
+		] as unknown as SessionTreeNode[];
+		context.setFocused(
+			new TreeSelectorComponent(
+				tree,
+				"root",
+				20,
+				() => {},
+				() => {},
+			),
+		);
+
+		expect(dispatchInput(listeners, ALT_L)).toBeUndefined();
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).not.toHaveBeenCalled();
+		context.setKeybinding("app.display.reset", ["ctrl+l"]);
+		expect(dispatchInput(listeners, "\x0c")).toEqual({ consume: true });
+		expect(context.spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
 	});
 
 	it("defers external editing to a focused ask-dialog prompt editor untracked by ctx.hookEditor", async () => {

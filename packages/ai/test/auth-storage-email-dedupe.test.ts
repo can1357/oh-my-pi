@@ -425,13 +425,115 @@ describe("AuthStorage openai-codex email dedupe", () => {
 		expect(readDisabledCauses(dbPath, "openai-codex")).toEqual([disabledCause]);
 	});
 
+	it("re-keys stored SingularityAPI credentials into the product that accepts them", async () => {
+		if (!tempDir) throw new Error("test setup failed");
+
+		const splitDbPath = path.join(tempDir, "singularityapi-split-agent.db");
+		const legacyDb = new Database(splitDbPath);
+		legacyDb.run(`
+			CREATE TABLE auth_schema_version (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				version INTEGER NOT NULL
+			);
+			INSERT INTO auth_schema_version(id, version) VALUES (1, 7);
+			CREATE TABLE auth_credentials (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				provider TEXT NOT NULL,
+				credential_type TEXT NOT NULL,
+				data TEXT NOT NULL,
+				disabled_cause TEXT DEFAULT NULL,
+				identity_key TEXT DEFAULT NULL,
+				created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+				updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+			);
+			CREATE TABLE auth_credential_blocks (
+				credential_id INTEGER NOT NULL,
+				provider_key TEXT NOT NULL,
+				block_scope TEXT NOT NULL DEFAULT '',
+				blocked_until_ms INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				PRIMARY KEY (credential_id, provider_key, block_scope)
+			);
+		`);
+		const insertCredential = legacyDb.prepare(
+			"INSERT INTO auth_credentials (provider, credential_type, data, identity_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+		);
+		// One row per product, both stored under the retired shared id: the
+		// gateway key carries the `sk-sapi-` prefix, the lane key does not.
+		insertCredential.run(
+			"singularityapi",
+			"api_key",
+			JSON.stringify({ key: "sk-sapi-live-abc", source: "login" }),
+			null,
+			LEGACY_TIMESTAMP,
+			LEGACY_TIMESTAMP,
+		);
+		insertCredential.run(
+			"singularityapi",
+			"api_key",
+			JSON.stringify({ key: "sk-sing-lane-abc", source: "login" }),
+			null,
+			LEGACY_TIMESTAMP,
+			LEGACY_TIMESTAMP,
+		);
+		legacyDb
+			.prepare(
+				"INSERT INTO auth_credential_blocks (credential_id, provider_key, block_scope, blocked_until_ms, updated_at) VALUES (?, ?, ?, ?, ?)",
+			)
+			.run(2, "singularityapi:api_key", "shared", LEGACY_TIMESTAMP, LEGACY_TIMESTAMP);
+		legacyDb.close();
+
+		const migratedStore = await SqliteAuthCredentialStore.open(splitDbPath);
+		try {
+			expect(readAuthSchemaVersion(splitDbPath)).toBe(8);
+			const inspect = new Database(splitDbPath, { readonly: true });
+			try {
+				const readKeys = (provider: string): string[] => {
+					// Rows were inserted by this test above; the cast names their shape.
+					const rows = inspect
+						.prepare("SELECT data FROM auth_credentials WHERE provider = ? ORDER BY id ASC")
+						.all(provider) as Array<{ data: string }>;
+					return rows.map(row => {
+						const parsed: unknown = JSON.parse(row.data);
+						if (
+							typeof parsed !== "object" ||
+							parsed === null ||
+							!("key" in parsed) ||
+							typeof parsed.key !== "string"
+						) {
+							throw new Error("credential payload is missing a string key");
+						}
+						return parsed.key;
+					});
+				};
+				// Each key lands on the product that accepts it — a gateway key on the
+				// lanes would 401, and leaving either under the retired id would make
+				// it invisible to both providers.
+				expect(readKeys("singularityapi-dev")).toEqual(["sk-sapi-live-abc"]);
+				expect(readKeys("singularityapi-tech")).toEqual(["sk-sing-lane-abc"]);
+				expect(readKeys("singularityapi")).toEqual([]);
+				// Rate-limit state travels with the credential: a block recorded under
+				// the old provider key must not be dropped, nor outlive the rename.
+				// Rows were inserted by this test above; the cast names their shape.
+				const blockRows = inspect
+					.prepare("SELECT provider_key FROM auth_credential_blocks ORDER BY credential_id ASC")
+					.all() as Array<{ provider_key: string }>;
+				expect(blockRows.map(row => row.provider_key)).toEqual(["singularityapi-tech:api_key"]);
+			} finally {
+				inspect.close();
+			}
+		} finally {
+			migratedStore.close();
+		}
+	});
+
 	it("creates fresh auth schema without unixepoch defaults", async () => {
 		if (!tempDir) throw new Error("test setup failed");
 
 		const freshDbPath = path.join(tempDir, "fresh-schema-agent.db");
 		const freshStore = await SqliteAuthCredentialStore.open(freshDbPath);
 		try {
-			expect(readAuthSchemaVersion(freshDbPath)).toBe(7);
+			expect(readAuthSchemaVersion(freshDbPath)).toBe(8);
 			expect(readTableSql(freshDbPath, "auth_credentials")).not.toContain("unixepoch(");
 			expect(readTableSql(freshDbPath, "auth_credentials")).toContain("strftime('%s','now')");
 		} finally {
@@ -449,7 +551,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL
 			);
-			INSERT INTO auth_schema_version(id, version) VALUES (1, 8);
+			INSERT INTO auth_schema_version(id, version) VALUES (1, 9);
 			CREATE TABLE auth_credentials (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				provider TEXT NOT NULL,
@@ -465,7 +567,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const reopenedStore = await SqliteAuthCredentialStore.open(futureDbPath);
 		try {
-			expect(readAuthSchemaVersion(futureDbPath)).toBe(8);
+			expect(readAuthSchemaVersion(futureDbPath)).toBe(9);
 		} finally {
 			reopenedStore.close();
 		}
@@ -491,7 +593,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 			const reopened = await SqliteAuthCredentialStore.open(reopenDbPath);
 			try {
 				expect(reopened.listAuthCredentials("openai")).toHaveLength(1);
-				expect(readAuthSchemaVersion(reopenDbPath)).toBe(7);
+				expect(readAuthSchemaVersion(reopenDbPath)).toBe(8);
 			} finally {
 				reopened.close();
 			}
@@ -547,7 +649,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const migratedStore = await SqliteAuthCredentialStore.open(legacyDbPath);
 		try {
-			expect(readAuthSchemaVersion(legacyDbPath)).toBe(7);
+			expect(readAuthSchemaVersion(legacyDbPath)).toBe(8);
 			expect(readTableSql(legacyDbPath, "auth_credentials")).not.toContain("unixepoch(");
 			expect(readTableSql(legacyDbPath, "auth_credentials")).toContain("strftime('%s','now')");
 			expect(readStoredIdentityRows(legacyDbPath, "openai-codex")).toEqual([

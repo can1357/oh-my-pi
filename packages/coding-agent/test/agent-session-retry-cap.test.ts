@@ -3351,6 +3351,124 @@ describe("AgentSession retry delay cap", () => {
 	});
 
 	it.each([
+		["sub", 2],
+		["main", 1],
+	] as const)(
+		"a %s session treats partial text as replay-%s for the Anthropic envelope error",
+		async (agentKind, expectedStreamCalls) => {
+			// Production 2026-09-21: `scout` subagents whose stream died with
+			// "stream ended before message_stop" after streaming prose exited 1
+			// instead of retrying. A subagent's streamed text reaches no output
+			// sink (the parent only ever sees the yield), so it is replay-safe
+			// without the print-mode `setTextOutputCommitted(false)` dance; a
+			// main session keeps the veto because the text is already rendered.
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) {
+				throw new Error("Expected bundled Anthropic test model to exist");
+			}
+			const envelopeError = "Anthropic stream envelope error: stream ended before message_stop";
+
+			let streamCalls = 0;
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: requestedModel => {
+					streamCalls += 1;
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						const partial: AssistantMessage = {
+							role: "assistant",
+							content: [],
+							api: requestedModel.api,
+							provider: requestedModel.provider,
+							model: requestedModel.id,
+							usage: {
+								input: 0,
+								output: 0,
+								cacheRead: 0,
+								cacheWrite: 0,
+								totalTokens: 0,
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+							},
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+
+						if (streamCalls === 1) {
+							const text = { type: "text" as const, text: "I'll systematically investigate the codebase" };
+							partial.content.push(text);
+							stream.push({ type: "start", partial });
+							stream.push({ type: "text_start", contentIndex: 0, partial });
+							stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial });
+							stream.push({
+								type: "error",
+								reason: "error",
+								error: { ...partial, stopReason: "error", errorMessage: envelopeError, duration: 1000 },
+							});
+							return;
+						}
+
+						const recovered = { type: "text" as const, text: "recovered after envelope retry" };
+						partial.content.push(recovered);
+						stream.push({ type: "start", partial });
+						stream.push({ type: "text_start", contentIndex: 0, partial });
+						stream.push({ type: "text_delta", contentIndex: 0, delta: recovered.text, partial });
+						stream.push({ type: "text_end", contentIndex: 0, content: recovered.text, partial });
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: { ...partial, stopReason: "stop", duration: 1000 },
+						});
+					});
+					return stream;
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxDelayMs": 5_000,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": false,
+			});
+			settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				agentKind,
+			});
+
+			mockSchedulerWaitWithClock();
+			const retryStartEvents: AutoRetryStartEvent[] = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			});
+
+			await session.prompt("Trigger envelope error after partial text");
+			await session.waitForIdle();
+
+			expect(streamCalls).toBe(expectedStreamCalls);
+			expect(retryStartEvents).toHaveLength(expectedStreamCalls - 1);
+			const last = lastAssistant(session);
+			if (agentKind === "sub") {
+				expect(last.stopReason).toBe("stop");
+				expect(last.content).toContainEqual({ type: "text", text: "recovered after envelope retry" });
+			} else {
+				expect(last.stopReason).toBe("error");
+				expect(last.errorMessage).toBe(envelopeError);
+			}
+		},
+	);
+
+	it.each([
 		[
 			"Bun HTTP/2",
 			{

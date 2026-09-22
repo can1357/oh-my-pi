@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { $ } from "bun";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -18,7 +18,15 @@ import {
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, removeSyncWithRetries, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
+
+function restoreEnv(key: string, value: string | undefined): void {
+	if (value === undefined) {
+		delete process.env[key];
+	} else {
+		process.env[key] = value;
+	}
+}
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const providerName = "restricted-session-provider";
@@ -33,9 +41,15 @@ describe("restricted sessions sharing extension providers", () => {
 	let providerRequests: number;
 	let settings: Settings;
 
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const originalPiProfile = process.env.PI_PROFILE;
+	const originalOmpProfile = process.env.OMP_PROFILE;
+
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-restricted-provider-${Snowflake.next()}`);
-		fs.mkdirSync(tempDir, { recursive: true });
+		const testAgentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(testAgentDir, { recursive: true });
+		setAgentDir(testAgentDir);
 		authStorage = createInMemoryAuthStorage();
 		modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		settings = Settings.isolated();
@@ -44,10 +58,24 @@ describe("restricted sessions sharing extension providers", () => {
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
-		modelRegistry.clearSourceRegistrations(sourceId);
-		authStorage.close();
-		removeSyncWithRetries(tempDir);
+		try {
+			vi.restoreAllMocks();
+			modelRegistry.clearSourceRegistrations(sourceId);
+			authStorage.close();
+		} finally {
+			restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
+			restoreEnv("PI_PROFILE", originalPiProfile);
+			restoreEnv("OMP_PROFILE", originalOmpProfile);
+			__resetDirsFromEnvForTests();
+			removeSyncWithRetries(tempDir);
+		}
+	});
+
+	afterAll(() => {
+		restoreEnv("PI_CODING_AGENT_DIR", originalAgentDir);
+		restoreEnv("PI_PROFILE", originalPiProfile);
+		restoreEnv("OMP_PROFILE", originalOmpProfile);
+		__resetDirsFromEnvForTests();
 	});
 
 	const providerExtension: ExtensionFactory = pi => {
@@ -341,6 +369,7 @@ describe("restricted sessions sharing extension providers", () => {
 				settings,
 				modelRegistry,
 				authStorage,
+				sessionManager: SessionManager.inMemory(),
 				changelogTargets: [],
 				requireChangelog: false,
 			});

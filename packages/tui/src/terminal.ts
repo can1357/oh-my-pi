@@ -1066,6 +1066,11 @@ export class ProcessTerminal implements Terminal {
 		this.#queryPrivateMode(2026);
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
+		// 2004 (bracketed paste) is queried only to confirm the terminal brackets
+		// pastes; once confirmed, the unbracketed raw-paste heuristic in
+		// StdinBuffer is disabled so keystrokes an event-loop stall batches into
+		// one read are never misclassified as a paste (#12540).
+		this.#queryPrivateMode(2004);
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
 		}
@@ -1749,6 +1754,11 @@ export class ProcessTerminal implements Terminal {
 		}
 		if (mode === 2048 && supported) this.#enableInBandResize();
 		if (mode === 2031) this.#syncWindowsTerminalAppearancePolling(supported);
+		// Confirmed bracketed-paste support makes the unbracketed raw-paste
+		// heuristic pure downside — turn it off so stall-batched keystrokes are
+		// not misread as a paste (#12540). `supported` is only true here after an
+		// explicit DECRPM reply (the DA1-sentinel fallback resolves unsupported).
+		if (mode === 2004 && supported) this.#stdinBuffer?.setRawPasteClassification(false);
 	}
 
 	#syncWindowsTerminalAppearancePolling(mode2031Supported: boolean): void {

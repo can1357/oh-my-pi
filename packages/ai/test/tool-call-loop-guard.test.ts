@@ -190,6 +190,27 @@ describe("ToolCallLoopGuard", () => {
 		).toBeNull();
 	});
 
+	test("re-detects continued identical calls past the threshold (issue #12564)", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
+		const turn = (id: string) => ({
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id, name: "todo", arguments: {} }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test-model",
+				usage: zeroUsage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			} satisfies AssistantMessage,
+			toolResults: [],
+		});
+		expect(guard.recordTurn(turn("a"))).toBeNull();
+		expect(guard.recordTurn(turn("b"))).toMatchObject({ toolName: "todo", count: 2 });
+		expect(guard.recordTurn(turn("c"))).toMatchObject({ toolName: "todo", count: 3 });
+		expect(guard.recordTurn(turn("d"))).toMatchObject({ toolName: "todo", count: 4 });
+	});
+
 	test("ignores exempt polling tools", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["job"] });
 		expect(

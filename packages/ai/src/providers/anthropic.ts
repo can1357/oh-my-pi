@@ -111,9 +111,10 @@ import {
 	CLAUDE_CODE_MAX_OUTPUT_TOKENS,
 	claudeCodeSdkVersion,
 	claudeCodeSystemInstruction,
-	claudeCodeVersion,
+	adoptRequiredClaudeCodeVersion,
 	claudeToolPrefix,
-	claudeCodeUserAgent,
+	getClaudeCodeUserAgent,
+	getClaudeCodeVersion,
 } from "./claude-code-fingerprint";
 import {
 	buildCopilotDynamicHeaders,
@@ -377,7 +378,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	}
 
 	if (oauthToken) {
-		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent) ? incomingUserAgent : claudeCodeUserAgent;
+		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent) ? incomingUserAgent : getClaudeCodeUserAgent();
 		const headers = {
 			...modelHeaders,
 			Accept: acceptHeader,
@@ -666,14 +667,11 @@ function createClaudeBillingHeader(firstUserMessageText: string): string {
 	// Matches CC's computeFingerprint in utils/fingerprint.ts.
 	// Uses chars from the first user message (not the system prompt).
 	const k = [4, 7, 20].map(i => firstUserMessageText[i] ?? "0").join("");
-	const versionSuffix = nodeCrypto
-		.createHash("sha256")
-		.update(`59cf53e54c78${k}${claudeCodeVersion}`)
-		.digest("hex")
-		.slice(0, 3);
+	const version = getClaudeCodeVersion();
+	const versionSuffix = nodeCrypto.createHash("sha256").update(`59cf53e54c78${k}${version}`).digest("hex").slice(0, 3);
 	// cch=00000: placeholder replaced with the real attestation hash by wrapFetchForCch
 	// before the request hits the wire (see below).
-	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${claudeCodeVersion}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
+	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${version}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
 }
 
 // cch attestation: XXHash64(body_with_placeholder, seed) low-20-bits, 5 hex chars.
@@ -2086,6 +2084,8 @@ const streamAnthropicOnce = (
 			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
+			// Retained so a Claude Code version bump can rebuild the client's fingerprint headers.
+			let clientArgs: AnthropicClientOptionsArgs | undefined;
 
 			if (options?.client) {
 				client = options.client;
@@ -2191,7 +2191,7 @@ const streamAnthropicOnce = (
 					}
 				}
 
-				const created = createClient(model, {
+				clientArgs = {
 					model,
 					apiKey,
 					extraBetas,
@@ -2212,7 +2212,8 @@ const streamAnthropicOnce = (
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
 						options?.promptCacheKey,
 					disableStrictTools,
-				});
+				};
+				const created = createClient(model, clientArgs);
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
@@ -2261,6 +2262,15 @@ const streamAnthropicOnce = (
 
 			if (zeroOutputCacheRefresh) {
 				const refreshParams: MessageCreateParams = { ...params, max_tokens: 0, stream: false };
+				// Anthropic rejects `tool_choice: {type:"tool"|"any"}` with `max_tokens: 0`
+				// ("tool_choice ... cannot be used when max_tokens is 0", #12597). A refresh
+				// replays the captured turn's payload, which can carry a forced selector
+				// (e.g. a forced yield). A zero-output keep-alive produces no tokens, so the
+				// forced choice is meaningless here — drop it so the request is accepted.
+				const refreshChoiceType = refreshParams.tool_choice?.type;
+				if (refreshChoiceType === "tool" || refreshChoiceType === "any") {
+					delete refreshParams.tool_choice;
+				}
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -3077,6 +3087,30 @@ const streamAnthropicOnce = (
 					}
 					const streamFailureMessage =
 						streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
+					if (
+						isOAuthToken &&
+						clientArgs &&
+						firstTokenTime === undefined &&
+						adoptRequiredClaudeCodeVersion(streamFailure)
+					) {
+						logger.warn("anthropic: Claude Code version rejected as too old, retrying with required version", {
+							model: model.id,
+							version: getClaudeCodeVersion(),
+						});
+						client = createClient(model, { ...clientArgs, disableStrictTools }).client;
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.upstreamModel = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
 					if (
 						!prefixBindingRetryAttempted &&
 						options?.anthropicPrefixMismatchBehavior !== "error" &&
