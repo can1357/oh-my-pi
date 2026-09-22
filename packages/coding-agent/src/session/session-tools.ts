@@ -1792,12 +1792,13 @@ export class SessionTools {
 	async buildSystemPromptForAgentStart(
 		promptText: string,
 		isCurrent: () => boolean,
+		signal?: AbortSignal,
 	): Promise<SystemPromptPreparation> {
 		const backend = await resolveMemoryBackend(this.#host.settings);
 		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
 
 		try {
-			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
+			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText, signal);
 			if (!isCurrent() || !memory) return { systemPrompt: this.#baseSystemPrompt };
 			const injected = memory.context;
 			if (!injected) {

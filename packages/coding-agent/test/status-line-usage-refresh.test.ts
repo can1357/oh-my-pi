@@ -244,6 +244,47 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(plain(component.getTopBorder(80).content)).toContain("5h 42%");
 	});
 
+	it("shows Claude's banked count, current availability, and expiry in the usage segment", async () => {
+		const expiresAt = new Date(Date.now() + 48 * 3_600_000).toISOString();
+		const reports = usageReport(25) as Array<Record<string, unknown>>;
+		reports[0]!.resetCredits = {
+			availableCount: 3,
+			redeemableCount: 0,
+			reason: "weekly cooldown",
+			credits: [
+				{
+					id: "cedar",
+					title: "Claude reset",
+					program: "cedar_ember",
+					remainingCount: 3,
+					usable: false,
+					requiresLimit: true,
+					clears: ["anthropic:5h", "anthropic:7d"],
+					blocking: [],
+					usedFractions: {},
+					expiresAt,
+				},
+			],
+		};
+		const component = new StatusLineComponent(
+			makeSession(async () => reports),
+			statusLineHost,
+		);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "powerline-thin",
+		});
+
+		await refreshUsage(component);
+
+		const output = plain(component.getTopBorder(120).content);
+		expect(output).toContain("✦ 3 (0 usable)");
+		expect(output).toContain("exp 2d");
+		expect(output).toContain("weekly cooldown");
+	});
+
 	it("re-fetches usage immediately when the session rotates to another org under the same email", async () => {
 		let calls = 0;
 		let orgId = "org-team";

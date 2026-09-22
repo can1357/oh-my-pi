@@ -71,3 +71,10 @@ it("runs compiled bytecode containing dependency import.meta.resolve calls", asy
 	expect(result.exitCode).toBe(0);
 	expect(result.text().trim()).toBe("node:fs");
 }, 30_000);
+describe("macOS release binary entitlements", () => {
+	it("allows Xcode MCP automation through Apple Events", async () => {
+		const entitlements = await Bun.file(path.join(repoRoot, "scripts/macos-entitlements.plist")).text();
+
+		expect(entitlements).toContain("<key>com.apple.security.automation.apple-events</key>\n\t<true/>");
+	});
+});

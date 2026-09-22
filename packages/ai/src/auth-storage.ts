@@ -51,11 +51,14 @@ import type {
 	UsageLogger,
 	UsageProvider,
 	UsageReport,
+	UsageResetCredit,
+	UsageResetCredits,
 } from "./usage";
 import { resolveUsedFraction } from "./usage";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./usage/alibaba-token-plan";
 import { charmHyperUsageProvider } from "./usage/charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./usage/claude";
+import { consumeClaudeResetCredit, listClaudeResetCredits } from "./usage/claude-reset";
 import { clinePassUsageProvider } from "./usage/cline-pass";
 import { cursorUsageProvider } from "./usage/cursor";
 import { devinUsageProvider } from "./usage/devin";
@@ -67,13 +70,7 @@ import { museCodeUsageProvider } from "./usage/muse-code";
 import { minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { ollamaCloudUsageProvider, ollamaUsageProvider } from "./usage/ollama";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
-import {
-	type CodexResetConsumeCode,
-	type CodexResetCredit,
-	consumeCodexResetCredit,
-	listCodexResetCredits,
-	pickSoonestExpiringCredit,
-} from "./usage/openai-codex-reset";
+import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCredit } from "./usage/openai-codex-reset";
 import { opencodeGoRankingStrategy, opencodeGoUsageProvider } from "./usage/opencode-go";
 import { syntheticUsageProvider } from "./usage/synthetic";
 import { umansUsageProvider } from "./usage/umans";
@@ -990,14 +987,15 @@ export interface StoredOAuthRefreshResult<T extends OAuthCredential = OAuthCrede
 	removed: boolean;
 }
 
-/**
- * Identifies which stored account to redeem a saved rate-limit reset for.
- * Any one field is enough; `credentialId` is the most precise.
- */
+/** A saved-reset option bound to one provider and durable stored credential. */
 export interface ResetCreditTarget {
-	credentialId?: number;
+	provider: string;
+	credentialId: number;
+	/** Grant selected by the caller; a changed offer must be confirmed again. */
+	creditId?: string;
 	accountId?: string;
 	email?: string;
+	orgId?: string;
 }
 
 /** Outcome of {@link AuthStorage.redeemResetCredit}. */
@@ -1012,21 +1010,28 @@ export interface ResetCreditRedeemOutcome {
 	 * retryable, unlike a genuine `no_credit`), `http_<status>` (unexpected
 	 * HTTP).
 	 */
-	code: CodexResetConsumeCode;
+	code: string;
+	provider?: string;
 	accountId?: string;
 	email?: string;
+	orgId?: string;
+	/** Provider explanation for an unavailable or refused reset. */
+	reason?: string;
+	/** Normalized usage limit IDs the provider confirmed it cleared. */
+	cleared?: string[];
 	/** The credit that was spent (when one was). */
 	creditId?: string;
 }
 
 /** One stored account's live saved-reset status, from {@link AuthStorage.listResetCredits}. */
-export interface ResetCreditAccountStatus {
-	credentialId?: number;
+export interface ResetCreditAccountStatus extends UsageResetCredits {
+	provider: string;
+	credentialId: number;
 	accountId?: string;
 	email?: string;
-	/** Resets redeemable for this account right now (live, not cached). */
-	availableCount: number;
-	credits: CodexResetCredit[];
+	orgId?: string;
+	orgName?: string;
+	credits: UsageResetCredit[];
 	/** Whether this is the given session's active account. */
 	active: boolean;
 	/** Set when the account's token refresh or list call failed. */
@@ -1399,6 +1404,13 @@ export class AuthStorage {
 	#usageHeaderIngestAt: Map<string, number> = new Map();
 	#usageReportsInFlight: Map<string, Promise<UsageReport[] | null>> = new Map();
 	#usageFetch: typeof fetch;
+	/** Manual and automatic attempts on one stored account share a mutation. */
+	#resetInFlight = new Map<string, { creditId?: string; promise: Promise<ResetCreditRedeemOutcome> }>();
+	/** Ambiguous Claude claims retain their idempotency key until reconciled. */
+	#pendingClaudeResets = new Map<
+		string,
+		{ creditId: string; requestId: string; program?: string; remainingCount?: number; startedAt: number }
+	>();
 	#usageRequestTimeoutMs: number;
 	#usageLogger?: UsageLogger;
 	#fallbackResolver?: (provider: string) => string | undefined;
@@ -6391,16 +6403,7 @@ export class AuthStorage {
 		return this.#resolveStoredOAuthAccess(provider, selection, providerKey, options);
 	}
 
-	/**
-	 * List saved rate-limit resets for every stored OAuth account of `provider`
-	 * (Codex), fetched LIVE from the dedicated `rate-limit-reset-credits` route.
-	 *
-	 * This deliberately bypasses the usage-report cache: `/wham/usage` is
-	 * IP-rate-limited and may serve stale (or pre-feature) snapshots when many
-	 * accounts are polled, which would hide redeemable credits. One entry per
-	 * account, with the session's active account flagged and unreachable
-	 * accounts carrying an `error`.
-	 */
+	/** List live saved-reset balances and eligibility for one provider's stored OAuth accounts. */
 	async listResetCredits(options?: {
 		provider?: string;
 		sessionId?: string;
@@ -6408,36 +6411,25 @@ export class AuthStorage {
 		signal?: AbortSignal;
 	}): Promise<ResetCreditAccountStatus[]> {
 		const provider = options?.provider ?? "openai-codex";
-		const accesses = await this.getOAuthAccesses(provider);
-		if (accesses.length === 0) return [];
+		if (provider !== "openai-codex" && provider !== "anthropic") return [];
+		const accounts = this.listOAuthAccounts(provider, options?.sessionId);
 		const baseUrl = options?.baseUrlResolver?.(provider);
-		const activeId = this.getOAuthAccountIdentity(provider, options?.sessionId);
 		return Promise.all(
-			accesses.map(async (access): Promise<ResetCreditAccountStatus> => {
-				const active =
-					!!activeId &&
-					((!!activeId.accountId && activeId.accountId === access.accountId) ||
-						(!!activeId.email && activeId.email === access.email));
-				const base = {
-					credentialId: access.credentialId,
-					accountId: access.accountId,
-					email: access.email,
-					active,
-				};
-				if (!access.ok)
+			accounts.map(async (account): Promise<ResetCreditAccountStatus> => {
+				const base = { ...account, provider };
+				const access = await this.getOAuthAccessByCredentialId(provider, account.credentialId, {
+					signal: options?.signal,
+				});
+				if (!access?.ok)
 					return {
 						...base,
 						availableCount: 0,
 						credits: [],
-						error: access.error,
+						error: access?.error ?? "Account no longer available",
 					};
-				const list = await listCodexResetCredits({
-					accessToken: access.accessToken,
-					accountId: access.accountId,
-					baseUrl,
-					fetch: this.#usageFetch,
-					signal: options?.signal,
-				});
+				const auth = { ...access, baseUrl, fetch: this.#usageFetch, signal: options?.signal };
+				const list =
+					provider === "anthropic" ? await listClaudeResetCredits(auth) : await listCodexResetCredits(auth);
 				if (!list)
 					return {
 						...base,
@@ -6445,115 +6437,195 @@ export class AuthStorage {
 						credits: [],
 						error: "Failed to load saved resets",
 					};
-				return {
-					...base,
-					availableCount: list.availableCount,
-					credits: list.credits,
-				};
+				return { ...base, ...list };
 			}),
 		);
 	}
 
 	/**
-	 * Redeem one saved rate-limit reset (OpenAI Codex "saved resets") for a
-	 * specific stored account.
-	 *
-	 * Resolves a fresh access token for the target account, picks an available
-	 * credit (the given `creditId`, else the first redeemable one), spends it,
-	 * and invalidates the cached usage report so the next `/usage` reflects the
-	 * reset. Never throws for business outcomes — inspect the returned `code`.
+	 * Redeem a stored account's saved reset after checking its live offer.
+	 * Business refusals return a code; transport errors may throw without losing Claude's request ID.
 	 */
 	async redeemResetCredit(options: {
 		target: ResetCreditTarget;
-		provider?: string;
-		creditId?: string;
 		baseUrlResolver?: (provider: string) => string | undefined;
 		signal?: AbortSignal;
 	}): Promise<ResetCreditRedeemOutcome> {
-		const provider = options.provider ?? "openai-codex";
-		const baseUrl = options.baseUrlResolver?.(provider);
 		const { target } = options;
-		const accesses = await this.getOAuthAccesses(provider);
-		const match = accesses.find(
-			access =>
-				(target.credentialId !== undefined && access.credentialId === target.credentialId) ||
-				(!!target.accountId && access.accountId === target.accountId) ||
-				(!!target.email && access.email === target.email),
-		);
-		if (!match)
-			return {
-				ok: false,
-				code: "no_account",
-				accountId: target.accountId,
-				email: target.email,
-			};
-		if (!match.ok) {
-			return {
-				ok: false,
-				code: "account_unavailable",
-				accountId: match.accountId,
-				email: match.email,
-			};
+		const { provider, creditId } = target;
+		const identity = { provider, accountId: target.accountId, email: target.email, orgId: target.orgId };
+		if (provider !== "openai-codex" && provider !== "anthropic") {
+			return { ...identity, ok: false, code: "unsupported_provider" };
 		}
+		const baseUrl = options.baseUrlResolver?.(provider);
+		const match = await this.getOAuthAccessByCredentialId(provider, target.credentialId, { signal: options.signal });
+		if (!match) return { ...identity, ok: false, code: "no_account" };
+		const resolvedIdentity = {
+			provider,
+			accountId: match.accountId,
+			email: match.email,
+			orgId: match.orgId,
+		};
+		if (!match.ok) return { ...resolvedIdentity, ok: false, code: "account_unavailable" };
+		const accountKey = JSON.stringify([provider, baseUrl, target.credentialId]);
+		const inFlight = this.#resetInFlight.get(accountKey);
+		if (inFlight) {
+			if (inFlight.creditId !== creditId) return { ...resolvedIdentity, ok: false, code: "reset_in_progress" };
+			return inFlight.promise;
+		}
+		const promise = this.#redeemAccountReset(provider, match, accountKey, {
+			creditId,
+			baseUrl,
+			signal: options.signal,
+		}).finally(() => this.#resetInFlight.delete(accountKey));
+		this.#resetInFlight.set(accountKey, { creditId, promise });
+		return promise;
+	}
 
+	async #redeemAccountReset(
+		provider: string,
+		access: OAuthAccess,
+		accountKey: string,
+		options: { creditId?: string; baseUrl?: string; signal?: AbortSignal },
+	): Promise<ResetCreditRedeemOutcome> {
+		const identity = { provider, accountId: access.accountId, email: access.email, orgId: access.orgId };
+		const auth = { ...access, baseUrl: options.baseUrl, fetch: this.#usageFetch, signal: options.signal };
 		let creditId = options.creditId;
-		if (!creditId) {
-			const list = await listCodexResetCredits({
-				accessToken: match.accessToken,
-				accountId: match.accountId,
-				baseUrl,
-				fetch: this.#usageFetch,
-				signal: options.signal,
-			});
-			// Transport/auth failure is NOT "no credits": callers treat `no_credit`
-			// as terminal for the episode, so conflating them would bury a live
-			// credit behind one flaky request.
-			if (!list) {
+		let result: ResetCreditRedeemOutcome;
+		let report: UsageReport | null = null;
+		if (provider === "anthropic") {
+			const list = await listClaudeResetCredits(auth);
+			if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
+			const selected = list.credits.find(credit => credit.id === list.nextCreditId);
+			if (creditId && creditId !== list.nextCreditId) {
+				return { ...identity, ok: false, code: "offer_changed", creditId };
+			}
+			if (!list.eligible || !selected || !selected.usable || (list.redeemableCount ?? 0) < 1) {
 				return {
+					...identity,
 					ok: false,
-					code: "credit_list_failed",
-					accountId: match.accountId,
-					email: match.email,
+					code: list.availableCount > 0 ? "ineligible" : "no_credit",
+					reason: list.reason,
 				};
 			}
-			const credit = pickSoonestExpiringCredit(list.credits);
-			if (!credit)
-				return {
-					ok: false,
-					code: "no_credit",
-					accountId: match.accountId,
-					email: match.email,
-				};
-			creditId = credit.id;
+			creditId = selected.id;
+			let pending = this.#pendingClaudeResets.get(accountKey);
+			if (pending && Date.now() - pending.startedAt >= 10 * 60_000) {
+				this.#pendingClaudeResets.delete(accountKey);
+				pending = undefined;
+			}
+			if (pending) {
+				if (pending.creditId !== creditId) return { ...identity, ok: false, code: "reset_unconfirmed", creditId };
+				if (
+					pending.remainingCount !== undefined &&
+					selected.remainingCount !== undefined &&
+					selected.remainingCount < pending.remainingCount
+				) {
+					this.#pendingClaudeResets.delete(accountKey);
+					this.#invalidateUsageReportCache(provider, options.baseUrl);
+					return { ...identity, ok: false, code: "already_redeemed", creditId };
+				}
+				if (pending.program === "juniper_tide") {
+					return { ...identity, ok: false, code: "reset_unconfirmed", creditId };
+				}
+			}
+			const credential = this.#getStoredCredentials(provider).find(entry => entry.id === access.credentialId);
+			if (credential?.credential.type === "oauth") {
+				report = await this.#getUsageReport(provider, credential.credential, {
+					baseUrl: options.baseUrl,
+					signal: options.signal,
+				});
+			}
+			const requestId = pending?.requestId ?? crypto.randomUUID();
+			options.signal?.throwIfAborted();
+			this.#pendingClaudeResets.set(accountKey, {
+				creditId,
+				requestId,
+				program: selected.program,
+				remainingCount: selected.remainingCount,
+				startedAt: pending?.startedAt ?? Date.now(),
+			});
+			const consumed = await consumeClaudeResetCredit({
+				...auth,
+				baseUrl: list.baseUrl ?? auth.baseUrl,
+				orgId: list.orgId ?? access.orgId,
+				credit: selected,
+				redeemRequestId: requestId,
+			});
+			if (
+				consumed.ok ||
+				consumed.code === "already_redeemed" ||
+				consumed.code === "nothing_to_reset" ||
+				consumed.code === "ineligible" ||
+				(!pending &&
+					(consumed.code === "cooldown" ||
+						consumed.status === 401 ||
+						consumed.status === 403 ||
+						consumed.status === 429))
+			) {
+				this.#pendingClaudeResets.delete(accountKey);
+			}
+			result = {
+				...identity,
+				ok: consumed.ok,
+				code: consumed.code,
+				reason: consumed.reason,
+				cleared: consumed.cleared,
+				creditId,
+			};
+		} else {
+			if (!creditId) {
+				const list = await listCodexResetCredits(auth);
+				if (!list) return { ...identity, ok: false, code: "credit_list_failed" };
+				const credit = pickSoonestExpiringCredit(list.credits);
+				if (!credit) return { ...identity, ok: false, code: "no_credit" };
+				creditId = credit.id;
+			}
+			const consumed = await consumeCodexResetCredit({ ...auth, creditId });
+			result = { ...identity, ok: consumed.ok, code: consumed.code, creditId };
 		}
-
-		const result = await consumeCodexResetCredit({
-			creditId,
-			accessToken: match.accessToken,
-			accountId: match.accountId,
-			baseUrl,
-			fetch: this.#usageFetch,
-			signal: options.signal,
-		});
 		if (result.ok) {
-			this.#invalidateUsageReportCache(provider, baseUrl);
+			this.#invalidateUsageReportCache(provider, options.baseUrl);
 			if (this.#store.invalidateUsageCache) {
 				await this.#store.invalidateUsageCache(options.signal).catch(err => {
 					logger.debug("Failed to notify store of stale usage", { err });
 				});
 			}
-			// The window this credential was blocked on (by markUsageLimitReached)
-			// is now reset, so lift its temporary block — otherwise selection
-			// keeps skipping/under-ranking the freshly-reset account.
-			if (match.credentialId !== undefined) this.#clearCredentialBlocks(provider, match.credentialId);
+			if (access.credentialId !== undefined) {
+				if (provider === "anthropic")
+					this.#clearClaudeResetBlocks(access.credentialId, result.cleared ?? [], report);
+				else this.#clearCredentialBlocks(provider, access.credentialId);
+			}
 		}
-		return {
-			ok: result.ok,
-			code: result.code,
-			accountId: match.accountId,
-			email: match.email,
-			creditId,
-		};
+		return result;
+	}
+
+	/** Partial Claude resets must leave blocks for uncovered weekly/model limits intact. */
+	#clearClaudeResetBlocks(credentialId: number, cleared: readonly string[], report: UsageReport | null): void {
+		if (!report || Date.now() - report.fetchedAt > USAGE_REPORT_TTL_MS || cleared.length === 0) return;
+		const provider = "anthropic";
+		const index = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
+		if (index < 0) return;
+		const shared = report.limits.filter(limit => limit.scope.shared);
+		if (!["anthropic:5h", "anthropic:7d"].every(id => shared.some(limit => limit.id === id))) return;
+		const unscoped = report.limits.filter(
+			limit => limit.scope.shared || limit.scope.tier === "opus" || limit.scope.tier === "sonnet",
+		);
+		const scopes = [
+			{ blockScope: undefined, limits: unscoped },
+			...(claudeRankingStrategy.healableBlockScopes?.(report) ?? []),
+		];
+		for (const scope of scopes) {
+			if (!scope.limits.some(limit => cleared.includes(limit.id))) continue;
+			if (this.#isUsageLimitReached(scope.limits.filter(limit => !cleared.includes(limit.id)))) continue;
+			this.#clearCredentialBlockScope(
+				provider,
+				credentialId,
+				index,
+				this.#getProviderTypeKey(provider, "oauth"),
+				scope.blockScope,
+			);
+		}
 	}
 
 	/**
@@ -7350,6 +7422,9 @@ export class AuthStorage {
 				throw error;
 			}
 			const updated: OAuthCredential = {
+				// Preserve credential-subtype metadata, such as MCP token endpoints,
+				// that the provider's bare OAuth response cannot reproduce.
+				...attempted,
 				type: "oauth",
 				access: refreshed.access,
 				refresh: refreshed.refresh,

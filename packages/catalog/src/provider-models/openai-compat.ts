@@ -5053,6 +5053,9 @@ export function xiaomiModelManagerOptions(
 	// would incorrectly pin to the standard endpoint (api.xiaomimimo.com).
 	const baseUrl = isTokenPlanKey ? tokenPlanBaseUrls[0] : (config?.baseUrl ?? XIAOMI_STANDARD_BASE_URL);
 	const references = createBundledReferenceMap<"openai-completions">("xiaomi");
+	for (const seed of seedModels<"openai-completions">(providerId)) {
+		references.set(seed.id, seed);
+	}
 	const fetchModels = (url: string) =>
 		fetchOpenAICompatibleModels({
 			api: "openai-completions",
