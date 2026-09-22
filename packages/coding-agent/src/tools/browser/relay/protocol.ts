@@ -30,7 +30,9 @@ export type RelayRpcRequest =
 	/** Add tabs to the per-window omp group (created/reused by title), remembering prior membership. */
 	| { op: "group"; tabIds: number[]; title: string; color: string }
 	/** Return tabs to their pre-omp group (or ungroup); no-op for tabs the relay never grouped. */
-	| { op: "ungroup"; tabIds: number[] };
+	| { op: "ungroup"; tabIds: number[] }
+	/** Toggle the "⏳" busy suffix on the tab's omp group title while it drives the tab. */
+	| { op: "setBusy"; tabId: number; busy: boolean };
 
 /** Messages sent relay → extension. */
 export type RelayToExtMessage = ({ t: "rpc"; id: number } & RelayRpcRequest) | { t: "pong" };
