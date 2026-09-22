@@ -68,6 +68,19 @@ export function isUserRequestEntry(entry: TranscriptEntryLike | { type: string }
 	return false;
 }
 
+/**
+ * Recent transcript tail starting at a user-request boundary, so tool calls
+ * and results stay together.
+ * ponytail: a whole user turn may exceed `limit`; paginate rendering if one turn grows too large.
+ */
+export function recentTranscriptEntries(entries: TranscriptEntryLike[], limit = 600): TranscriptEntryLike[] {
+	if (entries.length <= limit) return entries;
+	for (let index = entries.length - limit; index > 0; index--) {
+		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
+	}
+	return entries;
+}
+
 /** Editable user request text, preserving skill invocation syntax. */
 export function userTurnDraft(entry: TranscriptEntryLike): string | undefined {
 	const message = transcriptEntryMessage(entry);

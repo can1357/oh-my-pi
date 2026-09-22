@@ -18,12 +18,12 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Component, matchesKey, routeSgrMouseInput, type TUI, truncateToWidth, visibleWidth } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
 import {
-	isUserRequestEntry,
+	recentTranscriptEntries,
+	type SessionMessageEntryLike as SessionMessageEntry,
 	type TranscriptEntryLike as TranscriptEntry,
 	transcriptEntryMessage,
 	userTurnDraft,
 } from "../chat/transcript-entry";
-import type { SessionMessageEntryLike as SessionMessageEntry } from "../chat/transcript-entry";
 import { replaceTabs } from "../render/render-utils";
 import { highlightCode, type ThemeColor, theme } from "../theme/theme";
 import { commandFromToolCall, extractBlocks, extractLinks } from "./copy-targets";
@@ -72,13 +72,6 @@ interface CopyBlock {
 const BLOCK_PREVIEW_LINES = 12;
 /** The copy picker's outline stroke — green, distinct from the rewind selector's accent. */
 const OUTLINE_COLOR: ThemeColor = "success";
-/**
- * Entries replayed when the picker opens. Replaying a long session's whole
- * branch costs seconds before the first frame (one component built and
- * rendered per entry), and the clipboard target is almost always recent, so
- * the picker starts at this tail and loads the rest on demand (`a`).
- */
-const INITIAL_ENTRIES = 600;
 
 /** A clickable control on a block caption, in composed-column columns. */
 interface ControlRegion {
@@ -112,7 +105,7 @@ export class CopySelectorComponent implements Component {
 		private readonly deps: CopySelectorDeps,
 	) {
 		this.#entries = entries;
-		const tail = recentEntries(entries, INITIAL_ENTRIES);
+		const tail = recentTranscriptEntries(entries);
 		this.#truncated = tail.length < entries.length;
 		this.#builder = this.#replay(tail);
 		this.#selected = Math.max(0, this.#targets.length - 1);
@@ -447,27 +440,6 @@ export class CopySelectorComponent implements Component {
 		lines.push("");
 		return { lines, selStart, selEnd };
 	}
-}
-
-/**
- * The trailing slice starting at the last turn initiator at or before
- * `entries.length - limit`: a user message, or a custom message that starts
- * a user-attributed turn (a directly invoked `/skill:` prompt, a collab peer's
- * prompt), the same boundary `ChatTranscriptBuilder` uses.
- *
- * The cut has to land on a turn boundary: the builder drops a tool result
- * whose initiating call was sliced away, so a tail beginning mid-turn renders
- * without its command — and a tail of nothing but orphaned results would
- * leave the picker with no target at all. Scanning backwards keeps the whole
- * final turn instead, and a branch whose last turn is itself longer than
- * `limit` replays in full.
- */
-function recentEntries(entries: TranscriptEntry[], limit: number): TranscriptEntry[] {
-	if (entries.length <= limit) return entries;
-	for (let index = entries.length - limit; index > 0; index--) {
-		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
-	}
-	return entries;
 }
 
 /** Raw multi-line text of a user message (string or text blocks). */

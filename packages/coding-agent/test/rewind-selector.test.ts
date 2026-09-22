@@ -79,11 +79,26 @@ function makeEntries(): SessionMessageEntry[] {
 	];
 }
 
+/** The cutoff falls on a tool result; keep its call and user turn. */
+function longEntriesWithBoundaryTool(): SessionMessageEntry[] {
+	const entries: SessionMessageEntry[] = [];
+	for (let index = 0; index < 40; index++) {
+		entries.push(entry(`u${index}`, entries.at(-1)?.id ?? null, userMessage(`prompt ${index}`)));
+	}
+	entries.push(entry("a39", "u39", assistantWithBashCall("boundary-call")));
+	entries.push(entry("t39", "a39", bashResult("boundary-call")));
+	for (let index = 40; index <= 638; index++) {
+		entries.push(entry(`u${index}`, entries.at(-1)!.id, userMessage(`prompt ${index}`)));
+	}
+	return entries;
+}
+
 function makeSelector(
 	onSelect: (id: string) => void,
 	siblingPaths?: (entryId: string) => BranchVariantPath[],
+	entries: SessionMessageEntry[] = makeEntries(),
 ): RewindSelectorComponent {
-	return new RewindSelectorComponent(makeEntries(), {
+	return new RewindSelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
@@ -106,6 +121,71 @@ describe("RewindSelectorComponent", () => {
 		resetSettingsForTest();
 	});
 
+	it("loads the earlier rewind history on `a` without splitting the cutoff tool exchange", () => {
+		const selected: string[] = [];
+		const entries = longEntriesWithBoundaryTool();
+		const selector = makeSelector(id => selected.push(id), undefined, entries);
+		try {
+			selector.render(120);
+
+			// The oldest retained turn must include its folded tool result.
+			for (let index = entries.length; index > 0; index--) selector.handleInput(UP);
+			selector.handleInput(DOWN);
+			expect(Bun.stripANSI(selector.render(120).join("\n"))).toContain("file.txt");
+			selector.handleInput(ENTER);
+			selector.handleInput(UP);
+			selector.handleInput(ENTER);
+
+			// Loading twice must preserve the selected turn.
+			selector.handleInput("a");
+			selector.handleInput("a");
+			selector.render(120);
+			selector.handleInput(ENTER);
+
+			for (let index = entries.length; index > 0; index--) selector.handleInput(UP);
+			selector.handleInput(ENTER);
+
+			expect(selected).toEqual(["t39", "u39", "u39", "u0"]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("keeps the selected sibling entry and main anchor when `a` loads earlier history", () => {
+		const selected: string[] = [];
+		const selector = makeSelector(
+			id => selected.push(id),
+			entryId =>
+				entryId === "u638"
+					? [
+							{
+								rootId: "b0",
+								entries: [
+									entry("b0", "u637", userMessage("alternate start")),
+									entry("b1", "b0", userMessage("alternate continuation")),
+								],
+							},
+						]
+					: [],
+			longEntriesWithBoundaryTool(),
+		);
+		try {
+			selector.render(120);
+
+			selector.handleInput(RIGHT);
+			selector.handleInput(DOWN);
+			selector.handleInput("a");
+			selector.render(120);
+
+			selector.handleInput(ENTER);
+			selector.handleInput(LEFT);
+			selector.handleInput(ENTER);
+
+			expect(selected).toEqual(["b1", "u638"]);
+		} finally {
+			selector.dispose();
+		}
+	});
 	it("starts on the newest rendered item and Up steps in transcript order past hidden notices", () => {
 		const selected: string[] = [];
 		const selector = makeSelector(id => selected.push(id));

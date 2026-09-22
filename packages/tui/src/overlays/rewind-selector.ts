@@ -20,7 +20,7 @@
  * Keys: Up/Down step through rendered items in transcript order (within the
  * active column when a strip is open), Left/Right slide between branch
  * variants at a fork and jump between user turns elsewhere, Enter rewinds to
- * the outlined item, Esc cancels.
+ * the outlined item, A loads earlier turns without changing selection, Esc cancels.
  */
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
@@ -33,7 +33,7 @@ import {
 	truncateToWidth,
 } from "../index";
 import type { MessageRenderer } from "../chat/extension-types";
-import type { TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
+import { recentTranscriptEntries, type TranscriptEntryLike as TranscriptEntry } from "../chat/transcript-entry";
 import { theme } from "../theme/theme";
 import { matchesAppToolsExpand, matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { ChatTranscriptBuilder } from "../chat/chat-transcript-builder";
@@ -110,12 +110,19 @@ export class RewindSelectorComponent implements Component {
 	#slide: { from: number; to: number; startedAt: number } | undefined;
 	#slideTimer: NodeJS.Timeout | undefined;
 
+	/** Whole branch; the selector may currently replay only its tail. */
+	#entries: TranscriptEntry[];
+	/** True while older history is still unreplayed. */
+	#truncated = false;
+
 	constructor(
 		entries: TranscriptEntry[],
 		private readonly deps: RewindSelectorDeps,
 	) {
-		this.#builder = this.#newBuilder();
-		this.#targets = appendOutlineEntries(this.#builder, entries);
+		this.#entries = entries;
+		const tail = recentTranscriptEntries(entries);
+		this.#truncated = tail.length < entries.length;
+		this.#builder = this.#replay(tail);
 		this.#selected = Math.max(0, this.#targets.length - 1);
 		this.#browser = new TranscriptBrowser({
 			getHeight: () => this.deps.ui.terminal?.rows || process.stdout.rows || 40,
@@ -129,7 +136,7 @@ export class RewindSelectorComponent implements Component {
 	}
 
 	#newBuilder(): ChatTranscriptBuilder {
-		return new ChatTranscriptBuilder({
+		const builder = new ChatTranscriptBuilder({
 			ui: this.deps.ui,
 			getTool: this.deps.getTool,
 			isBuiltInTool: this.deps.isBuiltInTool,
@@ -140,6 +147,29 @@ export class RewindSelectorComponent implements Component {
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});
+		builder.setExpanded(this.#expanded);
+		return builder;
+	}
+
+	/** Build a transcript for `entries` and adopt its targets. */
+	#replay(entries: TranscriptEntry[]): ChatTranscriptBuilder {
+		const builder = this.#newBuilder();
+		this.#targets = appendOutlineEntries(builder, entries);
+		return builder;
+	}
+
+	/** Replay the whole branch, keeping the main outline on the same turn. */
+	#loadFullHistory(): void {
+		if (!this.#truncated) return;
+		const selectedId = this.#targets[this.#selected]?.turnId;
+		const previous = this.#builder;
+		this.#builder = this.#replay(this.#entries);
+		previous.dispose();
+		this.#truncated = false;
+		this.#mainVisible = undefined;
+		const restored = selectedId ? this.#targets.findIndex(target => target.turnId === selectedId) : -1;
+		this.#selected = restored >= 0 ? restored : Math.max(0, this.#targets.length - 1);
+		this.deps.requestRender();
 	}
 
 	invalidate(): void {
@@ -173,7 +203,6 @@ export class RewindSelectorComponent implements Component {
 		for (const sibling of this.deps.siblingPaths(target.turnId)) {
 			if (sibling.entries.length === 0) continue;
 			const builder = this.#newBuilder();
-			builder.setExpanded(this.#expanded);
 			const targets = appendOutlineEntries(builder, sibling.entries);
 			const firstUser = sibling.entries.find(isUserTurnEntry);
 			const label = (firstUser && userTurnLabel(firstUser)) || sibling.rootId;
@@ -271,6 +300,10 @@ export class RewindSelectorComponent implements Component {
 			}
 			return;
 		}
+		if (data === "a" || data === "A") {
+			this.#loadFullHistory();
+			return;
+		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			const target = this.#outlinedTarget();
 			if (target) this.deps.onSelect(target.entryId);
@@ -366,7 +399,12 @@ export class RewindSelectorComponent implements Component {
 				lines: composed.lines,
 				anchor: this.#outlineAnchor(composed),
 			},
-			footer: [theme.fg("dim", `${position}↑/↓ step  ${lateral}  enter rewind  ctrl+o expand  esc cancel`)],
+			footer: [
+				theme.fg(
+					"dim",
+					`${position}↑/↓ step  ${lateral}  enter rewind  ${this.#truncated ? "a earlier turns  " : ""}ctrl+o expand  esc cancel`,
+				),
+			],
 		};
 	}
 
