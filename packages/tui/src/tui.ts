@@ -992,6 +992,20 @@ export class TUI extends Container {
 		}
 	}
 
+	/**
+	 * Retransmit image data the terminal may have dropped — e.g. Kitty payloads
+	 * emitted while a tmux window was hidden, where tmux replays the
+	 * placeholders on selection without the image data (issue #12595). Drops
+	 * transmit tracking so the next render re-sends resident payloads with
+	 * their placements, then forces a repaint.
+	 */
+	retransmitInlineImages(): void {
+		if (this.#stopped) return;
+		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
+		this.#imageBudget.forgetTransmitted();
+		this.requestRender();
+	}
+
 	getShowHardwareCursor(): boolean {
 		return this.#showHardwareCursor;
 	}

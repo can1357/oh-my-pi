@@ -48,6 +48,7 @@ app.history.search: []
 | `app.stt.toggle`             | Unbound (hold `Space`)                                                | Toggle speech-to-text. By default there is no key chord — hold the space bar to record (push-to-talk) and release to transcribe; bind a chord here for a press-to-toggle alternative |
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
+| `app.images.retransmit`      | Unbound                                                               | Re-send image data the terminal may have dropped (e.g. Kitty payloads emitted while a tmux window was hidden); repairs blank placeholders on repaint                                   |
 
 ## Recover a cleared prompt
 
