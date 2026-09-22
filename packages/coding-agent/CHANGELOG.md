@@ -10,6 +10,14 @@
 
 - Updated server-side fallback documentation and logic to target claude-opus-5-5
 - Added support for claude-opus-5-5 to model priority registry
+### Added
+
+- Added intent descriptions to judgment batching
+- Added live progress tracking for judgment batches in the TUI
+
+### Changed
+
+- Coalesced judgment batch drain operations for better performance under high load
 
 ## [18.2.9] - 2026-09-22
 

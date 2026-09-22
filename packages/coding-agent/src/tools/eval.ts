@@ -137,6 +137,8 @@ export type EvalProxyExecutor = (params: EvalToolParams, signal?: AbortSignal) =
 /** Shared cap for each structured `display()` preview returned by eval. */
 const MAX_DISPLAY_TEXT_BYTES = 8000;
 const DISPLAY_ELISION_RESERVE_BYTES = 64;
+/** Minimum spacing between live eval updates; bursts coalesce to one trailing snapshot. */
+const LIVE_UPDATE_INTERVAL_MS = 50;
 
 interface FormattedDisplayJson {
 	fullText: string;
@@ -703,6 +705,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		let outputSink: OutputSink | undefined;
 		let outputSummary: OutputSummary | undefined;
 		let outputDumped = false;
+		let updateTimer: NodeJS.Timeout | undefined;
 		const finalizeOutput = async (): Promise<OutputSummary | undefined> => {
 			if (outputDumped || !outputSink) return outputSummary;
 			outputSummary = await outputSink.dump();
@@ -784,8 +787,19 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				return details;
 			};
 
-			const pushUpdate = () => {
+			// Stdout chunks and status events can arrive hundreds of times per
+			// second; each emitted update rebuilds details and re-renders the card.
+			// Coalesce to one trailing update per interval — the snapshot is taken
+			// at flush time, so the newest state wins.
+			const flushUpdate = () => {
+				if (!updateTimer) return;
+				clearTimeout(updateTimer);
+				updateTimer = undefined;
 				emitUpdate?.(tailBuffer.text(), buildUpdateDetails());
+			};
+			const pushUpdate = () => {
+				if (!emitUpdate || updateTimer) return;
+				updateTimer = setTimeout(flushUpdate, LIVE_UPDATE_INTERVAL_MS);
 			};
 
 			const sessionFile = session.getSessionFile?.() ?? undefined;
@@ -877,6 +891,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					});
 				} finally {
 					idle?.dispose();
+					// Publish the cell's last live state before its final output replaces it.
+					flushUpdate();
 					activeLiveCell = undefined;
 				}
 				const durationMs = Date.now() - startTime;
@@ -1037,6 +1053,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				.truncationFromSummary(summaryForMeta, { direction: "tail" })
 				.done();
 		} finally {
+			clearTimeout(updateTimer);
 			if (!outputDumped) {
 				try {
 					await finalizeOutput();

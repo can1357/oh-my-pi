@@ -24,6 +24,7 @@ import type { ToolSession } from "../tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { withBridgeTimeoutPause } from "./bridge-timeout";
 import { EVAL_HANDLE_CONCURRENCY, evalRequestSlots } from "./completion-bridge";
+import { JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, type JudgmentBatchProgress } from "./judgment-batch-events";
 import type { JsStatusEvent } from "./js/shared/types";
 import { type CellAnswer, parseQuestions, parseState, sessionJudge, toEvalJudgmentResult } from "./judgment-bridge";
 
@@ -34,6 +35,16 @@ export const EVAL_JUDGMENT_BATCH_BRIDGE_NAME = "__judge_batch__";
 const DEFAULT_RETRIES = 1;
 /** Progress is reported to the async job at most this often. */
 const PROGRESS_INTERVAL_MS = 1_000;
+/**
+ * Once a waiting drain sees its first item, it holds this long for more.
+ * Fan-out workers settle one at a time, so returning on the first would cost
+ * one bridge round-trip (and one runtime wakeup) per item.
+ */
+const DRAIN_COALESCE_MS = 100;
+/** Live UI snapshots are coalesced to at most four emissions per second. */
+const EVENT_PROGRESS_INTERVAL_MS = 250;
+/** Intent used when the caller does not describe the batch. */
+const DEFAULT_INTENT = "Judging";
 
 /** Caller-supplied item key; list inputs use their index. */
 export type BatchKey = string | number;
@@ -50,6 +61,8 @@ export interface JudgmentBatchItem {
 /** Snapshot returned by `status()` and carried on `create`/`attach`. */
 export interface JudgmentBatchStatus {
 	id: string;
+	/** Caller-provided progress/job label. */
+	intent: string;
 	total: number;
 	done: number;
 	failed: number;
@@ -123,6 +136,14 @@ function parseBatchOptions(args: Record<string, unknown>, total: number): BatchO
 	};
 }
 
+function parseIntent(value: unknown): string {
+	if (value === undefined) return DEFAULT_INTENT;
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw invalid("intent must be a non-empty string");
+	}
+	return value;
+}
+
 function ownerOf(session: ToolSession): string {
 	return session.getAgentId?.() ?? MAIN_AGENT_ID;
 }
@@ -131,6 +152,7 @@ function ownerOf(session: ToolSession): string {
 export class JudgmentBatch {
 	readonly id: string;
 	readonly ownerId: string;
+	readonly intent: string;
 	readonly total: number;
 	readonly #inputs: BatchInput[];
 	readonly #questions: Record<string, Question>;
@@ -147,10 +169,19 @@ export class JudgmentBatch {
 	#running = true;
 	#error: string | undefined;
 	#lastProgressAt = 0;
+	#lastEventAt = 0;
+	#eventTimer: NodeJS.Timeout | undefined;
 
-	constructor(session: ToolSession, inputs: BatchInput[], questions: Record<string, Question>, options: BatchOptions) {
+	constructor(
+		session: ToolSession,
+		inputs: BatchInput[],
+		questions: Record<string, Question>,
+		options: BatchOptions,
+		intent: string,
+	) {
 		this.id = `jdgb-${Snowflake.next()}`;
 		this.ownerId = ownerOf(session);
+		this.intent = intent;
 		this.total = inputs.length;
 		this.#inputs = inputs;
 		this.#questions = questions;
@@ -164,12 +195,13 @@ export class JudgmentBatch {
 	 * still proceeds — only auto-delivery and `hub` addressing are lost.
 	 */
 	start(): void {
+		this.#emitProgressEvent();
 		const manager = this.#session.asyncJobManager;
 		if (manager) {
 			try {
 				manager.register(
 					"eval",
-					`judge_batch ${this.id}`,
+					this.intent,
 					async ({ signal, reportProgress }) => {
 						const onAbort = (): void => {
 							this.cancel();
@@ -200,6 +232,7 @@ export class JudgmentBatch {
 	status(): JudgmentBatchStatus {
 		return {
 			id: this.id,
+			intent: this.intent,
 			total: this.total,
 			done: this.#settled.length,
 			failed: this.#failed,
@@ -212,12 +245,19 @@ export class JudgmentBatch {
 
 	/**
 	 * Items settled since the previous drain. Waits up to `timeoutMs` for at
-	 * least one new item; returns `[]` on timeout. Once the cursor is exhausted
-	 * on a run that died wholesale, throws that error.
+	 * least one new item, then up to {@link DRAIN_COALESCE_MS} more (never past
+	 * `timeoutMs`) so near-simultaneous settles return together; returns `[]` on
+	 * timeout. Once the cursor is exhausted on a run that died wholesale, throws
+	 * that error.
 	 */
 	async drain(timeoutMs: number | undefined, signal: AbortSignal | undefined): Promise<JudgmentBatchItem[]> {
 		if (this.#cursor === this.#settled.length && this.#running) {
-			await this.#waitForSettle(timeoutMs, signal);
+			const deadline = timeoutMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + timeoutMs;
+			await this.#wait(timeoutMs, signal, { untilSettle: true });
+			const linger = Math.min(DRAIN_COALESCE_MS, deadline - Date.now());
+			if (this.#running && this.#cursor < this.#settled.length && linger > 0) {
+				await this.#wait(linger, signal);
+			}
 		}
 		if (this.#cursor < this.#settled.length) {
 			const items = this.#settled.slice(this.#cursor);
@@ -248,10 +288,18 @@ export class JudgmentBatch {
 		return true;
 	}
 
-	async #waitForSettle(timeoutMs: number | undefined, signal: AbortSignal | undefined): Promise<void> {
+	/**
+	 * Resolve on `timeoutMs`, run completion, or — with `untilSettle` — the next
+	 * settled item. Rejects when `signal` aborts.
+	 */
+	async #wait(
+		timeoutMs: number | undefined,
+		signal: AbortSignal | undefined,
+		options?: { untilSettle: boolean },
+	): Promise<void> {
 		const settled = Promise.withResolvers<void>();
 		const wake = (): void => settled.resolve();
-		this.#waiters.push(wake);
+		if (options?.untilSettle) this.#waiters.push(wake);
 		let timer: NodeJS.Timeout | undefined;
 		if (timeoutMs !== undefined) {
 			timer = setTimeout(wake, timeoutMs);
@@ -275,6 +323,7 @@ export class JudgmentBatch {
 		if (item.error !== undefined) this.#failed++;
 		if (item.model !== undefined) this.#model = item.model;
 		for (const wake of this.#waiters.splice(0)) wake();
+		this.#emitProgressEvent();
 	}
 
 	async #run(reportProgress: ((text: string) => Promise<void>) | undefined): Promise<void> {
@@ -284,6 +333,7 @@ export class JudgmentBatch {
 			this.#error = error instanceof Error ? error.message : String(error);
 		} finally {
 			this.#running = false;
+			this.#emitProgressEvent(true);
 			this.#finished.resolve();
 			for (const wake of this.#waiters.splice(0)) wake();
 		}
@@ -353,6 +403,39 @@ export class JudgmentBatch {
 		return undefined;
 	}
 
+	#emitProgressEvent(final = false): void {
+		if (final && this.#eventTimer) {
+			clearTimeout(this.#eventTimer);
+			this.#eventTimer = undefined;
+		}
+		const eventBus = this.#session.eventBus;
+		if (!eventBus) return;
+		const now = Date.now();
+		const elapsed = now - this.#lastEventAt;
+		if (!final && elapsed < EVENT_PROGRESS_INTERVAL_MS) {
+			if (!this.#eventTimer) {
+				this.#eventTimer = setTimeout(() => {
+					this.#eventTimer = undefined;
+					this.#emitProgressEvent();
+				}, EVENT_PROGRESS_INTERVAL_MS - elapsed);
+				this.#eventTimer.unref?.();
+			}
+			return;
+		}
+		this.#lastEventAt = now;
+		const { id, intent, done, total, failed, running, error } = this.status();
+		const progress: JudgmentBatchProgress = {
+			id,
+			intent,
+			done,
+			total,
+			failed,
+			running,
+			...(error === undefined ? {} : { error }),
+		};
+		eventBus.emit(JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, progress);
+	}
+
 	async #reportProgress(report: ((text: string) => Promise<void>) | undefined, final: boolean): Promise<void> {
 		if (!report) return;
 		const now = Date.now();
@@ -392,11 +475,6 @@ function requireBatch(args: Record<string, unknown>, session: ToolSession): Judg
 	return batch;
 }
 
-function progressEvent(batch: JudgmentBatch, action: string): JsStatusEvent {
-	const { done, total, failed, model } = batch.status();
-	return { op: "judge_batch", action, id: batch.id, done, total, failed, ...(model ? { model } : {}) };
-}
-
 /** Create or operate a host-owned bulk judgment run. */
 export async function runEvalJudgmentBatch(
 	args: unknown,
@@ -408,10 +486,15 @@ export async function runEvalJudgmentBatch(
 		case "create": {
 			const items = parseItems(args.items);
 			const questions = parseQuestions(args.questions);
-			const batch = new JudgmentBatch(session, items, questions, parseBatchOptions(args, items.length));
+			const batch = new JudgmentBatch(
+				session,
+				items,
+				questions,
+				parseBatchOptions(args, items.length),
+				parseIntent(args.intent),
+			);
 			batches.set(batch.id, batch);
 			batch.start();
-			options.emitStatus?.(progressEvent(batch, "create"));
 			return batch.status();
 		}
 		case "attach":
@@ -427,18 +510,8 @@ export async function runEvalJudgmentBatch(
 			) {
 				throw invalid("timeoutMs must be a non-negative finite number");
 			}
-			options.emitStatus?.(progressEvent(batch, "drain"));
-			const interval = setInterval(() => options.emitStatus?.(progressEvent(batch, "drain")), PROGRESS_INTERVAL_MS);
-			interval.unref?.();
-			try {
-				const items = await withBridgeTimeoutPause(options.emitStatus, () =>
-					batch.drain(timeoutMs, options.signal),
-				);
-				return { items };
-			} finally {
-				clearInterval(interval);
-				options.emitStatus?.(progressEvent(batch, batch.status().running ? "drain" : "done"));
-			}
+			const items = await withBridgeTimeoutPause(options.emitStatus, () => batch.drain(timeoutMs, options.signal));
+			return { items };
 		}
 		case "results":
 			return { results: requireBatch(args, session).results() };
@@ -447,7 +520,6 @@ export async function runEvalJudgmentBatch(
 		case "cancel": {
 			const batch = requireBatch(args, session);
 			const cancelled = batch.cancel();
-			options.emitStatus?.(progressEvent(batch, "cancel"));
 			return { cancelled };
 		}
 		case "close": {

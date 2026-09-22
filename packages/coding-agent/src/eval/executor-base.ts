@@ -1,6 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
@@ -23,6 +24,31 @@ export class EvalKernelNotRunningError extends Error {
 			`${language} kernel is not running; tools defined with @tool / tool() live in the kernel and must be (re)defined in an eval cell first`,
 		);
 		this.name = "EvalKernelNotRunningError";
+	}
+}
+
+/**
+ * A cell's display outputs in emission order. Progress snapshots (see
+ * `statusEventKey`) replace their earlier snapshot in place, so a long `wait()`
+ * over agents keeps one event per handle instead of one per poll tick. Shared
+ * by the kernel (Python) and VM (JS) executors.
+ */
+export class DisplayOutputCollector<T extends KernelDisplayOutput> {
+	readonly outputs: T[] = [];
+	readonly #snapshotIndex = new Map<string, number>();
+
+	push(output: T): void {
+		const display: KernelDisplayOutput = output;
+		const key = display.type === "status" ? statusEventKey(display.event) : undefined;
+		if (key !== undefined) {
+			const index = this.#snapshotIndex.get(key);
+			if (index !== undefined) {
+				this.outputs[index] = output;
+				return;
+			}
+			this.#snapshotIndex.set(key, this.outputs.length);
+		}
+		this.outputs.push(output);
 	}
 }
 
@@ -451,7 +477,8 @@ export async function executeWithKernelBase<
 		maxColumns: resolveOutputMaxColumns(settings),
 	});
 
-	const displayOutputs: KernelDisplayOutput[] = [];
+	const display = new DisplayOutputCollector<KernelDisplayOutput>();
+	const displayOutputs = display.outputs;
 	const deadlineMs = getExecutionDeadlineMs(options);
 	const remainingMs = getRemainingTimeoutMs(deadlineMs);
 	const executionTimeoutMs = remainingMs !== undefined && remainingMs > 0 ? remainingMs : undefined;
@@ -478,7 +505,7 @@ export async function executeWithKernelBase<
 			options?.onStatus?.(output.event);
 			if (isEvalTimeoutControlEvent(output.event)) return;
 		}
-		displayOutputs.push(output);
+		display.push(output);
 	};
 
 	const emitStatus: (event: JsStatusEvent) => void =
