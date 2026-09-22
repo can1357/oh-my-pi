@@ -1,8 +1,8 @@
 import { Container, type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
-import { getSelectListTheme } from "../../modes/theme/theme";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
+import { routeSelectListMouseWithTopBorder } from "@oh-my-pi/pi-tui/chrome/select-list-mouse-routing";
+import { getSelectListTheme } from "@oh-my-pi/pi-tui/theme";
 import type { PanelRole } from "../../panel/types";
-import { DynamicBorder } from "./dynamic-border";
-import { routeSelectListMouseWithTopBorder } from "./select-list-mouse-routing";
 
 /** Keep the picker compact; type-to-filter covers larger role sets. */
 const MAX_VISIBLE_ROLES = 10;

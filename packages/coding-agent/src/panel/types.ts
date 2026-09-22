@@ -1,4 +1,4 @@
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 
 /** Supported ways a panel can combine its members' perspectives. */
 export const PANEL_STRATEGIES = Object.freeze(["independent", "personas"] as const);

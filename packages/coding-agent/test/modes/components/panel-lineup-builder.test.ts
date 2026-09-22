@@ -3,13 +3,13 @@ import { stripVTControlCharacters } from "node:util";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
-import { KeybindingsManager } from "../../../src/config/keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { Settings } from "../../../src/config/settings";
 import {
 	type PanelLineupBuilderCallbacks,
 	PanelLineupBuilderOverlayComponent,
 } from "../../../src/modes/components/panel-lineup-builder";
-import { getThemeByName, setThemeInstance } from "../../../src/modes/theme/theme";
+import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { PanelPersona, PanelSettings } from "../../../src/panel/types";
 
 const DOWN = "\x1b[B";
