@@ -51,13 +51,22 @@ type RequestBody = string | Uint8Array;
  * opens a socket per concurrent turn against one host, with nothing bounding
  * the total. 128 is twice the widest preset fan-out, so a fully fanned-out
  * session still dials everything at once, and it bounds file descriptors and
- * per-connection TLS state.
+ * per-connection TLS state. The same number is the agent's `maxTotalSockets`:
+ * this transport talks to one provider host in practice, and the process-wide
+ * total is the budget that actually protects the descriptor table.
  *
  * Past the ceiling the agent queues FIFO: those requests wait with no timeout
  * and no indicator anywhere in the UI, exactly the silence #12319 is about.
- * The headroom above the fan-out is what keeps that queue empty in practice;
- * surfacing the wait itself (a `providerRetryWait`-style event while a request
- * sits in the pool queue) is a deliberate follow-up, not this change.
+ * `task.maxConcurrency` also offers "Unlimited" (0), and a session running that
+ * way can hold more concurrent turns than any fixed ceiling — past 128 they
+ * queue in the pool, silently, until a socket frees. Raise
+ * `PI_ANTHROPIC_MAX_SOCKETS` when that is the shape of the workload. Surfacing
+ * the wait itself (a `providerRetryWait`-style event while a request sits in
+ * the pool queue) is a deliberate follow-up, not this change.
+ *
+ * Only requests that stay on this transport are pooled here: a proxied request
+ * leaves for `globalThis.fetch` (see {@link coworkFetch}) and is bounded by
+ * Bun's own pool instead.
  *
  * `PI_ANTHROPIC_MAX_SOCKETS` overrides it (positive integer; anything else is
  * ignored with a debug log), following the `PI_CODEX_WEBSOCKET_*` precedent in
@@ -78,7 +87,11 @@ export function resolveMaxSocketsPerHost(raw: string | undefined): number {
 export const MAX_SOCKETS_PER_HOST = resolveMaxSocketsPerHost($env.PI_ANTHROPIC_MAX_SOCKETS);
 
 /** Exported so tests can read the pool's socket and queue books. */
-export const directAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS_PER_HOST });
+export const directAgent = new https.Agent({
+	keepAlive: true,
+	maxSockets: MAX_SOCKETS_PER_HOST,
+	maxTotalSockets: MAX_SOCKETS_PER_HOST,
+});
 
 /**
  * Drops a still-queued request from its per-host FIFO inside the agent.

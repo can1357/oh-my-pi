@@ -194,6 +194,21 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 | `CLAUDE_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                                                                                                       |
 | `CLAUDE_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                                                                                                            |
 
+### Anthropic connection pool
+
+Anthropic Messages requests run on a dedicated HTTP/1.1 keepalive transport
+(`node:https`) with one shared agent per process; every other provider, and any
+proxied Anthropic request, goes out through Bun's own `fetch` pool instead. The
+shared agent is capped at 128 sockets per host and 128 in total, which is twice
+the widest `task.maxConcurrency` preset. Requests past the cap queue in the
+agent with no timeout and no UI indicator until a socket frees, so a session
+running `task.maxConcurrency` unlimited against one provider may want a higher
+ceiling.
+
+| Variable                    | Value type                        | Behavior                                                                                                            |
+| --------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `PI_ANTHROPIC_MAX_SOCKETS`  | Positive integer (default `128`)  | Per-host and process-wide socket ceiling for the Anthropic keepalive pool. Anything but a positive integer is ignored (debug-logged) and the default applies. |
+
 ### Amazon Bedrock
 
 | Variable                                                                        | Default / behavior                                                                                                                              |

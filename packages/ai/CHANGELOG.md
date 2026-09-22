@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- The shared Anthropic keepalive pool now opens at most 128 sockets per host by default (`PI_ANTHROPIC_MAX_SOCKETS` overrides it) instead of an unbounded number, and an aborted request that is still waiting for a socket leaves the queue and settles immediately instead of holding its place until one frees.
+- The shared Anthropic keepalive pool now opens at most 128 sockets per host and 128 in total for the process, instead of an unbounded number, and an aborted request that is still waiting for a socket leaves the queue and settles immediately instead of holding its place until one frees. Requests past the ceiling queue in the pool with no timeout and no indicator, so a session running `task.maxConcurrency` unlimited should raise `PI_ANTHROPIC_MAX_SOCKETS` (positive integer; anything else is ignored).
 
 ## [18.2.8] - 2026-09-21
 

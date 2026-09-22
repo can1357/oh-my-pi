@@ -15,7 +15,13 @@ import {
  * connections and then says nothing: the TLS handshake never completes, so each
  * admitted request parks a socket the server can count while the requests
  * behind the cap stay visible in the agent's queue.
+ *
+ * They are sized from the shipped default, so an environment that sets
+ * `PI_ANTHROPIC_MAX_SOCKETS` measures a different pool than the one they
+ * describe: skip there rather than assert against a moving ceiling.
  */
+const CAP = DEFAULT_MAX_SOCKETS_PER_HOST;
+const CAP_OVERRIDDEN = (Bun.env.PI_ANTHROPIC_MAX_SOCKETS ?? "") !== "";
 const EXTRA_REQUESTS = 8;
 
 /** Accepts and holds sockets so the pool's admission decisions are observable server-side. */
@@ -105,7 +111,7 @@ function openSockets(): number {
 	return Object.values(directAgent.sockets).reduce((total, sockets) => total + (sockets?.length ?? 0), 0);
 }
 
-describe("coworkFetch connection pool", () => {
+describe.skipIf(CAP_OVERRIDDEN)("coworkFetch connection pool", () => {
 	let server: HoldingServer;
 	let attempts: Attempt[];
 
@@ -126,34 +132,34 @@ describe("coworkFetch connection pool", () => {
 	});
 
 	it("holds a host to one cap of sockets and dials the queued rest as slots free", async () => {
-		for (let index = 0; index < MAX_SOCKETS_PER_HOST + EXTRA_REQUESTS; index++) {
+		for (let index = 0; index < CAP + EXTRA_REQUESTS; index++) {
 			attempts.push(fire(server.url(`/v1/messages?i=${index}`)));
 		}
 		// Without a cap the agent hands every one of them a socket outright.
 		expect(queuedRequests()).toBe(EXTRA_REQUESTS);
 
-		await server.whenOpened(MAX_SOCKETS_PER_HOST);
+		await server.whenOpened(CAP);
 		// Nothing has closed yet, so live and peak are the admitted set itself.
-		expect(server.opened).toBe(MAX_SOCKETS_PER_HOST);
-		expect(server.live).toBe(MAX_SOCKETS_PER_HOST);
-		expect(server.peakLive).toBe(MAX_SOCKETS_PER_HOST);
+		expect(server.opened).toBe(CAP);
+		expect(server.live).toBe(CAP);
+		expect(server.peakLive).toBe(CAP);
 
-		server.reset(MAX_SOCKETS_PER_HOST);
-		await server.whenOpened(MAX_SOCKETS_PER_HOST + EXTRA_REQUESTS);
+		server.reset(CAP);
+		await server.whenOpened(CAP + EXTRA_REQUESTS);
 
 		// Counting live sockets here would race the closing ones, so the proof
 		// after the drain is the totals: every queued request dialed, none
 		// beyond them did, and the pool never holds more than a cap of sockets.
 		expect(queuedRequests()).toBe(0);
-		expect(server.opened).toBe(MAX_SOCKETS_PER_HOST + EXTRA_REQUESTS);
-		expect(openSockets()).toBeLessThanOrEqual(MAX_SOCKETS_PER_HOST);
+		expect(server.opened).toBe(CAP + EXTRA_REQUESTS);
+		expect(openSockets()).toBeLessThanOrEqual(CAP);
 	});
 
 	it("settles an aborted request that is still queued instead of holding its place", async () => {
-		for (let index = 0; index < MAX_SOCKETS_PER_HOST; index++) {
+		for (let index = 0; index < CAP; index++) {
 			attempts.push(fire(server.url(`/v1/messages?i=${index}`)));
 		}
-		await server.whenOpened(MAX_SOCKETS_PER_HOST);
+		await server.whenOpened(CAP);
 
 		const controller = new AbortController();
 		const queued = fire(server.url("/v1/messages?i=queued"), controller.signal);
@@ -168,26 +174,26 @@ describe("coworkFetch connection pool", () => {
 		// socket is the pool handing it one — which the race would report.
 		const settled = await Promise.race([
 			queued.promise.then(() => "settled"),
-			server.whenOpened(MAX_SOCKETS_PER_HOST + 1).then(() => "dialed"),
+			server.whenOpened(CAP + 1).then(() => "dialed"),
 		]);
 
 		expect(settled).toBe("settled");
 		expect(queued.outcome).toBe("rejected:AbortError");
-		expect(server.opened).toBe(MAX_SOCKETS_PER_HOST);
+		expect(server.opened).toBe(CAP);
 	});
 
 	it("frees the slot of a socket the peer resets", async () => {
-		for (let index = 0; index < MAX_SOCKETS_PER_HOST; index++) {
+		for (let index = 0; index < CAP; index++) {
 			attempts.push(fire(server.url(`/v1/messages?i=${index}`)));
 		}
-		await server.whenOpened(MAX_SOCKETS_PER_HOST);
+		await server.whenOpened(CAP);
 
 		const queued = fire(server.url("/v1/messages?i=queued"));
 		attempts.push(queued);
 		expect(queuedRequests()).toBe(1);
 
 		server.reset(1);
-		await server.whenOpened(MAX_SOCKETS_PER_HOST + 1);
+		await server.whenOpened(CAP + 1);
 		// The killed request settles on its own error; wait for that rather than
 		// assume the accept above already carried it.
 		await Promise.race(attempts.map(attempt => attempt.promise));
@@ -197,8 +203,8 @@ describe("coworkFetch connection pool", () => {
 		expect(attempts.filter(attempt => attempt.outcome !== null)).toHaveLength(1);
 		expect(queued.outcome).toBeNull();
 		expect(queuedRequests()).toBe(0);
-		expect(server.opened).toBe(MAX_SOCKETS_PER_HOST + 1);
-		expect(openSockets()).toBeLessThanOrEqual(MAX_SOCKETS_PER_HOST);
+		expect(server.opened).toBe(CAP + 1);
+		expect(openSockets()).toBeLessThanOrEqual(CAP);
 	});
 });
 
@@ -216,5 +222,12 @@ describe("resolveMaxSocketsPerHost", () => {
 		for (const raw of ["0", "-4", "1.5", "lots", "Infinity"]) {
 			expect(resolveMaxSocketsPerHost(raw)).toBe(DEFAULT_MAX_SOCKETS_PER_HOST);
 		}
+	});
+
+	it("wires the resolved cap into the shared agent, per host and in total", () => {
+		// `maxTotalSockets` is the process-wide half: without it one agent can
+		// hold `maxSockets` per host across arbitrarily many hosts.
+		expect(directAgent.maxSockets).toBe(MAX_SOCKETS_PER_HOST);
+		expect(directAgent.maxTotalSockets).toBe(MAX_SOCKETS_PER_HOST);
 	});
 });
