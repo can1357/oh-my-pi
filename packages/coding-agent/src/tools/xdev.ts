@@ -121,10 +121,14 @@ function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string 
  * Parse and validate a device write's JSON `content` against the wrapped
  * tool's wire schema. Strips a habitual top-level `i` (intent) unless the
  * schema declares one. Throws ToolError; schema-mismatch errors carry `docs()`
- * for repair.
+ * for repair. A device with `lenientArgValidation` receives the raw args on a
+ * schema mismatch instead — the same contract the agent loop and the eval
+ * tool bridge honor — so a tool that owns its own refusal (the Dispatch tools
+ * re-validate with a strict schema and name the precise problem) is never
+ * pre-empted by the host's generic wording plus the full docs.
  */
 function parseDeviceArgs(
-	device: AiTool,
+	device: Tool,
 	content: string,
 	toolCallId: string,
 	docs: () => string,
@@ -154,6 +158,12 @@ function parseDeviceArgs(
 			arguments: args,
 		});
 	} catch (error) {
+		if (device.lenientArgValidation) {
+			const fallback = { ...args };
+			delete fallback.__parseError;
+			delete fallback.__rawJson;
+			return fallback;
+		}
 		const message = error instanceof Error ? error.message : String(error);
 		throw new ToolError(`Invalid args for ${XD_URL_PREFIX}${device.name}: ${message}\n\n${docs()}`);
 	}
@@ -406,7 +416,7 @@ export async function dispatchXdevTool(
 			};
 		}
 
-		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () => renderDocs(canonical));
+		const validated = parseDeviceArgs(canonical, content, toolCallId, () => renderDocs(canonical));
 		// Record the wrapped tool's approval tier so the prewalk coordinator can
 		// tell a read-only device call (e.g. `lsp` navigation) from a real
 		// workspace mutation without re-decoding the payload. Best-effort: a

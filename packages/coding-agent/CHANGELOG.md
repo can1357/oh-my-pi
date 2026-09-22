@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `write xd://<tool>` now honors a device's `lenientArgValidation`: on a schema mismatch the raw arguments reach the tool's own `execute()` (matching the agent loop and eval tool bridge), so tools that own their refusal answer with their precise message instead of the generic `Invalid args for xd://…` plus the full tool doc ([#12871](https://github.com/can1357/oh-my-pi/pull/12871) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
