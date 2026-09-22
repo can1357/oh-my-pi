@@ -69,6 +69,7 @@ function makeFixture(over: Partial<CollabHostSnapshot> = {}): Fixture {
 			participants: 3,
 			relayConnected: true,
 			inputRequired: false,
+			busy: false,
 			access: "control",
 			...over,
 		},
@@ -394,6 +395,26 @@ describe("collab registry", () => {
 		expect(JSON.parse(missingOp)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "invalid_operation" });
 		const unknownOp = await rawRequest(pub.endpoint, { ...auth, op: "unknown" });
 		expect(JSON.parse(unknownOp)).toEqual({ ok: false, v: COLLAB_REGISTRY_VERSION, error: "invalid_operation" });
+	});
+
+	it("lists a host that omits busy as unknown and drops one that reports garbage", async () => {
+		const dir = await tempDir();
+		// An omp older than the `busy` field: same protocol version, one key short.
+		const older = makeFixture({ sessionId: "older-host" });
+		const { busy: _busy, ...withoutBusy } = older.snapshot;
+		openPublications.push(
+			await publishCollabHost(
+				{ snapshot: () => withoutBusy as CollabHostSnapshot, link: () => null },
+				{ dir, instanceId: older.snapshot.instanceId },
+			),
+		);
+		const broken = makeFixture({ sessionId: "broken-host", busy: "yes" as unknown as boolean });
+		await publish(dir, broken);
+
+		const hosts = await listCollabHosts({ dir });
+		// Unknown, never idle: the older host stays listed with a null flag, and a
+		// snapshot that answers with a non-boolean is malformed, not busy.
+		expect(hosts.map(host => [host.sessionId, host.busy])).toEqual([["older-host", null]]);
 	});
 
 	it("keeps both URLs and room secrets off disk even after resolving links", async () => {

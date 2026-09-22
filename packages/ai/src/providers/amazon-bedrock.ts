@@ -988,10 +988,17 @@ function buildToolResultBlock(
 	hoistedImages: ImageBlockWire[],
 ): ToolResultBlockWire {
 	const content: Array<TextBlockWire | ImageBlockWire> = [];
+	// Bedrock's Anthropic Claude models reject an error toolResult that carries a
+	// non-text block ("all content must be type `text` if `is_error` is true"),
+	// so images inside an error result must always be hoisted out regardless of
+	// the model's requiresToolResultImageHoisting flag (no `class "anthropic"`
+	// rule sets it). Mirrors anthropic.ts buildToolResultBlock. Re-serializing a
+	// previously-persisted poisoned result on a later turn repairs it in place.
+	const hoistImages = message.isError || model.requiresToolResultImageHoisting;
 	for (const block of message.content) {
 		if (block.type === "image") {
 			const image: ImageBlockWire = { image: createImageBlock(block.mimeType, block.data) };
-			if (model.requiresToolResultImageHoisting) {
+			if (hoistImages) {
 				content.push({ text: "(see attached image)" });
 				hoistedImages.push(image);
 			} else {

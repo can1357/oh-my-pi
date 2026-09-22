@@ -63,6 +63,20 @@ type BabelExpressionStatement = {
 	start: number;
 	end: number;
 	expression?: { type?: string };
+	directive?: string;
+};
+
+type BabelAssignmentNode = BabelNode & {
+	type: "AssignmentExpression" | "UpdateExpression";
+	left?: unknown;
+	argument?: unknown;
+};
+
+type BindingAssignmentEdit = {
+	start: number;
+	end: number;
+	names: string[];
+	children: BindingAssignmentEdit[];
 };
 
 type BabelProgramNode = BabelImportDeclaration | BabelLexicalDecl | BabelExpressionStatement | { type: string };
@@ -510,6 +524,243 @@ function appendGlobalBindingPublish(source: string, names: readonly string[]): s
 	return `${source};\n${assignments}`;
 }
 
+function addBindingNames(pattern: unknown, names: Set<string>): void {
+	const collected: string[] = [];
+	collectBindingNames(pattern, collected);
+	for (const name of collected) names.add(name);
+}
+
+function addDirectLexicalBindings(value: unknown, names: Set<string>): void {
+	if (!Array.isArray(value)) return;
+	for (const item of value) {
+		if (!item || typeof item !== "object") continue;
+		const node = item as Record<string, unknown>;
+		if (node.type === "VariableDeclaration" && node.kind !== "var" && Array.isArray(node.declarations)) {
+			for (const declaration of node.declarations) {
+				if (declaration && typeof declaration === "object" && "id" in declaration) {
+					addBindingNames(declaration.id, names);
+				}
+			}
+		} else if (
+			(node.type === "ClassDeclaration" || node.type === "FunctionDeclaration") &&
+			node.id &&
+			typeof node.id === "object"
+		) {
+			addBindingNames(node.id, names);
+		}
+	}
+}
+
+function withLexicalShadows(shadowed: ReadonlySet<string>, value: unknown): ReadonlySet<string> {
+	const names = new Set(shadowed);
+	addDirectLexicalBindings(value, names);
+	return names;
+}
+
+function addFunctionScopedBindings(value: unknown, names: Set<string>): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) addFunctionScopedBindings(item, names);
+		return;
+	}
+	const node = value as Record<string, unknown>;
+	const type = node.type;
+	if (typeof type !== "string") return;
+	if (isExecutionBoundary(type)) {
+		if (type === "FunctionDeclaration") addBindingNames(node.id, names);
+		return;
+	}
+	if (type === "VariableDeclaration" && node.kind === "var" && Array.isArray(node.declarations)) {
+		for (const declaration of node.declarations) {
+			if (declaration && typeof declaration === "object" && "id" in declaration) {
+				addBindingNames(declaration.id, names);
+			}
+		}
+	}
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		addFunctionScopedBindings(node[key], names);
+	}
+}
+
+function collectBindingAssignmentEdits(
+	value: unknown,
+	tracked: ReadonlySet<string>,
+	shadowed: ReadonlySet<string>,
+	out: BindingAssignmentEdit[],
+	parent?: BindingAssignmentEdit,
+): void {
+	if (!value || typeof value !== "object") return;
+	if (Array.isArray(value)) {
+		for (const item of value) collectBindingAssignmentEdits(item, tracked, shadowed, out, parent);
+		return;
+	}
+
+	const node = value as Record<string, unknown>;
+	const type = node.type;
+	if (typeof type !== "string") return;
+
+	if (isExecutionBoundary(type)) {
+		const functionShadows = new Set(shadowed);
+		if (Array.isArray(node.params)) {
+			for (const param of node.params) addBindingNames(param, functionShadows);
+		}
+		if (type === "FunctionExpression") addBindingNames(node.id, functionShadows);
+		addFunctionScopedBindings(node.body, functionShadows);
+		collectBindingAssignmentEdits(node.body, tracked, functionShadows, out, parent);
+		return;
+	}
+	if (type === "BlockStatement") {
+		const blockShadows = withLexicalShadows(shadowed, node.body);
+		collectBindingAssignmentEdits(node.body, tracked, blockShadows, out, parent);
+		return;
+	}
+	if (type === "CatchClause") {
+		const catchShadows = new Set(shadowed);
+		addBindingNames(node.param, catchShadows);
+		collectBindingAssignmentEdits(node.body, tracked, catchShadows, out, parent);
+		return;
+	}
+	if (type === "ForStatement") {
+		const loopShadows = new Set(shadowed);
+		const init = node.init as Record<string, unknown> | undefined;
+		if (init?.type === "VariableDeclaration" && init.kind !== "var" && Array.isArray(init.declarations)) {
+			for (const declaration of init.declarations) {
+				if (declaration && typeof declaration === "object" && "id" in declaration) {
+					addBindingNames(declaration.id, loopShadows);
+				}
+			}
+		}
+		for (const key of ["init", "test", "update", "body"]) {
+			collectBindingAssignmentEdits(node[key], tracked, loopShadows, out, parent);
+		}
+		return;
+	}
+	if (type === "ForInStatement" || type === "ForOfStatement") {
+		const loopShadows = new Set(shadowed);
+		const left = node.left as Record<string, unknown> | undefined;
+		if (left?.type === "VariableDeclaration" && left.kind !== "var" && Array.isArray(left.declarations)) {
+			for (const declaration of left.declarations) {
+				if (declaration && typeof declaration === "object" && "id" in declaration) {
+					addBindingNames(declaration.id, loopShadows);
+				}
+			}
+		}
+		for (const key of ["left", "right", "body"]) {
+			collectBindingAssignmentEdits(node[key], tracked, loopShadows, out, parent);
+		}
+		return;
+	}
+	if (type === "SwitchStatement") {
+		collectBindingAssignmentEdits(node.discriminant, tracked, shadowed, out, parent);
+		const switchShadows = new Set(shadowed);
+		if (Array.isArray(node.cases)) {
+			for (const item of node.cases) {
+				if (!item || typeof item !== "object") continue;
+				const switchCase = item as Record<string, unknown>;
+				addDirectLexicalBindings(switchCase.consequent, switchShadows);
+			}
+			for (const item of node.cases) {
+				if (!item || typeof item !== "object") continue;
+				const switchCase = item as Record<string, unknown>;
+				collectBindingAssignmentEdits(switchCase.test, tracked, switchShadows, out, parent);
+				collectBindingAssignmentEdits(switchCase.consequent, tracked, switchShadows, out, parent);
+			}
+		}
+		return;
+	}
+
+	let currentParent = parent;
+	if (type === "AssignmentExpression" || type === "UpdateExpression") {
+		const assignment = node as unknown as BabelAssignmentNode;
+		const assigned: string[] = [];
+		collectBindingNames(type === "AssignmentExpression" ? assignment.left : assignment.argument, assigned);
+		const names = [...new Set(assigned.filter(name => tracked.has(name) && !shadowed.has(name)))];
+		if (names.length > 0) {
+			const edit: BindingAssignmentEdit = {
+				start: assignment.start,
+				end: assignment.end,
+				names,
+				children: [],
+			};
+			if (parent) parent.children.push(edit);
+			else out.push(edit);
+			currentParent = edit;
+		}
+	}
+
+	for (const key in node) {
+		if (key === "loc" || key === "extra" || key === "range") continue;
+		if (key === "leadingComments" || key === "trailingComments" || key === "innerComments") continue;
+		collectBindingAssignmentEdits(node[key], tracked, shadowed, out, currentParent);
+	}
+}
+
+function uniqueInternalName(ast: unknown, base: string, used: Set<string>): string {
+	if (used.size === 0) {
+		walkNodes(ast, node => {
+			if (node.type === "Identifier" && typeof node.name === "string") used.add(node.name);
+		});
+	}
+	let name = base;
+	let suffix = 2;
+	while (used.has(name)) name = `${base}${suffix++}`;
+	used.add(name);
+	return name;
+}
+
+function renderBindingAssignmentEdit(
+	code: string,
+	edit: BindingAssignmentEdit,
+	valueName: string,
+	globalName: string,
+): string {
+	let expression = code.slice(edit.start, edit.end);
+	const children = [...edit.children].sort((left, right) => right.start - left.start);
+	for (const child of children) {
+		const replacement = renderBindingAssignmentEdit(code, child, valueName, globalName);
+		expression =
+			expression.slice(0, child.start - edit.start) + replacement + expression.slice(child.end - edit.start);
+	}
+	const publications = edit.names.map(name => `${globalName}[${JSON.stringify(name)}] = ${name}`).join(", ");
+	return `(${valueName} = (${expression}), ${publications}, ${valueName})`;
+}
+
+function instrumentBindingAssignments(
+	code: string,
+	ast: { program: { body: ReadonlyArray<BabelProgramNode> } },
+	names: readonly string[],
+): string {
+	if (names.length === 0) return code;
+	const edits: BindingAssignmentEdit[] = [];
+	const tracked = new Set(names);
+	for (const node of ast.program.body) {
+		collectBindingAssignmentEdits(node, tracked, new Set(), edits);
+	}
+	if (edits.length === 0) return code;
+
+	const used = new Set<string>();
+	const valueName = uniqueInternalName(ast, "__omp_assignment_value__", used);
+	const globalName = uniqueInternalName(ast, "__omp_assignment_global__", used);
+	edits.sort((left, right) => right.start - left.start);
+	let result = code;
+	for (const assignment of edits) {
+		const replacement = renderBindingAssignmentEdit(code, assignment, valueName, globalName);
+		result = result.slice(0, assignment.start) + replacement + result.slice(assignment.end);
+	}
+
+	let directiveEnd = 0;
+	for (const node of ast.program.body) {
+		if (node.type !== "ExpressionStatement" || typeof (node as BabelExpressionStatement).directive !== "string")
+			break;
+		directiveEnd = (node as BabelExpressionStatement).end;
+	}
+	const declaration = `var ${valueName}, ${globalName} = this;`;
+	const separator = directiveEnd > 0 ? "\n" : "";
+	return `${result.slice(0, directiveEnd)}${separator}${declaration}\n${result.slice(directiveEnd)}`;
+}
+
 /**
  * Demote top-level `const`/`let`/`class` declarations to `var` so they persist on the
  * worker's globalThis across indirect `eval` calls. Indirect eval gives each call its own
@@ -523,7 +774,9 @@ function appendGlobalBindingPublish(source: string, names: readonly string[]): s
  * When the source must run inside the async wrapper (top-level `await`), demoted `var`s —
  * and the user's own top-level `var` and `function` declarations — would be scoped to the
  * wrapper function and die with the cell. In that mode we publish every top-level binding
- * back to the wrapper's lexical `this`, which is the worker global object.
+ * back to the wrapper's lexical `this`, which is the worker global object. Every executed
+ * assignment to those bindings publishes in evaluation order; there is no end-of-cell sweep
+ * that could clobber a later explicit global write or publish a declaration that never ran.
  *
  * Nested declarations (inside functions, blocks, classes) are left alone — they're
  * scoped to their enclosing function/block regardless of `var` vs `let`/`const`.
@@ -554,11 +807,13 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 	}
 	if (targets.length === 0) return code;
 
+	const bindingNames = publishGlobals ? [...new Set(targets.flatMap(({ node }) => getLexicalBindingNames(node)))] : [];
+
 	targets.sort((a, b) => b.node.start - a.node.start);
 	let result = code;
 	for (const { node, demote } of targets) {
 		const segment = result.slice(node.start, node.end);
-		const bindingNames = publishGlobals ? getLexicalBindingNames(node) : [];
+		const declarationBindingNames = publishGlobals ? getLexicalBindingNames(node) : [];
 		let replacement: string;
 		if (!demote) {
 			replacement = segment;
@@ -573,9 +828,13 @@ async function demoteTopLevelLexicals(code: string, options: { publishGlobals?: 
 			replacement = `var ${id.name} = class${tail}${hasTrailingSemi ? "" : ";"}`;
 		}
 		result =
-			result.slice(0, node.start) + appendGlobalBindingPublish(replacement, bindingNames) + result.slice(node.end);
+			result.slice(0, node.start) +
+			appendGlobalBindingPublish(replacement, declarationBindingNames) +
+			result.slice(node.end);
 	}
-	return result;
+	if (bindingNames.length === 0) return result;
+	const rewrittenAst = await parseProgram(result);
+	return rewrittenAst ? instrumentBindingAssignments(result, rewrittenAst, bindingNames) : result;
 }
 
 async function returnFinalExpression(code: string): Promise<{ source: string; returned: boolean }> {

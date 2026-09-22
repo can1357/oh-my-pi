@@ -7350,6 +7350,9 @@ export class AuthStorage {
 				throw error;
 			}
 			const updated: OAuthCredential = {
+				// Preserve credential-subtype metadata, such as MCP token endpoints,
+				// that the provider's bare OAuth response cannot reproduce.
+				...attempted,
 				type: "oauth",
 				access: refreshed.access,
 				refresh: refreshed.refresh,
