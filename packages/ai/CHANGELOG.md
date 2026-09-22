@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Command Code `omp usage` reports 5-hour and weekly credit windows plus remaining credits via the alpha billing endpoints.
+
 ### Fixed
 
 - Signing in to a local provider (lm-studio, llama.cpp, vllm) with an empty key paste no longer reports the provider as logged in while its requests go out unauthenticated. ([#12436](https://github.com/can1357/oh-my-pi/pull/12436) by [@xiechimon](https://github.com/xiechimon))
