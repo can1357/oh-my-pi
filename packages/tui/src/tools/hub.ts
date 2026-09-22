@@ -100,6 +100,8 @@ export interface JobSnapshot {
 	status: "running" | "completed" | "failed" | "cancelled";
 	label: string;
 	durationMs: number;
+	/** Process exit status when the job reports one. */
+	exitCode?: number;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
 	resolvedModel?: string;
 	/** Provider/id including routing, with no added thinking suffix. */
@@ -570,11 +572,11 @@ export function jobsRenderResult(
 					renderItem: (job, context) => {
 						const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
 						const lines: string[] = [];
-						const icon = formatStatusIcon(
+						const icon = `${formatStatusIcon(
 							statusToIcon(job.status),
 							uiTheme,
 							job.status === "running" ? options.spinnerFrame : undefined,
-						);
+						)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
 						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
 						const durationSuffix = `${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
 						const displayId = truncateToWidth(

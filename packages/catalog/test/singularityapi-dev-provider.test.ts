@@ -5,15 +5,18 @@ import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isCatalogDescriptor, resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
-import { singularityApiModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { singularityApiDevModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { normalizeSingularityApiBaseUrl } from "@oh-my-pi/pi-catalog/wire/singularityapi";
+import {
+	SINGULARITYAPI_DEV_API_BASE_URL,
+	normalizeSingularityApiBaseUrl,
+} from "@oh-my-pi/pi-catalog/wire/singularityapi";
 
-const originalKey = Bun.env.SINGULARITYAPI_API_KEY;
+const originalKey = Bun.env.SINGULARITYAPI_DEV_API_KEY;
 
 afterEach(() => {
-	if (originalKey === undefined) delete Bun.env.SINGULARITYAPI_API_KEY;
-	else Bun.env.SINGULARITYAPI_API_KEY = originalKey;
+	if (originalKey === undefined) delete Bun.env.SINGULARITYAPI_DEV_API_KEY;
+	else Bun.env.SINGULARITYAPI_DEV_API_KEY = originalKey;
 	vi.restoreAllMocks();
 });
 
@@ -35,7 +38,7 @@ function singularityApiModelsFetch(): { calls: string[]; authorizations: (string
 					{
 						id: "deepseek-v4-flash",
 						object: "model",
-						created: 1690000000,
+						created: 1697716800,
 						owned_by: "singularityapi",
 						capabilities: [
 							{
@@ -53,7 +56,7 @@ function singularityApiModelsFetch(): { calls: string[]; authorizations: (string
 					{
 						id: "gpt-image-2",
 						object: "model",
-						created: 1690000000,
+						created: 1697716800,
 						owned_by: "singularityapi",
 						capabilities: [
 							{
@@ -76,7 +79,7 @@ function bareSpec(id: string): ModelSpec<"openai-completions"> {
 		id,
 		name: id,
 		api: "openai-completions",
-		provider: "singularityapi",
+		provider: "singularityapi-dev",
 		baseUrl: "https://api.singularityapi.dev/v1",
 		reasoning: false,
 		input: ["text"],
@@ -86,16 +89,16 @@ function bareSpec(id: string): ModelSpec<"openai-completions"> {
 	};
 }
 
-describe("SingularityAPI provider support", () => {
+describe("SingularityAPI universal gateway support", () => {
 	test("discovers the catalog with live limits and tariffs", async () => {
 		const { calls, authorizations, fetch } = singularityApiModelsFetch();
-		const pending = singularityApiModelManagerOptions({ apiKey: "sapi-test", fetch }).fetchDynamicModels?.();
+		const pending = singularityApiDevModelManagerOptions({ apiKey: "sk-sapi-test", fetch }).fetchDynamicModels?.();
 		const models = pending ? await pending : pending;
 
 		expect(calls).toEqual(["https://api.singularityapi.dev/v1/models"]);
-		expect(authorizations).toEqual(["Bearer sapi-test"]);
+		expect(authorizations).toEqual(["Bearer sk-sapi-test"]);
 		expect(models?.find(model => model.id === "deepseek-v4-flash")).toMatchObject({
-			provider: "singularityapi",
+			provider: "singularityapi-dev",
 			api: "openai-completions",
 			baseUrl: "https://api.singularityapi.dev/v1",
 			contextWindow: 1000000,
@@ -103,14 +106,18 @@ describe("SingularityAPI provider support", () => {
 			cost: { input: 0.081, output: 0.162, cacheRead: 0, cacheWrite: 0 },
 		});
 		// Discovery needs the key: an unauthenticated manager must not probe.
-		expect(singularityApiModelManagerOptions({}).fetchDynamicModels).toBeUndefined();
+		expect(singularityApiDevModelManagerOptions({}).fetchDynamicModels).toBeUndefined();
 	});
 
-	test("identifies DeepSeek V4 Flash rows as the reviewed Flash family", () => {
+	test("identifies DeepSeek V4 Flash rows with the gateway's measured ladder", () => {
+		// Probed live 2026-09-22: admission accepts `none`, `minimal`, `low`,
+		// `medium`, `high` and 400s `xhigh`, `max`, integers and unknown values —
+		// `max` is a reserve-lane-only tier, so shipping it here 400s every
+		// DeepSeek request.
 		for (const id of ["deepseek-v4-flash", "deepseek-v4-flash-0731"]) {
 			const model = buildModel(bareSpec(id));
 			expect(model.reasoning).toBe(true);
-			expect(model.thinking).toMatchObject({ mode: "effort", efforts: ["low", "high", "max"] });
+			expect(model.thinking).toMatchObject({ mode: "effort", efforts: ["low", "medium", "high"] });
 			expect(model.compat.maxTokensField).toBe("max_tokens");
 			expect(model.compat.reasoningContentField).toBe("reasoning_content");
 			expect(model.compat.reasoningDisableMode).toBe("none-effort");
@@ -121,7 +128,7 @@ describe("SingularityAPI provider support", () => {
 	test("identifies DeepSeek V4 Pro rows with the Pro ladder", () => {
 		const model = buildModel(bareSpec("deepseek-v4-pro"));
 		expect(model.reasoning).toBe(true);
-		expect(model.thinking).toMatchObject({ mode: "effort", efforts: ["low", "high", "max"] });
+		expect(model.thinking).toMatchObject({ mode: "effort", efforts: ["low", "medium", "high"] });
 		expect(model.compat.reasoningContentField).toBe("reasoning_content");
 	});
 
@@ -149,7 +156,7 @@ describe("SingularityAPI provider support", () => {
 		// …and discovery assigns the transport from the row's own capability list, so
 		// `generate_image` dispatches it instead of rejecting `openai-completions`.
 		const { fetch } = singularityApiModelsFetch();
-		const pending = singularityApiModelManagerOptions({ apiKey: "sapi-test", fetch }).fetchDynamicModels?.();
+		const pending = singularityApiDevModelManagerOptions({ apiKey: "sk-sapi-test", fetch }).fetchDynamicModels?.();
 		const models = pending ? await pending : pending;
 		expect(models?.find(model => model.id === "gpt-image-2")).toMatchObject({
 			api: "openai-images",
@@ -168,24 +175,24 @@ describe("SingularityAPI provider support", () => {
 	});
 
 	test("registers discovery, defaults, and the API key environment name", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "singularityapi");
+		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "singularityapi-dev");
 		expect(descriptor).toMatchObject({
 			defaultModel: "deepseek-v4-flash",
 			dynamicModelsAuthoritative: true,
 		});
 		expect(isCatalogDescriptor(descriptor!)).toBe(false);
-		expect(DEFAULT_MODEL_PER_PROVIDER.singularityapi).toBe("deepseek-v4-flash");
+		expect(DEFAULT_MODEL_PER_PROVIDER["singularityapi-dev"]).toBe("deepseek-v4-flash");
 
-		delete Bun.env.SINGULARITYAPI_API_KEY;
-		expect(getEnvApiKey("singularityapi")).toBeUndefined();
-		Bun.env.SINGULARITYAPI_API_KEY = "sapi-test";
-		expect(getEnvApiKey("singularityapi")).toBe("sapi-test");
+		delete Bun.env.SINGULARITYAPI_DEV_API_KEY;
+		expect(getEnvApiKey("singularityapi-dev")).toBeUndefined();
+		Bun.env.SINGULARITYAPI_DEV_API_KEY = "sk-sapi-test";
+		expect(getEnvApiKey("singularityapi-dev")).toBe("sk-sapi-test");
 	});
 
 	test("pastes a key through the login selector after models-endpoint validation", async () => {
-		const provider = getOAuthProviders().find(item => item.id === "singularityapi");
+		const provider = getOAuthProviders().find(item => item.id === "singularityapi-dev");
 		expect(provider?.name).toBe("SingularityAPI");
-		const login = getProviderDefinition("singularityapi")?.login;
+		const login = getProviderDefinition("singularityapi-dev")?.login;
 		expect(login).toBeDefined();
 
 		const { calls, fetch } = singularityApiModelsFetch();
@@ -196,9 +203,9 @@ describe("SingularityAPI provider support", () => {
 			await expect(
 				login?.({
 					onAuth,
-					onPrompt: async () => "  Bearer sapi-test  ",
+					onPrompt: async () => "  Bearer sk-sapi-test  ",
 				}),
-			).resolves.toBe("sapi-test");
+			).resolves.toBe("sk-sapi-test");
 		} finally {
 			globalThis.fetch = previousFetch;
 		}
@@ -210,14 +217,14 @@ describe("SingularityAPI provider support", () => {
 	});
 
 	test("rejects a key the models endpoint refuses", async () => {
-		const login = getProviderDefinition("singularityapi")?.login;
+		const login = getProviderDefinition("singularityapi-dev")?.login;
 		const unauthorizedFetch: FetchImpl = async () =>
 			Response.json({ error: { message: "Invalid API key.", type: "invalid_request_error" } }, { status: 401 });
 		const previousFetch = globalThis.fetch;
 		globalThis.fetch = unauthorizedFetch as typeof globalThis.fetch;
 		try {
 			await expect(
-				login?.({ onPrompt: async () => "sapi-bogus" }) ?? Promise.reject(new Error("missing login")),
+				login?.({ onPrompt: async () => "sk-sapi-bogus" }) ?? Promise.reject(new Error("missing login")),
 			).rejects.toThrow();
 		} finally {
 			globalThis.fetch = previousFetch;
@@ -225,13 +232,20 @@ describe("SingularityAPI provider support", () => {
 	});
 
 	test("scopes the model cache to the credential and the endpoint across both call paths", () => {
-		const keyed = { apiKey: "sapi-a", baseUrl: "https://api.singularityapi.dev/v1" };
-		expect(singularityApiModelManagerOptions(keyed).cacheProviderId).toBe(
-			resolveModelCacheProviderId("singularityapi", keyed),
+		const keyed = { apiKey: "sk-sapi-a", baseUrl: "https://api.singularityapi.dev/v1" };
+		expect(singularityApiDevModelManagerOptions(keyed).cacheProviderId).toBe(
+			resolveModelCacheProviderId("singularityapi-dev", keyed),
 		);
-		expect(resolveModelCacheProviderId("singularityapi", keyed)).not.toBe(
-			resolveModelCacheProviderId("singularityapi", { apiKey: "sapi-b", baseUrl: keyed.baseUrl }),
+		expect(resolveModelCacheProviderId("singularityapi-dev", keyed)).not.toBe(
+			resolveModelCacheProviderId("singularityapi-dev", { apiKey: "sk-sapi-b", baseUrl: keyed.baseUrl }),
 		);
-		expect(normalizeSingularityApiBaseUrl("https://api.singularityapi.dev")).toBe(keyed.baseUrl);
+		// A blank override means "not configured", so it shares the canonical host's
+		// namespace instead of hashing a bare `/v1`.
+		expect(singularityApiDevModelManagerOptions({ apiKey: "sk-sapi-a", baseUrl: "   " }).cacheProviderId).toBe(
+			singularityApiDevModelManagerOptions({ apiKey: "sk-sapi-a" }).cacheProviderId,
+		);
+		expect(normalizeSingularityApiBaseUrl("https://api.singularityapi.dev", SINGULARITYAPI_DEV_API_BASE_URL)).toBe(
+			keyed.baseUrl,
+		);
 	});
 });

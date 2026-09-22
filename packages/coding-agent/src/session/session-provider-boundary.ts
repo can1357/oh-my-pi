@@ -15,6 +15,7 @@ import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
+import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
 import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { type CustomMessage, convertToLlm } from "./messages";
@@ -61,6 +62,11 @@ export class SessionProviderBoundary {
 			return images.flatMap((image, index) => {
 				const label = `Image #${index + 1}`;
 				const uri = `attachment://${index + 1}`;
+				// File-backed attachments resolve to their original path so tools and
+				// clickable links open the user's real file; clipboard payloads have no
+				// source file and materialize a blob copy instead.
+				const originalPath = imageAttachmentSource(image)?.path;
+				if (originalPath) return [{ label, uri, image, sourcePath: originalPath }];
 				try {
 					const sourcePath = this.#host.sessionManager.putBlobSync(Buffer.from(image.data, "base64"), {
 						extension: blobExtensionForImageMimeType(image.mimeType),

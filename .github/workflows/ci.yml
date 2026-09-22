@@ -674,9 +674,9 @@ jobs:
            run: bun run ci:release:build-binaries
          - name: Sign and notarize macOS binary (Developer ID)
            # Replaces the ad-hoc signature with a Developer ID + hardened-runtime
-           # one (+JIT/library-validation entitlements; omp dlopens its
-           # runtime-extracted native addon, which has a different Team ID) and
-           # notarizes. Auto-skips until the APPLE_* secrets are configured.
+           # one while preserving the required JIT, Apple Events, and
+           # library-validation entitlements, then notarizes. Auto-skips until
+           # the APPLE_* secrets are configured.
            if: matrix.platform == 'darwin' && env.MACOS_SIGNING == 'true'
            env:
               APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}

@@ -599,18 +599,18 @@ export function agentLoop(
 	const stream = createAgentStream();
 
 	(async () => {
-		const newMessages: AgentMessage[] = [...prompts];
-		const currentContext: AgentContext = {
-			...context,
-			messages: [...context.messages, ...prompts],
-		};
-		for (const prompt of prompts) {
-			(prompt as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
-		}
-
-		stream.push({ type: "agent_start" });
-
 		try {
+			const newMessages: AgentMessage[] = [...prompts];
+			const currentContext: AgentContext = {
+				...context,
+				messages: [...context.messages, ...prompts],
+			};
+			for (const prompt of prompts) {
+				(prompt as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+			}
+
+			stream.push({ type: "agent_start" });
+
 			await runLoop(currentContext, newMessages, config, signal, stream, streamFn, prompts);
 		} catch (err) {
 			stream.fail(err);
@@ -668,12 +668,12 @@ export function agentLoopContinue(
 	const stream = createAgentStream();
 
 	(async () => {
-		const newMessages: AgentMessage[] = [];
-		const currentContext: AgentContext = { ...context, messages: [...context.messages] };
-
-		stream.push({ type: "agent_start" });
-
 		try {
+			const newMessages: AgentMessage[] = [];
+			const currentContext: AgentContext = { ...context, messages: [...context.messages] };
+
+			stream.push({ type: "agent_start" });
+
 			await runLoop(currentContext, newMessages, config, signal, stream, streamFn);
 		} catch (err) {
 			stream.fail(err);
@@ -1112,7 +1112,11 @@ function resolveAsides(entries: AsideMessage[] | undefined): AgentMessage[] {
 
 function discardAsides(messages: readonly AgentMessage[], error: Error): void {
 	for (const message of messages) {
-		(message as CommittableAsideMessage)[ASIDE_MESSAGE_DISCARD]?.(error);
+		try {
+			(message as CommittableAsideMessage)[ASIDE_MESSAGE_DISCARD]?.(error);
+		} catch (discardError) {
+			logger.error("Aside discard hook threw", { error: discardError });
+		}
 	}
 }
 
@@ -2331,8 +2335,11 @@ async function streamAssistantResponse(
 				}
 				if (addedPartial) {
 					context.messages[context.messages.length - 1] = trailing;
-					stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
+				} else {
+					context.messages.push(trailing);
+					stream.push({ type: "message_start", message: snapshotAssistantMessage(trailing) });
 				}
+				stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
 				await finishChat(trailing);
 				speculationSettled = true;
 				providerStreamSettled = true;
@@ -3274,7 +3281,13 @@ async function executeToolCalls(
 			toolName: toolCall.name,
 		});
 
-		await checkSteering();
+		// Best-effort steering probe: its own failure is surfaced by the
+		// dedicated watch path (which guards the identical call), so a rejecting
+		// host `hasSteeringMessages`/`hasIrcInterrupts` callback must not reject
+		// this task. An unguarded rejection here fires after the tool already
+		// ran and poisons the `start.then(runTool)` ordering chain, skipping
+		// every later chained record with a phantom "pending steering" result.
+		await checkSteering().catch(() => undefined);
 	};
 
 	let lastExclusive: Promise<void> = Promise.resolve();

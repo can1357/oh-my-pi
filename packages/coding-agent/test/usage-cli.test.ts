@@ -660,6 +660,31 @@ describe("formatUsageBreakdown", () => {
 					credits: [{ expiresAt: "2025-12-30T00:00:00.000Z" }],
 				},
 			},
+			{
+				provider: "anthropic",
+				fetchedAt: now,
+				limits: [],
+				metadata: { email: "claude@example.test" },
+				resetCredits: {
+					availableCount: 3,
+					redeemableCount: 0,
+					reason: "weekly cooldown",
+					credits: [
+						{
+							id: "cedar",
+							title: "Claude reset",
+							program: "cedar_ember",
+							remainingCount: 3,
+							usable: false,
+							requiresLimit: true,
+							clears: ["anthropic:5h", "anthropic:7d"],
+							blocking: [],
+							usedFractions: {},
+							expiresAt: "2026-01-04T00:00:00.000Z",
+						},
+					],
+				},
+			},
 		];
 
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
@@ -667,6 +692,10 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("soonest expires in 2d (2026-01-03)");
 		expect(text).toContain("expired@example.test");
 		expect(text).toContain("expired (2025-12-30)");
+		expect(text).toContain("claude@example.test");
+		expect(text).toContain("3 saved resets");
+		expect(text).toContain("0 usable now");
+		expect(text).toContain("unavailable: weekly cooldown");
 	});
 
 	it("deduplicates identical per-limit notes across accounts sharing a window", () => {

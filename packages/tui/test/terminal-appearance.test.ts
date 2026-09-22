@@ -139,7 +139,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		// Seed the current appearance and drain all startup probe sentinels.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 
 		const events: Array<{ kind: "report" | "change"; appearance: string; token: number | undefined }> = [];
 		terminal.onAppearanceReport?.((appearance, token) => {
@@ -198,7 +198,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// Complete the startup query and drain every startup probe sentinel before
 		// issuing explicit refreshes, so each response belongs to a real query cycle.
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 
 		terminal.refreshAppearance?.();
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
@@ -321,8 +321,8 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
 		process.stdin.emit("data", "\x1b[?2031;0$y");
 		// Drain startup sentinels in send order: keyboard, OSC 11, DEC 2026,
-		// DEC 2048, DEC 2031, and xterm ?1010/?1011.
-		for (let i = 0; i < 7; i++) {
+		// DEC 2048, DEC 2031, DEC 2004, and xterm ?1010/?1011.
+		for (let i = 0; i < 8; i++) {
 			process.stdin.emit("data", "\x1b[?1;2c");
 		}
 		const afterStartup = queryCount();
@@ -337,11 +337,11 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 	it("refreshAppearance() issues exactly one OSC 11 re-query per call (#5352)", () => {
 		const { terminal, queryCount } = setupTerminal();
 
-		// Drain the OSC 11 reply and all seven startup DA1 sentinels (keyboard,
-		// OSC 11, and the DECRQM probes for 2026/2048/2031/1010/1011) so the
+		// Drain the OSC 11 reply and all eight startup DA1 sentinels (keyboard,
+		// OSC 11, and the DECRQM probes for 2026/2048/2031/2004/1010/1011) so the
 		// probe FIFO is empty before the refresh gesture.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const afterInitial = queryCount();
 
 		// An explicit refresh gesture (Ctrl+L) issues one bounded probe.
@@ -372,7 +372,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		expect(writes).toContain("\x1b[c");
 
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		terminal.refreshAppearance?.();
 
 		expect(writes).toContain("\x1bPtmux;\x1b\x1b]11;?\x07\x1b\\");
@@ -386,7 +386,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const { terminal, received, queryCount } = setupTerminal();
 
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const reports: Array<{ appearance: string; token: number | undefined }> = [];
 		terminal.onAppearanceReport?.((appearance, token) => reports.push({ appearance, token }));
 		const beforeRefresh = queryCount();
@@ -419,7 +419,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		const { terminal, queryCount, sentinelCount } = setupTerminal();
 
 		process.stdin.emit("data", "\x1b]11;rgb:0000/0000/0000\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		const directQueriesBeforeRefresh = queryCount();
 		const directSentinelsBeforeRefresh = sentinelCount();
 
@@ -440,7 +440,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 
 		// Startup classifies the terminal as light.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		expect(terminal.appearance).toBe("light");
 		expect(appearances).toEqual(["light"]);
 
@@ -464,7 +464,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		// terminal may still never emit an appearance notification, so an explicit
 		// refresh must not be gated on advertised 2031 support.
 		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
-		for (let i = 0; i < 7; i++) process.stdin.emit("data", "\x1b[?1;2c");
+		for (let i = 0; i < 8; i++) process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?2031;2$y");
 		const afterInitial = queryCount();
 
@@ -615,10 +615,11 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		expect(writes.some(w => w.includes("\x1b[>31u"))).toBe(false);
 		expect(writes).toContain("\x1b[?u\x1b[c");
 
-		// Seven DA1 sentinels are in flight at startup: keyboard probe, OSC 11, and
-		// the DECRQM probes for DEC 2026, 2048, 2031, 1010, and 1011 (each rides the
-		// shared FIFO). Consume them in send-order and verify none leaks to the input
-		// handler.
+		// Eight DA1 sentinels are in flight at startup: keyboard probe, OSC 11, and
+		// the DECRQM probes for DEC 2026, 2048, 2031, 2004, 1010, and 1011 (each
+		// rides the shared FIFO). Consume them in send-order and verify none leaks
+		// to the input handler.
+		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
 		process.stdin.emit("data", "\x1b[?1;2c");
@@ -628,7 +629,7 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		process.stdin.emit("data", "\x1b[?1;2c");
 		expect(received).toEqual([]);
 
-		// An eighth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
+		// A ninth stray DA1 has no owner, yet is still swallowed: `CSI ? … c` is
 		// exclusively a terminal->host report, never a keystroke, so a reply that
 		// lands after the sentinel FIFO drains (slow SSH/PTY links) must not leak
 		// into the composer as literal text (#8542).
@@ -762,6 +763,34 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		expect(writes.some(w => w.includes("\x1b[?2031$p"))).toBe(true);
 		expect(writes.some(w => w.includes("\x1b[?1010$p"))).toBe(true);
 		expect(writes.some(w => w.includes("\x1b[?1011$p"))).toBe(true);
+		expect(writes.some(w => w.includes("\x1b[?2004$p"))).toBe(true);
+		terminal.stop();
+	});
+
+	it("disables raw-paste coalescing once DECRQM confirms bracketed-paste (mode 2004) support (#12540)", () => {
+		const { terminal, received } = setup();
+
+		// Confirm bracketed-paste support: a genuine paste now always arrives
+		// wrapped, so a multiline keystroke burst an event-loop stall batched into
+		// one read must submit per Enter instead of coalescing onto the paste path.
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		received.length = 0;
+		process.stdin.emit("data", "aaa\rbbb\rccc");
+
+		expect(received).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
+		expect(received.some(seq => seq.includes("\x1b[200~"))).toBe(false);
+		terminal.stop();
+	});
+
+	it("coalesces an unbracketed multiline burst when bracketed paste is unconfirmed (#12540)", () => {
+		const { terminal, received } = setup();
+
+		// No DECRQM 2004 confirmation: the terminal may not bracket pastes, so the
+		// raw-burst heuristic stays on and re-wraps the burst with paste markers.
+		received.length = 0;
+		process.stdin.emit("data", "aaa\rbbb\rccc");
+
+		expect(received).toEqual(["\x1b[200~aaa\rbbb\rccc\x1b[201~"]);
 		terminal.stop();
 	});
 

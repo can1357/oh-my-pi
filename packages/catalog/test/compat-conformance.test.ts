@@ -24,10 +24,11 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	// including its tariff and effort ladder, comes from the live /v1/models
 	// snapshot, so no bundled rows are frozen into models.json.
 	"charm-hyper",
-	// SingularityAPI reserved-lane roster via singularityApiModelManagerOptions:
-	// the `deepseek-ai/*` lane ids are credential-scoped (one key sees only
-	// its reserved lanes), so no rows are frozen into models.json.
-	"singularityapi",
+	// Both SingularityAPI rosters are live and credential-scoped (one key sees
+	// only its own product's models — the pay-as-you-go catalog or the reserved
+	// lanes), so no rows are frozen into models.json.
+	"singularityapi-dev",
+	"singularityapi-tech",
 	// User-configured LiteLLM proxy (models.yml provider or litellm auth flow;
 	// PROXY_OPENAI_COMPAT_PROVIDERS) that forwards upstream chat templates.
 	"litellm",

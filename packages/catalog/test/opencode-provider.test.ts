@@ -679,6 +679,24 @@ describe("OpenCode provider discovery", () => {
 		});
 	});
 
+	test("routes gateway-listed Union Alpha to Messages on Go and Zen (#12359)", async () => {
+		for (const [makeOptions, baseUrl] of [
+			[opencodeGoModelManagerOptions, "https://opencode.ai/zen/go"],
+			[opencodeZenModelManagerOptions, "https://opencode.ai/zen"],
+		] as const) {
+			const options = makeOptions({
+				apiKey: "test-key",
+				fetch: async () => modelListResponse(["union-alpha"]),
+			});
+			const models = await options.fetchDynamicModels?.();
+			expect(models?.find(model => model.id === "union-alpha")).toMatchObject({
+				api: "anthropic-messages",
+				baseUrl,
+			});
+			expect(options.dropCachedModelIdsOnStaticMismatch).toContain("union-alpha");
+		}
+	});
+
 	test("routes gateway-listed OpenCode Zen GPT-6 Astra to Responses (#12030)", async () => {
 		const options = opencodeZenModelManagerOptions({
 			apiKey: "test-key",
