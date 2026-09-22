@@ -985,7 +985,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						}
 
 						if (emptyAttempt > 0) {
-							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
+							const backoffMs = Math.min(EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1), options?.maxRetryDelayMs ?? 300000);
 							try {
 								await scheduler.wait(backoffMs, { signal: options?.signal });
 							} catch {
