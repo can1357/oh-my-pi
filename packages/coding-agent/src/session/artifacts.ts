@@ -8,6 +8,57 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { replaceFileAtomically } from "../utils/atomic-file";
 
+const ARTIFACT_PROVENANCE_VERSION = 1;
+
+export interface ArtifactProvenance {
+	version: typeof ARTIFACT_PROVENANCE_VERSION;
+	producerSessionId: string;
+}
+
+function provenancePath(dir: string, id: string): string {
+	return path.join(dir, `.artifact-${id}.json`);
+}
+
+/** Read the producer recorded alongside an artifact, if it has provenance metadata. */
+export async function readArtifactProvenance(dir: string, id: string): Promise<ArtifactProvenance | null> {
+	try {
+		const value: unknown = await Bun.file(provenancePath(dir, id)).json();
+		if (
+			typeof value !== "object" ||
+			value === null ||
+			!("version" in value) ||
+			value.version !== ARTIFACT_PROVENANCE_VERSION ||
+			!("producerSessionId" in value) ||
+			typeof value.producerSessionId !== "string" ||
+			value.producerSessionId.length === 0
+		) {
+			return null;
+		}
+		return { version: ARTIFACT_PROVENANCE_VERSION, producerSessionId: value.producerSessionId };
+	} catch {
+		return null;
+	}
+}
+
+/** Reassign only the source session's own sidecars, preserving other producers in shared storage. */
+export async function rebindArtifactProvenance(
+	dir: string,
+	sourceSessionId: string | undefined,
+	producerSessionId: string,
+): Promise<void> {
+	for (const file of await fs.readdir(dir)) {
+		const match = /^\.artifact-(\d+)\.json$/.exec(file);
+		if (!match || !sourceSessionId) continue;
+		const previous = await readArtifactProvenance(dir, match[1]!);
+		if (previous?.producerSessionId !== sourceSessionId) continue;
+		const provenance: ArtifactProvenance = {
+			version: ARTIFACT_PROVENANCE_VERSION,
+			producerSessionId,
+		};
+		await writeArtifact(provenancePath(dir, match[1]!), `${JSON.stringify(provenance)}\n`);
+	}
+}
+
 /**
  * Sanitize a tool name for safe use as the middle segment of the artifact
  * filename (`${id}.${toolType}.log`). Built-in tool names are fixed, but MCP,
@@ -136,10 +187,17 @@ export class ArtifactManager {
 	 *
 	 * @param toolType Tool name for file extension (e.g., "bash", "read")
 	 */
-	async allocatePath(toolType: string): Promise<{ id: string; path: string }> {
+	async allocatePath(toolType: string, producerSessionId?: string): Promise<{ id: string; path: string }> {
 		await this.#ensureDir();
 		const id = String(this.allocateId());
 		const filename = `${id}.${sanitizeToolType(toolType)}.log`;
+		if (producerSessionId) {
+			const provenance: ArtifactProvenance = {
+				version: ARTIFACT_PROVENANCE_VERSION,
+				producerSessionId,
+			};
+			await writeArtifact(provenancePath(this.#dir, id), `${JSON.stringify(provenance)}\n`);
+		}
 		return { id, path: path.join(this.#dir, filename) };
 	}
 
@@ -150,8 +208,8 @@ export class ArtifactManager {
 	 * @param toolType Tool name for file extension (e.g., "bash", "read")
 	 * @returns Artifact ID (numeric string)
 	 */
-	async save(content: string, toolType: string): Promise<string> {
-		const { id, path } = await this.allocatePath(toolType);
+	async save(content: string, toolType: string, producerSessionId?: string): Promise<string> {
+		const { id, path } = await this.allocatePath(toolType, producerSessionId);
 		await writeArtifact(path, content);
 		return id;
 	}

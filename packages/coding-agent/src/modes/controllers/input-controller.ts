@@ -2274,6 +2274,7 @@ export class InputController {
 					cwd: manager.getCwd(),
 					sessionId: manager.getSessionId(),
 					sessionFile: manager.getSessionFile(),
+					localProtocolOptions: this.ctx.viewSession.localProtocolOptions,
 				};
 			},
 			keybindings: this.ctx.keybindings,

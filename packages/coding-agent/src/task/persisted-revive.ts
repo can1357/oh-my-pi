@@ -156,6 +156,7 @@ export function createPersistedSubagentReviverFactory(
 				modelPatternAuthFallback: init.resolvedModel,
 				settings: subagentSettings,
 				sessionManager: reopened,
+				localProtocolOptions: ctx.session.localProtocolOptions,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,
 				// `agents` rule scoping keys on the durable definition name (`scout`,

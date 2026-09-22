@@ -998,12 +998,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const session = this.viewSession;
 		return resolveMarkdownLinkTargets(texts, {
 			cwd: session.sessionManager.getCwd(),
+			sessionId: session.sessionManager.getSessionId(),
 			sessionFile: session.sessionFile,
 			settings: session.settings,
-			localProtocolOptions: {
-				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
-			},
+			localProtocolOptions: session.localProtocolOptions,
 			skills: session.skills,
 			rules: session.ttsrManager?.getRules(),
 		});

@@ -379,7 +379,7 @@ import {
 	SessionMaintenance,
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
-import { cleanupEmptyMoveSession, copySessionArtifacts, type SessionManager } from "./session-manager";
+import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -1293,6 +1293,10 @@ export class AgentSession {
 		this.#reseedTokenRate();
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
+		this.localProtocolOptions = config.localProtocolOptions ?? {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
+		};
 		this.settings = config.settings;
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
@@ -4195,11 +4199,10 @@ export class AgentSession {
 		return undefined;
 	}
 
+	readonly localProtocolOptions: LocalProtocolOptions;
+
 	#localProtocolOptions(): LocalProtocolOptions {
-		return {
-			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
-			getSessionId: () => this.sessionManager.getSessionId(),
-		};
+		return this.localProtocolOptions;
 	}
 
 	#resetSessionStopContinuationState(): void {
@@ -8456,8 +8459,6 @@ export class AgentSession {
 			// The fork clones the transcript and keeps this recovery state running
 			// under a fresh id, so the work already produced is still this session's.
 			this.#recovery.reanchorServedAttribution(previousSessionId);
-
-			await copySessionArtifacts(forkResult.oldSessionFile, forkResult.newSessionFile);
 
 			// Update agent session ID
 			this.#freshProviderSessionId = undefined;

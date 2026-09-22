@@ -147,7 +147,7 @@ describe("resource links in chat markdown", () => {
 
 	it("expands labeled, reference, and table links to real local and artifact files", async () => {
 		const localFile = path.join(tempDir, "local", "reviewed findings#.json");
-		const artifactFile = path.join(tempDir, "42.txt");
+		const artifactFile = path.join(tempDir, "42.read.log");
 		await Bun.write(localFile, '{"reviewed":true}');
 		await Bun.write(artifactFile, "artifact output");
 		const href = "local://reviewed%20findings%23.json";

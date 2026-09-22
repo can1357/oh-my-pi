@@ -35,6 +35,7 @@ import type { ExtensionRunner, PreparedExtension } from "../extensibility/extens
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { LocalProtocolOptions } from "../internal-urls";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
@@ -128,6 +129,8 @@ export interface AgentSessionConfig {
 	/** Shared with the provider stream wrapper: current Codex Code Mode tool exposure snapshot for turn metadata. */
 	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;
+	/** Session-bound local/artifact URL policy used by tools and interactive UI surfaces. */
+	localProtocolOptions?: LocalProtocolOptions;
 	settings: Settings;
 	/**
 	 * Live extension-root policy inherited from the owning session. Subagents use

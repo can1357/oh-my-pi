@@ -42,6 +42,7 @@ Implications:
 Artifact types share this directory:
 
 - truncated tool output files: `<numericId>.<toolType>.log` (for `artifact://`)
+- artifact provenance sidecars: `.artifact-<numericId>.json`, recording the producing session ID
 - subagent output files: `<outputId>.md` (for `agent://`)
 - subagent session JSONL sidecars: `<outputId>.jsonl` when task execution receives an artifacts directory
 
@@ -155,6 +156,8 @@ Handled by `ArtifactProtocolHandler` over registered active session artifact dir
 - searches for filename prefix `<id>.`
 - returns raw `text/plain` for inline resolution
 - when missing, reports available numeric artifact IDs
+- callers may opt into `artifactResolutionScope: "producer"`; this searches only the caller's pinned
+  directory, requires the artifact producer to match the caller's session ID, and does not enumerate IDs on misses
 - refuses to materialize a full artifact larger than 8 MiB; use bounded `read` selectors or the reported backing path for search/copy workflows
 
 Path-only consumers can resolve the backing file at any size without loading its bytes.

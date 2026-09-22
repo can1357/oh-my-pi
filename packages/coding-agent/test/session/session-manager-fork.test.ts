@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
 import { collectPendingToolCalls } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
+import { readArtifactProvenance } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
 	CURRENT_SESSION_VERSION,
 	type SessionEntry,
@@ -46,6 +47,10 @@ async function createSessionWithArtifacts(root: string): Promise<{
 	await fs.mkdir(path.join(sourceArtifactsDir, "nested"), { recursive: true });
 	await Bun.write(sourceFile, `${JSON.stringify(sourceHeader)}\n`);
 	await Bun.write(path.join(sourceArtifactsDir, "1.read.log"), "tool output");
+	await Bun.write(
+		path.join(sourceArtifactsDir, ".artifact-1.json"),
+		`${JSON.stringify({ version: 1, producerSessionId: sourceHeader.id })}\n`,
+	);
 	await Bun.write(path.join(sourceArtifactsDir, "nested", "result.txt"), "nested output");
 	return { cwd, sessionDir, sourceFile, sourceArtifactsDir };
 }
@@ -134,7 +139,15 @@ describe("SessionManager.forkFrom", () => {
 
 		expect(await Bun.file(path.join(forkArtifactsDir, "1.read.log")).text()).toBe("tool output");
 		expect(await Bun.file(path.join(forkArtifactsDir, "nested", "result.txt")).text()).toBe("nested output");
+		expect(await readArtifactProvenance(forkArtifactsDir, "1")).toEqual({
+			version: 1,
+			producerSessionId: forked.getSessionId(),
+		});
 		expect(await Bun.file(path.join(sourceArtifactsDir, "1.read.log")).text()).toBe("tool output");
+		expect(await readArtifactProvenance(sourceArtifactsDir, "1")).toEqual({
+			version: 1,
+			producerSessionId: "source-with-artifacts",
+		});
 	});
 
 	it("does not copy artifacts when the caller opts out", async () => {
