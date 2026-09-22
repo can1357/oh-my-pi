@@ -2,7 +2,7 @@ import { scheduler } from "node:timers/promises";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import * as AIError from "../error";
-import { claudeCodeVersion } from "../providers/claude-code-fingerprint";
+import { getClaudeCodeUserAgent } from "../providers/claude-code-fingerprint";
 import {
 	type CredentialRankingContext,
 	type CredentialRankingStrategy,
@@ -31,7 +31,6 @@ const CLAUDE_HEADERS = {
 	"anthropic-beta":
 		"claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,redact-thinking-2026-02-12,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,effort-2025-11-24,extended-cache-ttl-2025-04-11",
 	"content-type": "application/json",
-	"user-agent": `claude-cli/${claudeCodeVersion} (external, cli)`,
 	connection: "keep-alive",
 } as const;
 
@@ -686,6 +685,7 @@ async function fetchClaudeUsage(params: UsageFetchParams, ctx: UsageFetchContext
 
 	const headers: Record<string, string> = {
 		...CLAUDE_HEADERS,
+		"user-agent": getClaudeCodeUserAgent(),
 		authorization: `Bearer ${credential.accessToken}`,
 	};
 

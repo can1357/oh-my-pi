@@ -2,15 +2,19 @@
 
 ## [Unreleased]
 
+## [18.2.9] - 2026-09-22
+
 ### Added
 
-- Detected the otty terminal (`TERM_PROGRAM=otty`) with the Kitty graphics protocol, Unicode placeholder placement, OSC 8 hyperlinks and OSC 99 notifications; Sixel is absent and unverified capabilities (DECCARA, text sizing) keep conservative defaults ([#12665](https://github.com/can1357/oh-my-pi/pull/12665) by [@xiechimon](https://github.com/xiechimon)).
-- Detected the rio terminal (`TERM_PROGRAM=rio`) with Kitty graphics protocol and true color; unverified capabilities (hyperlinks, notifications, DECCARA) keep conservative defaults until proven in that terminal ([#12205](https://github.com/can1357/oh-my-pi/issues/12205)) ([#12263](https://github.com/can1357/oh-my-pi/pull/12263) by [@danilouchoa](https://github.com/danilouchoa)).
-- Added `stripTerminalSequences` export for extensions that strip CSI/OSC/APC sequences ([#12795](https://github.com/can1357/oh-my-pi/pull/12795) by [@RockinPaul](https://github.com/RockinPaul)).
+- Added terminal detection and capability support for otty and rio, including Kitty graphics and true-color support where available, plus otty hyperlinks and notifications.
+- Added the public `stripTerminalSequences` export for extensions that need to remove terminal control sequences.
 
 ### Fixed
 
-- Composer shape previews now use the full overlay width instead of clipping at 96 columns ([#12713](https://github.com/can1357/oh-my-pi/pull/12713) by [@F0Rextasy](https://github.com/F0Rextasy)).
+- Composer shape previews now use the full available overlay width instead of being clipped at 96 columns.
+- Fixed cursor placement when recalling prompts from history, keeping single-line entries at the end and preserving the appropriate position for multi-line entries.
+- Restored modified-key handling and terminal notifications over SSH sessions running inside tmux.
+- Fixed typed Enter occasionally being interpreted as a literal newline when terminal input events are batched.
 
 ## [18.2.8] - 2026-09-21
 
