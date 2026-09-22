@@ -200,8 +200,8 @@ interface PythonSession extends KernelSession<PythonKernel> {
 	activeCells: number;
 	resolveIdle?: () => void;
 	whenIdle?: Promise<void>;
-	/** Serializes RSS recycles so two finished cells cannot replace two generations. */
-	rssRecycle?: Promise<void>;
+	/** In-flight RSS recycle. Waiters receive the same note instead of starting another replacement. */
+	rssRecycle?: Promise<string | undefined>;
 }
 
 function normalizeExplicitInterpreter(cwd: string, interpreter: string | undefined): string {
@@ -372,18 +372,25 @@ async function executeWithKernel(
 	code: string,
 	options: PythonExecutorOptions | undefined,
 ): Promise<PythonResult> {
-	const remainingMs = getRemainingTimeoutMs(options?.deadlineMs);
-	await kernel.syncPreludes?.(
-		pythonPreludeSources(options?.toolSession),
-		options?.signal,
-		Math.max(1, remainingMs ?? 10_000),
-	);
 	const cwd = options?.cwd;
 	const session = cwd ? sessionRegistry.getPresentSession(cwd, options ?? {}) : undefined;
+	// A recycle already in progress is shutting the sampled kernel down. Wait
+	// before counting this cell so the drain can finish, then run on the
+	// replacement. Counting first would deadlock the drain.
+	while (session?.rssRecycle) {
+		await session.rssRecycle.catch(() => undefined);
+	}
 	if (session) beginPythonCell(session);
+	const liveKernel = session?.kernel.isAlive() ? session.kernel : kernel;
 	try {
+		const remainingMs = getRemainingTimeoutMs(options?.deadlineMs);
+		await liveKernel.syncPreludes?.(
+			pythonPreludeSources(options?.toolSession),
+			options?.signal,
+			Math.max(1, remainingMs ?? 10_000),
+		);
 		return await executeWithKernelBase<PythonExecutorOptions>({
-			kernel,
+			kernel: liveKernel,
 			code,
 			options,
 			runIdPrefix: "py",
@@ -443,9 +450,16 @@ async function recycleRetainedPythonKernelIfOverRss(
 	const maxRssMb = normalizeMaxRssMb(options.maxRssMb);
 	if (maxRssMb <= 0) return undefined;
 	const session = sessionRegistry.getPresentSession(cwd, options);
-	const kernel = session?.kernel.isAlive() ? session.kernel : undefined;
+	if (!session) return undefined;
+	// Shutdown marks the sampled kernel dead before the note is ready. A sibling
+	// that reaches this check in that window must wait for the note instead of
+	// bailing out on the dead kernel.
+	if (session.rssRecycle) {
+		return await session.rssRecycle.catch(() => undefined);
+	}
+	const kernel = session.kernel.isAlive() ? session.kernel : undefined;
 	const pid = kernel?.pid;
-	if (!session || pid === undefined) return undefined;
+	if (pid === undefined) return undefined;
 	const sampledGeneration = session.generation;
 	let rssKb: number | undefined;
 	try {
@@ -456,25 +470,22 @@ async function recycleRetainedPythonKernelIfOverRss(
 	if (!kernelRssExceedsLimit(rssKb, maxRssMb)) return undefined;
 	const rssMb = Math.max(1, Math.round((rssKb ?? 0) / 1024));
 	if (session.rssRecycle) {
-		await session.rssRecycle.catch(() => undefined);
-		return undefined;
+		return await session.rssRecycle.catch(() => undefined);
 	}
-	let finishRecycle: () => void = () => undefined;
+	let finishRecycle: (note?: string) => void = () => undefined;
 	session.rssRecycle = new Promise(resolve => {
 		finishRecycle = resolve;
 	});
+	let note: string | undefined;
 	try {
 		while (session.activeCells > 0) {
 			await waitForPythonSessionIdle(session);
 		}
-		if (
-			session.generation !== sampledGeneration ||
-			session.kernel.pid !== pid ||
-			!session.kernel.isAlive()
-		) {
+		if (session.generation !== sampledGeneration || session.kernel.pid !== pid || !session.kernel.isAlive()) {
 			return undefined;
 		}
 		await sessionRegistry.recycleLiveKernel(cwd, options);
+		note = formatKernelRssRecycleAnnotation(rssMb, maxRssMb);
 	} catch (err) {
 		logger.warn("Failed to recycle Python kernel after RSS cap", {
 			error: err instanceof Error ? err.message : String(err),
@@ -484,11 +495,11 @@ async function recycleRetainedPythonKernelIfOverRss(
 		});
 		return undefined;
 	} finally {
-		if (session.rssRecycle) session.rssRecycle = undefined;
-		finishRecycle();
+		session.rssRecycle = undefined;
+		finishRecycle(note);
 	}
 	logger.warn("Recycled Python kernel after RSS exceeded python.maxRssMb", { pid, rssMb, maxRssMb });
-	return formatKernelRssRecycleAnnotation(rssMb, maxRssMb);
+	return note;
 }
 
 async function ensureToolBridge(options: PythonExecutorOptions): Promise<void> {

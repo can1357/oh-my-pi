@@ -477,10 +477,11 @@ describe("executePython session lifecycle", () => {
 		expect(firstKernel.shutdownCalls).toBe(0);
 		releaseHold();
 		const done = await finished;
-		await sibling;
+		const held = await sibling;
 		expect(firstKernel.shutdownCalls).toBe(1);
 		expect(firstKernel.executeCalls).toEqual(["hold", "print('done')"]);
 		expect(done.output).toContain("python.maxRssMb=1");
+		expect(held.output).toContain("python.maxRssMb=1");
 	});
 
 	it("does not recycle when python.maxRssMb is 0", async () => {
