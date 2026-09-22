@@ -1159,7 +1159,7 @@ describe("Editor component", () => {
 
 			const [line] = editor.render(width);
 			expect(stripVTControlCharacters(line!).startsWith("> ")).toBeTrue();
-			expect(line).toContain(`\x1b[7ma\x1b[0m${CURSOR_MARKER}`);
+			expect(line).toContain(`\x1b[4ma\x1b[0m${CURSOR_MARKER}`);
 			expect(visibleWidth(line!.replaceAll(CURSOR_MARKER, ""))).toBeLessThanOrEqual(width);
 		});
 
@@ -1219,7 +1219,7 @@ describe("Editor component", () => {
 
 			expect(line).toContain(CURSOR_MARKER);
 			expect(stripVTControlCharacters(line!.replaceAll(CURSOR_MARKER, ""))).toBe("abc");
-			expect(visibleWidth(beforeMarker!)).toBe(width - 1);
+			expect(visibleWidth(beforeMarker!)).toBe(width);
 			expect(visibleWidth(line!.replaceAll(CURSOR_MARKER, ""))).toBe(width);
 		});
 
@@ -1237,8 +1237,55 @@ describe("Editor component", () => {
 
 			expect(line).toContain(CURSOR_MARKER);
 			expect(stripVTControlCharacters(line!.replaceAll(CURSOR_MARKER, ""))).toBe("> abc");
-			expect(visibleWidth(beforeMarker!)).toBe(width - 1);
+			expect(visibleWidth(beforeMarker!)).toBe(width);
 			expect(visibleWidth(line!.replaceAll(CURSOR_MARKER, ""))).toBe(width);
+		});
+		it("distinguishes end-of-line from on-character cursor at the borderless width limit", () => {
+			const width = 20;
+			const atEnd = new Editor(defaultEditorTheme);
+			atEnd.setBorderVisible(false);
+			atEnd.focused = true;
+			for (let i = 0; i < width; i++) {
+				atEnd.handleInput("a");
+			}
+
+			const onLast = new Editor(defaultEditorTheme);
+			onLast.setBorderVisible(false);
+			onLast.focused = true;
+			for (let i = 0; i < width; i++) {
+				onLast.handleInput("a");
+			}
+			onLast.handleInput("\x1b[D");
+
+			const [endLine] = atEnd.render(width);
+			const [onLine] = onLast.render(width);
+			expect(endLine).not.toBe(onLine);
+			expect(visibleWidth(endLine!.replaceAll(CURSOR_MARKER, ""))).toBeLessThanOrEqual(width);
+			expect(visibleWidth(onLine!.replaceAll(CURSOR_MARKER, ""))).toBeLessThanOrEqual(width);
+		});
+
+		it("distinguishes end-of-line from on-character hardware cursor at the borderless width limit", () => {
+			const width = 5;
+			const atEnd = new Editor(defaultEditorTheme);
+			atEnd.setBorderVisible(false);
+			atEnd.setPromptGutter("> ");
+			atEnd.setUseTerminalCursor(true);
+			atEnd.focused = true;
+			atEnd.setText("abc");
+
+			const onLast = new Editor(defaultEditorTheme);
+			onLast.setBorderVisible(false);
+			onLast.setPromptGutter("> ");
+			onLast.setUseTerminalCursor(true);
+			onLast.focused = true;
+			onLast.setText("abc");
+			onLast.handleInput("\x1b[D");
+
+			const [endLine] = atEnd.render(width);
+			const [onLine] = onLast.render(width);
+			expect(endLine).not.toBe(onLine);
+			expect(stripVTControlCharacters(endLine!.replaceAll(CURSOR_MARKER, ""))).toBe("> abc");
+			expect(stripVTControlCharacters(onLine!.replaceAll(CURSOR_MARKER, ""))).toBe("> abc");
 		});
 
 		it("does not overflow prompt-gutter wraps when a wide grapheme lands in a 1-column content area", () => {
@@ -1281,7 +1328,7 @@ describe("Editor component", () => {
 			}
 
 			const [line] = editor.render(width);
-			expect(line).toContain(`\x1b[7ma\x1b[0m${CURSOR_MARKER}`);
+			expect(line).toContain(`\x1b[4ma\x1b[0m${CURSOR_MARKER}`);
 			expect(visibleWidth(line.replaceAll(CURSOR_MARKER, ""))).toBeLessThanOrEqual(width);
 		});
 

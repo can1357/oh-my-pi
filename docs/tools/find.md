@@ -26,9 +26,9 @@ It is a TypeScript port of the default (`cascade`) strategy of [jegrep](https://
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | Plain-language description of the behavior or concept to locate. Quoted phrases are matched whole in the lexical pass. Whitespace-only queries are rejected. |
 | `grep_keywords` | `string[]` | Yes | Extra identifiers or terms for the lexical pre-ranking, in addition to those derived from `query`. `[]` when nothing specific comes to mind. |
-| `path` | `string` | No | Directory to search, resolved against the session cwd (`~` expanded, a bare `/` means the workspace root). Omitted or empty defaults to the cwd. A missing path or a file is rejected. |
+| `path` | `string` | No | Directory to search, or an `omp://` docs scope (`omp://` for all harness docs, `omp://<file>.md` for one doc). Resolved against the session cwd (`~` expanded, a bare `/` means the workspace root). Omitted or empty defaults to the cwd. A missing path or a file is rejected. A trailing `:start-end` selector on an `omp://` scope is rejected too — `find` judges whole files. |
 
-Hidden files are excluded. Hit paths are always reported relative to the session cwd, not the searched directory, so `read` and hyperlinks resolve without knowing the scope.
+`omp://` hits are canonical doc URLs (`omp://tools/read.md`), not cwd-relative paths — open them directly with `read`, including with `:start-end` selectors (`read omp://tools/read.md:50-100`). Hidden files are excluded. Hit paths are otherwise reported relative to the session cwd, not the searched directory, so `read` and hyperlinks resolve without knowing the scope.
 
 `find` is disabled by default (`find.enabled = false`); once enabled it is an essential (top-level) tool, never mounted under `xd://`. It needs a judge: configure the `judge` model role (a TypeSafe System One model such as `typesafe/jev-latest`).
 

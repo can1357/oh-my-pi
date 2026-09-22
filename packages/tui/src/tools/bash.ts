@@ -25,7 +25,7 @@ export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 /** LLM-facing footer appended when a tool call becomes a background job. */
 export function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; result will be delivered automatically.`;
+	return `Backgrounded as job ${jobId}; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no \`sleep\`, \`ps\`, \`pgrep\`, \`top\`, \`pidwait\`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.`;
 }
 
 /** Shell execution metadata used by transcript rendering. */
