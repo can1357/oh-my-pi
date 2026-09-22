@@ -541,7 +541,18 @@ export async function formatContent(
 	const uri = fileToUri(absolutePath);
 	let hadFailure = false;
 
-	for (const [serverName, serverConfig] of servers) {
+	// Prefer dedicated formatter/linter servers (`isLinter`) over type-checkers
+	// when choosing who formats. A type-checker such as tsserver also advertises
+	// `documentFormattingProvider` but only reindents; without this preference a
+	// configured external formatter (prettier via efm-langserver, ruff, dprint,
+	// gofumpt) could never win for a file type the type-checker also claims,
+	// since the loop returns at the first formatting-capable server. The sort is
+	// stable, so same-class ordering (and the type-checker-first order used for
+	// type-intelligence in `getServerForFile`) is otherwise preserved.
+	const ordered =
+		servers.length > 1 ? [...servers].sort((a, b) => (a[1].isLinter ? 0 : 1) - (b[1].isLinter ? 0 : 1)) : servers;
+
+	for (const [serverName, serverConfig] of ordered) {
 		try {
 			throwIfAborted(signal);
 			// Use custom linter client if configured

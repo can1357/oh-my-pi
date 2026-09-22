@@ -379,6 +379,57 @@ describe("hindsightBackend first-turn injection", () => {
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
 	});
 
+	it("forwards the turn's abort signal to recall and unwinds when aborted (#12668)", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+			"hindsight.mentalModelsEnabled": false,
+		});
+		const session = makeFakeSession({ sessionId: "s-abort" });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		// A slow recall server: the request never resolves on its own and only
+		// settles when the forwarded signal aborts, mirroring a fetch honouring
+		// AbortSignal. Pre-fix the signal was dropped, so this pended for the full
+		// recall timeout and Esc could not cancel it.
+		let received: AbortSignal | undefined;
+		vi.spyOn(HindsightApi.prototype, "recall").mockImplementation(((
+			_bankId: string,
+			_query: string,
+			options?: { signal?: AbortSignal },
+		) => {
+			received = options?.signal;
+			const { promise, reject } = Promise.withResolvers<never>();
+			if (options?.signal?.aborted) reject(new DOMException("Aborted", "AbortError"));
+			else {
+				options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+					once: true,
+				});
+			}
+			return promise;
+		}) as never);
+
+		const controller = new AbortController();
+		const pending = hindsightBackend.beforeAgentStartPrompt?.(
+			session as never,
+			"What do I know about this user?",
+			controller.signal,
+		);
+		await Promise.resolve();
+		expect(received).toBe(controller.signal);
+
+		controller.abort();
+		const block = await pending;
+		expect(block).toBeUndefined();
+		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(false);
+	});
+
 	it("keeps the <memories> wrapper in buildDeveloperInstructions", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",

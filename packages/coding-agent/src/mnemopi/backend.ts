@@ -146,9 +146,9 @@ export const mnemopiBackend: MemoryBackend = {
 		return truncateApproxTokens(rendered, settings.get("mnemopi.injectionTokenLimit"));
 	},
 
-	async beforeAgentStartPrompt(session, promptText): Promise<MemoryPromptPreparation | undefined> {
+	async beforeAgentStartPrompt(session, promptText, signal): Promise<MemoryPromptPreparation | undefined> {
 		const state = getMnemopiSessionState(session);
-		const preparation = await state?.beforeAgentStartPrompt(promptText);
+		const preparation = await state?.beforeAgentStartPrompt(promptText, signal);
 		if (!preparation) return undefined;
 		if (preparation.context) {
 			// Match the canonical memory block's budget while the recall is staged

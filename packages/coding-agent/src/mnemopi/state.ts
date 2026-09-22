@@ -471,13 +471,17 @@ export class MnemopiSessionState {
 		return this.rememberInScope(memory, options);
 	}
 
-	async recallForContext(query: string): Promise<string | undefined> {
+	async recallForContext(query: string, signal?: AbortSignal): Promise<string | undefined> {
 		const results = await this.collectScopedRecallResults(query);
+		if (signal?.aborted) return undefined;
 		if (results.length === 0) return undefined;
 		return formatRecallBlock(results);
 	}
 
-	async beforeAgentStartPrompt(promptText: string): Promise<MemoryPromptPreparation | undefined> {
+	async beforeAgentStartPrompt(
+		promptText: string,
+		signal?: AbortSignal,
+	): Promise<MemoryPromptPreparation | undefined> {
 		if (!this.config.autoRecall || this.hasRecalledForFirstTurn) return undefined;
 		const latestPrompt = promptText.trim();
 		if (!latestPrompt) return undefined;
@@ -486,7 +490,7 @@ export class MnemopiSessionState {
 		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
 		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
 		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
-		const context = await this.recallForContext(truncated);
+		const context = await this.recallForContext(truncated, signal);
 		return {
 			context,
 			commit: () => {

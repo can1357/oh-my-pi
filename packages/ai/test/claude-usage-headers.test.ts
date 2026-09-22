@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import type { UsageFetchContext, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy, claudeUsageProvider } from "@oh-my-pi/pi-ai/usage/claude";
 
@@ -115,7 +115,9 @@ describe("claude usage request headers", () => {
 
 		const headers = calls[0]?.init?.headers;
 		expect(getHeaderCaseInsensitive(headers, "authorization")).toBe(`Bearer ${token}`);
-		expect(getHeaderCaseInsensitive(headers, "user-agent")).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
+		expect(getHeaderCaseInsensitive(headers, "user-agent")).toBe(
+			`claude-cli/${getClaudeCodeVersion()} (external, cli)`,
+		);
 
 		const beta = getHeaderCaseInsensitive(headers, "anthropic-beta");
 		const betaTokens = beta?.split(",").map(tokenValue => tokenValue.trim()) ?? [];
