@@ -1349,6 +1349,17 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	parameters: TParameters;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */
 	strict?: boolean;
+	/**
+	 * If true, argument validation errors are non-fatal: callers pass the raw
+	 * args to execute() instead of returning an error to the LLM. Validation
+	 * still applies every repair, but an unrecognized key it deletes to reach
+	 * success is put back on the validated value, so a tool that owns its
+	 * refusal sees the keys the model wrote rather than a silently narrowed
+	 * subset. A key the null-is-absent repair drops — a null optional field,
+	 * or an unknown null-valued key inside a closed nested object — stays
+	 * dropped.
+	 */
+	lenientArgValidation?: boolean;
 	/** Withhold this Anthropic tool until a `tool_addition` message references it. */
 	deferLoading?: boolean;
 	/**
