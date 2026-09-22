@@ -199,15 +199,20 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 Anthropic Messages requests run on a dedicated HTTP/1.1 keepalive transport
 (`node:https`) with one shared agent per process; every other provider, and any
 proxied Anthropic request, goes out through Bun's own `fetch` pool instead. The
-shared agent is capped at 128 sockets per host and 128 in total, which is twice
-the widest `task.maxConcurrency` preset. Requests past the cap queue in the
-agent with no timeout and no UI indicator until a socket frees, so a session
-running `task.maxConcurrency` unlimited against one provider may want a higher
-ceiling.
+shared agent allows 128 sockets per host — twice the widest `task.maxConcurrency`
+preset — and twice that process-wide, so a saturated host cannot starve another
+host or TLS profile.
+
+Requests past the cap queue in the agent with no UI indicator. They are not
+silent forever: the stream's first-event watchdog is armed when the request is
+created, so one that never reaches a socket fails after
+`PI_STREAM_FIRST_EVENT_TIMEOUT_MS` (300 s by default) as a retry-eligible
+`StreamTimeoutError` ("waiting for the first event"). A session running
+`task.maxConcurrency` unlimited against one provider may want a higher ceiling.
 
 | Variable                    | Value type                        | Behavior                                                                                                            |
 | --------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `PI_ANTHROPIC_MAX_SOCKETS`  | Positive integer (default `128`)  | Per-host and process-wide socket ceiling for the Anthropic keepalive pool. Anything but a positive integer is ignored (debug-logged) and the default applies. |
+| `PI_ANTHROPIC_MAX_SOCKETS`  | Positive integer (default `128`)  | Per-host socket ceiling for the Anthropic keepalive pool; the process-wide ceiling is twice this value. Anything but a positive integer is ignored (debug-logged) and the default applies. |
 
 ### Amazon Bedrock
 

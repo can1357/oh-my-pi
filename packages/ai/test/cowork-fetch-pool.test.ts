@@ -5,6 +5,7 @@ import {
 	DEFAULT_MAX_SOCKETS_PER_HOST,
 	directAgent,
 	MAX_SOCKETS_PER_HOST,
+	MAX_TOTAL_SOCKETS,
 	resolveMaxSocketsPerHost,
 } from "@oh-my-pi/pi-ai/providers/cowork-fetch";
 
@@ -113,10 +114,12 @@ function openSockets(): number {
 
 describe.skipIf(CAP_OVERRIDDEN)("coworkFetch connection pool", () => {
 	let server: HoldingServer;
+	let otherServer: HoldingServer | undefined;
 	let attempts: Attempt[];
 
 	beforeEach(async () => {
 		server = new HoldingServer();
+		otherServer = undefined;
 		attempts = [];
 		await server.listen();
 	});
@@ -127,8 +130,29 @@ describe.skipIf(CAP_OVERRIDDEN)("coworkFetch connection pool", () => {
 		// what stops cleanup from waiting on them.
 		directAgent.destroy();
 		await server.close();
+		await otherServer?.close();
 		await Promise.all(attempts.map(attempt => attempt.promise));
 		expect(queuedRequests()).toBe(0);
+	});
+
+	it("lets a second agent key dial while the first is saturated", async () => {
+		for (let index = 0; index < CAP; index++) {
+			attempts.push(fire(server.url(`/v1/messages?i=${index}`)));
+		}
+		await server.whenOpened(CAP);
+
+		// A second port is a second agent key, which is also what a different
+		// host or a different TLS profile produces.
+		otherServer = new HoldingServer();
+		await otherServer.listen();
+		attempts.push(fire(otherServer.url("/v1/messages?i=other-key")));
+
+		// A process-wide ceiling equal to the per-host cap parks this behind the
+		// saturated key instead of dialing.
+		expect(queuedRequests()).toBe(0);
+		await otherServer.whenOpened(1);
+		expect(otherServer.opened).toBe(1);
+		expect(server.opened).toBe(CAP);
 	});
 
 	it("holds a host to one cap of sockets and dials the queued rest as slots free", async () => {
@@ -226,8 +250,14 @@ describe("resolveMaxSocketsPerHost", () => {
 
 	it("wires the resolved cap into the shared agent, per host and in total", () => {
 		// `maxTotalSockets` is the process-wide half: without it one agent can
-		// hold `maxSockets` per host across arbitrarily many hosts.
+		// hold `maxSockets` per host across arbitrarily many hosts. It stays
+		// strictly above the per-host cap so a saturated key leaves budget for
+		// the others, and idle sockets are capped and reaped so they cannot sit
+		// on that budget.
 		expect(directAgent.maxSockets).toBe(MAX_SOCKETS_PER_HOST);
-		expect(directAgent.maxTotalSockets).toBe(MAX_SOCKETS_PER_HOST);
+		expect(directAgent.maxTotalSockets).toBe(MAX_TOTAL_SOCKETS);
+		expect(MAX_TOTAL_SOCKETS).toBeGreaterThan(MAX_SOCKETS_PER_HOST);
+		expect(directAgent.maxFreeSockets).toBeLessThanOrEqual(Math.min(16, MAX_SOCKETS_PER_HOST));
+		expect(directAgent.options.timeout).toBe(60_000);
 	});
 });

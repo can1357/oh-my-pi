@@ -51,18 +51,18 @@ type RequestBody = string | Uint8Array;
  * opens a socket per concurrent turn against one host, with nothing bounding
  * the total. 128 is twice the widest preset fan-out, so a fully fanned-out
  * session still dials everything at once, and it bounds file descriptors and
- * per-connection TLS state. The same number is the agent's `maxTotalSockets`:
- * this transport talks to one provider host in practice, and the process-wide
- * total is the budget that actually protects the descriptor table.
+ * per-connection TLS state.
  *
- * Past the ceiling the agent queues FIFO: those requests wait with no timeout
- * and no indicator anywhere in the UI, exactly the silence #12319 is about.
- * `task.maxConcurrency` also offers "Unlimited" (0), and a session running that
- * way can hold more concurrent turns than any fixed ceiling — past 128 they
- * queue in the pool, silently, until a socket frees. Raise
- * `PI_ANTHROPIC_MAX_SOCKETS` when that is the shape of the workload. Surfacing
- * the wait itself (a `providerRetryWait`-style event while a request sits in
- * the pool queue) is a deliberate follow-up, not this change.
+ * Past the ceiling the agent queues FIFO. A queued request is not silent
+ * forever: the Anthropic client arms its first-event watchdog when the request
+ * is created, so one that never reaches a socket fails after
+ * `PI_STREAM_FIRST_EVENT_TIMEOUT_MS` (300 s by default) as a retry-eligible
+ * `StreamTimeoutError` — but it spends those five minutes with no indicator
+ * anywhere in the UI. `task.maxConcurrency` also offers "Unlimited" (0), and a
+ * session running that way can hold more concurrent turns than any fixed
+ * ceiling, so raise `PI_ANTHROPIC_MAX_SOCKETS` when that is the shape of the
+ * workload. Surfacing the wait itself (a `providerRetryWait`-style event while
+ * a request sits in the pool queue) is a deliberate follow-up, not this change.
  *
  * Only requests that stay on this transport are pooled here: a proxied request
  * leaves for `globalThis.fetch` (see {@link coworkFetch}) and is bounded by
@@ -86,11 +86,34 @@ export function resolveMaxSocketsPerHost(raw: string | undefined): number {
 
 export const MAX_SOCKETS_PER_HOST = resolveMaxSocketsPerHost($env.PI_ANTHROPIC_MAX_SOCKETS);
 
+/**
+ * Process-wide ceiling, deliberately above {@link MAX_SOCKETS_PER_HOST} rather
+ * than equal to it. Agent keys split by host *and* by TLS material, so one
+ * saturated key must never consume the whole process budget: with the two equal,
+ * a second key's request queues until the first key gives a socket back, and on
+ * a keepalive agent an idle free socket keeps holding that budget. Twice the
+ * per-host cap leaves a full key saturated and still lets every other key dial.
+ */
+export const MAX_TOTAL_SOCKETS = MAX_SOCKETS_PER_HOST * 2;
+
+/**
+ * Idle sockets are the ones that hold budget without doing work, so the pool
+ * keeps few of them and drops them after a minute. The agent `timeout` only
+ * reaps sockets sitting in the free list — an in-flight streaming response is
+ * not cut short by it. Clamped to the cap so a small
+ * `PI_ANTHROPIC_MAX_SOCKETS` cannot end up allowing more idle sockets than
+ * sockets.
+ */
+const MAX_FREE_SOCKETS = Math.min(16, MAX_SOCKETS_PER_HOST);
+const IDLE_SOCKET_TIMEOUT_MS = 60_000;
+
 /** Exported so tests can read the pool's socket and queue books. */
 export const directAgent = new https.Agent({
 	keepAlive: true,
 	maxSockets: MAX_SOCKETS_PER_HOST,
-	maxTotalSockets: MAX_SOCKETS_PER_HOST,
+	maxTotalSockets: MAX_TOTAL_SOCKETS,
+	maxFreeSockets: MAX_FREE_SOCKETS,
+	timeout: IDLE_SOCKET_TIMEOUT_MS,
 });
 
 /**
@@ -227,6 +250,11 @@ async function sendCoworkRequest(
 	const tlsOptions = resolveTlsOptions(url, init.tls);
 	const headers = buildOrderedHeaders(url, sourceHeaders, body);
 	const result = Promise.withResolvers<Response>();
+	// Declared before the abort listener is attached: a synchronous throw out of
+	// `https.request` would otherwise leave the binding in its temporal dead
+	// zone, and an abort arriving on that path would raise a ReferenceError from
+	// inside the listener instead of cancelling.
+	let request: ClientRequest | undefined;
 	const release = (): void => {
 		signal?.removeEventListener("abort", abort);
 	};
@@ -236,7 +264,7 @@ async function sendCoworkRequest(
 		// Order matters: the queue has to let go of the request before it is
 		// destroyed, and the caller is settled here because a queued request
 		// never reaches the `error` handler below.
-		dropFromAgentQueue(directAgent, request);
+		if (request !== undefined) dropFromAgentQueue(directAgent, request);
 		request?.destroy(error);
 		result.reject(error);
 	};
@@ -245,7 +273,7 @@ async function sendCoworkRequest(
 		signal.throwIfAborted();
 	}
 	signal?.addEventListener("abort", abort, { once: true });
-	const request = https.request(
+	request = https.request(
 		{
 			protocol: url.protocol,
 			hostname: url.hostname,
