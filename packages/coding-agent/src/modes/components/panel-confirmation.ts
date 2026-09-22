@@ -1,6 +1,6 @@
 import { Container, type SelectItem, SelectList, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getSelectListTheme, theme } from "../../modes/theme/theme";
-import { DynamicBorder } from "./dynamic-border";
+import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
+import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
 /** A bounded decision prompt shown in the editor slot before or after a panel run. */
 export interface PanelConfirmationOptions {

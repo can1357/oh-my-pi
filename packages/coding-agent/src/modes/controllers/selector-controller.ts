@@ -74,7 +74,7 @@ import {
 	selectReportableAccounts,
 } from "../../slash-commands/helpers/usage-accounts";
 import { loadDailyActivity } from "../../stats/activity-client";
-import type { AgentProgress } from "../../task/types";
+import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -181,16 +181,6 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 	};
 }
 
-interface ProviderToggleModules {
-	disableProvider: typeof DisableProvider;
-	enableProvider: typeof EnableProvider;
-}
-
-/** Settings-only boundary for provider discovery mutations. */
-function loadProviderToggles(): ProviderToggleModules {
-	const discovery = require("../../discovery");
-	return { disableProvider: discovery.disableProvider, enableProvider: discovery.enableProvider };
-}
 type InteractivePanelRunOptions = Omit<PanelRunOptions, "onProgress" | "plan" | "session" | "signal">;
 
 function panelPreviewDetails(preview: PanelRunPreview, request: string): string[] {

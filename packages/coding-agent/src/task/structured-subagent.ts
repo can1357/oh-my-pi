@@ -10,7 +10,11 @@ import path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import {
+	resolveAgentModelPatterns,
+	resolveAgentModelSelection,
+	resolveConfiguredModelPatterns,
+} from "../config/model-resolver";
 import {
 	type CompactionThresholdPair,
 	validateAgentCompactionThresholdOverrides,
@@ -393,7 +397,7 @@ function resolvePanelSubagentPolicy(request: StructuredSubagentRequest): Effecti
 		// Panel definitions are already capability attenuated. Never inject the
 		// plan-mode prompt or tool mutation just because the parent is planning.
 		effectiveAgent: agent,
-		modelOverride: resolveConfiguredModelPatterns({
+		modelOverride: resolveAgentModelPatterns({
 			settingsOverride: request.model,
 			agentModel: agent.model,
 			settings: request.session.settings,
@@ -543,6 +547,7 @@ async function applySpawnHook(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
 ): Promise<EffectiveSubagentPolicy> {
+	if (request.invocationKind === "panel") return policy;
 	const emit = request.session.emitBeforeSubagentSpawn;
 	if (!emit) return policy;
 	const spawnKey =

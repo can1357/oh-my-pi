@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { PanelRunResult, PanelSettings, PanelTaskMode } from "@oh-my-pi/pi-coding-agent/panel";
 import {
@@ -95,7 +96,7 @@ function tuiRuntime(overrides: TuiRuntimeOverrides = {}) {
 		ctx: {
 			session: { runPanel },
 			sessionManager: { getCwd: () => "/tmp" },
-			settings: { get: vi.fn((key: string) => (key === "panel" ? panelSettings : undefined)) },
+			settings: Settings.isolated({ panel: panelSettings }),
 			showStatus,
 			editor: { setText },
 			showPanelRolePicker,
