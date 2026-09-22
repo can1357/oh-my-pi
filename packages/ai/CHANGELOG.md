@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Keenable API-key login (`KEENABLE_API_KEY` / `/login keenable`) for web search and page fetch ([#9939](https://github.com/can1357/oh-my-pi/pull/9939) by [@audreyt](https://github.com/audreyt)).
+
 ## [18.2.9] - 2026-09-22
 
 ### Added

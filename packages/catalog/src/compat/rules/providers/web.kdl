@@ -61,6 +61,13 @@ provider "web" {
 			limits
 			supports-tools #false
 		}
+		model "keenable" name="Keenable" {
+			reasoning #false
+			input "text"
+			cost input=0 output=0 cache-read=0 cache-write=0
+			limits
+			supports-tools #false
+		}
 		model "firecrawl" name="Firecrawl" {
 			reasoning #false
 			input "text"

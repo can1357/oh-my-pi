@@ -92,6 +92,7 @@
 		"web/jina",
 		"web/kagi",
 		"web/tavily",
+		"web/keenable",
 		"web/firecrawl",
 		"web/brave",
 		"web/kimi",

@@ -23,6 +23,7 @@ const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
 	jina: () => import("./providers/jina").then(m => new m.JinaProvider()),
 	kagi: () => import("./providers/kagi").then(m => new m.KagiProvider()),
 	tavily: () => import("./providers/tavily").then(m => new m.TavilyProvider()),
+	keenable: () => import("./providers/keenable").then(m => new m.KeenableProvider()),
 	firecrawl: () => import("./providers/firecrawl").then(m => new m.FirecrawlProvider()),
 	brave: () => import("./providers/brave").then(m => new m.BraveProvider()),
 	kimi: () => import("./providers/kimi").then(m => new m.KimiProvider()),
