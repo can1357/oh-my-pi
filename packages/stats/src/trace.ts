@@ -115,6 +115,15 @@ interface PendingToolCall {
 	modelEnd: number;
 }
 
+/** Background job opened by an async-running tool result. */
+interface PendingBackgroundJob {
+	jobId: string;
+	start: number;
+	label: string;
+	entryId?: string;
+	end?: number;
+}
+
 /** Task tool result row, used to place subagent spans on the parent track. */
 interface TaskResultFact {
 	childId: string;
@@ -280,8 +289,8 @@ function scanTranscript(
 	const pendingTools: PendingToolCall[] = [];
 	const toolStarts = new Map<string, ToolStartFact>();
 	const toolResults = new Map<string, { end: number; isError: boolean; entryId?: string; toolName: string }>();
-	const backgroundOpens: Array<{ jobId: string; start: number; label: string; entryId?: string }> = [];
-	const asyncCloses = new Map<string, number>();
+	const backgroundJobs: PendingBackgroundJob[] = [];
+	const activeBackgroundJobs = new Map<string, PendingBackgroundJob>();
 	const turns: Array<{ time: number; label: string; entryId?: string }> = [];
 	const taskResults: TaskResultFact[] = [];
 
@@ -467,12 +476,14 @@ function scanTranscript(
 				"jobId" in asyncInfo &&
 				typeof asyncInfo.jobId === "string"
 			) {
-				backgroundOpens.push({
+				const job: PendingBackgroundJob = {
 					jobId: asyncInfo.jobId,
 					start: end,
 					label: headText(`${msg.toolName ?? "tool"} job`, LABEL_MAX),
 					entryId: entry.id,
-				});
+				};
+				backgroundJobs.push(job);
+				activeBackgroundJobs.set(job.jobId, job);
 			}
 			if (msg.toolName === "task" && Array.isArray(details?.results)) {
 				for (const result of details.results) {
@@ -499,7 +510,10 @@ function scanTranscript(
 			if (closeAt !== undefined && Array.isArray(jobs)) {
 				for (const job of jobs) {
 					if (!job || typeof job !== "object" || !("jobId" in job) || typeof job.jobId !== "string") continue;
-					if (!asyncCloses.has(job.jobId)) asyncCloses.set(job.jobId, closeAt);
+					const targetJob = activeBackgroundJobs.get(job.jobId);
+					if (!targetJob || targetJob.end !== undefined) continue;
+					targetJob.end = closeAt;
+					activeBackgroundJobs.delete(job.jobId);
 				}
 			}
 			continue;
@@ -549,19 +563,18 @@ function scanTranscript(
 		spans.push(span);
 	}
 
-	// Background spans: opened by an async-running tool result, closed by async-result delivery.
-	for (const open of backgroundOpens) {
-		const close = asyncCloses.get(open.jobId);
-		const end = close ?? (lastChainTs || open.start);
+	// Background spans: opened by an async-running tool result, closed by the async-result delivery.
+	for (const [backgroundIndex, job] of backgroundJobs.entries()) {
+		const end = job.end ?? (lastChainTs || job.start);
 		const span: TraceSpan = {
-			id: `${trackId}:bg:${open.jobId}`,
+			id: `${trackId}:bg:${backgroundIndex}:${job.jobId}`,
 			kind: "background",
-			start: open.start,
-			end: Math.max(open.start, end),
-			label: open.label,
+			start: job.start,
+			end: Math.max(job.start, end),
+			label: job.label,
 		};
-		if (open.entryId) span.entryId = open.entryId;
-		if (close === undefined) span.unterminated = true;
+		if (job.entryId) span.entryId = job.entryId;
+		if (job.end === undefined) span.unterminated = true;
 		spans.push(span);
 	}
 

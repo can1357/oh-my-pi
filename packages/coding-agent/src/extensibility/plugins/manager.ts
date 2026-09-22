@@ -210,14 +210,22 @@ export class PluginManager {
 		}
 	}
 
-	async #removeDependencyEntry(pkgJsonPath: string, name: string): Promise<void> {
+	async #removeDependencyEntries(pkgJsonPath: string, names: readonly string[]): Promise<void> {
 		const pkgJson: { dependencies?: Record<string, string>; [key: string]: unknown } =
 			await Bun.file(pkgJsonPath).json();
-		if (!pkgJson.dependencies || !(name in pkgJson.dependencies)) {
+		if (!pkgJson.dependencies) {
 			return;
 		}
-		delete pkgJson.dependencies[name];
-		await Bun.write(pkgJsonPath, JSON.stringify(pkgJson, null, 2));
+		let changed = false;
+		for (const name of names) {
+			if (name in pkgJson.dependencies) {
+				delete pkgJson.dependencies[name];
+				changed = true;
+			}
+		}
+		if (changed) {
+			await Bun.write(pkgJsonPath, JSON.stringify(pkgJson, null, 2));
+		}
 	}
 
 	#collectInstalledNames(deps: Record<string, string>, config: PluginRuntimeConfig): Set<string> {
@@ -491,7 +499,24 @@ export class PluginManager {
 			if (gitSource && existingActualName) {
 				const installedSource = parseGitUrl(depsBefore[existingActualName] ?? "");
 				if (installedSource && installedSource.ref !== gitSource.ref) {
-					await this.#removeDependencyEntry(pkgJsonPath, existingActualName);
+					await this.#removeDependencyEntries(pkgJsonPath, [existingActualName]);
+				}
+			}
+			// `bun install` appends a manifest edge rather than replacing it, so
+			// reinstalling over a stale, malformed, or duplicated entry leaves bad
+			// keys and the next install dies with DependencyLoop. Prune the edges
+			// first; rollback restores the original package.json on failure, and
+			// the parse/rewrite also collapses any pre-existing duplicates (#12296).
+			if (!gitSource) {
+				const npmName = extractPackageName(spec.packageName);
+				const staleNames: string[] = [];
+				for (const name in depsBefore) {
+					if (extractPackageName(name) === npmName) {
+						staleNames.push(name);
+					}
+				}
+				if (staleNames.length > 0) {
+					await this.#removeDependencyEntries(pkgJsonPath, staleNames);
 				}
 			}
 

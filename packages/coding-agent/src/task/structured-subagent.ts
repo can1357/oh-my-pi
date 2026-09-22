@@ -583,18 +583,32 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
 		return;
 	}
 	if (result.structuredOutput) return;
+	// The executor attaches metadata for every payload it validated, so a
+	// failed run reaching here never submitted one: the model stream died, the
+	// run was cancelled, or the agent exited without yielding. That is not a
+	// schema verdict — `result.output` is partial prose, not a payload — and
+	// labelling it "invalid" reported provider errors as schema failures with
+	// the half-streamed text as the offending data (production 2026-09-21).
+	if (result.exitCode !== 0) {
+		result.structuredOutput = {
+			source: schema.source,
+			mode: schema.mode,
+			status: "unavailable",
+			...(result.error ? { error: result.error } : {}),
+		};
+		return;
+	}
 	let fallbackData: unknown = result.output;
 	try {
 		fallbackData = JSON.parse(result.output);
 	} catch {}
-	const output: StructuredSubagentOutput = {
+	result.structuredOutput = {
 		source: schema.source,
 		mode: schema.mode,
-		status: result.exitCode === 0 ? "valid" : "invalid",
+		status: "valid",
 		data: fallbackData,
 		...(result.error ? { error: result.error } : {}),
 	};
-	result.structuredOutput = output;
 }
 
 /**

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A provider stream that ends without a `done`/`error` event and produced zero events now appends the finalized trailing assistant message to the replay context and emits `message_start`/`message_end`, matching the done/error-event path ([#12605](https://github.com/can1357/oh-my-pi/pull/12605) by [@xiechimon](https://github.com/xiechimon)).
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed
