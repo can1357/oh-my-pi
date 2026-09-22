@@ -3,9 +3,23 @@
 provider "amazon-bedrock" {
 	default-model "us.anthropic.claude-opus-4-8"
 
-	// The Converse assembler positions content blocks by wire index
-	// (`amazon-bedrock.ts`), so a block can land above text already rendered.
-	stream-revision "possible"
+	// K3 is available through Global and US inference profiles, not in-region inference.
+	// Keep the Chat Completions route when the shared catalog lists the same IDs.
+	seed api="openai-completions" base-url="https://bedrock-runtime.{region}.amazonaws.com/openai/v1" bundle="always" precedence="seed" {
+		model "global.moonshotai.kimi-k3" name="Kimi K3 (Global)" {
+			reasoning #true
+			input "text" "image"
+			cost input=3 output=15 cache-read=0.3 cache-write=3.75
+			limits context=1000000 max-tokens=128000
+		}
+		model "us.moonshotai.kimi-k3" name="Kimi K3 (US)" {
+			reasoning #true
+			input "text" "image"
+			cost input=3.3 output=16.5 cache-read=0.33 cache-write=4.125
+			limits context=1000000 max-tokens=128000
+		}
+	}
+
 	class "anthropic" {
 		family "fable" {
 			revision ">=5.1 <5.2" {
@@ -35,6 +49,17 @@ provider "amazon-bedrock" {
 	class "minimax" {
 		family "m2" {
 			thinking-mode "budget"
+		}
+	}
+	class "kimi" {
+		family "k3" {
+			stream-idle-timeout-ms 300000
+			clamp-output-to-model-max #true
+			native-kimi-k3-reasoning #true
+			// K3 requires reasoning even when tool choice is forced.
+			disable-reasoning-on-forced-tool-choice #false
+			// Replay the returned reasoning_content without synthetic placeholders.
+			allows-synthetic-reasoning-content-for-tool-calls #false
 		}
 	}
 	class "unknown" {
@@ -72,4 +97,9 @@ provider "amazon-bedrock" {
 			max-tokens 16000
 		}
 	}
+}
+
+// Resolve the overlap with Kimi's class-level stream-revision rule.
+provider "amazon-bedrock" priority=1 {
+	stream-revision "possible"
 }

@@ -981,7 +981,8 @@ function streamDispatch<TApi extends Api>(
 	const providerModel = prepared?.model ?? requestModel;
 	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
-	if (!apiKey) {
+	// Native transports resolve credentials in prepareRequest.
+	if (!apiKey && !(prepared && providerDefinition?.nativeAuthApis?.includes(providerModel.api))) {
 		throw new AIError.MissingApiKeyError(providerModel.provider);
 	}
 	const providerOptions = isGoogleVertexAuthenticatedModel(providerModel)
@@ -1618,7 +1619,8 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			if (lastKey === undefined) {
-				if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
+				const providerDefinition = getProviderDefinition(model.provider);
+				if (providerDefinition?.allowsMissingApiKey || providerDefinition?.nativeAuthApis?.includes(model.api)) {
 					const failure = await runAttempt();
 					if (failure) emitFailure(failure);
 					return;
@@ -1698,6 +1700,11 @@ function streamSimpleRequest<TApi extends Api>(
 	} else if (model.api === "bedrock-converse-stream") {
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
 		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
+		return stream(model, context, providerOptions);
+	} else if (getProviderDefinition(model.provider)?.nativeAuthApis?.includes(model.api)) {
+		const staticApiKey =
+			typeof requestOptions.apiKey === "string" ? requestOptions.apiKey : getEnvApiKey(model.provider);
+		const providerOptions = mapOptionsForApi(model, requestOptions, staticApiKey);
 		return stream(model, context, providerOptions);
 	} else if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
 		const providerOptions = mapOptionsForApi(

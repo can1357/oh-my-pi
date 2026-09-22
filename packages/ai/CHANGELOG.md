@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed AWS credential-chain authentication for `amazon-bedrock` Chat Completions, including regional routing, request-scoped options, and guardrails.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
