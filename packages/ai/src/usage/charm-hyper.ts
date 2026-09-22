@@ -73,8 +73,14 @@ async function fetchCharmHyperUsage(params: UsageFetchParams, ctx: UsageFetchCon
 		label: "Credit balance",
 		// Windowless and shared: the label already says "balance", and the
 		// shared flag tells renderers this is one account-level pool seen once
-		// per stored key.
-		scope: { provider: params.provider, windowId: "balance", shared: true },
+		// per stored key. Include the endpoint in the group so distinct
+		// proxy-scoped pools remain distinct in aggregate amount displays.
+		scope: {
+			provider: params.provider,
+			windowId: "balance",
+			shared: true,
+			sharedGroup: `charm-hyper:credits:${creditsUrl}`,
+		},
 		amount: { remaining: balance, unit: "credits" },
 	};
 

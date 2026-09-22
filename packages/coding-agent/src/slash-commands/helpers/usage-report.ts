@@ -1,7 +1,12 @@
 import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	accountLabelsFor,
+	collapseSharedAccountReports,
+	collapseSharedUsageReports,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 import type { SlashCommandRuntime } from "../types";
 import { reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
@@ -26,40 +31,13 @@ function formatUsageAmount(limit: UsageLimit): string {
 	return `${usedText}${remainingText}`;
 }
 
-function formatUsageReportAccount(report: UsageReport, limit: UsageLimit, index: number): string {
-	const metaOrgName = report.metadata?.orgName;
-	const metaOrgId = report.metadata?.orgId;
-	const org =
-		typeof metaOrgName === "string" && metaOrgName
-			? metaOrgName
-			: typeof metaOrgId === "string" && metaOrgId
-				? metaOrgId
-				: undefined;
-	// Two subscriptions (orgs) can share one email — suffix the org so the rows
-	// are tellable apart.
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return org ? `${email} (${org})` : email;
-	// Guard metadata values for truthiness before using, then fall back to scope.
-	// ?? won't help here: empty string is not null/undefined, so it would suppress
-	// a valid scoped fallback (e.g. metadata.accountId="" hides limit.scope.accountId).
-	const metaAccountId = report.metadata?.accountId;
-	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit.scope.accountId;
-	if (typeof accountId === "string" && accountId) {
-		return org && org !== accountId ? `${accountId} (${org})` : accountId;
-	}
-	const metaProjectId = report.metadata?.projectId;
-	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
-	if (typeof projectId === "string" && projectId) return projectId;
-	return `account ${index + 1}`;
-}
-
 function renderUsageReports(
 	reports: UsageReport[],
 	nowMs: number,
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const displayReports = collapseSharedAccountReports(collapseSharedUsageReports(reports));
 	const latestFetchedAt = Math.max(...displayReports.map(report => report.fetchedAt ?? 0));
 	const lines = [`Usage${latestFetchedAt ? ` (${formatCoarseDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
 	const grouped = new Map<string, UsageReport[]>();
@@ -83,25 +61,13 @@ function renderUsageReports(
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes)
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
-		for (const report of providerReports) {
+		const accountLabels = accountLabelsFor(providerReports);
+		providerReports.forEach((report, reportIndex) => {
+			const accountLabel = accountLabels[reportIndex] ?? `account ${reportIndex + 1}`;
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
 			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 			if (resets && resets.bankedCount > 0) {
-				const resetIdentity =
-					typeof report.metadata?.email === "string"
-						? report.metadata.email
-						: typeof report.metadata?.accountId === "string"
-							? report.metadata.accountId
-							: "account";
-				const resetOrg =
-					typeof report.metadata?.orgName === "string" && report.metadata.orgName
-						? report.metadata.orgName
-						: typeof report.metadata?.orgId === "string"
-							? report.metadata.orgId
-							: undefined;
-				const rawResetLabel =
-					resetOrg && resetOrg !== resetIdentity ? `${resetIdentity} (${resetOrg})` : resetIdentity;
-				const resetLabel = sanitizeText(rawResetLabel.replace(/[\r\n\t]+/g, " "));
+				const resetLabel = sanitizeText(accountLabel.replace(/[\r\n\t]+/g, " "));
 				const availability =
 					resets.redeemableCount === resets.bankedCount ? "available" : `${resets.redeemableCount} usable now`;
 				lines.push(
@@ -124,9 +90,8 @@ function renderUsageReports(
 				}
 			}
 			if (report.limits.length === 0) {
-				const email = typeof report.metadata?.email === "string" ? report.metadata.email : "account";
-				lines.push(`- ${email}: no limits reported`);
-				continue;
+				lines.push(`- ${accountLabel}: no limits reported`);
+				return;
 			}
 			for (let index = 0; index < report.limits.length; index++) {
 				const limit = report.limits[index]!;
@@ -138,9 +103,7 @@ function renderUsageReports(
 						? ` (${limit.scope.tier})`
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
-				lines.push(
-					`  ${formatUsageReportAccount(report, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
-				);
+				lines.push(`  ${accountLabel}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`);
 				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
 					lines.push(
@@ -152,7 +115,7 @@ function renderUsageReports(
 						`  ${limit.notes.map(n => sanitizeText(n.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))).join(" • ")}`,
 					);
 			}
-		}
+		});
 	}
 	return ["```", ...lines, "```"].join("\n");
 }

@@ -94,7 +94,7 @@ import { getAssistantMessageLinkTargets } from "@oh-my-pi/pi-tui/prompt/interact
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import { createAgentsHubDeps } from "../agents-hub-deps";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-import { collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import { collapseSharedAccountReports, collapseSharedUsageReports } from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { createAgentHubRuntime } from "../agent-hub-runtime";
@@ -456,7 +456,7 @@ export class SelectorController {
 				getAdvisorStats: () => this.ctx.session.getAdvisorStats().advisors,
 				getUsageReports: async () => {
 					const reports = await this.ctx.session.fetchUsageReports?.();
-					return reports ? collapseSharedUsageReports(reports) : null;
+					return reports ? collapseSharedAccountReports(collapseSharedUsageReports(reports)) : null;
 				},
 				getQuotaLimitFilter: (provider, sessionId) => {
 					const identity = this.ctx.session.modelRegistry.authStorage.getOAuthAccountIdentity(

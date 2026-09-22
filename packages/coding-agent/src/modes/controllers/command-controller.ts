@@ -70,6 +70,9 @@ import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import {
+	accountLabelsFor,
+	aggregationLimit,
+	collapseSharedAccountReports,
 	collapseSharedUsageReports,
 	formatLimitTitle,
 	summarizeUsageResetCredits,
@@ -1815,38 +1818,13 @@ function formatWindowSuffix(label: string, windowLabel: string, uiTheme: Theme):
 	return uiTheme.fg("dim", `(${windowLabel})`);
 }
 
-/** ` (org)` suffix when the report is org-attributed — two subscriptions can share one email. */
-function orgSuffix(report: UsageReport): string {
-	const orgName = report.metadata?.orgName;
-	const orgId = report.metadata?.orgId;
-	const org = typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-	return org ? ` (${org})` : "";
-}
-
-function formatAccountLabel(limit: UsageLimit, report: UsageReport, index: number): string {
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return `${email}${orgSuffix(report)}`;
-	const accountId =
-		typeof report.metadata?.accountId === "string" && report.metadata.accountId
-			? report.metadata.accountId
-			: limit.scope.accountId || undefined;
-	if (accountId) return `${accountId}${orgSuffix(report)}`;
-	const projectId =
-		typeof report.metadata?.projectId === "string" && report.metadata.projectId
-			? report.metadata.projectId
-			: limit.scope.projectId || undefined;
-	if (projectId) return projectId;
-	return `account ${index + 1}`;
-}
-
-function formatUnlimitedReportLabel(report: UsageReport, index: number): string {
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return `${email}${orgSuffix(report)}`;
-	const accountId = report.metadata?.accountId;
-	if (typeof accountId === "string" && accountId) return `${accountId}${orgSuffix(report)}`;
-	const projectId = report.metadata?.projectId;
-	if (typeof projectId === "string" && projectId) return projectId;
-	return `account ${index + 1}`;
+/**
+ * Account label for one column of the detail grid. Disambiguation is decided
+ * per provider row: when sibling reports render the same base label, the
+ * distinct identity parts are appended (dashboard parity), else plain label.
+ */
+function detailAccountLabels(reports: readonly UsageReport[]): string[] {
+	return accountLabelsFor(reports);
 }
 
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
@@ -1866,11 +1844,12 @@ function formatAccountHeaderRow(
 	uiTheme: Theme,
 	activeAccount?: OAuthAccountIdentity,
 ): string[] {
+	const labels = detailAccountLabels(reports);
 	const parts = limits.map((limit, index) => {
 		const reset = formatResetShort(limit, nowMs);
 		const report = reports[index];
 		const active = report !== undefined && limitMatchesActiveAccount(report, limit, activeAccount);
-		const label = formatAccountLabel(limit, report, index);
+		const label = labels[index] ?? `account ${index + 1}`;
 		return {
 			label: active ? `● ${label}` : label,
 			suffix: reset ? `(${reset})` : "",
@@ -2044,7 +2023,7 @@ export function renderUsageReports(
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const displayReports = collapseSharedAccountReports(collapseSharedUsageReports(reports));
 	const lines: string[] = [];
 	const latestFetchedAt = Math.max(...reports.map(report => report.fetchedAt ?? 0));
 	const headerSuffix = latestFetchedAt ? ` (${formatDuration(nowMs - latestFetchedAt)} ago)` : "";
@@ -2086,7 +2065,7 @@ export function renderUsageReports(
 					limits: [],
 					reports: [],
 				};
-				entry.limits.push(limit);
+				entry.limits.push(aggregationLimit(report, limit));
 				entry.reports.push(report);
 				limitGroups.set(key, entry);
 			}
@@ -2115,23 +2094,11 @@ export function renderUsageReports(
 		}
 
 		const resetAccountLines: string[] = [];
-		for (const report of providerReports) {
+		const resetLabels = detailAccountLabels(providerReports);
+		providerReports.forEach((report, reportIndex) => {
 			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
-			if (!resets || resets.bankedCount <= 0) continue;
-			const identityLabel =
-				typeof report.metadata?.email === "string" && report.metadata.email
-					? report.metadata.email
-					: typeof report.metadata?.accountId === "string" && report.metadata.accountId
-						? report.metadata.accountId
-						: "account";
-			const orgLabel =
-				typeof report.metadata?.orgName === "string" && report.metadata.orgName
-					? report.metadata.orgName
-					: typeof report.metadata?.orgId === "string"
-						? report.metadata.orgId
-						: undefined;
-			const rawLabel = orgLabel && orgLabel !== identityLabel ? `${identityLabel} (${orgLabel})` : identityLabel;
-			const label = sanitizeText(rawLabel.replace(/[\r\n\t]+/g, " "));
+			if (!resets || resets.bankedCount <= 0) return;
+			const label = sanitizeText(resetLabels[reportIndex] ?? `account ${reportIndex + 1}`);
 			const activeOrg = activeAccount?.orgId;
 			const reportOrg = typeof report.metadata?.orgId === "string" ? report.metadata.orgId : undefined;
 			const orgMatches = !activeOrg && !reportOrg ? true : activeOrg === reportOrg;
@@ -2159,7 +2126,7 @@ export function renderUsageReports(
 				const reason = sanitizeText(resets.unavailableReason.replace(/[\r\n\t]+/g, " "));
 				resetAccountLines.push(`        unavailable: ${reason}`);
 			}
-		}
+		});
 		if (resetAccountLines.length > 0) {
 			lines.push(
 				`  ${uiTheme.fg("accent", "Saved rate-limit resets")} ${uiTheme.fg("dim", "(/usage reset to spend)")}`,
@@ -2240,14 +2207,15 @@ export function renderUsageReports(
 
 		// Render accounts with no rate limits (e.g. business/enterprise plans).
 		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
-		for (const report of unlimitedReports) {
-			const label = formatUnlimitedReportLabel(report, 0);
+		const unlimitedLabels = detailAccountLabels(unlimitedReports);
+		unlimitedReports.forEach((report, unlimitedIndex) => {
+			const label = unlimitedLabels[unlimitedIndex] ?? `account ${unlimitedIndex + 1}`;
 			const tier = report.metadata?.planType;
 			const tierSuffix = typeof tier === "string" && tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
 			lines.push(
 				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
 			);
-		}
+		});
 		// No per-provider footer; global header shows last check.
 	}
 

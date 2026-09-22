@@ -21,6 +21,10 @@
 - Restored modified-key handling and terminal notifications over SSH sessions running inside tmux.
 - Fixed typed Enter occasionally being interpreted as a literal newline when terminal input events are batched.
 
+### Changed
+
+- Expanded the initial `/usage` dashboard to show each account's identity, availability status, remaining percentage, and individual quota windows instead of only provider-level aggregates. Combined rows now preserve tier boundaries, weight absolute quotas by their capacities, and show partial-account coverage only across eligible plan accounts (including Pro-only reserve buckets).
+
 ## [18.2.8] - 2026-09-21
 
 ### Changed

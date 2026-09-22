@@ -343,6 +343,33 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("capacity: 5h → 1.34/2 accounts used (0.66× quota left)");
 	});
 
+	it("collapses per-key probes of one shared pool into a single account row", () => {
+		// The CLI is the third surface of the same collapse rule: two stored keys
+		// on one Charm Hyper account must read as one account holding one balance.
+		const charmReport = (remaining: number): UsageReport => ({
+			provider: "charm-hyper",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: {
+						provider: "charm-hyper",
+						windowId: "balance",
+						shared: true,
+						sharedGroup: "charm-hyper:credits:https://hyper.charm.land/v1/credits",
+					},
+					amount: { remaining, unit: "credits" },
+				},
+			],
+			metadata: { endpoint: "https://hyper.charm.land/v1/credits" },
+		});
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([charmReport(100), charmReport(95)], [], Date.now()));
+		expect(text).toContain("— 1 account");
+		expect(text).not.toContain("— 2 accounts");
+	});
+
 	it("renders marked Antigravity shared quotas once per account", () => {
 		const antigravity = makeReport("google-antigravity", "user@example.test", [
 			makeLimit({

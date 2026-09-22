@@ -45,6 +45,7 @@ describe("charm hyper usage provider", () => {
 		// Account-wide: spending through one key moves every key's balance, so
 		// renderers must collapse the duplicates rather than sum them.
 		expect(limit.scope.shared).toBe(true);
+		expect(limit.scope.sharedGroup).toBe("charm-hyper:credits:https://hyper.charm.land/v1/credits");
 		expect(limit.window).toBeUndefined();
 		expect(resolveUsedFraction(limit)).toBeUndefined();
 	});

@@ -25,7 +25,14 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	accountLabelPartsFor,
+	type AccountLabelParts,
+	collapseSharedAccountReports,
+	collapseSharedUsageReports,
+	composeAccountLabel,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 
 const BAR_WIDTH = 28;
 
@@ -268,17 +275,22 @@ function limitTitle(limit: UsageLimit): string {
 	return `${label} (${windowLabel})`;
 }
 
-function reportAccountLabel(report: UsageReport, index: number): string {
-	const meta = report.metadata ?? {};
-	for (const key of ["email", "accountId", "projectId"] as const) {
-		const value = meta[key];
-		if (typeof value === "string" && value) return value;
-	}
-	for (const limit of report.limits) {
-		const scoped = limit.scope.accountId ?? limit.scope.projectId;
-		if (scoped) return scoped;
-	}
-	return `account ${index + 1}`;
+/**
+ * Compose a CLI account label from canonical parts, masking every identity
+ * string before composition: masking the finished label would leave the parts
+ * inside it readable under `--redact`.
+ */
+function cliAccountLabel(parts: AccountLabelParts, index: number, redaction?: Map<string, string>): string {
+	const mask = (value: string): string => redaction?.get(value) ?? value;
+	return composeAccountLabel(
+		{
+			...(parts.base === undefined ? {} : { base: mask(parts.base) }),
+			...(parts.org === undefined ? {} : { org: mask(parts.org) }),
+			...(parts.suffix === undefined ? {} : { suffix: parts.suffix.map(mask) }),
+			...(parts.ordinal === undefined ? {} : { ordinal: parts.ordinal }),
+		},
+		index,
+	);
 }
 
 /** Lowercased identity strings a report can be attributed to. */
@@ -391,18 +403,14 @@ function formatAccountHeader(
 	report: UsageReport,
 	index: number,
 	nowMs: number,
+	label: string,
 	redaction?: Map<string, string>,
 ): string {
 	const status = aggregateStatus(report.limits);
 	const icon = STATUS_COLOR[status]("●");
-	const label = reportAccountLabel(report, index);
+	// The canonical label already carries the org as `(org)` when it differs
+	// from the base identity, so no separate org fragment is appended here.
 	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
-	const metaOrgName = report.metadata?.orgName;
-	const metaOrgId = report.metadata?.orgId;
-	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-	if (typeof org === "string" && org && org !== label) {
-		header += chalk.dim(` · ${redaction?.get(org) ?? org}`);
-	}
 	const planType = report.metadata?.planType;
 	if (typeof planType === "string" && planType) header += chalk.dim(` · plan: ${planType}`);
 	const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
@@ -634,7 +642,7 @@ export function formatUsageBreakdown(
 	redaction?: Map<string, string>,
 	disabled: DisabledCredentialSummary[] = [],
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const displayReports = collapseSharedAccountReports(collapseSharedUsageReports(reports));
 	const reportsByProvider = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const list = reportsByProvider.get(report.provider) ?? [];
@@ -680,9 +688,11 @@ export function formatUsageBreakdown(
 
 		const providerLimitTemplates = collectProviderLimitTemplates(providerReports);
 		const labelWidth = providerLimitTemplates.reduce((max, template) => Math.max(max, template.title.length), 0);
+		const labelParts = accountLabelPartsFor(providerReports);
 
 		providerReports.forEach((report, index) => {
-			lines.push(`  ${formatAccountHeader(report, index, nowMs, redaction)}`);
+			const label = cliAccountLabel(labelParts[index] ?? {}, index, redaction);
+			lines.push(`  ${formatAccountHeader(report, index, nowMs, label, redaction)}`);
 			if (report.limits.length === 0) {
 				lines.push(`      ${chalk.dim("no limits reported")}`);
 				return;
@@ -1138,10 +1148,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			: undefined;
 
 		if (cmd.json) {
+			// Merge per-credential probes of one account-wide pool first, so the
+			// JSON surface reports the same accounts and capacity as the text view.
+			const displayReports = collapseSharedAccountReports(collapseSharedUsageReports(filteredReports));
 			// Drop the heavy provider-specific `raw` payload — same shape as the
 			// broker/gateway `/v1/usage` endpoints.
-			let trimmed = filteredReports.map(({ raw: _raw, ...rest }) => rest);
-			let unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts);
+			let trimmed = displayReports.map(({ raw: _raw, ...rest }) => rest);
+			let unreportedAccounts = collectUnreportedAccounts(displayReports, accounts);
 			if (redaction) {
 				trimmed = trimmed.map(report => redactReportForJson(report, redaction));
 				unreportedAccounts = unreportedAccounts.map(account => ({
@@ -1155,9 +1168,9 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				}));
 			}
 			const capacity: Record<string, ProviderWindowStat[]> = {};
-			for (const report of filteredReports) {
+			for (const report of displayReports) {
 				if (capacity[report.provider]) continue;
-				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
+				const stats = computeProviderWindowStats(displayReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
 			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));

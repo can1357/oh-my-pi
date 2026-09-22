@@ -10,7 +10,7 @@ function normalizeIdentityValue(value: unknown): string | undefined {
  * (email → accountId → projectId) suffixed with the organization when present
  * and distinct. Same-email Anthropic multi-org accounts share the base, so the
  * org suffix is the only field that tells the session's quota pool apart —
- * mirrors the account-list rows (`formatUsageReportAccount`) and login success.
+ * mirrors the account-list rows (`accountLabelsFor`) and login success.
  * Returns `undefined` when no identifier is recoverable.
  */
 export function formatActiveAccountLabel(identity: OAuthAccountIdentity | undefined): string | undefined {

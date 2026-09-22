@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { renderUsageReports } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { buildProviderCards } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 
 describe("renderUsageReports content", () => {
@@ -168,5 +169,109 @@ describe("renderUsageReports content", () => {
 
 		expect(output.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
 		expect(output.match(/Gemini/g)).toHaveLength(2);
+	});
+
+	it("uses the newest shared snapshot instead of stale max headroom", () => {
+		const now = Date.now();
+		const balance = (fetchedAt: number, remaining: number): UsageReport => ({
+			provider: "charm-hyper",
+			fetchedAt,
+			limits: [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: { provider: "charm-hyper", windowId: "balance", shared: true },
+					amount: { remaining, unit: "credits" },
+				},
+			],
+		});
+
+		// Two probes of one pool: the later one observed 95. Reporting the
+		// earlier 100 would claim headroom the account already spent.
+		const output = stripVTControlCharacters(renderUsageReports([balance(1, 100), balance(2, 95)], theme, now, 98));
+		expect(output).toContain("95 credits left");
+		expect(output).not.toContain("100 credits left");
+	});
+
+	it("keeps independent account pools apart in the detail grid", () => {
+		const now = Date.now();
+		const balance = (accountId: string, remaining: number): UsageReport => ({
+			provider: "zai",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "zai:credits",
+					label: "Credits",
+					scope: { provider: "zai", accountId, windowId: "credits", shared: true },
+					window: { id: "credits", label: "credits" },
+					amount: { remaining, unit: "credits" },
+				},
+			],
+			metadata: { accountId, email: `${accountId}@example.test` },
+		});
+
+		const output = stripVTControlCharacters(
+			renderUsageReports([balance("acct-a", 100), balance("acct-b", 50)], theme, now, 120),
+		);
+		expect(output).toContain("150 credits left");
+	});
+
+	it("disambiguates duplicate account labels in the detail grid", () => {
+		const now = Date.now();
+		const shared = (accountId: string, usedFraction: number): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "anthropic:primary",
+					label: "Claude 7 Day",
+					scope: { provider: "anthropic", accountId, windowId: "7d" },
+					window: { id: "7d", label: "7 days" },
+					amount: { usedFraction, unit: "percent" },
+				},
+			],
+			metadata: { accountId, email: "same@example.test" },
+		});
+
+		const output = stripVTControlCharacters(
+			renderUsageReports([shared("acct-a", 0.2), shared("acct-b", 0.8)], theme, now, 140),
+		);
+		expect(output).toContain("same@example.test (acct-a)");
+		expect(output).toContain("same@example.test (acct-b)");
+	});
+
+	it("reports the same pooled balance as the dashboard card model", () => {
+		// The two surfaces share one collapse rule now; a divergence here means
+		// one of them drifted back to its own aggregation.
+		const now = Date.now();
+		const charmReport = (remaining: number, endpoint = "https://api.example.test/credits"): UsageReport => ({
+			provider: "charm-hyper",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: {
+						provider: "charm-hyper",
+						windowId: "balance",
+						shared: true,
+						sharedGroup: `charm-hyper:credits:${endpoint}`,
+					},
+					amount: { remaining, unit: "credits" },
+				},
+			],
+			metadata: { endpoint },
+		});
+		const onePool = [charmReport(100), charmReport(95)];
+		const twoPools = [charmReport(100), charmReport(95, "https://other.example.test/credits")];
+
+		for (const [label, reports, expected] of [
+			["one pool", onePool, "100 credits left"],
+			["two pools", twoPools, "195 credits left"],
+		] as const) {
+			const dashboardText = buildProviderCards([...reports], now)[0]?.windows[0]?.usedText;
+			expect(dashboardText, label).toBe(expected);
+			expect(stripVTControlCharacters(renderUsageReports([...reports], theme, now, 120)), label).toContain(expected);
+		}
 	});
 });
