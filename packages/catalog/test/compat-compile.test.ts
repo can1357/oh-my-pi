@@ -26,6 +26,60 @@ describe("compat compiler grammar", () => {
 		).toThrow(/classes\/test\.kdl:2.*unknown directive `not-an-axis`/);
 	});
 
+	test("root on-api compiles into an api-scoped catalog rule", () => {
+		const compiled = compileCascade([
+			{ file: "providers/test.kdl", text: 'on-api "cursor-agent" {\n\trequires-native-tools #true\n}' },
+		]);
+		expect(compiled.rules).toHaveLength(1);
+		expect(compiled.rules[0]).toMatchObject({
+			apis: ["cursor-agent"],
+			catalog: { requiresNativeTools: true },
+		});
+	});
+
+	test("root on-api accepts class and models children", () => {
+		const compiled = compileCascade([
+			{
+				file: "providers/test.kdl",
+				text: [
+					'on-api "bedrock-converse-stream" {',
+					'\tclass "anthropic" {',
+					'\t\tmodels "claude-*" {',
+					"\t\t\trequires-tool-free-history-for-tool-opt-out #true",
+					"\t\t}",
+					"\t}",
+					"}",
+				].join("\n"),
+			},
+		]);
+		expect(compiled.rules[0]).toMatchObject({
+			apis: ["bedrock-converse-stream"],
+			class: "anthropic",
+			models: [{ kind: "glob", value: "claude-*" }],
+			catalog: { requiresToolFreeHistoryForToolOptOut: true },
+		});
+	});
+
+	test("root on-api rejects catalog-entry directives it does not own", () => {
+		expect(() =>
+			compileCascade([{ file: "providers/test.kdl", text: 'on-api "cursor-agent" {\n\tdefault-model "m"\n}' }]),
+		).toThrow(/providers\/test\.kdl:2.*unknown directive `default-model`/);
+	});
+
+	test("boolean-valued axes reject non-boolean scalars", () => {
+		// KDL rejects a bare `false` keyword already, but a quoted `"false"` is a
+		// string: `=== true` / `!== false` consumers would read it as the opposite
+		// intent, so the vocabulary has to reject it at compile time.
+		expect(() =>
+			compileCascade([
+				{
+					file: "providers/test.kdl",
+					text: 'on-api "cursor-agent" {\n\tpreserves-max-output-tokens "false"\n}',
+				},
+			]),
+		).toThrow(/providers\/test\.kdl:2.*axis `preserves-max-output-tokens` rejects value `false`/);
+	});
+
 	test("malformed scalar shape is rejected", () => {
 		expect(() =>
 			compileCascade([{ file: "classes/test.kdl", text: 'class "openai" {\n\tsupports-store #true #false\n}' }]),
