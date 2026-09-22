@@ -26,6 +26,12 @@ import {
 } from "../subprocess/worker-runtime";
 import { renderTextChatTemplate } from "./completion-prompt";
 import {
+	completeAfmCore,
+	foundationModelsUnavailableReason,
+	isAfmRequestScopedFailure,
+	probeAfmCore,
+} from "./apple-fm";
+import {
 	resolveTinyModelDevicePreference,
 	type TinyModelDevicePreference,
 	type TinyOnnxDevice,
@@ -34,6 +40,7 @@ import {
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
 import {
 	getTinyLocalModelSpec,
+	isFoundationModelsSpec,
 	isTinyLocalModelKey,
 	type TinyLocalModelKey,
 	type TinyTitleLocalModelSpec,
@@ -251,6 +258,85 @@ class OnnxModel {
 	}
 }
 
+/**
+ * Apple Foundation Models worker: OS-owned weights behind the bundled
+ * sidecar. There is nothing to download or load, so `pipeline` probes Apple
+ * Intelligence readiness (failing closed while it is off or the model is not
+ * ready) and chat completes through the sidecar. Darwin only — selection
+ * refuses other platforms via {@link foundationModelsUnavailableReason}.
+ */
+class FoundationModelsModel {
+	#spec: TinyTitleLocalModelSpec;
+	#modelKey: TinyLocalModelKey;
+	#probe: Promise<void> | null = null;
+
+	constructor(modelKey: TinyLocalModelKey, spec: TinyTitleLocalModelSpec) {
+		this.#modelKey = modelKey;
+		this.#spec = spec;
+	}
+
+	async #runProbe(reply: ReplyTransport, requestId: string): Promise<void> {
+		reply.send({
+			type: "progress",
+			id: requestId,
+			event: { modelKey: this.#modelKey, status: "initiate", name: this.#spec.repo },
+		});
+		const status = await probeAfmCore();
+		if (!status.available) throw new Error(status.reason ?? "Apple Foundation Model unavailable");
+	}
+
+	/** Readiness probe, standing in for pipeline load (with progress for `requestId`). */
+	pipeline(reply: ReplyTransport, requestId: string): Promise<void> {
+		if (!this.#probe) {
+			const blocked = foundationModelsUnavailableReason(this.#spec);
+			this.#probe = blocked
+				? Promise.reject(new Error(`${this.#modelKey} is unavailable: ${blocked}`))
+				: this.#runProbe(reply, requestId).catch((error: unknown) => {
+						this.#probe = null;
+						throw error;
+					});
+		}
+		return this.#probe;
+	}
+
+	/** Send the `ready` marker the client's download UI waits for. */
+	sendReady(reply: ReplyTransport, requestId: string): void {
+		reply.send({
+			type: "progress",
+			id: requestId,
+			event: { modelKey: this.#modelKey, status: "ready", task: "text-generation", model: this.#spec.repo },
+		});
+	}
+
+	async chat(request: Extract<TinyWorkerRequest, { type: "chat" }>, reply: ReplyTransport): Promise<string> {
+		const instructions = request.messages.find(message => message.role === "system")?.content ?? "";
+		const prompt = request.messages
+			.filter(message => message.role === "user")
+			.map(message => message.content)
+			.join("\n");
+		try {
+			// Probe inside the request scope: a transient probe failure
+			// (modelNotReady, unclassified transport) returns empty like a
+			// guardrail failure instead of failing the worker, so later
+			// completions re-probe and recover. Terminal availability
+			// faults still throw and fail closed. (The load path keeps
+			// throwing: download must report probe failures.)
+			await this.pipeline(reply, request.id);
+			// Bound AFM completion tokens (1–1024) like the ONNX path caps
+			// generation length; the sidecar has no safe default of its own.
+			const maxTokens = Math.min(Math.max(1, request.maxNewTokens), 1024);
+			return await completeAfmCore({ instructions, prompt, maxTokens });
+		} catch (error) {
+			// Guardrail and empty-text failures are request-scoped: return
+			// empty (the client normalizes it to null) without failing the
+			// worker, so later titles still try AFM. Compile and
+			// availability faults throw and fail closed.
+			if (isAfmRequestScopedFailure(error)) return "";
+			throw error;
+		}
+	}
+}
+
 /** Run the ONNX worker for the model/endpoint selected by the CLI worker host environment. */
 export async function startTinyWorkerFromEnvironment(): Promise<void> {
 	const endpoint = process.env[TINY_WORKER_SOCKET_ENV];
@@ -261,7 +347,9 @@ export async function startTinyWorkerFromEnvironment(): Promise<void> {
 	const spec = getTinyLocalModelSpec(modelKey);
 	if (!spec) throw new Error(`Unknown tiny local model: ${modelKey}`);
 	setProcessName(`omp tiny ${modelKey}`);
-	const model = new OnnxModel(modelKey, spec, resolveTinyModelDevicePreference(), resolveTinyModelDtypeOverride());
+	const model = isFoundationModelsSpec(spec)
+		? new FoundationModelsModel(modelKey, spec)
+		: new OnnxModel(modelKey, spec, resolveTinyModelDevicePreference(), resolveTinyModelDtypeOverride());
 	const server = new TinyWorkerServer({
 		tag,
 		idleMs: Number(process.env[TINY_WORKER_IDLE_MS_ENV]) || TINY_WORKER_IDLE_MS,

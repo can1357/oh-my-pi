@@ -1,18 +1,24 @@
 /** Local model the `tiny-models` CLI downloads when none is named. */
 export const DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY = "lfm2.5-230m";
 
+export type TinyModelEngine = "transformers" | "foundation-models";
+
 export interface TinyTitleLocalModelSpec {
 	key: string;
+	/** Default `transformers` (ONNX). `foundation-models` is Darwin SystemLanguageModel. */
+	engine?: TinyModelEngine;
 	/** ONNX export loaded by transformers.js on every platform. */
 	repo: string;
 	dtype: "q4";
-	/** Pre-quantized MLX export loaded by mlx-lm when `PI_TINY_DEVICE=mlx`. */
-	mlxRepo: string;
+	/** Pre-quantized MLX export loaded by mlx-lm when `PI_TINY_DEVICE=mlx`. Absent for non-weight engines (Apple Foundation Models). */
+	mlxRepo?: string;
 	label: string;
 	description: string;
 	contextNote: string;
 	/** Model family emits hidden reasoning unless the chat template disables it. */
 	reasoning?: boolean;
+	/** Darwin-only gate for non-weight engines; `undefined` when usable on this machine. */
+	unsupportedReason?: string;
 	/** Reason the ONNX backend refuses this model before loading the runtime; the MLX backend ignores it. */
 	onnxUnsupportedReason?: string;
 }
@@ -45,6 +51,19 @@ export const TINY_TITLE_LOCAL_MODELS = [
 		description: "Smallest option, about 147 MB cached; lower fidelity on complex prompts.",
 		contextNote: "Use on constrained machines where download size matters most.",
 	},
+	{
+		key: "afm-core",
+		engine: "foundation-models",
+		repo: "apple.SystemLanguageModel",
+		dtype: "q4",
+		label: "AFM 3 Core",
+		description:
+			"On-device Apple Foundation Model (macOS). OS-owned weights; download is a readiness probe, not a Hugging Face fetch.",
+		contextNote:
+			"Darwin only. Session context is SystemLanguageModel.contextSize (4096 on 26.x, live _contextSize on 27+; 8192 for AFM 3 on this class of Mac). Fail closed when Apple Intelligence is off or the model is not ready.",
+		unsupportedReason: process.platform === "darwin" ? undefined : "Apple Foundation Models is macOS-only",
+		onnxUnsupportedReason: "Apple Foundation Models uses the SystemLanguageModel engine, not ONNX",
+	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
 export type TinyTitleLocalModelKey = (typeof TINY_TITLE_LOCAL_MODELS)[number]["key"];
@@ -57,6 +76,12 @@ export function getTinyTitleModelSpec(key: TinyTitleLocalModelKey): (typeof TINY
 	const spec = TINY_TITLE_LOCAL_MODELS.find(model => model.key === key);
 	if (!spec) throw new Error(`Unknown tiny title model: ${key}`);
 	return spec;
+}
+
+export function isFoundationModelsSpec(
+	spec: TinyTitleLocalModelSpec | undefined,
+): spec is TinyTitleLocalModelSpec & { engine: "foundation-models" } {
+	return spec?.engine === "foundation-models";
 }
 
 /** Recommended local model for memory tasks when none is named. */
@@ -119,6 +144,18 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 		description: "Fastest load; solid all-rounder, slightly noisier extraction labels.",
 		contextNote: "Use when local startup cost is the priority.",
 	},
+	{
+		key: "afm-core",
+		engine: "foundation-models",
+		repo: "apple.SystemLanguageModel",
+		dtype: "q4",
+		label: "AFM 3 Core",
+		description:
+			"On-device Apple Foundation Model (macOS). OS-owned weights; download is a readiness probe, not a Hugging Face fetch.",
+		contextNote:
+			"Darwin only. Session context is SystemLanguageModel.contextSize (4096 on 26.x, live _contextSize on 27+; 8192 for AFM 3 on this class of Mac). Fail closed when Apple Intelligence is off or the model is not ready.",
+		unsupportedReason: process.platform === "darwin" ? undefined : "Apple Foundation Models is macOS-only",
+	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
 export type TinyMemoryLocalModelKey = (typeof TINY_MEMORY_LOCAL_MODELS)[number]["key"];
@@ -157,5 +194,5 @@ export function isTinyLocalModelKey(value: string): value is TinyLocalModelKey {
 /** Combined local model registry (title + memory) for the shared tiny-models CLI. */
 export const TINY_LOCAL_MODELS = [
 	...TINY_TITLE_LOCAL_MODELS,
-	...TINY_MEMORY_LOCAL_MODELS,
+	...TINY_MEMORY_LOCAL_MODELS.filter(spec => spec.key !== "afm-core"),
 ] as const satisfies readonly TinyTitleLocalModelSpec[];

@@ -127,8 +127,8 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
 | Falcon-H1-Tiny-90M | 147MB |     117 / 174ms |       17/29 | Smallest; lower fidelity on complex inputs       |
 | LFM2.5-350M        | 292MB |     166 / 266ms |        4/30 | Aggressively terse, often a one-word label       |
 
-**Shipped local options**: `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`.
-When `modelRoles.tiny` is unset, title generation resolves its built-in online role path; no local weights are downloaded automatically. The default download for a bare `omp tiny-models` command is `lfm2.5-230m`.
+**Shipped local options**: `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`, and Darwin-only `afm-core` (Apple SystemLanguageModel; OS-owned weights, not ONNX).
+When `modelRoles.tiny` is unset, title generation resolves its built-in online role path; no local weights are downloaded automatically. The default download for a bare `omp tiny-models` command is `lfm2.5-230m`. `omp tiny-models download afm-core` installs the bundled Apple Silicon sidecar (or compiles one when that triple is absent) and probes Apple Intelligence readiness; it does not download weights.
 
 ## Task 2: Mnemopi memory (`modelRoles.memory`)
 
@@ -184,8 +184,8 @@ Of the runnable options, the registry marks `lfm2-1.2b` as the recommended local
 `gemma-3-1b` favors consolidation quality, while `qwen2.5-1.5b` favors fine-grained extraction.
 
 **Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (ONNX-disabled as described above),
-`gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`.
-When `modelRoles.memory` is unset, it resolves through the effective `tiny` role and then the built-in smol priority list; no local weights are downloaded automatically.
+`gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`, and Darwin-only `afm-core` (Apple SystemLanguageModel; OS default, Advanced when present; not scored on this extract set).
+When `modelRoles.memory` is unset, it resolves through the effective `tiny` role and then the built-in smol priority list; no local weights are downloaded automatically. Apple Foundation Models (`afm-core`) can serve memory, auto-thinking, and unexpected-stop workloads assigned to a local tiny model through the same on-device path as titles; it simply has no extraction/consolidation scores from these experiments.
 
 ### Known Mnemopi parser bugs (surfaced by these experiments)
 
@@ -224,3 +224,4 @@ Kokoro and the transformers.js Whisper models use the same `providers.tinyModelD
 - Session-title generation uses `modelRoles.tiny`; Mnemopi extraction and consolidation use `modelRoles.memory` when its LLM mode is enabled. Their distinct prompts and benchmark groups do not impose separate runtime model types.
 - Auto-thinking, Smart unexpected-stop detection, typed Eval judgments, and AI-assisted git staging use the `judge` role. Assign `typesafe/jev-latest` for TypeSafe or a compatible local tiny model for on-device judgment; order alternatives under `retry.fallbackChains.judge`.
 - The memory local path applies the refined line-format and small-talk-guarded extraction prompt plus the hardened consolidation prompt; selecting an online chat model for the role keeps the online transport path.
+- Darwin-only `afm-core` (Apple Foundation Models) is accepted anywhere a local tiny model is, including the `tiny`, `memory`, and `judge` roles; it ships no downloadable weights.
