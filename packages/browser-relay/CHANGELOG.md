@@ -9,6 +9,7 @@
 - Fixed browser relay support when multiple browser instances, such as Chrome and Edge, are connected simultaneously, ensuring tabs and relay requests remain associated with the correct browser while preserving single-browser compatibility for extensions without an instance identifier.
 ### Added
 
+- Relay-created tabs are now born inside the omp tab group: `createTab` carries the group spec and the extension groups in the same RPC, so a driven tab never flashes standalone (and a claim-sync racing a service-worker restart can no longer leave it loose). `--no-group` still creates loose tabs.
 - Busy affordances matching Claude in Chrome: the extension now pins a small "⏳" badge on the toolbar icon of the exact tab being driven (complementing the existing "⏳" group-title suffix), while the CLI's tab worker pulses a frame along all four viewport edges of the page and glides a virtual cursor between interaction points for the whole duration of a driving burst.
 
 
