@@ -175,8 +175,8 @@ function usageOverlayKey(
 	const accountId = ids.accountId?.trim().toLowerCase();
 	const email = ids.email?.trim().toLowerCase();
 	const projectId = ids.projectId?.trim().toLowerCase();
-	if (accountId) base = `account:${accountId}`;
-	else if (email) base = `email:${email}`;
+	if (email) base = `email:${email}`;
+	else if (accountId) base = `account:${accountId}`;
 	else if (projectId) base = `project:${projectId}`;
 	const orgId = ids.orgId?.trim().toLowerCase();
 	if (orgId) return base ? `${provider}\0org:${orgId}|${base}` : `${provider}\0org:${orgId}`;
@@ -1556,16 +1556,16 @@ function reportMatchesIdentity(
 	projectId: string | undefined,
 ): boolean {
 	const metadata = (report.metadata ?? {}) as Record<string, unknown>;
+	const metaEmail = readMetadataString(metadata, "email")?.toLowerCase();
+	// Email identifies the member within shared Team workspace account/org ids.
+	// When both sides provide it, a mismatch is decisive.
+	if (email && metaEmail) return metaEmail === email;
 	if (accountId) {
 		const metaAccount = readMetadataString(metadata, "accountId") ?? readMetadataString(metadata, "account_id");
 		if (metaAccount && metaAccount.toLowerCase() === accountId) return true;
 		for (const limit of report.limits) {
 			if (limit.scope.accountId?.toLowerCase() === accountId) return true;
 		}
-	}
-	if (email) {
-		const metaEmail = readMetadataString(metadata, "email");
-		if (metaEmail && metaEmail.toLowerCase() === email) return true;
 	}
 	if (projectId) {
 		const metaProject = readMetadataString(metadata, "projectId") ?? readMetadataString(metadata, "project_id");

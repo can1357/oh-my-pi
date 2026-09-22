@@ -622,6 +622,11 @@ export class CollabHost {
 			participants: this.participants.length,
 			relayConnected: this.#relayConnected,
 			inputRequired: this.inputRequired,
+			// Same source as the guest footer's `isStreaming`, read at query time:
+			// true for the whole turn, including tool execution, and false once
+			// the agent ends — so a poller sees the session stop while the room
+			// is still published.
+			busy: this.#ctx.session.isStreaming,
 			access: this.#access,
 		};
 	}

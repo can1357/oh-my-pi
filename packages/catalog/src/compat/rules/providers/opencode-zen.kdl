@@ -1,7 +1,7 @@
 // Provider-wire compat for "opencode-zen"; regenerated from the frozen census using deployment contract selectors.
 
 provider "opencode-zen" {
-	default-model "claude-opus-4-8"
+	default-model "claude-opus-5"
 	env "OPENCODE_API_KEY"
 	dynamic-models-authoritative #true
 

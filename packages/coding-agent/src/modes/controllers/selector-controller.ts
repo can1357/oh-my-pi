@@ -6,7 +6,13 @@ import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
-import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDbPath,
+	getAgentDir,
+	getProjectDir,
+	normalizePathForComparison,
+	sanitizeText,
+} from "@oh-my-pi/pi-utils";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	discoverAdvisorConfigs,
@@ -2370,12 +2376,19 @@ export class SelectorController {
 		try {
 			statuses = await session.listResetCredits();
 		} catch (error) {
-			this.ctx.showError(`Could not load saved resets: ${error instanceof Error ? error.message : String(error)}`);
+			this.ctx.showError(
+				sanitizeText(
+					`Could not load saved resets: ${error instanceof Error ? error.message : String(error)}`.replace(
+						/[\r\n\t]+/g,
+						" ",
+					),
+				),
+			);
 			return;
 		}
 		const accounts = toResetUsageAccounts(statuses);
 		if (accounts.length === 0) {
-			this.ctx.showStatus("No Codex accounts found. Use /login to add one.");
+			this.ctx.showStatus("No provider accounts found. Use /login to add one.");
 			return;
 		}
 		if (!accounts.some(account => account.availableCount > 0)) {
@@ -2403,17 +2416,25 @@ export class SelectorController {
 	}
 
 	async #redeemReset(account: ResetUsageAccount): Promise<void> {
-		this.ctx.showStatus(`Spending 1 saved reset for ${account.label}…`, { dim: true });
+		this.ctx.showStatus(
+			`Spending 1 saved reset for ${sanitizeText(account.label.replace(/[\r\n\t]+/g, " "))} (${account.providerLabel})…`,
+			{ dim: true },
+		);
 		let outcome: ResetCreditRedeemOutcome;
 		try {
 			outcome = await this.ctx.session.redeemResetCredit(account.target);
 		} catch (error) {
 			this.ctx.showError(
-				`Reset failed for ${account.label}: ${error instanceof Error ? error.message : String(error)}`,
+				sanitizeText(
+					`Reset failed for ${account.label}: ${error instanceof Error ? error.message : String(error)}`.replace(
+						/[\r\n\t]+/g,
+						" ",
+					),
+				),
 			);
 			return;
 		}
-		const message = describeRedeemOutcome(outcome, account.label);
+		const message = sanitizeText(describeRedeemOutcome(outcome, account.label).replace(/[\r\n\t]+/g, " "));
 		if (outcome.ok) {
 			this.ctx.showStatus(message);
 			// Refresh the status-line usage so the freshly-reset window shows.

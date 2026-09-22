@@ -1845,6 +1845,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			enableLsp,
 			lspReadOnly,
 			enableIrc: restrictToolNames ? false : options.enableIrc,
+			/**
+			 * Frozen at the last system-prompt rebuild: a mid-session `/skillful`
+			 * toggle rides the next turn's notice, never the tool prefix. The
+			 * snapshot belongs to `SessionTools` (owner of the rebuild lifecycle);
+			 * before SessionTools exists this defaults to the startup settings.
+			 */
+			get skillHintVisible() {
+				return (
+					session?.getSkillHintVisible() ??
+					(settings.get("skillful") === true && (session?.skills ?? skills).length > 0)
+				);
+			},
 			restrictToolNames,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
@@ -3831,6 +3843,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			pendingFullWriteDescription: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
+			},
+			get skillHintVisible() {
+				return toolSession.skillHintVisible;
 			},
 			hasEditTool: true,
 			requireYieldTool: false,

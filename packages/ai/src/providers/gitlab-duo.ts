@@ -123,7 +123,17 @@ export function streamGitLabDuo(
 				...options.headers,
 			};
 
+			// This wrapper dispatches directly to the routed provider and bypasses
+			// mapOptionsForApi(), so preserve the shared reasoning contracts here as
+			// well. The anthropic-messages route derives thinking on/off from the
+			// effort itself, so fold the explicit off into a cleared effort — capped
+			// side turns rely on this to keep Anthropic from raising max_tokens for a
+			// thinking budget. The OpenAI routes take the flags themselves, mirroring
+			// mapOptionsForApi(), and keep the requested effort for their own
+			// off/fallback handling.
 			const reasoningEffort = options.reasoning;
+			const anthropicReasoningEffort =
+				options.disableReasoning || options.forceReasoningOff ? undefined : options.reasoning;
 
 			const inner =
 				route.api === "anthropic-messages"
@@ -159,11 +169,12 @@ export function streamGitLabDuo(
 								onResponse: options.onResponse,
 								onSseEvent: options.onSseEvent,
 								fetch: options.fetch,
-								thinkingEnabled: Boolean(reasoningEffort) && model.reasoning,
-								thinkingBudgetTokens: reasoningEffort
-									? (options.thinkingBudgets?.[reasoningEffort] ?? ANTHROPIC_THINKING[reasoningEffort])
+								thinkingEnabled: Boolean(anthropicReasoningEffort) && model.reasoning,
+								thinkingBudgetTokens: anthropicReasoningEffort
+									? (options.thinkingBudgets?.[anthropicReasoningEffort] ??
+										ANTHROPIC_THINKING[anthropicReasoningEffort])
 									: undefined,
-								reasoning: reasoningEffort,
+								reasoning: anthropicReasoningEffort,
 								toolChoice: mapAnthropicToolChoice(options.toolChoice),
 							},
 						)
@@ -201,6 +212,8 @@ export function streamGitLabDuo(
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
 									reasoning: reasoningEffort,
+									disableReasoning: options.disableReasoning,
+									forceReasoningOff: options.forceReasoningOff,
 									toolChoice: options.toolChoice,
 								} satisfies OpenAIResponsesOptions,
 							)
@@ -236,6 +249,9 @@ export function streamGitLabDuo(
 									onSseEvent: options.onSseEvent,
 									fetch: options.fetch,
 									reasoning: reasoningEffort,
+									// OpenAICompletionsOptions carries no forceReasoningOff; fold it
+									// like the azure-openai-responses mapping does.
+									disableReasoning: options.disableReasoning || options.forceReasoningOff,
 									toolChoice: options.toolChoice,
 								} satisfies OpenAICompletionsOptions,
 							);
