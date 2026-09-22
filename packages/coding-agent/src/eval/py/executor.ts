@@ -433,6 +433,11 @@ function endPythonCell(session: PythonSession): void {
 	}
 }
 
+/** Fresh read so a concurrent writer is visible after an earlier `if` narrowed the field. */
+function inflightRssRecycle(session: PythonSession): Promise<string | undefined> | undefined {
+	return session.rssRecycle;
+}
+
 function waitForPythonSessionIdle(session: PythonSession): Promise<void> {
 	if (session.activeCells === 0) return Promise.resolve();
 	if (!session.whenIdle) {
@@ -454,8 +459,9 @@ async function recycleRetainedPythonKernelIfOverRss(
 	// Shutdown marks the sampled kernel dead before the note is ready. A sibling
 	// that reaches this check in that window must wait for the note instead of
 	// bailing out on the dead kernel.
-	if (session.rssRecycle) {
-		return await session.rssRecycle.catch(() => undefined);
+	const inflightAtStart = inflightRssRecycle(session);
+	if (inflightAtStart) {
+		return await inflightAtStart.catch(() => undefined);
 	}
 	const kernel = session.kernel.isAlive() ? session.kernel : undefined;
 	const pid = kernel?.pid;
@@ -469,8 +475,9 @@ async function recycleRetainedPythonKernelIfOverRss(
 	}
 	if (!kernelRssExceedsLimit(rssKb, maxRssMb)) return undefined;
 	const rssMb = Math.max(1, Math.round((rssKb ?? 0) / 1024));
-	if (session.rssRecycle) {
-		return await session.rssRecycle.catch(() => undefined);
+	const inflightAfterSample = inflightRssRecycle(session);
+	if (inflightAfterSample) {
+		return await inflightAfterSample.catch(() => undefined);
 	}
 	let finishRecycle: (note?: string) => void = () => undefined;
 	session.rssRecycle = new Promise(resolve => {
