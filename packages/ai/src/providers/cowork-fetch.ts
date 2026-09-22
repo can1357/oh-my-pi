@@ -1,4 +1,4 @@
-import type { IncomingMessage } from "node:http";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import * as https from "node:https";
 import * as stream from "node:stream";
 import * as tls from "node:tls";
@@ -42,7 +42,64 @@ type CoworkRequestInit = RequestInit & {
 
 type RequestBody = string | Uint8Array;
 
-const directAgent = new https.Agent({ keepAlive: true });
+/**
+ * Per-host socket ceiling for the shared keepalive pool. `https.Agent` defaults
+ * to `Infinity`, and every request on this transport parks its socket for the
+ * whole streaming response — so one process fanning out subagents
+ * (`task.maxConcurrency` is 32 by default and offers 64 at the top of its
+ * presets) plus its main loop, speculation, compaction and advisor traffic
+ * opens a socket per concurrent turn against one host, with nothing bounding
+ * the total. 128 is twice the widest preset fan-out, so a fully fanned-out
+ * session still dials everything at once, and it bounds file descriptors and
+ * per-connection TLS state.
+ *
+ * Past the ceiling the agent queues FIFO: those requests wait with no timeout
+ * and no indicator anywhere in the UI, exactly the silence #12319 is about.
+ * The headroom above the fan-out is what keeps that queue empty in practice;
+ * surfacing the wait itself (a `providerRetryWait`-style event while a request
+ * sits in the pool queue) is a deliberate follow-up, not this change.
+ *
+ * Deliberately not a knob: the value only has to sit above what the loop can
+ * spawn, and `packages/ai` has no settings seam for a per-host socket budget.
+ */
+export const MAX_SOCKETS_PER_HOST = 128;
+
+/** Exported so tests can read the pool's socket and queue books. */
+export const directAgent = new https.Agent({ keepAlive: true, maxSockets: MAX_SOCKETS_PER_HOST });
+
+/**
+ * Drops a still-queued request from its per-host FIFO inside the agent.
+ *
+ * `destroy()` alone does not: a queued request has no socket to carry the error
+ * through, so it stays parked until the pool hands it a freed socket — which,
+ * with every socket held by a long streaming response, may be minutes away.
+ * The caller's abort would not settle until then, which is the opposite of what
+ * cancelling a request means. Removing it here settles the abort in the same
+ * tick and leaves the queue holding only requests that still want a socket.
+ *
+ * The queues are scanned by request identity rather than keyed by
+ * `agent.getName`: that key folds in TLS material and drops `servername` when
+ * it matches the host, so recomputing it from the request options here would
+ * miss the bucket the request is actually parked in.
+ */
+function dropFromAgentQueue(agent: https.Agent, request: ClientRequest): void {
+	// Agent internals, so shape drift is possible; an abort handler is the last
+	// place that may throw, and destroy + reject below still cancel correctly.
+	try {
+		const queues = agent.requests as Record<string, ClientRequest[] | undefined>;
+		for (const [name, queue] of Object.entries(queues)) {
+			if (queue === undefined) continue;
+			const index = queue.indexOf(request);
+			if (index < 0) continue;
+			queue.splice(index, 1);
+			// Mirrors the agent's own bookkeeping, which drops the key with its last entry.
+			if (queue.length === 0) delete queues[name];
+			return;
+		}
+	} catch (error) {
+		logger.debug("cowork transport could not dequeue an aborted request", { error });
+	}
+}
 
 /** Resolved at call time, so a proxy wrapper installed after this module loads is honored. */
 const fallbackFetch: FetchImpl = (input, init) => globalThis.fetch(input, init as RequestInit);
@@ -149,7 +206,13 @@ async function sendCoworkRequest(
 	};
 	const abort = (): void => {
 		const reason = signal?.reason;
-		request?.destroy(reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError"));
+		const error = reason instanceof Error ? reason : new DOMException("The operation was aborted.", "AbortError");
+		// Order matters: the queue has to let go of the request before it is
+		// destroyed, and the caller is settled here because a queued request
+		// never reaches the `error` handler below.
+		dropFromAgentQueue(directAgent, request);
+		request?.destroy(error);
+		result.reject(error);
 	};
 	if (signal?.aborted) {
 		release();

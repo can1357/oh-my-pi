@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The shared Anthropic keepalive pool now opens at most 128 sockets per host instead of an unbounded number, and an aborted request that is still waiting for a socket leaves the queue and settles immediately instead of holding its place until one frees.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added
