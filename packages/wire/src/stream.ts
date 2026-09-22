@@ -141,6 +141,20 @@ export const STREAM_CLOSE_FORBIDDEN = 4403;
 export const STREAM_AUTH_PROVIDER = "stencil";
 export const STREAM_AUTH_ENV = "STENCIL_API_KEY";
 
+/** Longest accepted clip description (runes). Titles share `STREAM_TITLE_MAX`. */
+export const CLIP_DESCRIPTION_MAX = 5000;
+
+/**
+ * `POST /api/clips` answer. The body is an `.ompcast` recording (optionally
+ * `Content-Encoding: gzip`) whose header may carry `title` and `description`;
+ * the bearer identifies the uploading Stencil account.
+ */
+export interface ClipUploadResponse {
+	id: string;
+	/** Public clip page, `<server>/c/<id>`. */
+	url: string;
+}
+
 /** HTTP/WS route layout of the stream server, relative to `DEFAULT_STREAM_URL`. */
 export const STREAM_ROUTES = {
 	channels: "/api/channels",
@@ -149,4 +163,7 @@ export const STREAM_ROUTES = {
 	host: "/ws/host",
 	watch: (name: string) => `/ws/watch/${name}`,
 	page: (name: string) => `/${name}`,
+	/** Clip upload (bearer-authenticated `POST`). */
+	clips: "/api/clips",
+	clipPage: (id: string) => `/c/${id}`,
 } as const;

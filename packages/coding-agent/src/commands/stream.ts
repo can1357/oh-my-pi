@@ -3,7 +3,7 @@ import { DEFAULT_STREAM_URL, STREAM_TITLE_MAX } from "@oh-my-pi/pi-wire";
 import { CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { streamHelp as commandHelp } from "../cli/command-help";
 import { Settings } from "../config/settings";
-import { StreamCredential } from "../stream/auth";
+import { StencilCredential } from "../stencil/credential";
 import { resolveStreamUrls, runStreamConsole, type StreamUrls } from "../stream/streamer";
 
 export default class Stream extends Command {
@@ -35,10 +35,10 @@ export default class Stream extends Command {
 		} catch (error) {
 			throw new CliUsageError(error instanceof Error ? error.message : String(error));
 		}
-		const credential = new StreamCredential();
+		const credential = new StencilCredential();
 		try {
 			if (!(await credential.resolve())) {
-				process.stderr.write(`stream: ${StreamCredential.missingMessage}\n`);
+				process.stderr.write(`stream: ${StencilCredential.missingMessage}\n`);
 				process.exitCode = 1;
 				return;
 			}

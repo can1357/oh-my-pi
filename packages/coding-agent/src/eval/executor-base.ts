@@ -61,6 +61,7 @@ export type KernelEnvPatch = Record<string, string | null | undefined>;
  */
 export interface KernelExecutorBaseOptions {
 	cwd?: string;
+	filename?: string;
 	timeoutMs?: number;
 	deadlineMs?: number;
 	idleTimeoutMs?: number;
@@ -96,6 +97,7 @@ export interface GenericKernel<TEnv> {
 		code: string,
 		options: {
 			cwd?: string;
+			filename?: string;
 			env?: TEnv;
 			id: string;
 			signal?: AbortSignal;
@@ -541,6 +543,7 @@ export async function executeWithKernelBase<
 
 		const result = await kernel.execute(code, {
 			cwd: options?.cwd,
+			filename: options?.filename,
 			env: buildKernelEnvPatch(options ?? ({} as TOptions)),
 			id: runId,
 			signal: abortShield.signal,

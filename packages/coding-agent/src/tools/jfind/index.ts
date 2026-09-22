@@ -12,7 +12,7 @@ import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber, isEnoent } from "@oh-my-pi/pi-utils";
-import { journalJudgmentUsage, resolveJudge } from "../../judgment";
+import { hasNativeJudge, journalJudgmentUsage, resolveJudge } from "../../judgment";
 import findDescription from "../../prompts/tools/find.md" with { type: "text" };
 import type { ToolSession } from "..";
 import { formatPathRelativeToCwd, normalizePathLikeInput, resolveToCwd } from "../path-utils";
@@ -36,6 +36,18 @@ export type FindToolInput = typeof findSchema.infer;
 
 /** Line ranges shown per hit in the model-facing text, strongest first. */
 const RANGES_SHOWN = 3;
+
+/**
+ * Resolve `find.enabled` for a session: `auto` enables `find` only when the
+ * judge role is backed by a native System One model ({@link hasNativeJudge})
+ * rather than a prompted small model. Gates tool creation and the `find` hints
+ * in sibling tool prompts.
+ */
+export function isFindEnabled(session: ToolSession): boolean {
+	const mode = session.settings.get("find.enabled");
+	if (mode !== "auto") return mode === "on";
+	return session.modelRegistry !== undefined && hasNativeJudge(session.settings, session.modelRegistry);
+}
 
 /** Semantic search tool: describe a behavior, get files and line ranges that implement it. */
 export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {

@@ -121,6 +121,22 @@ export function kindOf(value: RoleChainCandidate | Model): JudgeKind {
 	return "online";
 }
 
+/** The `judge` role's candidates in attempt order, drawn from credentialed judge-capable models. */
+function judgeRoleChain(settings: Settings, registry: ModelRegistry): RoleChainCandidate[] {
+	return resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+}
+
+/**
+ * Whether the `judge` role resolves first to a native System One backend
+ * (TypeSafe jev, directly or through OpenRouter) rather than a prompted
+ * on-device or chat model. Judge-heavy features gate on it, e.g. the `find`
+ * tool under `find.enabled: auto`.
+ */
+export function hasNativeJudge(settings: Settings, registry: ModelRegistry): boolean {
+	const [primary] = judgeRoleChain(settings, registry);
+	return primary !== undefined && kindOf(primary) === "native";
+}
+
 /** Resolve a live judge-role chain. Candidates resolve lazily and are reused for {@link CANDIDATE_TTL_MS}. */
 export function resolveJudge(deps: JudgeDeps): ChainJudge {
 	return new ChainJudge(deps);
@@ -201,7 +217,7 @@ export class ChainJudge implements Judge {
 
 	#buildCandidates(): RoleChainCandidate[] {
 		const { settings, registry, sessionModel } = this.#deps;
-		const candidates = resolveRoleChain("judge", settings, roleCandidatePool("judge", settings, registry));
+		const candidates = judgeRoleChain(settings, registry);
 		if (!sessionModel) return candidates;
 		const sessionIdentity = formatModelStringWithRouting(sessionModel);
 		if (candidates.some(candidate => formatModelStringWithRouting(candidate.model) === sessionIdentity)) {

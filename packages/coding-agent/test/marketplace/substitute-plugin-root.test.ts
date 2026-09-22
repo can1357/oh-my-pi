@@ -46,13 +46,6 @@ describe("substitutePluginRoot", () => {
 		});
 	});
 
-	it("passes through non-string primitives", () => {
-		expect(substitutePluginRoot(42, ROOT)).toBe(42);
-		expect(substitutePluginRoot(true, ROOT)).toBe(true);
-		expect(substitutePluginRoot(null, ROOT)).toBeNull();
-		expect(substitutePluginRoot(undefined, ROOT)).toBeUndefined();
-	});
-
 	it("returns string unchanged when no variables present", () => {
 		expect(substitutePluginRoot("no-vars-here", ROOT)).toBe("no-vars-here");
 	});

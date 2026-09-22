@@ -93,10 +93,7 @@ interface EvalRenderCellArg {
 	title?: string;
 }
 
-interface EvalRenderArgs {
-	language?: string;
-	code?: string;
-	title?: string;
+interface EvalRenderArgs extends EvalRenderCellArg {
 	cells?: EvalRenderCellArg[];
 	__partialJson?: string;
 }
@@ -126,10 +123,9 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 	for (const cell of raw) {
 		if (!cell || typeof cell !== "object") continue;
 		const language = normalizeRenderLanguage(typeof cell.language === "string" ? cell.language : undefined);
-		const code = typeof cell.code === "string" ? cell.code : "";
 		out.push({
 			language,
-			code: formatEvalCodeForDisplay(code, language),
+			code: formatEvalCodeForDisplay(cell.code ?? "", language),
 			title: typeof cell.title === "string" ? cell.title : undefined,
 		});
 	}
