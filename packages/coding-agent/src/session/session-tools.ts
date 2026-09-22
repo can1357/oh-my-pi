@@ -19,7 +19,7 @@ import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-brid
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import { invalidateToolSchemaMetadata } from "@oh-my-pi/pi-tui/status-line/context-usage";
-import type { MemoryBackendStartOptions } from "../memory-backend/types";
+import type { MemoryBackend, MemoryBackendStartOptions, MemoryPromptPreparation } from "../memory-backend/types";
 import toolRosterNoticePrompt from "../prompts/system/tool-roster-notice.md" with { type: "text" };
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -1734,7 +1734,7 @@ export class SessionTools {
 		if (!isCurrent() || !backend.beforeAgentStartPrompt) return { systemPrompt: this.#baseSystemPrompt };
 
 		try {
-			const memory = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
+			const memory = await this.#awaitMemoryPreparation(backend, promptText, isCurrent);
 			if (!isCurrent() || !memory) return { systemPrompt: this.#baseSystemPrompt };
 			const injected = memory.context;
 			if (!injected) {
@@ -1777,6 +1777,33 @@ export class SessionTools {
 				error: String(err),
 			});
 			return { systemPrompt: this.#baseSystemPrompt };
+		}
+	}
+
+	/**
+	 * Await the memory-backend preparation, releasing the caller promptly when
+	 * the owning turn is aborted mid-recall (#12668). The backend fetch keeps
+	 * running to its own timeout, but `isCurrent()` flips on Esc so polling it
+	 * lets setup bail on a timer tick instead of awaiting a 30s recall:
+	 * the caller observes `!isCurrent()` and returns the cancelled path.
+	 */
+	async #awaitMemoryPreparation(
+		backend: MemoryBackend,
+		promptText: string,
+		isCurrent: () => boolean,
+	): Promise<MemoryPromptPreparation | undefined> {
+		const pending = backend.beforeAgentStartPrompt!(this.#host.memoryBackendSession(), promptText);
+		pending.then(
+			() => undefined,
+			() => undefined,
+		);
+		for (;;) {
+			if (!isCurrent()) return undefined;
+			const winner = await Promise.race([
+				pending.then(outcome => ({ done: true as const, outcome })),
+				Bun.sleep(50).then(() => ({ done: false as const })),
+			]);
+			if (winner.done) return winner.outcome ?? undefined;
 		}
 	}
 
