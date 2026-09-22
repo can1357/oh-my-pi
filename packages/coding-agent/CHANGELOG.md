@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- SDK sessions now honor disposal deadlines, memory-consolidation budgets, and shutdown reasons. ([#12284](https://github.com/can1357/oh-my-pi/pull/12284) by [@iliaal](https://github.com/iliaal))
+
 ## [18.2.9] - 2026-09-22
 
 ### Added
@@ -30,7 +34,6 @@
 
 ### Fixed
 
-- SDK sessions now honor disposal deadlines, memory-consolidation budgets, and shutdown reasons. ([#12284](https://github.com/can1357/oh-my-pi/pull/12284) by [@iliaal](https://github.com/iliaal))
 - Fixed JavaScript `eval` assignments in cells containing top-level `await` so they persist into subsequent cells.
 - Fixed skill hints becoming out of sync with the active prompt after discarded rebuilds and in advisor sessions.
 - Restored `pi.pi.askToolRenderer` for extensions that replace the built-in ask tool, preserving native rendering.
