@@ -637,6 +637,19 @@ export const cfgTuiTmuxWindowName = register({
 			"Rename the enclosing tmux window to the current session name so `tmux list-windows -a` identifies live sessions; the original window name is restored on exit",
 	},
 });
+
+export const cfgTuiTmuxWindowNameColor = register({
+	id: "tui.tmuxWindowNameColor",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Tmux Window Accent",
+		description:
+			"Tint this window's tmux status entry with the session accent color, independently of `tui.tmuxWindowName`; the window's prior status styles are restored on exit",
+	},
+});
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
 	type: "enum",
