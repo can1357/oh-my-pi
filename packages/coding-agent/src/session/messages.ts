@@ -874,6 +874,43 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 	};
 }
 
+/**
+ * Drop the OpenAI-Responses native replay payload — the account-bound
+ * `reasoning.encrypted_content` items included — from every assistant
+ * message attributed to `provider`.
+ *
+ * Some OpenAI-Responses gateways (Bedrock Mantle observed) can invalidate a
+ * previously issued `encrypted_content` block out from under a live,
+ * unchanged model: the provider 400s with "encrypted reasoning was created
+ * for a different account or model" even though the harness never switched
+ * model or credential. Turn-recovery's model-fallback path sidesteps the
+ * poisoned payload naturally — a fallback candidate's model/api never
+ * matches the message that carries it, so the replay guard in
+ * `buildResponsesInput` already skips it — but a same-model retry, the only
+ * option when no fallback chain is configured, exhausted, or eligible, would
+ * resend the identical poisoned bytes and 400 again, looping until the retry
+ * budget burns out. Dropping the payload here forces that retry to
+ * reconstruct plain history from `message.content` instead, the same
+ * fallback path a cross-model swap already exercises safely.
+ *
+ * Returns the same array reference when nothing changed.
+ */
+export function dropAssistantReplayPayloadForProvider(messages: AgentMessage[], provider: string): AgentMessage[] {
+	let changed = false;
+	const next = messages.map(message => {
+		if (
+			message.role !== "assistant" ||
+			message.provider !== provider ||
+			message.providerPayload?.type !== "openaiResponsesHistory"
+		) {
+			return message;
+		}
+		changed = true;
+		return { ...message, providerPayload: undefined };
+	});
+	return changed ? next : messages;
+}
+
 function customMessageContentToLlmContent(content: CustomMessage["content"]): (TextContent | ImageContent)[] {
 	return typeof content === "string" ? [{ type: "text", text: content }] : content;
 }

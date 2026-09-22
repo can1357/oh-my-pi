@@ -46,7 +46,12 @@ import type {
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
-import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
+import {
+	assistantTurnProducedOutput,
+	dropAssistantReplayPayloadForProvider,
+	isEmptyAssistantStop,
+	isEmptyErrorTurn,
+} from "./messages";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -2212,6 +2217,19 @@ export class TurnRecovery {
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall) || AIError.retriable(id)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
 		const rateLimitReason = parseRateLimitReason(errorMessage);
+		// Bedrock Mantle's OpenAI-Responses gateway can invalidate a previously
+		// issued `reasoning.encrypted_content` block out from under a live,
+		// unchanged model — the request 400s with this exact text even though
+		// the harness never switched model or credential. `isStaleResponsesText`
+		// does not recognize it (no "Item with id"/"previous response" wording)
+		// and it must NOT reuse `Flag.StaleResponsesItem`: that flag gates OUT
+		// the model-fallback branch below, which is the recovery path that
+		// actually works here (a fallback candidate's model/api never matches
+		// the poisoned message, so `buildResponsesInput`'s replay guard already
+		// skips it) — only a same-model retry needs the payload stripped.
+		const accountBoundReasoningReplayError = /encrypted reasoning was created for a different account or model/i.test(
+			errorMessage,
+		);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
@@ -2576,6 +2594,21 @@ export class TurnRecovery {
 		// continue() accepts — and never once a newer prompt owns the session.
 		if (!preserveFailedTurn && this.#host.promptGeneration() === generation) {
 			this.#stripFailedAssistantTail();
+		}
+
+		// Drop the poisoned native replay payload so a same-model retry (no
+		// fallback configured, exhausted, or ineligible) reconstructs plain
+		// history instead of resending the identical encrypted_content that
+		// just 400'd. See dropAssistantReplayPayloadForProvider's own doc for
+		// why this must not gate on switchedModel/switchedCredential.
+		if (accountBoundReasoningReplayError && currentModel) {
+			const strippedMessages = dropAssistantReplayPayloadForProvider(
+				this.#host.agent.state.messages,
+				currentModel.provider,
+			);
+			if (strippedMessages !== this.#host.agent.state.messages) {
+				this.#host.agent.replaceMessages(strippedMessages);
+			}
 		}
 
 		// Retry via continue() outside the agent_end event callback chain. A
