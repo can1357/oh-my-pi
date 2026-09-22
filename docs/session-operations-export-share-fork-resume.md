@@ -50,10 +50,9 @@ Behavior details:
 - Tool calls render through the `<omp-tool-view>` web component — the React per-tool renderers shared with collab-web (`packages/collab-web/src/tool-render/`), prebuilt into `src/export/html/tool-views.generated.js` by `bun run gen:tool-views`.
 - No session entries are appended during export.
 
-Caveat:
+Notes:
 
-- Parsing is whitespace-based, so quoted paths with spaces are not preserved. Use a path without spaces.
-
+- Output path arguments support single- and double-quoted strings containing spaces (e.g. `/export "my report.html"`).
 ### `--export <inputSessionFile> [outputPath]` (CLI)
 
 Flow in `main.ts`:
@@ -394,7 +393,6 @@ When session manager is created with `SessionManager.inMemory()` (`--no-session`
 ## Known implementation caveats (as of current code)
 
 - `/share` custom-share failures do not degrade to the default encrypted share flow; they terminate the TUI command with an error.
-- `/export` argument tokenization does not preserve quoted paths with spaces.
 - `/delete` treats deletion as best-effort: it attempts to delete the current
   session JSONL and artifact directory, logs any deletion failure, and still
   creates and switches to a new session. A failed or partial deletion can leave
