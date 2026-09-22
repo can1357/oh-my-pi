@@ -74,6 +74,8 @@ const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
+/** Session-level replays allowed for an exhausted provider-operation budget; each one costs a full budget. */
+const OPERATION_DEADLINE_MAX_RETRIES = 2;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
@@ -2202,7 +2204,13 @@ export class TurnRecovery {
 		// configured chain.
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
-			: retrySettings.maxRetries;
+			: AIError.isProviderOperationDeadlineText(message.errorMessage)
+				? // An exhausted operation budget is transient — a fresh request may
+					// well succeed — but each replay costs another whole budget, so the
+					// generic ten-attempt ladder would turn a 15-minute ceiling back
+					// into a multi-hour silence. Retry it, briefly.
+					Math.min(retrySettings.maxRetries, OPERATION_DEADLINE_MAX_RETRIES)
+				: retrySettings.maxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";

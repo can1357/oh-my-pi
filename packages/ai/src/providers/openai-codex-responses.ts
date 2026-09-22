@@ -65,6 +65,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
+import { operationDeadlineExceeded } from "../utils/operation-deadline";
 import { getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
@@ -1626,7 +1627,10 @@ async function openInitialCodexEventStream(
 					});
 				if (!activateFallback) {
 					websocketRetries += 1;
-					await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries), {
+					const websocketRetryDelayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries);
+					const deadlineError = operationDeadlineExceeded(options, websocketRetryDelayMs);
+					if (deadlineError) throw deadlineError;
+					await scheduler.wait(websocketRetryDelayMs, {
 						signal: requestSetup.requestSignal,
 					});
 					continue;
@@ -2623,7 +2627,10 @@ class CodexStreamProcessor {
 		this.runtime.whitespaceToolCallArgumentsDelta = undefined;
 		resetOutputState(this.output);
 		this.firstTokenTime = undefined;
-		await scheduler.wait(CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS * this.runtime.whitespaceLoopRetries, {
+		const whitespaceRetryDelayMs = CODEX_WHITESPACE_LOOP_RETRY_DELAY_MS * this.runtime.whitespaceLoopRetries;
+		const whitespaceDeadlineError = operationDeadlineExceeded(this.options, whitespaceRetryDelayMs);
+		if (whitespaceDeadlineError) throw whitespaceDeadlineError;
+		await scheduler.wait(whitespaceRetryDelayMs, {
 			signal: this.requestSetup.requestSignal,
 		});
 
@@ -2708,7 +2715,10 @@ class CodexStreamProcessor {
 			return true;
 		}
 		this.runtime.websocketStreamRetries += 1;
-		await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
+		const reconnectDelayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries);
+		const reconnectDeadlineError = operationDeadlineExceeded(this.options, reconnectDelayMs);
+		if (reconnectDeadlineError) throw reconnectDeadlineError;
+		await scheduler.wait(reconnectDelayMs, {
 			signal: this.requestSetup.requestSignal,
 		});
 		await this.#reopenWebSocketStream(websocketState);
@@ -2787,7 +2797,10 @@ class CodexStreamProcessor {
 			// web_search_call) may already have accumulated.
 			this.runtime.resetAccumulators();
 			this.firstTokenTime = undefined;
-			await scheduler.wait(CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries), {
+			const replayDelayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, this.runtime.websocketStreamRetries);
+			const replayDeadlineError = operationDeadlineExceeded(this.options, replayDelayMs);
+			if (replayDeadlineError) throw replayDeadlineError;
+			await scheduler.wait(replayDelayMs, {
 				signal: this.requestSetup.requestSignal,
 			});
 			await this.#reopenWebSocketStream(state);
@@ -2880,7 +2893,10 @@ class CodexStreamProcessor {
 		this.runtime.sawTerminalEvent = false;
 		resetOutputState(this.output);
 		this.firstTokenTime = undefined;
-		await scheduler.wait(CODEX_RETRY_DELAY_MS * this.runtime.providerRetryAttempt, {
+		const providerRetryDelayMs = CODEX_RETRY_DELAY_MS * this.runtime.providerRetryAttempt;
+		const providerDeadlineError = operationDeadlineExceeded(this.options, providerRetryDelayMs);
+		if (providerDeadlineError) throw providerDeadlineError;
+		await scheduler.wait(providerRetryDelayMs, {
 			signal: this.requestSetup.requestSignal,
 		});
 

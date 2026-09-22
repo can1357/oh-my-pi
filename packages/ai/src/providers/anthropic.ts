@@ -74,6 +74,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { operationDeadlineExceeded } from "../utils/operation-deadline";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
@@ -2455,6 +2456,11 @@ const streamAnthropicOnce = (
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),
 					maxRetries: 0,
+					// `maxRetries: 0` pins the built-in client out of the retry business,
+					// but an injected SDK-style client keeps its own budget — forward the
+					// operation deadline so those retries spend it too.
+					operationTimeoutMs: options?.operationTimeoutMs,
+					operationDeadlineAt: options?.operationDeadlineAt,
 					...(perRequestHeaders ? { headers: perRequestHeaders } : {}),
 				};
 				const anthropicRequest: unknown =
@@ -3228,6 +3234,10 @@ const streamAnthropicOnce = (
 						throw streamFailure;
 					}
 					const delayMs = headerDelayMs !== undefined ? Math.max(headerDelayMs, backoffDelayMs) : backoffDelayMs;
+					// Whole-operation budget: a retry whose sleep would land past it is
+					// refused now, with its own error, instead of adding to the silence.
+					const deadlineError = operationDeadlineExceeded(options, delayMs);
+					if (deadlineError) throw deadlineError;
 					if (options?.providerRetryWait) {
 						await options.providerRetryWait(delayMs, options.signal);
 					} else {

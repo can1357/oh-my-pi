@@ -125,6 +125,32 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[1]?.options?.streamIdleTimeoutMs).toBe(10_000);
 	});
 
+	it("forwards the provider operation budget, its disabled form, and caller overrides", () => {
+		const { fn: base, calls } = captureBase();
+		createSettingsAwareStreamFn(Settings.isolated({}), base)(stubModel, stubContext, undefined);
+		createSettingsAwareStreamFn(Settings.isolated({ "providers.operationTimeoutSeconds": 300 }), base)(
+			stubModel,
+			stubContext,
+			undefined,
+		);
+		createSettingsAwareStreamFn(Settings.isolated({ "providers.operationTimeoutSeconds": 0 }), base)(
+			stubModel,
+			stubContext,
+			undefined,
+		);
+		createSettingsAwareStreamFn(Settings.isolated({ "providers.operationTimeoutSeconds": 300 }), base)(
+			stubModel,
+			stubContext,
+			{ operationTimeoutMs: 45_000 },
+		);
+
+		// Default is a bounded budget, not "off".
+		expect(calls[0]?.options?.operationTimeoutMs).toBe(900_000);
+		expect(calls[1]?.options?.operationTimeoutMs).toBe(300_000);
+		expect(calls[2]?.options?.operationTimeoutMs).toBe(0);
+		expect(calls[3]?.options?.operationTimeoutMs).toBe(45_000);
+	});
+
 	it("forwards retry.maxDelayMs while preserving caller overrides", () => {
 		const settings = Settings.isolated({ "retry.maxDelayMs": 300_000 });
 		const { fn: base, calls } = captureBase();

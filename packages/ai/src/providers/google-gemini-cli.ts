@@ -31,6 +31,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { operationDeadlineExceeded } from "../utils/operation-deadline";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -986,6 +987,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 
 						if (emptyAttempt > 0) {
 							const backoffMs = EMPTY_STREAM_BASE_DELAY_MS * 2 ** (emptyAttempt - 1);
+							// Whole-operation budget: a retry whose sleep would land past it
+							// is refused now, with its own error, instead of adding to the
+							// silence. The caller-abort check above still wins.
+							const deadlineError = operationDeadlineExceeded(options, backoffMs);
+							if (deadlineError) throw deadlineError;
 							try {
 								await scheduler.wait(backoffMs, { signal: options?.signal });
 							} catch {

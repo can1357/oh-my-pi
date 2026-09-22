@@ -49,6 +49,10 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
+		// Whole-request budget across pi-ai's nested retries. Separate knob from
+		// the watchdogs above: those bound silence inside one live stream, this
+		// one bounds the wall clock a request may spend retrying.
+		const operationTimeoutMs = timeoutSecondsToMs(settings.get("providers.operationTimeoutSeconds"));
 		// Server-side fallback (opt-in): when the user enables it AND the
 		// resolved model is a Claude Fable/Mythos on Anthropic's messages
 		// API, inject the `fallbacks: [{ model: "claude-opus-4-8" }]` chain.
@@ -74,6 +78,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
+			operationTimeoutMs: streamOptions?.operationTimeoutMs ?? operationTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				streamOptions?.maxInFlightRequests ?? settings.get("providers.maxInFlightRequests"),

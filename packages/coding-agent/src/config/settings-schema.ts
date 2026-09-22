@@ -5682,6 +5682,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.operationTimeoutSeconds": {
+		type: "number",
+		default: 900,
+		ui: {
+			tab: "providers",
+			group: "Timeouts",
+			label: "Operation Budget",
+			description:
+				"Wall-clock budget for one provider request including every internal retry; a retry that would sleep past it fails immediately instead of waiting. Unlike the watchdogs above it never interrupts a stream that is producing output. 0 disables the budget",
+			options: [
+				{
+					value: "0",
+					label: "Off",
+					description: "No aggregate budget; nested retries are bounded only by their own counts",
+				},
+				{ value: "300", label: "5 minutes" },
+				{ value: "900", label: "15 minutes" },
+				{ value: "1800", label: "30 minutes" },
+			],
+		},
+	},
+
 	"providers.openrouterVariant": {
 		type: "enum",
 		values: ["default", "nitro", "floor", "online", "exacto"] as const,

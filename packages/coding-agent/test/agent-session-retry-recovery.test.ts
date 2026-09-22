@@ -28,6 +28,9 @@ type RecoveryRun = {
 const RATE_LIMIT_ERROR =
 	'429 {"type":"error","error":{"type":"rate_limit_error","message":"This request would exceed your account\'s rate limit. Please try again later."}} retry-after-ms=11180000';
 const RETRIABLE_SERVER_ERROR = "503 service unavailable: overloaded_error";
+/** Verbatim text of `ProviderOperationDeadlineError` at the default 900s budget. */
+const OPERATION_DEADLINE_ERROR =
+	"Provider operation budget exhausted after 902s of a 900s budget; declined a 30000ms retry wait.";
 
 function emptyUsage(): Usage {
 	return {
@@ -496,6 +499,58 @@ describe("AgentSession retry recovery", () => {
 			.filter(presentation => presentation.kind !== "none");
 		expect(visibleErrors).toHaveLength(1);
 		expect(sessionManager.buildSessionContext().messages.map(message => message.role)).toEqual(["user"]);
+	});
+
+	it("bounds replays of an exhausted provider-operation budget and names it in the terminal error", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+
+		const mock = createMockModel({
+			responses: Array.from({ length: 8 }, () => ({ throw: OPERATION_DEADLINE_ERROR })),
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			// Ten generic retries would each burn a whole budget; the deadline
+			// classification must cap them well below this.
+			"retry.maxRetries": 10,
+			"retry.modelFallback": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		sessions.push(session);
+		mockSchedulerWaitWithClock();
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Exhaust the provider operation budget");
+		await session.waitForIdle();
+		await sessionManager.flush();
+
+		// Two replays, not ten: the original request plus OPERATION_DEADLINE_MAX_RETRIES.
+		expect(mock.calls).toHaveLength(3);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: 2 });
+
+		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
+		const terminalErrorText = errors.at(-1)?.message.errorMessage;
+		expect(terminalErrorText).toBe(`Retry budget exhausted after 2 retries: ${OPERATION_DEADLINE_ERROR}`);
+		// The budget and the elapsed wall clock stay visible to the user.
+		expect(terminalErrorText).toContain("900s budget");
+		expect(terminalErrorText).toContain("after 902s");
 	});
 
 	it("maps assistant error presentation for recovered, unrecovered, and silent abort turns", () => {

@@ -473,6 +473,32 @@ export interface StreamOptions {
 	 */
 	maxRetryDelayMs?: number;
 	/**
+	 * Aggregate wall-clock budget in milliseconds for one logical provider
+	 * operation, spanning every nested pi-ai retry of that request. Checked
+	 * before each retry sleep: a retry that would land past the budget fails
+	 * immediately with `ProviderOperationDeadlineError` instead of sleeping.
+	 * Omitted or `0` disables the budget.
+	 *
+	 * Honored by the replay-safe stream retry shared by every provider, the
+	 * Anthropic provider and client retry loops, the OpenAI Responses transient
+	 * stream retry, all five Codex Responses websocket/provider/whitespace
+	 * retries, and the Google and Gemini CLI empty-stream retries. Provider
+	 * loops not listed here sleep unbudgeted.
+	 *
+	 * Unrelated to `streamIdleTimeoutMs`, which bounds silence *within* one live
+	 * stream and never sees retries: this budget never interrupts a stream that
+	 * is producing output.
+	 */
+	operationTimeoutMs?: number;
+	/**
+	 * Absolute deadline (epoch ms) derived from `operationTimeoutMs` at the
+	 * pi-ai entry point (`streamSimple`'s request builder, or `stream`'s
+	 * dispatcher). Internal plumbing — callers set the budget, not this — but it
+	 * must be forwarded verbatim by any layer that rebuilds inner options, so
+	 * nested providers share one budget instead of restarting it.
+	 */
+	operationDeadlineAt?: number;
+	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
 	 * For example, Anthropic uses `user_id` for abuse tracking and rate limiting.
