@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the ChatGPT-subscription dictation model `openai-codex/chatgpt-transcribe`, which routes speech-to-text through the ChatGPT backend instead of paid API transcription ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
+
 ### Fixed
 
 - Fixed GitHub Copilot models with tier-level prompt limits showing the long-context window by default ([#14770](https://github.com/can1357/oh-my-pi/issues/14770)).
