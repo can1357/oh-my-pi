@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- A steering message queued while the loop waits on the provider is no longer parked until the turn ends: when the request has streamed nothing yet (still waiting, or inside a retry backoff), the loop cancels it, folds the steer in and re-issues the model call. The cancelled request produced no output, so no partial and no aborted assistant boundary is emitted or persisted (the provider may still charge for the prompt it had already accepted). A message left over from an earlier boundary never cancels a request on its own, and no longer hides the steer typed after it: the watch compares queue occupancy against what it saw when the request was issued. Once output has started the message waits for the turn boundary as before, an external abort in the same window is still reported as a user interrupt, and `interruptMode: "wait"` disables the cancellation entirely ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws)).
+- A steering message sent while a model request has not produced any output is applied immediately instead of waiting for the response, subject to `interruptMode`; the session shows whether a queued steer will interrupt or wait. ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws))
 
 ## [18.2.5] - 2026-09-17
 

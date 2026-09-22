@@ -3346,6 +3346,7 @@ describe("agentLoop event-driven steering watch", () => {
 		const firstToolStarted = Promise.withResolvers<void>();
 		const checkStarted = Promise.withResolvers<void>();
 		const checkRelease = Promise.withResolvers<void>();
+		let baselinePeeked = false;
 		let checking = false;
 		let drained = false;
 		let wake: (() => void) | undefined;
@@ -3397,6 +3398,14 @@ describe("agentLoop event-driven steering watch", () => {
 			interruptMode: "immediate",
 			hasSteeringMessages: async () => {
 				const queued = steerReady && !drained;
+				if (!baselinePeeked) {
+					// The provider-wait watch's baseline peek settles at once: the
+					// first model call waits for it, so gating it on run progress
+					// would deadlock the run before any tool starts. The gate below
+					// targets the tool-batch watch's checks instead.
+					baselinePeeked = true;
+					return queued ? { queued: true, source: "user" } : { queued: false };
+				}
 				if (!checking) {
 					checking = true;
 					checkStarted.resolve();
@@ -3637,13 +3646,19 @@ describe("agentLoop event-driven steering watch", () => {
 			waitForSteeringMessages: () => Promise.withResolvers<void>().promise,
 			getSteeringMessages: async () => [],
 		};
-
-		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		const controller = new AbortController();
+		const stream = agentLoop([createUserMessage("start")], context, config, controller.signal, mock.stream);
 		const drain = (async () => {
 			for await (const _event of stream) {
 				// drain
 			}
 		})();
+		// The first check never answers, so the provider request parks on its
+		// steering baseline; aborting the run must settle `ready` through the
+		// watch teardown (not the hung check) so the aborted turn still closes
+		// and nothing lingers.
+		await checkStarted.promise;
+		controller.abort();
 		// This is the behavior under test, so retain a deadline; cancel its timer
 		// when teardown succeeds instead of leaving a losing sleep alive.
 		const timeout = Promise.withResolvers<boolean>();
@@ -3652,7 +3667,9 @@ describe("agentLoop event-driven steering watch", () => {
 		clearTimeout(timeoutId);
 		try {
 			expect(completed).toBe(true);
-			expect(executed).toEqual(["only"]);
+			// The provider call never ran: the abort landed while the request
+			// was still parked on its baseline, so no tool executed.
+			expect(executed).toEqual([]);
 		} finally {
 			check.resolve(false);
 			await drain;
@@ -4337,8 +4354,7 @@ describe("agentLoop steering during the provider wait", () => {
 				// the assertions below instead of hanging the suite.
 				fallback = setTimeout(() => pushAnswer(stream, "uninterrupted answer"), 1500);
 			} else {
-				const text = contexts.length === 2 ? "answer with the leftover" : "answer with the correction";
-				queueMicrotask(() => pushAnswer(stream, text));
+				queueMicrotask(() => pushAnswer(stream, "answer with both"));
 			}
 			return stream;
 		};
@@ -4360,16 +4376,16 @@ describe("agentLoop steering during the provider wait", () => {
 		}
 
 		expect(firstRequestAborted).toBe(true);
-		// Delivery stays the host's business: this one hands over a single steer per
-		// boundary, so the cancelled request is re-issued with the leftover and the
-		// correction rides the turn after it.
-		expect(contexts.length).toBe(3);
+		// The interrupt drain takes everything queued — the leftover and the
+		// correction travel together on the re-issued call. Taking only the
+		// first (the host's one-at-a-time pacing) would leave the correction
+		// parked behind a watch baseline it can never exceed.
+		expect(contexts.length).toBe(2);
 		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "left over from the last turn")).toBe(
 			true,
 		);
-		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(false);
-		expect(contexts[2]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(true);
-		expect(assistantTexts(events)).toEqual(["answer with the leftover", "answer with the correction"]);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(true);
+		expect(assistantTexts(events)).toEqual(["answer with both"]);
 		expect(queue.size).toBe(0);
 	});
 
@@ -4429,6 +4445,330 @@ describe("agentLoop steering during the provider wait", () => {
 		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "steer before the first tick")).toBe(
 			true,
 		);
+	});
+	it("caps steer re-issues so a further steer waits for the boundary", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		const aborted: boolean[] = [];
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			const call = contexts.length;
+			options?.signal?.addEventListener(
+				"abort",
+				() => {
+					aborted[call - 1] = true;
+				},
+				{ once: true },
+			);
+			if (call <= 2) {
+				// Still thinking: never answers, so each steer cancels and re-issues.
+				queueMicrotask(() => queue.push(call === 1 ? "first correction" : "second correction"));
+			} else if (call === 3) {
+				// Re-issue cap hit: this call runs without the pre-output interrupt,
+				// so the arrival cannot cancel it — it answers and the steer lands
+				// at the turn boundary instead.
+				queueMicrotask(() => queue.push("third correction"));
+				queueMicrotask(() => pushAnswer(stream, "answer after two re-issues"));
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer after boundary"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+			events.push(event);
+		}
+
+		// Exactly two cancellations: the third steer arrives on a call running
+		// without the pre-output interrupt.
+		expect(aborted.filter(Boolean).length).toBe(2);
+		expect(contexts.length).toBe(4);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "first correction")).toBe(true);
+		expect(contexts[2]?.messages.some(m => m.role === "user" && m.content === "second correction")).toBe(true);
+		expect(contexts[3]?.messages.some(m => m.role === "user" && m.content === "third correction")).toBe(true);
+		expect(assistantTexts(events)).toEqual(["answer after two re-issues", "answer after boundary"]);
+		expect(queue.size).toBe(0);
+	});
+
+	it("stops the steering watch when setup between the response and the read loop throws", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		// Poll-only host: a leaked watch keeps its `setInterval` ticking, which
+		// keeps peeking the queue — peek-count stability after the failure
+		// proves the watch stopped.
+		const { waitForSteeringMessages: _unused, ...pollOnly } = queue.config;
+
+		const streamFn: StreamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			// Fail iterator acquisition itself, before the read loop (and its
+			// `finally`) exists.
+			(stream as unknown as Record<symbol, unknown>)[Symbol.asyncIterator] = () => {
+				throw new Error("iterator setup failed");
+			};
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...pollOnly,
+		};
+
+		await expect(
+			agentLoop([createUserMessage("start")], context, config, undefined, streamFn).result(),
+		).rejects.toThrow("iterator setup failed");
+
+		const peeksAfterThrow = queue.peeks;
+		// Real sleep: the behaviour under test IS the loop's own wall-clock poll
+		// interval leaking (or not) into the process, which no fake clock drives
+		// here — same reason as the poll-cadence tests above. Two cadences: a
+		// leaked interval would peek at least twice more.
+		await Bun.sleep(600);
+		expect(queue.peeks).toBe(peeksAfterThrow);
+	});
+
+	it("closes the open turn when the deadline expires on a steer re-issue", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			// Far enough out that the request is issued and the steer lands
+			// first; the drain moves it into the past (the deadline signal
+			// itself stays clean), so the re-issue `continue` re-enters the
+			// loop against an exceeded deadline with the turn still open.
+			deadline: Date.now() + 60_000,
+			hasSteeringMessages: queue.config.hasSteeringMessages,
+			waitForSteeringMessages: queue.config.waitForSteeringMessages,
+			getSteeringMessages: async signal => {
+				const batch = await queue.config.getSteeringMessages();
+				if (batch.length > 0) config.deadline = Date.now() - 1;
+				return batch;
+			},
+		};
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				queueMicrotask(() => queue.push("steer before the deadline"));
+			}
+			// Never answers: the re-issue `continue` re-enters the loop, where
+			// the expired deadline stops the run with the turn still open.
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+			events.push(event);
+		}
+
+		// The interrupt happened (not a plain pre-first-call deadline exit)...
+		expect(firstRequestAborted).toBe(true);
+		expect(contexts.length).toBe(1);
+		// ...the steer was folded into the turn before the deadline hit...
+		expect(
+			events.some(
+				e =>
+					e.type === "message_start" &&
+					e.message.role === "user" &&
+					e.message.content === "steer before the deadline",
+			),
+		).toBe(true);
+		// ...and the open turn is closed instead of leaving `turn_start` unpaired.
+		expect(events.filter(e => e.type === "turn_start").length).toBe(1);
+		expect(events.filter(e => e.type === "turn_end").length).toBe(1);
+		expect(events.some(e => e.type === "agent_end")).toBe(true);
+	});
+
+	it("waits for the steering baseline before issuing the provider request", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+		let peeks = 0;
+		// Slow host: the first peek reads the queue when called but answers
+		// late. The snapshot-at-call models a host whose observation reflects
+		// arm time while delivery takes a round trip; a steer pushed while the
+		// answer is in flight is growth past that baseline, not baseline.
+		const releaseBaseline = Promise.withResolvers<void>();
+		const peekEntered = Promise.withResolvers<void>();
+		let baselineSnapshot = 0;
+		const hasSteeringMessages = (): Promise<{ queued: boolean; source: "user"; pending: number }> => {
+			peeks += 1;
+			if (peeks === 1) {
+				baselineSnapshot = queue.size;
+				peekEntered.resolve();
+				return releaseBaseline.promise.then(() => ({
+					queued: baselineSnapshot > 0,
+					source: "user" as const,
+					pending: baselineSnapshot,
+				}));
+			}
+			return Promise.resolve(queue.config.hasSteeringMessages());
+		};
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				// Still thinking: without the baseline wait this call would be
+				// issued while the peek is in flight and the steer below would
+				// count as baseline, hanging the run here.
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer with steer"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasSteeringMessages,
+			waitForSteeringMessages: queue.config.waitForSteeringMessages,
+			getSteeringMessages: queue.config.getSteeringMessages,
+		};
+
+		const events: AgentEvent[] = [];
+		const run = (async (): Promise<AgentEvent[]> => {
+			for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+				events.push(event);
+			}
+			return events;
+		})();
+		// Await the real signal, never a tick count: a tight poll loop starves
+		// the loop's own startup in Bun, while this resolves whenever the watch
+		// arms. (A regression that never peeks fails on the test timeout.)
+		await peekEntered.promise;
+		expect(peeks).toBe(1);
+		expect(contexts.length).toBe(0);
+		// Pushed after the request would have been issued (unfixed code has
+		// already called streamFn by now) but before the peek resolves.
+		queue.push("steer during baseline");
+		releaseBaseline.resolve();
+
+		// Hang guard only: a baseline race that swallows the steer leaves the
+		// thinking request parked forever. That must fail this test with a
+		// diagnostic, not hang it — a real timer is the only guard a hung
+		// promise allows (fake timers cannot settle an await that never
+		// resolves). Kept under bun's 5s default test timeout so the guard,
+		// not the runner, reports the cause.
+		let hangTimer: Timer | undefined;
+		const hangGuard = new Promise<never>((_resolve, reject) => {
+			hangTimer = setTimeout(
+				() => reject(new Error("run hung: steer during baseline never interrupted the request")),
+				4000,
+			);
+		});
+		try {
+			await Promise.race([run, hangGuard]);
+		} finally {
+			clearTimeout(hangTimer);
+		}
+
+		expect(firstRequestAborted).toBe(true);
+		expect(contexts.length).toBe(2);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "steer during baseline")).toBe(true);
+		expect(queue.size).toBe(0);
+		expect(assistantTexts(events)).toEqual(["answer with steer"]);
+	});
+
+	it("does not record a cancelled pre-output request as a failed chat", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				// Still thinking: the steer below cancels a request that
+				// streamed nothing, and the loop re-issues with it folded in.
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				queueMicrotask(() => queue.push("ordinary steer"));
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer with steer"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const { detailed } = agentLoopDetailed([createUserMessage("start")], context, config, undefined, streamFn);
+		const result = await detailed();
+
+		expect(firstRequestAborted).toBe(true);
+		expect(contexts.length).toBe(2);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "ordinary steer")).toBe(true);
+		// Only the re-issued call owns a chat: the cancelled request leaves no
+		// failed chat, no error stop reason, and no error entry.
+		expect(result.telemetry?.chats.total).toBe(1);
+		expect(result.telemetry?.chats.byStopReason).toEqual({ stop: 1 });
+		expect(result.telemetry?.errors.total).toBe(0);
+		expect(result.telemetry?.errors.byType).toEqual({});
+		expect(
+			result.messages.flatMap(message =>
+				message.role === "assistant"
+					? [
+							message.content
+								.filter(
+									(block): block is Extract<AssistantMessage["content"][number], { type: "text" }> =>
+										block.type === "text",
+								)
+								.map(block => block.text)
+								.join(""),
+						]
+					: [],
+			),
+		).toEqual(["answer with steer"]);
 	});
 });
 

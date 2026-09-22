@@ -1195,6 +1195,20 @@ export function failChatSpan(
 	span.end();
 }
 
+/**
+ * End a chat span for a request discarded before it produced anything (queued
+ * steering cancelled the provider call before its first event). The re-issued
+ * call owns the step's telemetry, so the cancelled span leaves no chat record,
+ * no error type, and no error status — it never reaches the run summary.
+ * Like {@link failChatSpan} it fires no span-end hook: there is no finalized
+ * message to report.
+ */
+export function cancelChatSpan(span: Span | undefined): void {
+	if (!span) return;
+	span.setStatus({ code: SpanStatusCode.UNSET });
+	span.end();
+}
+
 function applyChatResponseAttributes(span: Span, message: AssistantMessage): void {
 	span.setAttribute(GenAIAttr.ResponseModel, message.model);
 	if (message.responseId) span.setAttribute(GenAIAttr.ResponseId, message.responseId);
