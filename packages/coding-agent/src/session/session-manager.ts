@@ -589,7 +589,7 @@ export type ReadonlySessionManager = Pick<
 	| "allocateArtifactPath"
 	| "saveArtifact"
 	| "getArtifactPath"
-	| "getLeafId"
+	| "getArtifactContent"
 	| "getLeafEntry"
 	| "getEntry"
 	| "getLabel"
@@ -618,6 +618,13 @@ interface SessionManagerStateSnapshot {
 	fallbackRuntimeOnly: boolean;
 	header: SessionHeader;
 	entries: SessionEntry[];
+}
+
+/** Mutation-safe snapshot of one working journal's entries and active branch. */
+export interface SessionManagerJournalSnapshot {
+	readonly header: SessionHeader;
+	readonly entries: readonly SessionEntry[];
+	readonly leafId: string | null;
 }
 
 interface DiskQueueOptions {
@@ -783,6 +790,9 @@ export class SessionManager {
 	#adoptedArtifactManager: ArtifactManager | null = null;
 	#inMemoryArtifacts: Map<string, string> | null = null;
 	#inMemoryArtifactCounter = 0;
+	/** Dynamic artifact owner used by in-memory working journals. */
+	#adoptedArtifactSession: SessionManager | null = null;
+	#adoptedArtifactSessionId: string | null = null;
 
 	#suppressBreadcrumb = false;
 	/**
@@ -1692,6 +1702,28 @@ export class SessionManager {
 	}
 
 	/**
+	 * Capture a mutation-safe working-journal checkpoint. Unlike {@link captureState},
+	 * entries are deep-cloned because shake/prune operations mutate message payloads
+	 * in place before their transaction commits.
+	 */
+	captureJournalSnapshot(): SessionManagerJournalSnapshot {
+		return {
+			header: structuredClone(this.#header),
+			entries: structuredClone(this.#entries),
+			leafId: this.#index.leafId(),
+		};
+	}
+
+	/** Restore a working-journal checkpoint without replacing its artifact owner. */
+	restoreJournalSnapshot(snapshot: SessionManagerJournalSnapshot): void {
+		const header = structuredClone(snapshot.header);
+		const entries = structuredClone(snapshot.entries) as SessionEntry[];
+		this.#applyEntries(header, entries);
+		this.#additionalDirectories = header.additionalDirectories ?? [];
+		this.#index.setLeaf(snapshot.leafId && this.#index.has(snapshot.leafId) ? snapshot.leafId : null);
+	}
+
+	/**
 	 * Create an independent manager for the current logical session and branch.
 	 * The clone shares the storage backend but owns its entry index and writer, so
 	 * callers can finish session-owned work after this manager switches elsewhere.
@@ -2531,6 +2563,7 @@ export class SessionManager {
 	}
 
 	getArtifactsDir(): string | null {
+		if (this.#artifactSessionIsCurrent()) return this.#adoptedArtifactSession!.getArtifactsDir();
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
 		return artifactsDirectoryFor(this.#sessionFile);
 	}
@@ -2540,14 +2573,23 @@ export class SessionManager {
 	}
 
 	getArtifactManager(): ArtifactManager | null {
+		if (this.#artifactSessionIsCurrent()) return this.#adoptedArtifactSession!.getArtifactManager();
 		return this.#artifactManagerForSession();
 	}
 
 	async allocateArtifactPath(toolType: string): Promise<{ id?: string; path?: string }> {
+		if (this.#adoptedArtifactSession) {
+			if (!this.#artifactSessionIsCurrent()) return {};
+			return this.#adoptedArtifactSession.allocateArtifactPath(toolType);
+		}
 		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
 	}
 
 	async saveArtifact(content: string, toolType: string): Promise<string | undefined> {
+		if (this.#adoptedArtifactSession) {
+			if (!this.#artifactSessionIsCurrent()) return undefined;
+			return this.#adoptedArtifactSession.saveArtifact(content, toolType);
+		}
 		const manager = this.#artifactManagerForSession();
 		if (manager) return manager.save(content, toolType);
 
@@ -2559,7 +2601,37 @@ export class SessionManager {
 	}
 
 	async getArtifactPath(id: string): Promise<string | null> {
+		if (this.#adoptedArtifactSession) {
+			if (!this.#artifactSessionIsCurrent()) return null;
+			return this.#adoptedArtifactSession.getArtifactPath(id);
+		}
 		return (await this.#artifactManagerForSession()?.getPath(id)) ?? null;
+	}
+
+	/** Resolve an artifact retained by a non-persistent session. */
+	async getArtifactContent(id: string): Promise<string | undefined> {
+		if (this.#adoptedArtifactSession) {
+			if (!this.#artifactSessionIsCurrent()) return undefined;
+			return this.#adoptedArtifactSession.getArtifactContent(id);
+		}
+		return this.#inMemoryArtifacts?.get(id);
+	}
+
+	/**
+	 * Share another session's artifact namespace dynamically. This is used by
+	 * in-memory working journals: it preserves a single allocator even when the
+	 * owning primary session has no on-disk ArtifactManager yet.
+	 */
+	adoptArtifactSession(manager: SessionManager): void {
+		this.#adoptedArtifactSession = manager;
+		this.#adoptedArtifactSessionId = manager.getSessionId();
+	}
+
+	#artifactSessionIsCurrent(): boolean {
+		return (
+			this.#adoptedArtifactSession !== null &&
+			this.#adoptedArtifactSession.getSessionId() === this.#adoptedArtifactSessionId
+		);
 	}
 
 	async saveDraft(text: string): Promise<void> {

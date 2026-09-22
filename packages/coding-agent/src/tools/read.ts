@@ -32,7 +32,7 @@ import {
 import { normalizeToLF } from "../edit/normalize";
 import { getEditStore } from "../edit/store";
 import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from "../internal-urls";
-import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
+import { parseArtifactId, type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { getExperimentalContextSession } from "./context-notes";
@@ -2507,6 +2507,23 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		parsed: ParsedSelector,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		const inMemory = await this.session.localProtocolOptions?.getArtifactContent?.(parseArtifactId(url));
+		throwIfAborted(signal);
+		if (inMemory !== undefined) {
+			const details: ReadToolDetails = { contentType: "text/plain" };
+			if (parsed.kind === "raw" && Buffer.byteLength(inMemory) > MAX_ARTIFACT_RAW_INLINE_BYTES) {
+				return toolResult(details)
+					.text(`Unbounded raw read blocked for ${url.href}. Use ${url.href}:raw:1-3000 for bounded chunks.`)
+					.sourceInternal(url.href)
+					.done();
+			}
+			return buildInMemorySelectorResult(this.session, inMemory, parsed, {
+				details,
+				sourceInternal: url.href,
+				entityLabel: "artifact",
+				immutable: true,
+			});
+		}
 		const artifact = await resolveArtifactFile(url, {
 			cwd: this.session.cwd,
 			settings: this.session.settings,

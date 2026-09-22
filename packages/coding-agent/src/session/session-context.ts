@@ -36,6 +36,17 @@ const LEGACY_SNAPCOMPACT_TRUNCATED_CHARS_GUARD = 1_000_000;
 const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
 const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
 
+/** Native replay must predate both the journal clock and the provider-message clock. */
+function earliestRetainedTimestamp(entry: SessionEntry | undefined): number {
+	if (!entry) return Number.POSITIVE_INFINITY;
+	const entryTimestamp = new Date(entry.timestamp).getTime();
+	const messageTimestamp = entry.type === "message" ? entry.message.timestamp : Number.POSITIVE_INFINITY;
+	return Math.min(
+		Number.isFinite(entryTimestamp) ? entryTimestamp : Number.POSITIVE_INFINITY,
+		Number.isFinite(messageTimestamp) ? messageTimestamp : Number.POSITIVE_INFINITY,
+	);
+}
+
 function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
 	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
 }
@@ -477,7 +488,7 @@ export function buildSessionContext(
 		// A natively replayed summary must not invalidate the retained tail's
 		// bound thinking: stamping it with the entry commit timestamp would
 		// expose that as historyRewriteAt newer than the tail and strip its
-		// signatures on the next request. Predate the marker before the first
+		// signatures on the next request. Predate both clocks of the first
 		// retained entry instead (other lanes keep the commit timestamp).
 		let summaryTimestamp = compaction.timestamp;
 		if (anthropicPayload !== undefined) {
@@ -485,7 +496,13 @@ export function buildSessionContext(
 			const firstRetained =
 				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
 				path[compactionIdx + 1];
-			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
+			let retainedAt = earliestRetainedTimestamp(firstRetained);
+			for (const prior of path.slice(0, compactionIdx)) {
+				if (prior.type !== "compaction" || getAnthropicCompactionPayload(prior.preserveData) === undefined)
+					continue;
+				const priorFirstKept = path.find(entry => entry.id === prior.firstKeptEntryId);
+				retainedAt = Math.min(retainedAt, earliestRetainedTimestamp(priorFirstKept));
+			}
 			if (Number.isFinite(retainedAt)) {
 				summaryTimestamp = new Date(retainedAt - 1).toISOString();
 			}

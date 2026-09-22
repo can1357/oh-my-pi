@@ -5,27 +5,10 @@ import {
 	type AgentTool,
 	type AgentToolContext,
 	AppendOnlyContextManager,
-	type CompactionSummaryMessage,
-	resolveTelemetry,
 	type StreamFn,
 	ThinkingLevel,
-	type Tokenizer,
 } from "@oh-my-pi/pi-agent-core";
-import {
-	canReplayRemoteCompaction,
-	type CompactionResult,
-	compact,
-	compactionContextTokens,
-	createCompactionSummaryMessage,
-	estimateTranscriptTokens,
-	getAnthropicCompactionPayload,
-	isOpenAiRemoteCompactionApi,
-	NativeCompactionError,
-	prepareCompaction,
-	type SessionMessageEntry,
-	shouldCompact,
-	shouldUseProviderNativeCompaction,
-} from "@oh-my-pi/pi-agent-core/compaction";
+import { canReplayRemoteCompaction } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -67,6 +50,7 @@ import {
 	resolveAdvisorDeliveryChannel,
 	slugifyAdvisorName,
 } from "../advisor";
+import { AdvisorContextMaintenance } from "../advisor/context-maintenance";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelString,
@@ -79,7 +63,6 @@ import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/s
 import type { Settings } from "../config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";
-import { estimateToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -91,7 +74,6 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
-import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
 import type { CustomMessage, CustomMessagePayload } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
@@ -101,9 +83,14 @@ import {
 	parseRetryFallbackSelector,
 	type RetryFallbackSelector,
 } from "./retry-fallback-chains";
-import { getOpenAiRemoteCompactionPayload } from "./session-context";
+import {
+	findSafeRetryFallbackCandidate,
+	classifyRetryFallbackMessage,
+	isHardErrorFallbackEligible,
+	type RetryFallbackSafetyHost,
+} from "./retry-fallback-safety";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { CompactionEntry, SessionEntry } from "./session-entries";
+import { getLatestCompactionEntry } from "./session-context";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import type { SessionManager } from "./session-manager";
 import { buildSessionMetadata } from "./session-metadata";
@@ -261,6 +248,8 @@ interface ActiveAdvisor {
 	recorder: AdvisorTranscriptRecorder;
 	recorderClosed: Promise<void>;
 	agentUnsubscribe?: () => void;
+	maintenance: AdvisorContextMaintenance;
+	providerSessionState: Map<string, ProviderSessionState>;
 	model: Model;
 	thinkingLevel: ThinkingLevel;
 	providerSessionId: string | undefined;
@@ -269,18 +258,6 @@ interface ActiveAdvisor {
 	/** Count of consecutive usage-limit block waits, bounded by retry.maxRetries; reset on turn success. */
 	usageLimitRetries: number;
 	signature: string;
-}
-interface AdvisorCompactionSummaryMessage extends CompactionSummaryMessage {
-	firstKeptEntryId?: string;
-	advisorUsageAnchorStartIndex?: number;
-	/**
-	 * Provider-native replay state from `compact()` (e.g. the Anthropic
-	 * compaction block), mirroring entry `preserveData` on the primary
-	 * session. The message payload replays it on later requests; the next
-	 * maintenance run persists it back into the reconstructed entry so the
-	 * following preparation keeps the opaque state and cache continuity.
-	 */
-	preserveData?: CompactionEntry["preserveData"];
 }
 
 interface AdvisorRuntimeDescriptor {
@@ -395,6 +372,7 @@ export interface SessionAdvisorsHost {
 		role: string,
 		currentSelector: string,
 		currentModel?: Model | null,
+		options?: { wrapAround?: boolean },
 	): RetryFallbackSelector[];
 	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean;
 	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void;
@@ -564,10 +542,14 @@ export class SessionAdvisors {
 
 	/**
 	 * Pause advisor work while old-session recorder feeds remain attached, then
-	 * detach only after any active prompt has settled.
+	 * detach only after core and maintenance work have settled.
 	 */
 	async drainAndDetachRecorders(): Promise<void> {
-		await Promise.all(this.#advisors.map(advisor => advisor.runtime.pauseForSessionTransition()));
+		await Promise.all(
+			this.#advisors.map(advisor =>
+				Promise.all([advisor.runtime.pauseForSessionTransition(), advisor.maintenance.pauseAndDrain()]),
+			),
+		);
 		await this.detachAndCloseRecorders();
 	}
 
@@ -586,6 +568,7 @@ export class SessionAdvisors {
 	/** Reattach recorder feeds and resume work after a rolled-back or preserving transition. */
 	reattachRecorderFeeds(): void {
 		for (const advisor of this.#advisors) {
+			advisor.recorder.resume();
 			if (!advisor.agentUnsubscribe) this.#attachAdvisorRecorderFeed(advisor);
 			advisor.runtime.resumeAfterSessionTransition();
 		}
@@ -1035,6 +1018,9 @@ export class SessionAdvisors {
 				primaryProviderSessionId,
 				slug,
 			);
+			// Provider state is owner-scoped: an advisor rewrite must never close or
+			// clear the primary or a sibling advisor's live transport state.
+			const advisorProviderSessionState = new Map<string, ProviderSessionState>();
 			const appendOnlyContext = new AppendOnlyContextManager();
 
 			// Thread the primary's telemetry into the advisor loop so the advisor
@@ -1123,7 +1109,7 @@ export class SessionAdvisors {
 				appendOnlyContext,
 				sessionId: advisorProviderSessionId,
 				promptCacheKey: advisorPromptCacheKey,
-				providerSessionState: this.#host.providerSessionState,
+				providerSessionState: advisorProviderSessionState,
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
 				preferWebsockets: this.#host.preferWebsockets,
@@ -1162,8 +1148,10 @@ export class SessionAdvisors {
 					advisorAgent.abort(reason);
 				},
 			});
-			advisorAgent.setOnTurnEnd((messages, signal, context) => {
+			advisorAgent.setOnTurnEnd(async (messages, signal, context) => {
 				if (signal?.aborted) return;
+				const current = await advisorRef.maintenance.maintainMidRun(messages, signal, context);
+				if (signal?.aborted || !current) return;
 				advisorLoopGuard.recordTurn(messages, context);
 			});
 
@@ -1199,21 +1187,20 @@ export class SessionAdvisors {
 					if (quarantined) throw new AdvisorOutputQuarantinedError(quarantined);
 				},
 				abort: reason => advisorAgent.abort(reason),
-				reset: () => {
+				checkpoint: () => advisorRef.maintenance.checkpoint(),
+				restoreCheckpoint: (checkpoint, reason) => advisorRef.maintenance.restoreCheckpoint(checkpoint, reason),
+				messagesSince: checkpoint => advisorRef.maintenance.messagesSince(checkpoint),
+				hasCommittedRewrite: checkpoint => advisorRef.maintenance.hasCommittedRewrite(checkpoint),
+				discardFailedAttempt: checkpoint => advisorRef.maintenance.discardFailedAttempt(checkpoint),
+				continue: async () => {
+					await advisorAgent.continue();
+				},
+				reset: reason => {
+					advisorRef.maintenance.reset(reason);
 					advisorLoopGuard.reset();
 					advisorLoopGuardStopped = false;
 					advisorAgent.reset();
 					appendOnlyContext.log.clear();
-				},
-				rollbackTo: count => {
-					// Drop the failed user batch + synthetic assistant-error turn
-					// `Agent.#runLoop` appended for a turn ending in `stopReason: "error"`.
-					const messages = advisorAgent.state.messages;
-					if (count < messages.length) {
-						messages.length = count;
-					}
-					appendOnlyContext.resetSyncCursor();
-					advisorAgent.state.error = undefined;
 				},
 				state: advisorAgent.state,
 			};
@@ -1231,9 +1218,49 @@ export class SessionAdvisors {
 					? Promise.all([this.#advisorRecorderClosed, this.#advisorCostSnapshotBarrier])
 					: this.#advisorRecorderClosed,
 			);
+			const maintenance = new AdvisorContextMaintenance({
+				name: advisorName,
+				agent: advisorAgent,
+				primarySessionManager: this.#host.sessionManager,
+				settings: this.#host.settings,
+				modelRegistry: this.#host.modelRegistry,
+				sideStreamFn: advisorStreamFn,
+				providerSessionState: advisorProviderSessionState,
+				preferWebsockets: this.#host.preferWebsockets,
+				obfuscator: this.#host.obfuscator,
+				model: () => advisorAgent.state.model,
+				thinkingLevel: () => advisorRef.thinkingLevel,
+				sessionId: () => advisorRef.providerSessionId ?? advisorProviderSessionId ?? "",
+				convertToLlmForSideRequest: messages => this.#host.convertToLlmForSideRequest(messages),
+				prepareSimpleStreamOptions: (streamOptions, provider) => ({
+					...streamOptions,
+					metadata:
+						streamOptions.metadata ??
+						advisorAgent.metadataForProvider(provider ?? advisorAgent.state.model.provider),
+					onPayload: streamOptions.onPayload ?? this.#host.onPayload,
+					onResponse: streamOptions.onResponse ?? this.#host.onResponse,
+					onSseEvent: streamOptions.onSseEvent ?? this.#host.onSseEvent,
+				}),
+				tryHardFallback: (message, signal) => this.#tryAdvisorHardFallback(advisorRef, message, signal),
+				effectiveServiceTier: model => (model ? advisorServiceTierResolver(model) : undefined),
+				setModel: async (model, thinkingLevel) => {
+					this.#setAdvisorModel(advisorRef, model, thinkingLevel ?? advisorRef.thinkingLevel);
+				},
+				emitNotice: (level, message, source) => this.#host.emitNotice(level, message, source),
+				createCodexCompactionContext: options => this.#host.createCodexCompactionContext(options),
+				continueReview: async () => {
+					await advisorAgent.continue();
+				},
+				isDisposed: () => advisorRef.runtime.disposed,
+				captureMaintenanceSink: () => recorder.captureMaintenanceSink(),
+			});
 			const runtime = new AdvisorRuntime(advisorAgentFacade, {
 				snapshotMessages: () => this.#host.agent.state.messages,
-				maintainContext: (incoming, signal) => this.#maintainAdvisorContext(advisorRef, incoming, signal),
+				maintainContext: async (incoming, signal) => {
+					await this.#maybeRestoreAdvisorRetryFallbackPrimary(advisorRef, signal);
+					signal.throwIfAborted();
+					await maintenance.maintainBeforePrompt(incoming, signal);
+				},
 				obfuscator: this.#host.obfuscator,
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
@@ -1246,6 +1273,7 @@ export class SessionAdvisors {
 				},
 				onTurnError: (error, failedMessages, signal) =>
 					this.#recoverAdvisorTurn(advisorRef, error, failedMessages, signal),
+				onTurnSettled: (checkpoint, signal, error) => maintenance.settle(checkpoint, signal, error),
 				onTurnSuccess: async () => {
 					// Commit the delivered batch so retries of a failed turn stay deduped
 					// while this successful turn's context is persisted once (issue #9553).
@@ -1300,6 +1328,8 @@ export class SessionAdvisors {
 				runtime,
 				adviseTool,
 				recorder,
+				maintenance,
+				providerSessionState: advisorProviderSessionState,
 				recorderClosed: Promise.resolve(),
 				model: advisorModel,
 				thinkingLevel: advisorThinkingLevel,
@@ -1458,9 +1488,10 @@ export class SessionAdvisors {
 			a.agentUnsubscribe?.();
 			a.agentUnsubscribe = undefined;
 			a.runtime.dispose();
-			// Capture each close so dispose()/`/delete` can await the queued open+append+close —
-			// the last advisor turn would otherwise be lost on a fast process exit.
-			a.recorderClosed = a.recorder.close();
+			const maintenanceDisposed = a.maintenance.dispose();
+			// Capture each close so dispose()/`/delete` waits for scheduled
+			// maintenance and its diagnostics before releasing the transcript.
+			a.recorderClosed = maintenanceDisposed.then(() => a.recorder.close());
 			closes.push(a.recorderClosed);
 		}
 		this.#advisorRecorderClosed = Promise.all(closes).then(() => {});
@@ -1487,12 +1518,15 @@ export class SessionAdvisors {
 			if (event.type !== "message_end") return;
 			if (event.message.role === "assistant") this.#recordAdvisorCost(advisor, event.message);
 			advisor.recorder.record(event.message);
+			advisor.maintenance.recordFinalized(event.message);
 		});
 	}
 
 	/** Switch one advisor model while preserving its context and effort invariants. */
 	#setAdvisorModel(advisor: ActiveAdvisor, model: Model, requestedThinkingLevel: ThinkingLevel): ThinkingLevel {
 		const resolvedThinkingLevel = resolveThinkingLevelForModel(model, requestedThinkingLevel);
+		for (const state of advisor.providerSessionState.values()) state.close();
+		advisor.providerSessionState.clear();
 		const nextThinkingLevel = resolvedThinkingLevel ?? ThinkingLevel.Inherit;
 		advisor.agent.setModel(model);
 		advisor.agent.setThinkingLevel(toReasoningEffort(nextThinkingLevel));
@@ -1504,11 +1538,95 @@ export class SessionAdvisors {
 	}
 
 	#canReplayAdvisorHistory(advisor: ActiveAdvisor, model: Model): boolean {
-		return advisor.agent.state.messages.every(
-			message =>
-				message.role !== "compactionSummary" ||
-				canReplayRemoteCompaction((message as AdvisorCompactionSummaryMessage).preserveData, model),
-		);
+		const compaction = getLatestCompactionEntry(advisor.maintenance.journal.getBranch());
+		return canReplayRemoteCompaction(compaction?.preserveData, model);
+	}
+
+	async #tryAdvisorHardFallback(
+		advisor: ActiveAdvisor,
+		failedMessage: AssistantMessage,
+		signal: AbortSignal,
+	): Promise<boolean> {
+		const currentModel = advisor.agent.state.model;
+		const generation = advisor.maintenance.generation;
+		const ownsAttempt = () =>
+			!signal.aborted && !advisor.runtime.disposed && advisor.maintenance.generation === generation;
+		const classified = classifyRetryFallbackMessage(failedMessage, currentModel);
+		if (
+			!AIError.isPayloadRejection(failedMessage) &&
+			(AIError.retriable(classified) ||
+				AIError.is(classified, AIError.Flag.AuthFailed) ||
+				AIError.is(classified, AIError.Flag.UsageLimit) ||
+				AIError.isContextOverflow(failedMessage, currentModel.contextWindow ?? 0))
+		) {
+			return false;
+		}
+		const currentSelector = formatRetryFallbackSelector(currentModel, advisor.thinkingLevel);
+		const isCurrent = () => ownsAttempt() && advisor.agent.state.model === currentModel;
+		const safetyHost: RetryFallbackSafetyHost = {
+			settings: this.#host.settings,
+			modelRegistry: this.#host.modelRegistry,
+			model: () => advisor.agent.state.model,
+			thinkingLevel: () => advisor.thinkingLevel,
+			thinkingLevelCeiling: () => undefined,
+			sessionId: () => advisor.providerSessionId ?? "",
+			textOutputCommitted: () => false,
+			contextFitsModel: (model, excluded) => advisor.maintenance.contextFitsModel(model, excluded),
+			retryFallbackChainKeys: selector =>
+				this.#host.retryFallbackChainKeys(selector, currentModel, {
+					pinnedRole: advisor.retryFallback?.role,
+					roleHint: "advisor",
+				}),
+			findRetryFallbackCandidates: (role, selector, options) =>
+				this.#host.findRetryFallbackCandidates(role, selector, currentModel, options),
+			isRetryFallbackSelectorSuppressed: selector => this.#host.isRetryFallbackSelectorSuppressed(selector),
+			latestAssistantMessage: excluding =>
+				advisor.agent.state.messages.findLast(
+					(message): message is AssistantMessage => message.role === "assistant" && message !== excluding,
+				),
+			isNativeReplayCompatible: candidate => this.#canReplayAdvisorHistory(advisor, candidate),
+			isCurrent,
+		};
+		if (!isHardErrorFallbackEligible(safetyHost, failedMessage)) return false;
+		const candidate = await findSafeRetryFallbackCandidate(safetyHost, currentSelector, failedMessage, {
+			signal,
+			preserveFailedTurn: false,
+		});
+		if (!candidate || !isCurrent()) return false;
+		this.#host.noteRetryFallbackCooldown(currentSelector, undefined, failedMessage.errorMessage ?? "Unknown error");
+		const originalThinkingLevel = advisor.thinkingLevel;
+		const requestedThinkingLevel = candidate.selector.thinkingLevel ?? originalThinkingLevel;
+		const previousFallback = advisor.retryFallback ? { ...advisor.retryFallback } : undefined;
+		const previousFallbackPendingSuccess = advisor.retryFallbackPendingSuccess;
+		const nextThinkingLevel = this.#setAdvisorModel(advisor, candidate.model, requestedThinkingLevel);
+		advisor.retryFallback ??= {
+			role: candidate.role,
+			originalSelector: currentSelector,
+			originalThinkingLevel,
+			lastAppliedThinkingLevel: nextThinkingLevel,
+		};
+		advisor.retryFallback.lastAppliedThinkingLevel = nextThinkingLevel;
+		advisor.retryFallbackPendingSuccess = true;
+		this.#host.settings.getStorage()?.recordModelUsage(formatModelStringWithRouting(candidate.model));
+		try {
+			await this.#host.emitSessionEvent({
+				type: "retry_fallback_applied",
+				from: currentSelector,
+				to: candidate.selector.raw,
+				role: candidate.role,
+			});
+		} catch (error) {
+			if (ownsAttempt()) throw error;
+		}
+		if (!ownsAttempt() || advisor.agent.state.model !== candidate.model) {
+			if (advisor.maintenance.generation === generation && advisor.agent.state.model === candidate.model) {
+				if (!advisor.runtime.disposed) this.#setAdvisorModel(advisor, currentModel, originalThinkingLevel);
+				advisor.retryFallback = previousFallback;
+				advisor.retryFallbackPendingSuccess = previousFallbackPendingSuccess;
+			}
+			return false;
+		}
+		return true;
 	}
 
 	/** Restore an advisor's configured primary once its fallback cooldown expires. */
@@ -1765,315 +1883,6 @@ export class SessionAdvisors {
 		return true;
 	}
 
-	async #promoteAdvisorContextModel(
-		advisor: ActiveAdvisor,
-		currentModel: Model,
-		signal: AbortSignal,
-	): Promise<boolean> {
-		const promotionSettings = this.#host.settings.getGroup("contextPromotion");
-		if (!promotionSettings.enabled) return false;
-		const contextWindow = currentModel.contextWindow ?? 0;
-		if (contextWindow <= 0) return false;
-		const targetModel = await this.#host.resolveContextPromotionTarget(currentModel, contextWindow, signal);
-		if (!targetModel || !this.#canReplayAdvisorHistory(advisor, targetModel)) return false;
-		signal.throwIfAborted();
-
-		// Preserve this advisor's own thinking level (a configured `model:...:high`
-		// keeps its suffix across a promotion); only the model changes.
-		const advisorThinkingLevel = advisor.thinkingLevel;
-		try {
-			this.#setAdvisorModel(advisor, targetModel, advisorThinkingLevel);
-			logger.debug("Advisor context promotion switched model on overflow", {
-				advisor: advisor.name,
-				from: `${currentModel.provider}/${currentModel.id}`,
-				to: `${targetModel.provider}/${targetModel.id}`,
-			});
-			return true;
-		} catch (error) {
-			logger.warn("Advisor context promotion failed", {
-				advisor: advisor.name,
-				from: `${currentModel.provider}/${currentModel.id}`,
-				to: `${targetModel.provider}/${targetModel.id}`,
-				error: String(error),
-			});
-			return false;
-		}
-	}
-
-	async #maintainAdvisorContext(
-		advisor: ActiveAdvisor,
-		incoming: AgentMessage,
-		signal: AbortSignal,
-	): Promise<boolean> {
-		await this.#maybeRestoreAdvisorRetryFallbackPrimary(advisor, signal);
-		const agent = advisor.agent;
-		const incomingTokens = agent.tokenizer.countMessage(incoming);
-
-		const configuredCompaction = this.#host.settings.getGroup("compaction");
-		const methods = resolveCompactionMethodOrder(configuredCompaction.methodOrder);
-		if (!configuredCompaction.enabled || methods.length === 0) {
-			return false;
-		}
-		const compactionSettings = resolveMethodSettings(
-			configuredCompaction,
-			methods.includes("remote") ? "remote" : "soft",
-		);
-
-		let advisorModel = agent.state.model;
-		const contextWindow = advisorModel.contextWindow ?? 0;
-		if (contextWindow <= 0) return false;
-
-		const messages = agent.state.messages;
-		const storedConversationTokens = agent.tokenizer.countMessages(messages, { excludeEncryptedReasoning: true });
-		// Provider usage (including cache reads and generated output) is the
-		// trustworthy anchor for accumulated context. Add only the trailing incoming
-		// delta to that arm. Floor it by a full local estimate — fixed advisor system
-		// prompt, tool schemas, stored messages, and incoming delta — so provider
-		// under-reporting or payload transforms cannot suppress maintenance.
-		const providerContextTokens = this.#estimateAdvisorContextTokens(messages, agent.tokenizer) + incomingTokens;
-		const localContextTokens =
-			agent.tokenizer.countTokens(agent.state.systemPrompt) +
-			estimateToolSchemaTokens(agent.state.tools, agent.tokenizer, this.#host.settings.revision) +
-			storedConversationTokens +
-			incomingTokens;
-		const contextTokens = compactionContextTokens(providerContextTokens, localContextTokens);
-
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
-			return false;
-		}
-
-		// 1. Try promotion first
-		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
-			// Promotion succeeded, check if new model has enough space
-			const newModel = agent.state.model;
-			const newWindow = newModel.contextWindow ?? 0;
-			if (newWindow > 0) {
-				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);
-				if (!stillNeedsCompaction) return false;
-			}
-		}
-		advisorModel = agent.state.model;
-		const previousSummary = messages.findLast(
-			(message): message is AdvisorCompactionSummaryMessage => message.role === "compactionSummary",
-		);
-		const hasNativeHistory = previousSummary?.providerPayload?.type === "openaiResponsesHistory";
-		if (!this.#canReplayAdvisorHistory(advisor, advisorModel)) {
-			throw new NativeCompactionError(new Error("Advisor model cannot replay its native compaction history"));
-		}
-
-		// 2. Run compaction on advisor messages
-		const pathEntries: SessionEntry[] = messages.map((message, i) => {
-			const id = `msg-${i}`;
-			const parentId = i > 0 ? `msg-${i - 1}` : null;
-			const timestamp = String(message.timestamp || Date.now());
-
-			if (message.role === "compactionSummary") {
-				const advisorSummary = message as AdvisorCompactionSummaryMessage;
-				return {
-					type: "compaction",
-					id,
-					parentId,
-					// ISO like every CompactionEntry: the next round reads this
-					// back as previousSummaryTimestamp, and a millis string
-					// does not survive `new Date()` (NaN rewrite marker).
-					timestamp: new Date(message.timestamp || Date.now()).toISOString(),
-					summary: message.summary,
-					shortSummary: message.shortSummary,
-					firstKeptEntryId: advisorSummary.firstKeptEntryId || `msg-${i + 1}`,
-					tokensBefore: message.tokensBefore,
-					preserveData: advisorSummary.preserveData,
-				} satisfies CompactionEntry;
-			}
-
-			return {
-				type: "message",
-				id,
-				parentId,
-				timestamp,
-				message,
-			} satisfies SessionMessageEntry;
-		});
-
-		const availableModels = this.#host.modelRegistry.getAvailable();
-		let candidates = this.#host.resolveCompactionModelCandidates(advisorModel, availableModels);
-		if (hasNativeHistory) {
-			candidates = candidates.filter(
-				candidate =>
-					this.#canReplayAdvisorHistory(advisor, candidate) &&
-					shouldUseProviderNativeCompaction(candidate, compactionSettings),
-			);
-		}
-		if (candidates.length === 0) {
-			if (hasNativeHistory) {
-				throw new NativeCompactionError(new Error("No compaction model can preserve advisor native history"));
-			}
-			// No compaction candidates, fallback to re-prime
-			return true;
-		}
-		const advisorProviderSessionId = getOrCreateAdvisorProviderSessionId(
-			this.#advisorProviderSessionIds,
-			this.#host.sessionId(),
-			advisor.slug,
-		);
-		// Advisors no longer retain the pre-compaction originals. Prepare opaque
-		// history only for an eligible native writer, independently of whether the
-		// advisor reader itself can create a new compaction. Without such a writer,
-		// the empty-candidate failure above preserves the existing history.
-		const preparation = prepareCompaction(
-			pathEntries,
-			compactionSettings,
-			hasNativeHistory ? candidates[0] : advisorModel,
-			agent.tokenizer,
-		);
-		if (!preparation) {
-			if (hasNativeHistory) {
-				throw new NativeCompactionError(new Error("Cannot prepare advisor native history for compaction"));
-			}
-			// Cannot prepare compaction, fallback to re-prime
-			return true;
-		}
-
-		const advisorCompactionThinkingLevel: ThinkingLevel | undefined = agent.state.disableReasoning
-			? ThinkingLevel.Off
-			: agent.state.thinkingLevel;
-
-		// Advisor maintenance uses LLM/native compaction rather than snapcompact's
-		// image renderer, but native creation still requires the remote method.
-
-		let compactResult: CompactionResult | undefined;
-		let lastError: unknown;
-		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
-		// Instrument the advisor's overflow-compaction one-shot like the primary
-		// compaction path so the advisor model's maintenance call also emits spans.
-		const telemetry = resolveTelemetry(agent.telemetry, advisorProviderSessionId);
-
-		const codexCompaction = this.#host.createCodexCompactionContext({
-			trigger: "auto",
-			reason: "context_limit",
-			phase: "pre_turn",
-		});
-
-		for (const candidate of candidates) {
-			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId, { signal });
-			if (!apiKey) continue;
-			if (
-				nativeCompactionFailure &&
-				(candidate.provider !== nativeCompactionFailure.provider ||
-					!shouldUseProviderNativeCompaction(candidate, compactionSettings))
-			) {
-				throw nativeCompactionFailure.error;
-			}
-			// A foreign native target can summarize readable history, but its opaque
-			// output cannot replace history consumed by this advisor's active model.
-			const candidatePreparation =
-				candidate.provider === advisorModel.provider && isOpenAiRemoteCompactionApi(advisorModel.api)
-					? preparation
-					: { ...preparation, settings: { ...compactionSettings, remoteEnabled: false } };
-
-			// The advisor overflow-compaction one-shot bypasses the advisor `Agent`,
-			// so its installed metadata resolver never runs. Emit the same
-			// `metadata.user_id` identity here (resolved per candidate provider,
-			// after the session-sticky credential is selected) so summarization
-			// requests carry the advisor session id like every other advisor call
-			// (issue #6625).
-			const advisorMetadata = advisorProviderSessionId
-				? buildSessionMetadata(advisorProviderSessionId, candidate.provider, this.#host.modelRegistry.authStorage)
-				: undefined;
-			try {
-				compactResult = await compact(
-					candidatePreparation,
-					candidate,
-					this.#host.modelRegistry.resolver(candidate, advisorProviderSessionId),
-					undefined,
-					signal,
-					{
-						thinkingLevel: advisorCompactionThinkingLevel,
-						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
-						telemetry,
-						tools: agent.state.tools,
-						// The advisor's own live prompt, so a provider-native compaction
-						// re-issues the advisor's request shape and reads its cached prefix.
-						remoteSystemPrompt: agent.state.systemPrompt,
-						sessionId: advisorProviderSessionId,
-						promptCacheKey: advisorProviderSessionId,
-						metadata: advisorMetadata,
-						providerSessionState: this.#host.providerSessionState,
-						preferWebsockets: this.#host.preferWebsockets,
-						codexCompaction,
-					},
-				);
-				break;
-			} catch (error) {
-				if (signal.aborted) throw error;
-				const id = AIError.classify(error, candidate.api);
-				if (error instanceof NativeCompactionError && !AIError.is(id, AIError.Flag.AuthFailed)) {
-					nativeCompactionFailure ??= { error, provider: candidate.provider };
-					lastError = nativeCompactionFailure.error;
-					continue;
-				}
-				lastError = error;
-			}
-		}
-
-		if (!compactResult && nativeCompactionFailure) throw nativeCompactionFailure.error;
-
-		if (!compactResult) {
-			if (hasNativeHistory) {
-				throw new NativeCompactionError(
-					lastError ?? new Error("No compaction model can preserve advisor native history"),
-				);
-			}
-			logger.warn("Advisor compaction failed, falling back to re-prime", { error: String(lastError) });
-			return true;
-		}
-
-		const summary = compactResult.summary;
-		const shortSummary = compactResult.shortSummary;
-		const firstKeptEntryId = compactResult.firstKeptEntryId;
-		const tokensBefore = compactResult.tokensBefore;
-		const providerPayload = getOpenAiRemoteCompactionPayload(compactResult);
-		if (hasNativeHistory && !providerPayload) {
-			throw new NativeCompactionError(new Error("Compaction result did not preserve advisor native history"));
-		}
-		if (!canReplayRemoteCompaction(compactResult.preserveData, advisorModel)) {
-			throw new NativeCompactionError(new Error("Compaction result cannot be replayed by the advisor model"));
-		}
-		// Native replacement history already contains the retained tail. Replaying
-		// that tail again as raw messages duplicates turns and tool-call IDs.
-		const recentMessages = providerPayload ? [] : preparation.recentMessages;
-
-		// The retained messages still carry provider usage from before this
-		// compaction. Record their exact array boundary on the in-memory summary so
-		// only assistants appended afterward can become the next usage anchor.
-		const advisorUsageAnchorStartIndex = recentMessages.length + 1;
-		const anthropicPayload = getAnthropicCompactionPayload(compactResult.preserveData);
-		// A native summary replays its block on later requests, so its rewrite
-		// marker must precede the retained tail: a fresh timestamp would make
-		// `historyRewriteAt` newer than the tail and strip its bound thinking
-		// on the very next request. Reuse the previous compaction's marker when
-		// one exists, else sit just before the retained tail. Local summaries
-		// keep the existing fresh timestamp.
-		const firstRetained = preparation.recentMessages[0];
-		const summaryTimestamp =
-			anthropicPayload !== undefined
-				? (preparation.previousSummaryTimestamp ??
-					(firstRetained ? new Date(firstRetained.timestamp - 1).toISOString() : new Date().toISOString()))
-				: new Date().toISOString();
-		const summaryMessage = {
-			...createCompactionSummaryMessage(summary, tokensBefore, summaryTimestamp, {
-				shortSummary,
-				// Carry provider-native replay state on the in-memory summary so
-				// later advisor requests replay it instead of ordinary summary text.
-				providerPayload: anthropicPayload ?? providerPayload,
-			}),
-			firstKeptEntryId,
-			advisorUsageAnchorStartIndex,
-			preserveData: compactResult.preserveData,
-		} satisfies AdvisorCompactionSummaryMessage;
-
-		agent.replaceMessages([summaryMessage, ...recentMessages]);
-		return false;
-	}
 	/**
 	 * Prevent advisor notes from starting hidden primary turns while a headless
 	 * caller prints and drains the final primary response.
@@ -2390,7 +2199,7 @@ export class SessionAdvisors {
 	#computeAdvisorStat(advisor: ActiveAdvisor): PerAdvisorStat {
 		const model = advisor.agent.state.model;
 		const messages = advisor.agent.state.messages;
-		const contextTokens = this.#estimateAdvisorContextTokens(messages, advisor.agent.tokenizer);
+		const contextTokens = advisor.maintenance.getContextUsage()?.tokens ?? 0;
 		let input = 0;
 		let output = 0;
 		let reasoning = 0;
@@ -2471,31 +2280,6 @@ export class SessionAdvisors {
 			`Totals: ${stats.tokens.input.toLocaleString()} input, ${stats.tokens.output.toLocaleString()} output, $${stats.cost.toFixed(4)}.`,
 		);
 		return lines.join("\n");
-	}
-
-	/**
-	 * Estimate the advisor's current context tokens. A successful provider usage
-	 * after the latest advisor compaction is ground truth for the prompt plus its
-	 * generated output; only messages after that anchor are estimated. Usage from
-	 * retained pre-compaction messages is stale and must not immediately retrigger
-	 * maintenance on the newly compacted context.
-	 */
-	#estimateAdvisorContextTokens(messages: AgentMessage[], tokenizer: Tokenizer): number {
-		let usageAnchorStartIndex = 0;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const message = messages[i];
-			if (message.role !== "compactionSummary") continue;
-			const advisorSummary = message as AdvisorCompactionSummaryMessage;
-			// Advisor summaries created before this runtime-only boundary existed have
-			// no trustworthy way to distinguish retained from newly appended messages.
-			// Conservatively ignore every current assistant until the next compaction.
-			usageAnchorStartIndex = advisorSummary.advisorUsageAnchorStartIndex ?? messages.length;
-			break;
-		}
-		return estimateTranscriptTokens(messages, tokenizer, {
-			anchorFromIndex: usageAnchorStartIndex,
-			excludeEncryptedReasoning: true,
-		});
 	}
 
 	/**
