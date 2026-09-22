@@ -2,6 +2,7 @@ import { afterEach, expect, test, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createPanelPersonaAgent, type PanelPersona, renderPanelAssignment } from "@oh-my-pi/pi-coding-agent/panel";
+import { cfgPanel } from "../../src/panel/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { preparePanelRun, runPanel } from "../../src/panel/runtime";
 import type { StructuredSubagentRequest, StructuredSubagentResult } from "../../src/task/structured-subagent";
@@ -80,7 +81,7 @@ test("runtime dispatches the reviewed plan after settings and model availability
 	const request = "Review this exact design.";
 	const plan = preparePanelRun({ session, taskMode: "answer", request, requestedRole: "reviewed" });
 
-	settings.set("panel", {
+	cfgPanel.set(settings, {
 		roles: {
 			changed: {
 				strategy: "independent",
