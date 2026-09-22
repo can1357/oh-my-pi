@@ -9,7 +9,15 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import type {
+	CredentialDisabledEvent,
+	ImageContent,
+	JudgeOptions,
+	JudgmentRequest,
+	Model,
+	ProviderResponseMetadata,
+	Questions,
+} from "@oh-my-pi/pi-ai";
 import {
 	clearContextHistoryIndex,
 	getContextHistoryIndex,
@@ -22,6 +30,12 @@ import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
+import {
+	createJudgmentRuntime,
+	type JudgeBatchOptions,
+	type JudgmentBatchRequest,
+	type JudgmentRuntime,
+} from "../../judgment/runtime";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
@@ -90,6 +104,9 @@ interface BeforeAgentStartCombinedResult {
 }
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+interface ExtensionJudgmentHost {
+	metadataResolver?(provider: string): Record<string, unknown> | undefined;
+}
 
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
@@ -216,6 +233,16 @@ function createHandlerUIContext(
 }
 
 /**
+ * Join a judgment caller's own signal with the scope that owns the call — the
+ * handler run or the delegating tool call — so leaving that scope cancels the
+ * judgment even when the caller passed no signal of its own.
+ */
+function scopeJudgmentSignal(scope: AbortSignal | undefined, caller: AbortSignal | undefined): AbortSignal | undefined {
+	if (!scope) return caller;
+	return caller ? AbortSignal.any([caller, scope]) : scope;
+}
+
+/**
  * Scope `ctx` to a single handler run without spreading it: `{ ...ctx }` would
  * snapshot live accessors (notably the `model` getter), so a handler calling
  * `pi.setModel()` and then reading `ctx.model` would see a stale model.
@@ -232,6 +259,24 @@ function createHandlerContext(
 		enumerable: true,
 		configurable: true,
 	});
+	const judge = ctx.judge;
+	if (judge) {
+		Object.defineProperty(scoped, "judge", {
+			value: <Q extends Questions>(request: JudgmentRequest<Q>, options: JudgeOptions = {}) =>
+				judge(request, { ...options, signal: scopeJudgmentSignal(handlerSignal, options.signal) }),
+			enumerable: true,
+			configurable: true,
+		});
+	}
+	const judgeBatch = ctx.judgeBatch;
+	if (judgeBatch) {
+		Object.defineProperty(scoped, "judgeBatch", {
+			value: <Q extends Questions>(request: JudgmentBatchRequest<Q>, options: JudgeBatchOptions = {}) =>
+				judgeBatch(request, { ...options, signal: scopeJudgmentSignal(handlerSignal, options.signal) }),
+			enumerable: true,
+			configurable: true,
+		});
+	}
 	return scoped;
 }
 
@@ -403,6 +448,7 @@ export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner 
 	} finally {
 		extensionRunner.disposeFileFallbacks();
 		extensionRunner.clearManagedTimers();
+		extensionRunner.disposeJudgments(new Error("extension session shut down"));
 	}
 }
 
@@ -460,6 +506,7 @@ export class ExtensionRunner {
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
 	#switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
 	#reloadHandler: () => Promise<void> = async () => {};
+	readonly #judgmentRuntime?: JudgmentRuntime;
 	#shutdownHandler: ShutdownHandler = () => {};
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
@@ -615,10 +662,20 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		judgmentHost?: ExtensionJudgmentHost,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
 		this.#getAsyncJobSnapshotFn = getAsyncJobSnapshot ?? (() => null);
+		if (settings && judgmentHost) {
+			this.#judgmentRuntime = createJudgmentRuntime({
+				settings,
+				modelRegistry,
+				sessionManager,
+				getSessionModel: () => this.#getModel(),
+				metadataResolver: judgmentHost.metadataResolver,
+			});
+		}
 	}
 
 	/**
@@ -1184,7 +1241,8 @@ export class ExtensionRunner {
 		},
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
-		return {
+		const judgmentRuntime = this.#judgmentRuntime;
+		const context: ExtensionContext = {
 			ui: this.#uiContext,
 			mode: this.#mode,
 			getContextUsage: () => this.#getContextUsageFn(),
@@ -1222,6 +1280,21 @@ export class ExtensionRunner {
 							})
 					: undefined,
 		};
+		// Both methods run on the one runtime this session owns, so they share its
+		// role resolution, usage journaling, and disposal.
+		if (judgmentRuntime) {
+			context.judge = (request, options: JudgeOptions = {}) =>
+				judgmentRuntime.judge(request, {
+					...options,
+					signal: scopeJudgmentSignal(delegation?.signal, options.signal),
+				});
+			context.judgeBatch = (request, options: JudgeBatchOptions = {}) =>
+				judgmentRuntime.judgeBatch(request, {
+					...options,
+					signal: scopeJudgmentSignal(delegation?.signal, options.signal),
+				});
+		}
+		return context;
 	}
 
 	/**
@@ -1229,6 +1302,10 @@ export class ExtensionRunner {
 	 */
 	shutdown(): void {
 		this.#shutdownHandler();
+	}
+
+	disposeJudgments(reason?: unknown): void {
+		this.#judgmentRuntime?.dispose(reason);
 	}
 
 	/**

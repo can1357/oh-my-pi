@@ -36,6 +36,32 @@ import { getTinyLocalModelSpec } from "../tiny/models";
 import localPromptTemplate from "../prompts/system/judgment-local.md" with { type: "text" };
 import { tinyModelClient } from "../tiny/title-client";
 
+/**
+ * Public judgment vocabulary. `@oh-my-pi/pi-coding-agent/judgment` is the
+ * supported entry point, so an extension author names request, option, result,
+ * and per-item failure types — and catches {@link JudgmentError} — from here
+ * rather than reaching into the runtime module or `@oh-my-pi/pi-ai`.
+ */
+export * from "./runtime";
+export { JudgmentParseError } from "@oh-my-pi/pi-ai/judgment";
+export type {
+	Answer,
+	AnswerFor,
+	ChoiceAnswer,
+	ChoiceQuestion,
+	JsonValue,
+	JudgeOptions,
+	JudgmentRequest,
+	JudgmentResult,
+	JudgmentState,
+	NoulAnswer,
+	NoulQuestion,
+	Question,
+	Questions,
+	ScoreAnswer,
+	ScoreQuestion,
+} from "@oh-my-pi/pi-ai/judgment";
+
 /** Usage of one judgment attempt, recorded on the session ledger by callers. */
 export interface JudgmentUsage {
 	/** Model role the call resolved through, or `typesafe` for native judgments. */
