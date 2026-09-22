@@ -1236,7 +1236,7 @@ function specUsesApi<TApi extends Api>(spec: ModelSpec<Api>, api: TApi): spec is
 
 /** Resolve the request adapter assigned to a discovery backend before materialization. */
 export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string): Api {
-	const identity = resolveIdentity(spec);
+	const identity = resolveIdentity(spec, { strict: false });
 	const discoveryApi = resolveCascade(buildResolveTarget(spec, identity, providerType)).catalog.discoveryApi;
 	return typeof discoveryApi === "string" ? discoveryApi : spec.api;
 }
@@ -1302,5 +1302,5 @@ export function resolveModelPolicy(
  * ever overriding reviewed knowledge.
  */
 export function hasModelScopedEffortLadder<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
-	return hasModelScopedEffortsRule(buildResolveTarget(spec, resolveIdentity(spec)));
+	return hasModelScopedEffortsRule(buildResolveTarget(spec, resolveIdentity(spec, { strict: false })));
 }

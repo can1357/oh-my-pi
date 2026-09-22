@@ -39,6 +39,11 @@
 - Fixed GPT-OSS tool interactions on Google Antigravity and Gemini CLI so function-call history is preserved correctly.
 - Fixed Devin model discovery for Enterprise credentials by falling back to the legacy Windsurf catalog when native discovery does not return the full model list.
 - Curated Xiaomi Token Plan (China) MiMo V2.6 metadata: context/output limits, reasoning, and image input ([#12841](https://github.com/can1357/oh-my-pi/pull/12841) by [@roboomp](https://github.com/roboomp)).
+- `buildModel` no longer aborts the process when a discovered or custom model id ties two identity classes (for example OmniRoute `openai-compatible-chat-<uuid>/cohere/...` vs the `openai` namespace). Classification is lenient for runtime specs; curated generation explicitly uses strict identity validation, and policy rebaking remains strict by default.
+- Local OpenAI-compatible backends (llama.cpp, LM Studio, vLLM, local Ollama, and loopback/LAN custom hosts) now honor `maxTokens` above 64k instead of silently clamping output to the hosted OpenAI ceiling ([#12433](https://github.com/can1357/oh-my-pi/pull/12433) by [@ton-anywhere](https://github.com/ton-anywhere)).
+- Fixed Union Alpha using the wrong API on OpenCode Go and Zen; it now uses the Messages endpoint ([#12380](https://github.com/can1357/oh-my-pi/pull/12380) by [@Dante-dan](https://github.com/Dante-dan)).
+- Fixed SuperGrok (xai-oauth) Grok 4.7 missing its thinking-level options and reporting null context limits; it now carries the documented 500K window and low/medium/high/xhigh ladder ([#12697](https://github.com/can1357/oh-my-pi/issues/12697)).
+- GPT-OSS models on Google Antigravity and Gemini CLI now preserve function call/response IDs in tool history ([#12771](https://github.com/can1357/oh-my-pi/pull/12771) by [@tuandinh0801](https://github.com/tuandinh0801)).
 
 ## [18.2.8] - 2026-09-21
 
@@ -70,7 +75,6 @@
 ### Fixed
 
 - Corrected Yolo-Auto metadata for Qwen Flash: `qwen3.8-flash` and the paid `yolo` route now report the documented 256K context window and use the Qwen chat-template reasoning dialect, with `qwen3.8-flash` as the provider default.
-- `buildModel` no longer aborts the process when a discovered or custom model id ties two identity classes (for example OmniRoute `openai-compatible-chat-<uuid>/cohere/...` vs the `openai` namespace). Classification is lenient for runtime specs; curated generation explicitly uses strict identity validation, and policy rebaking remains strict by default.
 
 ## [18.2.4] - 2026-09-17
 
@@ -230,9 +234,6 @@
    - Fixed GPT-6 Astra requests through GitHub Copilot failing with an unsupported endpoint error ([#10874](https://github.com/can1357/oh-my-pi/pull/10874) by [@xpcmdshell](https://github.com/xpcmdshell)).
    - Fixed GPT-6 Astra showing as free with a 272K-token window in the OpenAI Codex catalog by applying its documented pricing; `/extended-context` enables the wire-advertised 872K-token maximum ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
    - Made extended-context catalog rebuilds faster by resolving each model's maximum window once per process ([#11039](https://github.com/can1357/oh-my-pi/pull/11039) by [@H4vC](https://github.com/H4vC)).
-	- Fixed GPT-6 Astra requests through GitHub Copilot failing with an unsupported endpoint error ([#10874](https://github.com/can1357/oh-my-pi/pull/10874) by [@xpcmdshell](https://github.com/xpcmdshell)).
-	- Fixed GPT-6 Astra showing as free with a 272K-token window in the OpenAI Codex catalog by applying its documented pricing; `/extended-context` enables the wire-advertised 872K-token maximum ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).
-	- Made extended-context catalog rebuilds faster by resolving each model's maximum window once per process ([#11039](https://github.com/can1357/oh-my-pi/pull/11039) by [@H4vC](https://github.com/H4vC)).
 
 ## [18.1.9] - 2026-09-04
 

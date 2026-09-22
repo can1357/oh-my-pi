@@ -35,6 +35,8 @@
 - Improved Alibaba Token Plan (Beijing) quota reporting across workspaces and made gateway rejection codes visible in error logs.
 - Fixed the tool-call loop guard so repeated identical calls continue to be redirected after the detection threshold is reached.
 - Fixed valid required null values inside tool argument unions being removed before dispatch ([#12523](https://github.com/can1357/oh-my-pi/pull/12523) by [@cswenor](https://github.com/cswenor)).
+- Custom extension APIs that wrap the OpenAI-completions streamer now resolve neutral wire defaults and honor declared compatibility overrides instead of crashing on an undefined compatibility record ([#12562](https://github.com/can1357/oh-my-pi/issues/12562)).
+- Cursor request paths and Anthropic OAuth credential ranking classify discovered/custom model ids with `lenient: true`, so equal-rank taxonomy ties no longer throw `AmbiguousIdentityError` before the request is sent ([#10939](https://github.com/can1357/oh-my-pi/pull/10939)).
 - Signing in to a local provider (lm-studio, llama.cpp, vllm) with an empty key paste no longer reports the provider as logged in while its requests go out unauthenticated. ([#12436](https://github.com/can1357/oh-my-pi/pull/12436) by [@xiechimon](https://github.com/xiechimon))
 - Fixed every turn failing with `400 Invalid schema for function '<tool>' … Missing '<param>'` on Vercel AI Gateway models served from a non-Anthropic upstream (e.g. `openai/gpt-5.6-sol`): the translated strict-tool rejection now triggers the existing non-strict retry instead of failing the turn ([#12760](https://github.com/can1357/oh-my-pi/pull/12760) by [@primitive-type](https://github.com/primitive-type)).
 - Expired AWS SSO access tokens are now refreshed via the SSO OIDC `refresh_token` grant instead of failing with `sso-token-expired`, so Bedrock profiles keep working between `aws sso login` runs the same way the AWS CLI does ([#12736](https://github.com/can1357/oh-my-pi/pull/12736) by [@nwbb](https://github.com/nwbb)).
@@ -95,7 +97,6 @@
 ### Fixed
 
 - Fixed Anthropic prompt-cache breakpoints stalling when conversations include mid-conversation tool changes, preventing growing message tails from being unnecessarily re-billed as uncached input.
-- Cursor request paths and Anthropic OAuth credential ranking classify discovered/custom model ids with `lenient: true`, so equal-rank taxonomy ties no longer throw `AmbiguousIdentityError` before the request is sent ([#10939](https://github.com/can1357/oh-my-pi/pull/10939)).
 
 ## [18.2.4] - 2026-09-17
 
