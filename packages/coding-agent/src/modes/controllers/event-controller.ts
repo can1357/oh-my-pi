@@ -2292,13 +2292,19 @@ export class EventController {
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
 		const waitStartMs = Date.now();
+		// Only the loops that count their retries send the counters; without them
+		// the label stays bare rather than claiming a made-up attempt.
+		const attemptLabel =
+			event.attempt !== undefined && event.maxAttempts !== undefined
+				? ` (${event.attempt}/${event.maxAttempts})`
+				: "";
 		this.#providerRetryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
 			() => {
 				const remaining = Math.max(0, event.delayMs - (Date.now() - waitStartMs));
-				return `Provider retrying in ${formatDuration(remaining)}…`;
+				return `Provider retrying${attemptLabel} in ${formatDuration(remaining)}…`;
 			},
 			getSymbolTheme().spinnerFrames,
 		);

@@ -275,6 +275,27 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(statusContainer.children).toContain(ctx.loadingAnimation!);
 	});
 
+	it("shows the retry position when the waiting loop reported one", async () => {
+		const { ctx, streamState, statusContainer } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(AGENT_START);
+		streamState.isStreaming = true;
+
+		await controller.handleEvent({
+			...(PROVIDER_RETRY_WAIT_START as unknown as Record<string, unknown>),
+			delayMs: 4000,
+			attempt: 2,
+			maxAttempts: 10,
+		} as unknown as AgentSessionEvent);
+		const loader = statusContainer.children[0] as Loader;
+		const rendered = loader
+			.render(80)
+			.join("\n")
+			.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(rendered).toContain("Provider retrying (2/10) in 4.0s");
+	});
+
 	it("never clobbers an active session-level retry overlay", async () => {
 		const { ctx, streamState, statusContainer } = createContext();
 		const controller = new EventController(ctx);

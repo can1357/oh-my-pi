@@ -408,6 +408,24 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+/** Position of the retry a {@link ProviderRetryWaitFn} is about to sleep before. */
+export interface ProviderRetryAttemptInfo {
+	/** 1-based index of the retry being awaited. */
+	attempt: number;
+	/** Retry budget of the loop doing the waiting. */
+	maxAttempts: number;
+}
+
+/**
+ * Retry delay hook. `info` is omitted by retry loops with no attempt counter to
+ * report, so a UI must degrade to "no count" rather than assume one.
+ */
+export type ProviderRetryWaitFn = (
+	delayMs: number,
+	signal?: AbortSignal,
+	info?: ProviderRetryAttemptInfo,
+) => Promise<void>;
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -602,7 +620,7 @@ export interface StreamOptions {
 	/**
 	 * Optional retry delay hook for tests and transports that need custom scheduling.
 	 */
-	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	providerRetryWait?: ProviderRetryWaitFn;
 	/**
 	 * Accept a normal provider stop with no visible text or tool call as a
 	 * successful completion. Passive callers and zero-output cache refreshes use

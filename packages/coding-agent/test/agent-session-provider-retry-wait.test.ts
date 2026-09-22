@@ -19,7 +19,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
-import type { Context, FetchImpl } from "@oh-my-pi/pi-ai";
+import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -84,10 +84,8 @@ describe("createAgentSession provider retry wait visibility", () => {
 		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
 
-	it("reports the provider's own stream-retry backoff as session events, with no auto-retry", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
-
+	/** A real session with the wrapper chain sdk.ts installs, observer included. */
+	async function bootSession(model: Model<Api>): Promise<AgentSession> {
 		const { session } = await createAgentSession({
 			cwd: registryDir,
 			agentDir: registryDir,
@@ -105,6 +103,53 @@ describe("createAgentSession provider retry wait visibility", () => {
 			skipPythonPreflight: true,
 		});
 		sessions.push(session);
+		return session;
+	}
+
+	/** Drives the SDK stream fn against `fetchMock`, keeping only the events under test. */
+	async function runTurn(
+		session: AgentSession,
+		model: Model<Api>,
+		fetchMock: FetchImpl,
+	): Promise<{ stopReason: string; seen: AgentSessionEvent[] }> {
+		const seen: AgentSessionEvent[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type.startsWith("provider_retry_wait") || event.type === "auto_retry_start") seen.push(event);
+		});
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			tools: [],
+			systemPrompt: [],
+		};
+		try {
+			// The SDK wrapper chain (provider concurrency) is async, so the stream
+			// itself arrives through a promise.
+			const stream = await session.agent.streamFn(model, context, { apiKey: "sk-ant-test", fetch: fetchMock });
+			const message = await stream.result();
+			return { stopReason: message.stopReason, seen };
+		} finally {
+			unsubscribe();
+		}
+	}
+
+	/** Asserts exactly one wait was reported, and that it was not a turn supersession. */
+	function expectSingleReportedWait(seen: AgentSessionEvent[], model: Model<Api>): void {
+		expect(seen).toHaveLength(2);
+		const [start, end] = seen;
+		expect(start).toMatchObject({
+			type: "provider_retry_wait_start",
+			model: model.id,
+			provider: model.provider,
+			api: model.api,
+		});
+		expect((start as Extract<AgentSessionEvent, { type: "provider_retry_wait_start" }>).delayMs).toBeGreaterThan(0);
+		expect(end).toEqual({ type: "provider_retry_wait_end", aborted: false });
+	}
+
+	it("reports the provider's own stream-retry backoff as session events, with no auto-retry", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const session = await bootSession(model);
 
 		// The stream-retry backoff goes through `scheduler.wait`, so the whole
 		// saga settles instantly.
@@ -126,36 +171,38 @@ describe("createAgentSession provider retry wait visibility", () => {
 			return anthropicSseResponse("hi");
 		};
 
-		const seen: AgentSessionEvent[] = [];
-		const unsubscribe = session.subscribe(event => {
-			if (event.type.startsWith("provider_retry_wait") || event.type === "auto_retry_start") seen.push(event);
-		});
-		const context: Context = {
-			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-			tools: [],
-			systemPrompt: [],
-		};
-		try {
-			// The SDK wrapper chain (provider concurrency) is async, so the stream
-			// itself arrives through a promise.
-			const stream = await session.agent.streamFn(model, context, { apiKey: "sk-ant-test", fetch: fetchMock });
-			const message = await stream.result();
-			// The retry recovered: the caller sees the second attempt's real turn.
-			expect(message.stopReason).toBe("stop");
-		} finally {
-			unsubscribe();
-		}
-
+		const { stopReason, seen } = await runTurn(session, model, fetchMock);
+		// The retry recovered: the caller sees the second attempt's real turn.
+		expect(stopReason).toBe("stop");
 		expect(fetchCalls).toBe(2);
-		expect(seen).toHaveLength(2);
-		const [start, end] = seen;
-		expect(start).toMatchObject({
-			type: "provider_retry_wait_start",
-			model: model.id,
-			provider: model.provider,
-			api: model.api,
-		});
-		expect((start as Extract<AgentSessionEvent, { type: "provider_retry_wait_start" }>).delayMs).toBeGreaterThan(0);
-		expect(end).toEqual({ type: "provider_retry_wait_end", aborted: false });
+		expectSingleReportedWait(seen, model);
+	});
+
+	it("reports the HTTP client's own 529 backoff too", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
+		const session = await bootSession(model);
+
+		mockSchedulerWaitWithClock();
+
+		// A 529 overloaded response is the most common real backoff, and it is
+		// retried by `AnthropicMessagesClient`'s own budget — a layer below the
+		// stream loop. Without the hook down there this burns silent sleeps.
+		let fetchCalls = 0;
+		const fetchMock: FetchImpl = async () => {
+			fetchCalls++;
+			if (fetchCalls === 1) {
+				return new Response('{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', {
+					status: 529,
+					headers: { "content-type": "application/json", "request-id": "req_overloaded" },
+				});
+			}
+			return anthropicSseResponse("hi");
+		};
+
+		const { stopReason, seen } = await runTurn(session, model, fetchMock);
+		expect(stopReason).toBe("stop");
+		expect(fetchCalls).toBe(2);
+		expectSingleReportedWait(seen, model);
 	});
 });

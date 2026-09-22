@@ -882,7 +882,10 @@ const streamOpenAIResponsesOnce = (
 					nativeOutputItems.length = 0;
 
 					if (options?.providerRetryWait) {
-						await options.providerRetryWait(OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS, options.signal);
+						await options.providerRetryWait(OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS, options.signal, {
+							attempt: transientStreamRetryAttempt,
+							maxAttempts: OPENAI_RESPONSES_MAX_TRANSIENT_STREAM_RETRIES,
+						});
 					} else {
 						await scheduler.wait(OPENAI_RESPONSES_TRANSIENT_STREAM_RETRY_DELAY_MS, { signal: options?.signal });
 					}

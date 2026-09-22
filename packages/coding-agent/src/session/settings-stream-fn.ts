@@ -12,7 +12,7 @@
  */
 import { scheduler } from "node:timers/promises";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { type ProviderRetryAttemptInfo, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
@@ -23,6 +23,10 @@ export interface ProviderRetryWaitInfo {
 	model: string;
 	provider: string;
 	api: string;
+	/** 1-based retry index, when the waiting retry loop tracks one. */
+	attempt?: number;
+	/** Retry budget of that loop, when known. */
+	maxAttempts?: number;
 }
 
 /**
@@ -103,12 +107,17 @@ export function createSettingsAwareStreamFn(
 		const providerRetryWait =
 			streamOptions?.providerRetryWait ??
 			(retryWaitObserver
-				? async (delayMs: number, signal?: AbortSignal): Promise<void> => {
+				? async (delayMs: number, signal?: AbortSignal, attemptInfo?: ProviderRetryAttemptInfo): Promise<void> => {
 						const info: ProviderRetryWaitInfo = {
 							delayMs,
 							model: model.id,
 							provider: model.provider,
 							api: model.api,
+							// Absent when the waiting loop keeps no counter; the UI then
+							// drops the "(n/m)" instead of inventing one.
+							...(attemptInfo !== undefined
+								? { attempt: attemptInfo.attempt, maxAttempts: attemptInfo.maxAttempts }
+								: {}),
 						};
 						logger.info("Provider retry wait", { ...info });
 						retryWaitObserver.onStart(info);

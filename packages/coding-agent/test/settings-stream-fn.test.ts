@@ -317,6 +317,30 @@ describe("createSettingsAwareStreamFn", () => {
 			expect(ends).toEqual([]);
 		});
 
+		it("reports the waiting loop's attempt counters when it supplies them", async () => {
+			const settings = Settings.isolated({});
+			const { fn: base, calls } = captureBase();
+			const { starts, observer } = captureObserver();
+			const wrapped = createSettingsAwareStreamFn(settings, base, observer);
+
+			wrapped(stubAnthropicModel, stubContext, { apiKey: "k" });
+			const installed = calls[0]?.options?.providerRetryWait;
+
+			mockSchedulerWaitWithClock();
+			await installed!(1000, undefined, { attempt: 2, maxAttempts: 10 });
+
+			expect(starts).toEqual([
+				{
+					delayMs: 1000,
+					model: "claude-sonnet-4-5",
+					provider: "anthropic",
+					api: "anthropic-messages",
+					attempt: 2,
+					maxAttempts: 10,
+				},
+			]);
+		});
+
 		it("reports aborted:true and rethrows when the signal aborts during the wait", async () => {
 			const settings = Settings.isolated({});
 			const { fn: base, calls } = captureBase();
