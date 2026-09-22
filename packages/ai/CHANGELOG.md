@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Authenticate `amazon-bedrock` Chat Completions requests with the existing AWS credential chain or Bedrock bearer token instead of sending the internal authentication marker. Preserve regional routing, request-scoped AWS options, and configured guardrails.
+- Authenticate `amazon-bedrock` Chat Completions requests with the existing AWS credential chain or Bedrock bearer token instead of sending the internal authentication marker. Preserve regional routing, request-scoped AWS options, and configured guardrails. ([#12759](https://github.com/can1357/oh-my-pi/pull/12759) by [@LimpingNinja](https://github.com/LimpingNinja))
 
 ## [18.2.8] - 2026-09-21
 

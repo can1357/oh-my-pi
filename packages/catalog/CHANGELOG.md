@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the Global and US Kimi K3 inference profiles on Amazon Bedrock with Chat Completions, 1M context, 128K output, image input, and `low`/`high`/`max` reasoning effort.
+- Added the Global and US Kimi K3 inference profiles on Amazon Bedrock with Chat Completions, 1M context, 128K output, image input, and `low`/`high`/`max` reasoning effort. ([#12759](https://github.com/can1357/oh-my-pi/pull/12759) by [@LimpingNinja](https://github.com/LimpingNinja))
 
 ## [18.2.8] - 2026-09-21
 
