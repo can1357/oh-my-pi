@@ -78,6 +78,30 @@ describe("composer shape preview", () => {
 			expect(rendered[rendered.length - 2]).toBe(""); // spacer row before the bar
 		}
 	});
+	it("renders the status bar at the full overlay width instead of a 96-column stub (issue #12500)", async () => {
+		await setTheme("dark");
+		const seenWidths: number[] = [];
+		const status = {
+			getTopBorder: (width: number) => {
+				seenWidths.push(width);
+				return { content: `TOPBAR ${width}`, width };
+			},
+			getStandaloneTopBorder: (width: number) => {
+				seenWidths.push(width);
+				return { content: `CHIP ${width}`, width };
+			},
+			getBandTopBorder: (width: number) => {
+				seenWidths.push(width);
+				return { content: `BAND ${width}`, width };
+			},
+			renderBottomBar: (width: number) => {
+				seenWidths.push(width);
+				return `BOTTOM ${width}`;
+			},
+		};
+		renderComposerShapePreview("box", 160, status);
+		expect(Math.max(...seenWidths)).toBeGreaterThan(96);
+	});
 
 	it("installs extension shapes into both selectors and live rendering", async () => {
 		await setTheme("dark");
