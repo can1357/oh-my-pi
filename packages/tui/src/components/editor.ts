@@ -1027,6 +1027,9 @@ export class Editor implements Component, Focusable {
 			this.restoreHistoryState(entry?.draft?.restore);
 			this.#historyDraftActive = entry?.draft !== undefined;
 		}
+		// Browsing asks for the edge the key came from, so one press still steps one
+		// entry: Up opens a multi-row entry at its top, Down at its bottom (#99).
+		// #setTextInternal drops that request for single-row entries — see there.
 		const cursorAnchor: HistoryCursorAnchor = direction === -1 ? "start" : "end";
 		this.#setTextInternal(entry?.text ?? "", cursorAnchor);
 	}
@@ -1035,7 +1038,13 @@ export class Editor implements Component, Focusable {
 		this.#undoStack.length = 0;
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
-		if (cursorAnchor === "start") {
+		// A single-row entry's top and bottom are the same row, so the directional
+		// anchor degenerates to a bare column choice: the caret would sit at the start
+		// when Up recalled the entry and at the end when Down reached the same entry,
+		// leaving delete/yank commands aimed at column 0 on one path and at the tail on
+		// the other. Single-row entries always open at the end — matching what
+		// wholesale text replacement (`setText`) and the first-edit anchor do.
+		if (cursorAnchor === "start" && this.#spansMultipleVisualRows()) {
 			this.#state.cursorLine = 0;
 			this.#setCursorCol(0);
 		} else {
@@ -1043,6 +1052,17 @@ export class Editor implements Component, Focusable {
 			this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
 		}
 		this.#notifyChange();
+	}
+
+	/** Whether the buffer needs more than one visual row at the last painted layout
+	 *  width. The directional history anchors are load-bearing only for such entries —
+	 *  they keep one keypress stepping one entry instead of walking inside it — so a
+	 *  newline-free line that wraps past the editor width counts as multi-row too. */
+	#spansMultipleVisualRows(): boolean {
+		if (this.#state.lines.length > 1) return true;
+		const width = this.#lastLayoutWidth;
+		if (width <= 0) return false;
+		return this.#layoutText(width).length > 1;
 	}
 
 	invalidate(): void {

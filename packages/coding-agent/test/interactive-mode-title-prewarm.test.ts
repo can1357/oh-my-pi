@@ -73,6 +73,14 @@ describe("InteractiveMode tiny-title prewarm", () => {
 	});
 
 	afterEach(async () => {
+		// init() defers the prewarm probe behind a setImmediate. Flush one
+		// immediate tick while this case's spies are still installed: an
+		// unflushed callback otherwise fires during a later case, with
+		// `getSessionName` already restored and this mode's tiny role still
+		// configured, and lands in that case's `prewarm` spy (flaky in CI).
+		const pendingImmediates = Promise.withResolvers<void>();
+		setImmediate(pendingImmediates.resolve);
+		await pendingImmediates.promise;
 		mode?.stop();
 		vi.restoreAllMocks();
 		await session?.dispose();

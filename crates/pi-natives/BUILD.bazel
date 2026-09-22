@@ -56,6 +56,7 @@ rust_shared_library(
         "src/fonts/*",
         "data/*.bin.zst",
         "src/utok/claude/testdata/*.json",
+        "src/desktop/linux/wayland/testdata/*.xkb",
         "fixtures/*.json",
     ]) + select({
         "@platforms//os:macos": [":oauth_callback_darwin_helper"],

@@ -569,17 +569,52 @@ describe("Editor component", () => {
 			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
 		});
 
+		it("anchors a single-row history entry at the end for both arrows", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.addToHistory("older prompt");
+			editor.addToHistory("recent prompt");
+
+			editor.handleInput("\x1b[A"); // Up - recall
+			expect(editor.getCursor()).toEqual({ line: 0, col: "recent prompt".length });
+
+			editor.handleInput("\x1b[A"); // Up - older entry, same anchor
+			expect(editor.getCursor()).toEqual({ line: 0, col: "older prompt".length });
+
+			editor.handleInput("\x1b[B"); // Down - back to the newer entry, same anchor
+			expect(editor.getText()).toBe("recent prompt");
+			expect(editor.getCursor()).toEqual({ line: 0, col: "recent prompt".length });
+
+			editor.handleInput("\x1b[B"); // Down - still steps one entry per press from there
+			expect(editor.getText()).toBe("");
+		});
+
+		it("keeps a wrapped single-row history entry anchored at its top", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const wrapped = "word ".repeat(40).trim(); // 199 cells: wraps past the 80-column default layout width
+
+			editor.addToHistory("older");
+			editor.addToHistory(wrapped);
+
+			editor.handleInput("\x1b[A");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+
+			editor.handleInput("\x1b[A"); // one press still steps to the older entry
+			expect(editor.getText()).toBe("older");
+		});
+
 		it("anchors history entry at bottom when navigating with Down", () => {
 			const editor = new Editor(defaultEditorTheme);
 
-			editor.addToHistory("older");
+			editor.addToHistory("old1\nold2");
 			editor.addToHistory("line1\nline2\nline3");
 
 			editor.handleInput("\x1b[A"); // latest, anchored at top
 			editor.handleInput("\x1b[A"); // older, anchored at top
 			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
 
-			editor.handleInput("\x1b[B"); // newer, anchored at bottom
+			editor.handleInput("\x1b[B"); // walk down the older entry to its last row
+			editor.handleInput("\x1b[B"); // step to the newer entry, anchored at bottom
 			expect(editor.getText()).toBe("line1\nline2\nline3");
 			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
 		});

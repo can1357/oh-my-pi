@@ -1,3 +1,4 @@
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -1624,15 +1625,32 @@ const streamOpenAICompletionsOnce = (
 };
 
 /**
+ * Custom APIs deliberately have no catalog compat type. Once an extension
+ * explicitly delegates to this streamer, resolve the OpenAI wire policy on a
+ * request-local clone while preserving the custom API id on the original model.
+ */
+function resolveOpenAICompletionsCompat(model: Model<"openai-completions">): Model<"openai-completions"> {
+	if (model.compat !== undefined) return model;
+	const compat = resolveModelPolicy({
+		...model,
+		api: "openai-completions",
+		compat: model.compatConfig,
+	}).compat;
+	return { ...model, compat };
+}
+
+/**
  * Retries benign empty completions and transient provider failures only before
  * assistant output commits the attempt.
  */
-export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) =>
-	withReplaySafeStreamRetry(model, context, options, streamOpenAICompletionsOnce, {
+export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (model, context, options) => {
+	const resolvedModel = resolveOpenAICompletionsCompat(model);
+	return withReplaySafeStreamRetry(resolvedModel, context, options, streamOpenAICompletionsOnce, {
 		retryEmptyCompletion: true,
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
 	});
+};
 
 function createRequestSetup(
 	model: Model<"openai-completions">,
