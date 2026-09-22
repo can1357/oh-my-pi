@@ -63,6 +63,10 @@ export const gitHelp = {
 	description: "Interactive fullscreen git UI: split diff viewer, staging sidebar, and commit composer",
 } satisfies CommandMetadata;
 
+export const findHelp = {
+	description: "Semantic search: describe a behavior, get the files and line ranges that implement it",
+} satisfies CommandMetadata;
+
 export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
 
 export const grievancesHelp = {
@@ -113,6 +117,10 @@ export const shellHelp = { description: "Interactive shell console" } satisfies 
 export const sshHelp = { description: "Manage SSH host configurations" } satisfies CommandMetadata;
 
 export const statsHelp = { description: "View usage statistics" } satisfies CommandMetadata;
+
+export const streamHelp = {
+	description: "Broadcast local omp session screens and chat to your public live channel",
+} satisfies CommandMetadata;
 
 export const tinyModelsHelp = {
 	description: "Download tiny local models (session titles + memory)",

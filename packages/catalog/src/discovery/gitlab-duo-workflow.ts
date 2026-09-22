@@ -53,15 +53,19 @@ const ProjectRootNamespaceQuery = `query omp_gitlabDuoWorkflowProjectRootNamespa
   }
 }`;
 
+// Hoisted: per-element schema construction on a discovery hot path.
+const stringSchema = type("string");
+const unknownArraySchema = type("unknown[]");
+
 const resilientString = type("unknown").pipe(value => {
 	if (value === undefined) return undefined;
-	const parsed = type("string")(value);
+	const parsed = stringSchema(value);
 	return parsed instanceof type.errors ? undefined : parsed;
 });
 
 const resilientUnknownArray = type("unknown").pipe(value => {
 	if (value === undefined || value === null) return value;
-	const parsed = type("unknown[]")(value);
+	const parsed = unknownArraySchema(value);
 	return parsed instanceof type.errors ? [] : parsed;
 });
 

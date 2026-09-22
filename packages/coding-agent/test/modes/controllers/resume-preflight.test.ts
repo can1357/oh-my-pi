@@ -2,9 +2,9 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as SessionSelector from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
+import * as SessionSelector from "@oh-my-pi/pi-tui/overlays/session-selector";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -218,7 +218,7 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			firstMessage: "first",
 			allMessagesText: "first",
 		};
-		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
 		const OriginalSelector = SessionSelector.SessionSelectorComponent;
 		const selectionPromises: Promise<void>[] = [];
 		vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(
@@ -227,9 +227,9 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 				onSelect: (session: SessionInfo) => void,
 				onCancel: () => void,
 				onExit: () => void,
-				options: SessionSelector.SessionSelectorOptions,
+				options: SessionSelector.SessionSelectorOptions<SessionInfo>,
 			) =>
-				new OriginalSelector(
+				new OriginalSelector<SessionInfo>(
 					sessions,
 					selected => {
 						selectionPromises.push(onSelect(selected) as unknown as Promise<void>);
@@ -274,7 +274,7 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 			firstMessage: "first",
 			allMessagesText: "first",
 		};
-		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([session]);
 		const OriginalSelector = SessionSelector.SessionSelectorComponent;
 		let selectionPromise: Promise<void> | undefined;
 		vi.spyOn(SessionSelector, "SessionSelectorComponent").mockImplementation(
@@ -283,9 +283,9 @@ describe("SelectorController.handleResumeSession preflight flush", () => {
 				onSelect: (session: SessionInfo) => void,
 				onCancel: () => void,
 				onExit: () => void,
-				options: SessionSelector.SessionSelectorOptions,
+				options: SessionSelector.SessionSelectorOptions<SessionInfo>,
 			) =>
-				new OriginalSelector(
+				new OriginalSelector<SessionInfo>(
 					sessions,
 					selected => {
 						selectionPromise = onSelect(selected) as unknown as Promise<void>;

@@ -82,6 +82,11 @@ import {
 	transformRequestBody,
 } from "./openai-codex/request-transformer";
 import { CodexApiError } from "./openai-codex/response-handler";
+import { getCodexAttestationHeader } from "./openai-codex-attestation";
+export { createOpenAICodexCompactionRequestContext } from "./openai-codex-compaction";
+import { getOpenAICodexWebSocketEnvValue, isOpenAICodexWebSocketPreferred } from "./openai-codex-transport";
+export { setCodexAttestationProvider } from "./openai-codex-attestation";
+export type { CodexAttestationProvider } from "./openai-codex-attestation";
 import {
 	getOpenAIEffortControlState,
 	type OpenAIEffortControlState,
@@ -212,23 +217,6 @@ export interface OpenAICodexCompactionResetOptions {
 	compaction: CodexCompactionContext;
 }
 
-/** Add the selected wire implementation to one logical compaction context. */
-export function createOpenAICodexCompactionRequestContext(options: {
-	context: CodexCompactionContext | undefined;
-	implementation: "responses" | "responses_compaction_v2" | "responses_compact";
-}): CodexCompactionRequestContext | undefined {
-	const context = options.context;
-	if (!context) return undefined;
-	return {
-		operationId: context.operationId,
-		trigger: context.trigger,
-		reason: context.reason,
-		implementation: options.implementation,
-		phase: context.phase,
-		strategy: context.strategy,
-	};
-}
-
 const CODEX_DEBUG = $flag("PI_CODEX_DEBUG");
 const CODEX_MAX_RETRIES = 5;
 const CODEX_RETRY_DELAY_MS = 500;
@@ -281,41 +269,6 @@ const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
 
-/**
- * Host integration boundary for just-in-time `x-oai-attestation` header
- * values (codex-rs `AttestationProvider`). Resolves to the full header value
- * — an `{"v":1,"s":0,"t":"v1.…"}` envelope — or `undefined` when no
- * attestation should be sent.
- */
-export type CodexAttestationProvider = () => Promise<string | undefined>;
-
-let codexAttestationProvider: CodexAttestationProvider | undefined;
-
-/**
- * Install the process-wide attestation hook consulted for upstream Codex
- * requests (codex-rs stores its provider on `ModelClient` construction). The
- * hook is only consulted for ChatGPT-OAuth credentials and runs just-in-time
- * per request; WebSocket handshakes resolve once per connection because the
- * header is connection-scoped there.
- */
-export function setCodexAttestationProvider(provider: CodexAttestationProvider | undefined): void {
-	codexAttestationProvider = provider;
-}
-
-/**
- * Resolve the `x-oai-attestation` header value for one upstream request.
- * Gated on ChatGPT-OAuth credentials (a Codex JWT carries `chatgpt_account_id`;
- * codex-rs gates on `auth.is_chatgpt_auth()`). A throwing hook degrades to no
- * header rather than failing the request.
- */
-export async function getCodexAttestationHeader(accountId: string | undefined): Promise<string | undefined> {
-	if (!accountId || !codexAttestationProvider) return undefined;
-	try {
-		return await codexAttestationProvider();
-	} catch {
-		return undefined;
-	}
-}
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
 /** WebSocket frames cannot carry per-request HTTP headers; codex-rs mirrors the lite marker into `client_metadata` under this key. */
@@ -3229,14 +3182,6 @@ function recordCodexWebSocketFailure(state: CodexWebSocketSessionState, activate
 	}
 }
 
-function getCodexWebSocketEnvValue(): boolean | undefined {
-	const envVal = $env.PI_CODEX_WEBSOCKET;
-	if (envVal !== undefined) {
-		return $flag("PI_CODEX_WEBSOCKET");
-	}
-	return undefined;
-}
-
 function shouldUseCodexWebSocket(
 	model: Model<"openai-codex-responses">,
 	state: CodexWebSocketSessionState | undefined,
@@ -3247,7 +3192,7 @@ function shouldUseCodexWebSocket(
 	// Explicitly disabled by the session state.
 	if (!state || state.disableWebsocket) return false;
 	// Env val > Preference
-	const envVal = getCodexWebSocketEnvValue();
+	const envVal = getOpenAICodexWebSocketEnvValue();
 	if (envVal !== undefined) return envVal;
 	// Negative preference overrides model preference; otherwise use the model's preference.
 	if (preferWebsockets === false) return false;
@@ -3308,13 +3253,9 @@ export function getOpenAICodexTransportDetails(
 		providerSessionState?: Map<string, ProviderSessionState>;
 	},
 ): OpenAICodexTransportDetails {
-	const envVal = getCodexWebSocketEnvValue();
-	const websocketPreferred =
-		envVal !== undefined
-			? envVal
-			: options?.preferWebsockets === false
-				? false
-				: options?.preferWebsockets === true || model.preferWebsockets === true;
+	const websocketPreferred = isOpenAICodexWebSocketPreferred(model, {
+		preferWebsockets: options?.preferWebsockets,
+	});
 	const state = getCodexWebSocketStateForPublicSession(model, options);
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const sessionId = normalizeOpenAIPromptCacheKey(options?.sessionId);
@@ -4349,11 +4290,22 @@ async function openCodexSseEventStream(
 	// an internal timeout stays retryable while an explicit abort fails fast.
 	let clearPreResponseTimeout: (() => void) | undefined;
 	const fetchAttempt: FetchImpl = async (input, init) => {
+		let response: Response | undefined;
 		try {
-			return await (fetchOverride ?? fetch)(input, init);
+			response = await (fetchOverride ?? fetch)(input, init);
+			return response;
 		} finally {
-			clearPreResponseTimeout?.();
-			clearPreResponseTimeout = undefined;
+			// A successful streaming body is governed by the iterator-level idle
+			// watchdog, so disarm the pre-response guard the instant headers arrive.
+			// Keep it armed for a non-2xx response: the error body is still
+			// consumed under this deadline — by fetchWithRetry's
+			// retry-status inspection and by CodexApiError.fromResponse — otherwise a
+			// server that sends headers then stalls the body hangs the turn past every
+			// configured first-event/idle deadline (issue #12664).
+			if (!response || response.ok) {
+				clearPreResponseTimeout?.();
+				clearPreResponseTimeout = undefined;
+			}
 		}
 	};
 	const bodyJson = JSON.stringify(body);
@@ -4377,6 +4329,9 @@ async function openCodexSseEventStream(
 			body: requestBody,
 			signal,
 			prepareInit: () => {
+				// A retried non-2xx attempt leaves its guard armed for the retry-status
+				// body read; disarm it before arming the next attempt's guard.
+				clearPreResponseTimeout?.();
 				const watchdog = armPreResponseTimeout(signal, firstEventTimeoutMs);
 				clearPreResponseTimeout = watchdog.clear;
 				return { signal: watchdog.signal };
@@ -4401,8 +4356,9 @@ async function openCodexSseEventStream(
 				});
 			response = await send(bodyJson);
 		}
-	} finally {
+	} catch (error) {
 		clearPreResponseTimeout?.();
+		throw error;
 	}
 	CODEX_DEBUG &&
 		logger.debug("[codex] codex response", {
@@ -4413,7 +4369,14 @@ async function openCodexSseEventStream(
 			cfRay: response.headers.get("cf-ray") || null,
 		});
 	if (!response.ok) {
-		throw await CodexApiError.fromResponse(response);
+		// The pre-response guard is still armed for a non-2xx response; keep it live
+		// across the error-body read so a stalled body is bounded, then disarm once
+		// the read settles (issue #12664).
+		try {
+			throw await CodexApiError.fromResponse(response);
+		} finally {
+			clearPreResponseTimeout?.();
+		}
 	}
 	updateCodexSessionMetadataFromHeaders(turnState, state, response.headers);
 	if (!response.body) {

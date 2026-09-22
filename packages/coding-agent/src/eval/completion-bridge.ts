@@ -30,15 +30,16 @@ import {
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { Semaphore } from "../task/parallel";
 import type { ToolSession } from "../tools";
-import { ToolError } from "../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import {
 	findRetryFallbackCandidates,
 	getRetryFallbackChains,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "../session/retry-fallback-chains";
-import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { JsStatusEvent } from "./js/shared/types";
 
 /** Synthetic bridge name reserved for the `completion()` helper across both runtimes. */
@@ -68,9 +69,12 @@ export interface EvalCompletionBridgeOptions {
 	emitStatus?: (event: JsStatusEvent) => void;
 }
 
+/** Terminal payload of a retained handle. */
 export interface EvalCompletionResult {
 	text: string;
-	details: { model: string; tier: CompletionTier; structured: boolean };
+	/** Structured payload; when present the cell receives it in place of `text`. */
+	data?: unknown;
+	details: { model: string; tier?: CompletionTier; structured: boolean };
 }
 
 /** Handle returned immediately after an eval completion starts. */
@@ -91,6 +95,17 @@ export interface CompletionHandleEntry {
 
 const COMPLETION_HANDLE_RETENTION_MS = 30 * 60 * 1000;
 const completionHandles = new Map<string, CompletionHandleEntry>();
+
+/**
+ * Process-wide ceiling on eval model requests executing at once, shared by
+ * `completion()` handles, `judge()`, and `judge_batch()` items. A cell that
+ * fans out hundreds of calls otherwise opens every request simultaneously and,
+ * once the primary candidate rejects, floods each fallback in the role chain
+ * (including self-hosted models that serve requests serially). Queued handles
+ * report `running` until admitted.
+ */
+export const EVAL_HANDLE_CONCURRENCY = 32;
+export const evalRequestSlots = new Semaphore(EVAL_HANDLE_CONCURRENCY);
 
 /** Resolve a retained completion handle by id. */
 export function getCompletionHandle(id: string): CompletionHandleEntry | undefined {
@@ -400,7 +415,23 @@ export async function runEvalCompletion(
 		);
 	}
 
-	const id = `cmp-${Snowflake.next()}`;
+	return retainCompletionHandle("cmp", options, signal =>
+		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal),
+	);
+}
+
+/**
+ * Run `execute` in the background under a session-owned, cancellable handle
+ * and return its id immediately; `wait()`/`status()`/`cancel()` resolve it
+ * through {@link getCompletionHandle}. Settled entries are evicted after
+ * {@link COMPLETION_HANDLE_RETENTION_MS}.
+ */
+export function retainCompletionHandle(
+	prefix: string,
+	options: EvalCompletionBridgeOptions,
+	execute: (signal: AbortSignal) => Promise<EvalCompletionResult>,
+): EvalCompletionHandleResult {
+	const id = `${prefix}-${Snowflake.next()}`;
 	const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 	const controller = new AbortController();
 	const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
@@ -411,7 +442,15 @@ export async function runEvalCompletion(
 		settled: false,
 	};
 	completionHandles.set(id, entry);
-	entry.promise = executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal)
+	const run = async (): Promise<EvalCompletionResult> => {
+		await evalRequestSlots.acquire(signal);
+		try {
+			return await execute(signal);
+		} finally {
+			evalRequestSlots.release();
+		}
+	};
+	entry.promise = run()
 		.then(
 			result => {
 				entry.result = result;

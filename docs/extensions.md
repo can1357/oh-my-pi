@@ -127,6 +127,8 @@ Core methods:
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
 
+`ExtensionAPI` methods retain their extension binding when destructured or passed as callbacks.
+
 `getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
 
 ### Provider registration
@@ -179,6 +181,16 @@ extension source cleanup) removes only that runtime override, restoring the buil
 or configured usage resolver.
 
 Extension-registered providers (`registerProvider`) can supply `fetchDynamicModels` for runtime model discovery; these fetches are hard-bounded to a 15-second timeout (`RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS` in `model-provider-discovery.ts`) so a hung endpoint cannot stall discovery.
+
+Provider login callbacks can request masked entry with
+`callbacks.onPrompt({ message: "Consumer key", secret: true })`. Native `/login`
+and first-run setup preserve the exact submitted value while hiding it in the
+input, retained answers, and input diagnostic previews. Login prompts do not
+share undo or kill/yank history. Ordinary prompts remain unmasked.
+
+RPC rejects secret prompts instead of forwarding them as ordinary input. SDK
+hosts implementing `onPrompt` must honor `secret` or reject the prompt. Masking
+does not provide encryption, memory erasure, or general log redaction.
 
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
@@ -560,9 +572,10 @@ Two lifecycle constraints, which apply to both seams:
 - **The registries are process-wide.** A process can host several sessions (a subagent
   gets its own runner), so a handler may be consulted for a denied write or delete
   from any session in the process — not only the one whose extension registered it.
-  This is deliberate: a subagent spawned with restricted tools loads no extensions of
-  its own, and a host that registers once in its top-level session still expects its
-  subagents' writes brokered. `req.sessionId` names the session that issued the
+  This is deliberate: a host that registers once in its top-level session still
+  expects its subagents' writes brokered, including sessions without inherited
+  extension factories. Restricted children retain parent-loaded hooks but do not
+  discover ambient extensions. `req.sessionId` names the session that issued the
   mutation (`undefined` when it did not come from a tool call), and
   `ctx.sessionManager.getSessionId()` names the handler's own — compare them to make
   the decision per session. It matters most before prompting: `ctx.ui` belongs to the

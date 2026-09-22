@@ -4,13 +4,19 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
 import { committedTodoPhases } from "../../tools/todo";
-import { ToolError } from "../../tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { schemaDeclaresIntentField } from "../../utils/tool-schema";
 import { findEnabledEvalPrelude, invokeEvalPrelude } from "../preludes";
 import { EVAL_AGENT_BRIDGE_NAME, type EvalAgentHandleResult, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { withBridgeTimeoutPause } from "../bridge-timeout";
 import { EVAL_COMPLETION_BRIDGE_NAME, type EvalCompletionHandleResult, runEvalCompletion } from "../completion-bridge";
+import {
+	EVAL_JUDGMENT_BATCH_BRIDGE_NAME,
+	type EvalJudgmentBatchResult,
+	runEvalJudgmentBatch,
+} from "../judgment-batch-bridge";
+import { EVAL_JUDGMENT_BRIDGE_NAME, type EvalJudgmentResult, runEvalJudgment } from "../judgment-bridge";
 import {
 	EVAL_CANCEL_BRIDGE_NAME,
 	type EvalHandleSnapshot,
@@ -42,6 +48,8 @@ type ToolValue =
 	| EvalBudgetResult
 	| EvalAgentHandleResult
 	| EvalCompletionHandleResult
+	| EvalJudgmentResult
+	| EvalJudgmentBatchResult
 	| EvalHandleSnapshot
 	| EvalWorkpoolResult
 	| { items: EvalHandleSnapshot[] }
@@ -232,6 +240,12 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	}
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
 		return await runEvalCompletion(args, options);
+	}
+	if (name === EVAL_JUDGMENT_BRIDGE_NAME) {
+		return await runEvalJudgment(args, options);
+	}
+	if (name === EVAL_JUDGMENT_BATCH_BRIDGE_NAME) {
+		return await runEvalJudgmentBatch(args, options);
 	}
 	if (name === EVAL_AGENT_BRIDGE_NAME) {
 		return await runEvalAgent(args, options);

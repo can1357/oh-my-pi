@@ -1,7 +1,7 @@
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { $env, $flag } from "@oh-my-pi/pi-utils";
 
-export type EditMode = "replace" | "patch" | "hashline" | "apply_patch" | "sloppy";
+import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 
 export const DEFAULT_EDIT_MODE: EditMode = "hashline";
 

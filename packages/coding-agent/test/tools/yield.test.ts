@@ -11,7 +11,8 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { buildOutputValidator } from "@oh-my-pi/pi-coding-agent/tools/output-schema-validator";
 import { YieldTool } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { buildWorkPoolOutputSchema } from "../../src/task/workpool-yield";
-import { arrayValuedLabels, assembleYieldResult } from "../../src/task/yield-assembly";
+import { arrayValuedLabels } from "../../src/task/yield-assembly";
+import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
