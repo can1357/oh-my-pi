@@ -15,6 +15,12 @@ import {
 	runEvalJudgmentBatch,
 } from "../../src/eval/judgment-batch-bridge";
 import { JAVASCRIPT_PRELUDE_SOURCE } from "../../src/eval/js/shared/prelude";
+import {
+	isJudgmentBatchProgress,
+	JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL,
+	type JudgmentBatchProgress,
+} from "../../src/eval/judgment-batch-events";
+import { EventBus } from "../../src/utils/event-bus";
 import type { PythonResult } from "../../src/eval/py/executor";
 import type { ToolSession } from "../../src/tools";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
@@ -124,6 +130,36 @@ afterEach(async () => {
 });
 
 describe("judge_batch bridge", () => {
+	it("publishes live progress between cells without a job manager or drain calls", async () => {
+		const gate = Promise.withResolvers<string>();
+		mockJudge({ "state-fast": "tests: yes", "state-gated": gate.promise });
+		const { session } = makeSession({ jobs: false });
+		session.eventBus = new EventBus();
+		const events: JudgmentBatchProgress[] = [];
+		const intermediate = Promise.withResolvers<void>();
+		const finished = Promise.withResolvers<void>();
+		session.eventBus.on(JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, event => {
+			if (!isJudgmentBatchProgress(event)) return;
+			events.push(event);
+			if (event.running && event.done === 1) intermediate.resolve();
+			if (!event.running) finished.resolve();
+		});
+		try {
+			await create(session, ["state-fast", "state-gated"], { intent: "Classifying: Test idiomacy" });
+			await intermediate.promise;
+			expect(events[0]).toMatchObject({
+				intent: "Classifying: Test idiomacy",
+				done: 0,
+				total: 2,
+				running: true,
+			});
+			expect(events.at(-1)).toMatchObject({ done: 1, total: 2, running: true });
+		} finally {
+			gate.resolve("tests: no");
+		}
+		await finished.promise;
+		expect(events.at(-1)).toMatchObject({ done: 2, total: 2, failed: 0, running: false });
+	});
 	it("validates items and options before starting", async () => {
 		const { session } = makeSession();
 		const spy = vi.spyOn(ai, "completeSimple");
@@ -166,16 +202,15 @@ describe("judge_batch bridge", () => {
 		expect(created.total).toBe(3);
 		expect(created.running).toBe(true);
 
+		// Near-simultaneous settles coalesce into one drain instead of one round-trip each.
 		const first = await drain(session, created.id, 5_000);
-		const second = await drain(session, created.id, 5_000);
-		const firstKeys = [...first, ...second].map(item => item.key).sort();
-		expect(firstKeys).toEqual([0, 1]);
-		expect(first.concat(second).find(item => item.key === 0)).toEqual({
+		expect(first.map(item => item.key).sort()).toEqual([0, 1]);
+		expect(first.find(item => item.key === 0)).toEqual({
 			key: 0,
 			answers: { tests: { type: "bool", bool: 1 } },
 			model: "p/smol",
 		});
-		expect(first.concat(second).find(item => item.key === 1)?.error).toContain('judgment "tests"');
+		expect(first.find(item => item.key === 1)?.error).toContain('judgment "tests"');
 		// Nothing new and the run is still going: a zero timeout returns immediately with nothing.
 		expect(await drain(session, created.id, 0)).toEqual([]);
 
@@ -340,7 +375,7 @@ async function runPythonJudgeBatchInSubprocess(tempDir: TempDir): Promise<Python
 	const cellOne = [
 		"import json",
 		'Q = {"tests": {"type": "bool", "instructions": "Does the request mention tests?"}}',
-		'b = judge_batch({"a": "add tests please", "b": "rename a local"}, Q)',
+		'b = judge_batch({"a": "add tests please", "b": "rename a local"}, Q, intent="Classifying: Test idiomacy")',
 		"first = await b.drain(timeout=30)",
 		"second = await b.drain(timeout=30)",
 		"items = sorted(first + second, key=lambda kv: kv[0])",
