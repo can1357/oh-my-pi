@@ -32,7 +32,7 @@ import type { SkillsSettings } from "../extensibility/settings";
 import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
 import type { EvalPreludeDefinition } from "../eval/preludes";
-import type { EvalSpeculationStore } from "../eval/speculation";
+import type { EvalSpeculationStore } from "../eval/speculation/completion-store";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";

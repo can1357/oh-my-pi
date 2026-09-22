@@ -140,7 +140,7 @@ import { releaseJudgmentBatches } from "../eval/judgment-batch-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { formatEvalStateContext } from "../eval/state";
-import { type EvalSpeculationStore, streamedEvalCell } from "../eval/speculation";
+import { type EvalSpeculationStore, streamedEvalCell } from "../eval/speculation/completion-store";
 import { WorkPoolRegistry } from "../task/workpool";
 import { type BashPtyOptions, type BashResult, releaseShellSessions } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
