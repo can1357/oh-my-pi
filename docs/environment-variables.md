@@ -106,6 +106,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `AIAND_API_KEY`                 | ai& auth                                         | Using `aiand` provider                                         |                                                                                                     |
 | `GMI_API_KEY`                   | GMI Cloud auth                                   | Using `gmi-cloud` provider                                     |                                                                                                     |
 | `MODEL_API_KEY` / `META_API_KEY` | Meta Model API auth                             | Using `meta` provider                                          | Either variable works                                                                               |
+| `SINGULARITYAPI_API_KEY`        | SingularityAPI auth                              | Using `singularityapi` provider                                | 300+ models; validated against `https://api.singularityapi.dev/v1/models`                   |
 
 ### GitHub/Copilot tokens
 
