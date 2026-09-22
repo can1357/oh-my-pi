@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
+import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -1377,9 +1378,8 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		// Regression: with an Anthropic key but no configured `default` role and no
 		// session/CLI model, the step-4 startup fallback used to pick the first
 		// anthropic model in models.json catalog order (claude-3-5-sonnet-20240620)
-		// instead of the provider's configured default from DEFAULT_MODEL_PER_PROVIDER
-		// (claude-opus-4-8).
-		const providerDefault = getBundledModel("anthropic", "claude-opus-4-8");
+		// instead of the provider's configured default from DEFAULT_MODEL_PER_PROVIDER.
+		const providerDefault = getBundledModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic);
 		const catalogFirst = getBundledModel("anthropic", "claude-3-5-sonnet-20240620");
 		if (!providerDefault || !catalogFirst) {
 			throw new Error("Expected bundled anthropic models for fallback regression");

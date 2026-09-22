@@ -20,7 +20,7 @@ import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { type LocalReadSpeculationEvidence, resolveSpeculativeReadTarget, SNAPSHOT_MAX_BYTES } from "../tools/read";
 import { isCpuProfilePath } from "../utils/cpuprofile";
 import { isSampleProfilePath } from "../utils/sample-profile";
-import { isVideoPath } from "../utils/video";
+import { isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 
 type LocalReadEvidence = {
 	path: string;

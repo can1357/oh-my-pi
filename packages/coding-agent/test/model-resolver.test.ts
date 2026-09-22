@@ -3,12 +3,13 @@ import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
+	formatModelStringWithRouting,
 	parseModelPattern,
-	parseModelString,
 	pickDefaultAvailableModel,
 	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
@@ -17,10 +18,13 @@ import {
 	resolveAllowedModels,
 	resolveCliModel,
 	resolveExplicitModelRole,
+	resolveModelFromSettings,
 	resolveModelFromString,
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveRoleChain,
+	rolePriorityDefaults,
 	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
@@ -332,8 +336,8 @@ function createBedrockDefaultModel(
 	overrides?: Partial<ModelSpec<"bedrock-converse-stream">>,
 ): Model<"bedrock-converse-stream"> {
 	return buildModel({
-		id: "us.anthropic.claude-opus-4-8",
-		name: "Claude Opus 4.8 (US)",
+		id: DEFAULT_MODEL_PER_PROVIDER["amazon-bedrock"],
+		name: "Claude Opus (US)",
 		api: "bedrock-converse-stream",
 		provider: "amazon-bedrock",
 		baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
@@ -366,6 +370,21 @@ function createOpusModel(provider: string, id: string, name: string): Model<"ant
 }
 
 const allModels = [...mockModels, ...mockOpenRouterModels, ...mockProviderOverlapModels, ...mockCodexOverlapModels];
+
+function roleChainModel(provider: string, id: string): Model<Api> {
+	return buildModel({
+		id,
+		name: `${provider}/${id}`,
+		api: "openai-completions",
+		provider,
+		baseUrl: `https://${provider}.example.com`,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+}
 
 describe("pickDefaultAvailableModel", () => {
 	test("prefers Codex OAuth over plain OpenAI for the shared GPT default", () => {
@@ -860,6 +879,140 @@ describe("parseModelPattern", () => {
 			expect(result.model?.provider).toBe("openrouter");
 			expect(result.model?.id).toBe("moonshotai/kimi-k2.5");
 		});
+	});
+});
+
+describe("role priorities and chains", () => {
+	test("role priority defaults accept arbitrary role names safely", () => {
+		expect(rolePriorityDefaults("not-a-built-in-role")).toEqual([]);
+		expect(rolePriorityDefaults("__proto__")).toEqual([]);
+		expect(rolePriorityDefaults("memory")).toEqual(rolePriorityDefaults("smol"));
+	});
+
+	test("appends non-explicit web defaults after a configured primary", () => {
+		const exa = roleChainModel("web", "exa");
+		const parallel = roleChainModel("web", "parallel");
+		const perplexity = roleChainModel("web", "perplexity");
+		const settings = Settings.isolated({ modelRoles: { web: "web/exa" } });
+
+		const chain = resolveRoleChain("web", settings, [exa, parallel, perplexity]);
+
+		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
+			["web/exa", true],
+			["web/parallel", false],
+			["web/perplexity", false],
+		]);
+	});
+
+	test("upgrades a default primary when a configured fallback resolves the same route", () => {
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({
+			"retry.fallbackChains": { web: ["web/parallel"] },
+		});
+
+		const chain = resolveRoleChain("web", settings, [parallel]);
+
+		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
+			["web/parallel", true],
+		]);
+	});
+
+	test("treats an empty configured role value as explicit by key presence", () => {
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({ modelRoles: { web: "" } });
+
+		const chain = resolveRoleChain("web", settings, [parallel]);
+
+		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
+			["web/parallel", true],
+		]);
+	});
+
+	test("an explicitly empty retry chain disables role-default fallbacks", () => {
+		const exa = roleChainModel("web", "exa");
+		const parallel = roleChainModel("web", "parallel");
+		const settings = Settings.isolated({
+			modelRoles: { web: "web/exa" },
+			"retry.fallbackChains": { web: [] },
+		});
+
+		expect(resolveRoleChain("web", settings, [exa, parallel]).map(candidate => candidate.model.id)).toEqual(["exa"]);
+	});
+
+	test("hoists a provider within defaults without moving an explicit primary", () => {
+		const openai = roleChainModel("openai", "gpt-image-1");
+		const xai = roleChainModel("xai", "grok-imagine-image");
+		const defaults = resolveRoleChain("image", Settings.isolated(), [openai, xai], { hoistProvider: "xai" });
+		expect(defaults.map(candidate => candidate.model.provider)).toEqual(["xai", "openai"]);
+
+		const configured = resolveRoleChain(
+			"image",
+			Settings.isolated({ modelRoles: { image: "openai/gpt-image-1" } }),
+			[openai, xai],
+			{ hoistProvider: "xai" },
+		);
+		expect(configured.map(candidate => [candidate.model.provider, candidate.explicit])).toEqual([
+			["openai", true],
+			["xai", false],
+		]);
+
+		const google = roleChainModel("google-antigravity", "gemini-3-pro-image");
+		const explicitFallbacks = resolveRoleChain(
+			"image",
+			Settings.isolated({
+				modelRoles: { image: "openai/gpt-image-1" },
+				"retry.fallbackChains": {
+					image: ["google-antigravity/gemini-3-pro-image", "xai/grok-imagine-image"],
+				},
+			}),
+			[openai, google, xai],
+			{ hoistProvider: "xai" },
+		);
+		expect(explicitFallbacks.map(candidate => candidate.model.provider)).toEqual([
+			"openai",
+			"google-antigravity",
+			"xai",
+		]);
+		expect(explicitFallbacks.every(candidate => candidate.explicit)).toBe(true);
+	});
+
+	test("deduplicates by routed identity while retaining distinct upstream routes", () => {
+		const settings = Settings.isolated({
+			modelRoles: { routed: "openrouter/z-ai/glm-4.7@cerebras" },
+			"retry.fallbackChains": {
+				routed: ["openrouter/z-ai/glm-4.7@openai", "openrouter/z-ai/glm-4.7@cerebras"],
+			},
+		});
+
+		const chain = resolveRoleChain("routed", settings, mockOpenRouterModels);
+		expect(chain.map(candidate => formatModelStringWithRouting(candidate.model))).toEqual([
+			"openrouter/z-ai/glm-4.7@cerebras",
+			"openrouter/z-ai/glm-4.7@openai",
+		]);
+		expect(chain.every(candidate => candidate.explicit)).toBe(true);
+	});
+
+	test("ignores configured kind roles during default chat-model resolution", () => {
+		const chat = roleChainModel("anthropic", "chat-model");
+		const image = roleChainModel("openai", "gpt-image-1");
+		const settings = Settings.isolated({ modelRoles: { image: "openai/gpt-image-1" } });
+
+		expect(resolveModelFromSettings({ settings, availableModels: [chat, image] })).toBe(chat);
+	});
+
+	test("memory inherits configured tiny without kind roles inheriting configured default", () => {
+		const tiny = roleChainModel("local", "tiny-model");
+		const defaultModel = roleChainModel("local", "default-model");
+		const image = roleChainModel("openai", "gpt-image-1");
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default-model",
+				tiny: "local/tiny-model",
+			},
+		});
+
+		expect(resolveRoleChain("memory", settings, [defaultModel, tiny])[0]?.model.id).toBe("tiny-model");
+		expect(resolveRoleChain("image", settings, [defaultModel, image])[0]?.model.id).toBe("gpt-image-1");
 	});
 });
 

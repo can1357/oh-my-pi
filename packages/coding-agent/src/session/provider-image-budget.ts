@@ -15,7 +15,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
-import { imageDecodeFailureReason } from "../utils/image-loading";
+import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
 const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	type: "text",

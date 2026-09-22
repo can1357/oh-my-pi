@@ -11,10 +11,10 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
-import type { StructuredSubagentOutput } from "../task/types";
+import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
 import type { CustomMessage } from "./messages";
-import type { OutputMeta } from "../tools/output-meta";
-import { truncateMiddle } from "./streaming-output";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { truncateMiddle } from "@oh-my-pi/pi-tui/tools/streaming-output";
 
 /**
  * `customType` of the injected async-result follow-up message. The task
@@ -75,6 +75,16 @@ export function renderStructuredJson(structured: StructuredSubagentOutput): stri
 	return truncateMiddle(serialized, { maxBytes: ASYNC_PREVIEW_MAX_CHARS }).content;
 }
 
+/**
+ * Headline for the delivery's "Structured output:" line. `unavailable` means
+ * no payload was ever validated (the run failed before yielding, or the
+ * schema itself was unusable) — never a schema verdict, so it must not read
+ * as "schema unavailable"/"schema invalid".
+ */
+export function structuredStatusLabel(status: StructuredSubagentOutput["status"]): string {
+	return status === "unavailable" ? "unavailable" : `schema ${status}`;
+}
+
 export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => {
@@ -99,6 +109,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			structuredJson,
 			hasStructuredData,
 			schemaStatus: structured?.status,
+			schemaStatusLabel: structured ? structuredStatusLabel(structured.status) : undefined,
 			schemaError: structured?.error,
 			schemaValid: structured?.status === "valid",
 		};

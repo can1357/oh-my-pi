@@ -266,6 +266,34 @@ describe("error-id classification", () => {
 		expect(AIError.codexChatGPTAccountPolicyModel(oversized)).toBeUndefined();
 		expect(AIError.is(AIError.classifyMessage(oversized), AIError.Flag.AccountPolicy)).toBe(false);
 	});
+
+	it("classifies Anthropic permission and oauth organization policy denials as account policy without content blocked", () => {
+		const errorMessage =
+			'403 {"type":"error","error":{"type":"permission_error","message":"OAuth authentication is currently not allowed for this organization.","details":{"error_code":"oauth_not_allowed_for_organization"}},"request_id":"req_011CfDQosvzzsyor4jWjLsz8"}';
+		const denial = message({
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			errorStatus: 403,
+			errorMessage,
+		});
+		const denialId = AIError.classifyMessage(denial);
+		expect(AIError.is(denialId, AIError.Flag.AccountPolicy)).toBe(true);
+		expect(AIError.is(denialId, AIError.Flag.ContentBlocked)).toBe(false);
+		expect(AIError.retriable(denialId)).toBe(false);
+		expect(AIError.isAccountPolicyError(denial)).toBe(true);
+		expect(AIError.isAuthRetryableError(denial)).toBe(true);
+
+		const typedError = new AIError.AnthropicApiError(403, errorMessage, new Headers(), {
+			code: "oauth_not_allowed_for_organization",
+		});
+		const classifiedTyped = AIError.classify(typedError, "anthropic-messages");
+		expect(AIError.is(classifiedTyped, AIError.Flag.AccountPolicy)).toBe(true);
+		expect(AIError.is(classifiedTyped, AIError.Flag.ContentBlocked)).toBe(false);
+		expect(AIError.isAccountPolicyError(typedError)).toBe(true);
+		expect(AIError.isAuthRetryableError(typedError)).toBe(true);
+	});
+
 	it("classifies only Cursor plan-gate resource exhaustion as account policy", () => {
 		for (const errorMessage of [
 			'Connect error resource_exhausted: Error [details: {"error":"ERROR_RATE_LIMITED_CHANGEABLE","details":{"title":"Named models unavailable","detail":"Free plans can only use Auto."}}]',

@@ -4,7 +4,8 @@ import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
 import type { EvalShadowCellSession } from "@oh-my-pi/pi-coding-agent/eval/speculation/cell-session";
-import { type TodoPhase, TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { type TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function createTool(name: string, execute: AgentTool["execute"]): AgentTool {

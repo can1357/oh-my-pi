@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildCoordinationAdvisory, composeSpawnAdvisory } from "@oh-my-pi/pi-coding-agent/task";
-import type { TaskItem } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { TaskItem } from "@oh-my-pi/pi-tui/tools/task";
 
 // Contract: a multi-sibling spawn with spawn capacity and IRC available draws
 // a proactive coordinate-via-irc suggestion.

@@ -25,14 +25,13 @@ import {
 	type ExecutedWorkspaceChange,
 	sortAndValidateTextEdits,
 } from "@oh-my-pi/pi-coding-agent/lsp/edits";
-import { renderCall, renderResult } from "@oh-my-pi/pi-coding-agent/lsp/render";
+import { renderCall, renderResult } from "@oh-my-pi/pi-tui/tools/lsp";
 import {
 	type CodeAction,
 	type CreateFile,
 	type DeleteFile,
 	type Diagnostic,
 	type LspClient,
-	type LspToolDetails,
 	lspSchema,
 	type RenameFile,
 	type ServerConfig,
@@ -40,6 +39,7 @@ import {
 	type TextDocumentEdit,
 	type WorkspaceEdit,
 } from "@oh-my-pi/pi-coding-agent/lsp/types";
+import { type LspToolDetails } from "@oh-my-pi/pi-tui/tools/lsp";
 import {
 	applyCodeAction,
 	collectGlobMatches,
@@ -52,7 +52,7 @@ import {
 	resolveSymbolColumn,
 	uriToFile,
 } from "@oh-my-pi/pi-coding-agent/lsp/utils";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
@@ -60,8 +60,8 @@ import * as piUtils from "@oh-my-pi/pi-utils";
 import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
-import { renderResult as renderLocalResult } from "../../src/lsp/render";
-import { getLanguageFromPath } from "../../src/utils/lang-from-path";
+import { renderResult as renderLocalResult } from "@oh-my-pi/pi-tui/tools/lsp";
+import { getLanguageFromPath } from "@oh-my-pi/pi-tui/lang-from-path";
 
 const lspTestSettings = Settings.isolated();
 
@@ -1888,6 +1888,67 @@ describe("lsp regressions", () => {
 			15_000,
 		);
 	}
+
+	it("refreshes an open document after a watched module is created", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-created-module-");
+		try {
+			const sourcePath = path.join(tempDir.path(), "UsesMissing.ts");
+			const modulePath = path.join(tempDir.path(), "MissingClass.ts");
+			const sourceUri = fileToUri(sourcePath);
+			await Bun.write(
+				sourcePath,
+				'import { MissingClass } from "./MissingClass";\nexport const value = new MissingClass();\n',
+			);
+
+			const missingModuleDiagnostic: Diagnostic = {
+				message: "Cannot find module './MissingClass' or its corresponding type declarations.",
+				severity: 1,
+				code: 2307,
+				range: {
+					start: { line: 0, character: 29 },
+					end: { line: 0, character: 45 },
+				},
+			};
+			installFakeLsp((message, server) => {
+				if (message.method === "initialize") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "textDocument/didOpen") {
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri: sourceUri, diagnostics: [missingModuleDiagnostic] },
+					});
+				} else if (message.method === "textDocument/didChange") {
+					server.send({
+						jsonrpc: "2.0",
+						method: "textDocument/publishDiagnostics",
+						params: { uri: sourceUri, diagnostics: [] },
+					});
+				} else if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path());
+			await lspClient.ensureFileOpen(client, sourcePath);
+			expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([
+				missingModuleDiagnostic,
+			]);
+
+			await Bun.write(modulePath, "export class MissingClass {}\n");
+			await lspClient.notifyWorkspaceWatchedFiles(tempDir.path(), [
+				{ filePath: modulePath, type: lspClient.FileChangeType.Created },
+			]);
+
+			expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
 
 	it("does not reuse stale file diagnostics after another URI publishes", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-stale-diags-");
@@ -4699,7 +4760,7 @@ describe("lsp regressions", () => {
 			const loadConfigSpy = vi
 				.spyOn(lspConfig, "loadConfig")
 				.mockImplementation(() => configs.shift() ?? configs[0]);
-			const client = { proc: { kill: vi.fn() }, config: server } as unknown as LspClient;
+			const client = { proc: { kill: vi.fn() }, config: server, openFiles: new Map() } as unknown as LspClient;
 			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 			vi.spyOn(lspClient, "sendNotification").mockResolvedValue(undefined);
 
@@ -4842,6 +4903,67 @@ describe("lsp regressions", () => {
 			jsonrpc: "2.0",
 			id,
 			error: { code: -32_601, message: "method not found" },
+		});
+
+		it("refreshes open document diagnostics after a generic reload", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-reload-diagnostics-");
+			try {
+				const sourcePath = path.join(tempDir.path(), "UsesMissing.ts");
+				const sourceUri = fileToUri(sourcePath);
+				await Bun.write(sourcePath, 'import { MissingClass } from "./MissingClass";\n');
+				const missingModuleDiagnostic: Diagnostic = {
+					message: "Cannot find module './MissingClass' or its corresponding type declarations.",
+					severity: 1,
+					code: 2307,
+					range: {
+						start: { line: 0, character: 29 },
+						end: { line: 0, character: 45 },
+					},
+				};
+				installFakeLsp((message, server) => {
+					if (message.method === "initialize") {
+						server.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					} else if (message.method === "textDocument/didOpen") {
+						server.send({
+							jsonrpc: "2.0",
+							method: "textDocument/publishDiagnostics",
+							params: { uri: sourceUri, diagnostics: [missingModuleDiagnostic] },
+						});
+					} else if (message.method === "textDocument/didChange") {
+						server.send({
+							jsonrpc: "2.0",
+							method: "textDocument/publishDiagnostics",
+							params: { uri: sourceUri, diagnostics: [] },
+						});
+					} else if (message.method === "shutdown") {
+						server.send({ jsonrpc: "2.0", id: message.id, result: null });
+					} else if (message.method === "exit") {
+						server.exit(0);
+					}
+				});
+				const config: ServerConfig = { command: "fake-lsp", fileTypes: [".ts"], rootMarkers: [] };
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+					servers: { "fake-lsp": config },
+					idleTimeoutMs: undefined,
+				});
+				const client = await lspClient.getOrCreateClient(config, tempDir.path());
+				await lspClient.ensureFileOpen(client, sourcePath);
+				expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([
+					missingModuleDiagnostic,
+				]);
+
+				const result = await new LspTool(makeLspSession(tempDir.path())).execute("reload-diagnostics", {
+					action: "reload",
+					file: "*",
+				});
+
+				expect(textResult(result)).toContain("Reloaded fake-lsp");
+				expect(await waitForDiagnostics(client, sourceUri, { timeoutMs: 1_000, settleMs: 0 })).toEqual([]);
+			} finally {
+				vi.restoreAllMocks();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
 		});
 
 		it("propagates cancellation of the reload request instead of reporting Restarted", async () => {
@@ -5273,12 +5395,13 @@ describe("lsp regressions", () => {
 			const controller = new AbortController();
 			const second = lspClient.sendNotification(client, "textDocument/didOpen", {}, controller.signal);
 			controller.abort();
-			await Bun.sleep(0);
 
+			// The caller must be released even while the earlier queue slot remains
+			// wedged; aborting a not-yet-started write must not kill the client.
+			await expect(second).rejects.toBeInstanceOf(Error);
 			expect(kill).not.toHaveBeenCalled();
 			firstFlush.resolve(0);
 			await first;
-			await expect(second).rejects.toBeInstanceOf(Error);
 			expect(kill).not.toHaveBeenCalled();
 			expect(writes).toHaveLength(1);
 		});

@@ -31,7 +31,7 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
-import type { ConfiguredThinkingLevel } from "../thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
 
@@ -165,6 +165,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--system-prompt": (result, value) => {
 		result.systemPrompt = value;
+	},
+	"--system-prompt-template": (result, value) => {
+		result.systemPromptTemplate = value;
 	},
 	"--append-system-prompt": (result, value) => {
 		result.appendSystemPrompt = value;

@@ -133,6 +133,23 @@ describe("skillful setting and /skillful session toggle", () => {
 		).toBe(1);
 	});
 
+	it("keeps the provider-side skill hint frozen across a mid-session disable toggle", async () => {
+		const s = await createSession();
+		s.agent.appendMessage(createUserMessage("earlier work"));
+
+		const bashTool = s.agent.state.tools.find(tool => tool.name === "bash");
+		expect(bashTool).toBeDefined();
+		const describedBefore = bashTool?.description ?? "";
+		expect(describedBefore).toContain("skill://");
+
+		expect(await s.toggleSkillful()).toBe(false);
+
+		// The wire prefix is byte-stable mid-session: the toggle rides the next
+		// turn (a notice on enable, a no-op on disable) rather than mutating the
+		// provider tool definitions.
+		expect(bashTool?.description ?? "").toBe(describedBefore);
+	});
+
 	it("announces URI syntax without catalog rows for hidden-only skills mid-session", async () => {
 		const skillDir = path.join(tempDir, ".omp", "skills", "test-skill");
 		const skillFile = path.join(skillDir, "SKILL.md");

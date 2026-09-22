@@ -404,6 +404,68 @@ describe("buildSessionTrace", () => {
 		expect(main.spans.some(span => span.model === "m-abandoned")).toBe(false);
 	});
 
+	it("pairs reused background job ids with their own closes and keeps span ids unique", async () => {
+		const projectDir = path.join(getSessionsDir(), PROJECT);
+		const rootFile = path.join(projectDir, "1700000000001_reuse.jsonl");
+		const makeJobRun = (index: number, startAt: number, closeAt: number) => [
+			{
+				type: "message",
+				id: `a${index}`,
+				parentId: index === 1 ? "u1" : "ar1",
+				timestamp: iso(startAt - 1000),
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: `c${index}`, name: "bash" }],
+				},
+			},
+			{
+				type: "message",
+				id: `r${index}`,
+				parentId: `a${index}`,
+				timestamp: iso(startAt),
+				message: {
+					role: "toolResult",
+					toolCallId: `c${index}`,
+					toolName: "bash",
+					timestamp: startAt,
+					details: { async: { state: "running", jobId: "bg_1" } },
+				},
+			},
+			{
+				type: "message",
+				id: `ar${index}`,
+				parentId: `r${index}`,
+				timestamp: iso(closeAt),
+				message: {
+					role: "custom",
+					customType: "async-result",
+					timestamp: closeAt,
+					details: { jobs: [{ jobId: "bg_1" }] },
+				},
+			},
+		];
+		const entries = [
+			{ type: "session", version: 3, id: "reuse", timestamp: iso(T), cwd: "/tmp/proj" },
+			{ type: "message", id: "u1", parentId: null, timestamp: iso(T + 1000), message: { role: "user" } },
+			...makeJobRun(1, T + 3000, T + 4000),
+			...makeJobRun(2, T + 6000, T + 8000),
+		];
+		await fs.mkdir(projectDir, { recursive: true });
+		await Bun.write(rootFile, entries.map(entry => JSON.stringify(entry)).join("\n"));
+
+		const trace = await buildSessionTrace(rootFile);
+		const backgrounds = trace.tracks[0].spans.filter(span => span.kind === "background");
+
+		// Same jobId twice: two independent spans, each closed by its own async-result.
+		expect(backgrounds).toHaveLength(2);
+		expect(new Set(backgrounds.map(span => span.id)).size).toBe(2);
+		expect(backgrounds.map(span => ({ start: span.start, end: span.end }))).toEqual([
+			{ start: T + 3000, end: T + 4000 },
+			{ start: T + 6000, end: T + 8000 },
+		]);
+		expect(backgrounds.every(span => span.unterminated === undefined)).toBe(true);
+	});
+
 	it("aggregates summary counts, tool stats, and idle time across tracks", async () => {
 		const rootFile = await writeFixture();
 		const { summary } = await buildSessionTrace(rootFile);

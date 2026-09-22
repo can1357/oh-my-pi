@@ -45,6 +45,18 @@ describe("browser prelude", () => {
 		await expect(prelude.invoke({ action: "call", name: "x", chain: [] }, context)).rejects.toThrow(
 			"Action 'call' requires a non-empty 'chain'.",
 		);
+		for (const invalid of [
+			{ init_scripts: ["valid", 1] },
+			{ downloads: false },
+			{ user_agent: 1 },
+			{ ignore_https_errors: "yes" },
+			{ allow_file_access: 1 },
+			{ headed: "yes" },
+		]) {
+			await expect(prelude.invoke({ action: "open", ...invalid }, context)).rejects.toThrow(
+				/browser received invalid arguments/,
+			);
+		}
 	});
 
 	it("closes through the real host for an absent named tab", async () => {
