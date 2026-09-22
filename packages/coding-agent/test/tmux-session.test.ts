@@ -8,6 +8,10 @@ import {
 interface RecordingRunner extends TmuxCommandRunner {
 	calls: string[][];
 	captured: string | undefined;
+	/** Effective style capture: `window-status-style` and `window-status-current-style`. */
+	styleBases: string;
+	/** Local `show-window-options -v` values, keyed by option name. */
+	localStyles: Record<string, string>;
 }
 
 function createRunner(captured: string | undefined = "shell\t1"): RecordingRunner {
@@ -15,11 +19,15 @@ function createRunner(captured: string | undefined = "shell\t1"): RecordingRunne
 	return {
 		calls,
 		captured,
+		styleBases: "default\tdefault",
+		localStyles: {},
 		async run(args) {
 			calls.push(args);
 		},
 		captureSync(args) {
 			calls.push(args);
+			if (args[0] === "show-window-options") return this.localStyles[args[4] as string] ?? "";
+			if (args[4]?.startsWith("#{window-status-style}")) return this.styleBases;
 			return this.captured;
 		},
 		runSync(args) {
@@ -187,6 +195,116 @@ describe("TmuxWindowNamer.sync", () => {
 			["rename-window", "-t", "%7", "--", "shell"],
 			["set-window-option", "-t", "%7", "automatic-rename", "on"],
 		]);
+	});
+});
+
+describe("TmuxWindowNamer accent", () => {
+	it("appends the accent to each status style so inherited styling survives", async () => {
+		runner.styleBases = "default\tbg=blue,bold";
+		namer.sync("session", "/tmp/project", "#D787AF");
+		await namer.drain();
+
+		expect(runner.calls).toContainEqual(["set-window-option", "-t", "%7", "window-status-style", "fg=#d787af"]);
+		expect(runner.calls).toContainEqual([
+			"set-window-option",
+			"-t",
+			"%7",
+			"window-status-current-style",
+			"bg=blue,bold,fg=#d787af",
+		]);
+	});
+
+	it("leaves the name clean rather than embedding style markup", async () => {
+		namer.sync("session", "/tmp/project", "#d787af");
+		await namer.drain();
+
+		expect(renamedNames()).toEqual(["session"]);
+	});
+
+	it("ignores an accent that is not a literal hex color", async () => {
+		namer.sync("session", "/tmp/project", "red;#[fg=green]");
+		await namer.drain();
+
+		expect(runner.calls.filter(args => args[0] === "set-window-option")).toEqual([]);
+	});
+
+	it("re-styles when the accent changes under an unchanged session name", async () => {
+		namer.sync("session", "/tmp/project", "#d787af");
+		await namer.drain();
+		runner.calls.length = 0;
+		// Same name, same accent: nothing to do.
+		namer.sync("session", "/tmp/project", "#d787af");
+		await namer.drain();
+		const afterRepeat = runner.calls.length;
+		// Same name, new accent: a `/theme` switch must still repaint.
+		namer.sync("session", "/tmp/project", "#5fd7ff");
+		await namer.drain();
+
+		expect(afterRepeat).toBe(0);
+		expect(runner.calls).toEqual([
+			["set-window-option", "-t", "%7", "window-status-style", "fg=#5fd7ff"],
+			["set-window-option", "-t", "%7", "window-status-current-style", "fg=#5fd7ff"],
+		]);
+	});
+
+	it("styles the window without renaming it when only the accent is enabled", async () => {
+		namer.setEnabled(false);
+		namer.sync("session", "/tmp/project", "#d787af");
+		await namer.drain();
+		runner.calls.length = 0;
+
+		namer.restore();
+
+		expect(renamedNames()).toEqual([]);
+		// No name capture, so restore touches neither the name nor automatic-rename.
+		expect(runner.calls).toEqual([
+			["set-window-option", "-u", "-t", "%7", "window-status-style"],
+			["set-window-option", "-u", "-t", "%7", "window-status-current-style"],
+		]);
+	});
+
+	it("unsets an inherited style and re-sets a local one on restore", async () => {
+		runner.localStyles["window-status-style"] = "fg=red";
+		namer.sync("session", "/tmp/project", "#d787af");
+		await namer.drain();
+		runner.calls.length = 0;
+
+		namer.restore();
+
+		expect(runner.calls).toEqual([
+			["rename-window", "-t", "%7", "--", "shell"],
+			["set-window-option", "-t", "%7", "automatic-rename", "on"],
+			["set-window-option", "-t", "%7", "window-status-style", "fg=red"],
+			["set-window-option", "-u", "-t", "%7", "window-status-current-style"],
+		]);
+	});
+
+	it("puts the styles back when the accent is turned off mid-session", async () => {
+		namer.sync("session", "/tmp/project", "#d787af");
+		await namer.drain();
+		runner.calls.length = 0;
+
+		namer.sync("session", "/tmp/project", undefined);
+		await namer.drain();
+
+		expect(runner.calls).toEqual([
+			["set-window-option", "-u", "-t", "%7", "window-status-style"],
+			["set-window-option", "-u", "-t", "%7", "window-status-current-style"],
+		]);
+	});
+
+	it("still restores synchronously when shutdown drops the queued style restore", async () => {
+		namer.sync("session", "/tmp/project", "#d787af");
+		await namer.drain();
+		// Config reload turns the accent off; the restore is queued, not yet run.
+		namer.sync("session", "/tmp/project", undefined);
+		runner.calls.length = 0;
+
+		namer.restore();
+		await namer.drain();
+
+		expect(runner.calls).toContainEqual(["set-window-option", "-u", "-t", "%7", "window-status-style"]);
+		expect(runner.calls).toContainEqual(["set-window-option", "-u", "-t", "%7", "window-status-current-style"]);
 	});
 });
 
