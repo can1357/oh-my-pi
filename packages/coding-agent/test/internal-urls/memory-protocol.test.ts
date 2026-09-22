@@ -953,6 +953,34 @@ describe("MemoryProtocolHandler — hindsight (issue #7587)", () => {
 	});
 });
 
+describe("MemoryProtocolHandler — mnemon", () => {
+	beforeEach(() => {
+		InternalUrlRouter.resetForTests();
+	});
+
+	afterEach(() => {
+		InternalUrlRouter.resetForTests();
+	});
+
+	it("points callers at host related/forget tools, not the CLI", async () => {
+		const router = InternalUrlRouter.instance();
+		const settings = Settings.isolated({ "memory.backend": "mnemon" });
+		await expect(router.resolve("memory://a1b2c3d4e5f6", { settings })).rejects.toThrow(
+			/Native Mnemon memories are not addressable via memory:\/\/[\s\S]*`related` \/ `forget`/,
+		);
+	});
+
+	it("prioritizes explicit mnemon backend over cross-session hindsight fallback", async () => {
+		await withHindsightSession(async () => {
+			const router = InternalUrlRouter.instance();
+			const settings = Settings.isolated({ "memory.backend": "mnemon" });
+			await expect(router.resolve("memory://a1b2c3d4e5f6", { settings })).rejects.toThrow(
+				/Native Mnemon memories are not addressable via memory:\/\//,
+			);
+		});
+	});
+});
+
 describe("MemoryProtocolHandler — file-backed root vs non-local backends (issue #11909)", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
