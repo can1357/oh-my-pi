@@ -1,5 +1,6 @@
 /**
- * Aggregate wall-clock budget for ONE logical provider operation.
+ * Aggregate wall-clock budget for ONE logical provider operation, bounding
+ * time WITHOUT progress rather than total duration.
  *
  * pi-ai retries in nested layers — replay-safe stream retries wrap provider
  * transport retries wrap client retries — and every layer sleeps between
@@ -12,6 +13,12 @@
  * sleep still fits. A retry that would land past the deadline is refused
  * immediately instead of taken, so the budget is a ceiling on silence rather
  * than one more wait to sit through.
+ *
+ * Producing output extends the budget: every provider loop calls
+ * {@link markOperationProgress} when an attempt produces output, re-basing
+ * the deadline to now + budget. A long productive stream that later hits a
+ * transient failure therefore keeps its in-place retry, while a ladder of
+ * silent attempts is still cut at the budget.
  *
  * Enforced in: the replay-safe stream retry (`empty-completion-retry`), the
  * Anthropic provider loop and its HTTP client backoff, the OpenAI Responses
@@ -44,6 +51,26 @@ export function withOperationDeadline<T extends OperationDeadlineOptions>(option
 	const timeoutMs = options.operationTimeoutMs;
 	if (timeoutMs === undefined || !(timeoutMs > 0) || options.operationDeadlineAt !== undefined) return options;
 	return { ...options, operationDeadlineAt: Date.now() + timeoutMs };
+}
+
+/**
+ * Re-base the deadline to now + budget when an attempt produces output.
+ *
+ * Called by every provider loop at the point where it already decides the
+ * attempt "produced output" (Anthropic's replay-safety tracking, OpenAI
+ * Responses replay-unsafe events, Codex text/thinking/tool deltas, Google
+ * first-token delivery, the replay-safe wrapper's commit transition), so the
+ * budget bounds time without progress rather than total duration. Mutates the
+ * shared options object in place so every nested retry site in the operation
+ * sees the extended deadline. No-op when the budget is disabled, unstamped,
+ * or the options are absent — in particular it never invents a deadline the
+ * entry point did not stamp.
+ */
+export function markOperationProgress(options: OperationDeadlineOptions | undefined): void {
+	if (options?.operationDeadlineAt === undefined) return;
+	const timeoutMs = options.operationTimeoutMs;
+	if (timeoutMs === undefined || !(timeoutMs > 0)) return;
+	options.operationDeadlineAt = Date.now() + timeoutMs;
 }
 
 /**

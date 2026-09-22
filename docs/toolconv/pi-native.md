@@ -96,9 +96,14 @@ The server accepts this `SimpleStreamOptions` subset:
 `cacheRetention`, `cachedContent`, `headers`, `initiatorOverride`,
 `maxRetryDelayMs`, `metadata`, `sessionId`, `promptCacheKey`, `promptCache`,
 `statefulResponses`, `streamFirstEventTimeoutMs`, `streamIdleTimeoutMs`,
-`reasoning`, `disableReasoning`, `hideThinkingSummary`, `thinkingBudgets`,
-`toolChoice`, `serviceTier`, `kimiApiFormat`, `syntheticApiFormat`,
-`preferWebsockets`, `openrouterVariant`, and `loopGuard`.
+`operationTimeoutMs`, `reasoning`, `disableReasoning`, `hideThinkingSummary`,
+`thinkingBudgets`, `toolChoice`, `serviceTier`, `kimiApiFormat`,
+`syntheticApiFormat`, `preferWebsockets`, `openrouterVariant`, and `loopGuard`.
+
+`operationTimeoutMs` crosses so the gateway enforces the same whole-operation
+retry budget server-side. The gateway stamps its own `operationDeadlineAt`
+from it on entry — an epoch deadline is tied to the client's clock and never
+crosses the wire (the client strips it before sending).
 
 Unknown, `null`, and `undefined` option values are silently dropped by the
 server. The client additionally strips runtime/server-owned fields:

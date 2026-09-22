@@ -151,6 +151,18 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[3]?.options?.operationTimeoutMs).toBe(45_000);
 	});
 
+	it("treats a negative operation budget as off instead of silently disabling it", () => {
+		const { fn: base, calls } = captureBase();
+		createSettingsAwareStreamFn(Settings.isolated({ "providers.operationTimeoutSeconds": -1 }), base)(
+			stubModel,
+			stubContext,
+			undefined,
+		);
+
+		// Explicitly 0 (off): a negative must not slip through as undefined.
+		expect(calls[0]?.options?.operationTimeoutMs).toBe(0);
+	});
+
 	it("forwards retry.maxDelayMs while preserving caller overrides", () => {
 		const settings = Settings.isolated({ "retry.maxDelayMs": 300_000 });
 		const { fn: base, calls } = captureBase();

@@ -553,7 +553,67 @@ describe("AgentSession retry recovery", () => {
 		expect(terminalErrorText).toContain("after 902s");
 	});
 
-	it("maps assistant error presentation for recovered, unrecovered, and silent abort turns", () => {
+	it("holds the exhausted-budget replay bound across a model fallback instead of refunding it per model", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-5-mini");
+		const thirdFallback = getBundledModel("openai", "gpt-5");
+		if (!model || !firstFallback || !secondFallback || !thirdFallback) {
+			throw new Error("Expected bundled Anthropic and OpenAI test models to exist");
+		}
+		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel({
+			responses: Array.from({ length: 12 }, () => ({ throw: OPERATION_DEADLINE_ERROR })),
+		});
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const firstSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondSelector = `${secondFallback.provider}/${secondFallback.id}`;
+		const thirdSelector = `${thirdFallback.provider}/${thirdFallback.id}`;
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.maxRetries": 10,
+			"retry.modelFallback": true,
+			"retry.fallbackChains": { default: [firstSelector, secondSelector, thirdSelector] },
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		const sessionManager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"));
+		const session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		sessions.push(session);
+		mockSchedulerWaitWithClock();
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Exhaust the provider operation budget across fallbacks");
+		await session.waitForIdle();
+		await sessionManager.flush();
+
+		// Two fallbacks engaged, a third waiting (so a per-model bound would
+		// keep refunding down the chain), yet the saga still ends after the
+		// original request plus two replays — the bound is saga-wide and a
+		// spent bound no longer even consults the chain.
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, firstSelector, secondSelector]);
+		expect(mock.calls).toHaveLength(3);
+
+		const errors = assistantEntries(sessionManager).filter(candidate => candidate.message.stopReason === "error");
+		expect(errors.at(-1)?.message.errorMessage).toContain("Retry budget exhausted");
+	});
+
+	it("maps assistant error presentation for recovered, unrecovered, and silent abort turns", async () => {
 		const recoveredCases: Array<{
 			name: string;
 			recovery: AssistantRetryRecovery["recovery"];

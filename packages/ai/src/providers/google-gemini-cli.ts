@@ -31,7 +31,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
-import { operationDeadlineExceeded } from "../utils/operation-deadline";
+import { markOperationProgress, operationDeadlineExceeded } from "../utils/operation-deadline";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -699,6 +699,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const block = startTextBlock();
 					block.text += delta;
 					block.textSignature = retainThoughtSignature(block.textSignature, thoughtSignature);
+					// Producing output re-bases the operation deadline, so the
+					// budget bounds silence, not work.
+					markOperationProgress(options);
 					stream.push({
 						type: "text_delta",
 						contentIndex: blockIndex(),
@@ -711,6 +714,9 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					if (!delta) return;
 					const block = startThinkingBlock();
 					block.thinking += delta;
+					// Producing output re-bases the operation deadline, so the
+					// budget bounds silence, not work.
+					markOperationProgress(options);
 					stream.push({
 						type: "thinking_delta",
 						contentIndex: blockIndex(),

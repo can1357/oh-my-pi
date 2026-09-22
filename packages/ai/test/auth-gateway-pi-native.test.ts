@@ -154,6 +154,18 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
 	});
 
+	it("forwards the operation budget but never the epoch deadline", () => {
+		const parsed = parseRequest({
+			modelId: "x",
+			context: baseContext,
+			options: { operationTimeoutMs: 900_000, operationDeadlineAt: Date.now() + 900_000 },
+		});
+		// The gateway stamps its own deadline from the budget on entry; an
+		// epoch stamp from the client's clock must not cross the wire.
+		expect(parsed.options.operationTimeoutMs).toBe(900_000);
+		expect("operationDeadlineAt" in parsed.options).toBe(false);
+	});
+
 	it("forwards anthropicCompaction so gateway compaction survives the hop", () => {
 		const compaction = { triggerInputTokens: 50_000, pauseAfterCompaction: true, instructions: "Summarize." };
 		const parsed = parseRequest({

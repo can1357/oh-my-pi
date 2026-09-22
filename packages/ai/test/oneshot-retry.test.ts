@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { ProviderOperationDeadlineError } from "@oh-my-pi/pi-ai/error";
 import { retryTransientCompletion } from "@oh-my-pi/pi-ai/oneshot-retry";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai/types";
 
@@ -455,5 +456,63 @@ describe("retryTransientCompletion", () => {
 		} finally {
 			Date.now = realNow;
 		}
+	});
+
+	it("replays a budget-exhausted operation only once instead of running the full ladder", async () => {
+		// Each replay costs another whole operation budget, so a side request
+		// (summary, title, handoff) must not replay one for the full
+		// maxAttempts: one immediate replay, then the failure stands.
+		const exhausted = (): AssistantMessage =>
+			message({
+				stopReason: "error",
+				errorMessage:
+					"Provider operation budget exhausted after 900s of a 900s budget; declined a 30000ms retry wait.",
+			});
+		let calls = 0;
+		const final = await retryTransientCompletion(
+			() => {
+				calls += 1;
+				return Promise.resolve(exhausted());
+			},
+			{ baseDelayMs: 1, maxAttempts: 5 },
+		);
+
+		expect(calls).toBe(2);
+		expect(final.stopReason).toBe("error");
+		expect(final.errorMessage).toContain("Provider operation budget exhausted");
+	});
+
+	it("still recovers when the replay after a budget exhaustion succeeds", async () => {
+		const exhausted = (): AssistantMessage =>
+			message({
+				stopReason: "error",
+				errorMessage:
+					"Provider operation budget exhausted after 900s of a 900s budget; declined a 30000ms retry wait.",
+			});
+		let calls = 0;
+		const final = await retryTransientCompletion(
+			() => {
+				calls += 1;
+				return Promise.resolve(calls === 1 ? exhausted() : message());
+			},
+			{ baseDelayMs: 1, maxAttempts: 5 },
+		);
+
+		expect(calls).toBe(2);
+		expect(final.stopReason).toBe("stop");
+	});
+
+	it("caps a thrown budget-exhaustion the same way", async () => {
+		let calls = 0;
+		const attempt = retryTransientCompletion(
+			() => {
+				calls += 1;
+				throw new ProviderOperationDeadlineError(900_000, 900_000, 30_000);
+			},
+			{ baseDelayMs: 1, maxAttempts: 5 },
+		);
+
+		await expect(attempt).rejects.toThrow(/Provider operation budget exhausted/);
+		expect(calls).toBe(2);
 	});
 });

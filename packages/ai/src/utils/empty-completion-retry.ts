@@ -17,7 +17,7 @@ import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
-import { type OperationDeadlineOptions, operationDeadlineExceeded } from "./operation-deadline";
+import { type OperationDeadlineOptions, markOperationProgress, operationDeadlineExceeded } from "./operation-deadline";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
 export const EMPTY_COMPLETION_BASE_DELAY_MS = 500;
@@ -124,6 +124,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 						buffered.push(event);
 						continue;
 					}
+					// First meaningful event commits the attempt — and re-bases the
+					// operation deadline, so the budget bounds silence, not work.
+					if (!committed) markOperationProgress(options);
 					committed = true;
 					flush();
 					outer.push(event);

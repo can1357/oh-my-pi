@@ -25,6 +25,7 @@ import { withReplaySafeStreamRetry } from "@oh-my-pi/pi-ai/utils/empty-completio
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import {
 	type OperationDeadlineOptions,
+	markOperationProgress,
 	operationDeadlineExceeded,
 	withOperationDeadline,
 } from "@oh-my-pi/pi-ai/utils/operation-deadline";
@@ -164,6 +165,63 @@ describe("withOperationDeadline", () => {
 		expect(AIError.retriable(AIError.classify(error))).toBe(true);
 		expect(AIError.is(AIError.classify(error), AIError.Flag.Timeout)).toBe(true);
 		expect(operationDeadlineExceeded({ operationTimeoutMs: 60_000 }, 30_000)).toBeUndefined();
+	});
+});
+
+describe("operation progress re-bases the deadline", () => {
+	it("keeps the in-place retry for a productive attempt: progress past the old deadline re-arms the budget", () => {
+		// Simulates a long productive attempt: the stamp expired while the
+		// provider was streaming, then output re-based it.
+		const options = { operationTimeoutMs: 60_000, operationDeadlineAt: Date.now() - 1_000 };
+		expect(operationDeadlineExceeded(options, 500)).toBeDefined();
+
+		markOperationProgress(options);
+
+		expect(options.operationDeadlineAt).toBeGreaterThan(Date.now() + 59_000);
+		expect(operationDeadlineExceeded(options, 500)).toBeUndefined();
+	});
+
+	it("still cuts a silent ladder: no progress means the spent budget refuses", () => {
+		const options = { operationTimeoutMs: 60_000, operationDeadlineAt: Date.now() - 1_000 };
+		const error = operationDeadlineExceeded(options, 500);
+		expect(error?.name).toBe("ProviderOperationDeadlineError");
+		expect(options.operationDeadlineAt).toBeLessThan(Date.now());
+	});
+
+	it("never invents a deadline the entry point did not stamp, nor extends a disabled budget", () => {
+		const unstamped: OperationDeadlineOptions = { operationTimeoutMs: 60_000 };
+		markOperationProgress(unstamped);
+		expect(unstamped.operationDeadlineAt).toBeUndefined();
+
+		const disabled: OperationDeadlineOptions = { operationTimeoutMs: 0, operationDeadlineAt: Date.now() - 1 };
+		markOperationProgress(disabled);
+		expect(disabled.operationDeadlineAt).toBeLessThan(Date.now());
+
+		markOperationProgress(undefined);
+	});
+
+	it("re-bases the deadline while the Anthropic loop streams output", async () => {
+		let calls = 0;
+		const create = (() => {
+			calls += 1;
+			return createSuccessRequest("recovered");
+		}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
+		const operationTimeoutMs = 60_000;
+		const originalDeadline = Date.now() + 50;
+		const options = {
+			client: { messages: { create } } as AnthropicMessagesClientLike,
+			operationTimeoutMs,
+			operationDeadlineAt: originalDeadline,
+		};
+
+		const result = await streamAnthropic(model, context, options).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(calls).toBe(1);
+		// The text delta re-based the deadline to ~now + budget, far past
+		// the nearly-spent stamp the attempt started with.
+		expect(options.operationDeadlineAt).toBeGreaterThan(originalDeadline);
+		expect(options.operationDeadlineAt).toBeGreaterThan(Date.now() + 59_000);
 	});
 });
 

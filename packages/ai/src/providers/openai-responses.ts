@@ -32,7 +32,7 @@ import {
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
 import { OpenAIHttpError, postOpenAIStream } from "../utils/openai-http";
-import { operationDeadlineExceeded } from "../utils/operation-deadline";
+import { markOperationProgress, operationDeadlineExceeded } from "../utils/operation-deadline";
 import { notifyProviderResponse } from "../utils/provider-response";
 import {
 	adaptSchemaForStrict,
@@ -798,6 +798,9 @@ const streamOpenAIResponsesOnce = (
 					for await (const event of timedOpenaiStream) {
 						if (isOpenAIResponsesReplayUnsafeEvent(event)) {
 							sawReplayUnsafeOutput = true;
+							// Producing output re-bases the operation deadline,
+							// so the budget bounds silence, not work.
+							markOperationProgress(options);
 							if (!forwardAttemptLive) {
 								forwardAttemptEvents();
 								forwardAttemptLive = true;

@@ -27,7 +27,7 @@ import { shouldSendServiceTier } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
-import { operationDeadlineExceeded } from "../utils/operation-deadline";
+import { markOperationProgress, operationDeadlineExceeded } from "../utils/operation-deadline";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -1031,6 +1031,9 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 					retainTextSignature,
 					onFirstToken: () => {
 						firstTokenTime = performance.now();
+						// First output re-bases the operation deadline, so the
+						// budget bounds silence, not work.
+						markOperationProgress(options);
 					},
 				});
 

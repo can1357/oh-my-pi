@@ -74,7 +74,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
-import { operationDeadlineExceeded } from "../utils/operation-deadline";
+import { markOperationProgress, operationDeadlineExceeded } from "../utils/operation-deadline";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
@@ -2468,7 +2468,14 @@ const streamAnthropicOnce = (
 						? client.beta.messages.create({ ...params, stream: true }, requestOptions)
 						: client.messages.create({ ...params, stream: true }, requestOptions);
 				let streamedReplayUnsafeContent = false;
-
+				// Producing output re-bases the operation deadline, so the
+				// budget bounds time without progress rather than total
+				// duration. Every replay-unsafe content site below reports
+				// through here.
+				const noteReplayUnsafeContent = (): void => {
+					streamedReplayUnsafeContent = true;
+					markOperationProgress(options);
+				};
 				try {
 					let requestTimeout: NodeJS.Timeout | undefined;
 					if (requestTimeoutMs !== undefined) {
@@ -2674,7 +2681,7 @@ const streamAnthropicOnce = (
 								continue;
 							}
 							if (event.content_block.type === "text") {
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								const block: Block = {
 									type: "text",
 									text: "",
@@ -2689,7 +2696,7 @@ const streamAnthropicOnce = (
 									partial: output,
 								});
 							} else if (event.content_block.type === "thinking") {
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								const block: Block = {
 									type: "thinking",
 									thinking: event.content_block.thinking ?? "",
@@ -2713,7 +2720,7 @@ const streamAnthropicOnce = (
 									});
 								}
 							} else if (event.content_block.type === "redacted_thinking") {
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								const block: Block = {
 									type: "redactedThinking",
 									data: event.content_block.data,
@@ -2731,7 +2738,7 @@ const streamAnthropicOnce = (
 										? event.content_block.name !== "web_search"
 										: event.content_block.type !== "web_search_tool_result"))
 							) {
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								const block: Block = {
 									type: "anthropicServerTool",
 									block: { ...event.content_block },
@@ -2744,7 +2751,7 @@ const streamAnthropicOnce = (
 									kind: "anthropicServerTool",
 								});
 							} else if (event.content_block.type === "tool_use") {
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								const block: Block = {
 									type: "toolCall",
 									id: event.content_block.id,
@@ -2796,7 +2803,7 @@ const streamAnthropicOnce = (
 									reportAnthropicEnvelopeAnomaly(`received text_delta for ${openBlock.kind} block`);
 									continue;
 								}
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								block.text += event.delta.text;
 								stream.push({
 									type: "text_delta",
@@ -2809,7 +2816,7 @@ const streamAnthropicOnce = (
 									reportAnthropicEnvelopeAnomaly(`received thinking_delta for ${openBlock.kind} block`);
 									continue;
 								}
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								block.thinking += event.delta.thinking;
 								stream.push({
 									type: "thinking_delta",
@@ -2831,7 +2838,7 @@ const streamAnthropicOnce = (
 									reportAnthropicEnvelopeAnomaly(`received input_json_delta for ${openBlock.kind} block`);
 									continue;
 								}
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								block[kStreamingPartialJson] += event.delta.partial_json;
 								const throttled = parseStreamingJsonThrottled(
 									block[kStreamingPartialJson],
@@ -2852,7 +2859,7 @@ const streamAnthropicOnce = (
 									reportAnthropicEnvelopeAnomaly(`received signature_delta for ${openBlock.kind} block`);
 									continue;
 								}
-								streamedReplayUnsafeContent = true;
+								noteReplayUnsafeContent();
 								block.thinkingSignature = block.thinkingSignature || "";
 								block.thinkingSignature += event.delta.signature;
 							} else if (event.delta.type === "compaction_delta") {

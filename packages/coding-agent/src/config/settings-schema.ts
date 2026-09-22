@@ -5690,7 +5690,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Timeouts",
 			label: "Operation Budget",
 			description:
-				"Wall-clock budget for one provider request including every internal retry; a retry that would sleep past it fails immediately instead of waiting. Unlike the watchdogs above it never interrupts a stream that is producing output. 0 disables the budget",
+				"Wall-clock budget for one provider request including every internal retry; producing output extends it, so it bounds time without progress rather than total duration. A retry that would sleep past it fails immediately instead of waiting. 0 disables the budget; negative values are treated as 0",
 			options: [
 				{
 					value: "0",

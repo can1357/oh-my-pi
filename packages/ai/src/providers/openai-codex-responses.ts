@@ -65,7 +65,7 @@ import {
 	getOpenAIStreamIdleTimeoutMs,
 	iterateWithIdleTimeout,
 } from "../utils/idle-iterator";
-import { operationDeadlineExceeded } from "../utils/operation-deadline";
+import { markOperationProgress, operationDeadlineExceeded } from "../utils/operation-deadline";
 import { getProxyForUrl } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
@@ -1630,7 +1630,10 @@ async function openInitialCodexEventStream(
 					const websocketRetryDelayMs = CODEX_WEBSOCKET_RETRY_DELAY_MS * Math.max(1, websocketRetries);
 					// A caller abort wins over the budget, as in the in-class recoveries:
 					// an already-cancelled request must not read as a budget exhaustion.
-					if (requestSetup.requestSignal.aborted) throw new AIError.AbortError();
+					// Re-throw the abort reason itself rather than a fresh AbortError,
+					// so a timeout abort keeps its timeout classification (and a plain
+					// cancellation stays distinct from one).
+					if (requestSetup.requestSignal.aborted) throw requestSetup.requestSignal.reason;
 					const deadlineError = operationDeadlineExceeded(options, websocketRetryDelayMs);
 					if (deadlineError) throw deadlineError;
 					await scheduler.wait(websocketRetryDelayMs, {
@@ -2241,6 +2244,9 @@ class CodexStreamProcessor {
 			const delta = typeof rawEvent.delta === "string" ? rawEvent.delta : "";
 			if (entry?.item.type === "reasoning" && entry.block?.type === "thinking") {
 				entry.block.thinking += delta;
+				// Producing output re-bases the operation deadline, so the
+				// budget bounds silence, not work.
+				markOperationProgress(this.options);
 				stream.push({
 					type: "thinking_delta",
 					contentIndex: entry.contentIndex,
@@ -2277,6 +2283,9 @@ class CodexStreamProcessor {
 		if (eventType === "response.output_text.delta" || eventType === "response.refusal.delta") {
 			const entry = this.runtime.openItemForEvent(rawEvent);
 			if (entry?.item.type === "message" && entry.block?.type === "text") {
+				// Producing output re-bases the operation deadline, so the
+				// budget bounds silence, not work.
+				markOperationProgress(this.options);
 				appendMessageTextDelta(
 					entry.item,
 					entry.block,
@@ -2296,6 +2305,9 @@ class CodexStreamProcessor {
 				this.runtime.websocketState?.connection?.close("degenerate-tool-call");
 				throw new CodexWhitespaceToolCallLoopError(interruption.message);
 			}
+			// Argument deltas reach consumers as toolcall deltas: the attempt
+			// is producing output, so re-base the operation deadline.
+			markOperationProgress(this.options);
 			return firstTokenTime;
 		}
 
