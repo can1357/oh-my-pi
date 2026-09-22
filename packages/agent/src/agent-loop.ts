@@ -2,9 +2,11 @@
  * Agent loop that works with AgentMessage throughout.
  * Transforms to Message[] only at the LLM call boundary.
  */
+import { scheduler } from "node:timers/promises";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type AssistantMessageEventStream,
 	type ComputerAction,
 	type ComputerSafetyCheck,
 	type Context,
@@ -165,6 +167,221 @@ export function createToolScopedAbortReason(
 export const TERMINAL_TOOL_RESULT_ABORT_REASON = Symbol.for("pi-agent-core.terminal-tool-result");
 
 const STEERING_INTERRUPT_POLL_MS = 250;
+
+/**
+ * Abort reason threaded onto the provider request when queued steering cancels
+ * a model call that has produced no output yet. It never reaches an assistant
+ * message: the loop discards the empty request and re-issues it with the steer
+ * folded in, so this only labels the cancelled HTTP request for provider logs
+ * and telemetry. Deliberately distinct from the host's user-interrupt reason so
+ * an operator abort is never misclassified as steering, and vice versa.
+ */
+export const STEER_INTERRUPT_ABORT_REASON = "__omp.steer_interrupt__";
+
+/**
+ * Raised by `streamAssistantResponse` when queued steering cancelled a provider
+ * request before its first stream event. The loop body catches it, drains the
+ * queue and re-issues the model call; no aborted assistant boundary is emitted
+ * or persisted because the cancelled request produced no output, so there is no
+ * partial (and no thinking signature) that has to survive the replay. The
+ * provider may still charge for the prompt it had already accepted.
+ */
+class SteerInterruption extends Error {
+	constructor() {
+		super("Provider request cancelled by queued steering before any output");
+		this.name = "SteerInterruption";
+	}
+}
+
+/** Sentinel returned by the steering race in `streamAssistantResponse`. */
+const STEER_INTERRUPTED: unique symbol = Symbol("agent-loop-steer-interrupted");
+
+/** Shared empty set for aborted turns that never reached a `toolcall_end`. */
+const NO_COMPLETED_TOOL_CALLS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Non-consuming peek at the host's steering queue, normalized to a state object.
+ * Shared by the mid-batch tool watcher and the pre-first-event provider watcher
+ * so both read `boolean | SteeringQueueState` the same way.
+ */
+async function peekSteeringQueue(
+	hasSteeringMessages: NonNullable<AgentLoopConfig["hasSteeringMessages"]>,
+): Promise<{ queued: boolean; source?: SteeringInterruptSource; pending?: number }> {
+	const queuedState = await hasSteeringMessages();
+	if (typeof queuedState === "boolean") {
+		return { queued: queuedState, source: queuedState ? "user" : undefined };
+	}
+	const state: SteeringQueueState = queuedState;
+	return {
+		queued: state.queued,
+		source: state.source ?? (state.queued ? "unknown" : undefined),
+		pending: state.pending,
+	};
+}
+
+/**
+ * Occupancy of a queue that is non-empty but cannot count itself — a boolean
+ * host, or a {@link SteeringQueueState} without `pending`. Greater than every
+ * real count and equal to itself, so an uncountable queue that was already
+ * occupied when a watch armed can never look like it grew.
+ */
+const UNKNOWN_OCCUPANCY = Number.POSITIVE_INFINITY;
+
+/** Queue occupancy a steering peek reports, normalized for baseline compares. */
+function steeringOccupancy(peek: { queued: boolean; pending?: number }): number {
+	if (!peek.queued) return 0;
+	return peek.pending !== undefined && peek.pending > 0 ? peek.pending : UNKNOWN_OCCUPANCY;
+}
+
+/** Abortable `STEERING_INTERRUPT_POLL_MS` pause; returns early on teardown. */
+async function waitPollCadence(signal: AbortSignal): Promise<void> {
+	try {
+		await scheduler.wait(STEERING_INTERRUPT_POLL_MS, { signal });
+	} catch {
+		// Aborted teardown; the caller re-reads the signal.
+	}
+}
+
+interface SteeringWatch {
+	/** Resolves once queued steering was observed AND accepted by `onQueued`. */
+	readonly fired: Promise<void>;
+	/** Stops watching. Idempotent; MUST be called or the timer/wait leaks. */
+	stop: () => void;
+}
+
+/**
+ * Watch the host's steering queue without consuming it and call `onQueued` the
+ * first time its occupancy GROWS past what it held when the watch armed;
+ * `onQueued` returns false to decline, leaving the watch armed but unfired (the
+ * window it guards has already closed).
+ *
+ * Growth, not bare occupancy: a message the caller deliberately left queued
+ * (hosts inject one steer per turn) is already scheduled for the next injection
+ * boundary, so cancelling the work this watch guards would only discard a
+ * request the loop had just decided to make. Comparing counts rather than a
+ * "was it ever empty" bit keeps a steer typed *during* the guarded window
+ * firing even while that leftover is still parked — the leftover no longer
+ * blinds the watch for the rest of the request. A host that cannot count its
+ * queue ({@link SteeringQueueState.pending} omitted, or a bare boolean)
+ * degrades to the boolean edge: occupied at arm means this watch never fires
+ * and the leftover lands at the next boundary, exactly as before.
+ *
+ * Event-driven when the host provides `waitForSteeringMessages`, otherwise the
+ * same `STEERING_INTERRUPT_POLL_MS` timer the tool-batch watcher falls back to.
+ * Gated on `interruptMode` exactly like that watcher: "wait" means the user
+ * chose to never have steering cut anything short.
+ */
+function watchSteeringQueue(
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	onQueued: () => boolean,
+): SteeringWatch | undefined {
+	const { hasSteeringMessages } = config;
+	if (!hasSteeringMessages || (config.interruptMode ?? "immediate") === "wait") return undefined;
+	const watchController = new AbortController();
+	const watchSignal = signal ? AbortSignal.any([signal, watchController.signal]) : watchController.signal;
+	const { promise: fired, resolve: resolveFired } = Promise.withResolvers<void>();
+	// Same teardown guard the tool-batch watcher uses: a `waitForSteeringMessages`
+	// implementation that only settles on the next queue event would never resolve
+	// once the window closes, so every wait races this local abort promise.
+	const { promise: watchAborted, resolve: resolveWatchAbort } = Promise.withResolvers<void>();
+	if (watchSignal.aborted) {
+		resolveWatchAbort();
+	} else {
+		watchSignal.addEventListener("abort", () => resolveWatchAbort(), { once: true });
+	}
+	const watchAbortedFalse = watchAborted.then(() => false);
+	let settled = false;
+	// Occupancy when the watch armed; `undefined` until the first peek answers.
+	// That peek is issued synchronously below — a synchronous host reads its
+	// queue before the caller's next statement — so the baseline is the queue
+	// the guarded request was issued against, not a later one.
+	let baseline: number | undefined;
+	const check = async (): Promise<void> => {
+		if (settled || watchSignal.aborted) return;
+		let occupancy: number;
+		try {
+			occupancy = steeringOccupancy(await peekSteeringQueue(hasSteeringMessages));
+		} catch (error) {
+			// A failing peek must never take down the request it is watching.
+			logger.debug("Steering queue peek failed", { error });
+			return;
+		}
+		if (baseline === undefined) {
+			baseline = occupancy;
+			return;
+		}
+		// A queue observed below its baseline re-floors it (someone drained it),
+		// so the next arrival still reads as growth.
+		if (occupancy < baseline) baseline = occupancy;
+		if (occupancy <= baseline || settled || watchSignal.aborted || !onQueued()) return;
+		settled = true;
+		resolveFired();
+	};
+	let timer: Timer | undefined;
+	let watchLoop: Promise<void> | undefined;
+	if (config.waitForSteeringMessages) {
+		watchLoop = (async (): Promise<void> => {
+			while (!settled && !watchSignal.aborted) {
+				// Subscribe before checking queue state, closing the edge race where a
+				// steer arrives after the check but before listener registration.
+				const steeringQueued = config.waitForSteeringMessages?.(watchSignal).then(
+					() => true,
+					() => false,
+				);
+				await check();
+				if (settled || watchSignal.aborted) return;
+				if (!(await Promise.race([steeringQueued, watchAbortedFalse]))) return;
+				if (settled || watchSignal.aborted) return;
+				// Hosts resolve this waiter while the queue is merely non-empty, so a
+				// resolution is not proof of an arrival. Re-peek at once — that keeps a
+				// real arrival zero-latency — and, when nothing grew, wait out the poll
+				// cadence before resubscribing. Resubscribing straight onto an
+				// already-fulfilled waiter is a microtask spin that starves the very
+				// provider I/O this watch exists to let run.
+				await check();
+				if (settled || watchSignal.aborted) return;
+				await waitPollCadence(watchSignal);
+			}
+		})();
+	} else {
+		// Peek on arm so the baseline is the queue at issue time; a timer alone
+		// would only start counting at the first tick, making everything queued
+		// during that first cadence indistinguishable from a leftover.
+		void check();
+		timer = setInterval(() => void check(), STEERING_INTERRUPT_POLL_MS);
+	}
+	return {
+		fired,
+		stop: () => {
+			clearInterval(timer);
+			timer = undefined;
+			watchController.abort();
+			void watchLoop?.catch(() => undefined);
+		},
+	};
+}
+
+/**
+ * Close a provider stream the loop abandoned — steering cancelled the request
+ * before it produced anything, so the response (if the provider still hands one
+ * back) has no reader. Cancellation failures are irrelevant to a discarded
+ * request and must not escape into the re-issued call.
+ */
+function closeAbandonedStream(response: AssistantMessageEventStream): void {
+	try {
+		// Close the one iterator the loop would have consumed (a custom `streamFn`
+		// puts its cleanup in that generator's `finally`) AND settle the stream
+		// itself: `AssistantMessageEventStream` hands out a *fresh* generator per
+		// `[Symbol.asyncIterator]()`, so returning an unstarted one alone would
+		// leave the producer running with its waiters still parked.
+		const cleanup = response[Symbol.asyncIterator]().return?.();
+		if (cleanup) void Promise.resolve(cleanup).catch(() => {});
+		response.end();
+	} catch {
+		// Nothing to recover: the request is already cancelled and discarded.
+	}
+}
 
 class HarmonyLeakInterruption extends Error {
 	constructor(
@@ -1167,6 +1384,11 @@ async function runLoopBody(
 		let harmonyRetryAttempt = 0;
 		let harmonyTruncateResumeCount = 0;
 		let pausedTurnContinuations = 0;
+		// A host whose non-consuming peek disagrees with its dequeue (reports queued
+		// steering, then drains nothing) would otherwise interrupt the re-issued call
+		// forever. One empty drain disarms the pre-output interrupt for the next
+		// attempt; a drain that actually yields messages re-arms it.
+		let steerInterruptDrainedNothing = false;
 
 		// Soft tool requirement lifecycle (reminder then escalation; see SoftToolRequirement).
 		// The host-owned state survives only a gate stop between Agent.prompt calls.
@@ -1379,36 +1601,79 @@ async function runLoopBody(
 								)
 							);
 						},
+						!steerInterruptDrainedNothing,
 					);
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
+					steerInterruptDrainedNothing = false;
 				} catch (err) {
-					if (!(err instanceof HarmonyLeakInterruption)) throw err;
-					if (err.recovered) {
-						if (harmonyTruncateResumeCount >= 2) {
-							await emitHarmonyAudit(config, err, "escalated", harmonyRetryAttempt);
-							throw new Error(
-								`GPT-5 Harmony leak recurred after truncate-and-resume recovery (${signalListLabel(err.detection.signals)}).`,
+					if (err instanceof SteerInterruption) {
+						if (signal?.aborted) {
+							// Esc won the same window. Draining now would strand the user's
+							// queued message in a turn that is already dying, and re-issuing
+							// would only synthesize a second aborted assistant. Leave the
+							// queue for the next run and take the normal aborted-turn path
+							// (the request produced nothing, so there is no partial to keep).
+							message = emitAbortedAssistantMessage(
+								null,
+								false,
+								NO_COMPLETED_TOOL_CALLS,
+								currentContext,
+								config,
+								stream,
+								signal,
 							);
+							steerInterruptDrainedNothing = false;
+						} else {
+							// Queued steering cancelled a model call that had produced no
+							// output: nothing streamed and no assistant boundary was emitted or
+							// persisted — so there is nothing to pair, replay, or explain to
+							// the user. Fold the steer into this still-open turn and re-issue
+							// the call. Draining here empties the queue *before* the new
+							// request starts, so the message that caused this interrupt can
+							// never interrupt its own replacement.
+							const drained = (await config.getSteeringMessages?.(signal)) || [];
+							for (const steerMessage of drained) {
+								currentContext.messages.push(steerMessage);
+								newMessages.push(steerMessage);
+							}
+							emitInputMessages(stream, drained);
+							steerInterruptDrainedNothing = drained.length === 0;
+							// The turn is open with no assistant message in it, so the model
+							// call must be re-issued even when the drain came back empty (queue
+							// cancelled meanwhile) — otherwise the turn would end unanswered.
+							hasMoreToolCalls = true;
+							continue;
 						}
-						harmonyTruncateResumeCount++;
-						recovered = err.recovered;
-						message = recovered.message;
-						await emitHarmonyAudit(config, err, "truncate_resume", harmonyRetryAttempt);
-						// A recovered message completes the turn, so the abort-retry counter
-						// resets like the normal success path (the truncate-resume counter
-						// keeps accumulating for its cross-turn cap).
-						harmonyRetryAttempt = 0;
+					} else if (err instanceof HarmonyLeakInterruption) {
+						if (err.recovered) {
+							if (harmonyTruncateResumeCount >= 2) {
+								await emitHarmonyAudit(config, err, "escalated", harmonyRetryAttempt);
+								throw new Error(
+									`GPT-5 Harmony leak recurred after truncate-and-resume recovery (${signalListLabel(err.detection.signals)}).`,
+								);
+							}
+							harmonyTruncateResumeCount++;
+							recovered = err.recovered;
+							message = recovered.message;
+							await emitHarmonyAudit(config, err, "truncate_resume", harmonyRetryAttempt);
+							// A recovered message completes the turn, so the abort-retry counter
+							// resets like the normal success path (the truncate-resume counter
+							// keeps accumulating for its cross-turn cap).
+							harmonyRetryAttempt = 0;
+						} else {
+							if (harmonyRetryAttempt >= 2) {
+								await emitHarmonyAudit(config, err, "escalated", harmonyRetryAttempt);
+								throw new Error(
+									`GPT-5 Harmony leak persisted after ${harmonyRetryAttempt} retries (${signalListLabel(err.detection.signals)}).`,
+								);
+							}
+							await emitHarmonyAudit(config, err, "abort_retry", harmonyRetryAttempt);
+							harmonyRetryAttempt++;
+							continue;
+						}
 					} else {
-						if (harmonyRetryAttempt >= 2) {
-							await emitHarmonyAudit(config, err, "escalated", harmonyRetryAttempt);
-							throw new Error(
-								`GPT-5 Harmony leak persisted after ${harmonyRetryAttempt} retries (${signalListLabel(err.detection.signals)}).`,
-							);
-						}
-						await emitHarmonyAudit(config, err, "abort_retry", harmonyRetryAttempt);
-						harmonyRetryAttempt++;
-						continue;
+						throw err;
 					}
 				}
 				if (recovered) {
@@ -1775,6 +2040,8 @@ async function streamAssistantResponse(
 	forcedToolChoice?: ToolChoice,
 	prepared?: PreparedProviderCall,
 	canDispatchFinalToolCalls?: (message: AssistantMessage) => boolean,
+	/** False after a steer interrupt whose dequeue came back empty (see runLoopBody). */
+	allowSteerInterrupt = true,
 ): Promise<AssistantMessage> {
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
 	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
@@ -1803,6 +2070,20 @@ async function streamAssistantResponse(
 	const providerAbortSignals: AbortSignal[] = [];
 	if (requestSignal) providerAbortSignals.push(requestSignal);
 	if (promptToolAbortController) providerAbortSignals.push(promptToolAbortController.signal);
+	// Queued steering cancels a model call that has produced NOTHING yet — still
+	// waiting on the provider, or inside pi-ai's retry backoff, which is handed
+	// this same signal. Nothing streamed is nothing billed, so the loop can
+	// re-issue the call with the steer folded in instead of parking the user's
+	// message until the turn ends. Merged into the provider signal ONLY (like the
+	// prompt-tool controller above), so the loop's external-abort handling never
+	// sees it and a steer is never mistaken for a user interrupt.
+	// Gated here too (not just inside `watchSteeringQueue`) so a host without a
+	// steering queue pays no controller and no extra `AbortSignal.any` member.
+	const steerInterruptController =
+		allowSteerInterrupt && config.hasSteeringMessages && (config.interruptMode ?? "immediate") !== "wait"
+			? new AbortController()
+			: undefined;
+	if (steerInterruptController) providerAbortSignals.push(steerInterruptController.signal);
 	const finalRequestSignal =
 		providerAbortSignals.length === 0
 			? undefined
@@ -1867,19 +2148,71 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			let response = await streamFunction(model, llmContext, {
-				...config,
-				apiKey,
-				metadata: resolvedMetadata,
-				toolChoice: effectiveToolChoice,
-				reasoning: effectiveReasoning,
-				disableReasoning: effectiveDisableReasoning,
-				temperature: effectiveTemperature,
-				serviceTier: effectiveServiceTier,
-				cwd: effectiveCwd,
-				signal: finalRequestSignal,
-				onResponse: captureOnResponse,
-			});
+			// Open until the request produces its first stream event. The watcher only
+			// *reports* queued steering — it never aborts. The provider is cancelled
+			// below, and only once a race has actually been decided in the steer's
+			// favour: aborting from the callback would kill a request whose first
+			// event had already settled that race, truncating output the user is
+			// about to read.
+			let steerWindowOpen = true;
+			const steerWatch = steerInterruptController
+				? watchSteeringQueue(config, requestSignal, () => steerWindowOpen && !requestSignal?.aborted)
+				: undefined;
+			const steerRace = steerWatch?.fired.then((): typeof STEER_INTERRUPTED => STEER_INTERRUPTED);
+			/**
+			 * Cancel the provider request the steer just won the race against.
+			 *
+			 * Called ONLY from a branch that has already decided in the steer's
+			 * favour and throws {@link SteerInterruption} straight after, so the
+			 * rejection this abort provokes (pi-ai `fail()`s the stream and rejects
+			 * the in-flight waiter with the reason) is always abandoned, never
+			 * awaited — `STEER_INTERRUPT_ABORT_REASON` can therefore not surface as a
+			 * run error.
+			 */
+			const abortForSteer = (): void => {
+				steerWindowOpen = false;
+				steerWatch?.stop();
+				steerInterruptController?.abort(STEER_INTERRUPT_ABORT_REASON);
+			};
+			let response: AssistantMessageEventStream;
+			try {
+				const pendingResponse = Promise.resolve(
+					streamFunction(model, llmContext, {
+						...config,
+						apiKey,
+						metadata: resolvedMetadata,
+						toolChoice: effectiveToolChoice,
+						reasoning: effectiveReasoning,
+						disableReasoning: effectiveDisableReasoning,
+						temperature: effectiveTemperature,
+						serviceTier: effectiveServiceTier,
+						cwd: effectiveCwd,
+						signal: finalRequestSignal,
+						onResponse: captureOnResponse,
+					}),
+				);
+				if (steerRace) {
+					// The pre-stream wait is the whole point: a provider retrying with
+					// backoff emits no events, so racing only the iterator below would
+					// leave the steer parked for the entire backoff.
+					const raced = await Promise.race([pendingResponse.then(stream => ({ stream })), steerRace]);
+					if (raced === STEER_INTERRUPTED && !requestSignal?.aborted) {
+						abortForSteer();
+						// Close whatever the provider still hands back (or swallow its
+						// rejection) so no socket is left draining.
+						void pendingResponse.then(closeAbandonedStream, () => {});
+						throw new SteerInterruption();
+					}
+					// An external abort in the same window wins: fall through to the
+					// normal aborted-turn path, which classifies it as a user interrupt.
+					response = raced === STEER_INTERRUPTED ? await pendingResponse : raced.stream;
+				} else {
+					response = await pendingResponse;
+				}
+			} catch (error) {
+				steerWatch?.stop();
+				throw error;
+			}
 			if (promptToolWireTools && ownedDialect) {
 				// Re-materialize in-band tool-call text as native toolCall content blocks
 				// so the rest of the loop executes them unchanged. When the model starts
@@ -1958,6 +2291,7 @@ async function streamAssistantResponse(
 			let detachAbortListener: (() => void) | undefined;
 			if (requestSignal) {
 				if (requestSignal.aborted) {
+					steerWatch?.stop();
 					return await finishAbortedStream();
 				}
 				const { promise, resolve } = Promise.withResolvers<typeof ABORTED>();
@@ -1966,11 +2300,45 @@ async function streamAssistantResponse(
 				abortRacePromise = promise;
 				detachAbortListener = () => requestSignal.removeEventListener("abort", onAbort);
 			}
+			/** Discard a request that streamed nothing: no boundary, no partial, no
+			 *  replay. Returns the interruption for the caller to throw. */
+			const steerInterruptedStream = (): SteerInterruption => {
+				abortForSteer();
+				try {
+					const cleanup = responseIterator.return?.();
+					if (cleanup) void cleanup.catch(() => {});
+				} catch {
+					// Provider cancellation failures cannot change the discarded request.
+				}
+				return new SteerInterruption();
+			};
 
 			try {
 				while (true) {
 					let next: IteratorResult<AssistantMessageEvent>;
-					if (abortRacePromise) {
+					// Three-way race only while the steer window is open — i.e. for the
+					// first event alone, so steady-state streaming keeps the original
+					// two-promise (or bare) path and its per-event allocation profile.
+					if (steerRace && steerWindowOpen) {
+						// The waiter this race abandons is rejected moments later by the
+						// cancel below (pi-ai `fail()`s the stream with the abort reason).
+						// `Promise.race` keeps its own handler attached to every input for
+						// good, and `steerInterruptedStream` drains this very iterator via
+						// `return()`, so that rejection can never go unhandled.
+						const result = await Promise.race(
+							abortRacePromise
+								? [responseIterator.next(), abortRacePromise, steerRace]
+								: [responseIterator.next(), steerRace],
+						);
+						if (result === ABORTED || (result === STEER_INTERRUPTED && requestSignal?.aborted)) {
+							// An external abort in the same window always wins: the user's
+							// interrupt must never be reclassified as steering.
+							steerWatch?.stop();
+							return await finishAbortedStream();
+						}
+						if (result === STEER_INTERRUPTED) throw steerInterruptedStream();
+						next = result;
+					} else if (abortRacePromise) {
 						const result = await Promise.race([responseIterator.next(), abortRacePromise]);
 						if (result === ABORTED) {
 							return await finishAbortedStream();
@@ -1978,6 +2346,12 @@ async function streamAssistantResponse(
 						next = result;
 					} else {
 						next = await responseIterator.next();
+					}
+					// The provider answered: from here on a queued steer waits for the
+					// turn boundary rather than throwing away output the user is reading.
+					if (steerWindowOpen) {
+						steerWindowOpen = false;
+						steerWatch?.stop();
 					}
 					if (next.done) {
 						providerStreamSettled = true;
@@ -2268,6 +2642,7 @@ async function streamAssistantResponse(
 				}
 			} finally {
 				detachAbortListener?.();
+				steerWatch?.stop();
 				cancelArgStreams();
 				if (!providerStreamSettled) {
 					await speculationCoordinator?.discardAll("provider stream failed", "aborted");
@@ -2956,19 +3331,9 @@ async function executeToolCalls(
 		// Mid-batch steering detection must be non-consuming. If a direct
 		// integration only provides getSteeringMessages(), the queue drains at the
 		// injection boundary below; polling it here would strand or drop messages.
-		let steeringQueued = false;
-		let steeringSource: SteeringInterruptSource | undefined;
-		if (hasSteeringMessages) {
-			const queuedState = await hasSteeringMessages();
-			if (typeof queuedState === "boolean") {
-				steeringQueued = queuedState;
-				steeringSource = queuedState ? "user" : undefined;
-			} else {
-				const state: SteeringQueueState = queuedState;
-				steeringQueued = state.queued;
-				steeringSource = state.source ?? (state.queued ? "unknown" : undefined);
-			}
-		}
+		const { queued: steeringQueued, source: steeringSource } = hasSteeringMessages
+			? await peekSteeringQueue(hasSteeringMessages)
+			: { queued: false, source: undefined as SteeringInterruptSource | undefined };
 		if (steeringQueued) {
 			// Queued steering hard-aborts only interruptible waits and raises the
 			// cooperative soft signal for everything else: the boundary dequeue

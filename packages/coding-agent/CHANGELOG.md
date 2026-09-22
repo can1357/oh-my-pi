@@ -6,6 +6,10 @@
 
 - `find` (and `omp find`) accepts an `omp://` docs scope: `omp://` searches every embedded harness doc and `omp://<file>.md` searches one, reporting hits as canonical `omp://` URLs that `read` opens directly, including with `:start-end` selectors ([#12758](https://github.com/can1357/oh-my-pi/pull/12758) by [@H4vC](https://github.com/H4vC)).
 
+### Fixed
+
+- A message typed while the agent is streaming now gets an explicit "Queued — will apply after the current response" status instead of only a pending-bar repaint, so typed input is never silently swallowed. When the model call it lands on has produced no output yet, the loop cancels that call and applies the steer immediately; `interruptMode` (Settings → Interaction → Interrupt Mode) now governs that cancellation as well as tool execution.
+
 ## [18.2.8] - 2026-09-21
 
 ### Added

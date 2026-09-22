@@ -7305,6 +7305,16 @@ export class AgentSession {
 				attribution,
 				timestamp: timestamp ?? Date.now(),
 			});
+			// Typed input that lands mid-run is otherwise acknowledged only by the
+			// pending bar repainting, which reads as "swallowed" on a long turn.
+			// Same feedback the compaction queue gives (`queueCompactionMessage`),
+			// emitted from the session so every front-end (TUI, RPC, collab) shows
+			// it. Unconditional by design: when the agent loop can still cancel a
+			// model call that has streamed nothing, the steer simply applies sooner
+			// than the notice promises.
+			if (this.isStreaming && attribution === "user") {
+				this.emitNotice("info", "Queued — will apply after the current response");
+			}
 		}
 		this.#scheduleIdleQueueDrain();
 	}

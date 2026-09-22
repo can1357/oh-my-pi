@@ -16,6 +16,7 @@ import type {
 	AgentTool,
 	AgentToolContext,
 	SpeculativePhysicalOutcome,
+	StreamFn,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
 import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, SPECULATIVE_STREAM_SESSION } from "@oh-my-pi/pi-agent-core/types";
@@ -3543,6 +3544,7 @@ describe("agentLoop event-driven steering watch", () => {
 		const secondIrcCheck = Promise.withResolvers<void>();
 		let steeringChecks = 0;
 		let ircChecks = 0;
+		let steeringChecksAtFirstIrc: number | undefined;
 		let steeringChecksAtIrcTimer: number | undefined;
 		const toolSchema = type({ value: "string" });
 		const tool: AgentTool<typeof toolSchema> = {
@@ -3574,6 +3576,7 @@ describe("agentLoop event-driven steering watch", () => {
 			waitForSteeringMessages: () => Promise.withResolvers<void>().promise,
 			hasIrcInterrupts: () => {
 				ircChecks++;
+				if (ircChecks === 1) steeringChecksAtFirstIrc = steeringChecks;
 				if (ircChecks === 2) {
 					steeringChecksAtIrcTimer = steeringChecks;
 					secondIrcCheck.resolve();
@@ -3588,7 +3591,11 @@ describe("agentLoop event-driven steering watch", () => {
 			// drain
 		}
 
-		expect(steeringChecksAtIrcTimer).toBe(1);
+		// The timer ticks for IRC only: no steering peek is added between ticks.
+		// (Absolute counts also include the pre-first-event peek each model call's
+		// provider wait performs, which is not what this test governs.)
+		expect(steeringChecksAtFirstIrc).toBeDefined();
+		expect(steeringChecksAtIrcTimer).toBe(steeringChecksAtFirstIrc!);
 		expect(ircChecks).toBeGreaterThanOrEqual(2);
 	});
 
@@ -3690,7 +3697,738 @@ describe("agentLoop event-driven steering watch", () => {
 			// drain
 		}
 
-		expect(waitCalls).toBe(1);
+		// Exactly one subscription per watch — the provider wait before each of the
+		// two model calls, plus the tool batch — and a rejection ends that watch
+		// instead of resubscribing in a loop.
+		expect(waitCalls).toBe(3);
+	});
+});
+
+describe("agentLoop steering during the provider wait", () => {
+	/**
+	 * Queue shaped like AgentSession's: non-consuming peek, wake, consuming drain.
+	 *
+	 * `oneAtATime` mirrors Agent's one-steer-per-boundary mode — the only way a
+	 * message survives a drain and is therefore still queued when the next
+	 * request arms its steering watch.
+	 */
+	function createSteeringQueue(oneAtATime = false) {
+		const queued: AgentMessage[] = [];
+		let wake: (() => void) | undefined;
+		let peeks = 0;
+		return {
+			get size(): number {
+				return queued.length;
+			},
+			/** Non-consuming peeks the loop has made, across every watch it armed. */
+			get peeks(): number {
+				return peeks;
+			},
+			push(text: string): void {
+				queued.push(createUserMessage(text));
+				wake?.();
+				wake = undefined;
+			},
+			config: {
+				hasSteeringMessages: () => {
+					peeks += 1;
+					return { queued: queued.length > 0, source: "user" as const, pending: queued.length };
+				},
+				// Mirrors Agent: a waiter resolves immediately while ANY message is
+				// queued, so a resolution is not proof that something arrived.
+				waitForSteeringMessages: (signal?: AbortSignal) => {
+					if (queued.length > 0 || signal?.aborted) return Promise.resolve();
+					const waiter = Promise.withResolvers<void>();
+					wake = waiter.resolve;
+					signal?.addEventListener("abort", () => waiter.resolve(), { once: true });
+					return waiter.promise;
+				},
+				getSteeringMessages: async () => queued.splice(0, oneAtATime ? 1 : queued.length),
+			} satisfies Pick<AgentLoopConfig, "hasSteeringMessages" | "waitForSteeringMessages" | "getSteeringMessages">,
+		};
+	}
+
+	function pushAnswer(stream: AssistantMessageEventStream, text: string): void {
+		const partial = createAssistantMessage([{ type: "text", text }], "stop");
+		stream.push({ type: "start", partial });
+		stream.push({ type: "done", reason: "stop", message: partial });
+	}
+
+	/** One macrotask boundary: every microtask an armed steering watcher would
+	 *  use (wake -> peek -> abort) has run by the time this resolves. No wall
+	 *  clock is involved, so the gap cannot flake under load. */
+	function drainWatcherTurn(): Promise<void> {
+		return new Promise<void>(resolve => setImmediate(resolve));
+	}
+
+	/** Text of every assistant turn the run committed, in order. */
+	function assistantTexts(events: AgentEvent[]): string[] {
+		return events.flatMap(event =>
+			event.type === "message_end" && event.message.role === "assistant"
+				? [
+						event.message.content
+							.filter(
+								(block): block is Extract<AssistantMessage["content"][number], { type: "text" }> =>
+									block.type === "text",
+							)
+							.map(block => block.text)
+							.join(""),
+					]
+				: [],
+		);
+	}
+
+	it("cancels a request that streamed nothing and re-issues it with the steer", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				// The provider is still thinking (or retrying): no event will ever
+				// arrive unless the request is cancelled.
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				queueMicrotask(() => queue.push("actually, do X instead"));
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer with steer"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+			events.push(event);
+		}
+
+		expect(firstRequestAborted).toBe(true);
+		expect(contexts.length).toBe(2);
+		// The steer is in context for the re-issued call, and the queue is empty
+		// before that call starts, so it cannot interrupt its own replacement.
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(true);
+		expect(queue.size).toBe(0);
+		// No aborted boundary: nothing streamed, so nothing is persisted or shown.
+		expect(assistantTexts(events)).toEqual(["answer with steer"]);
+		expect(
+			events.some(
+				e => e.type === "message_end" && e.message.role === "assistant" && e.message.stopReason === "aborted",
+			),
+		).toBe(false);
+		// The steer is announced inside the still-open turn, before the retry.
+		const userTexts = events.flatMap(e =>
+			e.type === "message_start" && e.message.role === "user" && typeof e.message.content === "string"
+				? [e.message.content]
+				: [],
+		);
+		expect(userTexts).toEqual(["start", "actually, do X instead"]);
+	});
+
+	it("never interrupts a request that already streamed an event", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				const partial = createAssistantMessage([{ type: "text", text: "streamed answer" }], "stop");
+				queueMicrotask(async () => {
+					// First event: the interrupt window closes here.
+					stream.push({ type: "start", partial });
+					await drainWatcherTurn();
+					// Steering that arrives now must never discard the streamed turn.
+					queue.push("late steer");
+					await drainWatcherTurn();
+					stream.push({ type: "done", reason: "stop", message: partial });
+				});
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer after boundary"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+			events.push(event);
+		}
+
+		expect(firstRequestAborted).toBe(false);
+		// The streamed turn is kept and the steer lands at the turn boundary.
+		expect(assistantTexts(events)).toEqual(["streamed answer", "answer after boundary"]);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "late steer")).toBe(true);
+		expect(
+			events.some(
+				e => e.type === "message_end" && e.message.role === "assistant" && e.message.stopReason === "aborted",
+			),
+		).toBe(false);
+	});
+
+	it("keeps an external abort in the same window a user abort and leaves the queue intact", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const abortController = new AbortController();
+		const contexts: Context[] = [];
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			// Esc lands first; the message the user had already typed must survive
+			// for the next run instead of being drained into a dying one.
+			options?.signal?.addEventListener("abort", () => queue.push("typed before Esc"), { once: true });
+			queueMicrotask(() => abortController.abort("Interrupted by user"));
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop(
+			[createUserMessage("start")],
+			context,
+			config,
+			abortController.signal,
+			streamFn,
+		)) {
+			events.push(event);
+		}
+
+		expect(contexts.length).toBe(1);
+		const assistantEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "message_end" }> =>
+				e.type === "message_end" && e.message.role === "assistant",
+		);
+		expect(assistantEnd?.message.role).toBe("assistant");
+		if (assistantEnd?.message.role !== "assistant") return;
+		expect(assistantEnd.message.stopReason).toBe("aborted");
+		expect(assistantEnd.message.errorMessage).toBe("Interrupted by user");
+		expect(queue.size).toBe(1);
+	});
+
+	it("parks the steer for the turn boundary when interruptMode is wait", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				queueMicrotask(async () => {
+					// Queued while the provider has streamed nothing — exactly the window
+					// "immediate" would cancel; "wait" must let the request finish.
+					queue.push("steer while waiting");
+					await drainWatcherTurn();
+					pushAnswer(stream, "slow answer");
+				});
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer after boundary"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "wait",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+			events.push(event);
+		}
+
+		expect(firstRequestAborted).toBe(false);
+		expect(assistantTexts(events)).toEqual(["slow answer", "answer after boundary"]);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "steer while waiting")).toBe(true);
+	});
+
+	it("keeps a request whose first event settled the race in the same tick as the steer", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		const partial = createAssistantMessage([{ type: "text", text: "streamed answer" }], "stop");
+		let firstRequestAborted = false;
+		let firstStream: AssistantMessageEventStream | undefined;
+		let peeks = 0;
+		let wake: (() => void) | undefined;
+		const queued: AgentMessage[] = [];
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			// The steer becomes visible in the very tick the provider delivers its
+			// first event: the peek that reports it also pushes `start`, so the
+			// first-event race settles before the watcher can be believed. The loop
+			// must let that turn finish — the cancellation is only legal for a
+			// request that produced nothing.
+			hasSteeringMessages: () => {
+				peeks += 1;
+				if (peeks === 1) return { queued: false, source: "user" as const };
+				if (firstStream) {
+					queued.push(createUserMessage("same-tick steer"));
+					firstStream.push({ type: "start", partial });
+					firstStream = undefined;
+				}
+				return { queued: queued.length > 0, source: "user" as const };
+			},
+			waitForSteeringMessages: (signal?: AbortSignal) => {
+				if (queued.length > 0 || signal?.aborted) return Promise.resolve();
+				const waiter = Promise.withResolvers<void>();
+				wake = waiter.resolve;
+				signal?.addEventListener("abort", () => waiter.resolve(), { once: true });
+				return waiter.promise;
+			},
+			getSteeringMessages: async () => queued.splice(0, queued.length),
+		};
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				firstStream = stream;
+				queueMicrotask(() => {
+					// Wake the watcher while the loop is parked on the first event.
+					wake?.();
+					wake = undefined;
+				});
+				queueMicrotask(async () => {
+					await drainWatcherTurn();
+					stream.push({ type: "done", reason: "stop", message: partial });
+				});
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer after boundary"));
+			}
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+			events.push(event);
+		}
+
+		expect(firstRequestAborted).toBe(false);
+		expect(assistantTexts(events)).toEqual(["streamed answer", "answer after boundary"]);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "same-tick steer")).toBe(true);
+	});
+
+	it("folds a provider stream that fails with the steer abort reason into the steer path", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			unhandled.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				// A real provider stream rejects its in-flight waiter (and its
+				// result()) with the abort reason — the loop must read that as its own
+				// cancellation, not as a `__omp.steer_interrupt__` run failure.
+				options?.signal?.addEventListener("abort", () => stream.fail(options.signal?.reason), { once: true });
+				queueMicrotask(() => queue.push("actually, do X instead"));
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer with steer"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		try {
+			for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+				events.push(event);
+			}
+			// Let a rejection abandoned by the decided race surface as unhandled.
+			await drainWatcherTurn();
+			await drainWatcherTurn();
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+
+		expect(contexts.length).toBe(2);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(true);
+		expect(assistantTexts(events)).toEqual(["answer with steer"]);
+		expect(unhandled).toEqual([]);
+	});
+
+	it("takes the aborted-turn path when the user aborts before the steer is drained", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const abortController = new AbortController();
+		const contexts: Context[] = [];
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			// Esc lands in the gap between the cancellation and the drain: the queued
+			// message must stay queued for the next run instead of being injected
+			// into a turn that is already dying.
+			options?.signal?.addEventListener("abort", () => abortController.abort("Interrupted by user"), {
+				once: true,
+			});
+			queueMicrotask(() => queue.push("typed before Esc"));
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop(
+			[createUserMessage("start")],
+			context,
+			config,
+			abortController.signal,
+			streamFn,
+		)) {
+			events.push(event);
+		}
+
+		// No re-issue: the turn aborted instead of folding the steer in.
+		expect(contexts.length).toBe(1);
+		expect(queue.size).toBe(1);
+		const assistantEnd = events.find(
+			(e): e is Extract<AgentEvent, { type: "message_end" }> =>
+				e.type === "message_end" && e.message.role === "assistant",
+		);
+		expect(assistantEnd?.message.role).toBe("assistant");
+		if (assistantEnd?.message.role !== "assistant") return;
+		expect(assistantEnd.message.stopReason).toBe("aborted");
+		expect(assistantEnd.message.errorMessage).toBe("Interrupted by user");
+		expect(assistantTexts(events)).toEqual([""]);
+	});
+
+	it("closes a stream handed back by a provider that ignored the cancellation", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+
+		/** Counts the iterator the loop abandons; a fresh generator per call is
+		 *  exactly why `return()` alone cannot settle the stream. */
+		class TrackedStream extends AssistantMessageEventStream {
+			iteratorsReturned = 0;
+			override [Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+				const inner = super[Symbol.asyncIterator]();
+				return {
+					next: () => inner.next(),
+					return: async (value?: never) => {
+						this.iteratorsReturned += 1;
+						return (await inner.return?.(value)) ?? { value: undefined, done: true };
+					},
+				};
+			}
+		}
+
+		const leaked = new TrackedStream();
+		const handBack = Promise.withResolvers<AssistantMessageEventStream>();
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			if (contexts.length > 1) {
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => pushAnswer(stream, "answer with steer"));
+				return stream;
+			}
+			// Ignores the cancellation: hands a live stream back *after* the steer
+			// already won, so only the loop can close it.
+			options?.signal?.addEventListener("abort", () => handBack.resolve(leaked), { once: true });
+			queueMicrotask(() => queue.push("actually, do X instead"));
+			return handBack.promise;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+			events.push(event);
+		}
+
+		expect(contexts.length).toBe(2);
+		expect(assistantTexts(events)).toEqual(["answer with steer"]);
+		expect(leaked.iteratorsReturned).toBe(1);
+		// The producer itself is settled, not just an unstarted generator.
+		expect(leaked.done).toBe(true);
+	});
+
+	it("keeps a request whose steer was already queued when it was issued, without spinning the watch", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue(true);
+		// Two messages typed before the run; this host injects one per boundary, so
+		// the second is still parked when the first request is issued. It is already
+		// scheduled for the next boundary — cancelling this request for it would
+		// only discard work the loop had just decided to do.
+		queue.push("delivered with the prompt");
+		queue.push("left over from the last turn");
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+		let firstStream: AssistantMessageEventStream | undefined;
+		const firstCallIssued = Promise.withResolvers<void>();
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				// Stays silent until the assertions below release it.
+				firstStream = stream;
+				firstCallIssued.resolve();
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer after boundary"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		const run = (async () => {
+			for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+				events.push(event);
+			}
+		})();
+
+		// The watch is armed before the request is issued, so a spinning watcher
+		// never lets this resolve.
+		await firstCallIssued.promise;
+		// Macrotask turns with the provider still silent. A watcher that
+		// resubscribed to its already-fulfilled waiter (the host resolves it while
+		// the queue is merely occupied) would starve them, or burn a peek per
+		// microtask until it did.
+		for (let turn = 0; turn < 5; turn++) await drainWatcherTurn();
+		expect(firstRequestAborted).toBe(false);
+		// Bounded by the poll cadence, not by how long the provider thinks.
+		expect(queue.peeks).toBeLessThan(10);
+		expect(queue.size).toBe(1);
+
+		pushAnswer(firstStream!, "answer without the steer");
+		await run;
+
+		expect(firstRequestAborted).toBe(false);
+		expect(contexts.length).toBe(2);
+		expect(contexts[0]?.messages.some(m => m.role === "user" && m.content === "delivered with the prompt")).toBe(
+			true,
+		);
+		// The leftover lands at the turn boundary, exactly as it would have anyway.
+		expect(assistantTexts(events)).toEqual(["answer without the steer", "answer after boundary"]);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "left over from the last turn")).toBe(
+			true,
+		);
+	});
+
+	it("cancels the request for a steer that arrives while a leftover is still queued", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue(true);
+		queue.push("delivered with the prompt");
+		queue.push("left over from the last turn");
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+		// Real timers: the behaviour under test IS the loop's own wall-clock poll
+		// cadence (STEERING_INTERRUPT_POLL_MS), which no fake clock drives here.
+		let fallback: Timer | undefined;
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				// The user types a correction while the provider is still thinking and
+				// the earlier message is still parked. Occupancy alone cannot tell the
+				// two apart; the count can.
+				queueMicrotask(() => queue.push("actually, do X instead"));
+				// Deadline, not a guessed wait: a watcher that never fires must fail
+				// the assertions below instead of hanging the suite.
+				fallback = setTimeout(() => pushAnswer(stream, "uninterrupted answer"), 1500);
+			} else {
+				const text = contexts.length === 2 ? "answer with the leftover" : "answer with the correction";
+				queueMicrotask(() => pushAnswer(stream, text));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...queue.config,
+		};
+
+		const events: AgentEvent[] = [];
+		try {
+			for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+				events.push(event);
+			}
+		} finally {
+			clearTimeout(fallback);
+		}
+
+		expect(firstRequestAborted).toBe(true);
+		// Delivery stays the host's business: this one hands over a single steer per
+		// boundary, so the cancelled request is re-issued with the leftover and the
+		// correction rides the turn after it.
+		expect(contexts.length).toBe(3);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "left over from the last turn")).toBe(
+			true,
+		);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(false);
+		expect(contexts[2]?.messages.some(m => m.role === "user" && m.content === "actually, do X instead")).toBe(true);
+		expect(assistantTexts(events)).toEqual(["answer with the leftover", "answer with the correction"]);
+		expect(queue.size).toBe(0);
+	});
+
+	it("cancels within one poll cadence for a host with no steering wake-up", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const queue = createSteeringQueue();
+		const mock = createMockModel();
+		const contexts: Context[] = [];
+		let firstRequestAborted = false;
+		// Real timers for the same reason as the test above: the poll cadence is
+		// the mechanism under test.
+		let fallback: Timer | undefined;
+		// Poll-only: the loop has to notice the arrival on a timer tick, and the
+		// tick can only tell an arrival from a leftover if the watch recorded the
+		// queue when it armed.
+		const { waitForSteeringMessages: _unused, ...pollOnly } = queue.config;
+
+		const streamFn: StreamFn = (_model, llmContext, options) => {
+			contexts.push(llmContext);
+			const stream = new AssistantMessageEventStream();
+			if (contexts.length === 1) {
+				options?.signal?.addEventListener(
+					"abort",
+					() => {
+						firstRequestAborted = true;
+					},
+					{ once: true },
+				);
+				queueMicrotask(() => queue.push("steer before the first tick"));
+				// Deadline only; the interrupt must land a cadence before it.
+				fallback = setTimeout(() => pushAnswer(stream, "uninterrupted answer"), 1500);
+			} else {
+				queueMicrotask(() => pushAnswer(stream, "answer with steer"));
+			}
+			return stream;
+		};
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			...pollOnly,
+		};
+
+		const events: AgentEvent[] = [];
+		try {
+			for await (const event of agentLoop([createUserMessage("start")], context, config, undefined, streamFn)) {
+				events.push(event);
+			}
+		} finally {
+			clearTimeout(fallback);
+		}
+
+		expect(firstRequestAborted).toBe(true);
+		expect(contexts.length).toBe(2);
+		expect(assistantTexts(events)).toEqual(["answer with steer"]);
+		expect(contexts[1]?.messages.some(m => m.role === "user" && m.content === "steer before the first tick")).toBe(
+			true,
+		);
 	});
 });
 
