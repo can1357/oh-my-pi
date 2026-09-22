@@ -1,14 +1,17 @@
-import { afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { AuthStorage } from "../src/session/auth-storage";
 import { ModelRegistry } from "../src/config/model-registry";
+import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { Settings } from "../src/config/settings";
 import { loadExtensions } from "../src/extensibility/extensions/loader";
 import { ExtensionRunner } from "../src/extensibility/extensions/runner";
 import { SessionManager } from "../src/session/session-manager";
 import { EventBus } from "../src/utils/event-bus";
+import { setAgentDir } from "@oh-my-pi/pi-utils";
+import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 /**
  * `/reload-plugins` re-imports extension modules (issue: extension edits
@@ -28,6 +31,9 @@ function extensionDir(): string {
 }
 
 afterEach(() => {
+	authStorage?.close();
+	authStorage = undefined;
+	restoreSettingsTestState(settingsState);
 	while (tempDirs.length > 0) {
 		const dir = tempDirs.pop();
 		if (dir) rmSync(dir, { recursive: true, force: true });
@@ -45,6 +51,29 @@ function extensionSource(marker: string): string {
 `;
 }
 
+function toolExtensionSource(marker: string): string {
+	return `export default function ext(pi) {
+	const { Type } = pi.typebox;
+	pi.registerTool({
+		name: "reload_probe",
+		label: ${JSON.stringify(marker)} + "-initial",
+		description: "Reload probe",
+		parameters: Type.Object({}),
+		async execute() { return { content: [{ type: "text", text: ${JSON.stringify(marker)} }], details: {} }; },
+	});
+	pi.on("session_start", () => {
+		pi.registerTool({
+			name: "reload_probe_late",
+			label: ${JSON.stringify(marker)} + "-late",
+			description: "Late reload probe",
+			parameters: Type.Object({}),
+			async execute() { return { content: [{ type: "text", text: ${JSON.stringify(marker)} }], details: {} }; },
+		});
+	});
+}
+`;
+}
+
 function markers(): string[] {
 	return (globalThis as { __ompReloadMarkers?: string[] }).__ompReloadMarkers ?? [];
 }
@@ -54,13 +83,16 @@ function resetMarkers(): void {
 }
 
 let modelRegistry: ModelRegistry;
+let authStorage: AuthStorage | undefined;
+let settingsState: SettingsTestState;
 
-beforeAll(async () => {
+beforeEach(async () => {
+	settingsState = beginSettingsTest();
 	const home = extensionDir();
-	process.env.HOME = home;
+	setAgentDir(home);
 	await Settings.init({ inMemory: true, cwd: home });
-	Settings.instance.set("startup.quiet", true);
-	const authStorage = await AuthStorage.create(path.join(home, "testauth.db"));
+	cfgStartupQuiet.set(Settings.instance, true);
+	authStorage = await AuthStorage.create(path.join(home, "testauth.db"));
 	modelRegistry = new ModelRegistry(authStorage, path.join(home, "models.yml"));
 });
 
@@ -69,13 +101,7 @@ async function makeRunner(file: string) {
 	const events = new EventBus();
 	const loaded = await loadExtensions([file], cwd, events);
 	expect(loaded.errors).toEqual([]);
-	const runner = new ExtensionRunner(
-		loaded.extensions,
-		loaded.runtime,
-		cwd,
-		SessionManager.inMemory(),
-		modelRegistry,
-	);
+	const runner = new ExtensionRunner(loaded.extensions, loaded.runtime, cwd, SessionManager.inMemory(), modelRegistry);
 	runner.setExtensionReloader(() => loadExtensions([file], cwd, events));
 	return runner;
 }
@@ -157,35 +183,54 @@ describe("extension hot reload", () => {
 		expect(markers()).toEqual(["good"]);
 	});
 
-	test("timers from the previous load do not survive the swap", async () => {
-		resetMarkers();
+	test("reload refreshes initial and lifecycle-registered tools", async () => {
 		const dir = extensionDir();
-		const file = path.join(dir, "timer-extension.ts");
-
-		// A polling extension: the exact shape that doubles up if the previous
-		// instance's interval keeps firing alongside its replacement. Asserted
-		// on the timer registry rather than by watching for stale ticks, since
-		// "no longer running" cannot be observed by waiting without racing.
-		writeFileSync(
-			file,
-			`export default function ext(pi) {
-	pi.on("session_start", async (_event, ctx) => {
-		ctx.setInterval(() => {}, 1000);
-	});
-}
-`,
-		);
+		const file = path.join(dir, "tool-extension.ts");
+		writeFileSync(file, toolExtensionSource("v1"));
 		const runner = await makeRunner(file);
-		await runner.emit({ type: "session_start" });
-		expect(runner.managedTimerCount).toBe(1);
+		const labels: string[] = [];
+		const unsubscribe = runner.onToolRegistered(tool => {
+			labels.push(tool.definition.label);
+		});
 
+		writeFileSync(file, toolExtensionSource("v2"));
 		await runner.reloadExtensions();
 
-		// Exactly one: the previous instance's interval was cleared and the new
-		// instance registered its own. Two would mean both copies are polling.
-		expect(runner.managedTimerCount).toBe(1);
+		expect(labels).toEqual(["v2-initial", "v2-late"]);
+		unsubscribe();
+	});
 
-		runner.clearManagedTimers();
-		expect(runner.managedTimerCount).toBe(0);
+	test("reload stops old interval callbacks while the replacement keeps ticking", async () => {
+		resetMarkers();
+		const file = path.join(extensionDir(), "timer-extension.ts");
+		writeFileSync(
+			file,
+			`export default pi => {
+	pi.on("session_start", (_event, ctx) => {
+		ctx.setInterval(() => globalThis.__ompReloadMarkers.push("v1"), 1000);
+	});
+};`,
+		);
+		const runner = await makeRunner(file);
+		vi.useFakeTimers();
+		try {
+			await runner.emit({ type: "session_start" });
+			vi.advanceTimersByTime(1000);
+			expect(markers()).toEqual(["v1"]);
+			writeFileSync(
+				file,
+				`export default pi => {
+	pi.on("session_start", (_event, ctx) => {
+		ctx.setInterval(() => globalThis.__ompReloadMarkers.push("v2"), 1000);
+	});
+};`,
+			);
+			await runner.reloadExtensions();
+			vi.advanceTimersByTime(1000);
+			expect(markers()).toEqual(["v1", "v2"]);
+		} finally {
+			runner.clearManagedTimers();
+			vi.useRealTimers();
+		}
 	});
 });
