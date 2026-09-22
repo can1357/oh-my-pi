@@ -43,9 +43,12 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractHttpStatusFromError, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import {
+	ADVISOR_DEFAULT_MAX_CHECK_IN_TURNS,
+	ADVISOR_DEFAULT_MAX_TOOL_CALLS_PER_REVIEW,
 	ADVISOR_DEFAULT_TOOL_NAMES,
 	ADVISOR_DEFAULT_BUDGET_PER_UPDATE,
 	ADVISOR_MAX_BUDGET_PER_UPDATE,
+	AdvisorCheckInTool,
 	AdviseTool,
 	type AdvisorAgent,
 	AdvisorEmissionGuard,
@@ -59,12 +62,16 @@ import {
 	AdvisorTranscriptRecorder,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
+	consumeAdvisorToolCall,
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
+	isAdvisorCheckInDue,
 	isAdvisorInterruptImmuneTurnActive,
 	isInterruptingSeverity,
+	normalizeAdvisorToolCallBudget,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
+	scheduleAdvisorCheckIn,
 	slugifyAdvisorName,
 } from "../advisor";
 import type { ModelRegistry } from "../config/model-registry";
@@ -258,6 +265,10 @@ interface ActiveAdvisor {
 	agent: Agent;
 	runtime: AdvisorRuntime;
 	adviseTool: AdviseTool;
+	checkInTool: AdvisorCheckInTool;
+	nextCheckInTurn?: number;
+	reviewTurn?: number;
+	toolCallsUsed: number;
 	recorder: AdvisorTranscriptRecorder;
 	recorderClosed: Promise<void>;
 	agentUnsubscribe?: () => void;
@@ -479,7 +490,7 @@ export class SessionAdvisors {
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
 	}
 
-	/** Delivers one completed primary turn to every live advisor. */
+	/** Delivers one completed primary turn to every live advisor when due. */
 	async onPrimaryTurnEnd(
 		messages: AgentMessage[],
 		willContinue: boolean | undefined,
@@ -495,6 +506,11 @@ export class SessionAdvisors {
 				// tool turns must keep partial-work critiques withheld. The flush never
 				// resets the per-update budget — no new advisor update starts here.
 				if (willContinue !== true) advisor.adviseTool.flushDeferredNotes();
+				if (!isAdvisorCheckInDue(this.#advisorPrimaryTurnsCompleted, advisor.nextCheckInTurn)) continue;
+				advisor.reviewTurn = this.#advisorPrimaryTurnsCompleted;
+				// Safe default: if the advisor fails or stays silent, review the next
+				// primary turn. The check_in tool may move this farther out.
+				advisor.nextCheckInTurn = this.#advisorPrimaryTurnsCompleted + 1;
 				try {
 					advisor.runtime.onTurnEnd(messages, { willContinue });
 				} catch (error) {
@@ -750,8 +766,10 @@ export class SessionAdvisors {
 	}
 	#advisorMaxNotesPerUpdate(config?: AdvisorConfig): number {
 		const clamp = (value: unknown): number | undefined =>
-			typeof value === "number" && Number.isFinite(value) && value >= 1
-				? Math.min(ADVISOR_MAX_BUDGET_PER_UPDATE, Math.trunc(value))
+			typeof value === "number" && Number.isFinite(value) && value >= 0
+				? value === 0
+					? 0
+					: Math.min(ADVISOR_MAX_BUDGET_PER_UPDATE, Math.max(1, Math.trunc(value)))
 				: undefined;
 
 		return (
@@ -760,6 +778,18 @@ export class SessionAdvisors {
 			clamp(this.#host.settings.get("advisor.maxNotesPerUpdate")) ??
 			ADVISOR_DEFAULT_BUDGET_PER_UPDATE
 		);
+	}
+	#advisorReassessOnAdvice(): boolean {
+		return this.#host.settings.get("advisor.reassessOnAdvice") === true;
+	}
+	#advisorMaxCheckInTurns(): number {
+		const value = this.#host.settings.get("advisor.maxCheckInTurns") as number;
+		if (!Number.isFinite(value) || value < 1) return ADVISOR_DEFAULT_MAX_CHECK_IN_TURNS;
+		return Math.max(1, Math.trunc(value));
+	}
+	#advisorMaxToolCallsPerReview(): number {
+		const value = this.#host.settings.get("advisor.maxToolCallsPerReview") as number;
+		return normalizeAdvisorToolCallBudget(value, ADVISOR_DEFAULT_MAX_TOOL_CALLS_PER_REVIEW);
 	}
 
 	#isAdvisorInterruptImmuneTurnActive(): boolean {
@@ -841,6 +871,9 @@ export class SessionAdvisors {
 			a.usageLimitRetries = 0;
 			// Resets the emission guard and every tool-side note state together.
 			a.adviseTool.resetDeliveredNotes();
+			a.checkInTool.beginUpdate();
+			a.nextCheckInTurn = undefined;
+			a.reviewTurn = undefined;
 			this.#attachAdvisorRecorderFeed(a);
 		}
 		this.#advisorPrimaryTurnsCompleted = 0;
@@ -939,9 +972,21 @@ export class SessionAdvisors {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
 		const budget = this.#advisorMaxNotesPerUpdate(config);
-		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions, budget].join(
-			"\u001f",
-		);
+		const reassessOnAdvice = this.#advisorReassessOnAdvice();
+		const maxCheckInTurns = this.#advisorMaxCheckInTurns();
+		const maxToolCallsPerReview = this.#advisorMaxToolCallsPerReview();
+		return [
+			config.name,
+			slug,
+			formatModelStringWithRouting(model),
+			thinkingLevel,
+			tools,
+			instructions,
+			budget,
+			reassessOnAdvice,
+			maxCheckInTurns,
+			maxToolCallsPerReview,
+		].join("\u001f");
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -991,6 +1036,8 @@ export class SessionAdvisors {
 			} = descriptor;
 
 			const budgetPerUpdate = this.#advisorMaxNotesPerUpdate(config);
+			const budgetDescription = budgetPerUpdate === 0 ? "unlimited" : budgetPerUpdate;
+			const reassessOnAdvice = this.#advisorReassessOnAdvice();
 			// The tool owns admission end-to-end: the guard decides acceptance,
 			// suppression reason, and pending-note displacement; the tool routes
 			// accepted notes and acknowledges truthfully. No separate accept wrapper.
@@ -998,11 +1045,27 @@ export class SessionAdvisors {
 			const adviseTool = new AdviseTool(
 				(note, severity) => this.#routeAdvice(advisorRef, note, severity),
 				emissionGuard,
+				reassessOnAdvice,
 			);
+			const checkInTool = new AdvisorCheckInTool((afterTurns, reason) => {
+				const reviewTurn = advisorRef.reviewTurn ?? this.#advisorPrimaryTurnsCompleted;
+				const nextTurn =
+					scheduleAdvisorCheckIn(reviewTurn, afterTurns, this.#advisorMaxCheckInTurns()) ??
+					this.#advisorPrimaryTurnsCompleted + 1;
+				advisorRef.nextCheckInTurn = nextTurn;
+				return { afterTurns, nextTurn, reason };
+			}, this.#advisorMaxCheckInTurns());
 
 			// `#advisorWatchdogPrompt` already carries WATCHDOG.md + YAML shared
 			// instructions; `config.instructions` adds this advisor's specialization.
-			const systemPrompt = [prompt.render(advisorSystemPrompt, { max_notes_per_update: budgetPerUpdate })];
+			const systemPrompt = [
+				prompt.render(advisorSystemPrompt, {
+					max_notes_per_update: budgetDescription,
+					reassess_on_advice: reassessOnAdvice,
+					max_check_in_turns: this.#advisorMaxCheckInTurns(),
+					max_tool_calls_per_review: this.#advisorMaxToolCallsPerReview(),
+				}),
+			];
 			if (this.#advisorContextPrompt) systemPrompt.push(this.#advisorContextPrompt);
 			if (this.#advisorMemoryPrompt) systemPrompt.push(this.#advisorMemoryPrompt);
 			if (this.#advisorWatchdogPrompt) systemPrompt.push(this.#advisorWatchdogPrompt);
@@ -1017,7 +1080,7 @@ export class SessionAdvisors {
 			const names =
 				config.tools === undefined ? new Set([...ADVISOR_DEFAULT_TOOL_NAMES, "recall"]) : new Set(config.tools);
 			const tools = (this.#advisorTools ?? []).filter(t => names.has(t.name));
-			const advisorLoopTools: AgentTool<any>[] = [adviseTool, ...tools];
+			const advisorLoopTools: AgentTool<any>[] = [adviseTool, checkInTool, ...tools];
 			const advisorToolMap = new Map<string, AgentTool<any>>();
 			for (const tool of advisorLoopTools) {
 				advisorToolMap.set(tool.name, tool);
@@ -1146,6 +1209,16 @@ export class SessionAdvisors {
 				telemetry: advisorTelemetry,
 				serviceTier: undefined,
 				serviceTierResolver: advisorServiceTierResolver,
+				beforeToolCall: ({ toolCall }) => {
+					const decision = consumeAdvisorToolCall(
+						toolCall.name,
+						advisorRef.toolCallsUsed,
+						this.#advisorMaxToolCallsPerReview(),
+					);
+					if (!decision.allowed) return { block: true, reason: decision.reason };
+					advisorRef.toolCallsUsed = decision.nextUsed;
+					return undefined;
+				},
 			});
 			advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
 			let advisorLoopGuardStopped = false;
@@ -1238,6 +1311,9 @@ export class SessionAdvisors {
 				getModelIdentity: () => formatModelString(advisorRef.agent.state.model),
 				beginAdvisorUpdate: inProgress => {
 					advisorRef.recorder.beginTurn();
+					advisorRef.toolCallsUsed = 0;
+					advisorRef.reviewTurn = this.#advisorPrimaryTurnsCompleted;
+					advisorRef.checkInTool.beginUpdate();
 					// Flushes the deferred backlog on the in-progress→completed
 					// transition (notes already cleared admission when reserved) and
 					// resets the guard's per-update budget for this prompt's live
@@ -1299,6 +1375,9 @@ export class SessionAdvisors {
 				agent: advisorAgent,
 				runtime,
 				adviseTool,
+				checkInTool,
+				nextCheckInTurn: undefined,
+				reviewTurn: undefined,
 				recorder,
 				recorderClosed: Promise.resolve(),
 				model: advisorModel,
@@ -1307,6 +1386,7 @@ export class SessionAdvisors {
 				retryFallbackPendingSuccess: false,
 				usageLimitRetries: 0,
 				signature,
+				toolCallsUsed: 0,
 			};
 			this.#refreshAdvisorProviderIdentity(advisorRef);
 			this.#attachAdvisorRecorderFeed(advisorRef);
@@ -1369,8 +1449,17 @@ export class SessionAdvisors {
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
 		const source = advisor.slug ? advisor.name : undefined;
 		const interrupting = isInterruptingSeverity(severity);
+		const reassessOnAdvice = this.#advisorReassessOnAdvice();
+		// An emitted concern/blocker is a safety override: do not let a prior
+		// deferral hide the advisor immediately after it raised a risk. Opt-in
+		// reassessment applies the same next-review fence to every accepted note.
+		if (reassessOnAdvice || interrupting) advisor.nextCheckInTurn = this.#advisorPrimaryTurnsCompleted + 1;
 		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
-		const terminalUnwindPreserve = this.#terminalUnwindActive && severity !== "blocker" && terminalAnswerNoQueuedWork;
+		// Normal terminal unwind remains a lifecycle safety boundary. Explicit
+		// reassessment opts into steering late accepted notes; user-interrupt,
+		// plan-mode, ACP, and abort gates below still preserve where required.
+		const terminalUnwindPreserve =
+			!reassessOnAdvice && this.#terminalUnwindActive && severity !== "blocker" && terminalAnswerNoQueuedWork;
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
 			autoResumeSuppressed: this.#advisorAutoResumeSuppressed,
@@ -1381,7 +1470,8 @@ export class SessionAdvisors {
 			streaming: this.#host.agent.state.isStreaming && !this.#preserveTerminalYieldAdvice && !terminalUnwindPreserve,
 			aborting: this.#host.abortInProgress(),
 			terminalAnswerNoQueuedWork,
-			interruptImmuneTurnActive: interrupting && this.#isAdvisorInterruptImmuneTurnActive(),
+			interruptImmuneTurnActive: this.#isAdvisorInterruptImmuneTurnActive(),
+			reassessOnAdvice,
 		});
 		if (channel === "aside") {
 			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });

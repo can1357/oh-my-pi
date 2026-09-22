@@ -2,7 +2,8 @@
  * Per-session policy gate for advisor `advise()` calls.
  *
  * The advisor system prompt tells the watcher model a per-update advice budget
- * (default 4 non-blockers, `blocker` exempt):
+ * (default 4 non-blockers, `blocker` exempt; `0` means unlimited accepted
+ * non-blockers for that update):
  *
  * > max N non-blockers/update (`blocker` exempt)
  * > NEVER repeat advice you already gave, and NEVER send the same advice twice
@@ -154,7 +155,9 @@ export interface AdvisorAdmission {
  * remain charged and cannot be displaced — delivery cannot be retracted to
  * free a slot. With a budget of 1 this collapses to one non-blocker per
  * update with concern-evicts-pending-nit; with the default budget 4, up to 4
- * non-blockers are admitted before displacement applies.
+ * non-blockers are admitted before displacement applies. A budget of `0`
+ * bypasses only this per-update non-blocker capacity; the noise filter,
+ * dedupe, blocker rank, and pending-note displacement semantics remain active.
  *
  * Reset on advisor reset (compaction, session switch, `/new`) via
  * {@link reset}. Per-update budget is cleared at the start of every advisor
@@ -169,10 +172,10 @@ export class AdvisorEmissionGuard {
 	/** Insertion-order log to drive FIFO eviction without a second Map. Keys are
 	 *  pushed on first admission only; escalations update the rank in place. */
 	#seenOrder: string[] = [];
-	/** Budget slots charged this update, in admission order. Length ≤
-	 *  #budgetPerUpdate. `pending` marks notes withheld behind an in-progress
-	 *  primary turn: only those may be displaced by a strictly-higher-rank
-	 *  admission; routed notes stay charged. */
+	/** Budget slots charged this update, in admission order. With a budget of
+	 * `0` this list may grow without a per-update capacity limit. `pending`
+	 * marks notes withheld behind an in-progress primary turn: only those may
+	 * be displaced by a strictly-higher-rank admission; routed notes stay charged. */
 	#slots: { key: string; rank: number; pending: boolean }[] = [];
 	readonly #capacity: number;
 	readonly #budgetPerUpdate: number;
@@ -182,7 +185,9 @@ export class AdvisorEmissionGuard {
 		const budget = opts.budgetPerUpdate;
 		this.#budgetPerUpdate =
 			typeof budget === "number" && Number.isFinite(budget)
-				? Math.min(ADVISOR_MAX_BUDGET_PER_UPDATE, Math.max(1, Math.trunc(budget)))
+				? budget === 0
+					? 0
+					: Math.min(ADVISOR_MAX_BUDGET_PER_UPDATE, Math.max(1, Math.trunc(budget)))
 				: ADVISOR_DEFAULT_BUDGET_PER_UPDATE;
 	}
 
@@ -298,7 +303,7 @@ export class AdvisorEmissionGuard {
 			// routed nit re-raised as a concern): upgrade the slot's rank instead
 			// of charging a second slot for the same text.
 			ownSlot.rank = rank;
-		} else if (this.#slots.length < this.#budgetPerUpdate) {
+		} else if (this.#budgetPerUpdate === 0 || this.#slots.length < this.#budgetPerUpdate) {
 			this.#slots.push({ key, rank, pending: opts.pending });
 		} else {
 			// Budget full: a strictly-higher-rank note displaces the lowest-rank

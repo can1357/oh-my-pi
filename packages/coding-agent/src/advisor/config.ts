@@ -71,7 +71,7 @@ function parseWatchdogDoc(
 	}
 	const rawMaxNotes = doc.maxNotesPerUpdate;
 	const sharedMaxNotesPerUpdate =
-		typeof rawMaxNotes === "number" && Number.isFinite(rawMaxNotes) && rawMaxNotes >= 1
+		typeof rawMaxNotes === "number" && Number.isFinite(rawMaxNotes) && rawMaxNotes >= 0
 			? Math.trunc(rawMaxNotes)
 			: undefined;
 	const rawAdvisors = doc.advisors;
@@ -215,7 +215,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 				maxNotesPerUpdate:
 					typeof entry.maxNotesPerUpdate === "number" &&
 					Number.isFinite(entry.maxNotesPerUpdate) &&
-					entry.maxNotesPerUpdate >= 1
+					entry.maxNotesPerUpdate >= 0
 						? Math.trunc(entry.maxNotesPerUpdate)
 						: undefined,
 				enabled: entry.enabled,
@@ -301,7 +301,7 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
-		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
+		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 0) {
 			advisor.maxNotesPerUpdate = Math.trunc(a.maxNotesPerUpdate);
 		}
 		return advisor;
@@ -348,7 +348,7 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 	if (
 		typeof doc.maxNotesPerUpdate === "number" &&
 		Number.isFinite(doc.maxNotesPerUpdate) &&
-		doc.maxNotesPerUpdate >= 1
+		doc.maxNotesPerUpdate >= 0
 	) {
 		lines.push(`maxNotesPerUpdate: ${Math.trunc(doc.maxNotesPerUpdate)}`);
 	}
@@ -374,7 +374,7 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 			if (
 				typeof advisor.maxNotesPerUpdate === "number" &&
 				Number.isFinite(advisor.maxNotesPerUpdate) &&
-				advisor.maxNotesPerUpdate >= 1
+				advisor.maxNotesPerUpdate >= 0
 			) {
 				lines.push(`    maxNotesPerUpdate: ${Math.trunc(advisor.maxNotesPerUpdate)}`);
 			}

@@ -512,6 +512,63 @@ describe("AgentSession advisor toggle", () => {
 			await reviewSession.dispose();
 		}
 	});
+	it("lets the advisor defer its next review without rebuilding its runtime", async () => {
+		const mock = createMockModel({
+			responses: [{ content: ["primary one"] }, { content: ["primary two"] }, { content: ["primary three"] }],
+		});
+		const primaryAgent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "advisor.maxCheckInTurns": 3 });
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const reviewSession = new AgentSession({
+			agent: primaryAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+		});
+
+		try {
+			expect(reviewSession.setAdvisorEnabled(true)).toBe(true);
+			const advisorAgent = reviewSession.getAdvisorAgent();
+			if (!advisorAgent) throw new Error("Expected advisor agent to exist");
+			const advisorPrompt = vi.spyOn(advisorAgent, "prompt").mockImplementation(async () => {
+				advisorAgent.state.messages.push(advisorMessage(0.1, Date.now()));
+			});
+			const checkInTool = advisorAgent.state.tools?.find(tool => tool.name === "check_in");
+			if (!(checkInTool instanceof advisorModule.AdvisorCheckInTool)) {
+				throw new Error("Expected the built-in check_in tool");
+			}
+
+			await reviewSession.agent.prompt("first primary turn");
+			await reviewSession.waitForAdvisorCatchup(2000);
+			expect(advisorPrompt).toHaveBeenCalledTimes(1);
+
+			const scheduled = await checkInTool.execute("check-in-1", {
+				afterTurns: 2,
+				reason: "let the implementation make one more move",
+			});
+			expect(scheduled.details?.accepted).toBe(true);
+
+			await reviewSession.agent.prompt("second primary turn");
+			await reviewSession.waitForAdvisorCatchup(2000);
+			expect(advisorPrompt).toHaveBeenCalledTimes(1);
+
+			await reviewSession.agent.prompt("third primary turn");
+			await reviewSession.waitForAdvisorCatchup(2000);
+			expect(advisorPrompt).toHaveBeenCalledTimes(2);
+			expect(advisorAgent.state.messages.length).toBeGreaterThan(1);
+		} finally {
+			await reviewSession.dispose();
+		}
+	});
 	it("retains cumulative advisor cost after the advisor is disabled", () => {
 		const advisor = enableAdvisor();
 
@@ -1206,11 +1263,25 @@ describe("AgentSession advisor toggle", () => {
 		expect(advisor.state.systemPrompt.join("\n")).toContain("max 1 non-blockers/update (`blocker` exempt)");
 
 		session.settings.set("advisor.maxNotesPerUpdate", 3);
+		session.settings.set("advisor.reassessOnAdvice", true);
 		session.applyAdvisorConfigs([{ name: "Lenient" }], undefined, undefined);
 		expect(session.setAdvisorEnabled(true)).toBe(true);
 		advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent");
 		expect(advisor.state.systemPrompt.join("\n")).toContain("max 3 non-blockers/update (`blocker` exempt)");
+		expect(advisor.state.systemPrompt.join("\n")).toContain(
+			"Every accepted note, including omitted/`nit`, requests primary reassessment",
+		);
+		const reassessAdviseTool = advisor.state.tools?.find(candidate => candidate.name === "advise");
+		if (!(reassessAdviseTool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+		expect(reassessAdviseTool.description).toContain("Every accepted note, including omitted/`nit`");
+
+		session.settings.set("advisor.maxNotesPerUpdate", 0);
+		session.applyAdvisorConfigs([{ name: "Unlimited" }], undefined, undefined);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent");
+		expect(advisor.state.systemPrompt.join("\n")).toContain("max unlimited non-blockers/update (`blocker` exempt)");
 	});
 
 	it("enforces budget precedence through advisor calls: per-advisor > shared WATCHDOG.yml > settings > default", async () => {
