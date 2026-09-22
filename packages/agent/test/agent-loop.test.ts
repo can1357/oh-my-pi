@@ -3035,7 +3035,13 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
-	it("discards resolved asides when a later thunk fails", async () => {
+	it("isolates discard hooks when a later aside thunk fails", async () => {
+		const throwingAside = createUserMessage("throwing completion");
+		Object.defineProperty(throwingAside, ASIDE_MESSAGE_DISCARD, {
+			value: () => {
+				throw new Error("discard failed");
+			},
+		});
 		const aside = createUserMessage("completion");
 		let discarded: Error | undefined;
 		Object.defineProperty(aside, ASIDE_MESSAGE_DISCARD, {
@@ -3056,6 +3062,7 @@ describe("agentLoop with AgentMessage", () => {
 					if (delivered) return [];
 					delivered = true;
 					return [
+						() => throwingAside,
 						() => aside,
 						() => {
 							throw new Error("later aside failed");
@@ -3074,6 +3081,86 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		await expect(drain()).rejects.toThrow("later aside failed");
 		expect(discarded?.message).toBe("later aside failed");
+	});
+
+	it("fails the stream instead of hanging when an initial aside commit hook throws", async () => {
+		// Regression #12545: the aside-commit loop ran before agentLoop's try, so a
+		// throwing host commit hook escaped as an unhandled rejection and left the
+		// EventStream unsettled — stream.result() hung forever.
+		const message = createUserMessage("boom");
+		Object.defineProperty(message, ASIDE_MESSAGE_COMMIT, {
+			value: () => {
+				throw new Error("commit hook boom");
+			},
+		});
+		const mock = createMockModel({ handler: () => ({ content: ["done"] }) });
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const stream = agentLoop(
+			[message],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter },
+			undefined,
+			mock.stream,
+		);
+		await expect(stream.result()).rejects.toThrow("commit hook boom");
+	});
+
+	it("surfaces the original error when a discard hook throws in the loop's finally", async () => {
+		// Regression #12545: discardAsides ran bare in runLoopBody's finally, so a
+		// throwing host discard hook replaced the in-flight loop error. Here the
+		// pending aside's commit hook throws mid-turn and its discard hook throws in
+		// the finally; the surfaced failure must stay the original commit error.
+		const toolSchema = type({ value: "string" });
+		let executed = false;
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				executed = true;
+				return { content: [{ type: "text", text: "done" }], details: { value: params.value } };
+			},
+		};
+		const aside = createUserMessage("completion");
+		Object.defineProperties(aside, {
+			[ASIDE_MESSAGE_COMMIT]: {
+				value: () => {
+					throw new Error("commit boom");
+				},
+			},
+			[ASIDE_MESSAGE_DISCARD]: {
+				value: () => {
+					throw new Error("discard boom");
+				},
+			},
+		});
+		let delivered = false;
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } }] },
+				{ content: ["unused"] },
+			],
+		});
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const stream = agentLoop(
+			[createUserMessage("start")],
+			context,
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				getAsideMessages: async () => {
+					if (!delivered && executed) {
+						delivered = true;
+						return [aside];
+					}
+					return [];
+				},
+			},
+			undefined,
+			mock.stream,
+		);
+		await expect(stream.result()).rejects.toThrow("commit boom");
 	});
 
 	it("evaluates aside thunks at injection and skips ones that return null", async () => {
@@ -3691,6 +3778,80 @@ describe("agentLoop event-driven steering watch", () => {
 		}
 
 		expect(waitCalls).toBe(1);
+	});
+
+	it("preserves completed results and later tools when a steering callback throws", async () => {
+		const toolSchema = type({ value: "string", exclusive: "boolean" });
+		const executed: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: args => (args.exclusive ? "exclusive" : "shared"),
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "echo",
+							arguments: { value: "first-exclusive", exclusive: true },
+						},
+						{
+							type: "toolCall",
+							id: "tool-2",
+							name: "echo",
+							arguments: { value: "shared-sibling", exclusive: false },
+						},
+						{
+							type: "toolCall",
+							id: "tool-3",
+							name: "echo",
+							arguments: { value: "next-exclusive", exclusive: true },
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			// A transient host-callback failure after the first tool ran must not
+			// reject the trailing checkSteering and poison the ordering chain.
+			hasSteeringMessages: () => {
+				if (executed.length >= 1) throw new Error("transient steering-callback failure");
+				return { queued: false };
+			},
+			getSteeringMessages: async () => [],
+		};
+
+		const results: ToolResultMessage[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			if (event.type === "message_end" && event.message.role === "toolResult") {
+				results.push(event.message);
+			}
+		}
+
+		expect(executed).toEqual(["first-exclusive", "shared-sibling", "next-exclusive"]);
+		expect(
+			results.map(result => {
+				const block = result.content?.[0];
+				return block?.type === "text" ? block.text : "";
+			}),
+		).toEqual(["echoed: first-exclusive", "echoed: shared-sibling", "echoed: next-exclusive"]);
 	});
 });
 

@@ -2,6 +2,7 @@
 mod capture;
 mod libei;
 mod portal;
+mod xkb;
 
 use image::RgbaImage;
 

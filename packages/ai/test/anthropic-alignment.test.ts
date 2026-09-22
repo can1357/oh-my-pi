@@ -20,7 +20,7 @@ import {
 	stripClaudeToolPrefix,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
-import { claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import { getEnvApiKey, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	AssistantMessage,
@@ -187,9 +187,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(headers.Accept).toBe("application/json");
-		// Pinned literally (not via the imported constant) so a wrong version bump is caught
-		// on an observable wire header: this is the exact User-Agent the upstream expects.
-		expect(headers["User-Agent"]).toBe("claude-cli/2.1.257 (external, cli)");
+		expect(headers["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
 		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
@@ -695,6 +693,50 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(proxy.beta()).not.toContain("extended-cache-ttl-2025-04-11");
 	});
 
+	it("retries once with the version a claude_code_version_too_old rejection requires", async () => {
+		const tooOld = JSON.stringify({
+			type: "error",
+			error: {
+				type: "invalid_request_error",
+				message: "Claude Code 2.1.257 does not support this model; version 99.0.0 or newer is required.",
+				details: { error_code: "claude_code_version_too_old" },
+			},
+		});
+		const captured = JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "captured" } });
+		const requests: { userAgent: string; body: string }[] = [];
+		const fetchMock = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requests.push({
+				userAgent: new Headers(init?.headers).get("User-Agent") ?? "",
+				body: await new Response(init?.body).text(),
+			});
+			return new Response(requests.length === 1 ? tooOld : captured, {
+				status: 400,
+				headers: { "Content-Type": "application/json" },
+			});
+		}) as typeof fetch;
+		const context: Context = { messages: [{ role: "user", content: "Hello there", timestamp: Date.now() }] };
+
+		await streamAnthropic(ANTHROPIC_MODEL, context, { apiKey: "sk-ant-oat-test", fetch: fetchMock }).result();
+
+		expect(requests).toHaveLength(2);
+		expect(requests[0].userAgent).not.toBe("claude-cli/99.0.0 (external, cli)");
+		expect(requests[1].userAgent).toBe("claude-cli/99.0.0 (external, cli)");
+		expect(requests[1].body).toContain("cc_version=99.0.0.");
+
+		// Same rejection at the already-adopted version is terminal, not a retry loop.
+		requests.length = 0;
+		const alwaysTooOld = (async (_input: string | URL | Request, init?: RequestInit) => {
+			requests.push({ userAgent: new Headers(init?.headers).get("User-Agent") ?? "", body: "" });
+			return new Response(tooOld, { status: 400, headers: { "Content-Type": "application/json" } });
+		}) as typeof fetch;
+		const result = await streamAnthropic(ANTHROPIC_MODEL, context, {
+			apiKey: "sk-ant-oat-test",
+			fetch: alwaysTooOld,
+		}).result();
+		expect(requests).toHaveLength(1);
+		expect(result.stopReason).toBe("error");
+	});
+
 	it("gates the effort beta and field off google-vertex requests (#5614)", async () => {
 		let capturedBeta: string | undefined;
 		let capturedBody:
@@ -1032,7 +1074,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			stream: true,
 			modelHeaders: { "User-Agent": "curl/8.7.1" },
 		});
-		expect(normalizedHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
+		expect(normalizedHeaders["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 
 		const embeddedClaudeCliHeaders = buildAnthropicHeaders({
 			apiKey: "sk-ant-oat-test",
@@ -1040,7 +1082,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			stream: true,
 			modelHeaders: { "User-Agent": "my-client claude-cli/2.1.63" },
 		});
-		expect(embeddedClaudeCliHeaders["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
+		expect(embeddedClaudeCliHeaders["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 	});
 
 	it("forwards model-supplied User-Agent on API-key requests", () => {

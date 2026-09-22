@@ -1090,20 +1090,30 @@ export class ModelRegistry {
 	/** Merge custom models with built-in, replacing by provider+id match */
 	#mergeCustomModels(builtInModels: Model<Api>[], customModels: CustomModelOverlay[]): Model<Api>[] {
 		return mergeByModelKey(builtInModels, customModels, (existingModel, customModel) => {
-			if (!existingModel) return finalizeCustomModel(customModel, { useDefaults: true });
 			// Same-id custom definitions replace bundled transport behavior, so the
 			// patch is applied with the `replace` transport policy.
-			return applyModelPatch(
-				{
-					...existingModel,
-					id: customModel.id,
-					provider: customModel.provider,
-					api: customModel.api,
-					baseUrl: customModel.baseUrl,
-				},
-				customModel,
-				"replace",
-			);
+			const model = existingModel
+				? applyModelPatch(
+						{
+							...existingModel,
+							id: customModel.id,
+							provider: customModel.provider,
+							api: customModel.api,
+							baseUrl: customModel.baseUrl,
+						},
+						customModel,
+						"replace",
+					)
+				: finalizeCustomModel(customModel, { useDefaults: true });
+			const override = this.#providerOverrides.get(model.provider);
+			// Custom composition already resolved headers and metadata. Reapply only
+			// the provider transport and its gateway URL, without rebuilding the model.
+			return override?.transport
+				? this.#applyProviderTransportOverride(model, {
+						baseUrl: override.baseUrl,
+						transport: override.transport,
+					})
+				: model;
 		});
 	}
 

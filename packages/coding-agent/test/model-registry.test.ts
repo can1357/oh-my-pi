@@ -5,9 +5,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
@@ -1377,6 +1379,154 @@ describe("ModelRegistry", () => {
 						models: [{ id: "MiniMax-M2.5" }],
 					},
 				},
+			});
+		});
+
+		describe("provider transport on custom models", () => {
+			const customModel = {
+				id: "transport-fixture",
+				name: "Transport Fixture",
+				api: "openai-completions" as const,
+				reasoning: false,
+				input: ["text" as const],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32000,
+				maxTokens: 4000,
+				headers: { "X-Route": "model" },
+			};
+
+			async function loadRegistry(transport?: "pi-native", modelBaseUrl?: string): Promise<ModelRegistry> {
+				const modelsPath = path.join(tempDir, "models.yml");
+				await Bun.write(
+					modelsPath,
+					Bun.YAML.stringify({
+						providers: {
+							openai: {
+								baseUrl: "https://gateway.example",
+								apiKey: "gateway-bearer",
+								api: "openai-completions",
+								...(transport && { transport }),
+								headers: { "X-Route": "provider" },
+								models: [{ ...customModel, ...(modelBaseUrl && { baseUrl: modelBaseUrl }) }],
+							},
+						},
+					}),
+				);
+				return new ModelRegistry(authStorage, modelsPath);
+			}
+
+			async function requestModel(registry: ModelRegistry, model: Model | undefined, native: boolean) {
+				if (!model) throw new Error("custom transport fixture was not loaded");
+				let request: Request | undefined;
+				const fetch: FetchImpl = async (input, init) => {
+					request = input instanceof Request ? new Request(input, init) : new Request(String(input), init);
+					const events = native
+						? [
+								{
+									type: "done",
+									reason: "stop",
+									message: {
+										role: "assistant",
+										api: "openai-completions",
+										provider: "openai",
+										model: customModel.id,
+										content: [{ type: "text", text: "OK" }],
+										usage: {
+											input: 1,
+											output: 1,
+											cacheRead: 0,
+											cacheWrite: 0,
+											totalTokens: 2,
+											cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+										},
+										stopReason: "stop",
+										timestamp: 0,
+									},
+								},
+							]
+						: [
+								{
+									id: "chatcmpl-transport-fixture",
+									choices: [{ index: 0, delta: { role: "assistant", content: "OK" } }],
+								},
+								{
+									id: "chatcmpl-transport-fixture",
+									choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+									usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+								},
+							];
+					return new Response(
+						`${events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("")}data: [DONE]\n\n`,
+						{ headers: { "Content-Type": "text/event-stream" } },
+					);
+				};
+				const result = await streamSimple(
+					model,
+					{ messages: [{ role: "user", content: "Reply OK.", timestamp: 0 }] },
+					{ apiKey: await registry.getApiKey(model), fetch },
+				).result();
+				if (!request) throw new Error("custom transport fixture did not make a request");
+				const body = (await request.json()) as Record<string, unknown>;
+				return { request, body, result };
+			}
+
+			test("new custom model uses native gateway routing instead of /chat/completions on lazy find", async () => {
+				const registry = await loadRegistry("pi-native");
+				const { request, body, result } = await requestModel(
+					registry,
+					registry.find("openai", customModel.id),
+					true,
+				);
+
+				expect(request.url).toBe("https://gateway.example/v1/pi/stream");
+				expect(request.method).toBe("POST");
+				expect(body.modelId).toBe(`openai/${customModel.id}`);
+				expect(body.stream).toBe(true);
+				expect(request.headers.get("Authorization")).toBe("Bearer gateway-bearer");
+				expect(request.headers.get("X-Route")).toBe("model");
+				expect(result.content).toEqual([{ type: "text", text: "OK" }]);
+				expect(result.stopReason).toBe("stop");
+			});
+
+			test("same-ID custom replacement sends native requests to the provider gateway, not its model baseUrl", async () => {
+				const bundledModel = buildModel({
+					...customModel,
+					provider: "openai",
+					baseUrl: "https://bundled.example/v1",
+				});
+				const originalGetBundledModels = catalogModels.getBundledModels;
+				spies.push(
+					spyOn(catalogModels, "getBundledModels").mockImplementation(provider =>
+						provider === "openai" ? [bundledModel] : originalGetBundledModels(provider),
+					),
+				);
+				const registry = await loadRegistry("pi-native", "https://model.example/v1");
+				// A fresh full snapshot must not reuse a model already composed by find().
+				const model = registry.getAll().find(model => model.provider === "openai" && model.id === customModel.id);
+				const { request, body, result } = await requestModel(registry, model, true);
+
+				expect(request.url).toBe("https://gateway.example/v1/pi/stream");
+				expect(body.modelId).toBe(`openai/${customModel.id}`);
+				expect(request.headers.get("Authorization")).toBe("Bearer gateway-bearer");
+				expect(request.headers.get("X-Route")).toBe("model");
+				expect(result.content).toEqual([{ type: "text", text: "OK" }]);
+				expect(result.stopReason).toBe("stop");
+			});
+
+			test("without provider transport, custom model keeps /chat/completions at its explicit model baseUrl", async () => {
+				const registry = await loadRegistry(undefined, "https://model.example/v1");
+				const { request, body, result } = await requestModel(
+					registry,
+					registry.find("openai", customModel.id),
+					false,
+				);
+
+				expect(request.url).toBe("https://model.example/v1/chat/completions");
+				expect(body.model).toBe(customModel.id);
+				expect(body.modelId).toBeUndefined();
+				expect(request.headers.get("X-Route")).toBe("model");
+				expect(result.content).toEqual(expect.arrayContaining([{ type: "text", text: "OK" }]));
+				expect(result.stopReason).toBe("stop");
 			});
 		});
 
