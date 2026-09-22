@@ -1114,6 +1114,15 @@ export class SelectorController {
 									selector,
 									thinkingLevel: isAuto ? ThinkingLevel.Inherit : concreteThinking,
 									persist: targetScope === "global",
+									// Apply inside the switch transaction so the
+									// `model_select` commit observes the final level.
+									// `Inherit` keeps setModel's defaultLevel
+									// re-apply, matching the pre-transaction tail.
+									applyThinkingLevel: isAuto
+										? AUTO_THINKING
+										: concreteThinking && concreteThinking !== ThinkingLevel.Inherit
+											? concreteThinking
+											: undefined,
 								});
 								if (!switched) return false;
 								if (targetScope === "project") {
@@ -1123,9 +1132,7 @@ export class SelectorController {
 									);
 								}
 								if (isAuto) {
-									this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
-								} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
-									this.ctx.session.setThinkingLevel(concreteThinking);
+									this.ctx.settings.set("defaultThinkingLevel", AUTO_THINKING);
 								}
 								this.ctx.statusLine.invalidate();
 								this.ctx.updateEditorBorderColor();
@@ -1213,12 +1220,17 @@ export class SelectorController {
 										thinkingLevel: effectiveIsAuto
 											? ThinkingLevel.Inherit
 											: (concreteThinking ?? ThinkingLevel.Inherit),
+										// Apply inside the switch transaction; `Inherit`
+										// keeps setModel's defaultLevel re-apply.
+										applyThinkingLevel: effectiveIsAuto
+											? AUTO_THINKING
+											: concreteThinking && concreteThinking !== ThinkingLevel.Inherit
+												? concreteThinking
+												: undefined,
 									});
 									if (!switched) return;
 									if (effectiveIsAuto) {
-										this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
-									} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
-										this.ctx.session.setThinkingLevel(concreteThinking);
+										this.ctx.settings.set("defaultThinkingLevel", AUTO_THINKING);
 									}
 									this.ctx.statusLine.invalidate();
 									this.ctx.updateEditorBorderColor();

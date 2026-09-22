@@ -343,8 +343,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					);
 				}
 				try {
-					await runtime.session.setModel(match);
-					if (resolved.thinkingLevel !== undefined) runtime.session.setThinkingLevel(resolved.thinkingLevel);
+					await runtime.session.setModel(match, "default", { applyThinkingLevel: resolved.thinkingLevel });
 					await runtime.output(`Model set to ${match.provider}/${match.id}.`);
 					await runtime.notifyTitleChanged?.();
 					await runtime.notifyConfigChanged?.();

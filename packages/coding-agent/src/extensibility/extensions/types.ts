@@ -722,6 +722,33 @@ export type {
 } from "../shared-events";
 
 // ============================================================================
+// Model Selection Events
+// ============================================================================
+
+/**
+ * Why the active model changed: explicit selection (`set` — a role switch
+ * counts, so the ctrl+p role-model cycler included), `AgentSession.cycleModel()`
+ * (`cycle` — RPC `cycle_model` / SDK; no TUI keybinding), or a restore of a
+ * previously bound model (`restore` — session switch/resume rebind,
+ * failed-switch rollback, and retry-fallback returning to the previously
+ * selected model after an aborted swap or cooldown expiry).
+ */
+export type ModelSelectSource = "set" | "cycle" | "restore";
+
+/**
+ * Fired when the active model actually changes (pi-compatible `model_select`).
+ * Notification-only and dispatched detached from the switch, so handlers never
+ * delay a model change. Same-model rebinds (extended-context toggle, discovery
+ * metadata refresh) do not fire it.
+ */
+export interface ModelSelectEvent {
+	type: "model_select";
+	model: Model;
+	previousModel: Model | undefined;
+	source: ModelSelectSource;
+}
+
+// ============================================================================
 // Agent Events
 // ============================================================================
 
@@ -1057,6 +1084,7 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
+	| ModelSelectEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
@@ -1221,6 +1249,7 @@ export interface ExtensionAPI {
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;
+	on(event: "model_select", handler: ExtensionHandler<ModelSelectEvent>): void;
 	on(event: "context", handler: ExtensionHandler<ContextEvent, ContextEventResult>): void;
 	on(
 		event: "before_provider_request",
