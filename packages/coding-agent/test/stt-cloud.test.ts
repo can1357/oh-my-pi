@@ -156,6 +156,35 @@ describe("STTController cloud transcription", () => {
 		await stopping;
 	});
 
+	it("routes the Codex subscription model through buffered cloud transcription without local dependencies", async () => {
+		const model = getBundledModel("openai-codex", "transcribe");
+		settings.setModelRole("dictation", "openai-codex/transcribe");
+		const registry = registryFor(model);
+		const transcribe = vi.spyOn(transcription, "transcribeAudio").mockResolvedValue({
+			text: "codex transcript",
+			usage: ZERO_USAGE,
+		});
+		const download = vi.spyOn(downloader, "downloadSttModel");
+		let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+		controller = new STTController(
+			callback => {
+				onAudio = callback;
+				return { stop: vi.fn() };
+			},
+			{ settings, registry, getSessionId: () => "session-3" },
+		);
+		const editor = makeEditor();
+
+		await controller.toggle(editor, makeOptions());
+		onAudio?.(null, new Float32Array([0.5, -0.5]));
+		await controller.toggle(editor, makeOptions());
+
+		expect(download).not.toHaveBeenCalled();
+		expect(transcribe).toHaveBeenCalledTimes(1);
+		expect(transcribe.mock.calls[0]![0]).toBe(model);
+		expect(editor.commitVolatileText).toHaveBeenCalledWith("codex transcript");
+	});
+
 	it("keeps local-inference models on the streaming worker path", async () => {
 		const model = getBundledModel("local", "whisper-base");
 		settings.setModelRole("dictation", "local/whisper-base");
