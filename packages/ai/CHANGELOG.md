@@ -11,7 +11,7 @@
 
 - Anthropic organization-level OAuth permission errors now rotate to an eligible sibling credential instead of failing permanently.
 - Fixed error handling for provider responses that do not include token usage information.
-- Fixed Anthropic forced-tool turns (e.g. a subagent's pinned `_yield`) dying on a 400 during the zero-output cache-refresh replay: the refresh request no longer inherits `tool_choice`, which Anthropic rejects together with `max_tokens: 0` ([#12602](https://github.com/can1357/oh-my-pi/pull/12602) by [@xiechimon](https://github.com/xiechimon))
+- The Anthropic zero-output cache-refresh keep-alive now skips turns whose captured request pinned `tool_choice` (e.g. a subagent's forced `_yield`): Anthropic rejects a forced choice together with `max_tokens: 0`, and stripping the choice would invalidate the messages cache and bill a fresh write instead of refreshing the entry ([#12602](https://github.com/can1357/oh-my-pi/pull/12602) by [@xiechimon](https://github.com/xiechimon))
 
 ## [18.2.6] - 2026-09-18
 
