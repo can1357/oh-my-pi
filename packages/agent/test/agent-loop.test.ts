@@ -2972,6 +2972,40 @@ describe("agentLoop with AgentMessage", () => {
 		}
 	});
 
+	it("fails the stream when an initial aside-commit hook throws", async () => {
+		const message = createUserMessage("idle completion");
+		Object.defineProperty(message, ASIDE_MESSAGE_COMMIT, {
+			value: () => {
+				throw new Error("commit hook failed");
+			},
+		});
+		const mock = createMockModel({ handler: () => ({ content: ["done"] }) });
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+
+		const stream = agentLoop(
+			[message],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter },
+			undefined,
+			mock.stream,
+		);
+
+		const drain = async () => {
+			for await (const _event of stream) {
+				// Drain until fail().
+			}
+		};
+		const settled = Promise.all([drain(), stream.result()]);
+		await expect(
+			Promise.race([
+				settled,
+				Bun.sleep(1000).then(() => {
+					throw new Error("stream did not settle");
+				}),
+			]),
+		).rejects.toThrow("commit hook failed");
+	});
+
 	it("discards a drained aside when the deadline expires before insertion", async () => {
 		let now = 100;
 		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -3074,6 +3108,46 @@ describe("agentLoop with AgentMessage", () => {
 		};
 		await expect(drain()).rejects.toThrow("later aside failed");
 		expect(discarded?.message).toBe("later aside failed");
+	});
+
+	it("does not mask a later thunk failure when an aside discard hook throws", async () => {
+		const aside = createUserMessage("completion");
+		Object.defineProperty(aside, ASIDE_MESSAGE_DISCARD, {
+			value: () => {
+				throw new Error("discard hook failed");
+			},
+		});
+		let delivered = false;
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const stream = agentLoop(
+			[createUserMessage("hi")],
+			context,
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				getAsideMessages: async () => {
+					if (delivered) return [];
+					delivered = true;
+					return [
+						() => aside,
+						() => {
+							throw new Error("later aside failed");
+						},
+					];
+				},
+			},
+			undefined,
+			mock.stream,
+		);
+
+		const drain = async () => {
+			for await (const _event of stream) {
+				// Drain the loop.
+			}
+		};
+		await expect(drain()).rejects.toThrow("later aside failed");
+		await expect(stream.result()).rejects.toThrow("later aside failed");
 	});
 
 	it("evaluates aside thunks at injection and skips ones that return null", async () => {
