@@ -110,10 +110,11 @@ describe("claude usage request headers", () => {
 			ctx,
 		);
 
-		expect(calls).toHaveLength(1);
-		expect(calls[0]?.input).toBe("https://api.anthropic.com/api/oauth/usage");
+		const usageCalls = calls.filter(call => new URL(call.input).search === "");
+		expect(usageCalls).toHaveLength(1);
+		expect(usageCalls[0]?.input).toBe("https://api.anthropic.com/api/oauth/usage");
 
-		const headers = calls[0]?.init?.headers;
+		const headers = usageCalls[0]?.init?.headers;
 		expect(getHeaderCaseInsensitive(headers, "authorization")).toBe(`Bearer ${token}`);
 		expect(getHeaderCaseInsensitive(headers, "user-agent")).toBe(
 			`claude-cli/${getClaudeCodeVersion()} (external, cli)`,

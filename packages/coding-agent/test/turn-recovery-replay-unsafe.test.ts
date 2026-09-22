@@ -98,7 +98,7 @@ function createHost(
 		resolveActiveEditMode: () => "hashline",
 		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
-		maybeAutoRedeemCodexReset: async () => false,
+		maybeAutoRedeemReset: async () => false,
 		runAutoCompaction: async () =>
 			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
 		shakeForRequestBodyReadTimeout: async () => false,

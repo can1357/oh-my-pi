@@ -10,7 +10,12 @@ import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-p
 import { type Component, matchesKey, replaceTabs, routeSgrMouseInput, truncateToWidth, visibleWidth } from "../index";
 import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../chrome/format";
-import { collapseSharedUsageReports, formatLimitTitle } from "./usage-display";
+import {
+	collapseSharedUsageReports,
+	formatLimitTitle,
+	summarizeUsageResetCredits,
+	type UsageResetSummary,
+} from "./usage-display";
 import { colorToAnsi } from "../theme/color";
 import { ensureThemeSync, theme } from "../theme/theme";
 import { formatAbsoluteOnlyAmount } from "../prompt/usage-amounts";
@@ -61,6 +66,12 @@ export interface ProviderCard {
 	unlimited: boolean;
 	/** True when nothing is used anywhere (or there are no limits): collapses to a tick. */
 	idle: boolean;
+	resetCredits?: {
+		bankedCount: number;
+		redeemableCount: number;
+		soonestExpiryMs?: number;
+		unavailableReasons: string[];
+	};
 }
 
 /**
@@ -152,13 +163,43 @@ export function buildProviderCards(reports: UsageReport[], nowMs: number): Provi
 			if (!duplicated) window.windowTag = undefined;
 		}
 
+		const resetRows = providerReports
+			.map(report => summarizeUsageResetCredits(report.resetCredits, nowMs))
+			.filter((summary): summary is UsageResetSummary => summary !== undefined && summary.bankedCount > 0);
+		const bankedCount = resetRows.reduce((total, summary) => total + summary.bankedCount, 0);
+		const redeemableCount = resetRows.reduce((total, summary) => total + summary.redeemableCount, 0);
+		const resetExpiries = resetRows
+			.map(summary => summary.soonestExpiry)
+			.filter((expiry): expiry is string => expiry !== undefined)
+			.map(expiry => Date.parse(expiry))
+			.filter(Number.isFinite)
+			.sort((left, right) => left - right);
+		const soonestResetExpiry = resetExpiries.find(expiry => expiry > nowMs) ?? resetExpiries.at(-1);
+		const unavailableReasons = [
+			...new Set(
+				resetRows
+					.map(summary => summary.unavailableReason)
+					.filter((reason): reason is string => reason !== undefined),
+			),
+		];
+		const resetCredits =
+			bankedCount > 0
+				? {
+						bankedCount,
+						redeemableCount,
+						soonestExpiryMs: soonestResetExpiry === undefined ? undefined : soonestResetExpiry - nowMs,
+						unavailableReasons,
+					}
+				: undefined;
 		cards.push({
 			provider,
 			name: formatProviderName(provider),
 			accounts: providerReports.length,
 			windows,
 			unlimited: windows.length === 0,
-			idle: windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
+			idle:
+				!resetCredits && windows.every(window => window.fraction !== undefined && window.fraction < IDLE_FRACTION),
+			resetCredits,
 		});
 	}
 
@@ -390,6 +431,25 @@ export class UsageDashboardComponent implements Component {
 		const title = theme.bold(truncateToWidth(card.name, Math.max(4, titleBudget)));
 		const titlePad = Math.max(0, width - 2 - visibleWidth(title) - visibleWidth(accountsText));
 		lines.push(`${this.#statusIcon(cardStatus)} ${title}${" ".repeat(titlePad)}${accountsText}`);
+
+		if (card.resetCredits) {
+			const resets = card.resetCredits;
+			let resetText = `✦ ${resets.bankedCount} reset${resets.bankedCount === 1 ? "" : "s"}`;
+			if (resets.redeemableCount !== resets.bankedCount) {
+				resetText += ` · ${resets.redeemableCount} usable`;
+			}
+			if (resets.soonestExpiryMs !== undefined) {
+				resetText +=
+					resets.soonestExpiryMs > 0 ? ` · expires ${formatDuration(resets.soonestExpiryMs)}` : " · expired";
+			}
+			lines.push(
+				`  ${theme.fg(resets.redeemableCount > 0 ? "success" : "warning", truncateToWidth(resetText, width - 2))}`,
+			);
+			if (resets.redeemableCount === 0 && resets.unavailableReasons.length > 0) {
+				const reason = sanitizeText(resets.unavailableReasons.join(" • ").replace(/[\r\n\t]+/g, " "));
+				lines.push(`  ${theme.fg("dim", truncateToWidth(`unavailable: ${reason}`, width - 2))}`);
+			}
+		}
 
 		if (card.unlimited) {
 			lines.push(`  ${theme.fg("dim", "no limits")}`);

@@ -2,19 +2,18 @@
 
 ## [Unreleased]
 
-### Changed
-
-- Updated server-side fallback documentation and logic to target claude-opus-5-5
-- Added support for claude-opus-5-5 to model priority registry
-
 ## [18.2.9] - 2026-09-22
 
 ### Added
+
+- Added Claude saved resets to usage views and `/usage reset`, with automatic blocked-limit recovery and expiring-reset redemption controlled by `claudeResets`.
 
 - Added support for searching embedded harness documentation with `find` and `omp find` using `omp://` scopes, including file-specific searches and `:start-end` selectors; results open directly through canonical `omp://` URLs.
 
 ### Changed
 
+- Updated server-side fallback documentation and logic to target claude-opus-5-5
+- Added support for claude-opus-5-5 to model priority registry
 - Updated the read tool guidance to decode images inline by default and require an explicit `:img` selector for SVG rendering.
 - Improved model discovery and fallback behavior: authentication failures are surfaced in the `/models` hub, and models without a matching role-specific fallback now use the default fallback chain.
 - Improved resilience for subagents by retrying provider stream failures that occur after partial output and preserving configured ordered model fallbacks at startup.

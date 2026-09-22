@@ -6,6 +6,7 @@
 
 ### Added
 
+- Added Claude and Codex saved-reset counts, availability, and expiry to usage views, with provider-specific confirmation and uniquely identified account options.
 - Added terminal detection and capability support for otty and rio, including Kitty graphics and true-color support where available, plus otty hyperlinks and notifications.
 - Added the public `stripTerminalSequences` export for extensions that need to remove terminal control sequences.
 

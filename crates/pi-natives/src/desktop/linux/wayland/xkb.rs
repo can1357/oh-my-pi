@@ -107,8 +107,7 @@ impl KeyboardLayout {
 					.types
 					.get(&group)
 					.or_else(|| key.types.get(&0))
-					.map(String::as_str)
-					.unwrap_or_else(|| infer_type(symbols, &keysyms));
+					.map_or_else(|| infer_type(symbols, &keysyms), String::as_str);
 				let Some(key_type) = types.get(type_name) else {
 					continue;
 				};
@@ -135,7 +134,7 @@ impl KeyboardLayout {
 		Some(Self { groups, us_groups, virtuals, modifiers: ModifierState::default() })
 	}
 
-	pub(super) fn update_modifiers(
+	pub(super) const fn update_modifiers(
 		&mut self,
 		depressed: u32,
 		latched: u32,
@@ -145,7 +144,7 @@ impl KeyboardLayout {
 		self.modifiers = ModifierState { depressed, latched, locked, group };
 	}
 
-	pub(super) fn active_group(&self) -> u32 {
+	pub(super) const fn active_group(&self) -> u32 {
 		self.modifiers.group
 	}
 

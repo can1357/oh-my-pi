@@ -60,6 +60,10 @@ pub(super) struct Libei {
 	portal_session: Option<PortalSession>,
 }
 
+#[allow(
+	clippy::non_send_fields_in_send_ty,
+	reason = "EiConvertEventStream's only non-Send field is a callback map that stays empty"
+)]
 // SAFETY: the reis event stream is exclusively owned. Its sole non-`Send`
 // field is a private callback map which remains empty because
 // `EiConvertEventStream` exposes no callback-registration API.
