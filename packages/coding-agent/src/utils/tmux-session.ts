@@ -14,6 +14,11 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 const TMUX_NAME_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 const TMUX_NAME_WHITESPACE = /\s+/g;
 const TMUX_NAME_MAX_LENGTH = 64;
+/** Window options the session accent overrides; restored in this order. */
+const TMUX_STATUS_STYLE_OPTIONS = ["window-status-style", "window-status-current-style"] as const;
+type TmuxStatusStyleOption = (typeof TMUX_STATUS_STYLE_OPTIONS)[number];
+/** Only a literal CSS hex reaches a tmux option value; anything else is dropped. */
+const TMUX_STYLE_HEX = /^#[0-9a-fA-F]{6}$/;
 
 /**
  * The three shapes of tmux invocation this module needs. Injectable so tests
@@ -99,6 +104,18 @@ function getFallbackTmuxWindowName(cwd: string | undefined): string | undefined 
 }
 
 /**
+ * Append the session accent to the window's existing status style.
+ *
+ * tmux applies a style list left to right, so a trailing `fg=` overrides the
+ * inherited foreground while a `bg=` or attribute the user configured survives.
+ * `default` carries no foreground worth keeping, so it is dropped.
+ */
+function composeAccentStyle(base: string, hex: string): string {
+	const trimmed = base.trim();
+	return !trimmed || trimmed === "default" ? `fg=${hex}` : `${trimmed},fg=${hex}`;
+}
+
+/**
  * Owns the tmux window name for exactly one session.
  *
  * Instance-scoped rather than module-global: embedding hosts and test harnesses
@@ -111,6 +128,12 @@ export class TmuxWindowNamer {
 	#enabled = false;
 	/** Last name handed to tmux, so a repeated rename is a no-op. */
 	#lastName?: string;
+	/** Last accent handed to tmux, so a repeated sync is a no-op. */
+	#lastAccentHex?: string;
+	/** Effective pre-omp status style per option; the accent appends to it so user styling survives. */
+	#styleBase?: Record<TmuxStatusStyleOption, string>;
+	/** Locally-set status styles captured before the first accent; `""` = inherited, so restore unsets. */
+	#originalStyles?: Record<TmuxStatusStyleOption, string>;
 	/** `undefined` = not captured yet, `null` = capture failed, so skip restore. */
 	#original?: CapturedWindow | null;
 	/** Serializes the fire-and-forget renames so they land in call order. */
@@ -118,6 +141,7 @@ export class TmuxWindowNamer {
 	/** Set by {@link restore}: the window is back to its original name, stay off it. */
 	#restored = false;
 	#cancelCleanup?: () => void;
+	#cancelStyleCleanup?: () => void;
 
 	/** `runner` is the test seam; production always uses the real `tmux` binary. */
 	constructor(runner: TmuxCommandRunner = defaultRunner) {
@@ -135,17 +159,25 @@ export class TmuxWindowNamer {
 	}
 
 	/**
-	 * Rename the enclosing tmux window to the session name. The rename itself is
-	 * fire and forget, so the caller is never blocked and never sees a tmux
-	 * failure; only the one-time capture of the pre-omp window name is blocking.
+	 * Rename the enclosing tmux window to the session name, and point its status
+	 * styles at `accentHex`. The two halves are independent: either setting works
+	 * alone, and each owns its own capture, postmortem hook, and restore.
+	 *
+	 * The tmux writes are fire and forget, so the caller is never blocked and
+	 * never sees a tmux failure; only the one-time captures are blocking.
 	 *
 	 * An explicit `rename-window` also clears the window's `automatic-rename`, so
 	 * the name sticks until {@link restore} puts the original back.
 	 */
-	sync(sessionName: string | undefined, cwd?: string): void {
-		if (!this.#enabled || this.#restored || !hasTerminalMultiplexerSession("tmux")) return;
+	sync(sessionName: string | undefined, cwd?: string, accentHex?: string): void {
+		if (this.#restored || !hasTerminalMultiplexerSession("tmux")) return;
 		const pane = Bun.env.TMUX_PANE;
 		if (!pane) return;
+		// Before the name gate and the name dedupe: a `/theme` switch or a
+		// `statusLine.sessionAccent` toggle changes the accent while the session
+		// name stays identical, and renaming may be off entirely.
+		this.#syncAccent(pane, accentHex);
+		if (!this.#enabled) return;
 		const next = sanitizeTmuxWindowName(sessionName) ?? getFallbackTmuxWindowName(cwd);
 		if (!next || next === this.#lastName) return;
 		this.#lastName = next;
@@ -156,27 +188,67 @@ export class TmuxWindowNamer {
 	}
 
 	/**
-	 * Put the pre-omp window name and `automatic-rename` back.
+	 * Point the window's status styles at the session accent, or put them back
+	 * when the accent goes away.
+	 *
+	 * Styling the option rather than embedding `#[fg=...]` in the name keeps the
+	 * name clean: tmux format-expands window names when it draws the status bar,
+	 * so inline markup would both leak into `list-windows` / `choose-tree` and
+	 * risk being truncated mid-escape by the name length cap.
+	 */
+	#syncAccent(pane: string, accentHex: string | undefined): void {
+		const hex = accentHex && TMUX_STYLE_HEX.test(accentHex) ? accentHex.toLowerCase() : undefined;
+		if (hex === this.#lastAccentHex) return;
+		if (!hex) {
+			this.#lastAccentHex = undefined;
+			// `#originalStyles` deliberately survives: if this queued restore loses
+			// the race with process exit, {@link restore} still owes it synchronously.
+			for (const args of this.#styleRestoreArgs(pane)) this.#enqueue(args);
+			return;
+		}
+		this.#captureStyles(pane);
+		// No capture means no safe restore target; leave the styles alone.
+		if (!this.#styleBase) return;
+		this.#lastAccentHex = hex;
+		for (const option of TMUX_STATUS_STYLE_OPTIONS) {
+			this.#enqueue(["set-window-option", "-t", pane, option, composeAccentStyle(this.#styleBase[option], hex)]);
+		}
+	}
+
+	/**
+	 * Put the pre-omp window name, `automatic-rename`, and status styles back.
 	 *
 	 * Synchronous on purpose: every caller exits the process immediately
 	 * afterwards, and an enqueued async spawn never runs, which would leave the
-	 * window stuck on the omp session name with `automatic-rename` disabled.
+	 * window stuck on the omp session name with `automatic-rename` disabled, or
+	 * on omp's accent with no omp left to clear it.
 	 * Idempotent, because the owning mode's `shutdown()` and the postmortem
-	 * cleanup registered on the first rename can both reach it.
+	 * cleanups registered on first use can both reach it.
 	 */
 	restore(): void {
 		if (this.#restored) return;
 		this.#restored = true;
 		this.#cancelCleanup?.();
 		this.#cancelCleanup = undefined;
+		this.#cancelStyleCleanup?.();
+		this.#cancelStyleCleanup = undefined;
 		const original = this.#original;
+		// Set exactly once the styles were first touched: the honest "we owe a
+		// restore" flag. `#lastAccentHex` is not, because clearing the accent
+		// resets it while its queued restore may still be pending.
+		const owesStyles = this.#originalStyles !== undefined;
 		this.#lastName = undefined;
+		this.#lastAccentHex = undefined;
 		this.#original = undefined;
 		const pane = Bun.env.TMUX_PANE;
-		if (!pane || !original) return;
-		this.#runner.runSync(["rename-window", "-t", pane, "--", original.name]);
-		// rename-window forces automatic-rename off, so reinstate it afterwards.
-		this.#runner.runSync(["set-window-option", "-t", pane, "automatic-rename", original.automaticRename]);
+		if (pane && original) {
+			this.#runner.runSync(["rename-window", "-t", pane, "--", original.name]);
+			// rename-window forces automatic-rename off, so reinstate it afterwards.
+			this.#runner.runSync(["set-window-option", "-t", pane, "automatic-rename", original.automaticRename]);
+		}
+		if (pane && owesStyles) for (const args of this.#styleRestoreArgs(pane)) this.#runner.runSync(args);
+		this.#originalStyles = undefined;
+		this.#styleBase = undefined;
 	}
 
 	/**
@@ -205,6 +277,49 @@ export class TmuxWindowNamer {
 		// fatal error — postmortem runs its callbacks and exits. Register here so an
 		// SSH disconnect or `kill` restores the window too.
 		this.#cancelCleanup = postmortem.register("tmux-window-name", () => this.restore());
+	}
+
+	/**
+	 * Capture, once, both style values the accent needs: the *effective* style
+	 * the accent appends to, and the *local* style restore has to put back.
+	 * `show-window-options -v` prints an empty value for an option the window
+	 * inherits, which is the signal to unset rather than re-set it.
+	 *
+	 * Blocking, and paired with its own postmortem hook, for the same reason the
+	 * name capture is: a signal that kills the process must still find a restore
+	 * target.
+	 */
+	#captureStyles(pane: string): void {
+		if (this.#originalStyles) return;
+		const effective = this.#runner.captureSync([
+			"display-message",
+			"-p",
+			"-t",
+			pane,
+			"#{window-status-style}\t#{window-status-current-style}",
+		]);
+		if (effective === undefined) return;
+		const [statusStyle, currentStyle] = effective.trim().split("\t");
+		this.#styleBase = {
+			"window-status-style": statusStyle ?? "",
+			"window-status-current-style": currentStyle ?? "",
+		};
+		const captured = {} as Record<TmuxStatusStyleOption, string>;
+		for (const option of TMUX_STATUS_STYLE_OPTIONS) {
+			captured[option] = this.#runner.captureSync(["show-window-options", "-v", "-t", pane, option])?.trim() ?? "";
+		}
+		this.#originalStyles = captured;
+		this.#cancelStyleCleanup = postmortem.register("tmux-window-style", () => this.restore());
+	}
+
+	/** `set-window-option` argv that puts each status style back the way it was. */
+	#styleRestoreArgs(pane: string): string[][] {
+		return TMUX_STATUS_STYLE_OPTIONS.map(option => {
+			const prior = this.#originalStyles?.[option];
+			return prior
+				? ["set-window-option", "-t", pane, option, prior]
+				: ["set-window-option", "-u", "-t", pane, option];
+		});
 	}
 
 	/** Chain onto the tmux queue; a rejection never escapes into the caller's turn. */
