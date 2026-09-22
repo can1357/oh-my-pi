@@ -30,8 +30,8 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { BUILTIN_PANEL_PERSONAS, parsePanelPersona } from "../../panel/config";
 import { PANEL_PERSONA_TOOLS, PANEL_TASK_MODES, type PanelPersonaTools, type PanelTaskMode } from "../../panel/types";
-import { getSelectListTheme, theme } from "../theme/theme";
-import { HookEditorComponent } from "./hook-editor";
+import { getSelectListTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import {
 	bottomBorder,
 	divider,
@@ -41,7 +41,7 @@ import {
 	splitRow,
 	topBorder,
 	topBorderSplit,
-} from "./overlay-box";
+} from "@oh-my-pi/pi-tui/chrome/overlay-box";
 
 /** Host callbacks: the editor never reads or writes settings itself. */
 export interface PanelPersonaEditorCallbacks {

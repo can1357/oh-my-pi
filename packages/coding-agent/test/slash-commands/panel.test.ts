@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { PanelRunResult, PanelSettings, PanelTaskMode } from "@oh-my-pi/pi-coding-agent/panel";
 import {
@@ -95,7 +96,7 @@ function tuiRuntime(overrides: TuiRuntimeOverrides = {}) {
 		ctx: {
 			session: { runPanel },
 			sessionManager: { getCwd: () => "/tmp" },
-			settings: { get: vi.fn((key: string) => (key === "panel" ? panelSettings : undefined)) },
+			settings: Settings.isolated({ panel: panelSettings }),
 			showStatus,
 			editor: { setText },
 			showPanelRolePicker,
@@ -152,7 +153,7 @@ describe("/panel slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/panel debate what now?", h.runtime);
 
 		expect(h.runPanel).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("Usage: /panel");
 	});
 
@@ -161,7 +162,7 @@ describe("/panel slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/panel answer", h.runtime);
 
 		expect(h.runPanel).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 		expect((h.output.mock.calls[0]?.[0] as string) ?? "").toContain("Usage: /panel");
 	});
 
@@ -170,7 +171,7 @@ describe("/panel slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/panel answer @frontier", h.runtime);
 
 		expect(h.runPanel).not.toHaveBeenCalled();
-		expect(result).toEqual({ consumed: true });
+		expect(result).toEqual({ consumed: true, failed: true });
 	});
 
 	it("propagates errors thrown by the runner", async () => {
@@ -244,7 +245,7 @@ describe("/panel slash command", () => {
 			const h = acpRuntime();
 			const result = await executeAcpBuiltinSlashCommand(`/panel ${subcommand} answer one-off request`, h.runtime);
 
-			expect(result).toEqual({ consumed: true });
+			expect(result).toEqual({ consumed: true, failed: true });
 			expect(h.runPanel).not.toHaveBeenCalled();
 			expect(h.output).toHaveBeenCalledWith(`/panel ${subcommand} requires the interactive TUI.`);
 		}

@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
 import { PanelConfirmationComponent } from "@oh-my-pi/pi-coding-agent/modes/components/panel-confirmation";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { PanelRunPlan, PanelRunPreview, PanelRunResult } from "@oh-my-pi/pi-coding-agent/panel";
 
@@ -86,7 +86,7 @@ function createHarness(panelResult: PanelRunResult) {
 	const ctx = {
 		editor,
 		editorContainer,
-		ui: { setFocus: vi.fn(), requestRender: vi.fn() },
+		ui: { getFocused: vi.fn(() => editor), setFocus: vi.fn(), requestRender: vi.fn() },
 		showStatus,
 		session: { preparePanelRun: vi.fn(() => plan), runPanel },
 	} as unknown as InteractiveModeContext;

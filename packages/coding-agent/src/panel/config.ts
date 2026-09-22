@@ -1,7 +1,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
-import { parseConfiguredThinkingLevel, parseThinkingLevel } from "../thinking";
+import { parseConfiguredThinkingLevel, parseThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import {
 	PANEL_MAX_MEMBERS,
 	PANEL_PERSONA_TOOLS,
