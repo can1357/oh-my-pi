@@ -2994,7 +2994,10 @@ export interface VectorTopK {
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
 
-/** Warm syntax grammars and scope matchers on the native worker pool. */
+/**
+ * Warm syntax grammars, scope matchers, and the regexes of commonly
+ * highlighted languages on the native worker pool.
+ */
 export declare function warmHighlighter(): Promise<undefined>
 
 /** Profiling results returned to JavaScript. */
