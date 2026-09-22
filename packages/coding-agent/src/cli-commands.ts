@@ -167,6 +167,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.pluginHelp,
 	},
 	{
+		name: "seats",
+		load: () => import("./commands/seats").then(m => m.default),
+		help: commandHelp.seatsHelp,
+	},
+	{
 		name: "ps",
 		load: () => import("./commands/ps").then(m => m.default),
 		help: commandHelp.psHelp,

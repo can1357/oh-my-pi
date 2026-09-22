@@ -87,6 +87,8 @@ export const modelsHelp = { description: "List, search, and refresh available mo
 
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
 
+export const seatsHelp = { description: "Compact fleet summary of operator cockpit seats" } satisfies CommandMetadata;
+
 export const psHelp = {
 	description: "List and control daemon-supervised background processes (logs, stop, kill, restart)",
 } satisfies CommandMetadata;
