@@ -127,6 +127,9 @@
 
 - Removed support for image query parameters (`?q=`) and bare image paths in the read tool.
 - Custom models now honor provider-level `transport: pi-native` and send requests to the native gateway ([#12845](https://github.com/can1357/oh-my-pi/pull/12845) by [@joshrzemien](https://github.com/joshrzemien)).
+- JavaScript Eval reassignments made in cells containing top-level `await` now persist into later cells ([#10987](https://github.com/can1357/oh-my-pi/issues/10987)).
+- Fixed Wayland keyboard input resolving characters through a fixed US layout instead of the compositor's active XKB group ([#12534](https://github.com/can1357/oh-my-pi/issues/12534)).
+- Recycled the retained Python eval kernel on POSIX after a cell when `ps` reports RSS above `python.maxRssMb` (default 1024; 0 disables). In-flight cells on that kernel finish first. Windows cannot sample RSS, so the cap does not recycle there ([#12631](https://github.com/can1357/oh-my-pi/issues/12631), [#12637](https://github.com/can1357/oh-my-pi/pull/12637) by [@RaviTharuma](https://github.com/RaviTharuma)).
 - Fixed live models that match no `retry.fallbackChains` role primary (e.g. Fable after `/model`) resolving no chain, so a wait longer than `retry.maxDelayMs` aborted the session instead of walking `default` ([#12421](https://github.com/can1357/oh-my-pi/issues/12421)).
 - Fixed skill hints drifting from the active prompt after discarded rebuilds or in advisor sessions ([#12148](https://github.com/can1357/oh-my-pi/pull/12148) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Restored `askToolRenderer` on the extension namespace (`pi.pi.askToolRenderer`) after the pi-tui renderer migration dropped it, so extensions that shadow the built-in ask tool can keep the native rendering again. ([#12694](https://github.com/can1357/oh-my-pi/pull/12694) by [@xiechimon](https://github.com/xiechimon))
@@ -200,7 +203,6 @@
 
 ### Fixed
 
-- Recycled the retained Python eval kernel on POSIX after a cell when `ps` reports RSS above `python.maxRssMb` (default 1024; 0 disables). In-flight cells on that kernel finish first. Windows cannot sample RSS, so the cap does not recycle there ([#12631](https://github.com/can1357/oh-my-pi/issues/12631), [#12637](https://github.com/can1357/oh-my-pi/pull/12637) by [@RaviTharuma](https://github.com/RaviTharuma)).
 - Fixed system prompt configuration validation so systemPromptTemplate and customSystemPrompt cannot conflict with a full systemPrompt replacement, including when values are empty.
 - Added browser-relay support for listing eligible pages without attaching to or claiming them.
 - Fixed Codex compatibility with the sloppy edit tool.
