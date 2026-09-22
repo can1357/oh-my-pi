@@ -236,7 +236,7 @@ export interface AgentSessionConfig {
 	advisorStreamFn?: StreamFn;
 	/** Prefer websocket transport for OpenAI Codex requests when supported. */
 	preferWebsockets?: boolean;
-	/** Codex saved-reset coordinator; defaults to the process-wide singleton so concurrent sessions can't double-spend. Inject a fresh one in tests. */
+	/** Shared saved-reset coordinator; defaults process-wide so concurrent Codex/Claude sessions cannot double-spend. Inject a fresh one in tests. */
 	codexResetCoordinator?: CodexAutoRedeemCoordinator;
 	/** Provider payload hook used by the active session request path. */
 	onPayload?: SimpleStreamOptions["onPayload"];
