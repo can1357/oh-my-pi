@@ -1066,6 +1066,17 @@ export class ProcessTerminal implements Terminal {
 		this.#queryPrivateMode(2026);
 		this.#queryPrivateMode(2048);
 		this.#queryPrivateMode(2031);
+		// Bracketed paste (2004) is already enabled above via DECSET. When the
+		// terminal confirms it via DECRQM, genuine pastes always arrive
+		// bracketed — so the unbracketed raw-paste heuristic in StdinBuffer
+		// becomes pure downside (it also swallows Enter after a UI stall that
+		// batches keystrokes into one read) and is switched off (#12540).
+		this.#queryPrivateMode(2004);
+		this.onPrivateModeReport((mode, supported, confirmed) => {
+			if (mode === 2004 && supported && confirmed) {
+				this.#stdinBuffer?.setRawPasteClassificationEnabled(false);
+			}
+		});
 		for (const mode of XTERM_SCROLL_TO_BOTTOM_MODES) {
 			this.#queryPrivateMode(mode);
 		}
