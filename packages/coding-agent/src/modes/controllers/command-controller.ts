@@ -11,7 +11,7 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { directoryExists, formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -34,7 +34,7 @@ import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EvalExecutionComponent } from "@oh-my-pi/pi-tui/chat/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "@oh-my-pi/pi-tui/overlays/move-overlay";
-import { moveDirectorySource } from "../move-directory-source";
+import { createRecentAwareSource, getRecentWorkingDirectories, moveDirectorySource } from "../move-directory-source";
 import { TranscriptBlock } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme, type Theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../../modes/types";
@@ -46,6 +46,7 @@ import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
+import { SessionManager } from "../../session/session-manager";
 import {
 	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
@@ -1163,9 +1164,23 @@ export class CommandController {
 
 		// No argument in TUI mode: open the path autocomplete overlay.
 		if (!input) {
+			// Load recent working directories from persisted session metadata.
+			// `listAll()` is the global all-projects scope (matching `/resume`'s
+			// all-projects view): it scans every session file across projects,
+			// mtime-cached after the first call. Recent dirs are a global-history
+			// feature, so we deliberately do not scope to the active session dir.
+			let recentDirs: string[] = [];
+			try {
+				const sessions = await SessionManager.listAll();
+				const currentCwd = this.ctx.sessionManager.getCwd();
+				recentDirs = await getRecentWorkingDirectories(sessions, currentCwd, directoryExists);
+			} catch {
+				// Graceful degradation: picker still works without recent dirs.
+			}
+
+			const source = recentDirs.length > 0 ? createRecentAwareSource(recentDirs) : moveDirectorySource;
 			const result = await this.ctx.showHookCustom<MoveOverlayResult | undefined>(
-				(_tui, _theme, _keybindings, done) =>
-					new MoveOverlay(this.ctx.sessionManager.getCwd(), done, moveDirectorySource),
+				(_tui, _theme, _keybindings, done) => new MoveOverlay(this.ctx.sessionManager.getCwd(), done, source),
 				{ overlay: true },
 			);
 			if (!result) return; // cancelled

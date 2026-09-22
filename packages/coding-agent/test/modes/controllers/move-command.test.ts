@@ -2,9 +2,17 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	createRecentAwareSource,
+	getRecentWorkingDirectories,
+	MAX_RECENT_DIRS,
+} from "@oh-my-pi/pi-coding-agent/modes/move-directory-source";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import type { MoveDirectoryEntry } from "@oh-my-pi/pi-tui/overlays/move-overlay";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import * as sessionWorktree from "@oh-my-pi/pi-coding-agent/session/session-worktree";
 import { Container } from "@oh-my-pi/pi-tui";
 
@@ -537,6 +545,196 @@ describe("CommandController /move", () => {
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("getRecentWorkingDirectories", () => {
+	function makeSession(cwd: string, modified: Date, id?: string): SessionInfo {
+		return {
+			path: `${cwd}/session.jsonl`,
+			id: id ?? `session-${cwd}`,
+			cwd,
+			created: new Date(modified.getTime() - 60000),
+			modified,
+			messageCount: 1,
+			size: 100,
+			firstMessage: "test",
+			allMessagesText: "test",
+		};
+	}
+
+	/** In-memory dirExists: resolves paths before checking membership. */
+	const dirExistsFor = (...existing: string[]) => {
+		const resolved = new Set(existing.map(p => path.resolve(p)));
+		return async (p: string) => resolved.has(p);
+	};
+
+	it("excludes current cwd from recent directories", async () => {
+		const sessions = [
+			makeSession("/proj/current", new Date("2026-09-18T12:00:00Z")),
+			makeSession("/proj/other", new Date("2026-09-18T11:00:00Z")),
+		];
+		const recent = await getRecentWorkingDirectories(
+			sessions,
+			"/proj/current",
+			dirExistsFor("/proj/current", "/proj/other"),
+		);
+		expect(recent).toEqual([path.resolve("/proj/other")]);
+	});
+
+	it("deduplicates sessions with the same cwd", async () => {
+		const sessions = [
+			makeSession("/proj/a", new Date("2026-09-18T12:00:00Z"), "s1"),
+			makeSession("/proj/b", new Date("2026-09-18T11:00:00Z"), "s2"),
+			makeSession("/proj/a", new Date("2026-09-18T10:00:00Z"), "s3"),
+			makeSession("/proj/a", new Date("2026-09-18T09:00:00Z"), "s4"),
+		];
+		const recent = await getRecentWorkingDirectories(sessions, "/proj/cwd", dirExistsFor("/proj/a", "/proj/b"));
+		expect(recent).toEqual([path.resolve("/proj/a"), path.resolve("/proj/b")]);
+	});
+
+	it("orders by modified time, not pinned-first order", async () => {
+		// Simulate pinned-first: dirA is old but listed first.
+		// True recency: B > C > A.
+		const sessions = [
+			makeSession("/proj/a", new Date("2026-09-16T10:00:00Z"), "pinned"),
+			makeSession("/proj/b", new Date("2026-09-18T12:00:00Z"), "recent"),
+			makeSession("/proj/c", new Date("2026-09-18T11:00:00Z"), "mid"),
+		];
+		const recent = await getRecentWorkingDirectories(
+			sessions,
+			"/proj/cwd",
+			dirExistsFor("/proj/a", "/proj/b", "/proj/c"),
+		);
+		expect(recent).toEqual([path.resolve("/proj/b"), path.resolve("/proj/c"), path.resolve("/proj/a")]);
+	});
+
+	it("excludes non-existent directories", async () => {
+		const sessions = [
+			makeSession("/proj/ghost", new Date("2026-09-18T12:00:00Z")),
+			makeSession("/proj/real", new Date("2026-09-18T11:00:00Z")),
+		];
+		const recent = await getRecentWorkingDirectories(sessions, "/proj/cwd", dirExistsFor("/proj/real"));
+		expect(recent).toEqual([path.resolve("/proj/real")]);
+	});
+
+	it("scans until 8 valid unique dirs, not just 8 raw sessions", async () => {
+		const dirs = Array.from({ length: 12 }, (_, i) => `/proj/d${i}`);
+		// First 4 sessions are duplicates/invalid to test scanning past them.
+		const sessions: SessionInfo[] = [
+			makeSession(dirs[0]!, new Date("2026-09-18T12:00:00Z"), "s0"),
+			makeSession(dirs[0]!, new Date("2026-09-18T11:30:00Z"), "s1"), // duplicate
+			makeSession("/proj/cwd", new Date("2026-09-18T11:00:00Z"), "s2"), // current cwd
+			makeSession("/proj/cwd/ghost", new Date("2026-09-18T10:30:00Z"), "s3"), // deleted
+		];
+		for (let i = 1; i <= 8; i++) {
+			sessions.push(
+				makeSession(dirs[i]!, new Date(`2026-09-18T${String(10 - i).padStart(2, "0")}:00:00Z`), `s${i + 4}`),
+			);
+		}
+		const recent = await getRecentWorkingDirectories(
+			sessions,
+			"/proj/cwd",
+			dirExistsFor(...dirs.filter((_, i) => i !== 12)),
+		);
+		// 8 valid unique dirs despite 4 wasted sessions at the top.
+		expect(recent.length).toBe(MAX_RECENT_DIRS);
+	});
+
+	it("returns empty array when session list is empty", async () => {
+		const recent = await getRecentWorkingDirectories([], "/proj/cwd", dirExistsFor());
+		expect(recent).toEqual([]);
+	});
+
+	it("returns empty array when all sessions share current cwd", async () => {
+		const sessions = [
+			makeSession("/proj/cwd", new Date("2026-09-18T12:00:00Z"), "s1"),
+			makeSession("/proj/cwd", new Date("2026-09-18T11:00:00Z"), "s2"),
+		];
+		const recent = await getRecentWorkingDirectories(sessions, "/proj/cwd", dirExistsFor("/proj/cwd"));
+		expect(recent).toEqual([]);
+	});
+});
+
+describe("createRecentAwareSource", () => {
+	it("prepends recent dirs on empty prefix", () => {
+		const source = createRecentAwareSource(["/path/A", "/path/B"]);
+		const results = source.search("", "/cwd", 20) as MoveDirectoryEntry[];
+		const recentResults = results.filter(r => r.label.startsWith("↺"));
+		expect(recentResults.length).toBe(2);
+		expect(recentResults[0]!.value).toBe("/path/A");
+		expect(recentResults[0]!.label).toBe("↺ /path/A");
+	});
+
+	it("delegates to filesystem source on non-empty prefix", () => {
+		const source = createRecentAwareSource(["/path/A"]);
+		const results = source.search("some-prefix", "/cwd", 20) as MoveDirectoryEntry[];
+		const recentResults = results.filter(r => r.label.startsWith("↺"));
+		expect(recentResults.length).toBe(0);
+	});
+
+	it("returns filesystem results when no recent dirs provided", () => {
+		const source = createRecentAwareSource([]);
+		const results = source.search("", "/cwd", 20) as MoveDirectoryEntry[];
+		const recentResults = results.filter(r => r.label.startsWith("↺"));
+		expect(recentResults.length).toBe(0);
+	});
+
+	it("does not duplicate a recent dir that is also a cwd child", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-dedup-"));
+		const child = path.join(cwd, "sub");
+		await fs.mkdir(child);
+		try {
+			const source = createRecentAwareSource([child]);
+			const results = source.search("", cwd, 20) as MoveDirectoryEntry[];
+			// The child resolves to the same path whether reached via the recent
+			// row or the filesystem child row — it must appear exactly once.
+			const matches = results.filter(r => path.resolve(r.value) === path.resolve(child));
+			expect(matches.length).toBe(1);
+			expect(matches[0]!.label.startsWith("↺")).toBe(true);
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("CommandController /move recent dirs integration", () => {
+	beforeAll(async () => {
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("Expected dark theme");
+		setThemeInstance(theme);
+	});
+
+	afterEach(() => vi.restoreAllMocks());
+
+	it("does not load recent dirs for explicit /move <path>", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-recent-explicit-"));
+		const targetDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-recent-target-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			const listAllSpy = vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
+
+			await new CommandController(ctx).handleMoveCommand(targetDir);
+
+			expect(listAllSpy).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+			await fs.rm(targetDir, { recursive: true, force: true });
+		}
+	});
+
+	it("calls SessionManager.listAll when no path argument is given", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-move-recent-nopath-"));
+		try {
+			const { ctx } = createMoveContext(sourceDir);
+			vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
+
+			await new CommandController(ctx).handleMoveCommand(undefined);
+
+			expect(SessionManager.listAll).toHaveBeenCalledTimes(1);
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
 	});
 });
