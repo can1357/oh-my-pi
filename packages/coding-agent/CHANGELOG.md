@@ -140,6 +140,7 @@
 - Added `omp play` CLI for terminal-based playback of session recordings
 - Added intent descriptions to judgment batching
 - Added live progress tracking for judgment batches in the TUI
+- Added ChatGPT-subscription dictation: assign `openai-codex/chatgpt-transcribe` to the `dictation` role to transcribe push-to-talk speech through your ChatGPT plan instead of a paid transcription API ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
 
 ### Changed
 
