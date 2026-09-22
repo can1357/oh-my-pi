@@ -379,6 +379,68 @@ describe("hindsightBackend first-turn injection", () => {
 		expect(session.getHindsightSessionState()?.hasRecalledForFirstTurn).toBe(true);
 	});
 
+	it("forwards the setup abort signal to the recall request (issue #12668)", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		const session = makeFakeSession({ sessionId: "s-abort-fwd" });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		let seenSignal: AbortSignal | undefined;
+		vi.spyOn(HindsightApi.prototype, "recall").mockImplementation(async (_bank, _query, options) => {
+			seenSignal = options?.signal;
+			return { results: [] } as never;
+		});
+		const controller = new AbortController();
+
+		await hindsightBackend.beforeAgentStartPrompt?.(session as never, "hello", controller.signal);
+
+		expect(seenSignal).toBe(controller.signal);
+	});
+
+	it("unwinds an in-flight recall on abort instead of waiting out the timeout", async () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
+		const session = makeFakeSession({ sessionId: "s-abort-hang" });
+		await hindsightBackend.start({
+			session: session as never,
+			settings,
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		vi.spyOn(HindsightApi.prototype, "recall").mockImplementation((_bank, _query, options) => {
+			const { promise, reject } = Promise.withResolvers<never>();
+			seenRecallSignal(options?.signal);
+			options?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+			return promise as never;
+		});
+		const controller = new AbortController();
+		let recallStarted: AbortSignal | undefined;
+		function seenRecallSignal(signal: AbortSignal | undefined): void {
+			recallStarted = signal;
+		}
+
+		const pending = hindsightBackend.beforeAgentStartPrompt?.(session as never, "hello", controller.signal);
+		for (let i = 0; i < 1000 && recallStarted === undefined; i++) {
+			await new Promise(resolve => setTimeout(resolve, 0));
+		}
+		expect(recallStarted).toBe(controller.signal);
+		controller.abort();
+
+		await expect(pending).resolves.toBeUndefined();
+	});
+
 	it("keeps the <memories> wrapper in buildDeveloperInstructions", async () => {
 		const settings = Settings.isolated({
 			"memory.backend": "hindsight",
