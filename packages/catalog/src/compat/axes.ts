@@ -29,8 +29,8 @@ export interface AxisDef {
 	shape: AxisShape;
 	/** Wire axes only: records this key exists on. */
 	records?: readonly CompatRecordName[];
-	/** Closed value vocabulary for string scalars / string arrays. */
-	values?: readonly string[];
+	/** Closed value vocabulary for scalars / arrays (strings, and booleans on flag axes). */
+	values?: readonly (string | boolean)[];
 	/**
 	 * Object axes only: payload child names are literal wire JSON keys copied
 	 * verbatim (`extra-body`). Default object payloads author kebab-case names
@@ -283,6 +283,25 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		set: "catalog",
 		shape: "scalar",
 		values: ["freeform", "function"],
+	},
+	"requires-native-tools": { key: "requiresNativeTools", set: "catalog", shape: "scalar", values: [true, false] },
+	"requires-tool-free-history-for-tool-opt-out": {
+		key: "requiresToolFreeHistoryForToolOptOut",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
+	"preserves-max-output-tokens": {
+		key: "preservesMaxOutputTokens",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
+	},
+	"omit-max-output-tokens": {
+		key: "omitMaxOutputTokens",
+		set: "catalog",
+		shape: "scalar",
+		values: [true, false],
 	},
 	"clamp-context-override": { key: "clampContextOverride", set: "catalog", shape: "scalar" },
 	"context-promotion-target": { key: "contextPromotionTarget", set: "catalog", shape: "scalar" },

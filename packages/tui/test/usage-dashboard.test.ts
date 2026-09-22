@@ -100,6 +100,50 @@ describe("buildProviderCards", () => {
 		expect(cards[0].windows[0].resetMs).toBe(1000);
 	});
 
+	it("aggregates reset inventory without showing a spent grant's earlier expiry", () => {
+		const claude = report("anthropic", "claude@example.test", [
+			limit("anthropic", "claude", "5h", "Claude 5 Hour", 0, "ok"),
+		]);
+		claude.resetCredits = {
+			availableCount: 3,
+			redeemableCount: 0,
+			reason: "weekly cooldown",
+			credits: [
+				{
+					id: "cedar",
+					title: "Claude reset",
+					program: "cedar_ember",
+					remainingCount: 3,
+					usable: false,
+					requiresLimit: true,
+					clears: ["anthropic:5h", "anthropic:7d"],
+					blocking: ["anthropic:7d"],
+					usedFractions: {},
+					expiresAt: new Date(now + 2 * 86_400_000).toISOString(),
+				},
+				{ id: "spent", remainingCount: 0, expiresAt: new Date(now + 3_600_000).toISOString() },
+			],
+		};
+		const sibling = report("anthropic", "sibling@example.test", [
+			limit("anthropic", "sibling", "5h", "Claude 5 Hour", 0, "ok"),
+		]);
+		sibling.resetCredits = {
+			availableCount: 2,
+			redeemableCount: 2,
+			credits: [{ id: "later", remainingCount: 2, expiresAt: new Date(now + 3 * 86_400_000).toISOString() }],
+		};
+
+		const card = buildProviderCards([claude, sibling], now)[0];
+
+		expect(card.resetCredits).toEqual({
+			bankedCount: 5,
+			redeemableCount: 2,
+			soonestExpiryMs: 2 * 86_400_000,
+			unavailableReasons: ["weekly cooldown"],
+		});
+		expect(card.idle).toBe(false);
+	});
+
 	it("sorts pressured providers first and collapses untouched ones into idle", () => {
 		const reports = [
 			report("cursor", "c@x.test", [limit("cursor", "c", "monthly", "Cursor Models", 0.0, "ok")]),

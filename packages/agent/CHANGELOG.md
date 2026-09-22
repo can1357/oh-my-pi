@@ -5,6 +5,13 @@
 ### Fixed
 
 - A steering message sent while a model request has not produced any output is applied immediately instead of waiting for the response, subject to `interruptMode`; the session shows whether a queued steer will interrupt or wait. ([#12787](https://github.com/can1357/oh-my-pi/pull/12787) by [@geoyws](https://github.com/geoyws))
+## [18.2.9] - 2026-09-22
+
+### Fixed
+
+- Fixed stream finalization when a provider ends without emitting a completion or error event, ensuring the final assistant message is preserved and corresponding message lifecycle events are emitted.
+- Fixed tool execution being incorrectly skipped when host steering callbacks reject during a tool batch.
+- Fixed stream hangs and preserved the original error when host aside-commit or discard callbacks fail.
 
 ## [18.2.5] - 2026-09-17
 

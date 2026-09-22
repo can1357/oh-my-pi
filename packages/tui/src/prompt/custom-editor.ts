@@ -9,7 +9,8 @@ import { TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
 import { allowsModelMentions, allowsSkillTokens, SKILL_TOKEN_RE } from "./skill-tokens";
 import { expandModelMentionTags, MODEL_MENTION_RE, modelMentionToken } from "./model-mention-syntax";
-import { isVideoPath, videoPreviewSource } from "./video";
+import { imageAttachmentSource } from "./image-source";
+import { isVideoPath } from "./video";
 import {
 	attachmentSgr,
 	COMPOSER_TOKEN_REGEX,
@@ -711,7 +712,7 @@ export class CustomEditor extends Editor {
 		if (!materialize || images.length === 0) return;
 		const links = await materialize(images);
 		if (!links || this.pendingImages !== images) return;
-		this.pendingImageLinks = images.map((image, index) => videoPreviewSource(image) ?? links[index]);
+		this.pendingImageLinks = images.map((image, index) => imageAttachmentSource(image)?.path ?? links[index]);
 		this.imageLinks = this.pendingImageLinks;
 		this.#requestShimmerRepaint?.();
 	}

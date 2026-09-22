@@ -157,7 +157,18 @@ async function buildBinary(target: BinaryTarget): Promise<void> {
 	});
 	// Bun 1.3.12 emits a truncated Mach-O signature on darwin builds.
 	if (shouldAdhocSignDarwinBinary(target)) {
-		await runCommand(["codesign", "--force", "--sign", "-", path.join(repoRoot, target.outfile)], repoRoot);
+		await runCommand(
+			[
+				"codesign",
+				"--force",
+				"--sign",
+				"-",
+				"--entitlements",
+				path.join(repoRoot, "scripts", "macos-entitlements.plist"),
+				path.join(repoRoot, target.outfile),
+			],
+			repoRoot,
+		);
 	}
 }
 

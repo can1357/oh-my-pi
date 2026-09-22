@@ -17,6 +17,11 @@ provider "google-antigravity" {
 		}
 	}
 
+	// Routed wire profiles overwrite caller caps with fixed output limits.
+	// Conservatively reject requested bounds for this provider, including
+	// logical ids whose effort routing selects a profiled wire id later.
+	preserves-max-output-tokens #false
+
 	class "anthropic" {
 		family "opus" {
 			thinking-mode "budget"
