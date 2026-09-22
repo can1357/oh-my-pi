@@ -174,6 +174,46 @@ it("retries a batch item through the chain before reporting it as failed", async
 	expect(entries[0].result?.answers.level.choice).toBe("low");
 });
 
+it("rejects a batch width that would schedule no worker or a fraction of one", async () => {
+	const { runner } = createJudgmentRunner();
+	const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => nativeResponse("low")));
+	const judgeBatch = runner.createContext().judgeBatch;
+	if (!judgeBatch) throw new Error("expected batch judgment context");
+	const request: JudgmentBatchRequest<typeof QUESTIONS> = {
+		items: [{ key: "only", state: "simple work" }],
+		questions: QUESTIONS,
+	};
+
+	// 0 and -1 leave no worker, 1.5 truncates to a different width than asked,
+	// and NaN/Infinity produce an unusable worker count; each would otherwise
+	// resolve with holes where entries belong.
+	for (const concurrency of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+		await expect(judgeBatch(request, { concurrency })).rejects.toBeInstanceOf(JudgmentError);
+	}
+
+	expect(fetchSpy).not.toHaveBeenCalled();
+});
+
+it("rejects a retry budget that is negative, fractional, or unbounded", async () => {
+	const { runner } = createJudgmentRunner();
+	const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(asGlobalFetch(async () => nativeResponse("low")));
+	const judgeBatch = runner.createContext().judgeBatch;
+	if (!judgeBatch) throw new Error("expected batch judgment context");
+	const request: JudgmentBatchRequest<typeof QUESTIONS> = {
+		items: [{ key: "only", state: "simple work" }],
+		questions: QUESTIONS,
+	};
+
+	// -1 and NaN skip the attempt loop entirely (the item would report an
+	// invented failure), 0.5 asks for half an attempt, and Infinity never stops
+	// re-walking the chain.
+	for (const retries of [-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+		await expect(judgeBatch(request, { retries })).rejects.toBeInstanceOf(JudgmentError);
+	}
+
+	expect(fetchSpy).not.toHaveBeenCalled();
+});
+
 it("judges a batch through a configured chat model when the judge role routes to one", async () => {
 	const { runner, manager } = createJudgmentRunner(CHAT);
 	vi.spyOn(ai, "completeSimple").mockImplementation(async (model, _context, options) => {

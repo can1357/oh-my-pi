@@ -53,9 +53,12 @@ export interface JudgmentBatchRequest<Q extends Questions = Questions> {
 }
 
 export interface JudgeBatchOptions extends JudgeOptions {
-	/** Judgments in flight at once, clamped to the item count. Defaults to 4. */
+	/** Judgments in flight at once, clamped to the item count. An integer of at least 1; defaults to 4. */
 	concurrency?: number;
-	/** Extra attempts per item; each retry re-walks the whole judge chain. Defaults to none. */
+	/**
+	 * Extra attempts per item; each retry re-walks the whole judge chain. A
+	 * non-negative integer; defaults to none.
+	 */
 	retries?: number;
 }
 
@@ -85,6 +88,20 @@ export interface JudgmentRuntime {
 	dispose(reason?: unknown): void;
 }
 
+/**
+ * Bound one numeric batch option before any judgment is scheduled. A fractional
+ * or `NaN` width silently schedules no worker at all — the batch would resolve
+ * with holes where entries belong — and a non-finite retry budget never stops
+ * re-walking the chain, so both are caller errors rather than values to clamp.
+ */
+function boundedOption(value: number | undefined, fallback: number, minimum: number, name: string): number {
+	if (value === undefined) return fallback;
+	if (!Number.isInteger(value) || value < minimum) {
+		throw new JudgmentError(`judgeBatch ${name} must be an integer of at least ${minimum}, received ${value}`);
+	}
+	return value;
+}
+
 class Runtime implements JudgmentRuntime {
 	readonly #host: JudgmentRuntimeHost;
 	readonly #disposeController = new AbortController();
@@ -107,11 +124,12 @@ class Runtime implements JudgmentRuntime {
 		options: JudgeBatchOptions = {},
 	): Promise<JudgmentBatchEntry<Q>[]> {
 		const { items, questions } = request;
+		const retries = boundedOption(options.retries, 0, 0, "retries");
+		const concurrency = boundedOption(options.concurrency, DEFAULT_BATCH_CONCURRENCY, 1, "concurrency");
 		if (items.length === 0) return [];
 		const signal = this.#scope(options.signal);
 		const judge = this.#chain("extension-judge-batch");
-		const retries = Math.max(0, options.retries ?? 0);
-		const width = Math.min(Math.max(1, options.concurrency ?? DEFAULT_BATCH_CONCURRENCY), items.length);
+		const width = Math.min(concurrency, items.length);
 		const entries: JudgmentBatchEntry<Q>[] = Array.from({ length: items.length });
 		// Workers pull from one shared cursor so a slow item never idles the
 		// rest, and each entry lands at its request index so the caller reads
