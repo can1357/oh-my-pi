@@ -259,8 +259,15 @@ function formatReadPathLink(
 	const plainDisplayPath = options.suffixResolution
 		? shortenPath(options.suffixResolution.to)
 		: shortenPath(basePath || options.resolvedPath || options.fallbackLabel || rawPath);
+	// Calls render before the tool has resolved a filesystem target. Preserve
+	// protocol resources as plain text, but resolve direct relative file paths
+	// so terminals receive an explicit file: link rather than guessing HTTPS.
+	const relativeInputPath =
+		basePath && !INTERNAL_URL_LIKE_RE.test(basePath) && !path.isAbsolute(basePath)
+			? path.resolve(basePath)
+			: undefined;
 	const absoluteInputPath = path.isAbsolute(basePath) ? basePath : undefined;
-	const target = options.resolvedPath ?? options.sourcePath ?? absoluteInputPath;
+	const target = options.resolvedPath ?? options.sourcePath ?? absoluteInputPath ?? relativeInputPath;
 	const line = firstReadSelectorLine(split.sel) ?? options.offset;
 	const linkOptions = line !== undefined ? { line } : undefined;
 	const linkedPath = target ? fileHyperlink(target, plainDisplayPath, linkOptions) : plainDisplayPath;

@@ -411,7 +411,11 @@ export const writeToolRenderer = {
 		const filePath = shortenPath(rawPath);
 		const lang = rawPath ? (getLanguageFromPath(rawPath) ?? "text") : "text";
 		const langIcon = uiTheme.fg("muted", uiTheme.getLangIcon(lang));
-		const pathDisplay = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
+		const styledPath = filePath ? uiTheme.fg("accent", filePath) : uiTheme.fg("toolOutput", "…");
+		// A pending write has no result details yet, but its header is still a
+		// file-path field. Link it directly instead of letting terminals guess a
+		// relative path is an HTTP(S) URL before the file exists.
+		const pathDisplay = filePath ? fileHyperlink(rawPath, styledPath) : styledPath;
 		// No status icon on the head row: it's the head of the framed block, and
 		// native-scrollback commits are prefix-only — an animated glyph would pin
 		// the commit boundary at the top, and the pending hourglass just adds
