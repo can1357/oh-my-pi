@@ -230,6 +230,12 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 			);
 		case "createTab": {
 			const tab = await chrome.tabs.create({ url: msg.url });
+			// Group inside the same RPC that creates the tab, so a driven tab is
+			// born in the omp group rather than flashing standalone first. An absent
+			// spec means the relay runs with --no-group; leave the tab loose.
+			if (msg.group && tab.id !== undefined) {
+				await enqueueGroupOp(() => groupTabs([tab.id!], msg.group!.title, msg.group!.color)).catch(() => {});
+			}
 			const snap = snapshot(tab);
 			if (!snap) throw new Error("created tab has no id");
 			return { tab: snap };
