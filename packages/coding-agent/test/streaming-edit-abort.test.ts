@@ -6,7 +6,7 @@ import type { Agent, AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool, getEditStore } from "@oh-my-pi/pi-coding-agent/edit";
 import { StreamingEditGuard } from "@oh-my-pi/pi-coding-agent/session/stream-guards";
-import { formatHashlineHeader } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
+import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -30,7 +30,6 @@ function createGuard(
 		model: () => undefined,
 		isDisposed: () => false,
 		promptGeneration: () => 0,
-		localProtocolOptions: () => ({}),
 		emitNotice() {},
 		schedulePostPromptTask() {},
 		discardAssistantTurn() {},

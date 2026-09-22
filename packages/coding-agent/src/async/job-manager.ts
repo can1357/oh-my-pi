@@ -1,7 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentOutput } from "../task/types";
-import type { OutputMeta } from "../tools/output-meta";
+import type { StructuredSubagentOutput } from "@oh-my-pi/pi-tui/tools/task";
+import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -540,6 +540,18 @@ export class AsyncJobManager {
 			if (this.#consumeJobResult(jobId)) consumed += 1;
 		}
 		return consumed;
+	}
+	/**
+	 * Mark a foreground-returned job result consumed once the job record has
+	 * terminalized. Foreground races resolve before the registered body returns,
+	 * so immediate consumption would see a running job and do nothing.
+	 */
+	consumeJobResultWhenSettled(jobId: string): void {
+		const job = this.#jobs.get(jobId);
+		if (!job) return;
+		void job.promise.then(() => {
+			this.consumeJobResults([jobId]);
+		});
 	}
 
 	/** True once a result was auto-delivered or recovered by a foreground snapshot. */

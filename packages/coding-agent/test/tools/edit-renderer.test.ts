@@ -5,10 +5,10 @@ import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { editToolRenderer, renderStreamingFallback } from "@oh-my-pi/pi-coding-agent/edit/renderer";
-import { renderDiff } from "@oh-my-pi/pi-coding-agent/modes/components/diff";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { editToolRenderer, renderStreamingFallback } from "@oh-my-pi/pi-tui/tools/edit";
+import { renderDiff } from "@oh-my-pi/pi-tui/chrome/diff";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -174,7 +174,7 @@ describe("editToolRenderer", () => {
 	it("uses sloppy input section headers for the streaming call path", async () => {
 		const uiTheme = await getUiTheme();
 		const component = editToolRenderer.renderCall(
-			{ input: `<SM:EDIT path="src/engine/disk.rs">\n<SM:FIND>\nfn parse_disk_ref(` },
+			{ input: "*** SM:EDIT src/engine/disk.rs\n*** SM:FIND\nfn parse_disk_ref(" },
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },
 			uiTheme,
 		);
@@ -185,7 +185,7 @@ describe("editToolRenderer", () => {
 
 	it("counts extra sloppy sections in the streaming call header", async () => {
 		const uiTheme = await getUiTheme();
-		const input = `<SM:EDIT path="a.ts">\n<SM:FIND>\nfoo\n</SM:FIND>\n<SM:EDIT path="b.ts">\n<SM:FIND>\nbar`;
+		const input = "*** SM:EDIT a.ts\n*** SM:FIND\nfoo\n*** SM:EDIT b.ts\n*** SM:FIND\nbar";
 		const component = editToolRenderer.renderCall(
 			{ input },
 			{ expanded: false, isPartial: true, spinnerFrame: 0, renderContext: { editMode: "sloppy" } },

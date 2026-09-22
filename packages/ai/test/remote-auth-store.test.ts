@@ -558,10 +558,10 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		}
 	});
 
-	test("getUsageReport gates same-org siblings on the member's own identity", async () => {
-		// Two Team members share the org id but draw on per-user pools: the
-		// shared org is a gate, not a match, so Bob must never receive Alice's
-		// report just because it is the first (or only) same-org candidate.
+	test("getUsageReport gates same-org siblings on the member's email when their account ID is shared", async () => {
+		// Two Team members share the org and account ids but draw on per-user
+		// pools: Bob must never receive Alice's report just because the shared
+		// workspace identifiers match first.
 		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
 		const now = Date.now();
 		const makeMemberCredential = (name: string, orgId?: string) => ({
@@ -569,7 +569,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			access: `remote-access-${name}`,
 			refresh: REMOTE_REFRESH_SENTINEL,
 			expires: now + 120_000,
-			...(name === "org-only" ? {} : { accountId: `account-${name}`, email: `${name}@example.com` }),
+			...(name === "org-only" ? {} : { accountId: "account-shared", email: `${name}@example.com` }),
 			orgId,
 		});
 		const makeMemberReport = (
@@ -590,7 +590,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 					status,
 				},
 			],
-			metadata: { email: `${name}@example.com`, accountId: `account-${name}`, orgId },
+			metadata: { email: `${name}@example.com`, accountId: "account-shared", orgId },
 		});
 		// Bob's report deliberately precedes Alice's so a first-same-org match
 		// would hand his pool to Alice; org-duo holds only Dave's report.
@@ -616,10 +616,10 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		try {
 			// Each member routes to their OWN pool inside the shared org.
 			const aliceReport = await remoteStore.getUsageReport("anthropic", makeMemberCredential("alice", "org-team"));
-			expect(aliceReport?.metadata?.accountId).toBe("account-alice");
+			expect(aliceReport?.metadata?.email).toBe("alice@example.com");
 			expect(requireLimit(aliceReport!, "anthropic:5h").status).toBe("exhausted");
 			const bobReport = await remoteStore.getUsageReport("anthropic", makeMemberCredential("bob", "org-team"));
-			expect(bobReport?.metadata?.accountId).toBe("account-bob");
+			expect(bobReport?.metadata?.email).toBe("bob@example.com");
 			expect(requireLimit(bobReport!, "anthropic:5h").status).toBe("ok");
 
 			// Erin's own report is missing: the lone same-org sibling report
@@ -629,7 +629,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			// An org-only credential (no base identifiers) still matches on the
 			// org alone, but only when the same-org report is unambiguous.
 			const duoReport = await remoteStore.getUsageReport("anthropic", makeMemberCredential("org-only", "org-duo"));
-			expect(duoReport?.metadata?.accountId).toBe("account-dave");
+			expect(duoReport?.metadata?.email).toBe("dave@example.com");
 			expect(await remoteStore.getUsageReport("anthropic", makeMemberCredential("org-only", "org-team"))).toBeNull();
 
 			// Header-ingest overlays partition per member too: Alice's ingest
@@ -647,14 +647,14 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 						status: "ok",
 					},
 				],
-				metadata: { email: "alice@example.com", accountId: "account-alice", orgId: "org-team" },
+				metadata: { email: "alice@example.com", accountId: "account-shared", orgId: "org-team" },
 			};
 			expect(remoteStore.ingestUsageReport("anthropic", makeMemberCredential("alice", "org-team"), overlay)).toBe(
 				true,
 			);
 			const merged = await remoteStore.fetchUsageReports();
-			const mergedAlice = merged?.find(report => report.metadata?.accountId === "account-alice");
-			const mergedBob = merged?.find(report => report.metadata?.accountId === "account-bob");
+			const mergedAlice = merged?.find(report => report.metadata?.email === "alice@example.com");
+			const mergedBob = merged?.find(report => report.metadata?.email === "bob@example.com");
 			expect(requireLimit(mergedAlice!, "anthropic:5h").amount.used).toBe(90);
 			expect(requireLimit(mergedBob!, "anthropic:5h").amount.used).toBe(10);
 			const bobAfterIngest = await remoteStore.getUsageReport("anthropic", makeMemberCredential("bob", "org-team"));

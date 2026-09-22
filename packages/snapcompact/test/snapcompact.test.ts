@@ -886,6 +886,27 @@ describe("compact", () => {
 		expect(blocks[0]?.type).toBe("text");
 	});
 
+	it("omits the ¶think: legend from the preamble when thinking is excluded", async () => {
+		const fileOps = snapcompact.createFileOps();
+		fileOps.read.add("src/auth.ts");
+		const result = await snapcompact.compact(makePreparation({ fileOps }), {
+			frameSize: TEST_FRAME_SIZE,
+			includeThinking: false,
+		});
+
+		expect(result.summary).toContain("`¶user:`");
+		expect(result.summary).toContain("`¶call:`");
+		expect(result.summary).not.toContain("`¶think:`");
+	});
+
+	it("keeps the ¶think: legend in the preamble when thinking is included", async () => {
+		const fileOps = snapcompact.createFileOps();
+		fileOps.read.add("src/auth.ts");
+		const result = await snapcompact.compact(makePreparation({ fileOps }), { frameSize: TEST_FRAME_SIZE });
+
+		expect(result.summary).toContain("`¶think:`");
+	});
+
 	it("carries dim tool-output spans from text into the first image frame", async () => {
 		const result = await snapcompact.compact(
 			makePreparation({

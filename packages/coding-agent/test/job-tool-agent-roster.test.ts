@@ -11,7 +11,8 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool } from "../src/tools/hub";
+import { type CoordinationDetails } from "@oh-my-pi/pi-tui/tools/hub";
+import { HubTool } from "../src/tools/hub";
 
 const managers: AsyncJobManager[] = [];
 
@@ -92,11 +93,61 @@ describe("hub jobs snapshot", () => {
 
 		expect(deliveries).toEqual(["already delivered eval body"]);
 		expect(resultText(result)).not.toContain("already delivered eval body");
-		expect(resultText(result)).toContain("Delivery: already delivered or recovered.");
+		expect(resultText(result)).toContain(`\`${jobId}\` [eval] — completed — completed cell — delivery delivered`);
 		expect((result.details as CoordinationDetails)?.jobs?.[0]?.resultText).toBeUndefined();
 	});
 
-	test("recovers a result while auto-delivery still awaits consumer injection", async () => {
+	test("lists settled jobs without replaying or consuming their pending deliveries", async () => {
+		const manager = createManager();
+		const deliveryStarted = Promise.withResolvers<void>();
+		const allowInjection = Promise.withResolvers<void>();
+		const deliveries: string[] = [];
+		manager.registerDeliverySink("Main", async (_jobId, text) => {
+			deliveryStarted.resolve();
+			await allowInjection.promise;
+			deliveries.push(text);
+		});
+		const marker = "SETTLED-JOB-FULL-OUTPUT-MARKER";
+		const output = `large output\n${"line\n".repeat(250)}${marker}\n${"line\n".repeat(250)}`;
+		const jobId = manager.register(
+			"bash",
+			"large command",
+			async ({ reportProgress }) => {
+				await reportProgress("", {
+					exitCode: 7,
+					meta: {
+						truncation: {
+							direction: "tail",
+							truncatedBy: "lines",
+							totalLines: 502,
+							totalBytes: output.length,
+							outputLines: 10,
+							outputBytes: 50,
+							artifactId: "42",
+						},
+					},
+				});
+				throw new Error(output);
+			},
+			{ ownerId: "Main" },
+		);
+		await manager.getJob(jobId)!.promise;
+		await deliveryStarted.promise;
+
+		const tool = new HubTool(createToolSession({ manager, agentId: "Main" }));
+		const snapshot = await tool.execute("snapshot", { op: "jobs" });
+
+		expect(resultText(snapshot)).not.toContain(marker);
+		expect(resultText(snapshot)).toContain(`\`${jobId}\` [bash] — failed — large command — exit 7 — artifact://42`);
+		expect(JSON.stringify(snapshot.details)).not.toContain(marker);
+		expect(manager.isJobResultConsumed(jobId)).toBe(false);
+
+		allowInjection.resolve();
+		await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
+		expect(deliveries).toEqual([output]);
+	});
+
+	test("wait recovers a result while auto-delivery still awaits consumer injection", async () => {
 		const manager = createManager();
 		const deliveryStarted = Promise.withResolvers<void>();
 		const allowInjection = Promise.withResolvers<void>();
@@ -113,7 +164,7 @@ describe("hub jobs snapshot", () => {
 		await deliveryStarted.promise;
 
 		const tool = new HubTool(createToolSession({ manager, agentId: "Main" }));
-		const recovered = await tool.execute("recover", { op: "jobs" });
+		const recovered = await tool.execute("recover", { op: "wait", ids: [jobId] });
 		allowInjection.resolve();
 		await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
 
@@ -122,7 +173,7 @@ describe("hub jobs snapshot", () => {
 		expect(injected).toEqual([]);
 	});
 
-	test("returns an undelivered result body once for manual recovery", async () => {
+	test("wait returns an undelivered result body once for manual recovery", async () => {
 		const manager = createManager();
 		const jobId = manager.register("task", "orphaned child", async () => "recover this child report", {
 			ownerId: "Main",
@@ -131,8 +182,8 @@ describe("hub jobs snapshot", () => {
 		await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
 
 		const tool = new HubTool(createToolSession({ manager, agentId: "Main" }));
-		const recovered = await tool.execute("first", { op: "jobs" });
-		const consumed = await tool.execute("second", { op: "jobs" });
+		const recovered = await tool.execute("first", { op: "wait", ids: [jobId] });
+		const consumed = await tool.execute("second", { op: "wait", ids: [jobId] });
 
 		expect(resultText(recovered)).toContain("recover this child report");
 		expect(resultText(recovered)).toContain("Delivery: not auto-delivered; recovered by this snapshot.");

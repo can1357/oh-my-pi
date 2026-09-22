@@ -10,7 +10,6 @@ import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
-	getInstallId,
 	isEnoent,
 	logger,
 	parseJsonWithRepair,
@@ -111,9 +110,10 @@ import {
 	CLAUDE_CODE_MAX_OUTPUT_TOKENS,
 	claudeCodeSdkVersion,
 	claudeCodeSystemInstruction,
-	claudeCodeVersion,
+	adoptRequiredClaudeCodeVersion,
 	claudeToolPrefix,
-	claudeCodeUserAgent,
+	getClaudeCodeUserAgent,
+	getClaudeCodeVersion,
 } from "./claude-code-fingerprint";
 import {
 	buildCopilotDynamicHeaders,
@@ -129,6 +129,43 @@ import { getOpenAIPromptCacheKey } from "./openai-shared";
 import { applyInferenceHeaders } from "./inference-headers";
 import { redactSensitiveCredentials, transformMessages } from "./transform-messages";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+import {
+	injectedClientBaseUrl,
+	resolvesToOfficialAnthropicEndpoint,
+	supportsAnthropicCompaction,
+	supportsAnthropicCompactionOnClient,
+} from "./anthropic-compaction";
+import {
+	applyClaudeToolPrefix,
+	deriveClaudeDeviceId,
+	extractClaudeMetadataSessionId,
+	generateClaudeCloakingUserId,
+	isClaudeCloakingUserId,
+	readAnthropicMetadataAccountId,
+	readAnthropicMetadataString,
+	resolveAnthropicMetadataUserId,
+	stripClaudeToolPrefix,
+} from "./anthropic-identity";
+import {
+	anthropicProviderSessionStateKey,
+	clearAnthropicFastModeFallback,
+	isAnthropicFastModeFallbackDisabled,
+	normalizeAnthropicBaseUrl,
+	resolveDirectAnthropicBaseUrl,
+} from "./anthropic-state";
+
+export {
+	applyClaudeToolPrefix,
+	clearAnthropicFastModeFallback,
+	deriveClaudeDeviceId,
+	generateClaudeCloakingUserId,
+	isAnthropicFastModeFallbackDisabled,
+	isClaudeCloakingUserId,
+	normalizeAnthropicBaseUrl,
+	resolveAnthropicMetadataUserId,
+	stripClaudeToolPrefix,
+};
+export { resolvesToOfficialAnthropicEndpoint, supportsAnthropicCompaction, supportsAnthropicCompactionOnClient };
 
 export type AnthropicHeaderOptions = {
 	apiKey: string;
@@ -143,15 +180,6 @@ export type AnthropicHeaderOptions = {
 	/** Allow explicit fingerprint headers to replace OAuth defaults on non-official endpoints. */
 	allowAnthropicHeaderOverrides?: boolean;
 };
-
-export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
-	const trimmed = baseUrl?.trim();
-	if (!trimmed) {
-		return undefined;
-	}
-	const withoutTrailingSlashes = trimmed.replace(/\/+$/, "");
-	return withoutTrailingSlashes.endsWith("/v1") ? withoutTrailingSlashes.slice(0, -3) : withoutTrailingSlashes;
-}
 
 // Build deduplicated beta header string
 export function buildBetaHeader(baseBetas: readonly string[], extraBetas: readonly string[]): string {
@@ -349,7 +377,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	}
 
 	if (oauthToken) {
-		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent) ? incomingUserAgent : claudeCodeUserAgent;
+		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent) ? incomingUserAgent : getClaudeCodeUserAgent();
 		const headers = {
 			...modelHeaders,
 			Accept: acceptHeader,
@@ -415,8 +443,6 @@ type AnthropicOutputConfig = NonNullable<MessageCreateParamsStreaming["output_co
 
 const ANTHROPIC_STOP_SEQUENCES_MAX = 4;
 let warnedStopSequencesTrim = false;
-
-const ANTHROPIC_PROVIDER_SESSION_STATE_KEY = "anthropic-messages";
 
 /**
  * A mid-conversation `role: "system"` message omp inserts at a fixed slot in
@@ -504,18 +530,6 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 	return state;
 }
 
-/**
- * Key the sticky strict-tools / fast-mode learning per endpoint+model. A
- * grammar-too-large 400 or a fast-mode rejection is specific to the model (its
- * tool grammar / entitlement) and the endpoint (direct Anthropic vs a gateway /
- * Foundry / Bedrock proxy), so it MUST NOT bleed onto unrelated anthropic-messages
- * requests in the same session. NUL separates the two components so neither can
- * forge the boundary.
- */
-function anthropicProviderSessionStateKey(baseUrl: string, modelId: string): string {
-	return `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:${baseUrl}\u0000${modelId}`;
-}
-
 function getAnthropicProviderSessionState(
 	providerSessionState: Map<string, ProviderSessionState> | undefined,
 	baseUrl: string,
@@ -532,41 +546,6 @@ function getAnthropicProviderSessionState(
 	const created = createAnthropicProviderSessionState();
 	providerSessionState.set(key, created);
 	return created;
-}
-
-/**
- * Clears the in-session "server rejected fast mode" sticky flag. Call when the
- * caller is explicitly re-arming `serviceTier: "priority"` (e.g. user toggled
- * `/fast on` after a previous turn auto-disabled it) so the next request
- * actually carries `speed: "fast"` again. No-op when the map or state entry
- * hasn't been materialized yet.
- */
-export function clearAnthropicFastModeFallback(
-	providerSessionState: Map<string, ProviderSessionState> | undefined,
-): void {
-	if (!providerSessionState) return;
-	// Fast mode is re-armed session-wide (user toggled `/fast on`), so clear the
-	// sticky flag on every per-endpoint/model Anthropic entry — plus the legacy
-	// unscoped key — rather than a single shared object.
-	const prefix = `${ANTHROPIC_PROVIDER_SESSION_STATE_KEY}:`;
-	for (const [key, value] of providerSessionState) {
-		if (key !== ANTHROPIC_PROVIDER_SESSION_STATE_KEY && !key.startsWith(prefix)) continue;
-		(value as AnthropicProviderSessionState).fastModeDisabled = false;
-	}
-}
-/**
- * Whether the direct Anthropic model's endpoint-scoped fast-mode fallback is
- * currently active. Reading the map directly is intentional: inspection must
- * not materialize a state entry for a model that has never streamed.
- */
-export function isAnthropicFastModeFallbackDisabled(
-	providerSessionState: Map<string, ProviderSessionState> | undefined,
-	model: Model<Api>,
-): boolean {
-	if (!providerSessionState || model.provider !== "anthropic" || model.api !== "anthropic-messages") return false;
-	const baseUrl = resolveAnthropicBaseUrl(model as Model<"anthropic-messages">) ?? "https://api.anthropic.com";
-	const key = anthropicProviderSessionStateKey(baseUrl, model.id);
-	return (providerSessionState.get(key) as AnthropicProviderSessionState | undefined)?.fastModeDisabled ?? false;
 }
 
 function hasStrictAnthropicTools(params: MessageCreateParamsStreaming): boolean {
@@ -687,14 +666,11 @@ function createClaudeBillingHeader(firstUserMessageText: string): string {
 	// Matches CC's computeFingerprint in utils/fingerprint.ts.
 	// Uses chars from the first user message (not the system prompt).
 	const k = [4, 7, 20].map(i => firstUserMessageText[i] ?? "0").join("");
-	const versionSuffix = nodeCrypto
-		.createHash("sha256")
-		.update(`59cf53e54c78${k}${claudeCodeVersion}`)
-		.digest("hex")
-		.slice(0, 3);
+	const version = getClaudeCodeVersion();
+	const versionSuffix = nodeCrypto.createHash("sha256").update(`59cf53e54c78${k}${version}`).digest("hex").slice(0, 3);
 	// cch=00000: placeholder replaced with the real attestation hash by wrapFetchForCch
 	// before the request hits the wire (see below).
-	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${claudeCodeVersion}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
+	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${version}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
 }
 
 // cch attestation: XXHash64(body_with_placeholder, seed) low-20-bits, 5 hex chars.
@@ -760,145 +736,8 @@ export function wrapFetchForCch(base: FetchImpl): FetchImpl {
 	};
 }
 
-const CLAUDE_CLOAKING_USER_ID_REGEX =
-	/^user_[0-9a-fA-F]{64}_account_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-export function isClaudeCloakingUserId(userId: string): boolean {
-	return CLAUDE_CLOAKING_USER_ID_REGEX.test(userId);
-}
-
-/**
- * Real Claude Code sends `metadata.user_id` as a JSON-stringified object of the
- * shape `{ device_id, account_uuid, session_id, ...extra }` (see
- * services/api/claude.ts → getAPIMetadata). Accept that shape so callers that
- * supply a stable `session_id` aren't silently overwritten with fresh entropy
- * on every request, which would inflate the backend session count.
- */
-function isClaudeJsonUserId(userId: string): boolean {
-	if (userId.length === 0 || userId[0] !== "{") return false;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(userId);
-	} catch {
-		return false;
-	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
-	const obj = parsed as Record<string, unknown>;
-	return typeof obj.session_id === "string" && obj.session_id.length > 0;
-}
-
-function extractClaudeMetadataSessionId(userId: unknown): string | undefined {
-	if (typeof userId !== "string") return undefined;
-	if (isClaudeCloakingUserId(userId)) {
-		return userId.slice(userId.lastIndexOf("_session_") + "_session_".length);
-	}
-	if (userId.length === 0 || userId[0] !== "{") return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(userId);
-	} catch {
-		return undefined;
-	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-	const sessionId = (parsed as Record<string, unknown>).session_id;
-	return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
-}
-
-export function generateClaudeCloakingUserId(): string {
-	const userHash = nodeCrypto.randomBytes(32).toString("hex");
-	const accountId = nodeCrypto.randomUUID().toLowerCase();
-	const sessionId = nodeCrypto.randomUUID().toLowerCase();
-	return `user_${userHash}_account_${accountId}_session_${sessionId}`;
-}
-
-const CLAUDE_DEVICE_ID_INSTALL_HASH_DOMAIN = "omp-claude-device-id-v1:";
-const CLAUDE_DEVICE_ID_ACCOUNT_HASH_DOMAIN = "omp-claude-device-id-v2";
-
-export function deriveClaudeDeviceId(installId: string, accountId?: string): string {
-	const hash = nodeCrypto.createHash("sha256");
-	if (accountId && accountId.length > 0) {
-		return hash
-			.update(CLAUDE_DEVICE_ID_ACCOUNT_HASH_DOMAIN)
-			.update("\0")
-			.update(installId)
-			.update("\0")
-			.update(accountId)
-			.digest("hex");
-	}
-	return hash.update(CLAUDE_DEVICE_ID_INSTALL_HASH_DOMAIN).update(installId).digest("hex");
-}
-
-function readMetadataString(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
-	const value = metadata?.[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function readAnthropicMetadataAccountId(metadata: Record<string, unknown> | undefined): string | undefined {
-	return (
-		readMetadataString(metadata, "account_uuid") ??
-		readMetadataString(metadata, "accountId") ??
-		readMetadataString(metadata, "account_id")
-	);
-}
-
-function deriveClaudeDeviceIdFromInstallId(accountId?: string): string {
-	return deriveClaudeDeviceId(getInstallId(), accountId);
-}
-
-function generateClaudeJsonUserId(sessionId?: string, accountId?: string): string {
-	const userId: Record<string, string> = {
-		device_id: deriveClaudeDeviceIdFromInstallId(accountId),
-		session_id: sessionId ?? nodeCrypto.randomUUID().toLowerCase(),
-	};
-	if (accountId && accountId.length > 0) userId.account_uuid = accountId;
-	return JSON.stringify(userId);
-}
-
-/**
- * Resolve the `metadata.user_id` field for an Anthropic Messages request.
- *
- * For API-key tokens, an explicit caller-supplied `userId` is forwarded
- * verbatim and `undefined` yields no metadata. For OAuth tokens the value
- * must match the Claude Code attribution shape (`isClaudeCloakingUserId` or
- * the `{session_id, account_uuid?, device_id?}` JSON envelope) — anything
- * else is dropped and a fresh Claude-Code-style JSON id is generated from
- * `sessionId`/`accountId` so attribution stays consistent across the main
- * streaming path and provider-specific request builders (e.g. web search).
- */
-export function resolveAnthropicMetadataUserId(
-	userId: unknown,
-	isOAuthToken: boolean,
-	sessionId?: string,
-	accountId?: string,
-): string | undefined {
-	if (typeof userId === "string") {
-		if (!isOAuthToken || isClaudeCloakingUserId(userId) || isClaudeJsonUserId(userId)) {
-			return userId;
-		}
-	}
-
-	if (!isOAuthToken) return undefined;
-	return generateClaudeJsonUserId(sessionId, accountId);
-}
-const ANTHROPIC_BUILTIN_TOOL_NAMES = new Set(["web_search", "code_execution", "text_editor", "computer"]);
 const UMANS_WEBSEARCH_PROVIDER_HEADER = "X-Umans-Websearch-Provider";
 const UMANS_WEBSEARCH_TOOL_NAME = "web_search";
-export const applyClaudeToolPrefix = (name: string): string => {
-	if (!claudeToolPrefix) return name;
-	if (ANTHROPIC_BUILTIN_TOOL_NAMES.has(name.toLowerCase())) return name;
-	// Always prepend (no "already prefixed" short-circuit): the prefix is a wire
-	// transport detail applied once to internal tool names, and `stripClaudeToolPrefix`
-	// removes exactly one prefix on receive. Skipping names that already start with the
-	// prefix would make a tool literally named `_foo` lose its leading underscore on the
-	// return trip (`_foo` → wire `_foo` → strip → `foo`), so the agent loop can't find it.
-	return `${claudeToolPrefix}${name}`;
-};
-
-export const stripClaudeToolPrefix = (name: string): string => {
-	if (!claudeToolPrefix) return name;
-	if (!name.toLowerCase().startsWith(claudeToolPrefix.toLowerCase())) return name;
-	return name.slice(claudeToolPrefix.length);
-};
 
 function normalizeUmansWebSearchProvider(value: string | undefined): "native" | "exa" | undefined {
 	const normalized = value?.trim().toLowerCase();
@@ -1327,22 +1166,7 @@ function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: st
 	if (model.provider === "github-copilot") {
 		return normalizeAnthropicBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl);
 	}
-	if (model.provider === "anthropic" && isFoundryEnabled()) {
-		const foundryBaseUrl = normalizeAnthropicBaseUrl($env.FOUNDRY_BASE_URL);
-		if (foundryBaseUrl) {
-			return foundryBaseUrl;
-		}
-	}
-	if (model.provider === "anthropic") {
-		const configured = normalizeAnthropicBaseUrl(model.baseUrl);
-		// An explicitly configured non-official baseUrl (e.g. a models.yml provider
-		// override) is more specific than the generic env fallback and wins.
-		if (configured && !isOfficialAnthropicApiUrl(configured)) return configured;
-		// Otherwise ANTHROPIC_BASE_URL routes chat through an enterprise gateway
-		// (docs/environment-variables.md), ahead of the official default. The
-		// Foundry redirect is already handled above.
-		return normalizeAnthropicBaseUrl($env.ANTHROPIC_BASE_URL) ?? configured ?? "https://api.anthropic.com";
-	}
+	if (model.provider === "anthropic") return resolveDirectAnthropicBaseUrl(model);
 	return normalizeAnthropicBaseUrl(model.baseUrl);
 }
 
@@ -1563,7 +1387,9 @@ async function* iterateAnthropicEvents(
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
 
-	for await (const sse of readSseEvents(response.body, signal)) {
+	// Capture `raw` only when the diagnostic observer exists; otherwise the
+	// per-frame wire-line array is pure token-path garbage.
+	for await (const sse of readSseEvents(response.body, signal, onSseEvent ? { captureRaw: true } : undefined)) {
 		notifyRawSseEvent(onSseEvent, sse);
 		if (sse.event === "error") {
 			throw createAnthropicSseStreamError(sse.data);
@@ -1788,89 +1614,6 @@ function parseAnthropicFallbackWireBlock(value: unknown): AnthropicFallbackConte
 }
 
 const ANTHROPIC_COMPACTION_MIN_TRIGGER_TOKENS = 50_000;
-
-/**
- * Whether this model's requests reach the official Anthropic API, resolved the
- * way the transport resolves it — including the Foundry and
- * `ANTHROPIC_BASE_URL` reroutes that leave `compat.officialEndpoint` stale.
- */
-export function resolvesToOfficialAnthropicEndpoint(model: Model<"anthropic-messages">): boolean {
-	return isOfficialAnthropicApiUrl(resolveAnthropicBaseUrl(model));
-}
-
-/**
- * Whether server-side compaction (`compact-2026-01-12`) may be spoken for
- * this model to the endpoint a request actually reaches: a model line the
- * beta supports (`compat.supportsServerCompaction`, rule-owned in the
- * catalog), on the official API for the first-party provider or on any
- * endpoint that opted in through `remoteCompaction.enabled`, and never on one
- * whose deployment contract excludes context management. The same predicate
- * gates emitting the edit, attaching the beta, and replaying a persisted
- * block, so a route or model change can never leave a session sending a block
- * its endpoint rejects.
- */
-export function supportsAnthropicCompaction(model: Model<"anthropic-messages">, effectiveBaseUrl?: string): boolean {
-	if (!isCompactionCapableModel(model)) return false;
-	if (model.remoteCompaction?.enabled === true) return true;
-	// First-party provider is catalog policy (`first-party-provider` on the
-	// provider rules), never a provider-id literal. It reads its own axis
-	// rather than `officialEndpoint`, which stays URL-derived.
-	// A `transport: "pi-native"` baseUrl names the auth gateway, not the
-	// upstream model server: the gateway resolves the model's own provider
-	// server-side, so the upstream URL check cannot apply to the model's own
-	// transport URL — but only for the KDL-owned first-party deployment. A
-	// custom provider travels the same gateway to its own upstream, whose
-	// server-side gate stays off (unless `remoteCompaction.enabled` opts the
-	// route in above). An explicitly supplied foreign endpoint (e.g. a
-	// caller-owned client's URL) is still judged on its own merits below.
-	if (
-		model.transport === "pi-native" &&
-		model.compat.firstPartyProvider === true &&
-		(effectiveBaseUrl === undefined || effectiveBaseUrl === normalizeAnthropicBaseUrl(model.baseUrl))
-	) {
-		return true;
-	}
-	return (
-		model.compat.firstPartyProvider === true &&
-		(effectiveBaseUrl === undefined
-			? resolvesToOfficialAnthropicEndpoint(model)
-			: isOfficialAnthropicApiUrl(effectiveBaseUrl))
-	);
-}
-
-/**
- * {@link supportsAnthropicCompaction} for a request on a caller-owned client:
- * the endpoint is whatever the client targets (an `AnthropicVertex` client
- * carries an Anthropic model to Vertex), never the model's own routing. SDK
- * clients expose it as `baseURL`; a client that exposes no endpoint only
- * compacts through an explicit `remoteCompaction.enabled` opt-in.
- */
-export function supportsAnthropicCompactionOnClient(
-	model: Model<"anthropic-messages">,
-	client: AnthropicMessagesClientLike,
-): boolean {
-	const baseURL = injectedClientBaseUrl(client);
-	if (baseURL !== undefined) return supportsAnthropicCompaction(model, baseURL);
-	return isCompactionCapableModel(model) && model.remoteCompaction?.enabled === true;
-}
-
-/**
- * Effective endpoint of a caller-owned client. SDK clients expose it as
- * `baseURL`; a client that exposes none leaves routing to the model.
- */
-function injectedClientBaseUrl(client: AnthropicMessagesClientLike): string | undefined {
-	const baseURL = (client as { baseURL?: unknown }).baseURL;
-	return typeof baseURL === "string" && baseURL.length > 0 ? baseURL : undefined;
-}
-
-/** The model-side half of the gate: lineage support and a deployment contract that allows it. */
-function isCompactionCapableModel(model: Model<"anthropic-messages">): boolean {
-	return (
-		model.compat.supportsServerCompaction === true &&
-		model.compat.supportsContextManagement !== false &&
-		model.remoteCompaction?.enabled !== false
-	);
-}
 
 /**
  * Whether a persisted compaction summary replays as a native `compaction`
@@ -2340,6 +2083,8 @@ const streamAnthropicOnce = (
 			const zeroOutputCacheRefresh = options?.anthropicCacheRefreshRequest === true;
 			let client: AnthropicMessagesClientLike;
 			let isOAuthToken: boolean;
+			// Retained so a Claude Code version bump can rebuild the client's fingerprint headers.
+			let clientArgs: AnthropicClientOptionsArgs | undefined;
 
 			if (options?.client) {
 				client = options.client;
@@ -2445,7 +2190,7 @@ const streamAnthropicOnce = (
 					}
 				}
 
-				const created = createClient(model, {
+				clientArgs = {
 					model,
 					apiKey,
 					extraBetas,
@@ -2466,7 +2211,8 @@ const streamAnthropicOnce = (
 						extractClaudeMetadataSessionId(options?.metadata?.user_id) ??
 						options?.promptCacheKey,
 					disableStrictTools,
-				});
+				};
+				const created = createClient(model, clientArgs);
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
 			}
@@ -2515,6 +2261,15 @@ const streamAnthropicOnce = (
 
 			if (zeroOutputCacheRefresh) {
 				const refreshParams: MessageCreateParams = { ...params, max_tokens: 0, stream: false };
+				// Anthropic rejects `tool_choice: {type:"tool"|"any"}` with `max_tokens: 0`
+				// ("tool_choice ... cannot be used when max_tokens is 0", #12597). A refresh
+				// replays the captured turn's payload, which can carry a forced selector
+				// (e.g. a forced yield). A zero-output keep-alive produces no tokens, so the
+				// forced choice is meaningless here — drop it so the request is accepted.
+				const refreshChoiceType = refreshParams.tool_choice?.type;
+				if (refreshChoiceType === "tool" || refreshChoiceType === "any") {
+					delete refreshParams.tool_choice;
+				}
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -3320,6 +3075,30 @@ const streamAnthropicOnce = (
 					const streamFailureMessage =
 						streamFailure instanceof Error ? streamFailure.message : String(streamFailure);
 					if (
+						isOAuthToken &&
+						clientArgs &&
+						firstTokenTime === undefined &&
+						adoptRequiredClaudeCodeVersion(streamFailure)
+					) {
+						logger.warn("anthropic: Claude Code version rejected as too old, retrying with required version", {
+							model: model.id,
+							version: getClaudeCodeVersion(),
+						});
+						client = createClient(model, { ...clientArgs, disableStrictTools }).client;
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.upstreamModel = undefined;
+						output.errorMessage = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
+					if (
 						!prefixBindingRetryAttempted &&
 						options?.anthropicPrefixMismatchBehavior !== "error" &&
 						firstTokenTime === undefined &&
@@ -3952,8 +3731,17 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	const messageEnd = hasTrailingAssistantPad ? trailingIndex - 1 : trailingIndex;
 
 	// A breakpoint caches every preceding byte, not only the decorated message.
-	// Once per-call or turn-scoped content appears, no later message can anchor a
-	// prefix reusable by the next request.
+	// A per-call or turn-scoped message is rebuilt next request, so a prefix
+	// spanning it cannot match — but only at its own position. Messages after
+	// the mark are ordinary persisted history with stable bytes, so a later
+	// breakpoint still matches everything after the mark. The cost is bounded
+	// to re-billing the marked bytes themselves, not the growing tail.
+	// Hence two anchors, not a truncation: the newest candidate at or before
+	// the first per-call/turn-scoped message (when one exists) pins the
+	// reusable prefix behind the mark, and the rolling tail candidates pin
+	// the suffix after it. Turn-scoped `clear_at` messages are absent next
+	// request, so they still truncate the decimation range (ordinals would
+	// shift), but per-call marks no longer freeze the tail.
 	let stableMessageEnd = messageEnd;
 	for (let index = 0; index <= messageEnd; index++) {
 		const message = params.messages[index];
@@ -3978,18 +3766,39 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 	// Stable historical decimation checkpoint every 15 user turns (15th, 30th, 45th...)
 	const decimationIndices = userIndices.filter((_, ordinal) => (ordinal + 1) % ANTHROPIC_DECIMATION_INTERVAL === 0);
 
-	// Collect up to 2 trailing candidates from the reusable prefix.
+	// Collect up to 2 trailing candidates from the message tail, skipping
+	// per-call messages, turn-scoped messages, and mid-conversation
+	// tool-control messages. A per-call tail candidate is rebuilt next request
+	// (fresh timestamps on appended probes, fresh redaction bytes), so a
+	// breakpoint on it cannot match — it would spend the tail anchor on bytes
+	// that never repeat while the persisted history behind it goes uncached.
+	// Turn-scoped messages are absent next request for the same reason, and
+	// tool controls reject cache_control outright. The walk starts at the
+	// message tail (not the truncated prefix end) so the anchor advances every
+	// turn; the sub-prefix candidate below covers the reusable region behind
+	// a mark.
 	const trailingCandidates: number[] = [];
-	for (let index = stableMessageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
+	for (let index = messageEnd; index >= 0 && trailingCandidates.length < 2; index--) {
 		const message = params.messages[index];
-		if (!message) continue;
+		if (!message || message.clear_at === "next_user_message" || isPerCallContextMessage(message)) continue;
+		if (
+			message.role === "system" &&
+			typeof message.content !== "string" &&
+			Array.isArray(message.content) &&
+			message.content.length > 0 &&
+			message.content.every(block => block.type === "tool_addition" || block.type === "tool_removal")
+		) {
+			continue;
+		}
 		trailingCandidates.push(index);
 	}
-
 	// Prioritize:
 	// 1. Most recent trailing message
 	// 2. Latest decimation checkpoints (newest first) to maintain stable long-context anchors
-	// 3. Second trailing message
+	// 3. Newest message at or before the first per-call/turn-scoped mark, so a
+	//    volatile interior message costs only its own re-billed bytes instead
+	//    of invalidating the whole reusable prefix behind it
+	// 4. Second trailing message
 	const candidateIndices: number[] = [];
 	if (trailingCandidates.length > 0) {
 		candidateIndices.push(trailingCandidates[0]);
@@ -3998,6 +3807,9 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 		if (!candidateIndices.includes(decimationIndices[i])) {
 			candidateIndices.push(decimationIndices[i]);
 		}
+	}
+	if (stableMessageEnd < messageEnd && stableMessageEnd >= 0 && !candidateIndices.includes(stableMessageEnd)) {
+		candidateIndices.push(stableMessageEnd);
 	}
 	for (const index of trailingCandidates) {
 		if (!candidateIndices.includes(index)) {
@@ -4018,15 +3830,55 @@ function applyPromptCaching(params: MessageCreateParamsStreaming, cacheControl?:
 }
 
 /**
+ * Trailing system-prompt segments carrying per-turn volatile content (memory
+ * recall blocks). They are rendered by the coding agent as their own
+ * `systemPrompt` array elements and appended last, so on the wire they
+ * normally form a volatile suffix after the stable prefix. The system cache
+ * breakpoint anchors on the last stable segment instead of the array tail, so
+ * a recall refresh re-bills only the suffix and the message tail for one turn
+ * while the tools+stable-system prefix stays a cache hit. The fingerprint in
+ * `planStableAnthropicSystem` is scoped the same way, so a recall-only change
+ * no longer resets the tool/control baselines either.
+ *
+ * Only a genuinely trailing volatile run counts: a `before_agent_start`
+ * extension override may append a stable policy block after the staged recall
+ * block, and that block must stay fingerprinted stable (a change to it has to
+ * re-baseline). A volatile block stranded mid-array still poisons the prefix
+ * at its position — prefix caching is positional, so no classification can
+ * save the bytes after it — but the stable tail is at least fingerprinted
+ * instead of silently excluded.
+ *
+ * Detection is by our own markup, not model identity: recall blocks always
+ * open with `<memories>`. Stable segments containing recalled text elsewhere
+ * (e.g. quoted in conversation) are unaffected — only a leading tag counts.
+ */
+const VOLATILE_SYSTEM_SEGMENT_MARKERS = ["<memories>"];
+
+function stableSystemSuffixStart(systemBlocks: readonly AnthropicSystemBlock[]): number {
+	let start = systemBlocks.length;
+	while (start > 0) {
+		const text = systemBlocks[start - 1]?.text ?? "";
+		if (!VOLATILE_SYSTEM_SEGMENT_MARKERS.some(marker => text.startsWith(marker))) break;
+		start--;
+	}
+	return start;
+}
+
+/**
  * Anchor cache_control on the stable request head — the last (non-deferred)
- * tool definition and the last system block. The canonical cache order is
- * tools → system → messages, so a breakpoint on the final system block caches
- * the entire tools+system prefix, and the extra tool breakpoint keeps the tool
+ * tool definition and the last stable system block. The canonical cache order is
+ * tools → system → messages, so a breakpoint on the final stable system block caches
+ * the entire tools+stable-system prefix, and the extra tool breakpoint keeps the tool
  * definitions cached even when the system text changes. This guarantees the
  * large, unchanging head is a cache hit on every turn regardless of how the
  * message tail churns — the breakpoint placement first-party Anthropic clients
  * (Claude Code, Pi) use. Without it, the general API-key path anchors only the
  * moving message tail, so tail churn re-writes the whole head uncached.
+ *
+ * Volatile trailing segments (memory recall) sit after the breakpoint, so a
+ * recall refresh re-bills only the suffix and the tail for one turn instead of
+ * the whole head. When every system block is volatile there is no stable
+ * boundary and the breakpoint stays on the array tail (previous behavior).
  *
  * Anthropic allows at most 4 cache breakpoints per request. At most one is
  * spent on tools and one on system here, leaving the remaining budget for
@@ -4063,9 +3915,28 @@ function applyHeadCaching(
 		}
 	}
 
-	if (systemBlocks && systemBlocks.length > 0 && !systemBlocks.some(block => block.cache_control != null)) {
-		const lastBlock = systemBlocks[systemBlocks.length - 1];
-		if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+	if (systemBlocks && systemBlocks.length > 0) {
+		// Anchor on the last stable block so a volatile recall suffix refresh
+		// re-bills only the suffix, not the whole head. The skip-if-decorated
+		// check applies only when there is no volatile suffix (previous
+		// behavior): with a suffix present the boundary anchor is added
+		// whenever the anchor block itself lacks a breakpoint, even if the
+		// OAuth path pre-decorated its identity block — otherwise the only
+		// system breakpoint sits before the stable prompt and a recall
+		// refresh re-bills it. The message budget in `applyPromptCaching`
+		// shrinks accordingly (4 minus head breakpoints). All-volatile falls
+		// back to tail anchoring (previous behavior).
+		const suffixStart = stableSystemSuffixStart(systemBlocks);
+		if (suffixStart === systemBlocks.length) {
+			if (!systemBlocks.some(block => block.cache_control != null)) {
+				const lastBlock = systemBlocks[systemBlocks.length - 1];
+				if (lastBlock) lastBlock.cache_control = cloneAnthropicCacheControl(cacheControl);
+			}
+		} else {
+			const anchorIndex = suffixStart === 0 ? systemBlocks.length - 1 : suffixStart - 1;
+			const anchor = systemBlocks[anchorIndex];
+			if (anchor && anchor.cache_control == null) anchor.cache_control = cloneAnthropicCacheControl(cacheControl);
+		}
 	}
 }
 
@@ -4149,11 +4020,15 @@ function getAnthropicControlState(
 ): AnthropicControlState | undefined {
 	if (!state) return undefined;
 	const root = messages[0];
+	// Key on the stable system prefix, not the full array: a volatile recall
+	// suffix refresh must resolve the same baseline or the declared-tool,
+	// effort, and control-transition state it preserves is lost with it.
+	const stablePrefix = system?.slice(0, stableSystemSuffixStart(system)) ?? null;
 	const fingerprint = String(
 		Bun.hash(
 			JSON.stringify([
 				sessionId ?? "",
-				system?.map(block => block.text) ?? null,
+				stablePrefix?.map(block => block.text) ?? null,
 				root ? anthropicControlMessageProjection(root) : null,
 			]),
 		),
@@ -4199,14 +4074,16 @@ function syncAnthropicControlState(state: AnthropicControlState, messages: reado
 }
 
 /**
- * Keep the top-level `system` array byte-stable across a session. The blocks
- * captured on the first request are replayed verbatim (with the current
- * request's cache breakpoints) while their text is unchanged. A text change
+ * Keep the top-level `system` array byte-stable across a session. The stable
+ * prefix captured on the first request is replayed verbatim (with the current
+ * request's cache breakpoints) while its text is unchanged; the volatile
+ * recall suffix always passes through current-turn. A stable-prefix change
  * re-baselines instead of duplicating the prompt as a mid-conversation
  * system message: omp's system prompt is one rendered segment that embeds
  * the tool roster, so replaying a second copy on every later request would
  * cost the full prompt again per change. The prefix rewrite is absorbed by
- * `prefix_mismatch_behavior: "drop_block"` and one cache miss.
+ * `prefix_mismatch_behavior: "drop_block"` and one cache miss, while a
+ * recall-only change keeps the tool/control baselines intact.
  */
 function planStableAnthropicSystem(
 	current: AnthropicSystemBlock[] | undefined,
@@ -4214,16 +4091,21 @@ function planStableAnthropicSystem(
 	enabled: boolean,
 ): AnthropicSystemBlock[] | undefined {
 	if (!state || !enabled) return current;
-	const fingerprint = JSON.stringify(current?.map(block => block.text) ?? null);
+	const suffixStart = stableSystemSuffixStart(current ?? []);
+	const fingerprint = JSON.stringify(current?.slice(0, suffixStart).map(block => block.text) ?? null);
 	if (state.systemFingerprint !== fingerprint) {
 		resetAnthropicControlState(state);
 		state.systemFingerprint = fingerprint;
-		state.stableSystemBlocks = current?.map(block => ({ type: block.type, text: block.text }));
+		state.stableSystemBlocks = current?.slice(0, suffixStart).map(block => ({ type: block.type, text: block.text }));
 	}
-	return state.stableSystemBlocks?.map((block, index) => {
-		const cacheControl = current?.[index]?.cache_control;
-		return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
-	});
+	const stableReplay =
+		state.stableSystemBlocks?.map((block, index) => {
+			const cacheControl = current?.[index]?.cache_control;
+			return cacheControl ? { ...block, cache_control: cloneAnthropicCacheControl(cacheControl) } : { ...block };
+		}) ?? [];
+	const suffix = current?.slice(suffixStart).map(block => ({ ...block })) ?? [];
+	const replayed = [...stableReplay, ...suffix];
+	return replayed.length > 0 ? replayed : undefined;
 }
 
 function anthropicToolDefinitionKey(tool: AnthropicWireTool): string {
@@ -4462,7 +4344,7 @@ function buildParams(
 	// Pre-compute metadata.
 	const metadataAccountId = readAnthropicMetadataAccountId(options?.metadata);
 	const metadataUserId = resolveAnthropicMetadataUserId(
-		readMetadataString(options?.metadata, "user_id") ??
+		readAnthropicMetadataString(options?.metadata, "user_id") ??
 			// Deliberately share the normalized affinity identity across Kimi's two transports.
 			(model.provider === "kimi-code" ? getOpenAIPromptCacheKey(options) : undefined),
 		isOAuthToken,

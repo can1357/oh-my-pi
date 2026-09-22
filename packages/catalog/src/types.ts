@@ -23,6 +23,47 @@ export type KnownApi =
 	| "devin-agent";
 export type Api = KnownApi | (string & {});
 
+/** Catalog kinds used to isolate role-specific runners from session chat models. */
+export const MODEL_KINDS = [
+	"chat",
+	"tiny",
+	"image",
+	"tts",
+	"stt",
+	"search",
+	"judge",
+	"embedding",
+	"rerank",
+	"video",
+] as const;
+/** Technical capability of a catalog model; absent model kinds mean chat. */
+export type ModelKind = (typeof MODEL_KINDS)[number];
+/** Kinds a provider maps to a runner transport through `kind-apis` in its KDL; discovery drops rows of these kinds when the provider declares no API. */
+export const KIND_API_KINDS = ["image", "tts", "stt", "embedding", "rerank", "video"] as const;
+export type KindApiKind = (typeof KIND_API_KINDS)[number];
+/** Grounding transport available to chat models selected by the web role. */
+export type WebSearchGrounding = "gemini" | "anthropic" | "codex" | "xai" | "openrouter";
+/** Non-chat runner protocols accepted by catalog seeds, outside the chat dispatch union. */
+export const RUNNER_APIS = [
+	"local-inference",
+	"web-search",
+	"typesafe",
+	"openrouter-decisions",
+	"openai-images",
+	"openrouter-images",
+	"xai-tts",
+	"openai-speech",
+	"openai-embeddings",
+	"openrouter-rerank",
+	"openrouter-video",
+	"openai-transcriptions",
+] as const;
+
+/** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
+export function modelKind(model: Pick<Model, "kind">): ModelKind {
+	return model.kind ?? "chat";
+}
+
 /** Canonical thinking transport used by a model. */
 export type ThinkingControlMode =
 	| "effort"
@@ -1125,6 +1166,10 @@ export type ModelTokenizer =
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
+	/** Role-specific runner capability; omitted for ordinary chat models. */
+	kind?: ModelKind;
+	/** Grounding transport supported by this chat model. */
+	webSearch?: WebSearchGrounding;
 	/**
 	 * Structured model identity resolved by the compat engine: vendor lineage
 	 * class, product family, and revision. Baked into models.json rows and
@@ -1167,6 +1212,12 @@ export interface Model<TApi extends Api = Api> {
 	name: string;
 	api: TApi;
 	provider: Provider;
+	/**
+	 * Discovery backend whose catalog policy applies when it differs from the
+	 * credential-bearing provider id. Persisted so cached and rebuilt custom
+	 * providers retain their transport backend's policy.
+	 */
+	providerType?: string;
 	baseUrl: string;
 	reasoning: boolean;
 	/**
@@ -1226,6 +1277,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	omitMaxOutputTokens?: boolean;
 	headers?: Record<string, string>;
+	/**
+	 * Materialize config-backed headers immediately before a request. Catalog
+	 * inspection never invokes this hook; transports receive a cloned model
+	 * whose `headers` is a plain resolved record and whose hook is removed.
+	 */
+	resolveHeaders?: (signal?: AbortSignal) => Promise<Record<string, string> | undefined>;
 	/**
 	 * Streaming transport override. When `"pi-native"`, `streamSimple` routes
 	 * the request to the model's `baseUrl` via the auth-gateway's

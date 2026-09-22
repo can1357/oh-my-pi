@@ -16,8 +16,8 @@ import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
-import { buildAsyncResultBlock } from "@oh-my-pi/pi-coding-agent/modes/utils/transcript-render-helpers";
-import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { buildAsyncResultBlock } from "@oh-my-pi/pi-tui/chat/transcript-render-helpers";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { ArtifactManager } from "@oh-my-pi/pi-coding-agent/session/artifacts";
 import {
@@ -29,7 +29,8 @@ import { convertToLlm, type CustomMessage } from "@oh-my-pi/pi-coding-agent/sess
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { type OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { TempDir } from "@oh-my-pi/pi-utils";
 function observeAsyncResultEnqueue(session: AgentSession): Promise<void> {
@@ -450,6 +451,36 @@ describe("AgentSession owner-routed async delivery", () => {
 		const message = buildAsyncResultBatchMessage([entry]);
 		expect(message?.content).not.toContain("agent://SchemaProbe");
 		expect(message?.content).toContain("subagent yielded no data");
+	});
+
+	it("delivers a run that failed before yielding as the provider error, not a schema verdict", () => {
+		// Production 2026-09-21: `Structured output: schema invalid: Anthropic
+		// stream envelope error: ...` with the half-streamed prose previewed as
+		// the payload. Nothing was validated, so no schema wording applies.
+		const error = "Anthropic stream envelope error: stream ended before message_stop";
+		const job: AsyncJob = {
+			id: "DeadStream",
+			type: "task",
+			status: "failed",
+			startTime: Date.now(),
+			label: "DeadStream",
+			abortController: new AbortController(),
+			promise: Promise.resolve(),
+			errorText: "failed",
+			structured: { source: "agent", mode: "permissive", status: "unavailable", error },
+		};
+		const entry: AsyncResultEntry = {
+			jobId: "DeadStream",
+			result: "failed",
+			job,
+			durationMs: 1000,
+			epoch: 0,
+		};
+		const message = buildAsyncResultBatchMessage([entry]);
+		expect(message?.content).toContain(`Structured output: unavailable: ${error}`);
+		expect(message?.content).not.toContain("schema invalid");
+		expect(message?.content).not.toContain("schema unavailable");
+		expect(message?.content).not.toContain("```json");
 	});
 
 	it("routes an advisor-owned launch completion through the session", async () => {

@@ -330,4 +330,31 @@ describe("streamProxy — server disconnect without terminal event", () => {
 			expect(getStreamingPartialJson(toolCall)).toBeUndefined();
 		}
 	});
+
+	it("finalizes throttled trailing deltas when the server disconnects mid-tool-call", async () => {
+		// Small deltas all fall below the throttle gate, so mid-stream parses
+		// never fire; the disconnect error path must still finalize the full
+		// buffered arguments.
+		const deltas = ["{", '"c', "om", "ma", "nd", '":', '"l', 's"', "}"];
+		const events: ProxyAssistantMessageEvent[] = [
+			{ type: "start" },
+			{ type: "toolcall_start", contentIndex: 0, id: "call_1", toolName: "bash" },
+			...deltas.map(delta => ({ type: "toolcall_delta", contentIndex: 0, delta }) as const),
+		];
+		const body = buildSseBody(events);
+		const fetchMock: FetchImpl = () => Promise.resolve(new Response(body, { status: 200 }));
+
+		const stream = streamProxy(mockModel, mockContext, {
+			proxyUrl: "http://localhost:0",
+			authToken: "test",
+			fetch: fetchMock,
+		});
+
+		await collectEvents(stream);
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		const toolCall = result.content.find((c): c is ToolCall => c.type === "toolCall");
+		expect(toolCall?.arguments).toEqual({ command: "ls" });
+		expect(getStreamingPartialJson(toolCall)).toBeUndefined();
+	});
 });

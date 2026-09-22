@@ -1,9 +1,10 @@
 // Provider-wire compat for "anthropic"; regenerated from the frozen census using deployment contract selectors.
 
 provider "anthropic" {
-	default-model "claude-opus-4-8"
+	default-model "claude-opus-5-5"
 	env "ANTHROPIC_API_KEY"
 	discovery label="Anthropic"
+	web-search "anthropic"
 
 	// Curated Anthropic models that are live or limited-availability on the
 	// first-party `/v1/models` endpoint but that stencil.so has not catalogued

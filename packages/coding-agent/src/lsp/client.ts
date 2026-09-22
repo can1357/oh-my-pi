@@ -383,7 +383,11 @@ function queueWriteMessage(
 		throw err;
 	});
 	client.writeQueue = result.catch(() => {});
-	return result;
+	// Keep the internal queue chained so writes stay serialized, but do not make
+	// this caller wait forever behind an earlier wedged write. `writeMessage`
+	// observes the same signal once this write reaches the sink; until then the
+	// abort race only releases the caller and deliberately leaves the client alive.
+	return untilAborted(signal, result);
 }
 
 // =============================================================================
@@ -1546,7 +1550,9 @@ const WATCHED_FILES_NOTIFY_TIMEOUT_MS = 2_000;
 /**
  * Announce harness-authored filesystem changes to active LSP clients for `cwd`.
  *
- * This covers sibling files that are not open text documents, such as generated
+ * Created or deleted files can change module resolution for otherwise untouched
+ * open documents, so those overlays are refreshed after the watcher notification.
+ * This also covers sibling files that are not open text documents, such as generated
  * CSS modules or type files that another edited document imports immediately.
  *
  * The underlying stdin write drain is self-bounded by
@@ -1580,6 +1586,8 @@ export async function notifyWorkspaceWatchedFiles(
 				});
 			if (clientChanges.length === 0) return;
 			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
+			if (clientChanges.every(change => change.type === FileChangeType.Changed)) return;
+			await Promise.all(Array.from(client.openFiles.keys(), uri => refreshFile(client, uriToFile(uri), sendSignal)));
 		}),
 	);
 	throwIfAborted(signal);

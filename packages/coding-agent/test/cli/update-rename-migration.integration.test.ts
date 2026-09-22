@@ -28,7 +28,7 @@ import {
 	type ReleaseInfo,
 	type RenameMigrationSteps,
 } from "../../src/cli/update-cli";
-import { initTheme } from "../../src/modes/theme/theme";
+import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 const OLD_PKG = "omp-rename-fixture-old";
 const NEW_PKG = "omp-rename-fixture-new";

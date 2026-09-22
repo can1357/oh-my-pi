@@ -15,7 +15,7 @@ import {
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
 import * as AIError from "./error";
@@ -26,24 +26,17 @@ import type { AnthropicOptions } from "./providers/anthropic";
 import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
-import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
+import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
 import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
-import { isKimiModel, streamKimi } from "./providers/kimi";
+import { streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import { streamPiNative } from "./providers/pi-native-client";
-// Heavy provider stream functions are imported lazily via register-builtins,
-// which wraps each provider module in a dynamic import. This keeps the
-// AWS SDK, google-auth-library, @google/genai, and
-// other provider SDKs out of the CLI startup parse graph. The
-// gitlab-duo / kimi / synthetic providers stay eager because their modules
-// export routing predicates (isGitLabDuoModel, isKimiModel, isSyntheticModel)
-// that must be callable synchronously before streaming begins, and their
-// modules are thin wrappers with no heavy SDK dependencies.
+import { streamSynthetic } from "./providers/synthetic";
 import {
 	streamAnthropic,
 	streamAzureOpenAIResponses,
@@ -58,7 +51,6 @@ import {
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
-import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "./registry";
 import type {
 	Api,
@@ -889,11 +881,40 @@ export function listProvidersWithEnvKey(): string[] {
 	return Object.keys(serviceProviderMap);
 }
 
+function withResolvedModelHeaders<TApi extends Api>(
+	model: Model<TApi>,
+	signal: AbortSignal | undefined,
+	run: (resolvedModel: Model<TApi>) => AssistantMessageEventStream,
+): AssistantMessageEventStream {
+	const resolveHeaders = model.resolveHeaders;
+	if (!resolveHeaders) return run(model);
+
+	const outer = new AssistantMessageEventStream();
+	void (async () => {
+		try {
+			const headers = await untilAborted(signal, () => resolveHeaders(signal));
+			signal?.throwIfAborted();
+			const inner = run({ ...model, resolveHeaders: undefined, headers: headers ? { ...headers } : undefined });
+			for await (const event of inner) {
+				outer.push(event);
+				if (outer.done) return;
+			}
+			if (!outer.done) outer.end(await inner.result());
+		} catch (error) {
+			outer.fail(error);
+		}
+	})();
+	return outer;
+}
+
 export function stream<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	if (model.resolveHeaders) {
+		return withResolvedModelHeaders(model, options?.signal, resolvedModel => stream(resolvedModel, context, options));
+	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
 			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
@@ -924,7 +945,7 @@ function streamDispatch<TApi extends Api>(
 		return customApiProvider.stream(model, context, requestOptions as StreamOptions);
 	}
 
-	if (isGitLabDuoModel(model)) {
+	if (model.provider === "gitlab-duo") {
 		const apiKey = requestOptions.apiKey || getEnvApiKey(model.provider);
 		if (!apiKey) {
 			throw new AIError.MissingApiKeyError(model.provider);
@@ -1623,6 +1644,12 @@ function streamSimpleRequest<TApi extends Api>(
 		return outer;
 	}
 
+	if (model.resolveHeaders) {
+		return withResolvedModelHeaders(model, requestOptions.signal, resolvedModel =>
+			streamSimpleRequest(resolvedModel, context, requestOptions),
+		);
+	}
+
 	// Pi-native transport short-circuits the per-provider dispatch entirely:
 	// the gateway resolves provider + credential server-side, so we don't
 	// need an `apiKey` from `getEnvApiKey` here — `options.apiKey` carries
@@ -1690,7 +1717,7 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
-	if (isGitLabDuoModel(model)) {
+	if (model.provider === "gitlab-duo") {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
 			withProviderInFlightLimit(model, opts, () =>
 				streamGitLabDuo(model, context, {
@@ -1716,7 +1743,7 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	// Kimi Code - route to dedicated handler that wraps OpenAI or Anthropic API
-	if (isKimiModel(model)) {
+	if (model.provider === "kimi-code") {
 		// streamKimi handles openai/anthropic format mapping internally, but the
 		// mandatory-reasoning clamp is a request-shaping concern owned here: K3's
 		// `supports_thinking_type: "only"` endpoint rejects disabled/omitted
@@ -1735,7 +1762,7 @@ function streamSimpleRequest<TApi extends Api>(
 	}
 
 	// Synthetic - route to dedicated handler that wraps OpenAI or Anthropic API
-	if (isSyntheticModel(model)) {
+	if (model.provider === "synthetic") {
 		// Pass raw SimpleStreamOptions - streamSynthetic handles mapping internally.
 		return withThinkingLoopGuard(model, requestOptions, opts =>
 			withProviderInFlightLimit(model, opts, () =>
@@ -1814,7 +1841,7 @@ function resolveBedrockThinkingBudget(
 	model: Model<"bedrock-converse-stream">,
 	options?: SimpleStreamOptions,
 ): { budget: number; level: Effort } | null {
-	if (!options?.reasoning || !model.reasoning) return null;
+	if (!options?.reasoning || !model.reasoning || options.disableReasoning || options.forceReasoningOff) return null;
 	const level = requireSupportedEffort(model, options.reasoning);
 	const budget = options.thinkingBudgets?.[level] ?? BEDROCK_CLAUDE_THINKING[level];
 	return { budget, level };
@@ -2140,7 +2167,11 @@ function mapOptionsForApi<TApi extends Api>(
 		case "bedrock-converse-stream": {
 			const bedrockBase: BedrockOptions = {
 				...base,
-				reasoning: options?.reasoning,
+				// Explicit reasoning-off must fold here like the anthropic-messages
+				// branch: the provider gates thinking only on `reasoning`, and the
+				// budget path below must not inflate a capped request for thinking
+				// that was turned off.
+				reasoning: options?.disableReasoning || options?.forceReasoningOff ? undefined : options?.reasoning,
 				thinkingBudgets: options?.thinkingBudgets,
 				toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 				thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
@@ -2185,6 +2216,9 @@ function mapOptionsForApi<TApi extends Api>(
 					openrouterVariant: options?.openrouterVariant,
 					maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 					disableReasoning: options?.disableReasoning,
+					// Forwarded, not folded: the Responses record reads both flags
+					// itself (`applyResponsesCompatPolicy`).
+					forceReasoningOff: options?.forceReasoningOff,
 					textVerbosity: options?.textVerbosity,
 					promptCache: options?.promptCache,
 					statefulResponses: options?.statefulResponses,
@@ -2193,7 +2227,8 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"openai-completions">({
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
-				disableReasoning: options?.disableReasoning,
+				// `OpenAICompletionsOptions` carries no forceReasoningOff; fold it.
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
@@ -2206,7 +2241,8 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"openai-completions">({
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
-				disableReasoning: options?.disableReasoning,
+				// `OpenAICompletionsOptions` carries no forceReasoningOff; fold it.
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 				openrouterVariant: options?.openrouterVariant,
