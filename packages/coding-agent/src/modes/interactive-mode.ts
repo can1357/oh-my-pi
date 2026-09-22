@@ -279,6 +279,7 @@ import {
 	setSymbolPreset,
 	startMacOSAppearanceReprobeFallback,
 	theme,
+	warmHighlighter,
 } from "@oh-my-pi/pi-tui/theme";
 import { getSlashCommandTypeIcon } from "@oh-my-pi/pi-tui/theme/tui-adapters";
 import type {
@@ -1796,7 +1797,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// not be titled. Deferred via setImmediate so it runs AFTER the render
 		// callback requestRender(true) queued above (immediates are FIFO) — the
 		// spawn syscall never lands in the same loop turn ahead of the first paint.
+		// The native syntax set (syntect defaults plus the vendored TypeScript/TSX/
+		// Julia grammars, parsed from YAML) costs ~1s to build on first use, and each
+		// language's regexes compile on its first highlight (~250ms for TS/TSX).
+		// Warm both on the native worker pool now so the first highlighted code
+		// block, bash command preview, or file diff does not stall the render thread.
 		setImmediate(() => {
+			void warmHighlighter();
 			if (!$env.PI_NO_TITLE && !this.sessionManager.getSessionName()) {
 				this.#inputController.prewarmTinyTitleModel();
 			}
