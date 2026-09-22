@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `CompactionSettings.remoteTimeoutMs` to configure the Remote Compaction V2 per-attempt timeout while preserving the existing five-minute default.
+
 ## [18.2.5] - 2026-09-17
 
 ### Fixed

@@ -206,6 +206,8 @@ export interface CompactionSettings {
 	remoteEnabled?: boolean;
 	remoteEndpoint?: string;
 	remoteStreamingV2Enabled?: boolean;
+	/** Wall-clock timeout per V2 request attempt in milliseconds; unset keeps the provider default. */
+	remoteTimeoutMs?: number;
 	v2RetainedMessageBudget?: number;
 }
 
@@ -1750,6 +1752,7 @@ export async function compact(
 					apiKey,
 					key =>
 						requestCompactionV2Streaming(model, key, request, signal, {
+							timeoutMs: settings.remoteTimeoutMs,
 							fetch: summaryOptions.fetch,
 							providerSessionState: summaryOptions.providerSessionState,
 							preferWebsockets: summaryOptions.preferWebsockets,
